@@ -83,6 +83,15 @@ cost. Check supported configuration and extension points before adding a custom
 wrapper, fork, or replacement. Keep application-specific policy with its current
 owner; a ready-made mechanism need not own the surrounding business rules.
 
+Before a roadmap stage or a new capability starts, research the crates that
+already solve its problems and record the comparison and decision under
+`specs/<topic>/research/synthesis.md`, as [the roadmap's working
+rules](docs/roadmap.md#working-rules-for-every-stage) require. The Go template
+supplies each problem and the reasons behind its decision, not the shape of
+the solution: when Rust solves the problem differently, do it the Rust way and
+record the deviation. Template-owned code exists only for a gap the synthesis
+names.
+
 Make failure and replacement decisions explicit. When an operation cannot
 establish the authority or preconditions required before an effect, reject it
 through the canonical failure path; do not claim success or silently weaken the

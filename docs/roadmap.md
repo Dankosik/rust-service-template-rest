@@ -368,6 +368,21 @@ markers, tests, and initializer support. Order by expected demand:
 
 ## Working rules for every stage
 
+- Research before implementation. Before a stage starts, survey the crates
+  and frameworks that already solve each problem in the stage: verify the
+  latest version, release date, maintenance status, and exact behavior against
+  the stage's requirements from primary sources (docs.rs, crates.io, the
+  repository), and record the comparison and the decision in
+  `specs/<stage-topic>/research/synthesis.md`. Prefer a maintained crate over
+  template-owned code whenever it meets the requirement idiomatically; write
+  custom code only for a named gap the synthesis documents.
+- Rust idiom outranks Go parity. The Go template supplies the *problem* and
+  the *reasons* behind each decision, not the shape of the solution. When the
+  Rust ecosystem solves the same problem differently (a different layering,
+  a type-system guarantee instead of a runtime check, a different file
+  format, a facade crate instead of an SDK), do it the Rust way and record
+  the deviation and its rationale in the synthesis. Copy a Go mechanism
+  one-to-one only when Rust has no established alternative.
 - One stage, or one profile inside stage 10, per pull request series. Update
   the status table in this file in the same pull request that completes a
   stage.
