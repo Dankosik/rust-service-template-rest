@@ -99,14 +99,14 @@ Oxide's `dropshot` uses at scale.
 | Area | Decision | Crates (version) | Template-owned code (named gaps) |
 | --- | --- | --- | --- |
 | Route tree | `utoipa_axum::router::OpenApiRouter` with one `.routes(routes!(handler))` per path; `split_for_parts()` yields the axum `Router` that `infra_http::harden` wraps and the `OpenApi` document; the served router and the document come from one construction (*verified*) | `utoipa-axum` 0.2.0 | — |
-| Document identity | `#[derive(OpenApi)]` in `crates/service`, the composition root: `info` from the service crate's Cargo metadata (name, version, description, license), `servers`, `tags`; `infra-http` contributes the probe operations and problem components through `OpenApiRouter::merge`; feature crates will contribute the same way | `utoipa` 5.5.0 (`macros`, `yaml`) | the document assembly function (~20 lines) |
+| Document identity | `#[derive(OpenApi)]` in `crates/service`, the composition root: `info.title` and `info.description` as literals (the repository name; the crate description is about the binary, not the API), `version` and `license` filled from the service crate's Cargo metadata (utoipa's `Info::merge_with_env_args`, rendering the 3.1 `identifier: MIT` form), `servers`, `tags`; `infra-http` contributes the probe operations and problem components through `OpenApiRouter::merge`, which leaves `info` untouched (*verified* in source); feature crates will contribute the same way | `utoipa` 5.5.0 (`macros`, `yaml`) | the document assembly function (~20 lines) |
 | Typed responses per status | one `#[derive(IntoResponses)]` enum per operation with more than one success/failure shape, plus a hand-written `IntoResponse` (utoipa derives documentation only); reusable problem responses as `#[derive(ToResponse)]` newtypes over `Problem` with `content_type = "application/problem+json"`, referenced as `(status = 400, response = BadRequest)` (*verified*) | `utoipa` | the `IntoResponse` impls, a few lines each |
 | Problem schema | `ToSchema` on `Problem` and `InvalidParam`; `#[serde(deny_unknown_fields)]` renders `additionalProperties: false`; `#[serde(skip)]` and `rename` are honoured; `code` rendered as `string` through `#[schema(value_type = String)]`; optional members `#[schema(nullable = false)]` (*verified*, see deviations) | `utoipa` | — |
 | Typed request extraction | axum extractors on types that also derive `ToSchema`/`IntoParams`; the health-only contract has no parameters or bodies, so nothing is added now | `axum` | first parameterized operation: extractor rejection → `Problem` mapping and constraint enforcement (deferred, below) |
 | Generation | `crates/service/src/bin/openapi.rs` prints the rendered document (a one-line generated-file header, then `to_yaml()`); `make openapi-generate` redirects it into `api/openapi/service.yaml` | `utoipa` `yaml` feature (`serde_norway` 0.9.42) | ~10 lines |
 | Drift check | a `crates/service` test embeds the committed file with `include_str!` and asserts byte equality with the rendered document; cargo rebuilds the test when the file changes; `make openapi-check` runs it by name and `make test` covers it | — | ~10 lines |
-| Lint and validation | Redocly CLI pinned in `make/template.mk` (`REDOCLY_CLI_VERSION := 2.53.3`), `.redocly.yaml` ported from the Go template unchanged, `make openapi-lint`, part of `make openapi-check`, `make check`, and CI | — | `.redocly.yaml`, make target |
-| Breaking-change comparison | `oasdiff breaking --fail-on ERR <base> api/openapi/service.yaml` with `api/openapi/breaking-changes-approvals.txt` as `--err-ignore`; `make openapi-breaking BASE_OPENAPI=...`; CI on pull requests extracts `git show BASE:api/openapi/service.yaml` and skips when the base has no file (the first pull request); version pinned (`OASDIFF_VERSION := 1.32.1`) until the stage 4 tool manifest | — | make target, CI step |
+| Lint and validation | Redocly CLI pinned in `make/template.mk` (`REDOCLY_CLI_VERSION := 2.53.3`, run through `npx --yes`), `.redocly.yaml` ported from the Go template unchanged, `make openapi-lint`, part of `make openapi-check`, `make check`, and CI. The ported `security-defined: error` rule requires every operation to declare `security` explicitly, which is why public operations render `security: []` (*verified*: the first render without it failed lint) | — | `.redocly.yaml`, make target |
+| Breaking-change comparison | `oasdiff breaking --fail-on ERR <base> api/openapi/service.yaml` with `api/openapi/breaking-changes-approvals.txt` as `--err-ignore` when the file is non-empty; `make openapi-breaking BASE_OPENAPI=...` runs `go run github.com/oasdiff/oasdiff@v1.32.1`, one code path locally and in CI, pinned in one place and integrity-checked by the Go module checksum database; CI on pull requests extracts `git show BASE:api/openapi/service.yaml` and skips when the base has no file (the first pull request). The generated document against the Go template's health-only 3.0.3 document reports no breaking change (*verified*) | — | make target, CI step |
 | Runtime contract tests | iterate the in-memory `OpenApi` (paths → operations): every operation carries `x-security-decision` with `exposure` in {`public`, `protected`, `blocked`} and a `rationale`; `public` ⇔ the effective security requirements (operation, else document) are empty; `protected` ⇔ every alternative is exactly one `http`/`bearer` scheme without scopes and `400`, `401`, `403`, `431`, `503`, `504` declare `application/problem+json` referencing `#/components/schemas/Problem`; `Problem` and `InvalidParam` are closed objects | — | port of the Go test (~100 lines) |
 | Serving | the probe handlers are the annotated functions; tests drive the hardened router and assert status, `Content-Type`, and body against what the document declares | `tower::ServiceExt::oneshot` | — |
 
@@ -147,8 +147,8 @@ binary, which never calls `to_yaml()`.
 | Embedded spec served to the validator (`openapi.GetSpec()`) | Not embedded at runtime | No runtime consumer |
 | `Problem.code` documented as a free `string` while the Go catalog is closed | Same on the wire: the closed `Code` enum renders as `string` through `value_type = String` | oasdiff classifies a new enum value in a response as breaking (`response-property-enum-value-added`, *verified*), and the catalog is meant to grow with features |
 | Optional members `detail`, `instance`, `request_id` are plain strings | Same, declared with `#[schema(nullable = false)]` | utoipa renders `Option<T>` as `type: [string, 'null']` by default; the wire omits the member and never sends `null`, so the default would over-promise nullability and oasdiff would flag it (*verified*) |
-| Public operations carry `security: []` behind the `authn-bearer` marker; global `security: [{bearerAuth: []}]` | No `security` key on the operation or the document while no scheme exists | utoipa's `security(())` renders `security: [{}]` (an anonymous alternative, *verified*), which the Go rule classifies as neither public nor protected. The authn profile adds the scheme and renders `[]` for public operations through a `Modify` post-process (deferred) |
-| `info.title` and `info.version` are literals the initializer rewrites | `info` from the service crate's Cargo metadata | One identity: the stage 9 initializer rewrites `Cargo.toml` and the document follows |
+| Public operations carry `security: []` behind the `authn-bearer` marker; global `security: [{bearerAuth: []}]` | Public operations carry `security: []` through an empty `security()` attribute (*verified*); no global requirement while no scheme exists | Same wire form. The marker is not needed: the attribute is unconditional and the global requirement arrives with the scheme |
+| `info.title` and `info.version` are literals the initializer rewrites | `info.title` a literal, `info.version` and `info.license` from the service crate's Cargo metadata | Cargo already owns the version (`app.version` uses it); the stage 9 initializer rewrites the title with the other identity strings |
 | `example: ok` inside the `text/plain` schema | `example` on the media type | Where utoipa puts a response example; both forms are valid |
 | Bearer security scheme present in `components` behind a marker | Not present | Do not leave a scheme no operation uses; the authn profile adds it with its first protected operation |
 | `openapi-validate` with kin-openapi in addition to Redocly | Redocly only | Redocly's `struct` rule validates structure; the document is also type-constructed by utoipa |
@@ -168,8 +168,8 @@ binary, which never calls `to_yaml()`.
   validation attribute duplicated on the field) and newtypes with `TryFrom`
   (one source, hand-written `ToSchema`); decide with the first constrained
   parameter.
-- `security: []` rendering for public operations under a global bearer
-  requirement, and the bearer scheme itself: the authentication profile.
+- The bearer security scheme, the global requirement, and the `401`/`403`
+  problem components: the authentication profile.
 - `x-extensible-enum` on `Problem.code` if a client needs the catalog
   machine-readably; today the catalog is documented by `Code::ALL` and its
   test.
@@ -208,3 +208,16 @@ binary, which never calls `to_yaml()`.
    step must skip when `git show BASE:api/openapi/service.yaml` fails.
 10. `npx --yes @redocly/cli@<version>` downloads on first use; CI runners
     and workstations need Node, which `ubuntu-latest` provides.
+11. `security()` (empty) renders `security: []`, the explicit public
+    override; `security(())` renders `security: [{}]`, an anonymous
+    alternative that the contract test classifies as neither public nor
+    protected (*verified*). Redocly's `security-defined` rejects an
+    operation with no `security` at all when the document has none either.
+12. Inside `infra-http`, the local `health` module (handlers) shadows the
+    `health` crate; the crate is written `::health::ReadinessReader`.
+13. clippy's `doc_markdown` asks to backtick `OpenAPI` in doc comments;
+    `clippy.toml` lists it under `doc-valid-idents` beside the defaults
+    (`OpenTelemetry` is already in the default list).
+14. utoipa takes a handler's doc comment as the operation description and a
+    type's doc comment as the schema description: write those comments as
+    contract text and put implementation notes in `//` comments.

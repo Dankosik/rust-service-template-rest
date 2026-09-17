@@ -1,0 +1,18 @@
+---
+name: rust-api-contract
+description: "Observable contract. Use when a Rust service REST change can alter what a deployed client distinguishes across status, body shape, error code, security, or compatibility, or when the OpenAPI document and the handlers must stay in agreement."
+---
+
+# Rust API Contract
+
+**Observable contract.** Every distinction a deployed client can detect is a clause: status, body shape or absence, error code and detail, header, default, security requirement, and the outcome of a retry. Follow a change from the annotated handler through the committed document to the client that reads it. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
+
+The document is derived, not written. Handlers carry utoipa path attributes and request and response types derive ToSchema; service::api::contract merges every OpenApiRouter into one value whose two halves are the served router and the OpenAPI document; the openapi binary renders it into api/openapi/service.yaml, and the service crate's openapi test refuses a committed copy that differs from the generator. A contract change starts in the Rust annotation, continues with make openapi-generate, and is reviewed as the YAML diff. Editing the YAML by hand is the wrong default, and so is a handler doc comment meant for readers of the code, because it becomes the operation description.
+
+Every operation declares two things the contract tests enforce: the x-security-decision extension with an exposure of public, protected, or blocked plus a rationale, and its OpenAPI security. An empty security attribute renders the explicit public override; a protected operation names exactly the bearer scheme without scopes and declares the 400, 401, 403, 431, 503, and 504 problem responses. An anonymous alternative beside a scheme, a scoped requirement, or an unknown scheme is classified as neither public nor protected and fails.
+
+Failures are Problem values from the closed catalog in infra_http::problem, and the same type renders the Problem schema. The code member stays a plain string in the contract so the catalog can grow without a breaking change, optional members are declared non-nullable because the wire omits them, and a new status joins the shared response components with its first operation rather than being declared inline. Typed responses per status are an IntoResponses enum whose runtime IntoResponse is hand-written; the infra-http router tests prove the two agree by comparing served media types with the declared ones.
+
+Compatibility is judged on the committed file. oasdiff fails a pull request on a removed success status, a property that became optional, a new enum value in a response, or a member that became nullable; a deliberate exception is an exact, temporary entry in api/openapi/breaking-changes-approvals.txt with an owner and a deadline. Redocly lint catches what the generator does not guarantee: dangling references, duplicate operation ids, examples that contradict their schema, undefined path parameters, and a missing security declaration.
+
+For review, name each changed observable with its old behavior, accepted behavior, and client consequence without editing, and try to falsify each with a client-visible example. For implementation, finish with the regenerated document, make openapi-check, and a mounted-router test asserting status, content type, problem code, and headers for every declared status the change can produce. A green schema diff proves syntax, not compatibility, and no publishing step or client generation is required until a consumer exists.

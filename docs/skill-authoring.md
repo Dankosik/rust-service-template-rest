@@ -66,6 +66,7 @@ discriminate. Behavioural comparison on realistic tasks belongs to the
 evaluation fixtures that arrive with the harness stage; structural validity
 does not establish better model behaviour.
 
-Skills for a capability arrive with that capability's stage (`rust-sqlx`
-with PostgreSQL, `rust-api-contract` with the OpenAPI generator,
-`rust-tonic` with gRPC); do not add a skill for code that does not exist.
+Skills for a capability arrive with that capability's stage
+(`rust-api-contract` came with the OpenAPI contract, `rust-sqlx` comes with
+PostgreSQL, `rust-tonic` with gRPC); do not add a skill for code that does
+not exist.

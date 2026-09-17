@@ -8,10 +8,13 @@ repository surface that can prove them.
 - [rustup](https://rustup.rs). The pinned toolchain in `rust-toolchain.toml`
   installs on first use, or explicitly with `rustup toolchain install`.
 - GNU Make.
+- Node.js, for `make openapi-lint` (Redocly CLI through `npx`, pinned in
+  `make/template.mk`); it is part of `make check`.
+- Go, only for `make openapi-breaking` (oasdiff through `go run`); CI runs
+  it on pull requests, locally it is optional.
 
-Nothing else is required for the current scaffold. Later stages add Docker
-for integration proof and a small set of pinned Cargo tools; the roadmap
-names them when they land.
+Later stages add Docker for integration proof and one manifest of pinned
+tools; the roadmap names them when they land.
 
 ## Validate a change
 
@@ -24,10 +27,17 @@ make test-package PKG=<crate>      # one crate
 make test                          # several crates or a manifest change
 ```
 
-`make check` (`fmt-check`, `lint`, `test`) is the explicit full-repository
-gate and what CI runs; it is not a routine follow-up to every edit. Format
-with `make fmt`. Every Cargo command runs with `--locked`: if a change needs a
-lockfile update, make it deliberately and commit `Cargo.lock` with the change.
+`make check` (`fmt-check`, `lint`, `test`, `openapi-lint`, `check-skills`)
+is the explicit full-repository gate and what CI runs; it is not a routine
+follow-up to every edit. Format with `make fmt`. Every Cargo command runs
+with `--locked`: if a change needs a lockfile update, make it deliberately
+and commit `Cargo.lock` with the change.
+
+A change to an HTTP operation is made in the handler's `#[utoipa::path]`
+attributes and schema derives, then `make openapi-generate` rewrites
+`api/openapi/service.yaml`; commit the YAML with the change and review its
+diff as the contract change. `make test` fails on a stale copy.
+[HTTP Architecture](docs/architecture/http.md) has the full workflow.
 
 [AGENTS.md](AGENTS.md#validation-budget) owns the local stop rule. Missing
 optional infrastructure is a gap to disclose, not a blocker to repair; a known
