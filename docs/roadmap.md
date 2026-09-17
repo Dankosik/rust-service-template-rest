@@ -256,15 +256,15 @@ Go template's `go-*` set, built from
 decisions carry over.
 
 Delivered after stage 2 (decisions in `specs/rust-skills/research/synthesis.md`):
-fifteen `model/method` skills under `.agents/skills` (`rust-coder`,
+fifteen skills under `.agents/skills` in the rust-cli-skills shape (`rust-coder`,
 `rust-idiomatic`, `rust-tokio`, `rust-axum`, `rust-errors`, `rust-config`,
 `rust-observability`, `rust-reliability`, `rust-security`, `rust-testing`,
 `rust-performance`, `rust-debugging`, `rust-structural-quality`,
 `rust-dependencies`, `rust-verification`), each grounded in the repository
 owner it decides against; [Skill Authoring](skill-authoring.md);
-`make check-skills` (frontmatter, name/directory agreement, machine contract,
-word budget, links) wired into `make check` and CI; `AGENTS.md` routing to
-the catalog. Remaining for this stage: capability skills with their stages,
+`make check-skills` (frontmatter, name/directory agreement, trigger, prose-only
+body, word budget, LICENSE copy) wired into `make check` and CI; `AGENTS.md`
+routing to the catalog. Remaining for this stage: capability skills with their stages,
 the harness-neutral skills and Claude/Qwen views with stage 6, universal
 disciplines when a capability reaches them, and behavioural evaluation
 fixtures with the reviewer roles of stage 6.

@@ -145,11 +145,13 @@ confidence.
 
 `AGENTS.md` gives every supported agent the repository rules: authority,
 decision ownership, engineering constraints, the validation budget, and the
-crate-boundary model. `.agents/skills` holds focused, model-invoked skills
-that encode this repository's decisions; Cursor, Codex, Grok, and OpenCode
-read them directly, and the Claude Code and Qwen views arrive with the
-harness stage. Each skill names the repository owner it decides against, so
-an agent extends the existing path instead of creating a parallel one.
+crate-boundary model. `.agents/skills` holds small, independent skills in the
+[rust-cli-skills](https://github.com/Dankosik/rust-cli-skills) shape, one
+`SKILL.md` and `LICENSE` per skill, that encode this repository's decisions;
+Cursor, Codex, Grok, and OpenCode read them directly, and the Claude Code
+and Qwen views arrive with the harness stage. Each skill names the
+repository owner it decides against, so an agent extends the existing path
+instead of creating a parallel one.
 
 | Skill | Leading concept | Use it for |
 | --- | --- | --- |
@@ -172,9 +174,8 @@ an agent extends the existing path instead of creating a parallel one.
 Skills for a capability arrive with its stage (`rust-api-contract`,
 `rust-sqlx`, `rust-tonic`, delivery). Authoring rules and the structural
 check live in [Skill Authoring](docs/skill-authoring.md) and
-`make check-skills`. The set builds on
-[rust-cli-skills](https://github.com/Dankosik/rust-cli-skills) and the Go
-template's `go-*` skills where their decisions carry over.
+`make check-skills`. The decisions build on rust-cli-skills and the Go
+template's `go-*` skills where they carry over to a long-running service.
 
 ## Documentation
 

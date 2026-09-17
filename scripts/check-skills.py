@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Structural check for the canonical skills under .agents/skills.
+"""Structural check for the skills under .agents/skills.
 
-Proves shape, not model behavior: frontmatter fields, name/directory
-agreement, the machine contract (invocation and kind), the body word budget
-from docs/skill-authoring.md, and that relative links resolve. Standard
-library only, so it runs anywhere CI has Python 3.
+Enforces the rust-cli-skills shape: frontmatter with exactly `name` and
+`description`, a description that states its trigger in at most two
+sentences, one heading, prose paragraphs without links or lists, an opening
+bold concept, a body inside the word budget, and a LICENSE beside SKILL.md.
+Proves shape, not model behavior. Standard library only.
 """
 
 from __future__ import annotations
@@ -15,96 +16,87 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILLS = ROOT / ".agents" / "skills"
-INVOCATIONS = {"model", "user", "role"}
-KINDS = {"method", "workflow", "carrier"}
-MIN_WORDS, MAX_WORDS = 100, 600
-LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
-HEADING = re.compile(r"^#+\s+(.*)$", re.M)
+ROOT_LICENSE = ROOT / "LICENSE"
+MIN_WORDS, MAX_WORDS = 250, 500
+ALLOWED_FILES = {"SKILL.md", "LICENSE"}
+FRONTMATTER_KEYS = {"name", "description"}
+NAME = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 
-def parse_frontmatter(text: str) -> tuple[dict, str]:
+def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
     if not text.startswith("---\n"):
         raise ValueError("missing frontmatter")
     end = text.find("\n---\n", 4)
     if end < 0:
         raise ValueError("unterminated frontmatter")
-    fields: dict = {}
-    current: dict | None = None
+    fields: dict[str, str] = {}
     for line in text[4:end].splitlines():
         if not line.strip():
             continue
-        if line.startswith("  "):
-            if current is None:
-                raise ValueError(f"indented line without a parent: {line!r}")
-            key, _, value = line.strip().partition(":")
-            current[key.strip()] = value.strip().strip('"')
-            continue
-        key, _, value = line.partition(":")
-        value = value.strip()
-        if value:
-            fields[key.strip()] = value.strip('"')
-            current = None
-        else:
-            current = fields.setdefault(key.strip(), {})
+        key, sep, value = line.partition(":")
+        if not sep or line.startswith((" ", "\t")):
+            raise ValueError(f"frontmatter must be flat `key: value` lines, got {line!r}")
+        fields[key.strip()] = value.strip().strip('"')
     return fields, text[end + 5 :]
 
 
-def anchors(path: Path) -> set[str]:
-    return {
-        re.sub(r"[^\w\- ]", "", h.strip().lower()).replace(" ", "-")
-        for h in HEADING.findall(path.read_text())
-    }
-
-
 def check(skill_dir: Path) -> list[str]:
+    name = skill_dir.name
     problems: list[str] = []
     skill = skill_dir / "SKILL.md"
     if not skill.is_file():
-        return [f"{skill_dir.name}: missing SKILL.md"]
-    text = skill.read_text()
+        return [f"{name}: missing SKILL.md"]
     try:
-        fields, body = parse_frontmatter(text)
+        fields, body = parse_frontmatter(skill.read_text())
     except ValueError as err:
-        return [f"{skill_dir.name}: {err}"]
+        return [f"{name}: {err}"]
 
-    if fields.get("name") != skill_dir.name:
-        problems.append(f"{skill_dir.name}: frontmatter name {fields.get('name')!r} != directory")
+    if set(fields) != FRONTMATTER_KEYS:
+        problems.append(f"{name}: frontmatter keys must be exactly {sorted(FRONTMATTER_KEYS)}, got {sorted(fields)}")
+    if fields.get("name") != name or not NAME.match(name):
+        problems.append(f"{name}: frontmatter name must equal the lowercase-hyphen directory name")
     description = fields.get("description", "")
     if not description:
-        problems.append(f"{skill_dir.name}: empty description")
-    elif not description.startswith("Use "):
-        problems.append(f"{skill_dir.name}: description must state its trigger, starting with 'Use'")
-    elif len(re.findall(r"[.!?](\s|$)", description)) > 2:
-        problems.append(f"{skill_dir.name}: description longer than two sentences")
-
-    metadata = fields.get("metadata")
-    if not isinstance(metadata, dict):
-        problems.append(f"{skill_dir.name}: missing metadata block")
+        problems.append(f"{name}: empty description")
     else:
-        if metadata.get("invocation") not in INVOCATIONS:
-            problems.append(f"{skill_dir.name}: metadata.invocation must be one of {sorted(INVOCATIONS)}")
-        if metadata.get("kind") not in KINDS:
-            problems.append(f"{skill_dir.name}: metadata.kind must be one of {sorted(KINDS)}")
+        if "Use " not in description:
+            problems.append(f"{name}: description must state its trigger with `Use when`, `Use for`, or `Use to`")
+        if len(re.findall(r"[.!?](\s|$)", description)) > 2:
+            problems.append(f"{name}: description longer than two sentences")
+        if len(description) > 1024:
+            problems.append(f"{name}: description longer than 1024 characters")
 
-    words = len(body.split())
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body.strip()) if p.strip()]
+    headings = [p for p in paragraphs if p.startswith("#")]
+    if len(headings) != 1 or not paragraphs or not paragraphs[0].startswith("# "):
+        problems.append(f"{name}: body must start with one H1 heading and contain no other headings")
+    prose = paragraphs[1:] if paragraphs and paragraphs[0].startswith("# ") else paragraphs
+    if not prose or not prose[0].startswith("**"):
+        problems.append(f"{name}: first paragraph must open with the bold leading concept")
+    if len(prose) < 4:
+        problems.append(f"{name}: body has {len(prose)} paragraphs, expected at least 4")
+    for paragraph in prose:
+        if re.search(r"\]\(", paragraph):
+            problems.append(f"{name}: body contains a link; skills are self-contained prose")
+            break
+        if re.match(r"^\s*([-*]|\d+\.)\s", paragraph, re.M):
+            problems.append(f"{name}: body contains a list; write paragraphs")
+            break
+        if paragraph.startswith("```"):
+            problems.append(f"{name}: body contains a code block; name APIs in prose")
+            break
+    words = len(" ".join(prose).split())
     if not MIN_WORDS <= words <= MAX_WORDS:
-        problems.append(f"{skill_dir.name}: body has {words} words, budget is {MIN_WORDS}-{MAX_WORDS}")
-    if not HEADING.search(body):
-        problems.append(f"{skill_dir.name}: body has no heading")
+        problems.append(f"{name}: body has {words} words, budget is {MIN_WORDS}-{MAX_WORDS}")
 
-    for link in LINK.findall(body):
-        if link.startswith(("http://", "https://", "mailto:")):
-            continue
-        target_path, _, anchor = link.partition("#")
-        target = (skill.parent / target_path).resolve() if target_path else skill
-        if not target.exists():
-            problems.append(f"{skill_dir.name}: broken link {link}")
-        elif anchor and target.suffix == ".md" and anchor not in anchors(target):
-            problems.append(f"{skill_dir.name}: missing anchor in link {link}")
-
+    license_file = skill_dir / "LICENSE"
+    if not license_file.is_file():
+        problems.append(f"{name}: missing LICENSE beside SKILL.md")
+    elif ROOT_LICENSE.is_file() and license_file.read_bytes() != ROOT_LICENSE.read_bytes():
+        problems.append(f"{name}: LICENSE differs from the repository LICENSE")
     for stray in skill_dir.iterdir():
-        if stray.name not in {"SKILL.md", "references", "LICENSE"}:
-            problems.append(f"{skill_dir.name}: unexpected file {stray.name}")
+        if stray.name not in ALLOWED_FILES:
+            problems.append(f"{name}: unexpected entry {stray.name}; a skill is SKILL.md and LICENSE only")
     return problems
 
 

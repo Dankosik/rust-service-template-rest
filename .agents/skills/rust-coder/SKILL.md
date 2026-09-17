@@ -1,48 +1,20 @@
 ---
 name: rust-coder
-description: "Use to implement an authorized Rust change in this workspace with accepted behavior, including its tests and cleanup."
-metadata:
-  invocation: model
-  kind: method
+description: "Use when implementing specified behavior in this Rust service workspace within its existing crate boundaries, runtime, and technical choices."
 ---
 
 # Rust Coder
 
-Implementation starts at the **earliest valid owner** and ends at the accepted
-observable behavior.
+**Execution.** When the intended behavior is clear, implement it directly at the earliest owner that can carry it. Treat supplied requirements as constraints. Preserve settled technical decisions outside the explicitly requested change; do not reopen unrelated choices.
 
-`criterion -> earliest owner -> existing path -> far side -> proof -> cleanup`
+Read the affected code and its callers, then extend the existing path. Ownership boundaries are crates: the service crate composes and owns process lifecycle, the config crate owns the typed snapshot, the health crate owns readiness, infra crates adapt one transport or provider, and feature crates own business behavior without depending on a transport or provider. A new operation joins the router and a feature-owned handler rather than the hardened middleware chain; a new key joins its config section file; a new background task joins the task tracker in bootstrap with a child cancellation token. A parallel path beside an existing owner is the wrong default.
 
-Bind each accepted criterion to a current owner before editing. Owners are
-crates: `crates/service` composes and owns lifecycle; `crates/config` owns
-the typed snapshot; `crates/health` owns readiness; `crates/infra-*` adapt
-one transport or provider; `crates/<feature>` will own business behavior and
-depends on no transport or provider crate. Extend the existing policy path
-instead of adding a parallel one: a new operation joins `infra_http::router`
-and its feature handler, not the hardened chain; a new key joins its section
-file in `crates/config/src`; a new background task joins the `TaskTracker`
-in `bootstrap` with a child `CancellationToken`.
+**Reuse.** For a proposed helper, check the affected crate, the standard library, and the declared dependencies for matching semantics before writing it. A new abstraction, layer, trait, or crate must carry a current constraint, variation, or dependency direction; hypothetical reuse does not count. Before adding a crate or feature, survey and record the choice as the dependency skill describes; template-owned code exists only for a gap that survey names.
 
-Inspect the far side of every touched boundary: callers, the error identity
-they match on, drop order, the shutdown stage that must now wait, and the
-config validation that must now hold. A new helper, layer, trait, or crate
-must carry a current constraint, variation, or dependency direction;
-otherwise keep the behavior local. Before adding a crate or feature, apply
-`rust-dependencies`.
+**Clarity.** Use intention-revealing names, cohesive responsibilities, explicit ownership, and visible effects and failure paths. Inspect the far side of every touched boundary: the callers that match on an error variant, drop order, the shutdown stage that must now wait, and the config validation that must now hold. Match the surrounding code's naming and comment density.
 
-Choose tests while writing the code, beside the owner under `#[cfg(test)]`,
-from accepted behavior rather than the implementation's current output; state
-what wrong behavior each new test rejects. Bound every wait; join every task.
-Consult `rust-testing` only for a non-obvious proving layer.
+Work in behavior-sized changes with independent expectations. Choose tests while writing the code, beside the owner, from accepted behavior rather than the implementation's current output; bound every wait and join every task. For a bug with an available reproducer, observe that it fails for the reported reason before fixing it. A compile error is not evidence that a regression test detects the bug.
 
-Finish with `cargo fmt`, `make build`, and `make test-package PKG=<crate>` for
-each changed crate (`make test` when `Cargo.toml` or `Cargo.lock` changed).
-`make lint` runs clippy at `pedantic` with warnings as errors; fix the finding
-or add a site-local `#[allow]` with the reason, never a workspace-wide
-relaxation. Every Cargo command runs `--locked`; a lockfile change is part of
-the change. Delete each new seam whose removal preserves accepted behavior.
+Carry the change through formatting, the workspace build, and the tests of each changed crate; run the whole workspace suite when a manifest or the lockfile changed. Clippy runs at pedantic with warnings as errors: fix the finding or add a site-local allow with its reason, never a workspace-wide relaxation. Every Cargo invocation is locked, so a lockfile change ships with the change that caused it. Delete each new seam whose removal preserves accepted behavior.
 
-Complete when each criterion has a causal edit or a grounded no-change
-disposition and its proof, no superseded path remains, and no implementation
-choice is left open. The active task owns validation timing; do not add
-checks for confidence beyond [AGENTS.md](../../../AGENTS.md#validation-budget).
+Finish when the requested outcome and required checks are satisfied, or state the concrete blocker and unavailable verification. Report the changed behavior and actual evidence, distinguishing introduced failures from unrelated baseline failures. Do not invent unrelated cleanup, extra environments, or new test infrastructure as completion gates.
