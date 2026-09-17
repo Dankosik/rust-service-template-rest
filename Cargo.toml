@@ -1,0 +1,58 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/Dankosik/rust-service-template-rest"
+publish = false
+
+# One version per dependency for the whole workspace. Crates reference these
+# with `workspace = true` and enable only the features they need.
+[workspace.dependencies]
+# Workspace crates
+infra-http = { path = "crates/infra-http" }
+
+# Runtime and transport
+axum = { version = "0.8.9", default-features = false }
+tokio = { version = "1.53.1", default-features = false }
+tower = { version = "0.5.3", default-features = false }
+
+# Diagnostics
+tracing = { version = "0.1.44", default-features = false }
+tracing-subscriber = { version = "0.3.23", default-features = false }
+thiserror = { version = "2.0.20", default-features = false }
+
+# Test support
+http-body-util = "0.1.5"
+
+# Lints apply to every crate that opts in with `[lints] workspace = true`.
+# `make lint` promotes warnings to errors; keep the levels here at `warn` so
+# local builds stay usable while a fix is in progress.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+# Module names repeat in paths by design (`health::health_ready` reads worse).
+module_name_repetitions = "allow"
+
+[profile.release]
+# Matches the Go template's stripped release binary. LTO and codegen-unit
+# choices wait for the delivery stage, where image size and build time are
+# measured rather than assumed.
+strip = true

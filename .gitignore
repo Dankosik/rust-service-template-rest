@@ -1,0 +1,23 @@
+# Cargo build output
+/target/
+**/target/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local artifacts
+.artifacts/
+*.profraw
+*.profdata
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+
+# Harness-local overrides
+.claude/settings.local.json
+.qwen/QWEN.local.md
+.qwen/settings.local.json

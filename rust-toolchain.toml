@@ -1,0 +1,6 @@
+# Pinned toolchain for every checkout and CI runner. Bump deliberately, in one
+# reviewed change together with `rust-version` in Cargo.toml.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

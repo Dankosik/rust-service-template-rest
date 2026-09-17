@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+# Cargo.lock is committed for a binary template; keep merges explicit.
+Cargo.lock merge=binary linguist-generated=true

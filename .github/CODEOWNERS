@@ -1,0 +1,10 @@
+# Template users must replace the owner below before requiring code-owner review.
+# Example: * @acme/backend-platform
+* @Dankosik
+
+# Critical areas requiring explicit ownership.
+/crates/ @Dankosik
+/.github/workflows/ @Dankosik
+/Cargo.toml @Dankosik
+/Cargo.lock @Dankosik
+/rust-toolchain.toml @Dankosik
