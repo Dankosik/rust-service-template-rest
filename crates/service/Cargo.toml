@@ -9,9 +9,16 @@ repository.workspace = true
 publish.workspace = true
 build = "build.rs"
 
+# The library holds the API contract assembly (`api`); the `service` binary
+# is the runtime, and `openapi` renders the committed document from the same
+# assembly.
 [[bin]]
 name = "service"
 path = "src/main.rs"
+
+[[bin]]
+name = "openapi"
+path = "src/bin/openapi.rs"
 
 [lints]
 workspace = true
@@ -28,6 +35,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
+utoipa = { workspace = true, features = ["macros", "yaml"] }
+utoipa-axum = { workspace = true }
 
 [build-dependencies]
 vergen-gitcl = { workspace = true }

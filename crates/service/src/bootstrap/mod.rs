@@ -165,8 +165,11 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             .unwrap_or(usize::MAX),
         max_connections: config.http.max_connections,
     };
+    // The routes and the committed OpenAPI document are the two halves of
+    // one contract; only the routes are needed here.
+    let (routes, _document) = service::api::contract().split_for_parts();
     let app = infra_http::harden(
-        infra_http::router(readiness.reader()),
+        routes.with_state(readiness.reader()),
         &HardenOptions {
             max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64())
                 .unwrap_or(usize::MAX),

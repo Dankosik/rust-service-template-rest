@@ -55,6 +55,24 @@ jobs:
         run: make build
       - name: Test
         run: make test
+      - name: OpenAPI lint
+        # The drift check is part of `make test`; this is Redocly over the
+        # committed document. Node.js is preinstalled on the runner.
+        run: make openapi-lint
+      - name: OpenAPI compatibility
+        # oasdiff against the pull-request base. The base has no document
+        # before the stage that introduced it, so an absent file is a skip,
+        # not a failure. Go is preinstalled on the runner.
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+          if ! git show "${BASE_SHA}:api/openapi/service.yaml" >/tmp/openapi-base.yaml 2>/dev/null; then
+            echo "base ${BASE_SHA} has no api/openapi/service.yaml; nothing to compare"
+            exit 0
+          fi
+          make openapi-breaking BASE_OPENAPI=/tmp/openapi-base.yaml
       - name: Skills
         run: make check-skills
 

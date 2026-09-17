@@ -2,3 +2,5 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
+# Proper nouns `doc_markdown` would otherwise ask to backtick; `..` keeps the defaults.
+doc-valid-idents = ["OpenAPI", ".."]
