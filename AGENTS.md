@@ -121,7 +121,7 @@ Select commands from [`make/template.mk`](make/template.mk):
 | One crate's behavior or tests | `make build` and `make test-package PKG=<crate>` |
 | Several crates, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` | `make build` and `make test` |
 | Formatting or lint configuration | `make fmt-check` and `make lint` |
-| Documentation or agent instructions | Static consistency review; every link resolves |
+| Documentation or agent instructions | Static consistency review; every link resolves; `make check-skills` for skills |
 | Full-repository claim, explicitly requested | `make check` |
 
 Every Cargo command runs with `--locked`; a lockfile change is part of the
@@ -158,6 +158,7 @@ uncertain or contested.
 | A non-obvious technical decision must survive the current session | `specs/<topic>/` while open; the owning document once accepted |
 | Contribution, pull-request, or evidence expectations | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | Configuration key, secret source, telemetry environment, or runtime budget changes | [Configuration Source Policy](docs/configuration-source-policy.md) |
+| A skill or agent instruction is added or edited | [Skill Authoring](docs/skill-authoring.md), then `make check-skills` |
 
 The spec-first workflow router, architecture front door, validation routing,
 agent harness adapters, and Rust skills are planned owners; until their stage
@@ -166,15 +167,16 @@ and Direct Work applies.
 
 ## Rust Change Surface
 
+For Rust changes, apply only the skills under [`.agents/skills`](.agents/skills)
+whose descriptions match a pressure in the changed surface; each skill owns
+its method and completion condition. `rust-coder` owns ordinary
+implementation; `rust-dependencies` fires before any new crate, feature, or
+toolchain change; `rust-verification` decides what existing evidence
+supports. The catalog is listed in [README.md](README.md#working-with-coding-agents)
+and its authoring rules in [Skill Authoring](docs/skill-authoring.md).
+
 Use the pinned toolchain in [`rust-toolchain.toml`](rust-toolchain.toml) and
 the workspace `edition` and `rust-version` in [`Cargo.toml`](Cargo.toml) for
 language and standard-library choices; bump them only as one reviewed change.
 Workspace lints in `Cargo.toml` are the lint policy; `make lint` promotes
-warnings to errors. `unsafe_code` is forbidden workspace-wide. Add a
-dependency through `[workspace.dependencies]` with `default-features = false`
-and enable features per crate.
-
-Tests live beside their owner under `#[cfg(test)]`; black-box crate tests use
-the crate's `tests/` directory; process and container proof will live in a
-dedicated workspace crate. Prove async completion by joining tasks, not by
-sleeping; bound every wait.
+warnings to errors. `unsafe_code` is forbidden workspace-wide.
