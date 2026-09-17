@@ -1,0 +1,26 @@
+[package]
+name = "service-config"
+description = "Typed, validated, immutable runtime configuration snapshot."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytesize = { workspace = true, features = ["serde"] }
+clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }
+config = { workspace = true, features = ["toml"] }
+humantime = { workspace = true }
+humantime-serde = { workspace = true }
+secrecy = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["std", "derive"] }
+thiserror = { workspace = true }
+toml = { workspace = true, features = ["parse"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

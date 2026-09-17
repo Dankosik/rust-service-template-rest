@@ -1,13 +1,24 @@
 //! HTTP transport adapter.
 //!
-//! Owns the router, the health probe handlers, and the server lifecycle.
-//! Does not own business rules, configuration loading, or process lifecycle;
-//! the composition root in the `service` crate wires those together.
+//! Owns the hardened middleware chain, the problem envelope, the health
+//! probe handlers, and a bounded server over hyper. It does not own business
+//! rules, configuration loading, or process lifecycle; the composition root
+//! in the `service` crate wires those together.
+//!
+//! Most of the chain is `tower-http`; the template-owned pieces are named
+//! in `specs/runtime-core/research/synthesis.md`.
 
+pub mod problem;
+
+mod access_log;
+mod harden;
 mod health;
+mod request_id;
 mod router;
 mod server;
 
-pub use health::Readiness;
+pub use harden::{HTTP_METRICS_NAMES, HardenOptions, SHED_REQUESTS_METRIC, harden};
+pub use problem::{Code, InvalidParam, Problem};
+pub use request_id::{REQUEST_ID_HEADER, request_id};
 pub use router::router;
-pub use server::{Server, ServerError};
+pub use server::{CONNECTIONS_REFUSED_METRIC, Drained, Server, ServerError, ServerOptions};
