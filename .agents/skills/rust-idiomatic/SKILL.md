@@ -1,45 +1,18 @@
 ---
 name: rust-idiomatic
-description: "Use when a Rust change affects ownership, borrowing, trait bounds, caller-visible error identity, Send/Sync at an async boundary, or a public type's contract."
-metadata:
-  invocation: model
-  kind: method
+description: "Contracts. Use for Rust ownership, borrowing, trait, error-identity, or async-boundary decisions where caller-visible semantics or readability need attention."
 ---
 
 # Rust Idiomatic
 
-Correctness follows **contracts the type system can see**: who owns a value,
-who may mutate it, what absence and failure mean, and what crosses a task
-boundary.
+**Contracts.** Make ownership and caller expectations visible in ordinary Rust: who owns a value, who may mutate it, what absence and failure mean, and what crosses a task boundary. Identify those before changing representation. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
 
-Borrow through `&str`, slices, and `&Path` when ownership is unnecessary;
-move owned values when responsibility transfers; let lifetimes describe real
-relationships. Before a `clone`, `Arc`, or `Mutex` to satisfy the borrow
-checker, inspect the data flow: a shared owner that exists only to appease
-the compiler hides the real owner. `Arc` shares an allocation, not a
-synchronized mutation; a guard held across an `.await` is a contention and
-deadlock surface.
+Borrow through slices, string slices, and paths when ownership is unnecessary; move owned values when responsibility transfers; let lifetimes describe actual relationships. Before a clone, an Arc, or a Mutex introduced to satisfy the borrow checker, inspect the data flow and the scope of the borrow: a shared owner that exists only to appease the compiler hides the real owner. Cloning an Arc shares an allocation, not a synchronized mutation, and a guard held across an await is a contention and deadlock surface.
 
-Choose enums for meaningful alternatives, newtypes for distinctions that
-prevent misuse (`Readiness`, `Code`, `SecretString`), and `Option`/`Result`
-for absence and failure; never encode either in a sentinel value. Library
-crates expose typed errors with `thiserror` and preserve the cause through
-`#[source]`; the composition root is the only place an error becomes an exit
-code. Keep `Display` operator-readable and free of secrets.
+Choose enums for meaningful alternatives and newtypes for distinctions that prevent real misuse, as the readiness handle, the problem code, and the secret string do here. Use Option and Result to preserve absence and failure; never encode either in a sentinel value. Add standard conversion and comparison traits when their semantics fit; keep equality and hashing consistent.
 
-At async boundaries, values that cross `tokio::spawn` need `Send + 'static`;
-prefer owning the data the task needs over widening lifetimes. Return
-`impl Future`/`async fn` in traits only when object safety is not required;
-this repository's `health::Probe` returns a boxed future because probes are
-stored as `Box<dyn Probe>`.
+Library crates expose typed errors and preserve the cause through a source; only the composition root turns an error into an exit code. Keep Display operator-readable and free of secrets. Values that cross a spawn need to be Send and owned for the task's lifetime; prefer giving a task the data it needs over widening lifetimes. A trait stored as a trait object returns a boxed future, as the probe trait does; a trait used only generically may use an async method.
 
-`unsafe_code` is forbidden workspace-wide; compilation is not a soundness
-proof, and a need for `unsafe` reopens the design. Match the surrounding
-code's naming and comment density. Prefer iterators for transformations and
-loops for stateful control flow; collecting changes memory use.
+Use iterators for readable transformations and loops for clearer stateful control flow; collecting changes memory use. Preserve ordering, numeric overflow behavior, and byte versus text distinctions. Unsafe code is forbidden in this workspace and compilation is not a soundness proof; a need for unsafe reopens the design rather than the lint.
 
-For review, explain the contract issue and the smallest justified change
-without editing. For implementation, finish with `cargo fmt` and the focused
-tests for the changed contract. A `clone` or a shared owner is not wrong by
-spelling; it is wrong when it hides the actual owner or copies what could be
-borrowed on a hot path.
+For review, explain the contract issue and the smallest justified change without editing files. For implementation, finish with formatted code and focused checks for the behavior or type contract affected. Avoid unrelated modernization or abstractions that obscure the operation; neither a clone nor a shared owner is wrong merely by its spelling.

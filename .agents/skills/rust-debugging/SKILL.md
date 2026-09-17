@@ -1,48 +1,18 @@
 ---
 name: rust-debugging
-description: "Use when a test, the service, or a lifecycle stage fails, hangs, flakes, or produces wrong output and the cause is not yet known."
-metadata:
-  invocation: model
-  kind: method
+description: "Causality. Use for an uncertain Rust service defect: a failing or flaky test, a hang, a wrong response, a startup rejection, or a teardown that overran its budget."
 ---
 
 # Rust Debugging
 
-**Causality.** Find the first observable divergence between intended and
-actual behavior, and choose the observation that could disprove the leading
-explanation rather than confirm it.
+**Causality.** Find the first observable divergence between the intended and the actual execution path, and choose the observation that could disprove the leading explanation rather than confirm it. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
 
-Separate the failure classes first: a compiler or clippy diagnostic needs no
-process; a configuration rejection prints the offending key on stderr and
-exits 1; a startup failure logs `startup failed`; a degraded shutdown exits 3
-with the overrun stage in the log; a hang has a task without an owner or a
-wait without a bound. Read the error chain to its `#[source]`; read the
-`shutdown_*` and `drain_*` events in order before guessing which stage
-stalled.
+Separate the failure classes before reproducing anything. A compiler or clippy diagnostic needs no process. A configuration rejection prints the offending key on standard error and exits with failure. A startup failure logs a startup-failed event. A degraded shutdown exits with its distinct code and names the overrun stage in the shutdown events. A hang has a task without an owner or a wait without a bound. Read an error chain to its source, and read the shutdown and drain events in order before guessing which stage stalled.
 
-Reproduce at the smallest layer that still fails: a unit test with a paused
-clock, the router through `oneshot`, `Server` on an ephemeral port, then the
-binary. Keep raw stdout, stderr, exit status, and timings when their
-differences explain the symptom. `APP__LOG__LEVEL=debug` and
-`APP__LOG__FORMAT=text` make local runs readable; `RUST_BACKTRACE=1` for
-panics. `tokio-console` needs `--cfg tokio_unstable` and is a diagnostic
-session, not a dependency.
+Reproduce at the smallest layer that still fails: a unit test with a paused clock, the router through a one-shot call, the bounded server on an ephemeral port, then the binary. Preserve raw standard output, standard error, exit status, and timings when their differences explain the symptom. Debug level and text format through the APP environment make a local run readable, and a backtrace variable explains a panic; the tokio console is a diagnostic session behind an unstable cfg flag, not a dependency.
 
-For a flaky async test, suspect an unbounded wait, a `sleep` used as
-synchronization, `std::time::Instant` under a paused clock, a task that
-outlives the test, or a `select!` dropping a non-cancellation-safe future.
-Make the wait explicit and bounded before touching timing constants. For an
-ownership error, identify the actual owner and lifetime before reaching for
-`clone` or `Arc`.
+For a flaky async test, suspect an unbounded wait, a sleep used as synchronization, the standard library's Instant under a paused clock, a task that outlives the test, or a select arm that dropped a future that was not cancellation-safe. Make the wait explicit and bounded before touching timing constants. For an ownership error, identify the actual owner and required lifetime before adding a clone, an Arc, or a lock.
 
-Change one causal variable at a time. After an ineffective fix, revisit the
-explanation instead of stacking speculative changes. A retry, a caught panic,
-or a discarded `Err` can hide the mechanism without repairing it. Keep
-unrelated baseline failures distinct from the reported defect, and keep
-secrets out of captures.
+Minimize a reproducer only while it retains the same failure, and change one causal variable at a time. After an ineffective fix, revisit the explanation instead of stacking speculative changes. A retry, a caught panic, or a discarded error can hide the mechanism without repairing it. Keep unrelated baseline failures distinct from the reported defect, and keep secrets and credentials out of diagnostic captures.
 
-For diagnosis, finish with the supported explanation or the next
-discriminating observation; do not edit unless a fix is requested. For a fix,
-change the causal owner, replay the original failure, add the regression test
-that would have caught it, remove temporary instrumentation, and report what
-was verified and what remains uncertain.
+For diagnosis, finish with the supported explanation or the next discriminating observation; do not edit unless fixing is requested. For a fix, change the causal owner, replay the original failure, retain the regression test that would have caught it, remove temporary instrumentation, and report actual verification and remaining uncertainty without expanding to unrelated diagnostics.

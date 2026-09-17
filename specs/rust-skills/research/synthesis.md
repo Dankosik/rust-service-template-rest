@@ -32,10 +32,16 @@ can carry.
   `.agents/skills/` as a project-level path and also loads `.claude/skills/`
   and `.codex/skills/` for compatibility), Codex, Grok, and OpenCode. Claude
   and Qwen discovery views are generated with the harness stage.
-- Shape: one `SKILL.md` per skill, 150–350 words, frontmatter `name`,
-  `description` (a routing discriminator: the observable pressure and the
-  decision it owns), `metadata.invocation: model`, `metadata.kind: method`.
-  No `references/` until a real branch-only pressure appears.
+- Shape: exactly the rust-cli-skills shape, at the maintainer's request.
+  One directory per skill holding `SKILL.md` and `LICENSE`; frontmatter with
+  only `name` and `description` (an optional leading concept, then `Use
+  when/for/to` with the pressure and the decision, at most two sentences);
+  one H1 and four to seven prose paragraphs of 250–500 words with no links,
+  lists, or code blocks; an opening bold concept with the standing clause
+  about settled choices; a closing review-versus-implementation paragraph.
+  The Go template's `metadata.invocation/kind` block is not carried: Cursor
+  and Codex do not need it, and the harness stage can add it back if a
+  `user` or `role` skill ever requires the projection.
 - Every skill names the repository owner it decides against, so an agent
   extends the existing path instead of creating a parallel one.
 - The research-first rule becomes a skill (`rust-dependencies`) so it fires
@@ -46,9 +52,10 @@ can carry.
   arrive with their stage. `rust-test-strategy` and `rust-test-implementation`
   stay merged as `rust-testing` until the workflow stage separates
   implementation from review lenses.
-- A structural check (`make check-skills`) validates frontmatter, name/dir
-  agreement, body budget, and relative links; it proves shape, not model
-  behaviour. Behavioural evaluation fixtures are deferred to the harness
+- A structural check (`make check-skills`) enforces that shape: frontmatter
+  keys, name/dir agreement, trigger and sentence count in the description,
+  one heading, prose-only paragraphs, word budget, and the LICENSE copy; it
+  proves shape, not model behaviour. Behavioural evaluation fixtures are deferred to the harness
   stage, when the reviewer roles that consume them exist.
 
 ## Set

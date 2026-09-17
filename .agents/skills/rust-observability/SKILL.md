@@ -1,46 +1,18 @@
 ---
 name: rust-observability
-description: "Use when an operational question needs a log field, span, metric, or probe, or when an emitted field or label changes correlation, cardinality, privacy, or cost."
-metadata:
-  invocation: model
-  kind: method
+description: "Operator evidence. Use when a Rust service log field, span, metric, or probe must answer an operational question, or when an emitted field changes correlation, cardinality, privacy, or cost."
 ---
 
 # Rust Observability
 
-Telemetry is **operator evidence**: every signal answers a named operational
-question or is avoidable cost.
+**Operator evidence.** Start with the operational question and choose the smallest signal that answers it; every emitted field is either evidence or avoidable cost. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
 
-`operator question -> signal -> correlation -> cardinality, privacy, cost -> proof`
+Logs are tracing events with structured fields and a stable snake_case event name an operator can search, never formatted sentences. Correlation is already carried: every record inside a request has the request id, trace id, and span id from the span the hardened chain opened, so do not thread identifiers by hand or log them twice. The process installs exactly one subscriber in the telemetry crate; library crates never install one and never configure levels.
 
-Logs are `tracing` events with structured fields (`tracing::info!(key = %value,
-"event_name")`), never formatted strings; the event name is a stable
-snake_case token an operator can search. Correlation is free: every record
-inside a request carries `request_id`, `traceId`, and `spanId` from the span
-the `harden` chain opened, so do not thread ids by hand or log them again.
-The process installs exactly one subscriber in `infra_telemetry::logging`;
-library crates never install one.
+Metrics go through the metrics facade with a describe call beside the first use and snake_case names ending in total for counters. Labels are a cardinality budget: use route templates with an explicit unmatched label, finite outcomes, and problem codes; never a raw path, a user id, a peer address, or an error message. HTTP server, process, and Tokio runtime metrics already exist; add an instrument only for a question they cannot answer, and keep the diagnostics listener serving the metrics route alone.
 
-Metrics go through the `metrics` facade (`counter!`, `gauge!`, `histogram!`)
-with a `describe_*!` beside the first use and a snake_case name ending in
-`_total` for counters. Labels are a cardinality budget: use route templates
-(`endpoint`, with `<unmatched>` for fallbacks), finite outcomes, and problem
-codes; never a raw path, user id, peer address, or error message. HTTP
-server, process, and Tokio runtime metrics already exist; add an instrument
-only for a question they cannot answer.
+Spans for HTTP come from the tracing layer in the chain; inner operations use the instrument attribute and record identifiers and outcomes as fields rather than payloads. Every field is a disclosure surface: no secrets, tokens, bodies, or personal data. The trace exporter is installed only when an endpoint resolves, and its startup state is a configuration signal, not delivery health; a successful local emission proves nothing about a collector.
 
-Spans come from `axum-tracing-opentelemetry` for HTTP and from
-`#[tracing::instrument]` for inner operations; record ids and outcomes as
-fields, not payloads. Every emitted field is a disclosure surface: no
-secrets, tokens, bodies, or personal data.
+Probes are control inputs rather than diagnostics. Liveness describes process progress; readiness is the cached verdict the health crate refreshes in the background with a failure threshold and a staleness guard. A new dependency contributes a probe and a readiness consequence, never a per-request check, and its probe must respect the evaluation budget.
 
-Probes are control inputs, not diagnostics: liveness is process-only,
-readiness is the cached verdict in `crates/health` refreshed in the
-background. A new dependency adds a `Probe` and a readiness consequence,
-never a per-request check. The diagnostics listener serves `/metrics` only
-and stays off the application listener.
-
-For review, account for every affected signal's question, labels, and
-readers. For implementation, verify the signal's output and cardinality with a
-focused test or a scrape of `/metrics`; local checks describe emission, not
-delivery to a collector.
+For review, account for every affected signal's question, labels, readers, and privacy without editing. For implementation, verify the signal's output and cardinality with a focused test or a scrape of the metrics route, and distinguish local emission from deployment evidence. Do not add dashboards, alerts, or a lifecycle audit because a skill mentions them.
