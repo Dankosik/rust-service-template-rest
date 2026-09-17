@@ -1,0 +1,495 @@
+//! Readiness aggregation and the drain signal.
+//!
+//! Readiness is refreshed by a background task and served from the last
+//! observed result. Evaluating probes per request would make the probe route
+//! consume the dependency capacity it reports on: a pooled database ping
+//! needs a pool connection, so a saturated pool fails readiness, the
+//! orchestrator evicts the instance, and its traffic moves to instances that
+//! are already saturated.
+//!
+//! Serving from a cache means something must keep the cache honest, which is
+//! what the staleness bound in [`Readiness::verdict`] is for.
+//!
+//! The snapshot travels through [`tokio::sync::watch`], so tests and the
+//! shutdown sequence await transitions instead of sleeping.
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::time::Instant;
+
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
+
+/// One dependency check. Implementations must respect the deadline carried
+/// by the caller's timeout; a check that ignores it holds the whole
+/// evaluation past its budget.
+pub trait Probe: Send + Sync + 'static {
+    /// Bounded label used in log lines and verdict messages.
+    fn name(&self) -> &'static str;
+    /// Resolve `Ok` when the dependency can serve requests.
+    fn check(&self) -> Pin<Box<dyn Future<Output = Result<(), ProbeError>> + Send + '_>>;
+}
+
+/// Why one probe failed, without dependency internals.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct ProbeError(pub String);
+
+impl ProbeError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+/// Why the service is not ready.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum NotReady {
+    #[error("service is draining")]
+    Draining,
+    #[error("readiness has not been evaluated yet")]
+    NotEvaluated,
+    #[error("readiness verdict is stale: last evaluated {age:?} ago, budget {budget:?}")]
+    Stale { age: Duration, budget: Duration },
+    #[error("{probe} probe failed: {error}")]
+    ProbeFailed {
+        probe: &'static str,
+        error: ProbeError,
+    },
+}
+
+/// Cadence and thresholds for the refresher.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefreshPolicy {
+    /// Time between evaluations.
+    pub interval: Duration,
+    /// Budget for one evaluation across every probe.
+    pub probe_budget: Duration,
+    /// Consecutive failures before a healthy verdict flips to unhealthy. A
+    /// service that has never been healthy reports the failure at once.
+    pub failure_threshold: u32,
+}
+
+impl RefreshPolicy {
+    /// How old a verdict may get before it is refused.
+    ///
+    /// Evaluations are serial, so a probe budget above the interval makes
+    /// the loop run at the budget's pace; sizing from the interval alone
+    /// would expire a verdict that is being refreshed as fast as it can be.
+    /// Three periods so an ordinary missed tick does not flip readiness,
+    /// finite so a dead refresher cannot leave a verdict standing forever.
+    #[must_use]
+    pub fn stale_after(&self) -> Duration {
+        let period = self.interval.max(self.probe_budget);
+        self.probe_budget + period * 3
+    }
+}
+
+/// The immutable result of one evaluation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Evaluation {
+    /// The verdict a caller should see; `None` means ready.
+    pub failure: Option<NotReady>,
+    /// Failed evaluations since the last healthy one.
+    pub consecutive_failures: u32,
+    pub evaluated_at: Instant,
+}
+
+/// Published readiness state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    /// Set by [`Readiness::start_drain`]; read before anything else.
+    pub draining: bool,
+    /// `None` until the first evaluation completes.
+    pub evaluation: Option<Evaluation>,
+    /// Staleness budget published by the refresher; `None` before it runs.
+    pub stale_after: Option<Duration>,
+}
+
+/// Readiness owner: holds the probes and publishes snapshots.
+#[derive(Clone, Debug)]
+pub struct Readiness {
+    tx: Arc<watch::Sender<Snapshot>>,
+    probes: Arc<Vec<Box<dyn Probe>>>,
+}
+
+impl std::fmt::Debug for dyn Probe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Probe").field("name", &self.name()).finish()
+    }
+}
+
+/// Read side handed to HTTP handlers and the shutdown sequence.
+#[derive(Clone, Debug)]
+pub struct ReadinessReader {
+    rx: watch::Receiver<Snapshot>,
+}
+
+impl Readiness {
+    /// A readiness owner over `probes`. Nothing is evaluated until
+    /// [`Readiness::refresh`] or [`Readiness::watch`] runs.
+    #[must_use]
+    pub fn new(probes: Vec<Box<dyn Probe>>) -> Self {
+        let (tx, _rx) = watch::channel(Snapshot {
+            draining: false,
+            evaluation: None,
+            stale_after: None,
+        });
+        Self {
+            tx: Arc::new(tx),
+            probes: Arc::new(probes),
+        }
+    }
+
+    /// A reader over the current and future snapshots.
+    #[must_use]
+    pub fn reader(&self) -> ReadinessReader {
+        ReadinessReader {
+            rx: self.tx.subscribe(),
+        }
+    }
+
+    /// Mark the service as draining. Takes effect on the next read, not
+    /// after the next refresh.
+    pub fn start_drain(&self) {
+        self.tx.send_if_modified(|snapshot| {
+            let changed = !snapshot.draining;
+            snapshot.draining = true;
+            changed
+        });
+    }
+
+    /// Run one evaluation, fold it into the snapshot, and return what was
+    /// observed (not necessarily what callers now see, because of the
+    /// failure threshold).
+    ///
+    /// Startup admission calls this directly: it needs the verdict to decide
+    /// whether to admit traffic, and the seeded cache so the first probe
+    /// after admission is answered from a real evaluation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first failing probe.
+    pub async fn refresh(&self, policy: RefreshPolicy) -> Result<(), NotReady> {
+        let observed = tokio::time::timeout(policy.probe_budget, self.evaluate())
+            .await
+            .unwrap_or_else(|_elapsed| {
+                Err(NotReady::ProbeFailed {
+                    probe: "readiness",
+                    error: ProbeError::new(format!(
+                        "evaluation exceeded the {:?} budget",
+                        policy.probe_budget
+                    )),
+                })
+            });
+        let evaluated_at = Instant::now();
+        self.tx.send_modify(|snapshot| {
+            let previous = snapshot.evaluation.as_ref();
+            let evaluation = match &observed {
+                Ok(()) => Evaluation {
+                    failure: None,
+                    consecutive_failures: 0,
+                    evaluated_at,
+                },
+                Err(failure) => {
+                    let consecutive_failures = previous.map_or(0, |p| p.consecutive_failures) + 1;
+                    // Hold the previous healthy verdict until the streak
+                    // reaches the threshold. One that was already failing
+                    // keeps reporting the newest cause; one that has never
+                    // been healthy fails immediately.
+                    let reported = match previous {
+                        Some(p)
+                            if p.failure.is_none()
+                                && consecutive_failures < policy.failure_threshold =>
+                        {
+                            None
+                        }
+                        _ => Some(failure.clone()),
+                    };
+                    Evaluation {
+                        failure: reported,
+                        consecutive_failures,
+                        evaluated_at,
+                    }
+                }
+            };
+            snapshot.evaluation = Some(evaluation);
+        });
+        observed
+    }
+
+    /// Refresh on `policy.interval` until `cancel` fires.
+    ///
+    /// Publishes the staleness budget before the first evaluation so a
+    /// refresher that dies on its first pass still leaves readers able to
+    /// refuse the verdict it never wrote. The first evaluation runs
+    /// immediately unless startup admission already seeded the cache.
+    pub async fn watch(&self, policy: RefreshPolicy, cancel: CancellationToken) {
+        self.tx.send_modify(|snapshot| {
+            snapshot.stale_after = Some(policy.stale_after());
+        });
+        if self.tx.borrow().evaluation.is_none() {
+            let _ = self.refresh(policy).await;
+        }
+        let mut ticker = tokio::time::interval(policy.interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await; // the first tick completes immediately
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => return,
+                _ = ticker.tick() => {
+                    let before = self.reader().verdict();
+                    let _ = self.refresh(policy).await;
+                    let after = self.reader().verdict();
+                    if before.is_ok() != after.is_ok() {
+                        match &after {
+                            Ok(()) => tracing::info!("readiness recovered"),
+                            Err(reason) => tracing::warn!(%reason, "readiness lost"),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn evaluate(&self) -> Result<(), NotReady> {
+        for probe in self.probes.iter() {
+            probe.check().await.map_err(|error| NotReady::ProbeFailed {
+                probe: probe.name(),
+                error,
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl ReadinessReader {
+    /// The current verdict without touching any dependency.
+    ///
+    /// A verdict older than the refresher's own cadence is refused rather
+    /// than served: a stopped refresher leaves its last verdict standing,
+    /// and the last thing a healthy service writes is "healthy".
+    ///
+    /// # Errors
+    ///
+    /// Returns why the service is not ready.
+    pub fn verdict(&self) -> Result<(), NotReady> {
+        let snapshot = self.rx.borrow().clone();
+        if snapshot.draining {
+            return Err(NotReady::Draining);
+        }
+        let Some(evaluation) = snapshot.evaluation else {
+            return Err(NotReady::NotEvaluated);
+        };
+        if let Some(budget) = snapshot.stale_after {
+            let age = evaluation.evaluated_at.elapsed();
+            if age > budget {
+                return Err(NotReady::Stale { age, budget });
+            }
+        }
+        match evaluation.failure {
+            None => Ok(()),
+            Some(reason) => Err(reason),
+        }
+    }
+
+    /// Resolve after the next published change.
+    pub async fn changed(&mut self) {
+        let _ = self.rx.changed().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+    use super::*;
+
+    struct Flaky {
+        healthy: Arc<AtomicBool>,
+        calls: Arc<AtomicU32>,
+    }
+
+    impl Probe for Flaky {
+        fn name(&self) -> &'static str {
+            "flaky"
+        }
+        fn check(&self) -> Pin<Box<dyn Future<Output = Result<(), ProbeError>> + Send + '_>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                if self.healthy.load(Ordering::Relaxed) {
+                    Ok(())
+                } else {
+                    Err(ProbeError::new("connection refused"))
+                }
+            })
+        }
+    }
+
+    struct Hanging;
+
+    impl Probe for Hanging {
+        fn name(&self) -> &'static str {
+            "hanging"
+        }
+        fn check(&self) -> Pin<Box<dyn Future<Output = Result<(), ProbeError>> + Send + '_>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn policy() -> RefreshPolicy {
+        RefreshPolicy {
+            interval: Duration::from_millis(50),
+            probe_budget: Duration::from_millis(20),
+            failure_threshold: 3,
+        }
+    }
+
+    fn flaky(healthy: bool) -> (Readiness, Arc<AtomicBool>, Arc<AtomicU32>) {
+        let flag = Arc::new(AtomicBool::new(healthy));
+        let calls = Arc::new(AtomicU32::new(0));
+        let readiness = Readiness::new(vec![Box::new(Flaky {
+            healthy: flag.clone(),
+            calls: calls.clone(),
+        })]);
+        (readiness, flag, calls)
+    }
+
+    #[tokio::test]
+    async fn fails_closed_before_first_evaluation() {
+        let (readiness, _, _) = flaky(true);
+        assert_eq!(readiness.reader().verdict(), Err(NotReady::NotEvaluated));
+    }
+
+    #[tokio::test]
+    async fn refresh_seeds_the_verdict_and_reads_do_not_probe() {
+        let (readiness, _, calls) = flaky(true);
+        readiness.refresh(policy()).await.unwrap();
+        let reader = readiness.reader();
+        for _ in 0..10 {
+            assert_eq!(reader.verdict(), Ok(()));
+        }
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "verdict() must not run probes"
+        );
+    }
+
+    #[tokio::test]
+    async fn healthy_instance_survives_blips_below_the_threshold() {
+        let (readiness, flag, _) = flaky(true);
+        readiness.refresh(policy()).await.unwrap();
+        flag.store(false, Ordering::Relaxed);
+        assert!(readiness.refresh(policy()).await.is_err());
+        assert_eq!(readiness.reader().verdict(), Ok(()), "1 of 3 failures");
+        assert!(readiness.refresh(policy()).await.is_err());
+        assert_eq!(readiness.reader().verdict(), Ok(()), "2 of 3 failures");
+        assert!(readiness.refresh(policy()).await.is_err());
+        assert!(
+            matches!(
+                readiness.reader().verdict(),
+                Err(NotReady::ProbeFailed { probe: "flaky", .. })
+            ),
+            "3 of 3 failures flips"
+        );
+        flag.store(true, Ordering::Relaxed);
+        readiness.refresh(policy()).await.unwrap();
+        assert_eq!(readiness.reader().verdict(), Ok(()), "one success recovers");
+    }
+
+    #[tokio::test]
+    async fn never_healthy_instance_fails_immediately() {
+        let (readiness, _, _) = flaky(false);
+        assert!(readiness.refresh(policy()).await.is_err());
+        assert!(matches!(
+            readiness.reader().verdict(),
+            Err(NotReady::ProbeFailed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn hanging_probe_is_bounded_by_the_budget() {
+        let readiness = Readiness::new(vec![Box::new(Hanging)]);
+        let started = Instant::now();
+        let err = readiness.refresh(policy()).await.unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(
+            matches!(
+                err,
+                NotReady::ProbeFailed {
+                    probe: "readiness",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn draining_wins_over_a_healthy_verdict_immediately() {
+        let (readiness, _, _) = flaky(true);
+        readiness.refresh(policy()).await.unwrap();
+        let mut reader = readiness.reader();
+        readiness.start_drain();
+        reader.changed().await;
+        assert_eq!(reader.verdict(), Err(NotReady::Draining));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_verdict_is_refused_when_the_refresher_stops() {
+        let (readiness, _, _) = flaky(true);
+        let cancel = CancellationToken::new();
+        let watcher = tokio::spawn({
+            let readiness = readiness.clone();
+            let cancel = cancel.clone();
+            async move { readiness.watch(policy(), cancel).await }
+        });
+        let mut reader = readiness.reader();
+        reader.changed().await;
+        tokio::task::yield_now().await;
+        assert_eq!(reader.verdict(), Ok(()));
+
+        cancel.cancel();
+        watcher.await.unwrap();
+        tokio::time::advance(policy().stale_after() + Duration::from_millis(1)).await;
+        assert!(
+            matches!(reader.verdict(), Err(NotReady::Stale { .. })),
+            "{:?}",
+            reader.verdict()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_refreshes_on_the_interval_and_stops_on_cancel() {
+        let (readiness, flag, calls) = flaky(true);
+        let cancel = CancellationToken::new();
+        let watcher = tokio::spawn({
+            let readiness = readiness.clone();
+            let cancel = cancel.clone();
+            async move { readiness.watch(policy(), cancel).await }
+        });
+        let mut reader = readiness.reader();
+        reader.changed().await;
+        assert_eq!(reader.verdict(), Ok(()));
+
+        flag.store(false, Ordering::Relaxed);
+        for _ in 0..3 {
+            tokio::time::advance(policy().interval).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(
+            reader.verdict(),
+            Err(NotReady::ProbeFailed { .. })
+        ));
+        assert!(calls.load(Ordering::Relaxed) >= 4);
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), watcher)
+            .await
+            .expect("watch must return on cancel")
+            .unwrap();
+    }
+}

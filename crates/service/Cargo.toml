@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+build = "build.rs"
 
 [[bin]]
 name = "service"
@@ -16,11 +17,23 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+axum-prometheus = { workspace = true, features = ["prometheus"] }
+gethostname = { workspace = true }
+health = { workspace = true }
 infra-http = { workspace = true }
+infra-telemetry = { workspace = true }
+secrecy = { workspace = true }
+service-config = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
-tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "ansi", "std"] }
+
+[build-dependencies]
+vergen-gitcl = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["io-util"] }
+nix = { workspace = true, features = ["signal"] }
+tokio = { workspace = true, features = ["test-util"] }
+serde_json = { workspace = true, features = ["std"] }
+ureq = { workspace = true }

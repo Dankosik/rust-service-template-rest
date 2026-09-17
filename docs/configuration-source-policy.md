@@ -1,0 +1,164 @@
+# Configuration Source Policy
+
+This template uses a strict split between non-secret and secret
+configuration. The loader is the `config` crate with `serde`; the policy below
+is what the template adds on top. The `service-config` crate owns it.
+
+## Source Of Truth
+
+- TOML files (`env/config/*.toml`) hold baseline non-secret defaults. TOML is
+  the Rust ecosystem convention; a service that must consume YAML enables
+  config-rs's `yaml` feature rather than adding a YAML crate.
+- Environment variables (`APP__SECTION__KEY`) hold per-environment overrides
+  and every application-owned secret. `APP__HTTP__ADDR` sets `http.addr`;
+  `APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS` sets the collector
+  credential.
+- CLI flags are loader controls: `--config PATH` selects the base file and
+  `--config-overlay PATH` (repeatable, ordered) adds overlays. They never set
+  individual keys, and a positional argument is refused.
+
+Runtime value precedence, last wins:
+
+1. code defaults (`impl Default` beside each section type)
+2. `--config` base file
+3. `--config-overlay` files in order
+4. `APP__` environment variables
+
+An empty `APP__` value is still an explicit final override; it flows into
+validation and fails when the key cannot be empty. Unknown keys from files or
+the environment fail startup (`#[serde(deny_unknown_fields)]` on every
+section), and so does a malformed variable name such as `APP____ADDR` or
+`APP__HTTP__ADDR__`. Because every `APP__*` variable is read, an unrelated
+`APP__FOO` in the process environment also fails startup: name the namespace
+for this service only.
+
+Values keep their human forms in both files and the environment: durations
+as `"8s"`, `"250ms"`, `"1m 30s"`; byte sizes as `"1 MiB"`, `"16 KiB"`, or a
+plain integer; booleans as `true`/`false`; enums by their documented spelling.
+
+## Secret Rules
+
+- Do not place secrets in TOML. A secret-like key (any segment `password`,
+  `secret`, `secrets`, `authorization`, `dsn`, `token` unless followed by
+  `profile` or `url`, `key` after `api` or `private`, `headers` after `otlp`)
+  with a non-empty value in any file fails startup. Empty placeholders are
+  allowed so a file can document the key.
+- Secret fields are `secrecy::SecretString`: `Debug` output and the startup
+  summary print `[REDACTED]`, and the value is zeroed on drop.
+- Files are read as the process user; relative paths and symlinks are
+  accepted because Kubernetes projected volumes depend on symlinks for atomic
+  updates. Each file is bounded to 1 MiB before parsing.
+
+## OpenTelemetry Environment Policy
+
+Typed configuration owns service identity and takes precedence; the official
+OpenTelemetry environment stays a supported platform fallback:
+
+- `service.name`, `service.version`, `vcs.ref.head.revision`,
+  `service.instance.id`, and `deployment.environment.name` come from the
+  typed snapshot (`observability.otel.service_name`, `app.version`,
+  `app.commit`, `app.instance_id`, `app.env`). Additional
+  `OTEL_RESOURCE_ATTRIBUTES` survive underneath them. An empty
+  `app.instance_id` resolves to the hostname, which is the pod name on
+  Kubernetes.
+- A typed `observability.otel.exporter.otlp_endpoint` wins. Otherwise the SDK
+  reads `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, then `OTEL_EXPORTER_OTLP_ENDPOINT`
+  as the collector root. When neither is set the exporter stays disabled:
+  spans still get trace ids for log correlation but nothing is exported.
+- When the typed endpoint selects the destination, ambient credential and
+  trust variables (`OTEL_EXPORTER_OTLP_HEADERS`, `..._CERTIFICATE`,
+  `..._CLIENT_KEY`, `..._CLIENT_CERTIFICATE`, including the `TRACES` forms)
+  fail startup, so one collector's credential is never sent to another.
+  Configure the credential through `APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS`.
+- When the platform supplies the endpoint, it also owns the matching standard
+  credentials, trust material, and exporter tuning.
+- The sampler is always typed (`observability.otel.traces_sampler` and
+  `traces_sampler_arg`, default `parentbased_traceidratio` at `0.10`);
+  `OTEL_TRACES_SAMPLER` is not consulted.
+
+Telemetry setup failures never block the service: a failed exporter build is
+logged with a bounded reason and the process continues with the exporter
+`degraded`. The startup summary carries `tracing.exporter` as `initialized`,
+`disabled`, or `degraded`, and the diagnostics listener exposes
+`service_startup_trace_exporter_active`. This is a startup-configuration
+signal, not continuous delivery health.
+
+`observability.metrics.addr` owns the Prometheus diagnostics listener. It
+defaults to `:9090`, which binds every interface so a scraper in another pod
+can reach it; an empty value disables HTTP exposition. Binding failure blocks
+startup. Deployment network policy must keep this listener private.
+
+## Logging
+
+`log.level` is a `tracing_subscriber::EnvFilter` directive (`info`,
+`debug`, `info,hyper=warn`). `RUST_LOG` is not read; `APP__LOG__LEVEL` is the
+override channel like every other key. `log.format` is `json` (production:
+one flattened object per line with `openTelemetry.traceId` and `spanId` on
+every record inside a request) or `text` (local development).
+
+## Runtime Budget Policy
+
+- `http.request_timeout` (default `8s`) is the per-request handler budget and
+  the only bound on how long one request may hold a task and its pooled
+  resources. Body reads happen inside it because extractors run inside the
+  handler future. Expiry answers a `504` problem. It must not exceed the
+  drain budget left after readiness propagation, so in-flight requests can
+  finish inside the drain.
+- `http.header_read_timeout` (default `5s`) bounds delivery of a request head
+  and, because hyper restarts it whenever an HTTP/1 connection goes idle, is
+  also the keep-alive idle bound. It also closes a client that connects and
+  sends nothing.
+- `http.readiness_timeout` (default `4s`) bounds one background readiness
+  evaluation across every probe; `/health/ready` itself never runs a probe.
+- `http.shutdown_timeout` (default `25s`) bounds the HTTP drain, including
+  the `http.readiness_propagation_delay` (default `15s`) in front of it.
+  `http.grace_period` (default `45s`) is the platform's SIGTERM-to-SIGKILL
+  window; it must cover `shutdown_timeout` plus the `17s` teardown tail
+  (diagnostics close `2s`, background join `5s`, dependency close `5s`,
+  telemetry flush `5s`). The default worst case is 42 seconds inside 45.
+
+  **This is a deployment precondition on every platform.** Configure the
+  grace period explicitly:
+
+  | Platform | Setting |
+  | --- | --- |
+  | Kubernetes | `terminationGracePeriodSeconds: 50` |
+  | Docker | `docker run --stop-timeout 45` / `docker stop --time 45` |
+  | Compose | `stop_grace_period: 45s` |
+  | ECS | `stopTimeout: 45` |
+
+  Changing `http.shutdown_timeout` changes this number; re-derive it.
+- `http.max_header_bytes` (default `16 KiB`) is the read-buffer ceiling for
+  one request head; overflow answers `431`. hyper refuses values below
+  `8 KiB`. `http.max_body_bytes` (default `1 MiB`) answers `413`.
+- `http.max_in_flight` (default `256`) bounds concurrent handler executions;
+  the excess is shed with `503` and `Retry-After: 1` without queueing. Zero
+  disables shedding. `http.max_connections` (default `4096`) bounds accepted
+  connections; the excess is closed at accept without a response. It must be
+  at least `max_in_flight` so the informative rejection stays the common one.
+- `http.access_log_health_probes` defaults to `false`, so matched
+  `GET /health/live` and `GET /health/ready` requests are served without an
+  access-log line. The exclusion is by route template: an unmatched path that
+  merely resembles a probe is still recorded.
+- `health.refresh_interval` (default `2s`) and `health.failure_threshold`
+  (default `3`) drive the background readiness refresher. A cached verdict
+  older than three refresh periods plus one probe budget is refused, so a dead
+  refresher cannot leave a stale "healthy" standing.
+
+## Adding A Config Key
+
+1. Add the typed field, its default in the section's `impl Default`, and its
+   validation, all in the section's own file under `crates/config/src/`. One
+   section is one file: the reason a value was chosen sits beside the rule
+   that enforces it.
+2. Add a loader test in `crates/config/src/load.rs` that sets the key through
+   the environment and asserts the decoded value, and a validation test for a
+   rejected value.
+3. Update `env/config/local.toml` only where the key belongs for a non-secret
+   local example.
+4. Update this document when the key changes secret-source or runtime-budget
+   behaviour.
+
+`#[serde(deny_unknown_fields, default)]` on the section type is what makes an
+undeclared key fail and a missing key take its default; there is no second
+registry to maintain.

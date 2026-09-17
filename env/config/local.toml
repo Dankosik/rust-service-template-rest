@@ -1,0 +1,27 @@
+# Baseline for running the service on a developer machine:
+#   make run   (= cargo run -p service -- --config env/config/local.toml)
+#
+# Non-secret defaults only. Secret-like keys (password, secret, token, dsn,
+# authorization, api_key, private_key, otlp_headers) may appear here only as
+# empty placeholders; a non-empty value fails startup. Set secrets through
+# APP__SECTION__KEY environment variables. Every key not known to the service
+# fails startup too, so a typo cannot be silently ignored.
+
+[app]
+env = "local"
+
+[http]
+addr = ":8080"
+# Production keeps serving for 15s after readiness flips off so load
+# balancers notice; on a laptop that only delays Ctrl-C.
+readiness_propagation_delay = "0s"
+
+[log]
+level = "debug"
+format = "text"
+
+[observability.otel.exporter]
+# Empty: spans get trace ids for log correlation but nothing is exported.
+# Point at a local collector to see traces, e.g. "http://127.0.0.1:4318".
+otlp_endpoint = ""
+otlp_headers = ""

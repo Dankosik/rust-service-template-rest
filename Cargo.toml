@@ -14,20 +14,60 @@ publish = false
 # with `workspace = true` and enable only the features they need.
 [workspace.dependencies]
 # Workspace crates
+service-config = { path = "crates/config" }
+health = { path = "crates/health" }
 infra-http = { path = "crates/infra-http" }
+infra-telemetry = { path = "crates/infra-telemetry" }
 
 # Runtime and transport
 axum = { version = "0.8.9", default-features = false }
+hyper = { version = "1.11.1", default-features = false }
+hyper-util = { version = "0.1.20", default-features = false }
+http = "1.5.0"
+http-body-util = "0.1.5"
 tokio = { version = "1.53.1", default-features = false }
+tokio-util = { version = "0.7.19", default-features = false }
 tower = { version = "0.5.3", default-features = false }
+tower-http = { version = "0.7.1", default-features = false }
 
-# Diagnostics
+# Configuration (see specs/runtime-core/research/configuration.md)
+config = { version = "0.15.25", default-features = false }
+clap = { version = "4.6.7", default-features = false }
+serde = { version = "1", default-features = false }
+serde_json = { version = "1", default-features = false }
+toml = { version = "1.1.6", default-features = false }
+humantime = "2.4.0"
+humantime-serde = "1.1.1"
+bytesize = { version = "2.7.0", default-features = false }
+secrecy = { version = "0.10.3", default-features = false }
+gethostname = "1.1.0"
+
+# Diagnostics (see specs/runtime-core/research/observability.md). The
+# OpenTelemetry family moves together; tracing-opentelemetry is one minor ahead.
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false }
+json-subscriber = { version = "0.3.0", default-features = false }
+opentelemetry = { version = "0.32.0", default-features = false }
+opentelemetry_sdk = { version = "0.32.1", default-features = false }
+opentelemetry-otlp = { version = "0.32.0", default-features = false }
+opentelemetry-semantic-conventions = { version = "0.32.1", default-features = false }
+tracing-opentelemetry = { version = "0.33.0", default-features = false }
+axum-tracing-opentelemetry = { version = "0.39.1", default-features = false }
+metrics = { version = "0.24.6", default-features = false }
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+axum-prometheus = { version = "0.10.1", default-features = false }
+metrics-process = { version = "2.4.3", default-features = false }
+tokio-metrics = { version = "0.5.2", default-features = false }
 thiserror = { version = "2.0.20", default-features = false }
 
+# Build metadata
+vergen-gitcl = { version = "10.0.3", default-features = false }
+
 # Test support
-http-body-util = "0.1.5"
+futures-util = { version = "0.3", default-features = false }
+tempfile = "3"
+nix = { version = "0.31.3", default-features = false }
+ureq = { version = "3.4.2", default-features = false }
 
 # Lints apply to every crate that opts in with `[lints] workspace = true`.
 # `make lint` promotes warnings to errors; keep the levels here at `warn` so

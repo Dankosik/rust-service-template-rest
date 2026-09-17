@@ -1,6 +1,6 @@
 [package]
 name = "infra-http"
-description = "HTTP transport adapter: router, health probes, and server lifecycle."
+description = "HTTP transport adapter: hardened middleware chain, problem details, health probes, bounded server."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,11 +12,25 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-axum = { workspace = true, features = ["http1", "tokio", "tower-log", "tracing"] }
-tokio = { workspace = true, features = ["net", "rt", "sync"] }
-tracing = { workspace = true, features = ["std"] }
+axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json"] }
+axum-prometheus = { workspace = true, features = ["prometheus"] }
+axum-tracing-opentelemetry = { workspace = true, features = ["tracing_level_info"] }
+health = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["http1", "http2", "server"] }
+hyper-util = { workspace = true, features = ["server", "server-auto", "server-graceful", "service", "tokio", "http1", "http2"] }
+metrics = { workspace = true }
+serde = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
+tokio-util = { workspace = true }
+tower = { workspace = true, features = ["util", "limit", "load-shed", "timeout"] }
+tower-http = { workspace = true, features = ["request-id", "set-header", "catch-panic", "limit", "trace"] }
+tracing = { workspace = true, features = ["std", "attributes"] }
 
 [dev-dependencies]
-http-body-util = { workspace = true }
+futures-util = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util"] }
 tower = { workspace = true, features = ["util"] }

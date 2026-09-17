@@ -10,6 +10,9 @@ SHELL := /bin/sh
 CARGO ?= cargo
 CARGO_FLAGS ?= --locked
 SERVICE_BIN ?= service
+# Baseline configuration for `make run`; deployments pass their own file or
+# rely on APP__* environment variables.
+LOCAL_CONFIG ?= env/config/local.toml
 
 .PHONY: help build run test test-package fmt fmt-check lint check clean
 
@@ -19,8 +22,8 @@ help: ## List available commands
 build: ## Build every workspace crate in debug mode
 	$(CARGO) build --workspace $(CARGO_FLAGS)
 
-run: ## Start the HTTP service locally
-	$(CARGO) run -p $(SERVICE_BIN) $(CARGO_FLAGS)
+run: ## Start the HTTP service locally with env/config/local.toml
+	$(CARGO) run -p $(SERVICE_BIN) $(CARGO_FLAGS) -- --config $(LOCAL_CONFIG)
 
 test: ## Run the ordinary workspace unit-test suite
 	$(CARGO) test --workspace $(CARGO_FLAGS)
