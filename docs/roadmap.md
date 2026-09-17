@@ -21,7 +21,7 @@ is not a supported template state.
 | 4 | Validation routing and delivery: CI surfaces, security gates, image, publication | planned |
 | 5 | Repository documentation: architecture, placement, commands, production contract | planned |
 | 6 | Agent harness and spec-first workflow | planned |
-| 7 | Rust backend skills and universal disciplines | planned |
+| 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | planned |
 | 9 | Template initializer, profiles, and template sync | planned |
 | 10 | Optional capability profiles | planned |
@@ -29,8 +29,9 @@ is not a supported template state.
 | 12 | First release and derived-repository verification | planned |
 
 Stages 2 and 3 are independent of each other; 4 and 5 depend on both. Stage 6
-depends on 5. Stage 7 depends on 6 for skill placement rules but its skill
-content can start any time. Stage 9 depends on 4, 5, and 8. Stage 10 items are
+depends on 5. Stage 7's core set was pulled forward after stage 2 so the
+remaining stages are implemented through skills; its capability skills and
+the Claude/Qwen discovery views follow their stages. Stage 9 depends on 4, 5, and 8. Stage 10 items are
 independent of each other and each depends on 9 for its profile marker.
 
 ## Decisions fixed in stage 1
@@ -247,12 +248,28 @@ specific phase renamed.
 Exit criteria: every carrier check passes; a Cursor or Codex session can bind
 `/orchestrator` and dispatch a Lead; `AGENTS.md` reaches its final shape.
 
-### Stage 7: Rust backend skills
+### Stage 7: Rust backend skills (core set done)
 
 Goal: `.agents/skills/rust-*` gives agents the same decision coverage as the
 Go template's `go-*` set, built from
 [rust-cli-skills](https://github.com/Dankosik/rust-cli-skills) where its
 decisions carry over.
+
+Delivered after stage 2 (decisions in `specs/rust-skills/research/synthesis.md`):
+fifteen `model/method` skills under `.agents/skills` (`rust-coder`,
+`rust-idiomatic`, `rust-tokio`, `rust-axum`, `rust-errors`, `rust-config`,
+`rust-observability`, `rust-reliability`, `rust-security`, `rust-testing`,
+`rust-performance`, `rust-debugging`, `rust-structural-quality`,
+`rust-dependencies`, `rust-verification`), each grounded in the repository
+owner it decides against; [Skill Authoring](skill-authoring.md);
+`make check-skills` (frontmatter, name/directory agreement, machine contract,
+word budget, links) wired into `make check` and CI; `AGENTS.md` routing to
+the catalog. Remaining for this stage: capability skills with their stages,
+the harness-neutral skills and Claude/Qwen views with stage 6, universal
+disciplines when a capability reaches them, and behavioural evaluation
+fixtures with the reviewer roles of stage 6.
+
+Original mapping from the CLI pack:
 
 From rust-cli-skills, keep the decision and rewrite the examples and evidence
 rules for a long-running Tokio service:

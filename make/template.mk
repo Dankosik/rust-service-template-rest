@@ -14,7 +14,7 @@ SERVICE_BIN ?= service
 # rely on APP__* environment variables.
 LOCAL_CONFIG ?= env/config/local.toml
 
-.PHONY: help build run test test-package fmt fmt-check lint check clean
+.PHONY: help build run test test-package fmt fmt-check lint check check-skills clean
 
 help: ## List available commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -41,7 +41,10 @@ fmt-check: ## Fail when formatting differs from rustfmt output
 lint: ## Clippy over all targets, warnings are errors
 	$(CARGO) clippy --workspace --all-targets $(CARGO_FLAGS) -- -D warnings
 
-check: fmt-check lint test ## Full local gate: formatting, lint, tests
+check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
+	python3 scripts/check-skills.py
+
+check: fmt-check lint test check-skills ## Full local gate: formatting, lint, tests, skills
 
 clean: ## Remove build output
 	$(CARGO) clean

@@ -55,6 +55,8 @@ jobs:
         run: make build
       - name: Test
         run: make test
+      - name: Skills
+        run: make check-skills
 
   required:
     if: always()
