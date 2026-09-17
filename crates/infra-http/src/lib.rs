@@ -1,12 +1,14 @@
 //! HTTP transport adapter.
 //!
 //! Owns the hardened middleware chain, the problem envelope, the health
-//! probe handlers, and a bounded server over hyper. It does not own business
-//! rules, configuration loading, or process lifecycle; the composition root
-//! in the `service` crate wires those together.
+//! probe handlers with their OpenAPI contract, and a bounded server over
+//! hyper. It does not own business rules, configuration loading, or process
+//! lifecycle; the composition root in the `service` crate wires those
+//! together and assembles the full API document.
 //!
 //! Most of the chain is `tower-http`; the template-owned pieces are named
-//! in `specs/runtime-core/research/synthesis.md`.
+//! in `specs/runtime-core/research/synthesis.md` and the contract decisions
+//! in `specs/api-contract/research/synthesis.md`.
 
 pub mod problem;
 

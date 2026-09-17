@@ -17,7 +17,7 @@ is not a supported template state.
 | --- | --- | --- |
 | 1 | Bootstrap: repository, workspace, runnable health-only service | done |
 | 2 | Runtime core: configuration, logging, telemetry, hardened HTTP | done |
-| 3 | OpenAPI-first contract and generated bindings | planned |
+| 3 | OpenAPI-first contract and generated bindings | done |
 | 4 | Validation routing and delivery: CI surfaces, security gates, image, publication | planned |
 | 5 | Repository documentation: architecture, placement, commands, production contract | planned |
 | 6 | Agent harness and spec-first workflow | planned |
@@ -60,7 +60,7 @@ independent of each other and each depends on 9 for its profile marker.
 | `slog` + `logctx` | `tracing` + `tracing-subscriber` + `json-subscriber` | Typed `log.level` directive and `log.format`; `RUST_LOG` is not read. |
 | OpenTelemetry Go traces and metrics + Prometheus | Traces: `opentelemetry` 0.32 + `tracing-opentelemetry` + `axum-tracing-opentelemetry`. Metrics: the `metrics` facade + `metrics-exporter-prometheus` + `axum-prometheus` + `metrics-process` + `tokio-metrics` | The facade is the Rust idiom; OTLP metric push is deferred. Diagnostics stay on a separate listener (`:9090`). |
 | RFC 9457 `problem` package | `infra_http::problem` | Closed transport catalog, stable codes, no submitted values echoed; a `failure` leaf splits out with the gRPC profile. |
-| oapi-codegen strict server | Decision in stage 3 | Options: spec-first generation (`openapi-generator`, `progenitor`-style) vs. code-first (`utoipa`) with a drift check against the committed spec. The template is spec-first; code-first is acceptable only if the committed spec remains the reviewed authority. |
+| oapi-codegen strict server, hand-written `service.yaml`, runtime request validator | `utoipa` + `utoipa-axum`: handlers carry the contract, the generated `api/openapi/service.yaml` is committed and byte-compared by a test, Redocly lints it, oasdiff compares it with the pull-request base | No maintained Rust-native spec-first server generator exists for axum; the JVM `openapi-generator` output was rejected on quality (`specs/api-contract/research/synthesis.md`). The committed document stays the reviewed authority. Extractors are the request validator. |
 | `pgx` + `sqlc` + Goose | Decision in stage 8 | `sqlx` with compile-time checked queries and offline metadata is the leading candidate; migrations via `sqlx migrate` or `refinery`. |
 | River jobs | Decision in stage 10 | Candidates: `apalis`, `underway`, or a template-owned PostgreSQL queue. |
 | NATS JetStream (`nats.go`) | `async-nats` | |
@@ -148,29 +148,57 @@ policy line; `make check` passes (70 tests); the binary refuses unknown keys,
 malformed names, and secrets in files; the shutdown sequence is observable in
 logs and proven by the process test.
 
-### Stage 3: OpenAPI-first contract
+### Stage 3: OpenAPI-first contract (done)
+
+Research and decisions: `specs/api-contract/research/synthesis.md` (candidate
+survey, verified behaviour, deviations, gotchas). The bundle stays open with
+the stage 2 bundle until the stage 5 architecture documents absorb both.
 
 Goal: `api/openapi/service.yaml` is the reviewed source of truth for the HTTP
-contract, and handwritten handlers implement generated request and response
-types.
+contract, and the handlers cannot disagree with it.
 
-- Port the health-only `service.yaml` (OpenAPI 3.0.3, `Problem` and
-  `InvalidParam` schemas, `x-security-decision`, bearer scheme behind a
-  profile marker).
-- Research spike, recorded in `specs/`: pick the generation strategy (see the
-  concept map). Requirements: typed request extraction, typed responses per
-  status, a compile-time or CI drift check between spec and code, and no
-  hand-edited generated output.
-- `make openapi-generate`, `make openapi-check` (drift), Redocly lint and
-  validation, breaking-change comparison against the pull-request base.
-- Runtime contract tests: every operation declares its security decision and
-  the required problem responses.
-- `docs/architecture/http.md` describing the request path from listener to
-  feature handler and back.
+Delivered:
 
-Exit criteria: regenerating from the committed spec produces no diff; a
-deliberately changed spec fails `openapi-check`; the health probes are served
-through the generated interface.
+- Code-first generation with `utoipa` 5.5 and `utoipa-axum` 0.2: the probe
+  handlers in `crates/infra-http` carry `#[utoipa::path]` with
+  `operationId`, `summary`, `x-security-decision`, `security: []`, and every
+  response; `Problem` and `InvalidParam` derive their schemas from the
+  serializer (`deny_unknown_fields` → `additionalProperties: false`); the
+  shared problem responses are `ToResponse` components; the readiness
+  handler returns an `IntoResponses` enum with one variant per status.
+- `crates/service` gained a library (`api`) that merges every
+  `OpenApiRouter` into one value whose halves are the served router and the
+  document, an `openapi` binary that renders it, and contract tests: the
+  committed file equals the generator output byte for byte, every operation
+  declares its security decision, `public` means `security: []`,
+  `protected` means the bearer scheme alone plus `400`/`401`/`403`/`431`/
+  `503`/`504` problem responses, and the problem schemas are closed. The
+  `infra-http` router tests compare served media types with the declared
+  ones for `200`, `503`, and `413`.
+- `api/openapi/service.yaml` (OpenAPI 3.1, health-only), `.redocly.yaml`
+  ported unchanged, `make openapi-generate`, `openapi-check`,
+  `openapi-lint` (Redocly CLI 2.53.3 through `npx`, part of `make check`),
+  `openapi-breaking BASE_OPENAPI=…` (oasdiff 1.32.1 through `go run`), CI
+  lint step and pull-request compatibility step that skips when the base
+  has no document.
+- `docs/architecture/http.md` and the `rust-api-contract` skill.
+
+Deviations from the Go template, with reasons, are tabulated in the
+synthesis: code-first with the committed document as the reviewed authority;
+OpenAPI 3.1 instead of 3.0.3; no runtime request validator (extractors and
+the derived schema are one source); `Problem.code` stays a string in the
+contract so the catalog can grow without a breaking change; optional members
+declared non-nullable; `info` from the service crate's Cargo metadata; no
+bearer scheme until the authentication profile; Redocly alone (its `struct`
+rule validates structure); the drift and contract checks are ordinary Cargo
+tests.
+
+Exit criteria met: `make openapi-generate` on the committed document
+produces no diff; a changed `summary` in the committed file fails the drift
+test at the changed line; the probes are served by the annotated handlers
+whose responses the document declares; oasdiff reports no breaking change
+between the Go template's health-only 3.0.3 document and this one;
+`make check` passes (80 tests).
 
 ### Stage 4: Validation routing and delivery
 
@@ -184,7 +212,8 @@ they observe something, and a production image exists.
   Dependency Review on pull requests, Gitleaks with the same range/history
   policy, `actionlint`, `shellcheck`, CodeQL for Rust if the repository can
   enable it.
-- Pinned developer tool versions in one manifest consumed by `make` and CI.
+- Pinned developer tool versions in one manifest consumed by `make` and CI,
+  absorbing the Redocly CLI and oasdiff pins now in `make/template.mk`.
 - `build/docker/Dockerfile`: multi-stage, reproducible (`SOURCE_DATE_EPOCH`),
   non-root, `STOPSIGNAL SIGTERM`, version and commit baked in; runtime image
   lifecycle check (start, readiness, version, clean `SIGTERM`).
@@ -208,9 +237,10 @@ crate layout, with every link resolving.
 
 - `docs/repo-architecture.md` front door with global invariants, source of
   truth table, and one-leaf selector.
-- `docs/architecture/boundaries.md`, `runtime-lifecycle.md`, `http.md`,
+- `docs/architecture/boundaries.md`, `runtime-lifecycle.md`,
   `integration.md`, `persistence.md` (after stage 8), `async.md` (after the
-  first async profile).
+  first async profile); `http.md` exists since stage 3 and receives the
+  stage 2 and 3 research bundles' durable decisions.
 - `docs/project-structure-and-module-organization.md` with the deterministic
   placement algorithm for crates and modules, filename rules, and test
   placement (`#[cfg(test)]` beside the owner, `tests/` for black-box crate
@@ -264,7 +294,8 @@ fifteen skills under `.agents/skills` in the rust-cli-skills shape (`rust-coder`
 owner it decides against; [Skill Authoring](skill-authoring.md);
 `make check-skills` (frontmatter, name/directory agreement, trigger, prose-only
 body, word budget, LICENSE copy) wired into `make check` and CI; `AGENTS.md`
-routing to the catalog. Remaining for this stage: capability skills with their stages,
+routing to the catalog. `rust-api-contract` arrived with stage 3. Remaining
+for this stage: capability skills with their stages,
 the harness-neutral skills and Claude/Qwen views with stage 6, universal
 disciplines when a capability reaches them, and behavioural evaluation
 fixtures with the reviewer roles of stage 6.

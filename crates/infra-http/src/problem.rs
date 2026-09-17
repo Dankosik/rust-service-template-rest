@@ -5,6 +5,12 @@
 //! stable machine-readable identity; status, title, and type URI derive from
 //! it. A code with no matching response in a service's contract is
 //! unreachable, not wrong.
+//!
+//! The same types describe themselves in the OpenAPI document: `ToSchema`
+//! renders the `Problem` and `InvalidParam` schemas from the serializer, and
+//! the response newtypes at the end of this file are the reusable
+//! `application/problem+json` responses operations reference. Doc comments
+//! on those items are contract text.
 
 use std::time::Duration;
 
@@ -12,6 +18,7 @@ use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+use utoipa::{ToResponse, ToSchema};
 
 /// Stable machine-readable failure code a client matches on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -165,30 +172,55 @@ impl Code {
 
 /// Which part of a request failed validation, following the RFC 9457
 /// extension-member example. Never carries the submitted value.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct InvalidParam {
-    /// An RFC 6901 JSON pointer for a body member, or `location.name` for a
-    /// parameter such as `query.limit`.
+    /// An RFC 6901 JSON pointer for a request-body member, or a
+    /// `location.name` pair such as `query.limit` for a parameter.
+    #[schema(example = "/slug")]
     pub name: String,
-    /// The constraint that failed.
+    /// Why the contract rejected it. Names the constraint that failed and
+    /// never echoes the submitted value.
+    #[schema(example = "maximum string length is 64")]
     pub reason: String,
 }
 
-/// One problem response. Build with [`Problem::new`], add context with the
-/// builder methods, and return it from a handler or middleware.
-#[derive(Clone, Debug, Serialize)]
+/// RFC 9457 problem details: the failure envelope of every non-success
+/// response, keyed by a stable `code` from one closed catalog.
+// Build with `Problem::new`, add context with the builder methods, and
+// return it from a handler or middleware. Optional members are omitted,
+// never `null`, which the `nullable = false` annotations tell the contract.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Problem {
+    /// Stable machine-readable error code.
+    #[schema(value_type = String, example = "bad_request")]
     code: Code,
+    /// Stable URI reference identifying the problem class.
     #[serde(rename = "type")]
+    #[schema(
+        format = "uri-reference",
+        example = "https://www.rfc-editor.org/rfc/rfc9110#section-15.5.1"
+    )]
     type_uri: &'static str,
+    #[schema(example = "bad request")]
     title: &'static str,
+    #[schema(example = 400)]
     status: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, example = "invalid request framing")]
     detail: Option<String>,
+    /// URI reference identifying this occurrence when the service exposes
+    /// one.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, format = "uri-reference")]
     instance: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, example = "9ccecdfd-92c9-4665-a464-06f8ba73cd77")]
     request_id: Option<String>,
+    /// Which parts of the request failed validation, following the RFC 9457
+    /// extension-member example. Present only on a validation rejection,
+    /// and never carrying the submitted value.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     invalid_params: Vec<InvalidParam>,
     #[serde(skip)]
@@ -275,6 +307,28 @@ impl IntoResponse for Problem {
         response
     }
 }
+
+// Reusable problem responses (`#/components/responses/<Name>`). Each is the
+// declared shape of one status an operation can answer with a `Problem`;
+// operations reference them as `(status = 400, response = BadRequest)`. They
+// exist for the document and are not constructed at runtime: the runtime
+// value is always a `Problem`, whose code fixes the status. A new status
+// joins this list with its first operation.
+
+/// request is malformed or invalid
+#[derive(Debug, ToResponse)]
+#[response(content_type = "application/problem+json")]
+pub struct BadRequest(pub Problem);
+
+/// request body exceeds configured limit
+#[derive(Debug, ToResponse)]
+#[response(content_type = "application/problem+json")]
+pub struct RequestEntityTooLarge(pub Problem);
+
+/// unexpected server failure
+#[derive(Debug, ToResponse)]
+#[response(content_type = "application/problem+json")]
+pub struct InternalServerError(pub Problem);
 
 #[cfg(test)]
 mod tests {

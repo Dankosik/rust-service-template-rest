@@ -29,6 +29,8 @@ tokio-util = { workspace = true }
 tower = { workspace = true, features = ["util", "limit", "load-shed", "timeout"] }
 tower-http = { workspace = true, features = ["request-id", "set-header", "catch-panic", "limit", "trace"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
+utoipa = { workspace = true, features = ["macros"] }
+utoipa-axum = { workspace = true }
 
 [dev-dependencies]
 futures-util = { workspace = true, features = ["std"] }
