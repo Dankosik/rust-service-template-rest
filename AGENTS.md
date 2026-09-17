@@ -101,10 +101,11 @@ a removal condition; otherwise the replacement removes the superseded path.
 
 Ownership boundaries are crates. `crates/service` is the composition root and
 the only crate that knows the concrete runtime, signals, and process lifecycle.
-`crates/infra-<provider>` crates adapt one transport or provider and own no
-business rule. Business behavior will live in `crates/<feature>` crates that
-depend on no transport or provider crate. Do not create a crate, module, or
-directory before its first real artifact.
+`crates/config` owns the typed snapshot and its validation; `crates/health`
+owns readiness; `crates/infra-<provider>` crates adapt one transport or
+provider and own no business rule. Business behavior will live in
+`crates/<feature>` crates that depend on no transport or provider crate. Do
+not create a crate, module, or directory before its first real artifact.
 
 ## Validation budget
 
@@ -156,6 +157,7 @@ uncertain or contested.
 | A crate, binary, dependency, or CI gate is added or removed | [Roadmap concept map and stage scope](docs/roadmap.md#concept-map), then [CONTRIBUTING.md](CONTRIBUTING.md) |
 | A non-obvious technical decision must survive the current session | `specs/<topic>/` while open; the owning document once accepted |
 | Contribution, pull-request, or evidence expectations | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| Configuration key, secret source, telemetry environment, or runtime budget changes | [Configuration Source Policy](docs/configuration-source-policy.md) |
 
 The spec-first workflow router, architecture front door, validation routing,
 agent harness adapters, and Rust skills are planned owners; until their stage

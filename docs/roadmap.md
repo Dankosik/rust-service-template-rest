@@ -16,7 +16,7 @@ is not a supported template state.
 | Stage | Name | State |
 | --- | --- | --- |
 | 1 | Bootstrap: repository, workspace, runnable health-only service | done |
-| 2 | Runtime core: configuration, logging, telemetry, hardened HTTP | planned |
+| 2 | Runtime core: configuration, logging, telemetry, hardened HTTP | done |
 | 3 | OpenAPI-first contract and generated bindings | planned |
 | 4 | Validation routing and delivery: CI surfaces, security gates, image, publication | planned |
 | 5 | Repository documentation: architecture, placement, commands, production contract | planned |
@@ -54,11 +54,11 @@ independent of each other and each depends on 9 for its profile marker.
 | `tools/go.mod` pinned developer tools | Pinned `cargo install --locked` versions declared in one place (stage 4) | Candidates: `cargo-deny`, `cargo-nextest`, `cargo-audit`, `cargo-machete`. |
 | `cmd/service/main.go` → `bootstrap.Run` | `crates/service/src/main.rs` → `bootstrap::run` | Runtime construction, signals, and drain live in `bootstrap`; `main` only maps the result to an exit code. |
 | `internal/<feature>` | `crates/<feature>` | Not created until the first feature exists. |
-| `internal/infra/http` (`chi`) | `crates/infra-http` (axum `Router`, `tower` layers) | Middleware order is the route tree's observable semantics in both. |
-| `internal/config` (koanf, YAML + `APP__` env + flags) | `crates/config` (serde-based layering, same precedence and secret rules) | Stage 2 selects the crate; `figment` and `config` are the candidates. |
-| `slog` + `logctx` | `tracing` + `tracing-subscriber` JSON | `RUST_LOG` filter today; typed `log.level` later. |
-| OpenTelemetry Go + Prometheus | `opentelemetry`, `tracing-opentelemetry`, Prometheus exporter | Diagnostics stay on a separate listener (`:9090`). |
-| RFC 9457 `problem` package | `crates/problem` or a module in `infra-http` | Closed transport catalog, stable codes, no submitted values echoed. |
+| `internal/infra/http` (`chi`, `net/http` server) | `crates/infra-http` (axum `Router`, `tower-http` layers, hand-rolled hyper accept loop) | Middleware order is the route tree's observable semantics in both. `axum::serve` exposes no connection limits and sets no timer, so the accept loop is template-owned. |
+| `internal/config` (koanf, YAML + `APP__` env + flags) | `crates/config` (`config` crate + serde, TOML files, same precedence and secret rules) | `figment` was rejected: no release since 2024, silently drops malformed env names. |
+| `slog` + `logctx` | `tracing` + `tracing-subscriber` + `json-subscriber` | Typed `log.level` directive and `log.format`; `RUST_LOG` is not read. |
+| OpenTelemetry Go traces and metrics + Prometheus | Traces: `opentelemetry` 0.32 + `tracing-opentelemetry` + `axum-tracing-opentelemetry`. Metrics: the `metrics` facade + `metrics-exporter-prometheus` + `axum-prometheus` + `metrics-process` + `tokio-metrics` | The facade is the Rust idiom; OTLP metric push is deferred. Diagnostics stay on a separate listener (`:9090`). |
+| RFC 9457 `problem` package | `infra_http::problem` | Closed transport catalog, stable codes, no submitted values echoed; a `failure` leaf splits out with the gRPC profile. |
 | oapi-codegen strict server | Decision in stage 3 | Options: spec-first generation (`openapi-generator`, `progenitor`-style) vs. code-first (`utoipa`) with a drift check against the committed spec. The template is spec-first; code-first is acceptable only if the committed spec remains the reviewed authority. |
 | `pgx` + `sqlc` + Goose | Decision in stage 8 | `sqlx` with compile-time checked queries and offline metadata is the leading candidate; migrations via `sqlx migrate` or `refinery`. |
 | River jobs | Decision in stage 10 | Candidates: `apalis`, `underway`, or a template-owned PostgreSQL queue. |
@@ -100,43 +100,52 @@ Exit criteria met: `make check` passes; the binary serves both probes, exits
 `0` on `SIGTERM` after draining, and exits `1` with a readable message on a bad
 address or an occupied port.
 
-### Stage 2: Runtime core
+### Stage 2: Runtime core (done)
 
-Goal: the health-only service has every cross-cutting runtime property the Go
-template ships before any business feature.
+Research and decisions: `specs/runtime-core/research/synthesis.md` and the
+four lane reports beside it. The bundle stays open until the architecture
+documents of stage 5 exist to receive its durable decisions.
 
-- `crates/config`: typed immutable snapshot; precedence code defaults →
-  `--config` file → `--config-overlay` files → `APP__SECTION__KEY` env; unknown
-  keys fail; secret-like YAML values rejected; one file per section with
-  defaults and validation together; a reflection-style contract test that fails
-  on an undocumented key. Port
-  [Configuration Source Policy](https://github.com/Dankosik/go-service-template-rest/blob/main/docs/configuration-source-policy.md)
-  as `docs/configuration-source-policy.md`.
-- Runtime budgets as config: `http.request_timeout`, `http.read_timeout`,
-  `http.write_timeout`, `http.shutdown_timeout`,
-  `http.readiness_propagation_delay`, `http.readiness_timeout`, body and header
-  limits, with the same cross-field validation rules.
-- `infra-http` hardening chain: request-ID admission, W3C trace-context
-  extraction, body and header limits, request timeout returning `504`, panic
-  recovery returning `500`, in-flight limit, access log with bounded route
-  templates and probe suppression, fail-closed CORS.
-- RFC 9457 Problem Details with the closed transport catalog and `request_id`.
-- Structured JSON logging with level from config; process logger with
-  correlation fields.
-- OpenTelemetry traces and metrics, Prometheus diagnostics listener on
-  `observability.metrics.addr` (default `:9090`), typed resource identity,
-  ambient `OTEL_*` fallback rules, telemetry failure never blocking startup.
-- `crates/health`: readiness service running enabled dependency probes under
-  one timeout; liveness process-only; startup admission before traffic.
-- Full drain sequence: readiness off → propagation delay → drain transports →
-  join background tasks → close dependencies → flush telemetry, each inside its
-  own budget and the total inside the documented process grace period.
-- Process-level tests: start the built binary, probe, `SIGTERM`, assert exit
-  code and drain timing.
+Delivered:
 
-Exit criteria: every runtime key has a default, validation, a test, and a doc
-line; `make check` passes; the binary refuses unknown keys and secret values in
-YAML; the shutdown sequence is observable in logs and tested.
+- `crates/config` (`service-config`): typed immutable snapshot over the
+  `config` crate; precedence code defaults → `--config` → ordered
+  `--config-overlay` → `APP__SECTION__KEY`; unknown keys and malformed
+  variable names fail; secret-like values in files fail; `SecretString`
+  fields; durations and byte sizes in human form; per-section validation with
+  operator-readable messages. Policy: [Configuration Source Policy](configuration-source-policy.md).
+- `crates/health`: background readiness refresher over `tokio::sync::watch`
+  with failure threshold, staleness guard, and drain flag; `/health/ready` is
+  an O(1) snapshot read.
+- `crates/infra-http`: hardened chain from `tower-http` and `tower` (request
+  id set/propagate with inbound validation, `nosniff`, OpenTelemetry server
+  span, HTTP metrics, access log by route template, `503` shedding without
+  queueing, `504` request timeout, sanitized `500` on panic, `413` body limit,
+  `404`/`405` problems with `Allow`, fail-closed CORS by omission); RFC 9457
+  `Problem` with the closed code catalog; a hyper accept loop with header
+  timeout, header-size bound (`431`), connection cap, silent-client guard, and
+  a bounded graceful drain.
+- `crates/infra-telemetry`: subscriber (`json`/`text`), tracer provider with
+  OTLP/HTTP export only when an endpoint resolves and the ambient-credential
+  refusal, Prometheus recorder with process and Tokio runtime metrics, and the
+  diagnostics router.
+- `crates/service`: composition root with the ordered startup and the staged
+  teardown under one grace deadline (readiness off → propagation delay →
+  drain → diagnostics → background join → dependency close → telemetry
+  flush), exit codes 0 / 3 (degraded shutdown) / 1, `vergen-gitcl` commit
+  stamp, and process-level tests of the built binary.
+- `env/config/local.toml` and `make run`.
+
+Deviations from the Go template, with reasons, are tabulated in the
+synthesis: TOML instead of YAML; no connection read/write/idle deadlines
+(hyper has one header/idle knob); no `runtime.memory_limit_ratio` or `pprof`;
+`metrics` facade instead of OpenTelemetry SDK metrics; tracer provider always
+installed; `log.format` added; distinct exit code for a degraded shutdown.
+
+Exit criteria met: every runtime key has a default, validation, a test, and a
+policy line; `make check` passes (70 tests); the binary refuses unknown keys,
+malformed names, and secrets in files; the shutdown sequence is observable in
+logs and proven by the process test.
 
 ### Stage 3: OpenAPI-first contract
 

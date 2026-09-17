@@ -18,21 +18,25 @@
   <a href="docs/roadmap.md">Roadmap</a>
 </p>
 
-> **Status: stage 1 of 12.** The repository is a runnable health-only scaffold
-> with the toolchain, workspace layout, lint policy, command surface, CI, and
-> agent contract in place. Configuration, telemetry, the OpenAPI contract,
-> profiles, and the full agent harness are being ported stage by stage from
+> **Status: stage 2 of 12.** The repository is a runnable health-only service
+> with layered configuration, structured logs, OpenTelemetry traces,
+> Prometheus metrics, a hardened HTTP chain, cached readiness, and a staged
+> graceful shutdown. The OpenAPI contract, delivery gates, profiles, and the
+> full agent harness are being ported stage by stage from
 > [go-service-template-rest](https://github.com/Dankosik/go-service-template-rest).
 > [The roadmap](docs/roadmap.md) is the source of truth for what exists and
 > what is next.
 
 ## What this repository is
 
-A starting point for a Rust HTTP API or microservice. It will connect the
-pieces most services need: an OpenAPI contract, layered configuration, health
-checks, graceful shutdown, telemetry, tests, Docker, CI, and repository
-instructions for coding agents. It is a port of the *decisions* in the Go
-template, re-derived for what Rust's type system and ecosystem already provide.
+A starting point for a Rust HTTP API or microservice. It connects the pieces
+most services need: layered configuration, health checks, graceful shutdown,
+telemetry, a hardened HTTP server, tests, CI, and repository instructions for
+coding agents; the OpenAPI contract and Docker delivery follow in the next
+stages. It is a port of the *decisions* in the Go template, re-derived for
+what Rust's type system and ecosystem already provide: every stage starts with
+a survey of the crates that already solve the problem, and template-owned code
+exists only for a documented gap.
 
 The initialized service is small by default. Capabilities such as PostgreSQL,
 jobs, messaging, gRPC, authentication, and webhooks will arrive as profiles you
@@ -68,18 +72,27 @@ Then, in another terminal:
 ```bash
 curl -i http://127.0.0.1:8080/health/live    # 200 ok
 curl -i http://127.0.0.1:8080/health/ready   # 200 ok, 503 not ready while draining
+curl -i http://127.0.0.1:8080/missing        # 404 application/problem+json
+curl -s http://127.0.0.1:9090/metrics        # Prometheus exposition
 ```
 
-`APP__HTTP__ADDR` overrides the listen address (`host:port` or Go-style
-`:port`; default `0.0.0.0:8080`). `RUST_LOG` filters log output (default
-`info`). `SIGINT` or `SIGTERM` flips readiness off, drains in-flight requests
-inside a 25 s budget, and exits `0`.
+`make run` loads `env/config/local.toml` (text logs, no readiness propagation
+delay). Every key can be overridden with `APP__SECTION__KEY`, for example
+`APP__HTTP__ADDR=:9000` or `APP__LOG__LEVEL=debug`; unknown keys and secrets
+in files fail startup. `SIGINT` or `SIGTERM` flips readiness off, waits for
+load balancers, drains in-flight requests, flushes telemetry, and exits `0`
+(`3` when a teardown stage overran its budget). See
+[Configuration Source Policy](docs/configuration-source-policy.md).
 
 ## What is here now
 
 | Area | Included |
 | --- | --- |
-| Runtime | Tokio multi-thread runtime, axum router, `/health/live` and `/health/ready`, shared readiness flag, bounded graceful shutdown on `SIGINT`/`SIGTERM` |
+| Configuration | `config` crate + serde: code defaults → `--config` → `--config-overlay` → `APP__*` env; unknown keys, malformed names, and secrets in files fail; `SecretString` secrets; durations and byte sizes in human form |
+| HTTP | axum router behind a `tower-http` chain: request id, `nosniff`, OpenTelemetry span, metrics, access log, `503` shedding, `504` timeout, sanitized `500`, `413`, RFC 9457 problems for `404`/`405`; hyper accept loop with header timeout, `431` header bound, connection cap |
+| Readiness | Background probe refresher with failure threshold and staleness guard; `/health/ready` is a cached O(1) read; liveness is process-only |
+| Observability | JSON or text logs with trace and span ids on every record; OpenTelemetry traces with OTLP/HTTP export when an endpoint is configured; Prometheus metrics (HTTP, process, Tokio runtime) on a private `:9090` listener |
+| Lifecycle | Staged shutdown under one grace deadline: readiness off → propagation delay → drain → diagnostics → background join → telemetry flush; process-level tests of the built binary |
 | Workspace | Pinned stable toolchain, edition 2024, workspace-level dependency versions and lints (`clippy::pedantic`, `unsafe_code = "forbid"`), committed `Cargo.lock`, `--locked` everywhere |
 | Commands | `Makefile` + `make/template.mk`: `build`, `run`, `test`, `test-package`, `fmt`, `fmt-check`, `lint`, `check` |
 | Delivery | GitHub Actions CI (format, clippy, build, test) with pinned action SHAs and an always-reported `required` job; Dependabot for Cargo and Actions |
@@ -90,20 +103,23 @@ inside a 25 s budget, and exits `0`.
 
 The [roadmap](docs/roadmap.md) decomposes the port into twelve stages with
 exit criteria and a concept map from Go mechanisms to their Rust equivalents.
-The next two stages are independent: layered configuration, structured logs,
-OpenTelemetry, and the hardened HTTP chain (stage 2), and the OpenAPI-first
-contract with generated bindings (stage 3).
+Next is the OpenAPI-first contract with generated bindings (stage 3), then
+changed-surface CI, security gates, and the production image (stage 4).
 
 ## Repository map
 
 ```text
-crates/service/             service entrypoint and runtime composition root
-crates/infra-http/          HTTP adapter: router, health probes, server lifecycle
+crates/service/             entrypoint, composition root, staged shutdown, process tests
+crates/config/              typed configuration snapshot, loader, validation
+crates/health/              readiness refresher, cached verdict, drain flag
+crates/infra-http/          hardened middleware chain, problem details, bounded server
+crates/infra-telemetry/     subscriber, tracer provider, metrics, diagnostics router
 crates/<feature>/           business behavior (created with the first feature)
 crates/infra-<provider>/    database, messaging, and provider adapters (per profile)
+env/config/local.toml       local baseline configuration
 docs/roadmap.md             stages, fixed decisions, Go-to-Rust concept map
+specs/<topic>/research/     library research behind the current stage
 make/template.mk            portable standard Make commands
-make/service.mk             optional service-owned Make extensions
 .github/workflows/ci.yml    the source of truth for CI check names
 ```
 
@@ -111,7 +127,7 @@ make/service.mk             optional service-owned Make extensions
 
 | Command | Use it for |
 | --- | --- |
-| `make run` | Start the HTTP service locally |
+| `make run` | Start the service with `env/config/local.toml` |
 | `make build` | Build every workspace crate |
 | `make test` | Run the workspace unit-test suite |
 | `make test-package PKG=<crate>` | Run one crate's tests |
@@ -136,6 +152,7 @@ decisions carry over to a long-running service.
 ## Documentation
 
 - Plan and status: [Roadmap](docs/roadmap.md)
+- Configuration, secrets, telemetry environment, runtime budgets: [Configuration Source Policy](docs/configuration-source-policy.md)
 - Contributing and validation: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Agent contract: [AGENTS.md](AGENTS.md)
 
