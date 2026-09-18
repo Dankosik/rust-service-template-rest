@@ -1601,14 +1601,12 @@ version = "0.1.0"
 dependencies = [
  "infra-postgres",
  "infra-telemetry",
- "log",
  "secrecy",
  "service-config",
  "sqlx",
  "thiserror",
  "tokio",
  "tracing",
- "vergen-gitcl",
 ]
 
 [[package]]
@@ -2494,7 +2492,6 @@ dependencies = [
  "ureq",
  "utoipa",
  "utoipa-axum",
- "vergen-gitcl",
 ]
 
 [[package]]
@@ -2511,6 +2508,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
+ "vergen-gitcl",
 ]
 
 [[package]]

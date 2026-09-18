@@ -213,7 +213,7 @@ self_test() {
 	assert_case crates/service/src/main.rs \
 		"rust_source" \
 		"cargo_dependencies lint_config openapi shell documentation validation_system"
-	assert_case crates/service/build.rs \
+	assert_case crates/config/build.rs \
 		"rust_source" \
 		"cargo_dependencies validation_system"
 	assert_case crates/service/tests/lifecycle.rs \

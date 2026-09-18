@@ -13,6 +13,7 @@
 //! `OPTIONS` with 200 and hide the router's 405.
 
 use std::any::Any;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -72,8 +73,8 @@ pub struct HardenOptions {
     pub max_body_bytes: usize,
     /// Per-request handler budget; expiry answers 504.
     pub request_timeout: Duration,
-    /// Concurrent handler executions before 503; zero disables shedding.
-    pub max_in_flight: u32,
+    /// Concurrent handler executions before 503; `None` disables shedding.
+    pub max_in_flight: Option<NonZeroU32>,
     /// Re-enable access logging for matched health probe routes.
     pub log_health_probes: bool,
 }
@@ -90,8 +91,9 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
             UNMATCHED_ROUTE.to_owned()
         }))
         .build();
-    let in_flight = (options.max_in_flight > 0)
-        .then(|| GlobalConcurrencyLimitLayer::new(options.max_in_flight as usize));
+    let in_flight = options
+        .max_in_flight
+        .map(|limit| GlobalConcurrencyLimitLayer::new(limit.get() as usize));
 
     // `load_shed` plus `GlobalConcurrencyLimitLayer` reject with 503
     // instead of queueing. They sit inside `ServiceBuilder` on
@@ -227,6 +229,7 @@ async fn method_not_allowed(request: Request) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -243,7 +246,7 @@ mod tests {
         HardenOptions {
             max_body_bytes: 64,
             request_timeout: Duration::from_millis(200),
-            max_in_flight: 2,
+            max_in_flight: NonZeroU32::new(2),
             log_health_probes: false,
         }
     }
@@ -486,7 +489,7 @@ mod tests {
     #[tokio::test]
     async fn zero_in_flight_disables_shedding() {
         let mut options = options();
-        options.max_in_flight = 0;
+        options.max_in_flight = None;
         let response = app(&options)
             .oneshot(request(Method::GET, "/ok"))
             .await

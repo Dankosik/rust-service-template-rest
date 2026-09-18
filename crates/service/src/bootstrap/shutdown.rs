@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use health::Readiness;
 use infra_http::{Drained, Server};
-use infra_postgres::PgPool;
-use infra_telemetry::TracerProviderHandle;
+use infra_postgres::{Closed, PgPool};
+use infra_telemetry::{ProviderShutdown, TracerProviderHandle};
 use service_config::HttpConfig;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -64,12 +64,37 @@ pub(crate) async fn close_opened_dependencies(
     tracker: &TaskTracker,
     postgres_pool: Option<&PgPool>,
 ) {
+    let _ = join_background_then_close(
+        cancel,
+        tracker,
+        postgres_pool,
+        BACKGROUND_JOIN,
+        DEPENDENCY_CLOSE,
+    )
+    .await;
+}
+
+/// Cancel tracked work, wait for it, then close an opened pool.
+///
+/// Returns whether the join finished in time and the pool close outcome.
+async fn join_background_then_close(
+    cancel: &CancellationToken,
+    tracker: &TaskTracker,
+    postgres_pool: Option<&PgPool>,
+    join_budget: Duration,
+    close_budget: Duration,
+) -> (bool, Option<Closed>) {
     cancel.cancel();
     tracker.close();
-    let _ = tokio::time::timeout(BACKGROUND_JOIN, tracker.wait()).await;
-    if let Some(pool) = postgres_pool {
-        let _ = infra_postgres::close(pool, DEPENDENCY_CLOSE).await;
-    }
+    let joined = tokio::time::timeout(join_budget, tracker.wait())
+        .await
+        .is_ok();
+    let closed = if let Some(pool) = postgres_pool {
+        Some(infra_postgres::close(pool, close_budget).await)
+    } else {
+        None
+    };
+    (joined, closed)
 }
 
 /// How the teardown ended.
@@ -233,35 +258,36 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         }
     }
 
-    plan.cancel.cancel();
-    plan.tracker.close();
-    if tokio::time::timeout(budget.stage(BACKGROUND_JOIN), plan.tracker.wait())
-        .await
-        .is_err()
-    {
+    let (joined, closed) = join_background_then_close(
+        &plan.cancel,
+        &plan.tracker,
+        plan.postgres_pool.as_ref(),
+        budget.stage(BACKGROUND_JOIN),
+        budget.stage(DEPENDENCY_CLOSE),
+    )
+    .await;
+    if joined {
+        tracing::info!("background_joined");
+    } else {
         tracing::warn!("background tasks outlived their join budget");
         degraded = true;
-    } else {
-        tracing::info!("background_joined");
     }
-
-    if let Some(pool) = plan.postgres_pool {
-        if infra_postgres::close(&pool, budget.stage(DEPENDENCY_CLOSE)).await {
-            tracing::info!("postgres_pool_closed");
-        } else {
+    match closed {
+        None => {}
+        Some(Closed::Complete) => tracing::info!("postgres_pool_closed"),
+        Some(Closed::TimedOut) => {
             tracing::warn!("postgres pool outlived its close budget");
             degraded = true;
         }
     }
 
-    if plan
+    match plan
         .tracer_provider
         .shutdown(budget.stage(TELEMETRY_FLUSH))
         .await
     {
-        tracing::info!("telemetry_flushed");
-    } else {
-        degraded = true;
+        ProviderShutdown::Flushed => tracing::info!("telemetry_flushed"),
+        ProviderShutdown::Incomplete => degraded = true,
     }
 
     let outcome = if degraded {

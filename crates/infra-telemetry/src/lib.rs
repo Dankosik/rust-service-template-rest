@@ -14,6 +14,6 @@ pub mod tracing;
 pub use logging::{LogFormat, LoggingError, LoggingOptions, install_subscriber};
 pub use metrics::{Metrics, MetricsError, TRACE_EXPORTER_ACTIVE_METRIC, diagnostics_router};
 pub use tracing::{
-    ExporterState, Sampler, TracerProviderHandle, TracingError, TracingOptions,
+    ExporterState, ProviderShutdown, Sampler, TracerProviderHandle, TracingError, TracingOptions,
     install_tracer_provider,
 };

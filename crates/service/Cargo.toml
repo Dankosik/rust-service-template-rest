@@ -7,7 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-build = "build.rs"
 
 # The library holds the API contract assembly (`api`); the `service` binary
 # is the runtime, and `openapi` renders the committed document from the same
@@ -37,9 +36,6 @@ tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
 utoipa = { workspace = true, features = ["macros", "yaml"] }
 utoipa-axum = { workspace = true }
-
-[build-dependencies]
-vergen-gitcl = { workspace = true }
 
 [dev-dependencies]
 nix = { workspace = true, features = ["signal"] }

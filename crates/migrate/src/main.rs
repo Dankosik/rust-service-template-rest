@@ -17,10 +17,7 @@ use migrate::{FailedRun, MIGRATOR, RunOptions, RunResult};
 use secrecy::ExposeSecret;
 use service_config::{BuildInfo, Config, LoadOptions};
 
-const BUILD_INFO: BuildInfo = BuildInfo {
-    version: env!("CARGO_PKG_VERSION"),
-    commit: env!("VERGEN_GIT_SHA"),
-};
+const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -57,9 +54,7 @@ impl Failure {
 }
 
 fn main() -> ExitCode {
-    let mut args = std::env::args_os();
-    let _argv0 = args.next();
-    let options = match LoadOptions::parse_args(args) {
+    let options = match LoadOptions::parse_args(std::env::args_os()) {
         Ok(options) => options,
         Err(err) => {
             let success = err.exit_code() == 0;
@@ -137,31 +132,54 @@ async fn apply(config: &Config) -> Result<RunResult, Failure> {
         "migration_starting"
     );
     let options = RunOptions::defaults(&dsn, &config.observability.otel.service_name);
-    tokio::select! {
-        result = migrate::run(&MIGRATOR, &options) => result.map_err(Failure::from),
-        signal = stop_signal() => Err(Failure::Interrupted(signal)),
-    }
+    run_until_stop(&options).await
 }
 
-async fn stop_signal() -> &'static str {
+/// Apply migrations, interrupting on a stop signal when handlers install.
+///
+/// When no handler can be installed the run continues until success, SQL
+/// failure, or the orchestration deadline. That is a job-style contract,
+/// not the service binary's fail-startup path. A successful unix `Signal`
+/// stream is held until the wait completes; dropping it would swallow a
+/// later SIGTERM.
+async fn run_until_stop(options: &RunOptions<'_>) -> Result<RunResult, Failure> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        let (Ok(mut terminate), Ok(mut interrupt)) = (
+        match (
             signal(SignalKind::terminate()),
             signal(SignalKind::interrupt()),
-        ) else {
-            return std::future::pending().await;
-        };
-        tokio::select! {
-            _ = terminate.recv() => "SIGTERM",
-            _ = interrupt.recv() => "SIGINT",
+        ) {
+            (Ok(mut terminate), Ok(mut interrupt)) => {
+                tokio::select! {
+                    result = migrate::run(&MIGRATOR, options) => result.map_err(Failure::from),
+                    _ = terminate.recv() => Err(Failure::Interrupted("SIGTERM")),
+                    _ = interrupt.recv() => Err(Failure::Interrupted("SIGINT")),
+                }
+            }
+            (Ok(mut terminate), Err(_)) => {
+                tokio::select! {
+                    result = migrate::run(&MIGRATOR, options) => result.map_err(Failure::from),
+                    _ = terminate.recv() => Err(Failure::Interrupted("SIGTERM")),
+                }
+            }
+            (Err(_), Ok(mut interrupt)) => {
+                tokio::select! {
+                    result = migrate::run(&MIGRATOR, options) => result.map_err(Failure::from),
+                    _ = interrupt.recv() => Err(Failure::Interrupted("SIGINT")),
+                }
+            }
+            (Err(_), Err(_)) => migrate::run(&MIGRATOR, options)
+                .await
+                .map_err(Failure::from),
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
-        "ctrl-c"
+        tokio::select! {
+            result = migrate::run(&MIGRATOR, options) => result.map_err(Failure::from),
+            _ = tokio::signal::ctrl_c() => Err(Failure::Interrupted("ctrl-c")),
+        }
     }
 }
 

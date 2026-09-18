@@ -9,6 +9,7 @@
 mod shutdown;
 
 use std::ffi::OsString;
+use std::num::NonZeroU32;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -20,17 +21,14 @@ use infra_telemetry::{
     install_subscriber, install_tracer_provider,
 };
 use secrecy::ExposeSecret;
-use service_config::{BuildInfo, Config, LoadOptions, LogFormat, TracesSampler};
+use service_config::{AppConfig, BuildInfo, Config, LoadOptions, LogFormat, TracesSampler};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use self::shutdown::{Outcome, Signals};
 
 /// Version and revision stamped into this binary.
-pub(crate) const BUILD_INFO: BuildInfo = BuildInfo {
-    version: env!("CARGO_PKG_VERSION"),
-    commit: env!("VERGEN_GIT_SHA"),
-};
+pub(crate) const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
 /// Exit code when the process shut down but a teardown stage overran its
 /// budget: the platform and the process test can tell it from a crash.
@@ -45,8 +43,8 @@ const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum BootstrapError {
-    #[error(transparent)]
-    Signals(std::io::Error),
+    #[error("install stop signal handlers: {0}")]
+    Signals(#[source] std::io::Error),
     #[error(transparent)]
     Tracing(#[from] infra_telemetry::TracingError),
     #[error(transparent)]
@@ -65,16 +63,13 @@ pub(crate) enum BootstrapError {
     Server(#[from] infra_http::ServerError),
 }
 
-/// Parse flags (consuming argv0), load configuration, run the service, and
-/// map the result to an exit code. Never calls `process::exit`, so
-/// destructors run. `--help` and `--version` exit 0; other clap errors exit
-/// 1.
+/// Parse flags, load configuration, run the service, and map the result to
+/// an exit code. Never calls `process::exit`, so destructors run. `--help`
+/// and `--version` exit 0; other clap errors exit 1.
 pub(crate) fn run<I>(args: I) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
-    let mut args = args.into_iter();
-    let _argv0 = args.next();
     let options = match LoadOptions::parse_args(args) {
         Ok(options) => options,
         Err(err) => {
@@ -130,7 +125,8 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // process; install the handlers first and keep them for the lifetime.
     let mut signals = Signals::install().map_err(BootstrapError::Signals)?;
 
-    let tracer_provider = install_tracer_provider(&tracing_options(&config))?;
+    let tracer_provider =
+        install_tracer_provider(&tracing_options(&config, replica_instance_id(&config.app)))?;
     install_subscriber(&LoggingOptions {
         level: config.log.level.clone(),
         format: match config.log.format {
@@ -165,14 +161,21 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // fails startup here rather than serving a readiness that never passes.
     let mut probes: Vec<Box<dyn Probe>> = Vec::new();
     let postgres_pool = if config.postgres.enabled {
-        let pool = open_postgres(&config).await?;
-        probes.push(Box::new(PostgresProbe::new(pool.clone())));
-        tracker.spawn(infra_postgres::record_metrics_periodically(
-            pool.clone(),
-            METRICS_MAINTENANCE_INTERVAL,
-            cancel.child_token(),
-        ));
-        Some(pool)
+        match open_postgres(&config).await {
+            Ok(pool) => {
+                probes.push(Box::new(PostgresProbe::new(pool.clone())));
+                tracker.spawn(infra_postgres::record_metrics_periodically(
+                    pool.clone(),
+                    METRICS_MAINTENANCE_INTERVAL,
+                    cancel.child_token(),
+                ));
+                Some(pool)
+            }
+            Err(err) => {
+                shutdown::close_opened_dependencies(&cancel, &tracker, None).await;
+                return Err(err);
+            }
+        }
     } else {
         None
     };
@@ -198,9 +201,9 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
         postgres_pool: postgres_pool.clone(),
     })
     .await;
-    // Same owner as the success-path teardown: cancel and join the gauge
-    // (and readiness watch, if it started) before the pool waits for
-    // checked-out connections to return.
+    // Bind or admission failure: cancel and join tracked tasks, then close
+    // the pool. `Server` and `TracerProviderHandle` take their Drop path
+    // (stop accepting / SDK drop), not `shutdown(budget)`.
     if outcome.is_err() {
         shutdown::close_opened_dependencies(&cancel, &tracker, postgres_pool.as_ref()).await;
     }
@@ -267,7 +270,7 @@ async fn serve_transports(transports: Transports<'_>) -> Result<Outcome, Bootstr
         header_read_timeout: config.http.header_read_timeout,
         max_header_bytes: usize::try_from(config.http.max_header_bytes.as_u64())
             .unwrap_or(usize::MAX),
-        max_connections: config.http.max_connections,
+        max_connections: NonZeroU32::new(config.http.max_connections),
     };
     // The routes and the committed OpenAPI document are the two halves of
     // one contract; only the routes are needed here.
@@ -278,7 +281,7 @@ async fn serve_transports(transports: Transports<'_>) -> Result<Outcome, Bootstr
             max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64())
                 .unwrap_or(usize::MAX),
             request_timeout: config.http.request_timeout,
-            max_in_flight: config.http.max_in_flight,
+            max_in_flight: NonZeroU32::new(config.http.max_in_flight),
             log_health_probes: config.http.access_log_health_probes,
         },
     );
@@ -312,7 +315,13 @@ async fn serve_transports(transports: Transports<'_>) -> Result<Outcome, Bootstr
     .await)
 }
 
-fn tracing_options(config: &Config) -> TracingOptions {
+fn replica_instance_id(app: &AppConfig) -> String {
+    app.instance_id
+        .clone()
+        .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned())
+}
+
+fn tracing_options(config: &Config, instance_id: String) -> TracingOptions {
     let otel = &config.observability.otel;
     let sampler = match otel.traces_sampler {
         TracesSampler::AlwaysOn => Sampler::AlwaysOn,
@@ -322,10 +331,6 @@ fn tracing_options(config: &Config) -> TracingOptions {
             Sampler::ParentBasedTraceIdRatio(otel.traces_sampler_arg)
         }
     };
-    let instance_id = config.app.instance_id().map_or_else(
-        || gethostname::gethostname().to_string_lossy().into_owned(),
-        str::to_owned,
-    );
     TracingOptions {
         service_name: otel.service_name.clone(),
         service_version: config.app.version.clone(),

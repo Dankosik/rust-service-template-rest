@@ -7,18 +7,18 @@
 //! document, and wraps the routes in [`crate::harden`]. New operations join
 //! a feature router, never this file or the hardened chain.
 
-// The local `health` module holds the handlers; the readiness reader comes
-// from the `health` crate.
-use ::health::ReadinessReader;
+// Probe handlers live in `probes`; the readiness reader comes from the
+// `health` crate.
+use health::ReadinessReader;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::health;
+use crate::probes;
 use crate::problem::responses::ProblemComponents;
 
 /// Route templates served without an access-log line unless enabled.
-pub(crate) const HEALTH_PROBE_ROUTES: &[&str] = &[health::LIVE_PATH, health::READY_PATH];
+pub(crate) const HEALTH_PROBE_ROUTES: &[&str] = &[probes::LIVE_PATH, probes::READY_PATH];
 
 /// The probe routes with their contract and the problem components, as one
 /// [`OpenApiRouter`] whose [`ReadinessReader`] state is still unapplied: the
@@ -27,19 +27,19 @@ pub(crate) const HEALTH_PROBE_ROUTES: &[&str] = &[health::LIVE_PATH, health::REA
 /// per path: the macro groups the methods of a single path.
 pub fn router() -> OpenApiRouter<ReadinessReader> {
     OpenApiRouter::with_openapi(ProblemComponents::openapi())
-        .routes(routes!(health::live))
-        .routes(routes!(health::ready))
+        .routes(routes!(probes::live))
+        .routes(routes!(probes::ready))
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use ::health::{Readiness, RefreshPolicy};
     use axum::body::Body;
     use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
     use axum::http::{Method, Request, StatusCode};
     use axum::response::Response;
+    use health::{Readiness, RefreshPolicy};
     use tower::ServiceExt;
 
     use super::*;
@@ -49,7 +49,7 @@ mod tests {
         HardenOptions {
             max_body_bytes: 8,
             request_timeout: Duration::from_secs(1),
-            max_in_flight: 0,
+            max_in_flight: None,
             log_health_probes: false,
         }
     }

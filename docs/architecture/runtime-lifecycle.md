@@ -109,10 +109,10 @@ destructors run.
 - **Readiness over `tokio::sync::watch`** rather than a per-request probe or
   a mutex: tests await `changed()` instead of sleeping, and the handler is an
   O(1) read.
-- **Build metadata**: `app.version` is `CARGO_PKG_VERSION`; `app.commit` is
-  `vergen-gitcl` with `default_on_error()`, overridable through
-  `VERGEN_GIT_SHA`, which the image build sets from `VCS_REF` (or Railway's
-  `RAILWAY_GIT_COMMIT_SHA`).
+- **Build metadata**: `app.version` is `CARGO_PKG_VERSION` of the calling
+  binary; `app.commit` is `vergen-gitcl` in `crates/config/build.rs` with
+  `default_on_error()`, overridable through `VERGEN_GIT_SHA`, which the image
+  build sets from `VCS_REF` (or Railway's `RAILWAY_GIT_COMMIT_SHA`).
 - **Process tests** use `CARGO_BIN_EXE_service`, an ephemeral port
   (`APP__HTTP__ADDR=127.0.0.1:0`) read back from the JSON startup log, a
   readiness poll, `nix` `SIGTERM` (`Child::kill` is `SIGKILL`), and assert
