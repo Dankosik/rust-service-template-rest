@@ -17,13 +17,26 @@ SERVICE_BIN ?= service
 # Baseline configuration for `make run`; deployments pass their own file or
 # rely on APP__* environment variables.
 LOCAL_CONFIG ?= env/config/local.toml
-# Default comparison base for range-scoped gates (secret scan); CI passes the
-# event's base commit.
+# Default comparison base for range-scoped gates (secret scan, verify); CI
+# passes the event's base commit.
 BASE_REF ?= origin/main
-# Not a security boundary: stops an agent from launching a costly command by
-# accident. CI systems set CI=true, which is enough.
+export BASE_REF
+# Crate list for lint-changed and test-changed, as scripts/ci/affected-crates.sh
+# prints it: PKGS="health infra-http".
+PKGS ?=
+REQUIRE_PKGS = @test -n "$(strip $(PKGS))" || { printf '%s requires PKGS="<crate> <crate>"\n' "$@" >&2; exit 2; }
+# Not security boundaries: they stop an agent from launching a costly command
+# by accident. ALLOW_FULL guards the full-repository aggregate, ALLOW_HEAVY
+# the container-backed and history-wide commands. CI systems set CI=true,
+# which satisfies both.
+ALLOW_FULL ?=
 ALLOW_HEAVY ?=
+export ALLOW_FULL ALLOW_HEAVY
+FULL_GUARD = @if [ "$(ALLOW_FULL)" != "1" ] && [ "$(CI)" != "true" ]; then printf 'refusing %s: set ALLOW_FULL=1 (CI sets CI=true)\n' "$@" >&2; exit 2; fi
 HEAVY_GUARD = @if [ "$(ALLOW_HEAVY)" != "1" ] && [ "$(CI)" != "true" ]; then printf 'refusing %s: set ALLOW_HEAVY=1 (CI sets CI=true)\n' "$@" >&2; exit 2; fi
+# One Git-common lock keeps CPU-heavy validations from overlapping.
+VALIDATION_LOCK := bash scripts/ci/validation-lock.sh --
+VERIFY := bash scripts/ci/verify.sh
 
 # The OpenAPI document is generated from the Rust contract by the `openapi`
 # binary and committed; `make test` refuses a stale copy. Redocly CLI lints
@@ -62,9 +75,11 @@ ACTIONLINT ?= go run github.com/rhysd/actionlint/cmd/actionlint@v$(ACTIONLINT_VE
 # Tracked and untracked shell scripts that exist in the worktree.
 SHELL_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standard -- '*.sh'))
 
-.PHONY: help build run test test-package fmt fmt-check lint check check-skills clean \
+.PHONY: help build run test test-package test-changed fmt fmt-check lint lint-changed \
+	check check-unlocked check-skills clean \
 	openapi-generate openapi-check openapi-lint openapi-breaking \
-	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck
+	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck \
+	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test
 
 help: ## List available commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -82,6 +97,10 @@ test-package: ## Run one crate's tests; requires PKG=<crate name>
 	@test -n "$(PKG)" || { echo "test-package requires PKG=<crate name>" >&2; exit 2; }
 	$(CARGO) test -p $(PKG) $(CARGO_FLAGS)
 
+test-changed: ## Run the tests of the crates in PKGS="<crate> <crate>"
+	$(REQUIRE_PKGS)
+	$(CARGO) test $(addprefix -p ,$(PKGS)) $(CARGO_FLAGS)
+
 fmt: ## Format every crate
 	$(CARGO) fmt --all
 
@@ -90,6 +109,10 @@ fmt-check: ## Fail when formatting differs from rustfmt output
 
 lint: ## Clippy over all targets, warnings are errors
 	$(CARGO) clippy --workspace --all-targets $(CARGO_FLAGS) -- -D warnings
+
+lint-changed: ## Clippy over the crates in PKGS="<crate> <crate>", warnings are errors
+	$(REQUIRE_PKGS)
+	$(CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets $(CARGO_FLAGS) -- -D warnings
 
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py
@@ -151,7 +174,30 @@ openapi-breaking: ## Compare the document with BASE_OPENAPI=<file> for breaking 
 		$(OASDIFF) breaking --fail-on ERR "$(BASE_OPENAPI)" $(OPENAPI_FILE); \
 	fi
 
-check: fmt-check lint test unused-deps openapi-lint check-skills ## Full local gate: formatting, lint, tests, unused dependencies, OpenAPI lint, skills
+plan: ## Print the verification route for the changed surfaces without running it
+	$(VERIFY) --plan
+
+verify: ## Run the route for the changed surfaces and record a receipt
+	$(VERIFY)
+
+verify-check: ## Self-test of scripts/ci/verify.sh
+	$(VERIFY) --self-test
+
+changed-surfaces-check: ## Self-test of the surface classifier
+	bash scripts/ci/changed-surfaces.sh --self-test
+
+affected-crates-check: ## Self-test of the affected-crate planner
+	bash scripts/ci/affected-crates.sh --self-test
+
+validation-lock-self-test: ## Self-test of the validation lock
+	bash scripts/ci/validation-lock.sh --self-test
+
+check: ## Full repository gate under the validation lock; ALLOW_FULL=1 (CI sets CI=true)
+	$(FULL_GUARD)
+	$(VALIDATION_LOCK) $(MAKE) check-unlocked
+
+check-unlocked: fmt-check lint test unused-deps openapi-lint check-skills \
+	changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
 
 clean: ## Remove build output
 	$(CARGO) clean

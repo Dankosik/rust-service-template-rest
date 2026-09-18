@@ -118,18 +118,22 @@ Select commands from [`make/template.mk`](make/template.mk):
 
 | Changed surface | Local validation |
 | --- | --- |
-| One crate's behavior or tests | `make build` and `make test-package PKG=<crate>` |
+| One crate's behavior or tests | `make build` and `make test-package PKG=<crate>`, or `make test-changed PKGS="<crates>"` with the list `scripts/ci/affected-crates.sh` prints |
 | Several crates, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` | `make build` and `make test` |
 | Formatting or lint configuration | `make fmt-check` and `make lint` |
 | Documentation or agent instructions | Static consistency review; every link resolves; `make check-skills` for skills |
-| Full-repository claim, explicitly requested | `make check` |
+| Mixed or unclear surfaces | `make plan` shows the route the changed surfaces select; `make verify` runs it and records a receipt |
+| Full-repository claim, explicitly requested | `ALLOW_FULL=1 make check` |
 
 Every Cargo command runs with `--locked`; a lockfile change is part of the
 change, never a side effect of validation. Reuse adequate coverage; missing or
 skipped required tests are not passes. Do not create test environments or
 runners solely to establish local completion. Local completion does not
 establish a requested CI, release, deployment, or runtime result. Never run
-CPU-heavy validation concurrently or clear shared caches. Existing CI gates
+CPU-heavy validation concurrently or clear shared caches; `make check` and
+`make verify` take the shared validation lock. `ALLOW_FULL` and `ALLOW_HEAVY`
+are deliberate opt-ins for the aggregate and for container-backed or
+history-wide commands, not permissions to expand acceptance. Existing CI gates
 remain intact.
 
 ## Work Selection And Loading
