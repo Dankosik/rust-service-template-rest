@@ -9,24 +9,28 @@
 //!
 //! Forward-only by policy: a rollback is a new forward migration. The
 //! source rules the resolver does not enforce are proven by a test over the
-//! embedded set, not at runtime.
+//! embedded set; [`run`] still rejects a migrator that breaks them.
 
 use std::time::Duration;
 
-use infra_postgres::{ACQUIRE_TIMEOUT, Dsn, runtime_param_millis};
+use infra_postgres::{ACQUIRE_TIMEOUT, Dsn, connect_session, runtime_param_millis};
+use sqlx::Connection;
 use sqlx::migrate::{Migrate, MigrateError, MigrationType, Migrator};
 use sqlx::postgres::PgConnection;
-use sqlx::{ConnectOptions, Connection};
 
 /// The repository's migration set.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
 /// Bound on the whole run: connect, lock, every pending migration.
 pub const DEADLINE: Duration = Duration::from_secs(300);
-/// Session `statement_timeout` and `idle_in_transaction_session_timeout`
-/// for the migration connection. DDL on a large table legitimately runs
-/// longer than a request; the deadline above still bounds the run.
+/// Session `statement_timeout` for the migration connection. DDL on a
+/// large table legitimately runs longer than a request; the deadline above
+/// still bounds the run.
 pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Session `idle_in_transaction_session_timeout` for the migration
+/// connection. Same duration as [`STATEMENT_TIMEOUT`] by policy, kept
+/// separate so a later edit of one setting does not silently retune the other.
+pub const IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(120);
 /// Session `lock_timeout`, which also bounds the wait for the advisory
 /// session lock another migrator may hold.
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
@@ -101,17 +105,17 @@ impl RunError {
 }
 
 /// A failed run with what it had observed by then, so the terminal record
-/// reports the real `target` and `before` instead of zeros. The error is
-/// boxed because `MigrateError` is large and the `Ok` path is the common one.
+/// can report the real `target` and `before`. The error is boxed because
+/// `MigrateError` is large and the `Ok` path is the common one.
 #[derive(Debug, thiserror::Error)]
 #[error("{error}")]
-pub struct RunFailure {
+pub struct FailedRun {
     #[source]
     pub error: Box<RunError>,
     pub observed: RunResult,
 }
 
-impl RunFailure {
+impl FailedRun {
     #[must_use]
     pub fn stage(&self) -> Stage {
         self.error.stage()
@@ -144,19 +148,20 @@ impl RunResult {
     }
 }
 
-/// Budgets for one run. [`Options::defaults`] is what the binary uses;
+/// Budgets for one run. [`RunOptions::defaults`] is what the binary uses;
 /// tests shorten them to observe the corresponding failure stage.
 #[derive(Clone, Debug)]
-pub struct Options<'a> {
+pub struct RunOptions<'a> {
     pub dsn: &'a Dsn,
     /// Reported as `application_name` for the migration session.
     pub application_name: &'a str,
     pub deadline: Duration,
     pub statement_timeout: Duration,
+    pub idle_in_transaction_timeout: Duration,
     pub lock_timeout: Duration,
 }
 
-impl<'a> Options<'a> {
+impl<'a> RunOptions<'a> {
     #[must_use]
     pub fn defaults(dsn: &'a Dsn, application_name: &'a str) -> Self {
         Self {
@@ -164,6 +169,7 @@ impl<'a> Options<'a> {
             application_name,
             deadline: DEADLINE,
             statement_timeout: STATEMENT_TIMEOUT,
+            idle_in_transaction_timeout: IDLE_IN_TRANSACTION_TIMEOUT,
             lock_timeout: LOCK_TIMEOUT,
         }
     }
@@ -173,10 +179,10 @@ impl<'a> Options<'a> {
 ///
 /// # Errors
 ///
-/// [`RunFailure`], whose [`RunFailure::stage`] names where the run stopped.
+/// [`FailedRun`], whose [`FailedRun::stage`] names where the run stopped.
 /// Nothing partial is left behind: each migration and its history row share
 /// one transaction, and a dropped connection releases the session lock.
-pub async fn run(migrator: &Migrator, options: &Options<'_>) -> Result<RunResult, RunFailure> {
+pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<RunResult, FailedRun> {
     let started = std::time::Instant::now();
     let mut observed = RunResult {
         target: migrator.iter().map(|m| m.version).max(),
@@ -184,7 +190,7 @@ pub async fn run(migrator: &Migrator, options: &Options<'_>) -> Result<RunResult
     };
     let fail = |error: RunError, mut observed: RunResult| {
         observed.duration = started.elapsed();
-        RunFailure {
+        FailedRun {
             error: Box::new(error),
             observed,
         }
@@ -194,28 +200,22 @@ pub async fn run(migrator: &Migrator, options: &Options<'_>) -> Result<RunResult
         return Err(fail(RunError::Source(message), observed));
     }
 
-    let statement_timeout = runtime_param_millis(options.statement_timeout);
     let lock_timeout = runtime_param_millis(options.lock_timeout);
-    let connect_options = options
-        .dsn
-        .connect_options()
-        .application_name(options.application_name)
-        .options([
-            ("statement_timeout", statement_timeout.as_str()),
-            (
-                "idle_in_transaction_session_timeout",
-                statement_timeout.as_str(),
-            ),
-            ("lock_timeout", lock_timeout.as_str()),
-            // `CREATE TABLE IF NOT EXISTS` on the history table raises a
-            // notice on every run after the first; the terminal record is
-            // the operator's evidence, not the server's chatter.
-            ("client_min_messages", "warning"),
-        ])
-        .log_statements(log::LevelFilter::Off);
     let mut conn = match tokio::time::timeout(
         ACQUIRE_TIMEOUT,
-        PgConnection::connect_with(&connect_options),
+        connect_session(
+            options.dsn,
+            options.application_name,
+            options.statement_timeout,
+            options.idle_in_transaction_timeout,
+            &[
+                ("lock_timeout", lock_timeout.as_str()),
+                // `CREATE TABLE IF NOT EXISTS` on the history table raises a
+                // notice on every run after the first; the terminal record is
+                // the operator's evidence, not the server's chatter.
+                ("client_min_messages", "warning"),
+            ],
+        ),
     )
     .await
     {
@@ -294,15 +294,20 @@ async fn applied_versions(
     Ok(versions)
 }
 
+// `ExecuteMigration` and `_` both yield `Execute`; the named arm is the
+// SQL-failed stage, `_` is only the non-exhaustive remainder.
+#[allow(clippy::match_same_arms)]
 fn stage_of(err: &MigrateError) -> Stage {
     match err {
         MigrateError::Source(_) => Stage::Source,
+        // `55P03` is `lock_timeout` while waiting for `pg_advisory_lock`.
         MigrateError::Execute(sqlx::Error::Database(db))
             if db.code().as_deref() == Some("55P03") =>
         {
             Stage::Lock
         }
         MigrateError::Execute(sqlx::Error::Io(_) | sqlx::Error::Tls(_)) => Stage::Connect,
+        // `Execute` is lock, history table, and list-applied bookkeeping.
         MigrateError::Execute(_)
         | MigrateError::Dirty(_)
         | MigrateError::VersionMismatch(_)
@@ -310,6 +315,9 @@ fn stage_of(err: &MigrateError) -> Stage {
         | MigrateError::VersionNotPresent(_)
         | MigrateError::VersionTooOld(..)
         | MigrateError::VersionTooNew(..) => Stage::State,
+        // `ExecuteMigration` is the named file's SQL.
+        MigrateError::ExecuteMigration(..) => Stage::Execute,
+        // `ForceNotSupported`, `CreateSchemasNotSupported`, and later variants.
         _ => Stage::Execute,
     }
 }
@@ -462,6 +470,10 @@ mod tests {
     fn stages_map_from_migrate_errors() {
         assert_eq!(stage_of(&MigrateError::VersionMismatch(3)), Stage::State);
         assert_eq!(stage_of(&MigrateError::Dirty(3)), Stage::State);
+        assert_eq!(
+            stage_of(&MigrateError::Execute(sqlx::Error::PoolTimedOut)),
+            Stage::State
+        );
         assert_eq!(
             stage_of(&MigrateError::ExecuteMigration(
                 sqlx::Error::PoolTimedOut,

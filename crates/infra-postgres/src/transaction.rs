@@ -38,13 +38,15 @@ pub enum TxError {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Isolation {
+    /// Omit the isolation clause; the server uses `default_transaction_isolation`.
     #[default]
+    Default,
     ReadCommitted,
     RepeatableRead,
     Serializable,
 }
 
-/// How the transaction is opened. The default is the server default.
+/// How the transaction is opened. [`Isolation::Default`] is the server default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TxOptions {
     pub isolation: Isolation,
@@ -54,14 +56,20 @@ pub struct TxOptions {
 impl TxOptions {
     /// The `BEGIN` statement; `None` when the server default applies.
     fn begin_statement(self) -> Option<&'static str> {
-        Some(match (self.isolation, self.read_only) {
-            (Isolation::ReadCommitted, false) => return None,
-            (Isolation::ReadCommitted, true) => "BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY",
-            (Isolation::RepeatableRead, false) => "BEGIN ISOLATION LEVEL REPEATABLE READ",
-            (Isolation::RepeatableRead, true) => "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
-            (Isolation::Serializable, false) => "BEGIN ISOLATION LEVEL SERIALIZABLE",
-            (Isolation::Serializable, true) => "BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY",
-        })
+        match (self.isolation, self.read_only) {
+            (Isolation::Default, false) => None,
+            (Isolation::Default, true) => Some("BEGIN READ ONLY"),
+            (Isolation::ReadCommitted, false) => Some("BEGIN ISOLATION LEVEL READ COMMITTED"),
+            (Isolation::ReadCommitted, true) => {
+                Some("BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY")
+            }
+            (Isolation::RepeatableRead, false) => Some("BEGIN ISOLATION LEVEL REPEATABLE READ"),
+            (Isolation::RepeatableRead, true) => {
+                Some("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            }
+            (Isolation::Serializable, false) => Some("BEGIN ISOLATION LEVEL SERIALIZABLE"),
+            (Isolation::Serializable, true) => Some("BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY"),
+        }
     }
 }
 
@@ -165,6 +173,22 @@ mod tests {
     #[test]
     fn begin_statements_render_isolation_and_read_only() {
         assert_eq!(TxOptions::default().begin_statement(), None);
+        assert_eq!(
+            TxOptions {
+                isolation: Isolation::Default,
+                read_only: true,
+            }
+            .begin_statement(),
+            Some("BEGIN READ ONLY")
+        );
+        assert_eq!(
+            TxOptions {
+                isolation: Isolation::ReadCommitted,
+                read_only: false,
+            }
+            .begin_statement(),
+            Some("BEGIN ISOLATION LEVEL READ COMMITTED")
+        );
         assert_eq!(
             TxOptions {
                 isolation: Isolation::Serializable,

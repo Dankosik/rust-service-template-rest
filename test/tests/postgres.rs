@@ -18,7 +18,7 @@ use infra_postgres::{
     in_tx_with, retryable,
 };
 use integration_tests::{dsn_for, fixture_dir};
-use migrate::{MIGRATOR, Options, RunError, Stage};
+use migrate::{MIGRATOR, RunError, RunOptions, Stage};
 use sqlx::migrate::{Migrate, MigrateError, Migrator};
 use sqlx::{Executor, Row};
 
@@ -52,8 +52,8 @@ async fn fixture(name: &str) -> Migrator {
         .expect("fixture resolves")
 }
 
-fn options(dsn: &Dsn) -> Options<'_> {
-    Options::defaults(dsn, APP)
+fn options(dsn: &Dsn) -> RunOptions<'_> {
+    RunOptions::defaults(dsn, APP)
 }
 
 async fn applied_count(pool: &PgPool) -> i64 {

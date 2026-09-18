@@ -19,7 +19,7 @@ use tokio_util::task::TaskTracker;
 /// Ceilings for the stages after the HTTP drain. They are process
 /// structure, not configuration, so they live here.
 const DIAGNOSTICS_SHUTDOWN: Duration = Duration::from_secs(2);
-const BACKGROUND_JOIN: Duration = Duration::from_secs(5);
+pub(crate) const BACKGROUND_JOIN: Duration = Duration::from_secs(5);
 /// Also the bound for closing a pool that outlived a failed startup.
 pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
 const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
@@ -54,6 +54,22 @@ pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudget
         });
     }
     Ok(())
+}
+
+/// Cancel and join background work, then close an opened pool. Used on
+/// partial startup so the same owner story as [`run`] applies: no leftover
+/// clone holds a connection while `close` waits.
+pub(crate) async fn close_opened_dependencies(
+    cancel: &CancellationToken,
+    tracker: &TaskTracker,
+    postgres_pool: Option<&PgPool>,
+) {
+    cancel.cancel();
+    tracker.close();
+    let _ = tokio::time::timeout(BACKGROUND_JOIN, tracker.wait()).await;
+    if let Some(pool) = postgres_pool {
+        let _ = infra_postgres::close(pool, DEPENDENCY_CLOSE).await;
+    }
 }
 
 /// How the teardown ended.
@@ -150,7 +166,7 @@ pub(crate) struct Plan<'a> {
     pub(crate) tracker: TaskTracker,
     /// Closed after background tasks joined, so no task still holds a
     /// connection when the pool waits for them to return.
-    pub(crate) postgres: Option<PgPool>,
+    pub(crate) postgres_pool: Option<PgPool>,
     pub(crate) tracer_provider: TracerProviderHandle,
     pub(crate) signals: &'a mut Signals,
 }
@@ -229,7 +245,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         tracing::info!("background_joined");
     }
 
-    if let Some(pool) = plan.postgres {
+    if let Some(pool) = plan.postgres_pool {
         if infra_postgres::close(&pool, budget.stage(DEPENDENCY_CLOSE)).await {
             tracing::info!("postgres_pool_closed");
         } else {

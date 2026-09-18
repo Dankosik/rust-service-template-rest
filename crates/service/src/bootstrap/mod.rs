@@ -164,7 +164,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // unless selected; a selected profile whose database is unreachable
     // fails startup here rather than serving a readiness that never passes.
     let mut probes: Vec<Box<dyn Probe>> = Vec::new();
-    let postgres = if config.postgres.enabled {
+    let postgres_pool = if config.postgres.enabled {
         let pool = open_postgres(&config).await?;
         probes.push(Box::new(PostgresProbe::new(pool.clone())));
         tracker.spawn(infra_postgres::record_metrics_periodically(
@@ -191,17 +191,18 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
         signals: &mut signals,
         tracer_provider,
         metrics,
-        cancel,
-        tracker,
+        cancel: cancel.clone(),
+        tracker: tracker.clone(),
         readiness,
         policy,
-        postgres: postgres.clone(),
+        postgres_pool: postgres_pool.clone(),
     })
     .await;
-    // Partial-startup cleanup: a pool opened before a later stage failed is
-    // closed explicitly instead of being left to the runtime teardown.
-    if let (Err(_), Some(pool)) = (&outcome, &postgres) {
-        let _ = infra_postgres::close(pool, shutdown::DEPENDENCY_CLOSE).await;
+    // Same owner as the success-path teardown: cancel and join the gauge
+    // (and readiness watch, if it started) before the pool waits for
+    // checked-out connections to return.
+    if outcome.is_err() {
+        shutdown::close_opened_dependencies(&cancel, &tracker, postgres_pool.as_ref()).await;
     }
     outcome
 }
@@ -237,7 +238,7 @@ struct Transports<'a> {
     tracker: TaskTracker,
     readiness: Readiness,
     policy: RefreshPolicy,
-    postgres: Option<PgPool>,
+    postgres_pool: Option<PgPool>,
 }
 
 async fn serve_transports(transports: Transports<'_>) -> Result<Outcome, BootstrapError> {
@@ -250,7 +251,7 @@ async fn serve_transports(transports: Transports<'_>) -> Result<Outcome, Bootstr
         tracker,
         readiness,
         policy,
-        postgres,
+        postgres_pool,
     } = transports;
     readiness
         .refresh(policy)
@@ -304,7 +305,7 @@ async fn serve_transports(transports: Transports<'_>) -> Result<Outcome, Bootstr
         diagnostics,
         cancel,
         tracker,
-        postgres,
+        postgres_pool,
         tracer_provider,
         signals,
     })

@@ -9,7 +9,7 @@ should weigh before reopening them.
 
 | Owner | Owns | Does not own |
 | --- | --- | --- |
-| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`), the pool with the template's session budgets (`connect`, `session_options`), readiness participation (`PostgresProbe`), pool gauges, the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`, `retryable`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
+| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`), the pool with the template's session budgets (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), pool gauges, the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`, `retryable`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
 | `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), the source rules beyond the resolver's, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
 | `migrations/` | Forward-only SQL files, one transaction each, `<version>_<snake_case>.sql` ([rules](../../migrations/README.md)). | Access code; a repository adapts to the schema, never the reverse. |
 | `service-config` (`postgres` section) | `postgres.enabled`, `postgres.dsn` (secret, environment only), `postgres.max_connections`. | DSN shape (the adapter refuses what the driver would accept). |
@@ -30,11 +30,12 @@ access code from that schema.
 host, port, user, password, database, and `sslmode` in `disable`, `require`,
 `verify-ca`, or `verify-full`, and no other parameter. `Dsn::parse` refuses,
 in this order and without ever quoting the value: an empty string, another
-scheme, an unparsable URL or a fragment, a missing component, a Unix socket
+scheme, an unparsable URL, a URL fragment, a missing component, a Unix socket
 host, a comma-separated host list, `allow`/`prefer`, a service or passfile
-parameter, a TLS certificate or key file parameter, any other parameter, and
-a non-empty libpq variable (`PGHOST`, `PGPASSWORD`, `PGSSLMODE`, ... the
-thirteen names in `AMBIENT_ENVIRONMENT`). The result is exactly what the
+parameter, a TLS certificate or key file parameter, any other parameter, a
+non-empty libpq variable (`PGHOST`, `PGPASSWORD`, `PGSSLMODE`, ... the
+thirteen names in `AMBIENT_ENVIRONMENT`), and a string the driver still
+cannot turn into connect options. The result is exactly what the
 operator wrote; `application_name` is added by the template from the service
 name so `pg_stat_activity` attributes sessions.
 
@@ -46,7 +47,8 @@ different ones changes them in one reviewed place.
 | Budget | Value | Where it acts |
 | --- | --- | --- |
 | Acquire (including opening a connection) | 3 s | `PgPoolOptions::acquire_timeout`; the startup connection draws it too |
-| `statement_timeout`, `idle_in_transaction_session_timeout` | 8 s | Session defaults in the startup packet of every pooled connection |
+| `statement_timeout` | 8 s | Session default in the startup packet of every pooled connection |
+| `idle_in_transaction_session_timeout` | 8 s | Same duration as `statement_timeout` by policy; a separate constant |
 | Slow statement warning | 1 s | `warn` with SQL text and duration; statement logging is otherwise off |
 | Rollback after a failed closure | 3 s | `tokio::time::timeout` around `Transaction::rollback` |
 | Readiness probe | health `readiness_timeout` | The refresher bounds the acquire plus ping |
@@ -75,7 +77,9 @@ with the connection (not the transaction, so the closure cannot commit or
 roll back on its own), commits on `Ok`, and rolls back on `Err` inside the
 rollback budget, returning the closure's error; a rollback failure is logged.
 `in_tx_with(TxOptions { isolation, read_only })` renders the `BEGIN`
-statement for `Connection::begin_with`.
+statement for `Connection::begin_with`. `Isolation::Default` omits the
+isolation clause (server `default_transaction_isolation`);
+`Isolation::ReadCommitted` always sends `BEGIN ISOLATION LEVEL READ COMMITTED`.
 
 Commit-outcome policy: a commit error whose SQLSTATE class is `23`
 (integrity constraint violation, which a deferred constraint raises at
@@ -104,9 +108,10 @@ history row. On any failure the connection is dropped, which ends the
 session, the lock, and any open transaction.
 
 Source rules beyond the resolver's are a unit test over the embedded set
-(`cargo test -p migrate`, part of `make migration-check`): positive version,
-simple forward-only files (no `.up.sql`/`.down.sql`), no `-- no-transaction`,
-lowercase `snake_case` description. `scripts/ci/migration-history-check.sh`
+(`cargo test -p migrate`, part of `make migration-check`) and a runtime
+gate in `run`: positive version, simple forward-only files (no `.up.sql`/
+`.down.sql`), no `-- no-transaction`, lowercase `snake_case` description.
+`scripts/ci/migration-history-check.sh`
 refuses a pull request that modifies, deletes, or renames an existing
 migration or adds one older than the newest the base has.
 
