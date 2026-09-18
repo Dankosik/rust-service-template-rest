@@ -185,6 +185,25 @@ mod tests {
         assert_eq!(cfg.app.version, "1.2.3");
         assert_eq!(cfg.app.commit, "abc123");
         assert_eq!(cfg.log.format, LogFormat::Json);
+        assert_eq!(cfg.app.instance_id, None);
+    }
+
+    #[test]
+    fn empty_instance_id_is_occupancy_none() {
+        let empty = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__APP__INSTANCE_ID", "")]),
+        )
+        .unwrap();
+        assert_eq!(empty.app.instance_id, None);
+        let set = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__APP__INSTANCE_ID", "  pod-a  ")]),
+        )
+        .unwrap();
+        assert_eq!(set.app.instance_id.as_deref(), Some("pod-a"));
     }
 
     #[test]

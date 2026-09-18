@@ -160,28 +160,41 @@ impl TracerProviderHandle {
 
     /// Flush and stop the provider inside `budget`, off the async workers.
     ///
-    /// Returns `false` when the budget expired or the SDK reported an error.
+    /// Dropping the handle without this method is the failed-bind path: the
+    /// SDK provider drops without a flush budget. Call this only from the
+    /// ordered success-path teardown.
+    ///
     /// [`SHUTDOWN_JOIN_SLACK`] is join time around `spawn_blocking`, not extra
     /// flush budget: the SDK already times out at `budget`.
-    pub async fn shutdown(self, budget: Duration) -> bool {
+    pub async fn shutdown(self, budget: Duration) -> ProviderShutdown {
         let provider = self.provider;
         let job = tokio::task::spawn_blocking(move || provider.shutdown_with_timeout(budget));
         match tokio::time::timeout(budget + SHUTDOWN_JOIN_SLACK, job).await {
-            Ok(Ok(Ok(()))) => true,
+            Ok(Ok(Ok(()))) => ProviderShutdown::Flushed,
             Ok(Ok(Err(err))) => {
                 ::tracing::warn!(error = %err, "tracer provider shutdown reported an error");
-                false
+                ProviderShutdown::Incomplete
             }
             Ok(Err(join)) => {
                 ::tracing::warn!(error = %join, "tracer provider shutdown task failed");
-                false
+                ProviderShutdown::Incomplete
             }
             Err(_elapsed) => {
                 ::tracing::warn!(budget = ?budget, "tracer provider shutdown exceeded its budget");
-                false
+                ProviderShutdown::Incomplete
             }
         }
     }
+}
+
+/// Outcome of [`TracerProviderHandle::shutdown`].
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderShutdown {
+    /// The SDK reported a clean flush.
+    Flushed,
+    /// Timeout, SDK error, or join failure: not confirmed flushed.
+    Incomplete,
 }
 
 /// Which source selects the endpoint, or `None` for disabled.
@@ -255,6 +268,8 @@ fn resource(options: &TracingOptions) -> Resource {
         ),
     ];
     if !options.instance_id.trim().is_empty() {
+        // Skip an empty host probe result; occupancy is already resolved
+        // before `TracingOptions` is built.
         attributes.push(KeyValue::new(
             attribute::SERVICE_INSTANCE_ID,
             options.instance_id.clone(),

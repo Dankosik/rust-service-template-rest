@@ -51,10 +51,12 @@ pub struct HttpConfig {
     /// Request body ceiling; overflow answers 413.
     pub max_body_bytes: ByteSize,
     /// Concurrent handler executions before shedding with 503. Zero disables
-    /// shedding.
+    /// shedding. The composition root maps zero to `None` on the adapter
+    /// policy type.
     pub max_in_flight: u32,
     /// Accepted connections at once. At the cap the accept loop closes the
-    /// socket with no HTTP response. Zero accepts without a bound.
+    /// socket with no HTTP response. Zero accepts without a bound. The
+    /// composition root maps zero to `None` on the adapter policy type.
     pub max_connections: u32,
     /// Re-enable access logging for `/health/live` and `/health/ready`.
     pub access_log_health_probes: bool,

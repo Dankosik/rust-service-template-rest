@@ -39,7 +39,7 @@ ARG VCS_REF=unknown
 ARG RAILWAY_GIT_COMMIT_SHA
 ARG SOURCE_DATE_EPOCH=0
 # vergen emits VERGEN_GIT_SHA verbatim when the build has no .git (see
-# crates/service/build.rs); this is what the binary logs as app.commit.
+# crates/config/build.rs); this is what the binary logs as app.commit.
 ENV VERGEN_GIT_SHA=${RAILWAY_GIT_COMMIT_SHA:-${VCS_REF}}
 COPY . .
 RUN cargo auditable build --release --locked -p service --bin service -p migrate --bin migrate \

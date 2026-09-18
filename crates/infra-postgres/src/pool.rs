@@ -20,8 +20,9 @@ use crate::dsn::Dsn;
 pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Session default for `statement_timeout` on every pooled connection.
-/// Longer than any request budget the HTTP layer allows, so the server
-/// cancels only work whose caller has already given up.
+/// Matches the default HTTP request budget (`http.request_timeout` 8s). It
+/// is not kept in lockstep with a configured request timeout; both stay
+/// independent adapter vs operator values.
 pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Session default for `idle_in_transaction_session_timeout` on every
@@ -170,10 +171,22 @@ pub fn runtime_param_millis(duration: Duration) -> String {
     format!("{}ms", duration.as_nanos().div_ceil(1_000_000))
 }
 
-/// Close the pool inside `budget`, returning whether every connection was
-/// released in time.
-pub async fn close(pool: &PgPool, budget: Duration) -> bool {
-    tokio::time::timeout(budget, pool.close()).await.is_ok()
+/// Close the pool inside `budget`.
+pub async fn close(pool: &PgPool, budget: Duration) -> Closed {
+    match tokio::time::timeout(budget, pool.close()).await {
+        Ok(()) => Closed::Complete,
+        Err(_elapsed) => Closed::TimedOut,
+    }
+}
+
+/// Whether [`close`] released every connection inside its budget.
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Closed {
+    /// Every connection was released in time.
+    Complete,
+    /// The wait expired; the pool was asked to close and the budget ended.
+    TimedOut,
 }
 
 /// Publish pool occupancy gauges once.

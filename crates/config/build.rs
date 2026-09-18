@@ -1,5 +1,6 @@
-//! Stamp the git revision into the binary as `VERGEN_GIT_SHA`.
+//! Stamp the git revision into this crate as `VERGEN_GIT_SHA`.
 //!
+//! Binaries read it through [`service_config::BuildInfo::from_package_version`].
 //! The image build has no `.git`; it sets `VERGEN_GIT_SHA` from its `VCS_REF`
 //! argument and vergen emits that value verbatim. Without either, the
 //! fallback keeps `env!` compiling and the config layer reports `unknown`.

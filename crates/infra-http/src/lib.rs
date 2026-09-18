@@ -13,7 +13,7 @@ pub mod problem;
 
 mod access_log;
 mod harden;
-mod health;
+mod probes;
 mod request_id;
 mod router;
 mod server;

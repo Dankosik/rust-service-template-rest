@@ -65,9 +65,9 @@ OpenTelemetry environment stays a supported platform fallback:
   `service.instance.id`, and `deployment.environment.name` come from the
   typed snapshot (`observability.otel.service_name`, `app.version`,
   `app.commit`, `app.instance_id`, `app.env`). Additional
-  `OTEL_RESOURCE_ATTRIBUTES` survive underneath them. An empty
-  `app.instance_id` resolves to the hostname, which is the pod name on
-  Kubernetes.
+  `OTEL_RESOURCE_ATTRIBUTES` survive underneath them. A missing or empty
+  `app.instance_id` is occupancy: the composition root fills the hostname,
+  which is the pod name on Kubernetes.
 - A typed `observability.otel.exporter.otlp_endpoint` wins. Otherwise the SDK
   reads `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, then `OTEL_EXPORTER_OTLP_ENDPOINT`
   as the collector root. When neither is set the exporter stays disabled:

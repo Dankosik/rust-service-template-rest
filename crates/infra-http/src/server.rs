@@ -7,6 +7,7 @@
 //! long to wait.
 
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,8 +33,8 @@ pub struct ServerOptions {
     /// Read-buffer ceiling for one request head; overflow answers 431.
     /// hyper refuses values below 8 KiB.
     pub max_header_bytes: usize,
-    /// Accepted connections at once; zero accepts without a bound.
-    pub max_connections: u32,
+    /// Accepted connections at once; `None` accepts without a bound.
+    pub max_connections: Option<NonZeroU32>,
 }
 
 /// Server failures visible to the composition root.
@@ -127,7 +128,8 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         // Reached only when `shutdown` was not awaited: stop accepting so the
-        // listener is released, but do not abort in-flight connections.
+        // listener is released, but do not abort in-flight connections. This
+        // is the failed-bind / partial-startup path, not the ordered drain.
         self.stop_accepting.cancel();
     }
 }
@@ -159,8 +161,9 @@ async fn accept_loop(
 ) -> GracefulShutdown {
     let builder = connection_builder(options);
     let graceful = GracefulShutdown::new();
-    let permits = (options.max_connections > 0)
-        .then(|| Arc::new(Semaphore::new(options.max_connections as usize)));
+    let permits = options
+        .max_connections
+        .map(|limit| Arc::new(Semaphore::new(limit.get() as usize)));
 
     loop {
         let accepted = tokio::select! {
@@ -233,6 +236,7 @@ async fn wait_for_first_byte(stream: &TcpStream, timeout: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::num::NonZeroU32;
 
     use axum::routing::get;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -247,7 +251,7 @@ mod tests {
         ServerOptions {
             header_read_timeout: Duration::from_millis(300),
             max_header_bytes: 8 * 1024,
-            max_connections: 4,
+            max_connections: NonZeroU32::new(4),
         }
     }
 
@@ -349,7 +353,7 @@ mod tests {
     #[tokio::test]
     async fn connection_cap_refuses_the_excess() {
         let mut opts = options();
-        opts.max_connections = 1;
+        opts.max_connections = NonZeroU32::new(1);
         let server = Server::bind(loopback(), app(), opts).await.unwrap();
         let addr = server.local_addr();
         let first = TcpStream::connect(addr).await.unwrap();

@@ -20,10 +20,11 @@ pub struct LoadOptions {
 }
 
 impl LoadOptions {
-    /// Parse `args` without the program name. The composition root consumes
-    /// argv0 and passes the remainder here. Positional arguments are
-    /// rejected: a stray argument is usually a mistyped flag, and starting
-    /// with the wrong configuration is worse than not starting.
+    /// Parse the process argv, including the program name. Positional
+    /// arguments are rejected: a stray argument is usually a mistyped flag,
+    /// and starting with the wrong configuration is worse than not starting.
+    ///
+    /// Returns [`clap::Error`] instead of exiting so destructors still run.
     ///
     /// # Errors
     ///
@@ -33,9 +34,7 @@ impl LoadOptions {
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        let with_program = std::iter::once(std::ffi::OsString::from("service"))
-            .chain(args.into_iter().map(Into::into));
-        Self::try_parse_from(with_program)
+        Self::try_parse_from(args)
     }
 
     /// Base file first, then overlays in order.
@@ -51,6 +50,7 @@ mod tests {
     #[test]
     fn parses_base_and_ordered_overlays() {
         let opts = LoadOptions::parse_args([
+            "service",
             "--config",
             "base.toml",
             "--config-overlay",
@@ -70,14 +70,22 @@ mod tests {
 
     #[test]
     fn no_flags_means_defaults_only() {
-        let opts = LoadOptions::parse_args::<[&str; 0], &str>([]).unwrap();
+        let opts = LoadOptions::parse_args(["service"]).unwrap();
         assert_eq!(opts, LoadOptions::default());
     }
 
     #[test]
+    fn usage_names_the_real_program() {
+        let migrate = LoadOptions::parse_args(["migrate", "--unknown"]).unwrap_err();
+        assert!(migrate.to_string().contains("migrate"), "{migrate}");
+        let service = LoadOptions::parse_args(["service", "--unknown"]).unwrap_err();
+        assert!(service.to_string().contains("service"), "{service}");
+    }
+
+    #[test]
     fn rejects_positional_and_unknown_arguments() {
-        assert!(LoadOptions::parse_args(["stray"]).is_err());
-        assert!(LoadOptions::parse_args(["--unknown"]).is_err());
-        assert!(LoadOptions::parse_args(["--config"]).is_err());
+        assert!(LoadOptions::parse_args(["service", "stray"]).is_err());
+        assert!(LoadOptions::parse_args(["service", "--unknown"]).is_err());
+        assert!(LoadOptions::parse_args(["service", "--config"]).is_err());
     }
 }
