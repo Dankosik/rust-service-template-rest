@@ -29,7 +29,7 @@ pub fn is_secret_like_key(key: &str) -> bool {
 
 /// Return the first secret-like key in `table` that carries a non-empty
 /// scalar value, as a dotted path.
-pub(crate) fn first_secret_value(table: &toml::Table) -> Option<String> {
+pub(crate) fn first_secret_like_key(table: &toml::Table) -> Option<String> {
     let mut path = Vec::new();
     find_secret(table, &mut path)
 }
@@ -105,13 +105,16 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(first_secret_value(&table).as_deref(), Some("postgres.dsn"));
+        assert_eq!(
+            first_secret_like_key(&table).as_deref(),
+            Some("postgres.dsn")
+        );
     }
 
     #[test]
     fn empty_placeholders_are_allowed() {
         let table: toml::Table =
             toml::from_str("[observability.otel.exporter]\notlp_headers = \"\"\n").unwrap();
-        assert_eq!(first_secret_value(&table), None);
+        assert_eq!(first_secret_like_key(&table), None);
     }
 }

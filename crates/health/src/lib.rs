@@ -53,6 +53,8 @@ pub enum NotReady {
     NotEvaluated,
     #[error("readiness verdict is stale: last evaluated {age:?} ago, budget {budget:?}")]
     Stale { age: Duration, budget: Duration },
+    #[error("readiness evaluation exceeded the {budget:?} budget")]
+    TimedOut { budget: Duration },
     #[error("{probe} probe failed: {error}")]
     ProbeFailed {
         probe: &'static str,
@@ -75,11 +77,13 @@ pub struct RefreshPolicy {
 impl RefreshPolicy {
     /// How old a verdict may get before it is refused.
     ///
-    /// Evaluations are serial, so a probe budget above the interval makes
-    /// the loop run at the budget's pace; sizing from the interval alone
-    /// would expire a verdict that is being refreshed as fast as it can be.
-    /// Three periods so an ordinary missed tick does not flip readiness,
-    /// finite so a dead refresher cannot leave a verdict standing forever.
+    /// `stale_after = probe_budget + period * 3` where
+    /// `period = interval.max(probe_budget)`. Evaluations are serial, so a
+    /// probe budget above the interval makes the loop run at the budget's
+    /// pace; sizing from the interval alone would expire a verdict that is
+    /// being refreshed as fast as it can be. Three periods so an ordinary
+    /// missed tick does not flip readiness, finite so a dead refresher
+    /// cannot leave a verdict standing forever.
     #[must_use]
     pub fn stale_after(&self) -> Duration {
         let period = self.interval.max(self.probe_budget);
@@ -89,7 +93,7 @@ impl RefreshPolicy {
 
 /// The immutable result of one evaluation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Evaluation {
+pub(crate) struct Evaluation {
     /// The verdict a caller should see; `None` means ready.
     pub failure: Option<NotReady>,
     /// Failed evaluations since the last healthy one.
@@ -99,7 +103,7 @@ pub struct Evaluation {
 
 /// Published readiness state.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Snapshot {
+pub(crate) struct Snapshot {
     /// Set by [`Readiness::start_drain`]; read before anything else.
     pub draining: bool,
     /// `None` until the first evaluation completes.
@@ -171,60 +175,32 @@ impl Readiness {
     ///
     /// # Errors
     ///
-    /// Returns the first failing probe.
+    /// Returns the first failing probe, or [`NotReady::TimedOut`] when the
+    /// evaluation exceeds `policy.probe_budget`.
     pub async fn refresh(&self, policy: RefreshPolicy) -> Result<(), NotReady> {
         let observed = tokio::time::timeout(policy.probe_budget, self.evaluate())
             .await
-            .unwrap_or_else(|_elapsed| {
-                Err(NotReady::ProbeFailed {
-                    probe: "readiness",
-                    error: ProbeError::new(format!(
-                        "evaluation exceeded the {:?} budget",
-                        policy.probe_budget
-                    )),
-                })
-            });
+            .unwrap_or(Err(NotReady::TimedOut {
+                budget: policy.probe_budget,
+            }));
         let evaluated_at = Instant::now();
         self.tx.send_modify(|snapshot| {
-            let previous = snapshot.evaluation.as_ref();
-            let evaluation = match &observed {
-                Ok(()) => Evaluation {
-                    failure: None,
-                    consecutive_failures: 0,
-                    evaluated_at,
-                },
-                Err(failure) => {
-                    let consecutive_failures = previous.map_or(0, |p| p.consecutive_failures) + 1;
-                    // Hold the previous healthy verdict until the streak
-                    // reaches the threshold. One that was already failing
-                    // keeps reporting the newest cause; one that has never
-                    // been healthy fails immediately.
-                    let reported = match previous {
-                        Some(p)
-                            if p.failure.is_none()
-                                && consecutive_failures < policy.failure_threshold =>
-                        {
-                            None
-                        }
-                        _ => Some(failure.clone()),
-                    };
-                    Evaluation {
-                        failure: reported,
-                        consecutive_failures,
-                        evaluated_at,
-                    }
-                }
-            };
-            snapshot.evaluation = Some(evaluation);
+            let previous = snapshot.evaluation.clone();
+            snapshot.evaluation = Some(fold_evaluation(
+                previous.as_ref(),
+                &observed,
+                policy,
+                evaluated_at,
+            ));
         });
         observed
     }
 
     /// Refresh on `policy.interval` until `cancel` fires.
     ///
-    /// Publishes the staleness budget before the first evaluation so a
-    /// refresher that dies on its first pass still leaves readers able to
-    /// refuse the verdict it never wrote. The first evaluation runs
+    /// Publishes the staleness budget before awaiting the first evaluation
+    /// so a refresher that dies on its first pass still leaves readers able
+    /// to refuse the verdict it never wrote. The first evaluation runs
     /// immediately unless startup admission already seeded the cache.
     pub async fn watch(&self, policy: RefreshPolicy, cancel: CancellationToken) {
         self.tx.send_modify(|snapshot| {
@@ -234,6 +210,9 @@ impl Readiness {
             let _ = self.refresh(policy).await;
         }
         let mut ticker = tokio::time::interval(policy.interval);
+        // Delay, not Burst: a late tick is skipped rather than fired in a
+        // catch-up burst that would pile probe work onto a recovering
+        // dependency.
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         ticker.tick().await; // the first tick completes immediately
         loop {
@@ -262,6 +241,41 @@ impl Readiness {
             })?;
         }
         Ok(())
+    }
+}
+
+fn fold_evaluation(
+    previous: Option<&Evaluation>,
+    observed: &Result<(), NotReady>,
+    policy: RefreshPolicy,
+    evaluated_at: Instant,
+) -> Evaluation {
+    match observed {
+        Ok(()) => Evaluation {
+            failure: None,
+            consecutive_failures: 0,
+            evaluated_at,
+        },
+        Err(failure) => {
+            let consecutive_failures = previous.map_or(0, |p| p.consecutive_failures) + 1;
+            // Hold the previous healthy verdict until the streak reaches
+            // the threshold. One that was already failing keeps reporting
+            // the newest cause; one that has never been healthy fails
+            // immediately.
+            let reported = match previous {
+                Some(p)
+                    if p.failure.is_none() && consecutive_failures < policy.failure_threshold =>
+                {
+                    None
+                }
+                _ => Some(failure.clone()),
+            };
+            Evaluation {
+                failure: reported,
+                consecutive_failures,
+                evaluated_at,
+            }
+        }
     }
 }
 
@@ -416,16 +430,7 @@ mod tests {
         let started = Instant::now();
         let err = readiness.refresh(policy()).await.unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(
-            matches!(
-                err,
-                NotReady::ProbeFailed {
-                    probe: "readiness",
-                    ..
-                }
-            ),
-            "{err}"
-        );
+        assert!(matches!(err, NotReady::TimedOut { .. }), "{err}");
     }
 
     #[tokio::test]

@@ -4,6 +4,10 @@
 //! Readiness is the cached verdict owned by the `health` crate; the handler
 //! never touches a dependency and exposes no dependency detail.
 //!
+//! Probe bodies stay `text/plain` (`ok` / `not ready`) on purpose: kube and
+//! other platform probes match that contract. They do not use the Problem
+//! envelope the rest of the hardened router answers with.
+//!
 //! The `utoipa::path` attributes are the contract of these operations; the
 //! generated document is committed as `api/openapi/service.yaml` and the
 //! service crate's tests refuse a stale copy. Every operation declares its

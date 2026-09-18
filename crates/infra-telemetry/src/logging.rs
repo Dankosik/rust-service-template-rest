@@ -6,7 +6,7 @@
 //! JSON records carry `traceId` and `spanId`. `log` records are bridged by
 //! `tracing-subscriber`'s `tracing-log` feature during `try_init`.
 
-use opentelemetry_sdk::trace::SdkTracer;
+use crate::tracing::TracerProviderHandle;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
@@ -21,13 +21,15 @@ pub enum LogFormat {
 }
 
 #[derive(Debug)]
-pub struct LoggingOptions {
+pub struct LoggingOptions<'a> {
     /// An `EnvFilter` directive such as `info` or `info,hyper=warn`.
     pub level: String,
     pub format: LogFormat,
-    /// Tracer for the OpenTelemetry layer; `None` leaves spans without an
+    /// Installed tracer provider; `None` leaves spans without an
     /// OpenTelemetry context.
-    pub tracer: Option<SdkTracer>,
+    pub tracer_provider: Option<&'a TracerProviderHandle>,
+    /// Service name passed to the OpenTelemetry tracer.
+    pub service_name: &'a str,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -48,14 +50,14 @@ pub enum LoggingError {
 ///
 /// Returns an error for an unparsable directive or a second installation in
 /// the same process.
-pub fn install_subscriber(options: LoggingOptions) -> Result<(), LoggingError> {
+pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingError> {
     let filter = EnvFilter::try_new(&options.level).map_err(|source| LoggingError::Directive {
         directive: options.level.clone(),
         source,
     })?;
-    let otel = options
-        .tracer
-        .map(|tracer| tracing_opentelemetry::layer().with_tracer(tracer));
+    let otel = options.tracer_provider.map(|handle| {
+        tracing_opentelemetry::layer().with_tracer(handle.tracer(options.service_name))
+    });
     let format: Box<dyn Layer<_> + Send + Sync> = match options.format {
         LogFormat::Json => Box::new(
             json_subscriber::layer()

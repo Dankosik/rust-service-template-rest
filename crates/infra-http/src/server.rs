@@ -55,8 +55,9 @@ pub enum Drained {
     /// Every connection closed inside the budget.
     Complete,
     /// The budget expired with connections still open; they are dropped
-    /// when the runtime shuts down.
-    TimedOut { remaining: usize },
+    /// when the runtime shuts down. `remaining_connections` is the count
+    /// at cancel, not after the wait.
+    TimedOut { remaining_connections: usize },
 }
 
 /// A bound, serving HTTP server.
@@ -113,10 +114,12 @@ impl Server {
         let graceful = (&mut self.accept_loop)
             .await
             .map_err(ServerError::AcceptTask)?;
-        let remaining = graceful.count();
+        let remaining_connections = graceful.count();
         match tokio::time::timeout(budget, graceful.shutdown()).await {
             Ok(()) => Ok(Drained::Complete),
-            Err(_elapsed) => Ok(Drained::TimedOut { remaining }),
+            Err(_elapsed) => Ok(Drained::TimedOut {
+                remaining_connections,
+            }),
         }
     }
 }
@@ -141,6 +144,8 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
         .http2()
         .timer(TokioTimer::new())
         .max_header_list_size(u32::try_from(options.max_header_bytes).unwrap_or(u32::MAX))
+        // HTTP/2 PING keep-alive is independent of `header_read_timeout`,
+        // which is the HTTP/1 idle bound.
         .keep_alive_interval(Some(Duration::from_secs(20)))
         .keep_alive_timeout(Duration::from_secs(20));
     builder
@@ -168,7 +173,10 @@ async fn accept_loop(
                 // Transient accept errors (EMFILE, ECONNABORTED) recover on
                 // their own; back off briefly instead of spinning.
                 tracing::warn!(error = %err, "accept failed");
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::select! {
+                    () = stop.cancelled() => break,
+                    () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
                 continue;
             }
         };
@@ -294,7 +302,12 @@ mod tests {
         let slow = tokio::spawn(async move { fetch(addr, "/slow").await });
         tokio::time::sleep(Duration::from_millis(50)).await;
         let drained = server.shutdown(Duration::from_millis(50)).await.unwrap();
-        assert_eq!(drained, Drained::TimedOut { remaining: 1 });
+        assert_eq!(
+            drained,
+            Drained::TimedOut {
+                remaining_connections: 1
+            }
+        );
         slow.abort();
     }
 

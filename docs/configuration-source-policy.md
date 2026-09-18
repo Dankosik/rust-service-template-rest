@@ -108,7 +108,7 @@ every record inside a request) or `text` (local development).
   and, because hyper restarts it whenever an HTTP/1 connection goes idle, is
   also the keep-alive idle bound. It also closes a client that connects and
   sends nothing.
-- `http.readiness_timeout` (default `4s`) bounds one background readiness
+- `health.readiness_timeout` (default `4s`) bounds one background readiness
   evaluation across every probe; `/health/ready` itself never runs a probe.
 - `http.shutdown_timeout` (default `25s`) bounds the HTTP drain, including
   the `http.readiness_propagation_delay` (default `15s`) in front of it.
@@ -140,10 +140,11 @@ every record inside a request) or `text` (local development).
   `GET /health/live` and `GET /health/ready` requests are served without an
   access-log line. The exclusion is by route template: an unmatched path that
   merely resembles a probe is still recorded.
-- `health.refresh_interval` (default `2s`) and `health.failure_threshold`
-  (default `3`) drive the background readiness refresher. A cached verdict
-  older than three refresh periods plus one probe budget is refused, so a dead
-  refresher cannot leave a stale "healthy" standing.
+- `health.refresh_interval` (default `2s`), `health.readiness_timeout`
+  (default `4s`), and `health.failure_threshold` (default `3`) drive the
+  background readiness refresher. A cached verdict older than three refresh
+  periods plus one probe budget is refused, so a dead refresher cannot leave
+  a stale "healthy" standing.
 
 ## Adding A Config Key
 

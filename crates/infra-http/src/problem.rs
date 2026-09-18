@@ -70,104 +70,121 @@ impl Code {
     /// The `snake_case` wire form.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Code::BadRequest => "bad_request",
-            Code::Unauthorized => "unauthorized",
-            Code::Forbidden => "forbidden",
-            Code::NotFound => "not_found",
-            Code::MethodNotAllowed => "method_not_allowed",
-            Code::Conflict => "conflict",
-            Code::AlreadyExists => "already_exists",
-            Code::RequestEntityTooLarge => "request_entity_too_large",
-            Code::RequestHeaderFieldsTooLarge => "request_header_fields_too_large",
-            Code::UnprocessableContent => "unprocessable_content",
-            Code::TooManyRequests => "too_many_requests",
-            Code::InternalError => "internal_error",
-            Code::ServiceUnavailable => "service_unavailable",
-            Code::GatewayTimeout => "gateway_timeout",
-        }
+        self.meta().wire
     }
 
     #[must_use]
     pub const fn status(self) -> StatusCode {
-        match self {
-            Code::BadRequest => StatusCode::BAD_REQUEST,
-            Code::Unauthorized => StatusCode::UNAUTHORIZED,
-            Code::Forbidden => StatusCode::FORBIDDEN,
-            Code::NotFound => StatusCode::NOT_FOUND,
-            Code::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
-            Code::Conflict | Code::AlreadyExists => StatusCode::CONFLICT,
-            Code::RequestEntityTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            Code::RequestHeaderFieldsTooLarge => StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-            Code::UnprocessableContent => StatusCode::UNPROCESSABLE_ENTITY,
-            Code::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
-            Code::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
-            Code::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Code::GatewayTimeout => StatusCode::GATEWAY_TIMEOUT,
-        }
+        self.meta().status
     }
 
     #[must_use]
     pub const fn title(self) -> &'static str {
-        match self {
-            Code::BadRequest => "bad request",
-            Code::Unauthorized => "unauthorized",
-            Code::Forbidden => "forbidden",
-            Code::NotFound => "not found",
-            Code::MethodNotAllowed => "method not allowed",
-            Code::Conflict | Code::AlreadyExists => "conflict",
-            Code::RequestEntityTooLarge => "request entity too large",
-            Code::RequestHeaderFieldsTooLarge => "request header fields too large",
-            Code::UnprocessableContent => "unprocessable content",
-            Code::TooManyRequests => "too many requests",
-            Code::InternalError => "internal server error",
-            Code::ServiceUnavailable => "service unavailable",
-            Code::GatewayTimeout => "gateway timeout",
-        }
+        self.meta().title
     }
 
     /// Stable URI identifying the problem class.
     #[must_use]
     pub const fn type_uri(self) -> &'static str {
+        self.meta().type_uri
+    }
+
+    const fn meta(self) -> CodeMeta {
         match self {
-            Code::BadRequest => {
-                concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.1")
-            }
-            Code::Unauthorized => {
-                concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.2")
-            }
-            Code::Forbidden => concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.4"),
-            Code::NotFound => concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.5"),
-            Code::MethodNotAllowed => {
-                concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.6")
-            }
-            Code::Conflict | Code::AlreadyExists => {
-                concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.10")
-            }
-            Code::RequestEntityTooLarge => {
-                concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.14")
-            }
+            Code::BadRequest => CodeMeta {
+                wire: "bad_request",
+                status: StatusCode::BAD_REQUEST,
+                title: "bad request",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.1"),
+            },
+            Code::Unauthorized => CodeMeta {
+                wire: "unauthorized",
+                status: StatusCode::UNAUTHORIZED,
+                title: "unauthorized",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.2"),
+            },
+            Code::Forbidden => CodeMeta {
+                wire: "forbidden",
+                status: StatusCode::FORBIDDEN,
+                title: "forbidden",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.4"),
+            },
+            Code::NotFound => CodeMeta {
+                wire: "not_found",
+                status: StatusCode::NOT_FOUND,
+                title: "not found",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.5"),
+            },
+            Code::MethodNotAllowed => CodeMeta {
+                wire: "method_not_allowed",
+                status: StatusCode::METHOD_NOT_ALLOWED,
+                title: "method not allowed",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.6"),
+            },
+            Code::Conflict => CodeMeta {
+                wire: "conflict",
+                status: StatusCode::CONFLICT,
+                title: "conflict",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.10"),
+            },
+            Code::AlreadyExists => CodeMeta {
+                wire: "already_exists",
+                status: StatusCode::CONFLICT,
+                title: "conflict",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.10"),
+            },
+            Code::RequestEntityTooLarge => CodeMeta {
+                wire: "request_entity_too_large",
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                title: "request entity too large",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.14"),
+            },
             // RFC 9110 stops at 426; 431 and 429 are defined by RFC 6585.
-            Code::RequestHeaderFieldsTooLarge => {
-                concat!("https://www.rfc-editor.org/rfc/rfc6585", "#section-5")
-            }
-            Code::UnprocessableContent => {
-                concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.21")
-            }
-            Code::TooManyRequests => {
-                concat!("https://www.rfc-editor.org/rfc/rfc6585", "#section-4")
-            }
-            Code::InternalError => {
-                concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.1")
-            }
-            Code::ServiceUnavailable => {
-                concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4")
-            }
-            Code::GatewayTimeout => {
-                concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.5")
-            }
+            Code::RequestHeaderFieldsTooLarge => CodeMeta {
+                wire: "request_header_fields_too_large",
+                status: StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                title: "request header fields too large",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc6585", "#section-5"),
+            },
+            Code::UnprocessableContent => CodeMeta {
+                wire: "unprocessable_content",
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                title: "unprocessable content",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.21"),
+            },
+            Code::TooManyRequests => CodeMeta {
+                wire: "too_many_requests",
+                status: StatusCode::TOO_MANY_REQUESTS,
+                title: "too many requests",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc6585", "#section-4"),
+            },
+            Code::InternalError => CodeMeta {
+                wire: "internal_error",
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                title: "internal server error",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.1"),
+            },
+            Code::ServiceUnavailable => CodeMeta {
+                wire: "service_unavailable",
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                title: "service unavailable",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4"),
+            },
+            Code::GatewayTimeout => CodeMeta {
+                wire: "gateway_timeout",
+                status: StatusCode::GATEWAY_TIMEOUT,
+                title: "gateway timeout",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.5"),
+            },
         }
     }
+}
+
+struct CodeMeta {
+    wire: &'static str,
+    status: StatusCode,
+    title: &'static str,
+    type_uri: &'static str,
 }
 
 /// Which part of a request failed validation, following the RFC 9457

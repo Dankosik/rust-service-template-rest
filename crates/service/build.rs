@@ -5,6 +5,8 @@
 //! fallback keeps `env!` compiling and the config layer reports `unknown`.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `sha(false)` means the full SHA, not "disable SHA". Short SHA is the
+    // other polarity. Empty git still falls back via `default_on_error`.
     let gitcl = vergen_gitcl::Gitcl::builder().sha(false).build();
     vergen_gitcl::Emitter::default()
         .default_on_error()

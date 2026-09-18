@@ -20,7 +20,8 @@ pub struct LoadOptions {
 }
 
 impl LoadOptions {
-    /// Parse `args` (without the program name). Positional arguments are
+    /// Parse `args` without the program name. The composition root consumes
+    /// argv0 and passes the remainder here. Positional arguments are
     /// rejected: a stray argument is usually a mistyped flag, and starting
     /// with the wrong configuration is worse than not starting.
     ///

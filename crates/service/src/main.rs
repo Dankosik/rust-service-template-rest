@@ -5,5 +5,5 @@ use std::process::ExitCode;
 mod bootstrap;
 
 fn main() -> ExitCode {
-    bootstrap::run(std::env::args_os().skip(1))
+    bootstrap::run(std::env::args_os())
 }

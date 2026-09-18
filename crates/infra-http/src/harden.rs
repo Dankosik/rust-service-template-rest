@@ -45,13 +45,19 @@ use crate::request_id;
 /// is momentarily past capacity, not down.
 const SHED_RETRY_AFTER: Duration = Duration::from_secs(1);
 
+/// HTTP request-duration histogram name emitted by `axum-prometheus`.
+/// The composition root passes this into the Prometheus recorder so buckets
+/// match the adapter without naming `axum-prometheus` itself.
+pub const HTTP_REQUESTS_DURATION_SECONDS: &str =
+    axum_prometheus::AXUM_HTTP_REQUESTS_DURATION_SECONDS;
+
 /// HTTP server metrics are emitted by `axum-prometheus` under its default
 /// names: `axum_http_requests_total`, `axum_http_requests_duration_seconds`,
 /// and `axum_http_requests_pending`, labelled by `method`, `endpoint` (the
 /// matched route template or [`UNMATCHED_ROUTE`]), and `status`.
 pub const HTTP_METRICS_NAMES: &[&str] = &[
     axum_prometheus::AXUM_HTTP_REQUESTS_TOTAL,
-    axum_prometheus::AXUM_HTTP_REQUESTS_DURATION_SECONDS,
+    HTTP_REQUESTS_DURATION_SECONDS,
     axum_prometheus::AXUM_HTTP_REQUESTS_PENDING,
 ];
 
@@ -87,6 +93,9 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
     let in_flight = (options.max_in_flight > 0)
         .then(|| GlobalConcurrencyLimitLayer::new(options.max_in_flight as usize));
 
+    // `load_shed` plus `GlobalConcurrencyLimitLayer` reject with 503
+    // instead of queueing. They sit inside `ServiceBuilder` on
+    // `Router::layer` so 404 and 405 take the same chain.
     let chain = ServiceBuilder::new()
         .map_request(request_id::strip_invalid)
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -123,8 +132,9 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
 
 /// Map the shedder and timeout errors to problem responses.
 async fn middleware_error(id: Option<Extension<RequestId>>, err: BoxError) -> Response {
-    let request_id =
-        id.and_then(|Extension(id)| id.header_value().to_str().ok().map(str::to_owned));
+    let request_id = id
+        .as_ref()
+        .and_then(|Extension(id)| request_id::from_request_id(id));
     if err.is::<Overloaded>() {
         metrics::counter!(SHED_REQUESTS_METRIC).increment(1);
         return Problem::new(Code::ServiceUnavailable)
@@ -173,6 +183,7 @@ async fn enforce_body_limit(
     request: Request,
     next: Next,
 ) -> Response {
+    let request_id = request_id::request_id(request.extensions());
     let declared = request
         .headers()
         .get(CONTENT_LENGTH)
@@ -181,7 +192,7 @@ async fn enforce_body_limit(
     if declared.is_some_and(|length| length > limit) {
         return Problem::new(Code::RequestEntityTooLarge)
             .detail("request body exceeds the configured limit")
-            .request_id(request_id::request_id(request.extensions()))
+            .request_id(request_id)
             .into_response();
     }
     let request = request.map(|body| Body::new(Limited::new(body, limit)));
@@ -193,7 +204,7 @@ async fn enforce_body_limit(
         // axum's plain-text rejection; keep the envelope uniform.
         return Problem::new(Code::RequestEntityTooLarge)
             .detail("request body exceeds the configured limit")
-            .request_id(request_id::response_request_id(response.headers()))
+            .request_id(request_id)
             .into_response();
     }
     response
