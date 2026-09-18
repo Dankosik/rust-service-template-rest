@@ -13,8 +13,8 @@ repository surface that can prove them.
 - Go, for `make openapi-breaking` (oasdiff), `make secret-scan` (Gitleaks),
   and `make actionlint`, all through `go run`; CI runs them, locally they are
   optional.
-- Docker with BuildKit, for `make shellcheck` (pinned container),
-  `make dockerfile-check`, and the image targets (`runtime-image-build`,
+- Docker with BuildKit, for `make shellcheck` and `make docs-check` (pinned
+  containers), `make dockerfile-check`, and the image targets (`runtime-image-build`,
   `runtime-image-check`, `container-security`, behind `ALLOW_HEAVY=1`);
   later stages add integration proof.
 
@@ -44,7 +44,7 @@ under `<git-common-dir>/codex/verify` keyed by the changed files, the plan,
 and the environment. CI runs the same classifier.
 
 `ALLOW_FULL=1 make check` (`fmt-check`, `lint`, `test`, `unused-deps`,
-`openapi-lint`, `check-skills`, and the validation-system self-tests) is the
+`openapi-lint`, `check-skills`, `docs-check`, and the validation-system self-tests) is the
 explicit full-repository gate; it is not a routine follow-up to every edit,
 and the guard exists so it is never launched by accident. `ALLOW_HEAVY=1`
 guards the history-wide and container-backed commands the same way; CI sets

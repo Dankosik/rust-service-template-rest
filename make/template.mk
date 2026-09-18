@@ -74,6 +74,8 @@ GITLEAKS_FLAGS := --no-banner --redact --verbose --exit-code 1 --config .gitleak
 ACTIONLINT ?= go run github.com/rhysd/actionlint/cmd/actionlint@v$(ACTIONLINT_VERSION)
 # Tracked and untracked shell scripts that exist in the worktree.
 SHELL_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standard -- '*.sh'))
+# Tracked and untracked Markdown files; `git ls-files` keeps target/ out.
+MARKDOWN_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standard -- '*.md'))
 
 # Runtime image: one tag shared by build, lifecycle check, and scan.
 RUNTIME_IMAGE ?= service:ci
@@ -84,7 +86,7 @@ TRIVY_CACHE_VOLUME ?= trivy-cache
 .PHONY: help build run test test-package test-changed fmt fmt-check lint lint-changed \
 	check check-unlocked check-skills clean \
 	openapi-generate openapi-check openapi-lint openapi-breaking \
-	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck \
+	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck docs-check \
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
 	publish-image-metadata-check \
 	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test
@@ -162,6 +164,13 @@ zizmor: $(filter $(TOOLS_ROOT)/%,$(ZIZMOR)) ## Audit GitHub Actions workflows fo
 shellcheck: ## ShellCheck every shell script through the pinned container
 	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }
 	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
+
+# Offline on purpose: relative paths and #fragments are this repository's
+# contract; external URLs are not, and checking them would make the gate flaky.
+docs-check: ## Every relative Markdown link and #fragment resolves (lychee, pinned container)
+	@test -n "$(MARKDOWN_FILES)" || { echo "no Markdown files found; skipping link check"; exit 0; }
+	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
+		--offline --include-fragments --no-progress --root-dir /src -- $(MARKDOWN_FILES)
 
 dockerfile-check: ## Lint build/docker/Dockerfile with BuildKit's built-in checks
 	$(VALIDATION_LOCK) docker buildx build --check -f build/docker/Dockerfile .
@@ -254,7 +263,7 @@ check: ## Full repository gate under the validation lock; ALLOW_FULL=1 (CI sets 
 	$(FULL_GUARD)
 	$(VALIDATION_LOCK) $(MAKE) check-unlocked
 
-check-unlocked: fmt-check lint test unused-deps openapi-lint check-skills \
+check-unlocked: fmt-check lint test unused-deps openapi-lint check-skills docs-check \
 	changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
 
 clean: ## Remove build output

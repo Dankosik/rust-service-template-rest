@@ -6,6 +6,7 @@ Use for changes to `AGENTS.md`, `CLAUDE.md`, the skills under
 | Surface | Command |
 | --- | --- |
 | Skill shape: frontmatter, name and directory agreement, trigger, prose-only body, word budget, LICENSE copy | `make check-skills` |
+| Every relative link and `#fragment` in the instruction chain resolves | `make docs-check` |
 
 At final validation, review the changed instruction chain for consistency
 (every link resolves, neighbouring skill triggers still discriminate) and run

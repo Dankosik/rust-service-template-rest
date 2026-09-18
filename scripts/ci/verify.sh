@@ -119,6 +119,7 @@ self_test() (
 	printf 'include make/template.mk\n' >Makefile
 	printf '# Verification fixture\n' >README.md
 	printf '# Agent fixture\n' >AGENTS.md
+	: >scripts/check-skills.py
 	: >.gitleaks.toml
 	: >scripts/ci/fixture.sh
 	git init -q
@@ -168,8 +169,11 @@ self_test() (
 
 	output=$(bash "${script}" --plan --files README.md)
 	grep -q 'documentation=true' <<<"${output}"
+	grep -q '^  make docs-check$' <<<"${output}"
+	grep -q 'requires_docker=true' <<<"${output}"
+	if grep -q 'not applicable' <<<"${output}"; then return 1; fi
+	output=$(bash "${script}" --plan --files .github/dependabot.yml)
 	grep -q '^  none$' <<<"${output}"
-	grep -q 'documentation: no repository-wide documentation validator' <<<"${output}"
 
 	output=$(bash "${script}" --plan --files tools/versions.env)
 	grep -q 'make tools-check' <<<"${output}"
@@ -279,14 +283,14 @@ check-skills:
 MAKE
 	scratch=${fixture}/tmp
 	mkdir "${scratch}"
-	output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files AGENTS.md)
+	output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py)
 	grep -q 'fixture skills check passed' <<<"${output}"
 	grep -q '^result: pass$' <<<"${output}"
 	if grep -q 'reusing exact passing receipt' <<<"${output}"; then return 1; fi
-	output=$(TMPDIR="${scratch}" bash "${script}" --files AGENTS.md)
+	output=$(TMPDIR="${scratch}" bash "${script}" --files scripts/check-skills.py)
 	grep -q 'reusing exact passing receipt' <<<"${output}"
 	printf 'check-skills:\n\t@exit 42\n' >Makefile
-	if output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files AGENTS.md 2>&1); then
+	if output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py 2>&1); then
 		echo "verify self-test accepted a failing gate" >&2
 		return 1
 	fi
@@ -309,7 +313,7 @@ secret-scan:
 	@printf 'secrets\n' >>invoked
 MAKE
 	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
-	if output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env AGENTS.md .gitleaks.toml 2>&1); then
+	if output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml 2>&1); then
 		echo "verify self-test accepted a partially failed plan" >&2
 		return 1
 	fi
@@ -329,7 +333,7 @@ MAKE
 	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
 	# An explicitly requested run still executes the entire plan; partial
 	# results never become automatic cross-candidate cache hits.
-	output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env AGENTS.md .gitleaks.toml)
+	output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml)
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
 	grep -q '^attempt_state: passed$' "${attempt_path}"
 	[[ $(grep -c '^step_state: [123] passed ' "${attempt_path}") == 3 ]]
@@ -337,10 +341,10 @@ MAKE
 	# A step that mutates the selected candidate must not leave reusable success.
 	cat >Makefile <<'MAKE'
 check-skills:
-	@printf 'changed during verification\n' >>AGENTS.md
+	@printf 'changed during verification\n' >>scripts/check-skills.py
 MAKE
 	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
-	if output=$(VERIFY_FORCE=1 bash "${script}" --files AGENTS.md 2>&1); then
+	if output=$(VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py 2>&1); then
 		echo "verify self-test accepted a candidate changed by a gate" >&2
 		return 1
 	fi
@@ -354,7 +358,7 @@ MAKE
 check-skills:
 	@kill -TERM "$$VERIFY_TEST_PID"
 MAKE
-	if output=$(VERIFY_FORCE=1 bash -c 'export VERIFY_TEST_PID=$$; exec bash "$1" --locked --files AGENTS.md' _ "${script}" 2>&1); then
+	if output=$(VERIFY_FORCE=1 bash -c 'export VERIFY_TEST_PID=$$; exec bash "$1" --locked --files scripts/check-skills.py' _ "${script}" 2>&1); then
 		echo "verify self-test accepted an interrupted attempt" >&2
 		return 1
 	fi
@@ -565,7 +569,7 @@ if is_true runtime_image; then
 	add_command image-check "${image}" "runtime image lifecycle changed" "make runtime-image-check RUNTIME_IMAGE=${image}" docker true true
 	add_command image-security "${image}" "runtime image inputs changed" "make container-security CONTAINER_IMAGE=${image}" docker true true
 fi
-if is_true documentation; then add_na documentation "no repository-wide documentation validator is configured yet"; fi
+if is_true documentation; then add_command make docs-check "Markdown changed" "make docs-check" docker false true; fi
 
 print_plan() {
 	echo "files:"
