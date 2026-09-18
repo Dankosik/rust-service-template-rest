@@ -393,3 +393,10 @@ the initializer knows the service identity and may generate `.railway/`.
     host has on PATH (a runner-image update could change the result);
     `make actionlint` disables both so local and CI agree, and `*.sh` files
     get the pinned ShellCheck container through `make shellcheck`.
+18. The two base images are pinned once, in the Dockerfile `FROM` lines that
+    Dependabot's `docker` ecosystem updates; `tools/versions.env` does not
+    repeat them (the Version set table above lists them for reference).
+    `make tools-check` asserts every `FROM` carries a digest and the
+    `rust:<version>` tag equals the `rust-toolchain.toml` channel, and the
+    classifier marks the Dockerfile as `tool_manifest` so that check runs
+    on a Dockerfile change (*verified*: a drifted `ARG` default fails it).

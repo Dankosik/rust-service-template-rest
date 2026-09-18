@@ -77,6 +77,8 @@ fingerprint_candidate() {
 }
 
 # One argument vector owns both execution and the retained continuation command.
+# Image kinds bake and assert the commit the run executed against, so the
+# retained command proves the same identity as the run.
 prepare_command() {
 	local kind=$1 argument=$2
 	case "${kind}" in
@@ -84,6 +86,9 @@ prepare_command() {
 	lint) step_command=(make lint-changed "PKGS=${argument}") ;;
 	test) step_command=(make test-changed "PKGS=${argument}") ;;
 	shell) step_command=(make shellcheck "SHELL_FILES=${argument}") ;;
+	image-build) step_command=(env "VCS_REF=${execution_head}" make runtime-image-build "RUNTIME_IMAGE=${argument}") ;;
+	image-check) step_command=(make runtime-image-check "RUNTIME_IMAGE=${argument}" "RUNTIME_EXPECTED_COMMIT=${execution_head}") ;;
+	image-security) step_command=(make container-security "CONTAINER_IMAGE=${argument}") ;;
 	*)
 		echo "unknown verification command kind: ${kind}" >&2
 		return 2
@@ -220,6 +225,10 @@ self_test() (
 	output=$(bash "${script}" --plan --files scripts/ci/fixture.sh)
 	grep -q "^  make shellcheck SHELL_FILES='scripts/ci/fixture.sh'$" <<<"${output}"
 	grep -q 'requires_docker=true' <<<"${output}"
+	# A deleted script selects the surface but leaves nothing to lint.
+	output=$(bash "${script}" --plan --files scripts/ci/removed.sh)
+	grep -q 'shell: no changed shell source remains' <<<"${output}"
+	if grep -q 'make shellcheck' <<<"${output}"; then return 1; fi
 
 	output=$(bash "${script}" --plan --files api/openapi/service.yaml)
 	grep -q '^  make openapi-check$' <<<"${output}"
@@ -229,6 +238,27 @@ self_test() (
 
 	output=$(bash "${script}" --plan --files .github/dependabot.yml)
 	grep -q 'dependency_automation: GitHub validates' <<<"${output}"
+
+	# The Dockerfile selects one image shared by the lifecycle and scan gates,
+	# and the tool-pin check because it carries ARG defaults and FROM digests.
+	output=$(bash "${script}" --plan --files build/docker/Dockerfile)
+	grep -q '^  make tools-check$' <<<"${output}"
+	grep -q '^  make dockerfile-check$' <<<"${output}"
+	grep -q '^  make runtime-image-build RUNTIME_IMAGE=service:verify$' <<<"${output}"
+	grep -q '^  make runtime-image-check RUNTIME_IMAGE=service:verify$' <<<"${output}"
+	grep -q '^  make container-security CONTAINER_IMAGE=service:verify$' <<<"${output}"
+	grep -q 'requires_heavy=true' <<<"${output}"
+	if grep -q '^  make test$' <<<"${output}"; then return 1; fi
+	output=$(bash "${script}" --plan --files .dockerignore)
+	grep -q '^  make runtime-image-build' <<<"${output}"
+	if grep -q 'tools-check' <<<"${output}"; then return 1; fi
+
+	if CI='' ALLOW_HEAVY='' bash "${script}" --files build/docker/Dockerfile >/dev/null 2>"${TMPDIR:-/tmp}/verify-heavy.$$"; then
+		echo "verify self-test accepted a heavy route without ALLOW_HEAVY=1" >&2
+		return 1
+	fi
+	grep -q 'set ALLOW_HEAVY=1' "${TMPDIR:-/tmp}/verify-heavy.$$"
+	rm -f "${TMPDIR:-/tmp}/verify-heavy.$$"
 
 	if VERIFY_DOCKER_COMMAND=missing-docker-for-verify-test bash "${script}" --files scripts/ci/fixture.sh >/dev/null 2>"${TMPDIR:-/tmp}/verify-docker.$$"; then
 		echo "verify self-test accepted a container-backed route without Docker" >&2
@@ -349,6 +379,30 @@ SH
 			shell) grep -q '^SHELL_FILES=a b; unexpected-shell-command$' <<<"${replayed}" ;;
 			esac
 		done
+		# Image kinds carry the executed commit into the build and the check.
+		cat >stub-bin/make <<'SH'
+#!/usr/bin/env bash
+printf 'VCS_REF=%s\n' "${VCS_REF:-}"
+printf '%s\n' "$@"
+SH
+		execution_head='fixture-source-head'
+		for kind in image-build image-check image-security; do
+			prepare_command "${kind}" 'fixture:tag; unexpected-shell-command'
+			actual=$("${step_command[@]}")
+			replayed=$(bash -c "${step_display}")
+			[[ ${actual} == "${replayed}" ]]
+			case "${kind}" in
+			image-build)
+				grep -q '^VCS_REF=fixture-source-head$' <<<"${replayed}"
+				grep -q '^RUNTIME_IMAGE=fixture:tag; unexpected-shell-command$' <<<"${replayed}"
+				;;
+			image-check)
+				grep -q '^RUNTIME_IMAGE=fixture:tag; unexpected-shell-command$' <<<"${replayed}"
+				grep -q '^RUNTIME_EXPECTED_COMMIT=fixture-source-head$' <<<"${replayed}"
+				;;
+			image-security) grep -q '^CONTAINER_IMAGE=fixture:tag; unexpected-shell-command$' <<<"${replayed}" ;;
+			esac
+		done
 	)
 )
 
@@ -407,13 +461,14 @@ arguments=()
 reasons=()
 displays=()
 cost_classes=()
+heavy_requirements=()
 docker_requirements=()
 keys=''
 not_applicable=()
 
-# add_command KIND ARGUMENT REASON DISPLAY COST_CLASS REQUIRES_DOCKER
+# add_command KIND ARGUMENT REASON DISPLAY COST_CLASS REQUIRES_HEAVY REQUIRES_DOCKER
 add_command() {
-	local kind=$1 argument=$2 reason=$3 display=$4 cost_class=$5 requires_docker=$6 key
+	local kind=$1 argument=$2 reason=$3 display=$4 cost_class=$5 requires_heavy=$6 requires_docker=$7 key
 	key="${kind}|${argument}"
 	case $'\n'"${keys}" in *$'\n'"${key}"$'\n'*) return ;; esac
 	keys="${keys}${key}"$'\n'
@@ -422,6 +477,7 @@ add_command() {
 	reasons[${#reasons[@]}]=${reason}
 	displays[${#displays[@]}]=${display}
 	cost_classes[${#cost_classes[@]}]=${cost_class}
+	heavy_requirements[${#heavy_requirements[@]}]=${requires_heavy}
 	docker_requirements[${#docker_requirements[@]}]=${requires_docker}
 }
 
@@ -430,12 +486,12 @@ add_na() {
 }
 
 # Cheap owners first, so a plan fails fast on the inexpensive gate.
-if is_true tool_manifest; then add_command make tools-check "tool manifest changed" "make tools-check" cheap false; fi
+if is_true tool_manifest; then add_command make tools-check "tool manifest changed" "make tools-check" cheap false false; fi
 if is_true validation_system; then
-	add_command make changed-surfaces-check "validation routing changed" "make changed-surfaces-check" cheap false
-	add_command make affected-crates-check "validation routing changed" "make affected-crates-check" cpu false
-	add_command make validation-lock-self-test "validation routing changed" "make validation-lock-self-test" cheap false
-	add_command make verify-check "validation routing changed" "make verify-check" cpu false
+	add_command make changed-surfaces-check "validation routing changed" "make changed-surfaces-check" cheap false false
+	add_command make affected-crates-check "validation routing changed" "make affected-crates-check" cpu false false
+	add_command make validation-lock-self-test "validation routing changed" "make validation-lock-self-test" cheap false false
+	add_command make verify-check "validation routing changed" "make verify-check" cpu false false
 fi
 
 workspace_rust=false
@@ -459,43 +515,50 @@ if is_true rust_source && [[ ${workspace_rust} != true ]]; then
 fi
 
 if is_true rust_source || is_true cargo_dependencies; then
-	add_command make unused-deps "dependency declarations or their users changed" "make unused-deps" cpu false
+	add_command make unused-deps "dependency declarations or their users changed" "make unused-deps" cpu false false
 fi
 if is_true cargo_dependencies || is_true dependency_policy; then
-	add_command make deny "dependency graph or policy changed" "make deny" cpu false
+	add_command make deny "dependency graph or policy changed" "make deny" cpu false false
 fi
 if is_true rust_source || is_true lint_config; then
-	add_command make fmt-check "Rust source or formatting configuration changed" "make fmt-check" cheap false
+	add_command make fmt-check "Rust source or formatting configuration changed" "make fmt-check" cheap false false
 fi
 if [[ ${workspace_rust} == true ]]; then
 	reason="dependency, lockfile, or toolchain changes can affect every crate"
 	if is_true cargo_dependencies; then :; elif [[ -n ${affected_reason} ]]; then reason="Rust changes need the workspace oracle (${affected_reason})"; fi
-	add_command make lint "${reason}" "make lint" cpu false
-	add_command make build "${reason}" "make build" cpu false
-	add_command make test "${reason}" "make test" cpu false
+	add_command make lint "${reason}" "make lint" cpu false false
+	add_command make build "${reason}" "make build" cpu false false
+	add_command make test "${reason}" "make test" cpu false false
 else
 	if is_true lint_config; then
-		add_command make lint "the complete lint configuration changed" "make lint" cpu false
+		add_command make lint "the complete lint configuration changed" "make lint" cpu false false
 	elif [[ -n ${affected_lint} ]]; then
-		add_command lint "${affected_lint}" "crate owners changed" "make lint-changed PKGS='${affected_lint}'" cpu false
+		add_command lint "${affected_lint}" "crate owners changed" "make lint-changed PKGS='${affected_lint}'" cpu false false
 	fi
 	if [[ -n ${affected_tests} ]]; then
-		add_command test "${affected_tests}" "affected crates and their dependents changed" "make test-changed PKGS='${affected_tests}'" cpu false
+		add_command test "${affected_tests}" "affected crates and their dependents changed" "make test-changed PKGS='${affected_tests}'" cpu false false
 	fi
 fi
-if is_true openapi; then add_command make openapi-check "OpenAPI document or its lint configuration changed" "make openapi-check" cpu false; fi
+if is_true openapi; then add_command make openapi-check "OpenAPI document or its lint configuration changed" "make openapi-check" cpu false false; fi
 if is_true github_workflows; then
-	add_command make actionlint "GitHub workflow or action source changed" "make actionlint" cheap false
-	add_command make zizmor "GitHub workflow or action source changed" "make zizmor" cheap false
+	add_command make actionlint "GitHub workflow or action source changed" "make actionlint" cheap false false
+	add_command make zizmor "GitHub workflow or action source changed" "make zizmor" cheap false false
 fi
 if is_true dependency_automation; then add_na dependency_automation "GitHub validates the Dependabot schema; Dependency Review stays a CI gate"; fi
 if is_true shell; then
-	shell_files=$(awk '/\.sh$/ { print }' "${files_path}" | while IFS= read -r file; do [[ -f ${file} ]] && printf '%s ' "${file}"; done)
+	shell_files=$(awk '/\.sh$/ { print }' "${files_path}" | while IFS= read -r file; do if [[ -f ${file} ]]; then printf '%s ' "${file}"; fi; done)
 	shell_files=${shell_files% }
-	if [[ -n ${shell_files} ]]; then add_command shell "${shell_files}" "shell sources changed" "make shellcheck SHELL_FILES='${shell_files}'" docker true; else add_na shell "no changed shell source remains"; fi
+	if [[ -n ${shell_files} ]]; then add_command shell "${shell_files}" "shell sources changed" "make shellcheck SHELL_FILES='${shell_files}'" docker false true; else add_na shell "no changed shell source remains"; fi
 fi
-if is_true agent_instructions; then add_command make check-skills "agent instructions or skills changed" "make check-skills" cheap false; fi
-if is_true secret_scanning; then add_command make secret-scan "secret scanning policy changed" "make secret-scan" cpu false; fi
+if is_true agent_instructions; then add_command make check-skills "agent instructions or skills changed" "make check-skills" cheap false false; fi
+if is_true secret_scanning; then add_command make secret-scan "secret scanning policy changed" "make secret-scan" cpu false false; fi
+if is_true runtime_image; then
+	image=${VERIFY_RUNTIME_IMAGE:-service:verify}
+	add_command make dockerfile-check "runtime image inputs changed" "make dockerfile-check" docker false true
+	add_command image-build "${image}" "one image is shared by the selected runtime gates" "make runtime-image-build RUNTIME_IMAGE=${image}" docker true true
+	add_command image-check "${image}" "runtime image lifecycle changed" "make runtime-image-check RUNTIME_IMAGE=${image}" docker true true
+	add_command image-security "${image}" "runtime image inputs changed" "make container-security CONTAINER_IMAGE=${image}" docker true true
+fi
 if is_true documentation; then add_na documentation "no repository-wide documentation validator is configured yet"; fi
 
 print_plan() {
@@ -506,8 +569,8 @@ print_plan() {
 	echo "commands:"
 	if ((${#kinds[@]} == 0)); then echo "  none"; else
 		for i in "${!kinds[@]}"; do
-			printf '  %s\n    because %s\n    cost_class=%s requires_docker=%s\n' \
-				"${displays[$i]}" "${reasons[$i]}" "${cost_classes[$i]}" "${docker_requirements[$i]}"
+			printf '  %s\n    because %s\n    cost_class=%s requires_heavy=%s requires_docker=%s\n' \
+				"${displays[$i]}" "${reasons[$i]}" "${cost_classes[$i]}" "${heavy_requirements[$i]}" "${docker_requirements[$i]}"
 		done
 	fi
 	if ((${#not_applicable[@]})); then
@@ -527,8 +590,10 @@ if ((${#kinds[@]} == 0)); then
 	exit 0
 fi
 
+requires_heavy=false
 requires_docker=false
 for i in "${!kinds[@]}"; do
+	[[ ${heavy_requirements[$i]} == true ]] && requires_heavy=true
 	[[ ${docker_requirements[$i]} == true ]] && requires_docker=true
 done
 
@@ -537,6 +602,7 @@ blocked() {
 	exit 2
 }
 
+if [[ ${requires_heavy} == true && ${ALLOW_HEAVY:-} != 1 && ${CI:-} != true ]]; then blocked "set ALLOW_HEAVY=1 before verification"; fi
 for binary in git make shasum; do command -v "${binary}" >/dev/null 2>&1 || blocked "required binary is unavailable: ${binary}"; done
 if is_true rust_source || is_true cargo_dependencies || is_true dependency_policy || is_true lint_config || is_true openapi || is_true validation_system || is_true tool_manifest; then
 	command -v cargo >/dev/null 2>&1 || blocked "required binary is unavailable: cargo"
@@ -550,12 +616,13 @@ if [[ ${requires_docker} == true ]]; then
 fi
 
 candidate=$(fingerprint_candidate)
+execution_head=$(git rev-parse HEAD)
 command_summary=$(
 	IFS='; '
 	echo "${displays[*]}"
 )
 plan_input=${tmp}/plan
-for i in "${!kinds[@]}"; do printf '%s|%s|%s\n' "${displays[$i]}" "${cost_classes[$i]}" "${docker_requirements[$i]}"; done >"${plan_input}"
+for i in "${!kinds[@]}"; do printf '%s|%s|%s|%s\n' "${displays[$i]}" "${cost_classes[$i]}" "${heavy_requirements[$i]}" "${docker_requirements[$i]}"; done >"${plan_input}"
 plan=$(shasum -a 256 "${plan_input}" | awk '{print $1}')
 rust_environment=$(rustc --version 2>/dev/null || echo unavailable)
 cargo_environment=$(cargo --version 2>/dev/null || echo unavailable)

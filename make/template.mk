@@ -75,10 +75,17 @@ ACTIONLINT ?= go run github.com/rhysd/actionlint/cmd/actionlint@v$(ACTIONLINT_VE
 # Tracked and untracked shell scripts that exist in the worktree.
 SHELL_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standard -- '*.sh'))
 
+# Runtime image: one tag shared by build, lifecycle check, and scan.
+RUNTIME_IMAGE ?= service:ci
+CONTAINER_IMAGE ?= $(RUNTIME_IMAGE)
+# Trivy keeps its vulnerability database in a named volume between runs.
+TRIVY_CACHE_VOLUME ?= trivy-cache
+
 .PHONY: help build run test test-package test-changed fmt fmt-check lint lint-changed \
 	check check-unlocked check-skills clean \
 	openapi-generate openapi-check openapi-lint openapi-breaking \
 	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck \
+	dockerfile-check runtime-image-build runtime-image-check container-security \
 	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test
 
 help: ## List available commands
@@ -154,6 +161,34 @@ zizmor: $(filter $(TOOLS_ROOT)/%,$(ZIZMOR)) ## Audit GitHub Actions workflows fo
 shellcheck: ## ShellCheck every shell script through the pinned container
 	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }
 	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
+
+dockerfile-check: ## Lint build/docker/Dockerfile with BuildKit's built-in checks
+	$(VALIDATION_LOCK) docker buildx build --check -f build/docker/Dockerfile .
+
+runtime-image-build: ## Build the runtime image as RUNTIME_IMAGE from the repository context; ALLOW_HEAVY=1
+	$(HEAVY_GUARD)
+	$(VALIDATION_LOCK) bash scripts/ci/runtime-image-build.sh "$(RUNTIME_IMAGE)"
+
+runtime-image-check: ## Start RUNTIME_IMAGE hardened, await readiness, assert RUNTIME_EXPECTED_COMMIT, stop inside the grace budget; ALLOW_HEAVY=1
+	$(HEAVY_GUARD)
+	$(VALIDATION_LOCK) bash scripts/ci/runtime-image-check.sh "$(RUNTIME_IMAGE)" "$(RUNTIME_EXPECTED_COMMIT)"
+
+container-security: ## Trivy over CONTAINER_IMAGE: fixable HIGH and CRITICAL findings fail; ALLOW_HEAVY=1
+	$(HEAVY_GUARD)
+	$(VALIDATION_LOCK) docker run --rm \
+		-v /var/run/docker.sock:/var/run/docker.sock \
+		-v "$(TRIVY_CACHE_VOLUME):/root/.cache/trivy" \
+		-e DOCKER_HOST=unix:///var/run/docker.sock \
+		-e TRIVY_DB_REPOSITORY \
+		"$(TRIVY_IMAGE)" image \
+		--cache-dir /root/.cache/trivy \
+		--quiet \
+		--severity HIGH,CRITICAL \
+		--scanners vuln \
+		--ignore-unfixed \
+		--exit-code 1 \
+		--format table \
+		"$(CONTAINER_IMAGE)"
 
 openapi-generate: ## Regenerate api/openapi/service.yaml from the Rust contract
 	@tmp="$$(mktemp)" && $(CARGO) run -q -p $(SERVICE_BIN) --bin openapi $(CARGO_FLAGS) > "$$tmp" && mv "$$tmp" $(OPENAPI_FILE)

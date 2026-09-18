@@ -13,8 +13,10 @@ repository surface that can prove them.
 - Go, for `make openapi-breaking` (oasdiff), `make secret-scan` (Gitleaks),
   and `make actionlint`, all through `go run`; CI runs them, locally they are
   optional.
-- Docker, for `make shellcheck` (pinned container); later stages add the
-  runtime image and integration proof.
+- Docker with BuildKit, for `make shellcheck` (pinned container),
+  `make dockerfile-check`, and the image targets (`runtime-image-build`,
+  `runtime-image-check`, `container-security`, behind `ALLOW_HEAVY=1`);
+  later stages add integration proof.
 
 Every tool version is pinned once in `tools/versions.env`; `make` and CI read
 the same file, and `make tools-check` proves the pins resolve. The Cargo tools

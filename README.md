@@ -33,9 +33,9 @@
 
 A starting point for a Rust HTTP API or microservice. It connects the pieces
 most services need: layered configuration, health checks, graceful shutdown,
-telemetry, a hardened HTTP server, an OpenAPI contract, tests, CI, and
-repository instructions for coding agents; Docker delivery follows in the
-next stage. It is a port of the *decisions* in the Go template, re-derived for
+telemetry, a hardened HTTP server, an OpenAPI contract, tests, surface-selected
+CI with security gates, a production image, and repository instructions for
+coding agents. It is a port of the *decisions* in the Go template, re-derived for
 what Rust's type system and ecosystem already provide: every stage starts with
 a survey of the crates that already solve the problem, and template-owned code
 exists only for a documented gap.
@@ -99,7 +99,8 @@ load balancers, drains in-flight requests, flushes telemetry, and exits `0`
 | Workspace | Pinned stable toolchain, edition 2024, workspace-level dependency versions and lints (`clippy::pedantic`, `unsafe_code = "forbid"`), committed `Cargo.lock`, `--locked` everywhere |
 | Commands | `Makefile` + `make/template.mk`: `build`, `run`, `test`, `test-package`, `test-changed`, `fmt`, `fmt-check`, `lint`, `lint-changed`, `openapi-generate`, `openapi-check`, `openapi-lint`, `openapi-breaking`, `check-skills`, `deny`, `unused-deps`, `secret-scan`, `actionlint`, `zizmor`, `shellcheck`, `tools-check`, `plan`, `verify`, `check`; every tool pinned once in `tools/versions.env` |
 | Validation routing | `scripts/ci/changed-surfaces.sh` classifies changed paths into surfaces (fail-closed), `affected-crates.sh` selects the crates to lint and test through `cargo tree -i`, `verify.sh` plans, runs under one validation lock, and records a receipt; CI and `make verify` share the classifier |
-| Delivery | GitHub Actions CI selected by changed surface: `quality` (format, affected or workspace clippy, build, and tests, cargo-shear, OpenAPI lint, drift, and compatibility, skills, validation-system self-tests), `security` (cargo-deny, Dependency Review, zizmor), `secrets` (Gitleaks range or history), `delivery` (actionlint, ShellCheck, tool manifest), an always-reported `required` job; CodeQL for Rust and Actions with `codeql-required`; weekly schedule runs every surface; pinned action SHAs; Dependabot for Cargo and Actions |
+| Delivery | GitHub Actions CI selected by changed surface: `quality` (format, affected or workspace clippy, build, and tests, cargo-shear, OpenAPI lint, drift, and compatibility, skills, validation-system self-tests), `security` (cargo-deny, Dependency Review, zizmor), `secrets` (Gitleaks range or history), `delivery` (actionlint, ShellCheck, tool manifest, Dockerfile checks), `image` (build, hardened lifecycle check, Trivy), an always-reported `required` job; CodeQL for Rust and Actions with `codeql-required`; weekly schedule runs every surface; pinned action SHAs; Dependabot for Cargo, Actions, and the Dockerfile base images |
+| Runtime image | `build/docker/Dockerfile`: `rust:<toolchain>-slim-trixie` builder with cargo-chef dependency layers and `cargo auditable build`, `gcr.io/distroless/cc-debian13:nonroot` runtime, commit baked as `app.commit`, `STOPSIGNAL SIGTERM`, OCI labels; ~45 MiB; the lifecycle check starts it `--read-only --cap-drop=ALL --security-opt=no-new-privileges` and proves a clean stop inside the 45 s grace budget |
 | Agent workflow | `AGENTS.md` repository contract, 16 model-invoked skills under `.agents/skills`, `CLAUDE.md`, and the [roadmap](docs/roadmap.md) that names the Go-template source for every planned owner |
 | Community | MIT license, code of conduct, security policy, issue forms, pull-request template, `CODEOWNERS` |
 
@@ -127,7 +128,8 @@ docs/roadmap.md             stages, fixed decisions, Go-to-Rust concept map
 docs/architecture/http.md   request path, contract workflow, compatibility rules
 specs/<topic>/research/     library research behind the current stage
 make/template.mk            portable standard Make commands
-scripts/ci/                 surface classifier, affected-crate planner, verify, validation lock
+build/docker/Dockerfile     multi-stage production image (cargo-chef, cargo-auditable, distroless cc)
+scripts/ci/                 surface classifier, affected-crate planner, verify, validation lock, image build and check
 tools/versions.env          one pin per developer and delivery tool
 deny.toml, .gitleaks.toml   dependency and secret-scanning policy
 .github/workflows/ci.yml    surface-selected CI jobs; the source of truth for check names
@@ -152,7 +154,9 @@ deny.toml, .gitleaks.toml   dependency and secret-scanning policy
 | `make unused-deps` | cargo-shear: fail on a declared dependency no crate uses |
 | `make secret-scan` / `make secret-scan-history` | Gitleaks over the worktree and the commits since `BASE_REF`, or over the whole history (`ALLOW_HEAVY=1`) |
 | `make actionlint` / `make zizmor` / `make shellcheck` | Workflow lint, workflow security audit, shell lint |
-| `make tools-check` | Prove every pin in `tools/versions.env` resolves |
+| `make tools-check` | Prove every pin in `tools/versions.env` resolves and the Dockerfile agrees with it |
+| `make dockerfile-check` | BuildKit's built-in Dockerfile checks |
+| `ALLOW_HEAVY=1 make runtime-image-build` / `runtime-image-check` / `container-security` | Build the production image, start it hardened and assert readiness, commit, and a clean `SIGTERM` exit inside the grace budget, scan it with Trivy |
 | `make lint-changed PKGS="a b"` / `make test-changed PKGS="a b"` | Clippy or tests over the crates `scripts/ci/affected-crates.sh` selects |
 | `make plan` / `make verify` | Show the route the changed surfaces select, or run it under the validation lock and record a receipt |
 | `ALLOW_FULL=1 make check` | Full repository gate: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-skills`, and the validation-system self-tests |
