@@ -2,6 +2,6 @@
 
 @AGENTS.md
 
-Claude Code sessions follow the repository contract. Harness adapters arrive
-with the agent-harness stage of [the roadmap](docs/roadmap.md); until then,
-Direct Work under `AGENTS.md` applies.
+Claude Code sessions follow the repository contract. When a native control is
+needed, load [Agent Harness](docs/agent-harness.md) and only its [Claude Code
+adapter](docs/agent-harness/claude-code.md).

@@ -45,7 +45,9 @@ Crate names are package names: `service`, `service-config` (the
 | `make zizmor` | Workflow security audit; `GH_TOKEN=$(gh auth token)` enables the online audits | Cargo tool (built once) |
 | `make shellcheck` | ShellCheck over every tracked script; `SHELL_FILES='a.sh b.sh'` scopes it | Docker |
 | `make docs-check` | Every relative Markdown link and `#fragment` resolves; offline | Docker |
-| `make check-skills` | The shape of `.agents/skills/*` | Python 3 |
+| `make check-skills` | The shape of `.agents/skills/*` (decision and workflow classes) | Python 3 |
+| `make agent-roles-check`, `make codex-agents-check`, `make claude-skills-check`, `make qwen-skills-check` | The generated harness carriers (`.codex`, `.claude`, `.qwen`, `.grok`, `.cursor`, `.opencode`) are byte-stable against `.agents/roles`, `.agents/codex-project.toml`, and `.agents/skills`; the `*-sync` twins regenerate them | — |
+| `make check-instructions` | `check-skills` plus the four carrier checks; what CI runs on the `agent_instructions` surface | Python 3 |
 | `make tools-check` | `tools/versions.env` shape and digests; each Cargo tool reports its pin; the Dockerfile `ARG` defaults and `FROM` tags agree with the manifest and `rust-toolchain.toml` | Cargo tools (built once) |
 
 The Cargo tools (`cargo-deny`, `cargo-shear`, `zizmor`) build from
@@ -71,7 +73,7 @@ version. CI installs the same versions as prebuilt binaries.
 | `make plan` | Classify the worktree's changes since `BASE_REF` and print the route: files, surfaces, commands with reasons and cost, surfaces with nothing to run |
 | `make verify` | Run that route under the validation lock; write an attempt record and, on a complete pass, a receipt under `<git-common-dir>/codex/verify` |
 | `make changed-surfaces-check`, `make affected-crates-check`, `make validation-lock-self-test`, `make verify-check` | The validation scripts' self-tests |
-| `ALLOW_FULL=1 make check` | The full repository gate under the lock: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-skills`, `docs-check`, and the four self-tests |
+| `ALLOW_FULL=1 make check` | The full repository gate under the lock: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-instructions`, `docs-check`, and the four self-tests |
 
 ## Guards and variables
 

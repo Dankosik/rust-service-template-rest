@@ -121,7 +121,7 @@ Select commands from [`make/template.mk`](make/template.mk):
 | One crate's behavior or tests | `make build` and `make test-package PKG=<crate>`, or `make test-changed PKGS="<crates>"` with the list `scripts/ci/affected-crates.sh` prints |
 | Several crates, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` | `make build` and `make test` |
 | Formatting or lint configuration | `make fmt-check` and `make lint` |
-| Documentation or agent instructions | Static consistency review; `make docs-check` proves every relative link and fragment resolves; `make check-skills` for skills |
+| Documentation or agent instructions | Static consistency review; `make docs-check` proves every relative link and fragment resolves; `make check-instructions` for skills, roles, and their generated carriers |
 | Mixed or unclear surfaces | `make plan` shows the route the changed surfaces select; `make verify` runs it and records a receipt |
 | Full-repository claim, explicitly requested | `ALLOW_FULL=1 make check` |
 
@@ -148,30 +148,40 @@ For a clear, local, reversible, single-owner outcome with bounded proof and no
 unresolved protected decision, apply the matching implementation, investigation,
 or verification method directly. No workflow artifacts or delegation are needed.
 Finish under Validation budget and report the outcome, checks actually run, and
-material limitations. Request independent review when behavior materially
-affects authorization, money, data integrity, concurrency safety, or
-hard-to-reverse migration, or when a material correctness question remains
-uncertain or contested.
+material limitations. Select final independent [Review](docs/spec-first-workflow/shared/review.md)
+when requested, when behavior materially affects authorization, money, data
+integrity, concurrency safety, or hard-to-reverse migration, or when a material
+correctness question remains uncertain or contested.
+
+Tasks and lanes within an active Implementation ledger stay under its owner
+through final validation. For a non-direct outcome, or when the outcome loses
+Direct Work eligibility, read the [workflow router](docs/spec-first-workflow.md)
+and load only the owner it selects. An unavailable optional environment alone
+does not trigger escalation. Explicit verification and phase-only requests
+retain their boundaries.
 
 ### Conditional Owners
 
 | Trigger | Owner |
 | --- | --- |
+| Authorized external, costly, sensitive, destructive, or irreversible action | [External Effects](docs/spec-first-workflow/shared/external-effects.md) |
+| Accepted work first enters another checkout | [Repository Boundaries](docs/spec-first-workflow/shared/repository-boundaries.md) |
 | Work adds, completes, or re-scopes a roadmap stage or its fixed decisions | [Roadmap](docs/roadmap.md) |
 | Crate ownership, dependency direction, request path, lifecycle, or an integration boundary can change | [Repository Architecture](docs/repo-architecture.md), then the one leaf it selects |
 | A crate, binary, dependency, or CI gate is added or removed | [Roadmap concept map and stage scope](docs/roadmap.md#concept-map), then [CONTRIBUTING.md](CONTRIBUTING.md) |
 | A non-obvious technical decision must survive the current session | `specs/<topic>/` while open; the owning document once accepted |
 | Contribution, pull-request, or evidence expectations | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | Configuration key, secret source, telemetry environment, or runtime budget changes | [Configuration Source Policy](docs/configuration-source-policy.md) |
-| A skill or agent instruction is added or edited | [Skill Authoring](docs/skill-authoring.md), then `make check-skills` |
+| Instructions, tools, roles, or skills change | [Prompt Maintenance](docs/prompt-maintenance.md); [Skill Authoring](docs/skill-authoring.md) for skills; then `make check-instructions` |
+| A prompt for another agent, session, phase, or native entry skill must be written | [Prompt Composition](docs/prompt-composition.md) |
+| A durable control, carrier, model, or effort must be chosen or operated | [Agent Harness](docs/agent-harness.md) |
 | A verification claim beyond the budget table, or a mixed surface | [Validation Routing](docs/validation-routing.md) and the matching leaf under `docs/validation/` |
 | A CI job, tool pin, Dockerfile, image check, or publication step changes what may ship | [CI/CD Production Readiness](docs/ci-cd-production-ready.md); the `rust-delivery-platform` skill owns the method |
 | Deployment policy for a derived service on Railway | [Railway Deployment Profile](docs/railway-deployment-profile.md) |
 
-The spec-first workflow router, agent harness adapters, and the remaining
-capability skills are planned owners; until their stage lands, the roadmap
-names the source document in the Go template to port from, and Direct Work
-applies.
+The remaining capability skills (`rust-sqlx`, `rust-tonic`, and the profile
+skills) arrive with their stages; until then the roadmap names the Go source
+to port from.
 
 ## Rust Change Surface
 

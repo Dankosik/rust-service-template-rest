@@ -14,7 +14,7 @@ and `scripts/ci/changed-surfaces.sh` is the one classifier CI and
 | Changed surface | Load | Local validation |
 | --- | --- | --- |
 | Rust behavior, tests, or crate manifests | [Rust](validation/rust.md) | matching build and relevant tests |
-| Agent instructions or skills | [Instructions](validation/instructions.md) | static consistency review and `make check-skills` |
+| Agent instructions, roles, skills, or their carriers | [Instructions](validation/instructions.md) | static consistency review and `make check-instructions` |
 | Documentation | — | `make docs-check`: every relative link and `#fragment` resolves (lychee, offline, pinned container) |
 
 Stop when that boundary passes. Unrun optional image, security, or

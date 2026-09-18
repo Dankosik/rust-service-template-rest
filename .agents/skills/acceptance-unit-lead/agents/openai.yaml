@@ -1,0 +1,5 @@
+interface:
+  display_name: "Acceptance-Unit Lead"
+  short_description: "Own an implementation unit or final validation"
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,51 @@
+# Task Review / Readiness
+
+Use when shared [Review](../shared/review.md) routes one fixed inline unit or
+persisted ledger, or the user explicitly requests standalone plan/readiness
+review. This adapter owns only Planning falsifiers and threshold.
+
+## Atomicity Gate
+
+Before simulating execution, test whether the packet is one independently
+acceptable repository outcome. Return `FAIL` to Planning and name the
+boundaries when the packet contains more than one Outcome, or when it is only a
+layer of another Outcome and cannot be consumed without still-planned companion
+work. Independent implementation, investigation, or repair inside one
+postcondition is not a split. Do not author the replacement ledger.
+
+## Lenses
+
+Simulate the next executable unit from selection through
+implementation completion and its eventual final validation under [Ready
+Frontier](planning/ledger-contract.md#ready-frontier), using only the fixed plan,
+cited sources, and current evidence. Resolve prerequisites and handoffs, trace
+canonical/generated order, locate non-obvious writable surfaces/resources, and
+trace the expected user-visible outcome to the real path. Test cases, fixtures,
+assertions, and exact commands are executor-owned choices; their absence does
+not fail Planning review. Missing final integration evidence prevents
+Completion only when the accepted claim requires it, without blocking
+independent implementation. Optional integration evidence does not block local
+completion.
+
+Trace persisted artifact custody and status through each actor boundary; the
+next actor must proceed from canonical state without chat reconstruction.
+
+Falsify each changed contract/authority against current producers, consumers,
+derived outputs, mirrors, proof carriers, and replacement surfaces. A companion
+must be inside the unit, behind a dependency whose intermediate state remains
+valid, or proved unchanged. Stop a blocked path at its earliest unrecorded choice
+or unavailable input, but continue independent paths. Inspect later units only
+for a decision/dependency that can invalidate the next accepted result.
+
+Do not reslice tasks, author replacement packets, or choose missing behavior,
+mechanism, ownership, rollout, authority, or concurrency. Do not turn this
+review into a preliminary test-design exercise.
+
+Review is a written walkthrough, without live checks. `PASS` requires the next
+authorized implementation to be executable from closed product/design decisions,
+with a clear final observable outcome and known external gates. `CONCERNS` may
+carry only
+a later bounded risk that cannot invalidate that result. Any hidden decision,
+unavailable input required for the next implementation action, invalid split,
+or undefined product outcome is `FAIL` and reopens Planning or the
+smallest upstream owner.

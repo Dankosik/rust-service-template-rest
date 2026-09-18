@@ -167,6 +167,8 @@ self_test() (
 	grep -q 'ALLOW_FULL=1' "${TMPDIR:-/tmp}/verify-full-guard.$$"
 	rm -f "${TMPDIR:-/tmp}/verify-full-guard.$$"
 
+	output=$(bash "${script}" --plan --files .agents/roles/worker-agent.toml)
+	grep -q '^  make check-instructions$' <<<"${output}"
 	output=$(bash "${script}" --plan --files README.md)
 	grep -q 'documentation=true' <<<"${output}"
 	grep -q '^  make docs-check$' <<<"${output}"
@@ -278,7 +280,7 @@ self_test() (
 
 	# Execution against stub targets: pass, fail, temporary-file hygiene.
 	cat >Makefile <<'MAKE'
-check-skills:
+check-instructions:
 	@printf 'fixture skills check passed\n'
 MAKE
 	scratch=${fixture}/tmp
@@ -289,7 +291,7 @@ MAKE
 	if grep -q 'reusing exact passing receipt' <<<"${output}"; then return 1; fi
 	output=$(TMPDIR="${scratch}" bash "${script}" --files scripts/check-skills.py)
 	grep -q 'reusing exact passing receipt' <<<"${output}"
-	printf 'check-skills:\n\t@exit 42\n' >Makefile
+	printf 'check-instructions:\n\t@exit 42\n' >Makefile
 	if output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py 2>&1); then
 		echo "verify self-test accepted a failing gate" >&2
 		return 1
@@ -306,7 +308,7 @@ MAKE
 	cat >Makefile <<'MAKE'
 tools-check:
 	@printf 'tools\n' >>invoked
-check-skills:
+check-instructions:
 	@printf 'skills\n' >>invoked
 	@test -f allow-skills
 secret-scan:
@@ -328,7 +330,7 @@ MAKE
 	[[ $(cat invoked) == $'tools\nskills' ]]
 	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
 	: >allow-skills
-	make check-skills secret-scan >/dev/null
+	make check-instructions secret-scan >/dev/null
 	[[ $(cat invoked) == $'tools\nskills\nskills\nsecrets' ]]
 	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
 	# An explicitly requested run still executes the entire plan; partial
@@ -340,7 +342,7 @@ MAKE
 	grep -q '^result: pass$' <<<"${output}"
 	# A step that mutates the selected candidate must not leave reusable success.
 	cat >Makefile <<'MAKE'
-check-skills:
+check-instructions:
 	@printf 'changed during verification\n' >>scripts/check-skills.py
 MAKE
 	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
@@ -355,7 +357,7 @@ MAKE
 	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
 	# Interrupt only this fixture's verifier; its started step stays unverified.
 	cat >Makefile <<'MAKE'
-check-skills:
+check-instructions:
 	@kill -TERM "$$VERIFY_TEST_PID"
 MAKE
 	if output=$(VERIFY_FORCE=1 bash -c 'export VERIFY_TEST_PID=$$; exec bash "$1" --locked --files scripts/check-skills.py' _ "${script}" 2>&1); then
@@ -559,7 +561,7 @@ if is_true shell; then
 	shell_files=${shell_files% }
 	if [[ -n ${shell_files} ]]; then add_command shell "${shell_files}" "shell sources changed" "make shellcheck SHELL_FILES='${shell_files}'" docker false true; else add_na shell "no changed shell source remains"; fi
 fi
-if is_true agent_instructions; then add_command make check-skills "agent instructions or skills changed" "make check-skills" cheap false false; fi
+if is_true agent_instructions; then add_command make check-instructions "agent instructions, skills, roles, or carriers changed" "make check-instructions" cheap false false; fi
 if is_true publication_metadata; then add_command make publish-image-metadata-check "publication naming or promotion changed" "make publish-image-metadata-check" cheap false false; fi
 if is_true secret_scanning; then add_command make secret-scan "secret scanning policy changed" "make secret-scan" cpu false false; fi
 if is_true runtime_image; then

@@ -20,7 +20,7 @@ is not a supported template state.
 | 3 | OpenAPI-first contract and generated bindings | done |
 | 4 | Validation routing and delivery: CI surfaces, security gates, image, publication | done |
 | 5 | Repository documentation: architecture, placement, commands, production contract | done |
-| 6 | Agent harness and spec-first workflow | planned |
+| 6 | Agent harness and spec-first workflow | done |
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | planned |
 | 9 | Template initializer, profiles, and template sync | planned |
@@ -332,31 +332,69 @@ Exit criteria met: `make docs-check` passes (169 links, 0 errors) and CI's
 conditional owner resolves; the first-feature guide was followed on the
 scaffold end to end.
 
-### Stage 6: Agent harness and spec-first workflow
+### Stage 6: Agent harness and spec-first workflow (done)
 
-Goal: the harness-neutral workflow, roles, and adapters, ported with the Go
-specific phase renamed.
+Research: the Go template's harness documents and adapters are the research
+for this stage (they record how each harness discovers instructions, skills,
+and agents as of September 2026); no crate survey applies, and the port is
+"path changes only" as the working rules prescribe. The decisions specific to
+this repository are recorded in [Skill Authoring](skill-authoring.md#workflow-skills)
+(two skill classes) and below.
+
+Delivered in one pull request:
 
 - `docs/spec-first-workflow.md` router; `phases/` (Intake, Research,
-  Specification, System/Integration Design, Rust Code/Ownership Design,
-  Planning, Implementation, reviews); `interfaces/` result contracts;
-  `shared/` (artifacts, evidence contract, external effects, review, resume,
-  transition, cleanup, repository boundaries, read-only delegation);
-  `rubrics/`.
-- `docs/agent-harness.md` and adapters for Codex, Claude Code, Cursor, Qwen
-  Code, Grok Build, OpenCode; `docs/prompt-composition.md`,
-  `docs/prompt-maintenance.md`, `docs/skill-authoring.md`,
-  `docs/subagent-brief-template.md`.
-- `.agents/roles`, `.agents/role-classes`, `.agents/contracts`,
-  `.agents/codex-project.toml`; generated carriers under `.claude`, `.codex`,
-  `.cursor`, `.qwen`, `.grok`, `.opencode`; `scripts/agent-roles-sync.sh`,
-  `scripts/codex-agents-sync.sh`, `scripts/harness-skills-sync.sh`, and their
-  `--check` modes wired into CI's `agent_instructions` surface.
-- `CLAUDE.md`, `QWEN.md`, `Grok.md`, `.cursor/rules/agent-harness.mdc`,
-  `opencode.json`.
+  Specification, System / Integration Design, Rust Code / Ownership Design,
+  Planning, Implementation, and the reviews), `interfaces/` (result
+  contracts V1), `shared/` (artifacts, evidence contract, external effects,
+  review, resume, transition, cleanup, repository boundaries, read-only
+  delegation), `rubrics/` (falsifier, material flow and rule, release
+  closure, Rust ownership review).
+- `docs/agent-harness.md` and adapters for Codex, Claude Code, Qwen Code,
+  Grok Build, Cursor, and OpenCode; `docs/prompt-composition.md`,
+  `docs/prompt-maintenance.md`, `docs/subagent-brief-template.md`.
+- `.agents/roles` (five canonical roles), `.agents/role-classes`,
+  `.agents/contracts` (specialist contract, arbitration, and a neighbor map
+  written for the Rust skill catalog), `.agents/codex-project.toml`;
+  generated carriers under `.claude`, `.codex`, `.cursor`, `.qwen`, `.grok`,
+  `.opencode` from `scripts/agent-roles-sync.sh`, `scripts/codex-agents-sync.sh`,
+  and `scripts/harness-skills-sync.sh`; the hand-maintained Lead and
+  orchestrator carriers; `CLAUDE.md`, `QWEN.md`, `Grok.md`,
+  `.cursor/rules/agent-harness.mdc`, `opencode.json`, and the harness
+  settings files.
+- The nine harness-neutral workflow skills (`orchestrator`,
+  `acceptance-unit-lead`, `spec-first-brainstorming`,
+  `spec-document-designer`, `idea-refine`, `planning-and-task-breakdown`,
+  `grilling`, `agent-prompt-composer`, `thermo-nuclear-code-quality-review`)
+  with their references and Codex carriers, and `merge-conflict-resolution`
+  rewritten into the decision-skill shape; `scripts/check-skills.py` validates
+  both classes.
+- `make check-instructions` (skill shape plus the four carrier checks) in
+  `ALLOW_FULL=1 make check`, in `make verify`, and in CI's `quality` job on
+  the `agent_instructions` surface, whose classifier rows now cover every
+  carrier, harness document, and sync script.
+- `AGENTS.md` routes non-direct work through the router and names the
+  harness, prompt, and external-effect owners; it has its final shape for
+  the template.
 
-Exit criteria: every carrier check passes; a Cursor or Codex session can bind
-`/orchestrator` and dispatch a Lead; `AGENTS.md` reaches its final shape.
+Deviations from the Go template: the `Go Code / Ownership Design` phase and
+`Go Ownership Review` rubric are the Rust ones and judge the crate graph,
+`pub(crate)` visibility, and `#[cfg(test)]`/`tests/` placement; the phase
+method lists name the `rust-*` skills that exist and say where a pressure
+without a skill (domain invariants, data truth, durable delivery) is decided;
+decision skills carry no `metadata` block, so the skill sync treats its
+absence as `invocation: model`, `kind: method`; the specialist neighbor map
+is written for the eighteen decision skills rather than translated; there is
+no template-sync or purity check yet (stage 9), so `check-instructions` is
+the aggregate of the carrier checks.
+
+Exit criteria: every carrier check passes (`make check-instructions`, 27
+skills, 5 roles for 6 harnesses); `AGENTS.md` has its final shape. Binding
+`/orchestrator` and dispatching a Lead is structurally in place (the skill,
+the Cursor and Codex carriers, and the adapters exist; Cursor discovers
+`.agents/skills` in this repository) but has not been exercised on a real
+ledger, because no ledger-sized task exists yet; the first orchestrated stage
+will exercise it and record the result here.
 
 ### Stage 7: Rust backend skills (core set done)
 
@@ -375,11 +413,12 @@ owner it decides against; [Skill Authoring](skill-authoring.md);
 `make check-skills` (frontmatter, name/directory agreement, trigger, prose-only
 body, word budget, LICENSE copy) wired into `make check` and CI; `AGENTS.md`
 routing to the catalog. `rust-api-contract` arrived with stage 3 and
-`rust-delivery-platform` with stage 4. Remaining
-for this stage: capability skills with their stages,
-the harness-neutral skills and Claude/Qwen views with stage 6, universal
-disciplines when a capability reaches them, and behavioural evaluation
-fixtures with the reviewer roles of stage 6.
+`rust-delivery-platform` with stage 4; the harness-neutral workflow skills,
+`merge-conflict-resolution`, and the Claude/Qwen views with stage 6.
+Remaining for this stage: capability skills with their stages
+(`rust-sqlx`, `rust-tonic`, the profile skills), universal disciplines when
+a capability reaches them, and behavioural evaluation fixtures under
+`evals/` now that the reviewer roles exist.
 
 Original mapping from the CLI pack:
 
@@ -408,8 +447,8 @@ fallbacks, route labels), `rust-api-contract`, `rust-observability`,
 Harness-neutral skills (`orchestrator`, `acceptance-unit-lead`,
 `spec-first-brainstorming`, `spec-document-designer`, `idea-refine`,
 `planning-and-task-breakdown`, `grilling`, `agent-prompt-composer`,
-`merge-conflict-resolution`, `thermo-nuclear-code-quality-review`) port with
-path changes only.
+`merge-conflict-resolution`, `thermo-nuclear-code-quality-review`) ported
+with path changes only in stage 6.
 
 `docs/universal-disciplines/` is language-neutral and ports verbatim except
 its "reached from" column.
