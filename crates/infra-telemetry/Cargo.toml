@@ -18,7 +18,10 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 metrics-process = { workspace = true, features = ["metrics-rs"] }
 opentelemetry = { workspace = true, features = ["trace"] }
-opentelemetry-otlp = { workspace = true, features = ["http-proto", "reqwest-blocking-client", "trace", "internal-logs"] }
+# `reqwest-rustls` gives the exporter TLS (rustls + aws-lc-rs, system roots
+# through the platform verifier); without it an https:// collector fails at
+# export time with "URL scheme is not allowed".
+opentelemetry-otlp = { workspace = true, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "trace", "internal-logs"] }
 opentelemetry-semantic-conventions = { workspace = true, features = ["semconv_experimental"] }
 opentelemetry_sdk = { workspace = true, features = ["trace"] }
 secrecy = { workspace = true }

@@ -18,7 +18,7 @@ integration = []
 
 [dependencies]
 infra-postgres = { workspace = true }
-sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki", "migrate", "macros"] }
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "migrate", "macros"] }
 url = { workspace = true }
 
 [dev-dependencies]

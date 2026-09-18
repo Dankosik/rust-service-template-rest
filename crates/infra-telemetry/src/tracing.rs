@@ -349,6 +349,35 @@ mod tests {
     }
 
     #[test]
+    fn https_otlp_endpoint_is_admitted_by_the_exporter_client() {
+        use std::future::Future as _;
+        use std::task::{Context, Poll, Waker};
+
+        // Without `reqwest-rustls`, reqwest rejects `https://` at export
+        // with "URL scheme is not allowed". Construction succeeding is not
+        // that proof; the request must run. The batch processor hosts the
+        // blocking client off the async workers; a `#[tokio::test]` runtime
+        // cannot drop reqwest's inner runtime. Nothing listens on :1, so
+        // the accepted failure is a transport error, not collector delivery.
+        let exporter = span_exporter(&options("https://127.0.0.1:1/v1/traces"))
+            .expect("https endpoint must build");
+        let mut export = std::pin::pin!(async {
+            use opentelemetry_sdk::trace::SpanExporter as _;
+            exporter.export(Vec::new()).await
+        });
+        let mut cx = Context::from_waker(Waker::noop());
+        let Poll::Ready(result) = export.as_mut().poll(&mut cx) else {
+            panic!("blocking OTLP client must finish in one poll");
+        };
+        let err = result.expect_err("nothing listens on 127.0.0.1:1");
+        let message = err.to_string();
+        assert!(
+            !message.contains("URL scheme is not allowed"),
+            "https must be a permitted scheme: {message}"
+        );
+    }
+
+    #[test]
     fn resource_carries_typed_identity() {
         let resource = resource(&options(""));
         let get = |key: &str| {
