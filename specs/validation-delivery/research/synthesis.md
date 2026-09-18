@@ -400,3 +400,18 @@ the initializer knows the service identity and may generate `.railway/`.
     `rust:<version>` tag equals the `rust-toolchain.toml` channel, and the
     classifier marks the Dockerfile as `tool_manifest` so that check runs
     on a Dockerfile change (*verified*: a drifted `ARG` default fails it).
+19. The CycloneDX SBOM comes from the pinned Trivy container (`make
+    container-sbom`), not `aquasecurity/trivy-action`: the action would pin
+    Trivy a second time beside `TRIVY_IMAGE`. Locally *verified* on the
+    built image: 194 components, 178 `pkg:cargo` and 14 `pkg:deb`.
+20. A release publication refuses a `v*` tag that does not equal
+    `v<crate version>` (`cargo pkgid -p service`), because Cargo owns the
+    version and a tag on the wrong commit would otherwise publish `latest`
+    with a mismatched `app.version`. The Go template had no such check
+    because Go had no module version to compare.
+21. zizmor 1.30 flags `workflow_run` (`dangerous-triggers`) and the
+    workspace-relative `uses: ./.github/actions/…` (`self-repository`).
+    Both are ignored inline with the reason: the job's `if` admits only a
+    successful same-repository push run of ci at the exact SHA, and
+    actionlint 1.7.12 (the latest release) does not parse GitHub's July 2026
+    `$/…` form; switch when it does.

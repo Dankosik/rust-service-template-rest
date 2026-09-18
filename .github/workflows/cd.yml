@@ -1,0 +1,101 @@
+name: cd
+
+# Opt-in publication to GHCR: nothing runs until the repository variable
+# ENABLE_GHCR_PUBLISH is 'true'. A push to main publishes sha-<12> and `main`
+# after its ci run succeeded; a v* tag publishes the tag and `latest`. Both
+# wait for the exact-SHA CodeQL run (and ci for tags) before building, and
+# both go through .github/actions/publish-image, the one publication path.
+#
+# workflow_run is the trigger zizmor calls dangerous because it runs with the
+# default branch's workflow and permissions; the job's `if` admits only a
+# successful push run of ci from this repository's default branch at the
+# exact SHA, which is the property publication needs (ci passed on main).
+
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  push:
+    tags: [v*]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: >-
+      vars.ENABLE_GHCR_PUBLISH == 'true' && (
+        (
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+          github.event.workflow_run.head_sha == github.sha
+        ) || (
+          github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        )
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: publication-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Wait for exact-SHA admission workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          CANDIDATE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          CANDIDATE_REF: ${{ github.event_name == 'workflow_run' && github.event.repository.default_branch || github.ref_name }}
+        run: |
+          set -euo pipefail
+          workflows=(codeql.yml)
+          if [[ "${EVENT_NAME}" == push ]]; then
+            workflows=(ci.yml codeql.yml)
+          fi
+          for workflow in "${workflows[@]}"; do
+            run_id=""
+            for _ in {1..12}; do
+              run_id="$(gh run list \
+                --workflow "${workflow}" \
+                --event push \
+                --branch "${CANDIDATE_REF}" \
+                --commit "${CANDIDATE_SHA}" \
+                --limit 1 \
+                --json databaseId \
+                --jq '.[0].databaseId // empty')"
+              [[ -z "${run_id}" ]] || break
+              sleep 5
+            done
+            [[ -n "${run_id}" ]] || {
+              echo "no ${workflow} run found for ${CANDIDATE_REF}@${CANDIDATE_SHA}" >&2
+              exit 1
+            }
+            gh run watch "${run_id}" --exit-status
+          done
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+      - name: Install pinned toolchain
+        # The metadata step reads the crate version through cargo.
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      # The checkout above is at the exact candidate SHA, so the
+      # workspace-relative form loads the action version CI validated.
+      # GitHub's self-repository form (`$/…`) is not parsed by actionlint
+      # 1.7.12, the latest release; switch when it is.
+      - uses: ./.github/actions/publish-image # zizmor: ignore[self-repository]
+        with:
+          mode: ${{ github.event_name == 'workflow_run' && 'main' || 'release' }}
+          candidate_sha: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}

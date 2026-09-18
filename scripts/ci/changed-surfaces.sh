@@ -19,7 +19,7 @@ set -euo pipefail
 
 names=(
 	rust_source cargo_dependencies dependency_policy lint_config openapi tool_manifest
-	github_workflows dependency_automation shell runtime_image secret_scanning
+	github_workflows dependency_automation shell runtime_image publication_metadata secret_scanning
 	agent_instructions documentation validation_system no_validation_required
 )
 
@@ -96,6 +96,9 @@ classify() {
 		esac
 		case "${file}" in
 		*.sh) mark shell ;;
+		esac
+		case "${file}" in
+		.github/actions/publish-image/* | scripts/ci/publish-image-metadata.sh) mark publication_metadata ;;
 		esac
 		case "${file}" in
 		.gitleaks.toml) mark secret_scanning ;;
@@ -253,8 +256,14 @@ self_test() {
 		"github_workflows" \
 		"dependency_automation documentation"
 	assert_case .github/actions/publish-image/action.yml \
+		"github_workflows publication_metadata" \
+		"dependency_automation runtime_image"
+	assert_case scripts/ci/publish-image-metadata.sh \
+		"publication_metadata shell" \
+		"github_workflows validation_system runtime_image"
+	assert_case .github/workflows/cd.yml \
 		"github_workflows" \
-		"dependency_automation"
+		"publication_metadata"
 	assert_case .github/dependabot.yml \
 		"dependency_automation" \
 		"github_workflows cargo_dependencies"

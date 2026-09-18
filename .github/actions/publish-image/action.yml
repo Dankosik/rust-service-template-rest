@@ -1,0 +1,218 @@
+name: Publish runtime image
+description: >-
+  Build, prove, scan, describe, push, sign, attest, verify, and only then
+  promote the runtime image tags anyone deploys from.
+
+# The one publication path, used by both cd.yml modes, so a release cannot be
+# published under rules main has already moved past.
+#
+# It is a composite action rather than a reusable workflow on purpose: a
+# reusable workflow becomes the job_workflow_ref in the Fulcio certificate and
+# would change the keyless signing identity every consumer verifies against
+# (`.../.github/workflows/cd.yml@<ref>`). A composite action runs inside the
+# calling job and leaves that identity untouched.
+#
+# The two publications differ only in what they name; the metadata step is
+# the only place they branch. Everything after it is one sequence, and every
+# make target it calls is the one CI already ran on the candidate.
+
+inputs:
+  mode:
+    description: >-
+      Which publication this is. Both build a run-scoped candidate; "main"
+      promotes sha-<12> plus `main`, "release" promotes the v* tag plus
+      `latest`, each only after verification.
+    required: true
+  candidate_sha:
+    description: The commit being published; the checkout must be at it.
+    required: true
+  github_token:
+    description: GITHUB_TOKEN for the GHCR login and the gh attestation queries.
+    required: true
+  trivy_db_repository:
+    description: Vulnerability database source for the scan and the SBOM.
+    required: false
+    default: ghcr.io/aquasecurity/trivy-db:2
+
+runs:
+  using: composite
+  steps:
+    - name: Load tool manifest
+      shell: bash
+      run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
+
+    # The only step that knows which publication this is: the candidate tag,
+    # the tags promoted after verification, the artifact name, and the signing
+    # identity this run is verified against.
+    - name: Prepare image metadata
+      id: meta
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = "${CANDIDATE_SHA}"
+        crate_version=$(cargo pkgid --locked -p service | sed -n 's/.*#//p')
+        bash ./scripts/ci/publish-image-metadata.sh metadata \
+          "${MODE}" \
+          "${CANDIDATE_SHA}" \
+          "${GITHUB_REPOSITORY}" \
+          "${DEFAULT_BRANCH}" \
+          "${GITHUB_REF_NAME}" \
+          "${GITHUB_REF}" \
+          "${GITHUB_RUN_ID}" \
+          "${GITHUB_RUN_ATTEMPT}" \
+          "${crate_version}" >>"${GITHUB_OUTPUT}"
+
+    - name: Login to GHCR
+      shell: bash
+      env:
+        GHCR_TOKEN: ${{ inputs.github_token }}
+        GHCR_USER: ${{ github.actor }}
+      run: printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
+
+    - name: Install cosign
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      with:
+        cosign-release: v${{ env.COSIGN_VERSION }}
+
+    - name: Set up Buildx
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+    # Publication runs only on pushes to main and on tags, so writing the
+    # layer cache here is safe.
+    - name: Build image
+      shell: bash
+      env:
+        VCS_REF: ${{ inputs.candidate_sha }}
+        SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+        PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
+        RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
+        RUNTIME_IMAGE_CACHE_TO: type=gha,mode=max,scope=runtime-image
+      run: make runtime-image-build RUNTIME_IMAGE="${PRIMARY_IMAGE}"
+
+    - name: Runtime image lifecycle
+      shell: bash
+      env:
+        PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
+        CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      run: make runtime-image-check RUNTIME_IMAGE="${PRIMARY_IMAGE}" RUNTIME_EXPECTED_COMMIT="${CANDIDATE_SHA}"
+
+    - name: Scan image with Trivy
+      shell: bash
+      env:
+        PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
+        TRIVY_DB_REPOSITORY: ${{ inputs.trivy_db_repository }}
+      run: make container-security CONTAINER_IMAGE="${PRIMARY_IMAGE}"
+
+    - name: Generate SBOM (CycloneDX)
+      shell: bash
+      env:
+        PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
+        TRIVY_DB_REPOSITORY: ${{ inputs.trivy_db_repository }}
+      run: make container-sbom CONTAINER_IMAGE="${PRIMARY_IMAGE}" SBOM_OUTPUT=sbom.cdx.json
+
+    - name: Push candidate image
+      shell: bash
+      env:
+        PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
+      run: docker push "${PRIMARY_IMAGE}"
+
+    - name: Resolve pushed digest
+      id: digest
+      shell: bash
+      env:
+        PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
+      run: |
+        set -euo pipefail
+        digest="$(docker image inspect "${PRIMARY_IMAGE}" --format '{{index .RepoDigests 0}}' | cut -d'@' -f2)"
+        test -n "${digest}"
+        echo "digest=${digest}" >>"${GITHUB_OUTPUT}"
+
+    - name: Sign container image (keyless)
+      shell: bash
+      env:
+        COSIGN_YES: "true"
+        IMAGE_REPO: ${{ steps.meta.outputs.image_repo }}
+        DIGEST: ${{ steps.digest.outputs.digest }}
+      run: cosign sign "${IMAGE_REPO}@${DIGEST}"
+
+    - name: Attest build provenance
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-name: ${{ steps.meta.outputs.image_repo }}
+        subject-digest: ${{ steps.digest.outputs.digest }}
+        push-to-registry: true
+        create-storage-record: false
+
+    - name: Attest SBOM
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-name: ${{ steps.meta.outputs.image_repo }}
+        subject-digest: ${{ steps.digest.outputs.digest }}
+        sbom-path: sbom.cdx.json
+        push-to-registry: true
+        create-storage-record: false
+
+    # The gate every promotion depends on: what was just signed and attested
+    # is verified back out of the registry before any tag moves.
+    - name: Verify release trust
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        IMAGE_REPO: ${{ steps.meta.outputs.image_repo }}
+        DIGEST: ${{ steps.digest.outputs.digest }}
+        IDENTITY: ${{ steps.meta.outputs.identity }}
+      run: |
+        set -euo pipefail
+        image="${IMAGE_REPO}@${DIGEST}"
+        cosign verify \
+          --certificate-identity "${IDENTITY}" \
+          --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+          "${image}"
+        gh attestation verify "oci://${image}" --repo "${GITHUB_REPOSITORY}"
+        gh attestation verify "oci://${image}" \
+          --repo "${GITHUB_REPOSITORY}" \
+          --predicate-type "https://cyclonedx.org/bom"
+
+    - name: Record verified image
+      shell: bash
+      env:
+        IMAGE_REPO: ${{ steps.meta.outputs.image_repo }}
+        DIGEST: ${{ steps.digest.outputs.digest }}
+        VERSION: ${{ steps.meta.outputs.version }}
+        PROMOTE_TAGS: ${{ steps.meta.outputs.promote_tags }}
+      run: |
+        {
+          echo "### Verified image"
+          echo
+          # Markdown backticks are literal here.
+          # shellcheck disable=SC2016
+          printf '`%s@%s`\n' "${IMAGE_REPO}" "${DIGEST}"
+          echo
+          echo "Version: ${VERSION}; intended tags: ${PROMOTE_TAGS}"
+        } >>"${GITHUB_STEP_SUMMARY}"
+
+    - name: Upload SBOM artifact
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ steps.meta.outputs.artifact_name }}
+        path: sbom.cdx.json
+        if-no-files-found: error
+
+    - name: Promote verified tags
+      shell: bash
+      env:
+        IMAGE_REPO: ${{ steps.meta.outputs.image_repo }}
+        PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
+        DIGEST: ${{ steps.digest.outputs.digest }}
+        PROMOTE_TAGS: ${{ steps.meta.outputs.promote_tags }}
+      run: |
+        bash ./scripts/ci/publish-image-metadata.sh promote \
+          "${IMAGE_REPO}" \
+          "${PRIMARY_IMAGE}" \
+          "${DIGEST}" \
+          "${PROMOTE_TAGS}" \
+          "${GITHUB_STEP_SUMMARY}"

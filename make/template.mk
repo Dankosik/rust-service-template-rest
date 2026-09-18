@@ -85,7 +85,8 @@ TRIVY_CACHE_VOLUME ?= trivy-cache
 	check check-unlocked check-skills clean \
 	openapi-generate openapi-check openapi-lint openapi-breaking \
 	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck \
-	dockerfile-check runtime-image-build runtime-image-check container-security \
+	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
+	publish-image-metadata-check \
 	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test
 
 help: ## List available commands
@@ -189,6 +190,28 @@ container-security: ## Trivy over CONTAINER_IMAGE: fixable HIGH and CRITICAL fin
 		--exit-code 1 \
 		--format table \
 		"$(CONTAINER_IMAGE)"
+
+# The SBOM describes the shipped artifact: Debian packages plus the Rust
+# dependency list cargo-auditable embedded in the binary.
+SBOM_OUTPUT ?= sbom.cdx.json
+container-sbom: ## Write a CycloneDX SBOM of CONTAINER_IMAGE to SBOM_OUTPUT with Trivy; ALLOW_HEAVY=1
+	$(HEAVY_GUARD)
+	$(VALIDATION_LOCK) docker run --rm \
+		-v /var/run/docker.sock:/var/run/docker.sock \
+		-v "$(TRIVY_CACHE_VOLUME):/root/.cache/trivy" \
+		-v "$(CURDIR):/out" \
+		-e DOCKER_HOST=unix:///var/run/docker.sock \
+		-e TRIVY_DB_REPOSITORY \
+		"$(TRIVY_IMAGE)" image \
+		--cache-dir /root/.cache/trivy \
+		--quiet \
+		--scanners vuln \
+		--format cyclonedx \
+		--output "/out/$(SBOM_OUTPUT)" \
+		"$(CONTAINER_IMAGE)"
+
+publish-image-metadata-check: ## Self-test of the publication naming and tag promotion
+	bash scripts/ci/publish-image-metadata.sh self-test
 
 openapi-generate: ## Regenerate api/openapi/service.yaml from the Rust contract
 	@tmp="$$(mktemp)" && $(CARGO) run -q -p $(SERVICE_BIN) --bin openapi $(CARGO_FLAGS) > "$$tmp" && mv "$$tmp" $(OPENAPI_FILE)

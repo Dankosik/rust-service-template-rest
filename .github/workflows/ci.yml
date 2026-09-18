@@ -46,6 +46,7 @@ jobs:
       dependency_automation: ${{ steps.surfaces.outputs.dependency_automation }}
       shell: ${{ steps.surfaces.outputs.shell }}
       runtime_image: ${{ steps.surfaces.outputs.runtime_image }}
+      publication_metadata: ${{ steps.surfaces.outputs.publication_metadata }}
       secret_scanning: ${{ steps.surfaces.outputs.secret_scanning }}
       agent_instructions: ${{ steps.surfaces.outputs.agent_instructions }}
       documentation: ${{ steps.surfaces.outputs.documentation }}
@@ -336,7 +337,8 @@ jobs:
       needs.changes.outputs.shell == 'true' ||
       needs.changes.outputs.github_workflows == 'true' ||
       needs.changes.outputs.tool_manifest == 'true' ||
-      needs.changes.outputs.runtime_image == 'true'
+      needs.changes.outputs.runtime_image == 'true' ||
+      needs.changes.outputs.publication_metadata == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -382,6 +384,9 @@ jobs:
       - name: Dockerfile
         if: needs.changes.outputs.runtime_image == 'true'
         run: bash ./scripts/ci/measure.sh delivery-dockerfile -- make dockerfile-check
+      - name: Publication metadata
+        if: needs.changes.outputs.publication_metadata == 'true'
+        run: bash ./scripts/ci/measure.sh delivery-publication-metadata -- make publish-image-metadata-check
 
   image:
     needs: changes
