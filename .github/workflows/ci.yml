@@ -45,6 +45,7 @@ jobs:
       github_workflows: ${{ steps.surfaces.outputs.github_workflows }}
       dependency_automation: ${{ steps.surfaces.outputs.dependency_automation }}
       shell: ${{ steps.surfaces.outputs.shell }}
+      runtime_image: ${{ steps.surfaces.outputs.runtime_image }}
       secret_scanning: ${{ steps.surfaces.outputs.secret_scanning }}
       agent_instructions: ${{ steps.surfaces.outputs.agent_instructions }}
       documentation: ${{ steps.surfaces.outputs.documentation }}
@@ -228,7 +229,10 @@ jobs:
       needs.changes.outputs.cargo_dependencies == 'true' ||
       needs.changes.outputs.dependency_policy == 'true' ||
       needs.changes.outputs.github_workflows == 'true' ||
-      (github.event_name == 'pull_request' && needs.changes.outputs.tool_manifest == 'true')
+      (github.event_name == 'pull_request' && (
+        needs.changes.outputs.tool_manifest == 'true' ||
+        needs.changes.outputs.runtime_image == 'true'
+      ))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -244,7 +248,8 @@ jobs:
           github.event_name == 'pull_request' && (
             needs.changes.outputs.cargo_dependencies == 'true' ||
             needs.changes.outputs.tool_manifest == 'true' ||
-            needs.changes.outputs.github_workflows == 'true'
+            needs.changes.outputs.github_workflows == 'true' ||
+            needs.changes.outputs.runtime_image == 'true'
           )
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
@@ -330,7 +335,8 @@ jobs:
     if: >-
       needs.changes.outputs.shell == 'true' ||
       needs.changes.outputs.github_workflows == 'true' ||
-      needs.changes.outputs.tool_manifest == 'true'
+      needs.changes.outputs.tool_manifest == 'true' ||
+      needs.changes.outputs.runtime_image == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -373,10 +379,43 @@ jobs:
       - name: Tool manifest
         if: needs.changes.outputs.tool_manifest == 'true'
         run: bash ./scripts/ci/measure.sh delivery-tools -- make tools-check
+      - name: Dockerfile
+        if: needs.changes.outputs.runtime_image == 'true'
+        run: bash ./scripts/ci/measure.sh delivery-dockerfile -- make dockerfile-check
+
+  image:
+    needs: changes
+    if: needs.changes.outputs.runtime_image == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Buildx
+        # The docker-container driver exports layers to the Actions cache and
+        # exposes the runtime token the gha cache backend needs.
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build runtime image
+        # Layers (the cooked dependency layer above all) restore from the
+        # Actions cache on every run and are written only by pushes to main
+        # and schedules, so a pull request cannot poison them.
+        env:
+          VCS_REF: ${{ github.sha }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+          RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
+          RUNTIME_IMAGE_CACHE_TO: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'type=gha,mode=max,scope=runtime-image' || '' }}
+        run: bash ./scripts/ci/measure.sh image-build -- make runtime-image-build RUNTIME_IMAGE=service:ci
+      - name: Runtime image lifecycle
+        env:
+          VCS_REF: ${{ github.sha }}
+        run: bash ./scripts/ci/measure.sh image-lifecycle -- make runtime-image-check RUNTIME_IMAGE=service:ci RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+      - name: Image vulnerabilities
+        run: bash ./scripts/ci/measure.sh image-security -- make container-security CONTAINER_IMAGE=service:ci
 
   required:
     if: always()
-    needs: [changes, quality, security, secrets, delivery]
+    needs: [changes, quality, security, secrets, delivery, image]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

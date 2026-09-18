@@ -25,3 +25,14 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  # FROM digests in the Dockerfile. A rust:<version> bump must land with the
+  # same version in rust-toolchain.toml; `make tools-check` refuses drift.
+  - package-ecosystem: "docker"
+    directory: "/build/docker"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "build"

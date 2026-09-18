@@ -19,7 +19,7 @@ set -euo pipefail
 
 names=(
 	rust_source cargo_dependencies dependency_policy lint_config openapi tool_manifest
-	github_workflows dependency_automation shell secret_scanning
+	github_workflows dependency_automation shell runtime_image secret_scanning
 	agent_instructions documentation validation_system no_validation_required
 )
 
@@ -83,8 +83,12 @@ classify() {
 		case "${file}" in
 		.redocly.yaml | api/openapi/*) mark openapi ;;
 		esac
+		# The Dockerfile carries tool pins too (ARG defaults, FROM digests).
 		case "${file}" in
-		tools/versions.env | scripts/ci/tools-check.sh) mark tool_manifest ;;
+		tools/versions.env | scripts/ci/tools-check.sh | build/docker/Dockerfile) mark tool_manifest ;;
+		esac
+		case "${file}" in
+		.dockerignore | build/docker/* | scripts/ci/runtime-image-*.sh) mark runtime_image ;;
 		esac
 		case "${file}" in
 		.github/workflows/* | .github/actions/*) mark github_workflows ;;
@@ -233,6 +237,18 @@ self_test() {
 	assert_case scripts/ci/tools-check.sh \
 		"tool_manifest shell" \
 		"validation_system"
+	assert_case build/docker/Dockerfile \
+		"runtime_image tool_manifest" \
+		"rust_source cargo_dependencies shell validation_system"
+	assert_case .dockerignore \
+		"runtime_image" \
+		"tool_manifest no_validation_required"
+	assert_case scripts/ci/runtime-image-check.sh \
+		"runtime_image shell" \
+		"tool_manifest validation_system"
+	assert_case scripts/ci/runtime-image-build.sh \
+		"runtime_image shell" \
+		"tool_manifest validation_system"
 	assert_case .github/workflows/ci.yml \
 		"github_workflows" \
 		"dependency_automation documentation"

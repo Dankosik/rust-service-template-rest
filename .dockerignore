@@ -1,0 +1,12 @@
+# Only what build/docker/Dockerfile reads enters the build context, so a
+# change elsewhere never invalidates the cooked dependency layer.
+#
+# rust-toolchain.toml stays out on purpose: the builder's FROM tag is the
+# toolchain authority for the image, and a toolchain file in the context
+# makes rustup download clippy and rustfmt in every stage that runs cargo.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+# Integration tests are not compiled by `cargo build --bin service`.
+crates/*/tests/
