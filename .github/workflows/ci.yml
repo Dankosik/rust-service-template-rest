@@ -4,7 +4,7 @@ name: ci
 # reports; `make verify` reads the same classifier. `required` is the one
 # status to protect: it fails on any failed or cancelled gate and accepts a
 # gate the surfaces did not select. Job layout and the reason for each gate:
-# specs/validation-delivery/research/synthesis.md.
+# docs/ci-cd-production-ready.md.
 
 on:
   push:

@@ -19,7 +19,7 @@ is not a supported template state.
 | 2 | Runtime core: configuration, logging, telemetry, hardened HTTP | done |
 | 3 | OpenAPI-first contract and generated bindings | done |
 | 4 | Validation routing and delivery: CI surfaces, security gates, image, publication | done |
-| 5 | Repository documentation: architecture, placement, commands, production contract | planned |
+| 5 | Repository documentation: architecture, placement, commands, production contract | done |
 | 6 | Agent harness and spec-first workflow | planned |
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | planned |
@@ -52,7 +52,7 @@ independent of each other and each depends on 9 for its profile marker.
 | Go template | Rust template | Notes |
 | --- | --- | --- |
 | `go.mod` module path; `make template-init MODULE=...` | Workspace package names; initializer rewrites the service crate name, binary name, and owners | No module path to rewrite; less initializer surface. |
-| `tools/go.mod` pinned developer tools | `tools/versions.env`: one `NAME=value` pin per tool, read by `make`, shell, and CI; Cargo tools (`cargo-deny`, `cargo-shear`, `zizmor`) built once per version into the Git common directory locally, prebuilt in CI through `taiki-e/install-action`; Go tools through `go run`; ShellCheck and Trivy as digest-pinned containers | Cargo has no project-local tool table; `make tools-check` proves the pins resolve. `cargo-nextest` reopens at stage 8, `cargo-audit` and `cargo-machete` were rejected (`specs/validation-delivery/research/synthesis.md`). |
+| `tools/go.mod` pinned developer tools | `tools/versions.env`: one `NAME=value` pin per tool, read by `make`, shell, and CI; Cargo tools (`cargo-deny`, `cargo-shear`, `zizmor`) built once per version into the Git common directory locally, prebuilt in CI through `taiki-e/install-action`; Go tools through `go run`; ShellCheck and Trivy as digest-pinned containers | Cargo has no project-local tool table; `make tools-check` proves the pins resolve. `cargo-nextest` reopens at stage 8, `cargo-audit` and `cargo-machete` were rejected ([CI/CD Production Readiness](ci-cd-production-ready.md#decisions-recorded-here)). |
 | `cmd/service/main.go` → `bootstrap.Run` | `crates/service/src/main.rs` → `bootstrap::run` | Runtime construction, signals, and drain live in `bootstrap`; `main` only maps the result to an exit code. |
 | `internal/<feature>` | `crates/<feature>` | Not created until the first feature exists. |
 | `internal/infra/http` (`chi`, `net/http` server) | `crates/infra-http` (axum `Router`, `tower-http` layers, hand-rolled hyper accept loop) | Middleware order is the route tree's observable semantics in both. `axum::serve` exposes no connection limits and sets no timer, so the accept loop is template-owned. |
@@ -206,10 +206,11 @@ between the Go template's health-only 3.0.3 document and this one;
 
 ### Stage 4: Validation routing and delivery (done)
 
-Research and decisions: `specs/validation-delivery/research/synthesis.md`
-(tool survey with verified behaviour, the surface table, the job layout, the
-image measurements, deviations, and gotchas). The bundle stays open with the
-stage 2 and 3 bundles until the stage 5 documents absorb them.
+Research and decisions: absorbed in stage 5 into
+[CI/CD Production Readiness](ci-cd-production-ready.md#decisions-recorded-here)
+(tool survey outcome, gate decisions, routing, image measurements,
+deviations, deferred items, gotchas); the research bundle
+(`specs/validation-delivery/`) lives in Git history.
 
 Delivered, in five pull requests
 ([#8](https://github.com/Dankosik/rust-service-template-rest/pull/8),
@@ -283,27 +284,53 @@ targets); `make verify` prints a plan and writes a receipt (locally: a
 planted-finding check of the secret and dependency gates follows in a test
 branch that is closed without merge.
 
-### Stage 5: Repository documentation
+### Stage 5: Repository documentation (done)
 
-Goal: the same documentation graph as the Go template, rewritten for the
-crate layout, with every link resolving.
+Research and decisions: absorbed into
+[CI/CD Production Readiness](ci-cd-production-ready.md#decisions-recorded-here)
+(the link checker) and this section; the research bundle
+(`specs/repository-documentation/`) lives in Git history.
 
-- `docs/repo-architecture.md` front door with global invariants, source of
-  truth table, and one-leaf selector.
-- `docs/architecture/boundaries.md`, `runtime-lifecycle.md`,
-  `integration.md`, `persistence.md` (after stage 8), `async.md` (after the
-  first async profile); `http.md` exists since stage 3 and receives the
-  stage 2 and 3 research bundles' durable decisions.
-- `docs/project-structure-and-module-organization.md` with the deterministic
-  placement algorithm for crates and modules, filename rules, and test
-  placement (`#[cfg(test)]` beside the owner, `tests/` for black-box crate
-  tests, `test/` workspace crate for process and container proof).
-- `docs/build-test-and-development-commands.md`, `docs/production-contract.md`,
-  `docs/first-production-feature.md`, `specs/README.md`, `test/README.md`.
-- `CONTRIBUTING.md` completed against the real command catalog.
+Delivered, in four pull requests
+([#16](https://github.com/Dankosik/rust-service-template-rest/pull/16),
+[#17](https://github.com/Dankosik/rust-service-template-rest/pull/17),
+[#18](https://github.com/Dankosik/rust-service-template-rest/pull/18), and
+the closing one):
 
-Exit criteria: a link checker passes; `AGENTS.md` conditional owners all
-resolve; a new contributor can follow the first-feature guide on the scaffold.
+- `make docs-check`: lychee in a digest-pinned container, offline, with
+  `#fragment` resolution, over every tracked Markdown file; the
+  `documentation` surface runs it in `make verify`, a CI `docs` job, and
+  `ALLOW_FULL=1 make check`.
+- `docs/repo-architecture.md` front door with global invariants, the
+  source-of-truth table, and one leaf per pressure;
+  `docs/architecture/boundaries.md`, `runtime-lifecycle.md`,
+  `integration.md`; `http.md` and `configuration-source-policy.md` extended
+  with the stage 2 and 3 decisions.
+- `docs/project-structure-and-module-organization.md` (placement table and
+  algorithm, filename rules, test placement, generated and proof
+  boundaries), `docs/build-test-and-development-commands.md` (from the real
+  `make help`), `docs/production-contract.md` (unresolved, service-owned).
+- `docs/first-production-feature.md`, written from a walkthrough executed on
+  a scratch worktree (a `greeting` crate, `GET /greetings/{name}`, merged in
+  `service::api`, `ALLOW_FULL=1 make check` green with 84 tests). The
+  walkthrough found and fixed the contract test that asserted the exact
+  operation set.
+- `CONTRIBUTING.md` completed against the catalog; `AGENTS.md` routes
+  architecture pressure through the front door.
+- The stage 2, 3, 4, and 5 research bundles absorbed into their owning
+  documents and deleted; `specs/rust-skills/` stays open with stage 7.
+
+Deviations from the Go template: a link checker where Go has none;
+`test/README.md` deferred to the first `test/` crate (no directory before its
+first artifact); `architecture/async.md` and `persistence.md` deferred to
+their profiles; placement rules name the crate graph and `#[cfg(test)]` /
+`tests/` instead of Go packages and depguard file families; the first-feature
+guide edits handlers and regenerates the document (code-first contract).
+
+Exit criteria met: `make docs-check` passes (169 links, 0 errors) and CI's
+`docs` job runs it on every documentation change; every `AGENTS.md`
+conditional owner resolves; the first-feature guide was followed on the
+scaffold end to end.
 
 ### Stage 6: Agent harness and spec-first workflow
 

@@ -2,7 +2,7 @@
 # dependency graph. `make deny` runs every check; CI runs it on the
 # `cargo_dependencies` and `dependency_policy` surfaces and on schedule,
 # because the advisory database moves without a commit.
-# Decisions: specs/validation-delivery/research/synthesis.md.
+# Decisions: docs/ci-cd-production-ready.md.
 
 [graph]
 # Only the targets the service is built and tested for. Without this list
@@ -39,7 +39,7 @@ confidence-threshold = 0.8
 [bans]
 # Duplicate versions are reported, not refused: base64, getrandom, hashbrown,
 # syn, and tower-http currently resolve twice through upstream crates that
-# have not converged; the synthesis lists them as deferred.
+# have not converged; docs/ci-cd-production-ready.md lists them as deferred.
 multiple-versions = "warn"
 wildcards = "deny"
 # Workspace crates depend on each other by path without a version; cargo-deny
