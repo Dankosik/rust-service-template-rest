@@ -247,3 +247,11 @@ stage 9 initializer may generate `.railway/`.
 13. In zsh, `status` is a read-only variable; scripts run under `/bin/sh`.
 14. The contract test that listed the exact operation ids broke on the first
     feature; it asserts probe presence now.
+15. buildx's `type=gha` cache reads `ACTIONS_RUNTIME_TOKEN` and
+    `ACTIONS_RESULTS_URL`, which GitHub hands to actions but not to `run:`
+    steps, and it skips the import and export silently when they are absent
+    (*verified*: the first `main` run of the `image` job showed neither
+    "importing cache manifest from gha" nor "exporting cache"; the Go
+    template's logs show the same). `crazy-max/ghaction-github-runtime`
+    exposes them before `make runtime-image-build` in CI and in the
+    publication action.

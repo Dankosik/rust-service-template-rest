@@ -398,9 +398,13 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Buildx
-        # The docker-container driver exports layers to the Actions cache and
-        # exposes the runtime token the gha cache backend needs.
+        # The docker-container driver can export layers to the Actions cache.
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Expose the Actions runtime to buildx
+        # `type=gha` reads ACTIONS_RUNTIME_TOKEN and ACTIONS_RESULTS_URL, which
+        # GitHub hands to actions but not to `run:` steps; without this buildx
+        # silently skips the cache import and export.
+        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
       - name: Build runtime image
         # Layers (the cooked dependency layer above all) restore from the
         # Actions cache on every run and are written only by pushes to main
