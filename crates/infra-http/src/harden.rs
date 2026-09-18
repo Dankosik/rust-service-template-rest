@@ -236,7 +236,9 @@ mod tests {
     use axum::http::header::{ALLOW, CONTENT_TYPE, RETRY_AFTER};
     use axum::http::{Method, Request as HttpRequest};
     use axum::routing::{get, post};
+    use axum_test::TestServer;
     use http_body_util::BodyExt;
+    use serde_json::Value;
     use tower::ServiceExt;
 
     use super::*;
@@ -288,99 +290,73 @@ mod tests {
 
     #[tokio::test]
     async fn success_carries_request_id_and_nosniff() {
-        let response = app(&options())
-            .oneshot(request(Method::GET, "/ok"))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get(X_CONTENT_TYPE_OPTIONS).unwrap(),
-            "nosniff"
-        );
-        let id = response
-            .headers()
-            .get(&REQUEST_ID_HEADER)
-            .unwrap()
-            .to_str()
-            .unwrap();
+        let server = TestServer::new(app(&options()));
+        let response = server.get("/ok").await;
+        response.assert_status_ok();
+        response.assert_header(X_CONTENT_TYPE_OPTIONS, "nosniff");
+        response.assert_text("ok");
+        let id = response.header(REQUEST_ID_HEADER);
+        let id = id.to_str().unwrap();
         assert_eq!(id.len(), 36, "generated UUIDv4: {id}");
     }
 
     #[tokio::test]
     async fn valid_inbound_request_id_is_echoed_and_invalid_replaced() {
-        let mut req = request(Method::GET, "/ok");
-        req.headers_mut()
-            .insert(&REQUEST_ID_HEADER, HeaderValue::from_static("client-id_1"));
-        let response = app(&options()).oneshot(req).await.unwrap();
-        assert_eq!(
-            response.headers().get(&REQUEST_ID_HEADER).unwrap(),
-            "client-id_1"
-        );
+        let server = TestServer::new(app(&options()));
+        server
+            .get("/ok")
+            .add_header(REQUEST_ID_HEADER, "client-id_1")
+            .await
+            .assert_header(REQUEST_ID_HEADER, "client-id_1");
 
-        let mut req = request(Method::GET, "/ok");
-        req.headers_mut().insert(
-            &REQUEST_ID_HEADER,
-            HeaderValue::from_static("bad id with spaces"),
-        );
-        let response = app(&options()).oneshot(req).await.unwrap();
-        assert_ne!(
-            response.headers().get(&REQUEST_ID_HEADER).unwrap(),
-            "bad id with spaces"
-        );
+        let response = server
+            .get("/ok")
+            .add_header(REQUEST_ID_HEADER, "bad id with spaces")
+            .await;
+        let id = response.header(REQUEST_ID_HEADER);
+        assert_ne!(id, "bad id with spaces");
+        assert_eq!(id.to_str().unwrap().len(), 36);
     }
 
     #[tokio::test]
     async fn not_found_and_method_not_allowed_are_problems_with_allow() {
-        let response = app(&options())
-            .oneshot(request(Method::GET, "/missing"))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(
-            response.headers().get(CONTENT_TYPE).unwrap(),
-            "application/problem+json"
-        );
-        let json = body_json(response).await;
+        let server = TestServer::new(app(&options()));
+        let response = server.get("/missing").await;
+        response.assert_status(StatusCode::NOT_FOUND);
+        response.assert_header(CONTENT_TYPE, "application/problem+json");
+        let json = response.json::<Value>();
         assert_eq!(json["code"], "not_found");
-        assert!(json["request_id"].is_string());
+        let id = response.header(REQUEST_ID_HEADER);
+        assert_eq!(json["request_id"].as_str(), Some(id.to_str().unwrap()));
 
-        let response = app(&options())
-            .oneshot(request(Method::DELETE, "/ok"))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-        let allow = response
-            .headers()
-            .get(ALLOW)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned();
-        assert!(allow.contains("GET"), "{allow}");
-        assert_eq!(body_json(response).await["code"], "method_not_allowed");
+        let response = server.delete("/ok").await;
+        response.assert_status(StatusCode::METHOD_NOT_ALLOWED);
+        response.assert_header(CONTENT_TYPE, "application/problem+json");
+        let allow = response.header(ALLOW);
+        assert!(allow.to_str().unwrap().contains("GET"), "{allow:?}");
+        assert_eq!(response.json::<Value>()["code"], "method_not_allowed");
     }
 
     #[tokio::test]
     async fn timeout_is_a_504_problem() {
-        let response = app(&options())
-            .oneshot(request(Method::GET, "/slow"))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
-        let json = body_json(response).await;
+        let server = TestServer::new(app(&options()));
+        let response = server.get("/slow").await;
+        response.assert_status(StatusCode::GATEWAY_TIMEOUT);
+        response.assert_header(CONTENT_TYPE, "application/problem+json");
+        let json = response.json::<Value>();
         assert_eq!(json["code"], "gateway_timeout");
-        assert!(json["request_id"].is_string());
+        let id = response.header(REQUEST_ID_HEADER);
+        assert_eq!(json["request_id"].as_str(), Some(id.to_str().unwrap()));
     }
 
     #[tokio::test]
     async fn panic_is_a_sanitized_500_problem() {
-        let response = app(&options())
-            .oneshot(request(Method::GET, "/panic"))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let server = TestServer::new(app(&options()));
+        let response = server.get("/panic").await;
+        response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+        response.assert_header(CONTENT_TYPE, "application/problem+json");
         assert!(response.headers().contains_key(&REQUEST_ID_HEADER));
-        let json = body_json(response).await;
+        let json = response.json::<Value>();
         assert_eq!(json["code"], "internal_error");
         assert_eq!(json["detail"], SANITIZED_DETAIL);
         assert!(!json.to_string().contains("boom"));
@@ -490,24 +466,19 @@ mod tests {
     async fn zero_in_flight_disables_shedding() {
         let mut options = options();
         options.max_in_flight = None;
-        let response = app(&options)
-            .oneshot(request(Method::GET, "/ok"))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        let server = TestServer::new(app(&options));
+        server.get("/ok").await.assert_status_ok();
     }
 
     #[tokio::test]
     async fn options_is_not_answered_by_a_cors_layer() {
-        let mut req = request(Method::OPTIONS, "/ok");
-        req.headers_mut()
-            .insert("origin", HeaderValue::from_static("https://evil.example"));
-        req.headers_mut().insert(
-            "access-control-request-method",
-            HeaderValue::from_static("GET"),
-        );
-        let response = app(&options()).oneshot(req).await.unwrap();
-        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let server = TestServer::new(app(&options()));
+        let response = server
+            .method(Method::OPTIONS, "/ok")
+            .add_header("origin", "https://evil.example")
+            .add_header("access-control-request-method", "GET")
+            .await;
+        response.assert_status(StatusCode::METHOD_NOT_ALLOWED);
         assert!(
             response
                 .headers()

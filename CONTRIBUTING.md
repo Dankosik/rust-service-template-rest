@@ -133,6 +133,15 @@ real defect still requires correction.
   driver.
 - Tests live beside their owner; bound every wait; join every spawned task.
 
+## Library selection
+
+[Backend library selection](docs/backend-library-selection.md) records the
+adopted test helpers and the triggers for validators, serialization adapters,
+builders, SQLx query tooling and optional integrations. Consult it before
+adding a dependency or writing a generic mechanism. Deferred candidates are
+not a mandatory install list; the owning feature must justify and validate
+its choice.
+
 ## Security and ownership
 
 Do not open public issues for undisclosed vulnerabilities; follow
