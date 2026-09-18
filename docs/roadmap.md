@@ -18,7 +18,7 @@ is not a supported template state.
 | 1 | Bootstrap: repository, workspace, runnable health-only service | done |
 | 2 | Runtime core: configuration, logging, telemetry, hardened HTTP | done |
 | 3 | OpenAPI-first contract and generated bindings | done |
-| 4 | Validation routing and delivery: CI surfaces, security gates, image, publication | planned |
+| 4 | Validation routing and delivery: CI surfaces, security gates, image, publication | done |
 | 5 | Repository documentation: architecture, placement, commands, production contract | planned |
 | 6 | Agent harness and spec-first workflow | planned |
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
@@ -52,7 +52,7 @@ independent of each other and each depends on 9 for its profile marker.
 | Go template | Rust template | Notes |
 | --- | --- | --- |
 | `go.mod` module path; `make template-init MODULE=...` | Workspace package names; initializer rewrites the service crate name, binary name, and owners | No module path to rewrite; less initializer surface. |
-| `tools/go.mod` pinned developer tools | Pinned `cargo install --locked` versions declared in one place (stage 4) | Candidates: `cargo-deny`, `cargo-nextest`, `cargo-audit`, `cargo-machete`. |
+| `tools/go.mod` pinned developer tools | `tools/versions.env`: one `NAME=value` pin per tool, read by `make`, shell, and CI; Cargo tools (`cargo-deny`, `cargo-shear`, `zizmor`) built once per version into the Git common directory locally, prebuilt in CI through `taiki-e/install-action`; Go tools through `go run`; ShellCheck and Trivy as digest-pinned containers | Cargo has no project-local tool table; `make tools-check` proves the pins resolve. `cargo-nextest` reopens at stage 8, `cargo-audit` and `cargo-machete` were rejected (`specs/validation-delivery/research/synthesis.md`). |
 | `cmd/service/main.go` → `bootstrap.Run` | `crates/service/src/main.rs` → `bootstrap::run` | Runtime construction, signals, and drain live in `bootstrap`; `main` only maps the result to an exit code. |
 | `internal/<feature>` | `crates/<feature>` | Not created until the first feature exists. |
 | `internal/infra/http` (`chi`, `net/http` server) | `crates/infra-http` (axum `Router`, `tower-http` layers, hand-rolled hyper accept loop) | Middleware order is the route tree's observable semantics in both. `axum::serve` exposes no connection limits and sets no timer, so the accept loop is template-owned. |
@@ -65,11 +65,11 @@ independent of each other and each depends on 9 for its profile marker.
 | River jobs | Decision in stage 10 | Candidates: `apalis`, `underway`, or a template-owned PostgreSQL queue. |
 | NATS JetStream (`nats.go`) | `async-nats` | |
 | gRPC (`grpc-go`, buf) | `tonic` + `prost`, buf for lint and breaking checks | |
-| `golangci-lint`, `depguard` | clippy workspace lints; crate graph for direction; `cargo-deny` bans for forbidden crates | |
-| `gosec`, `govulncheck` | `cargo-deny advisories`, `cargo-audit`; CodeQL for Rust when available on the repository | |
+| `golangci-lint`, `depguard` | clippy workspace lints; crate graph for direction; `cargo-deny` bans for forbidden crates; `cargo-shear` for unused dependencies | |
+| `gosec`, `govulncheck` | `cargo-deny` (advisories, licenses, bans, sources) and CodeQL for Rust; Trivy over the `cargo-auditable` binary in the image | No reachability analysis exists for Rust; `cargo-audit` would read the same database. |
 | `goleak`, `-race` | Ownership and `Send`/`Sync` remove data races at compile time; task completion is proven by joining; `loom` only for hand-written lock-free code | Do not port a race detector step. |
-| Distroless static image | Multi-stage build; `distroless/cc` (glibc) or `distroless/static` (musl) decided in stage 4 with measured image size and build time | |
-| `.agents/skills/go-*` | `.agents/skills/rust-*` (stage 7) | See the skills plan below. |
+| Distroless static image | Multi-stage build on `rust:<toolchain>-slim-trixie` with cargo-chef and `cargo auditable build`; `gcr.io/distroless/cc-debian13:nonroot` (glibc) runtime | Measured against musl (43.5 vs 9.1 MiB, equal build time); glibc keeps the tests' target triple and leaves the allocator decision to stage 11, which may switch to the static image. |
+| `.agents/skills/go-*` | `.agents/skills/rust-*` (stage 7; `rust-delivery-platform` arrived with stage 4) | See the skills plan below. |
 
 ## Stages
 
@@ -200,35 +200,84 @@ whose responses the document declares; oasdiff reports no breaking change
 between the Go template's health-only 3.0.3 document and this one;
 `make check` passes (80 tests).
 
-### Stage 4: Validation routing and delivery
+### Stage 4: Validation routing and delivery (done)
 
-Goal: CI selects checks from the changed surfaces, security gates run where
-they observe something, and a production image exists.
+Research and decisions: `specs/validation-delivery/research/synthesis.md`
+(tool survey with verified behaviour, the surface table, the job layout, the
+image measurements, deviations, and gotchas). The bundle stays open with the
+stage 2 and 3 bundles until the stage 5 documents absorb them.
 
-- `scripts/ci/changed-surfaces.sh` classifying Rust source, dependencies,
-  lint config, OpenAPI, workflows, shell, Dockerfile, documentation, and agent
-  instructions; `required` job accepts deliberate skips.
-- `cargo-deny` (advisories, licenses, bans, sources), `cargo-audit`,
-  Dependency Review on pull requests, Gitleaks with the same range/history
-  policy, `actionlint`, `shellcheck`, CodeQL for Rust if the repository can
-  enable it.
-- Pinned developer tool versions in one manifest consumed by `make` and CI,
-  absorbing the Redocly CLI and oasdiff pins now in `make/template.mk`.
-- `build/docker/Dockerfile`: multi-stage, reproducible (`SOURCE_DATE_EPOCH`),
-  non-root, `STOPSIGNAL SIGTERM`, version and commit baked in; runtime image
-  lifecycle check (start, readiness, version, clean `SIGTERM`).
-- `cd.yml` with opt-in GHCR publication: run-scoped candidate, vulnerability
-  scan, CycloneDX SBOM, cosign signing and attestation, verification before
-  tag promotion. `railway.toml` and the deployment profile doc.
-- Expanded `make/template.mk`: `verify` plan/receipt model, `ALLOW_FULL` and
-  `ALLOW_HEAVY` guards, `lint-changed`, `test-changed` using
-  `cargo` package selection from changed paths.
-- `docs/validation-routing.md`, `docs/validation/*.md`,
-  `docs/ci-cd-production-ready.md`.
+Delivered, in five pull requests
+([#8](https://github.com/Dankosik/rust-service-template-rest/pull/8),
+[#9](https://github.com/Dankosik/rust-service-template-rest/pull/9),
+[#10](https://github.com/Dankosik/rust-service-template-rest/pull/10),
+[#12](https://github.com/Dankosik/rust-service-template-rest/pull/12),
+[#13](https://github.com/Dankosik/rust-service-template-rest/pull/13)) plus
+this documentation change:
 
-Exit criteria: a docs-only pull request runs no Rust job; a Dockerfile change
-builds and lifecycle-checks the image; `make verify` prints a plan and a
-receipt; secret and dependency gates fail on planted findings in a test branch.
+- `tools/versions.env`, the one pin manifest; `make tools-check` proves the
+  Cargo tools resolve, the Dockerfile `ARG` defaults agree, every `FROM`
+  carries a digest, and the builder tag equals the toolchain channel.
+- Dependency and secret gates: `deny.toml` + `make deny` (Linux gnu targets,
+  the `paste` advisory ignore with its reopen condition, permissive license
+  allow-list, path wildcards allowed, duplicate versions as warnings,
+  crates.io only); `make unused-deps` (cargo-shear, which removed the unused
+  `http` and `hyper` from `infra-http`); `.gitleaks.toml` + `make secret-scan`
+  and `secret-scan-history`; `make actionlint`, `make zizmor`,
+  `make shellcheck`.
+- The validation system: `scripts/ci/changed-surfaces.sh` (16 surfaces,
+  fail-closed, `--union BASE`, `--all`), `affected-crates.sh` (`cargo tree
+  -i` reverse closure, test-only `tests/`, workspace fallback),
+  `git-changed-paths.sh`, `validation-lock.sh`, `measure.sh`, and `verify.sh`
+  (plan, attempt record, receipt keyed by candidate × plan × environment,
+  invalidation, `ALLOW_HEAVY` and Docker preflight), each with a self-test;
+  `make plan`, `make verify`, `lint-changed`, `test-changed`;
+  `ALLOW_FULL=1 make check` under the validation lock.
+- CI by surface: `changes` → `quality`, `security`, `secrets`, `delivery`,
+  `image` → `required`; `codeql.yml` for Rust and Actions with
+  `codeql-required`; Dependency Review on pull requests; weekly schedule over
+  every surface; caches restored always and saved only on pushes to `main`;
+  every action pinned by SHA.
+- `build/docker/Dockerfile` and `.dockerignore`; `runtime-image-build.sh`
+  and `runtime-image-check.sh`; `make dockerfile-check`,
+  `runtime-image-build`, `runtime-image-check`, `container-security`,
+  `container-sbom`; Dependabot for the `FROM` digests.
+- `cd.yml` (opt-in through `ENABLE_GHCR_PUBLISH`) and
+  `.github/actions/publish-image` with `publish-image-metadata.sh`; nothing
+  published.
+- `docs/validation-routing.md`, `docs/validation/{rust,security,delivery,
+  containers,generated,instructions}.md`, `docs/ci-cd-production-ready.md`,
+  `docs/railway-deployment-profile.md`, the `rust-delivery-platform` skill,
+  and the `AGENTS.md` validation budget naming `ALLOW_FULL=1 make check` and
+  the plan/verify route.
+
+Deviations from the Go template, with reasons, are tabulated in the
+synthesis: a versions file instead of a tools module; `cargo-deny` and CodeQL
+instead of `govulncheck` and `gosec`; `cargo-shear` and `--locked` instead of
+`go mod tidy`; glibc on `distroless/cc-debian13` with the toolchain file kept
+out of the image context; `cargo auditable build` so the image scan sees Rust
+packages; the Cargo version stays `app.version` and the lifecycle check
+asserts `app.commit`; cargo-chef layers instead of cache mounts; no
+`railway.toml` (Config as Code is deprecated) but a profile document with an
+IaC snippet; a `target/` allowlist instead of a Gitleaks baseline; `cargo
+test` instead of a runner. Implementation notes recorded during the stage:
+the unmatched `ISC` licence allowance was dropped; actionlint's host
+integrations are disabled; the repository dependency graph had to be enabled
+for Dependency Review; base images are pinned in the Dockerfile only; the
+SBOM comes from the pinned Trivy container; a release tag must equal the
+crate version; two zizmor findings on `cd.yml` are ignored inline with their
+reasons.
+
+Exit criteria met: a docs-only pull request runs no Rust job
+([#11](https://github.com/Dankosik/rust-service-template-rest/pull/11):
+`quality`, `security`, `delivery`, and both CodeQL analyses skipped); a
+Dockerfile change builds and lifecycle-checks the image in CI (`image` job on
+#12: ready, `app.commit` asserted, clean stop in 15 s, Trivy clean on both
+targets); `make verify` prints a plan and writes a receipt (locally: a
+49 s route including the image gates); `ALLOW_FULL=1 make check` passes
+(80 tests, 17 skills, 4 self-tests); every tool pin lives in one file. The
+planted-finding check of the secret and dependency gates follows in a test
+branch that is closed without merge.
 
 ### Stage 5: Repository documentation
 
@@ -294,7 +343,8 @@ fifteen skills under `.agents/skills` in the rust-cli-skills shape (`rust-coder`
 owner it decides against; [Skill Authoring](skill-authoring.md);
 `make check-skills` (frontmatter, name/directory agreement, trigger, prose-only
 body, word budget, LICENSE copy) wired into `make check` and CI; `AGENTS.md`
-routing to the catalog. `rust-api-contract` arrived with stage 3. Remaining
+routing to the catalog. `rust-api-contract` arrived with stage 3 and
+`rust-delivery-platform` with stage 4. Remaining
 for this stage: capability skills with their stages,
 the harness-neutral skills and Claude/Qwen views with stage 6, universal
 disciplines when a capability reaches them, and behavioural evaluation
