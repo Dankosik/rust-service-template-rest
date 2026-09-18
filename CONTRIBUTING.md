@@ -77,6 +77,10 @@ real defect still requires correction.
   surfaces did not select and fail on any failed or cancelled one, so a
   docs-only pull request passes without running a Rust job. The repository
   does not mutate its own GitHub settings.
+- Dependency Review in the `security` job needs the repository's dependency
+  graph; enable Dependabot alerts (Settings → Code security, or
+  `gh api -X PUT repos/<owner>/<repo>/vulnerability-alerts`) once in a
+  derived repository, or the job fails on its first pull request.
 - Treat `.github/workflows/ci.yml` as the source of truth for current check
   names instead of copying a list into scripts or docs. Jobs are selected by
   `scripts/ci/changed-surfaces.sh`, the classifier `make plan` uses; a new

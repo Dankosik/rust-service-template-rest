@@ -377,8 +377,13 @@ the initializer knows the service identity and may generate `.railway/`.
     Dependabot's `docker` ecosystem move it.
 14. `GITHUB_ENV` accepts `NAME=value` lines only; strip comments from
     `tools/versions.env` before appending it.
-15. Dependabot alerts are disabled on this repository; Dependency Review does
-    not need them, but enabling them is an operator step worth documenting.
+15. Dependency Review needs the repository's dependency graph, which was
+    *not* on for this public repository (the observation above was wrong:
+    the action failed with "Dependency graph is not enabled"). Enabling
+    Dependabot alerts (`PUT /repos/{owner}/{repo}/vulnerability-alerts`)
+    turns the graph on; it was enabled during stage 4 to match the Go
+    template repository. A derived repository must do the same operator step
+    before its first pull request, or the `security` job fails (*verified*).
 16. `cargo deny check licenses` warns (`license-not-encountered`) on an
     allowance no crate in the target-restricted graph carries; `ISC` from the
     draft list above was unmatched, so the committed `deny.toml` omits it and
