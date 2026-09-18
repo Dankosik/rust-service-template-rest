@@ -1,0 +1,11 @@
+title = "rust-service-template-rest gitleaks configuration"
+
+# Default rules; every allowlist below names its current reason. No baseline
+# file exists because the history is clean; add one only for a finding that
+# cannot be removed from history.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Cargo build output is not source; `gitleaks dir` ignores .gitignore and would otherwise read hundreds of megabytes of it"
+paths = ['''^target/''']

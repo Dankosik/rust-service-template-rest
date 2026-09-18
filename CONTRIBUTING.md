@@ -8,13 +8,18 @@ repository surface that can prove them.
 - [rustup](https://rustup.rs). The pinned toolchain in `rust-toolchain.toml`
   installs on first use, or explicitly with `rustup toolchain install`.
 - GNU Make.
-- Node.js, for `make openapi-lint` (Redocly CLI through `npx`, pinned in
-  `make/template.mk`); it is part of `make check`.
-- Go, only for `make openapi-breaking` (oasdiff through `go run`); CI runs
-  it on pull requests, locally it is optional.
+- Node.js, for `make openapi-lint` (Redocly CLI through `npx`); it is part
+  of `make check`.
+- Go, for `make openapi-breaking` (oasdiff), `make secret-scan` (Gitleaks),
+  and `make actionlint`, all through `go run`; CI runs them, locally they are
+  optional.
+- Docker, for `make shellcheck` (pinned container); later stages add the
+  runtime image and integration proof.
 
-Later stages add Docker for integration proof and one manifest of pinned
-tools; the roadmap names them when they land.
+Every tool version is pinned once in `tools/versions.env`; `make` and CI read
+the same file, and `make tools-check` proves the pins resolve. The Cargo tools
+(`cargo-deny`, `cargo-shear`, `zizmor`) build from crates.io into the Git
+common directory the first time a target needs them, once per version.
 
 ## Validate a change
 
@@ -27,11 +32,14 @@ make test-package PKG=<crate>      # one crate
 make test                          # several crates or a manifest change
 ```
 
-`make check` (`fmt-check`, `lint`, `test`, `openapi-lint`, `check-skills`)
-is the explicit full-repository gate and what CI runs; it is not a routine
+`make check` (`fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`,
+`check-skills`) is the explicit full-repository gate; it is not a routine
 follow-up to every edit. Format with `make fmt`. Every Cargo command runs
 with `--locked`: if a change needs a lockfile update, make it deliberately
-and commit `Cargo.lock` with the change.
+and commit `Cargo.lock` with the change. `make deny` (advisories, licenses,
+bans, sources) and `make secret-scan` are the dependency and secret gates CI
+runs; run them locally when a change touches `Cargo.toml`, `Cargo.lock`,
+`deny.toml`, or adds anything that could look like a credential.
 
 A change to an HTTP operation is made in the handler's `#[utoipa::path]`
 attributes and schema derives, then `make openapi-generate` rewrites

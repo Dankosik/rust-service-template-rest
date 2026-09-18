@@ -97,7 +97,7 @@ load balancers, drains in-flight requests, flushes telemetry, and exits `0`
 | Observability | JSON or text logs with trace and span ids on every record; OpenTelemetry traces with OTLP/HTTP export when an endpoint is configured; Prometheus metrics (HTTP, process, Tokio runtime) on a private `:9090` listener |
 | Lifecycle | Staged shutdown under one grace deadline: readiness off → propagation delay → drain → diagnostics → background join → telemetry flush; process-level tests of the built binary |
 | Workspace | Pinned stable toolchain, edition 2024, workspace-level dependency versions and lints (`clippy::pedantic`, `unsafe_code = "forbid"`), committed `Cargo.lock`, `--locked` everywhere |
-| Commands | `Makefile` + `make/template.mk`: `build`, `run`, `test`, `test-package`, `fmt`, `fmt-check`, `lint`, `openapi-generate`, `openapi-check`, `openapi-lint`, `openapi-breaking`, `check-skills`, `check` |
+| Commands | `Makefile` + `make/template.mk`: `build`, `run`, `test`, `test-package`, `fmt`, `fmt-check`, `lint`, `openapi-generate`, `openapi-check`, `openapi-lint`, `openapi-breaking`, `check-skills`, `deny`, `unused-deps`, `secret-scan`, `actionlint`, `zizmor`, `shellcheck`, `tools-check`, `check`; every tool pinned once in `tools/versions.env` |
 | Delivery | GitHub Actions CI (format, clippy, build, test, OpenAPI lint and compatibility, skills) with pinned action SHAs and an always-reported `required` job; Dependabot for Cargo and Actions |
 | Agent workflow | `AGENTS.md` repository contract, 16 model-invoked skills under `.agents/skills`, `CLAUDE.md`, and the [roadmap](docs/roadmap.md) that names the Go-template source for every planned owner |
 | Community | MIT license, code of conduct, security policy, issue forms, pull-request template, `CODEOWNERS` |
@@ -126,6 +126,8 @@ docs/roadmap.md             stages, fixed decisions, Go-to-Rust concept map
 docs/architecture/http.md   request path, contract workflow, compatibility rules
 specs/<topic>/research/     library research behind the current stage
 make/template.mk            portable standard Make commands
+tools/versions.env          one pin per developer and delivery tool
+deny.toml, .gitleaks.toml   dependency and secret-scanning policy
 .github/workflows/ci.yml    the source of truth for CI check names
 ```
 
@@ -143,10 +145,18 @@ make/template.mk            portable standard Make commands
 | `make openapi-check` | Redocly lint plus the contract tests (drift, security decisions, closed schemas) |
 | `make openapi-breaking BASE_OPENAPI=<file>` | oasdiff breaking-change comparison against a base document |
 | `make check-skills` | Validate the shape of `.agents/skills` |
-| `make check` | Full local gate: `fmt-check`, `lint`, `test`, `openapi-lint`, `check-skills` |
+| `make deny` | cargo-deny: advisories, licenses, bans, sources (`deny.toml`) |
+| `make unused-deps` | cargo-shear: fail on a declared dependency no crate uses |
+| `make secret-scan` / `make secret-scan-history` | Gitleaks over the worktree and the commits since `BASE_REF`, or over the whole history (`ALLOW_HEAVY=1`) |
+| `make actionlint` / `make zizmor` / `make shellcheck` | Workflow lint, workflow security audit, shell lint |
+| `make tools-check` | Prove every pin in `tools/versions.env` resolves |
+| `make check` | Full local gate: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-skills` |
 
-`make openapi-lint` needs Node.js (Redocly CLI runs through `npx`);
-`make openapi-breaking` needs Go (oasdiff runs through `go run`). Stop at the
+Every tool version is pinned once in `tools/versions.env`. Cargo tools
+(`cargo-deny`, `cargo-shear`, `zizmor`) are built once per version into the
+Git common directory on first use; `make openapi-lint` needs Node.js (Redocly
+CLI through `npx`); `make openapi-breaking`, `make secret-scan`, and `make
+actionlint` need Go (`go run`); `make shellcheck` needs Docker. Stop at the
 local completion criterion in [AGENTS.md](AGENTS.md#validation-budget) rather
 than adding checks for confidence.
 

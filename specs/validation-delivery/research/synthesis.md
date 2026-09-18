@@ -379,3 +379,12 @@ the initializer knows the service identity and may generate `.railway/`.
     `tools/versions.env` before appending it.
 15. Dependabot alerts are disabled on this repository; Dependency Review does
     not need them, but enabling them is an operator step worth documenting.
+16. `cargo deny check licenses` warns (`license-not-encountered`) on an
+    allowance no crate in the target-restricted graph carries; `ISC` from the
+    draft list above was unmatched, so the committed `deny.toml` omits it and
+    a crate that brings a new license adds its line in the same change
+    (*verified*).
+17. actionlint's shellcheck and pyflakes integrations run whatever binary the
+    host has on PATH (a runner-image update could change the result);
+    `make actionlint` disables both so local and CI agree, and `*.sh` files
+    get the pinned ShellCheck container through `make shellcheck`.
