@@ -35,8 +35,10 @@ const GENERATED_HEADER: &str =
 )]
 struct ApiDoc;
 
-/// Every operation the service serves, with its contract, over the shared
-/// readiness reader. Bootstrap supplies the state and hardens the routes.
+/// Every operation the service serves, with its contract, as one
+/// [`OpenApiRouter`] whose [`ReadinessReader`] state is still unapplied.
+/// Bootstrap splits it, supplies the state, and hardens the routes;
+/// [`document`] takes the other half.
 #[must_use]
 pub fn contract() -> OpenApiRouter<ReadinessReader> {
     OpenApiRouter::with_openapi(ApiDoc::openapi()).merge(infra_http::router())
@@ -45,7 +47,7 @@ pub fn contract() -> OpenApiRouter<ReadinessReader> {
 /// The OpenAPI document of [`contract`].
 #[must_use]
 pub fn document() -> Document {
-    contract().split_for_parts().1
+    contract().into_openapi()
 }
 
 /// The committed form of [`document`]: the generated-file header followed

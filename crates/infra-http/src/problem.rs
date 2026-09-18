@@ -8,9 +8,8 @@
 //!
 //! The same types describe themselves in the OpenAPI document: `ToSchema`
 //! renders the `Problem` and `InvalidParam` schemas from the serializer, and
-//! the response newtypes at the end of this file are the reusable
-//! `application/problem+json` responses operations reference. Doc comments
-//! on those items are contract text.
+//! [`responses`] holds the reusable `application/problem+json` responses
+//! operations reference. Doc comments on those items are contract text.
 
 use std::time::Duration;
 
@@ -18,7 +17,7 @@ use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
-use utoipa::{ToResponse, ToSchema};
+use utoipa::ToSchema;
 
 /// Stable machine-readable failure code a client matches on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -189,6 +188,8 @@ struct CodeMeta {
 
 /// Which part of a request failed validation, following the RFC 9457
 /// extension-member example. Never carries the submitted value.
+// `deny_unknown_fields` on a type that is only serialized has no serde
+// effect; it is what renders `additionalProperties: false` in the schema.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InvalidParam {
@@ -205,24 +206,31 @@ pub struct InvalidParam {
 /// RFC 9457 problem details: the failure envelope of every non-success
 /// response, keyed by a stable `code` from one closed catalog.
 // Build with `Problem::new`, add context with the builder methods, and
-// return it from a handler or middleware. Optional members are omitted,
-// never `null`, which the `nullable = false` annotations tell the contract.
+// return it from a handler or middleware. Where the schema deliberately
+// differs from the Rust type: optional members are omitted, never `null`,
+// which the `nullable = false` annotations tell the contract; `code` is a
+// plain `string` rather than the closed `Code` enum, because oasdiff treats
+// a new enum value in a response as a breaking change and the catalog grows
+// with features; `deny_unknown_fields` has no serde effect on a type that is
+// only serialized and exists to render `additionalProperties: false`. The
+// examples are `Code::BadRequest` as the catalog renders it, so a catalog
+// edit regenerates them instead of leaving a stale copy.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Problem {
     /// Stable machine-readable error code.
-    #[schema(value_type = String, example = "bad_request")]
+    #[schema(value_type = String, example = json!(Code::BadRequest.as_str()))]
     code: Code,
     /// Stable URI reference identifying the problem class.
     #[serde(rename = "type")]
     #[schema(
         format = "uri-reference",
-        example = "https://www.rfc-editor.org/rfc/rfc9110#section-15.5.1"
+        example = json!(Code::BadRequest.type_uri())
     )]
     type_uri: &'static str,
-    #[schema(example = "bad request")]
+    #[schema(example = json!(Code::BadRequest.title()))]
     title: &'static str,
-    #[schema(example = 400)]
+    #[schema(example = json!(Code::BadRequest.status().as_u16()))]
     status: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, example = "invalid request framing")]
@@ -325,27 +333,64 @@ impl IntoResponse for Problem {
     }
 }
 
-// Reusable problem responses (`#/components/responses/<Name>`). Each is the
-// declared shape of one status an operation can answer with a `Problem`;
-// operations reference them as `(status = 400, response = BadRequest)`. They
-// exist for the document and are not constructed at runtime: the runtime
-// value is always a `Problem`, whose code fixes the status. A new status
-// joins this list with its first operation.
+/// Reusable problem responses (`#/components/responses/<Name>`) and their
+/// registration in the document.
+///
+/// Each newtype is the declared shape of one status an operation can answer
+/// with a [`Problem`]; an operation references it as
+/// `(status = <code>, response = <Name>)`. The types exist for the document
+/// and are not constructed at runtime: the runtime value is always a
+/// `Problem`, whose code fixes the status. Their names are distinct from
+/// [`Code`] on purpose: `Code::BadRequest` is what a handler returns,
+/// `responses::BadRequest` is what the contract declares. A new status joins
+/// this module with its first operation; the set every operation declares is
+/// [`TransportProblemResponses`]. Doc comments on the newtypes are the
+/// response descriptions in the contract.
+pub mod responses {
+    use utoipa::{IntoResponses, OpenApi, ToResponse};
 
-/// request is malformed or invalid
-#[derive(Debug, ToResponse)]
-#[response(content_type = "application/problem+json")]
-pub struct BadRequest(pub Problem);
+    use super::{InvalidParam, Problem};
 
-/// request body exceeds configured limit
-#[derive(Debug, ToResponse)]
-#[response(content_type = "application/problem+json")]
-pub struct RequestEntityTooLarge(pub Problem);
+    /// request is malformed or invalid
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json")]
+    pub struct BadRequest(pub Problem);
 
-/// unexpected server failure
-#[derive(Debug, ToResponse)]
-#[response(content_type = "application/problem+json")]
-pub struct InternalServerError(pub Problem);
+    /// request body exceeds configured limit
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json")]
+    pub struct RequestEntityTooLarge(pub Problem);
+
+    /// unexpected server failure
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json")]
+    pub struct InternalServerError(pub Problem);
+
+    /// The problem responses every operation declares, because the transport
+    /// can answer any route with them regardless of the handler. Name this
+    /// type in `responses(...)` beside the operation's own answers; a new
+    /// shared status joins here once instead of in every operation.
+    #[derive(Debug, IntoResponses)]
+    pub enum TransportProblemResponses {
+        #[response(status = 400)]
+        BadRequest(#[ref_response] BadRequest),
+        #[response(status = 413)]
+        RequestEntityTooLarge(#[ref_response] RequestEntityTooLarge),
+        #[response(status = 500)]
+        InternalServerError(#[ref_response] InternalServerError),
+    }
+
+    /// Components referenced by responses rather than by a handler's `body`,
+    /// which utoipa does not collect on its own; the router seeds its
+    /// document with them. `info` is irrelevant here: the service document
+    /// keeps its own when it merges this one.
+    #[derive(OpenApi)]
+    #[openapi(components(
+        schemas(Problem, InvalidParam),
+        responses(BadRequest, RequestEntityTooLarge, InternalServerError)
+    ))]
+    pub(crate) struct ProblemComponents;
+}
 
 #[cfg(test)]
 mod tests {

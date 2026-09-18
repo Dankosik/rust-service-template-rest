@@ -1,5 +1,5 @@
-//! The operations this crate owns: the platform probes and the problem
-//! components every operation references.
+//! The operations this crate owns: the platform probes, seeded with the
+//! problem components every operation references.
 //!
 //! [`router`] returns an [`OpenApiRouter`], so the axum routes and their
 //! OpenAPI description come from one construction. The service crate merges
@@ -15,26 +15,16 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::health;
-use crate::problem::{
-    BadRequest, InternalServerError, InvalidParam, Problem, RequestEntityTooLarge,
-};
+use crate::problem::responses::ProblemComponents;
 
 /// Route templates served without an access-log line unless enabled.
-pub(crate) const HEALTH_PROBE_ROUTES: &[&str] = &["/health/live", "/health/ready"];
+pub(crate) const HEALTH_PROBE_ROUTES: &[&str] = &[health::LIVE_PATH, health::READY_PATH];
 
-/// Components referenced by responses rather than by a handler's `body`,
-/// which utoipa does not collect on its own. `info` is irrelevant here: the
-/// service document keeps its own when it merges this one.
-#[derive(OpenApi)]
-#[openapi(components(
-    schemas(Problem, InvalidParam),
-    responses(BadRequest, RequestEntityTooLarge, InternalServerError)
-))]
-struct ProblemComponents;
-
-/// The probe routes with their contract, over the shared readiness reader.
-/// One `routes!` call per path: the macro groups the methods of a single
-/// path.
+/// The probe routes with their contract and the problem components, as one
+/// [`OpenApiRouter`] whose [`ReadinessReader`] state is still unapplied: the
+/// service crate's `api::contract` merges this value, and bootstrap splits
+/// it and calls `with_state` before [`crate::harden`]. One `routes!` call
+/// per path: the macro groups the methods of a single path.
 pub fn router() -> OpenApiRouter<ReadinessReader> {
     OpenApiRouter::with_openapi(ProblemComponents::openapi())
         .routes(routes!(health::live))
