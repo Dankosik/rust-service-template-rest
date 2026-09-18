@@ -67,10 +67,12 @@ regenerated fails everywhere tests run.
    feature's router.
 3. Write the handler with `#[utoipa::path]`: `operation_id`, `summary`,
    `tag`, the extension, `security()` for a public operation, and every
-   response. Reference the shared problem responses
-   (`(status = 400, response = BadRequest)`) and add a new one to
-   `infra_http::problem` only when a new status appears. Request and response
-   types derive `ToSchema`; `#[serde(deny_unknown_fields)]` closes an object.
+   response. Name `infra_http::problem::responses::TransportProblemResponses`
+   in `responses(...)` for the shared `400`/`413`/`500` problems, reference
+   an operation-specific one as `(status = <code>, response = <Name>)`, and
+   add a new component to `infra_http::problem::responses` only when a new
+   status appears. Request and response types derive `ToSchema`;
+   `#[serde(deny_unknown_fields)]` closes an object.
 4. Merge the feature's `OpenApiRouter` in `service::api::contract()`; the
    hardened chain is not edited for an operation.
 5. Run `make openapi-generate`, review the YAML diff as the contract change,

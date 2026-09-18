@@ -13,7 +13,10 @@
 //! service crate's tests refuse a stale copy. Every operation declares its
 //! `x-security-decision` and its OpenAPI `security`; an empty `security()`
 //! renders `security: []`, the explicit public override the linter and the
-//! contract tests require.
+//! contract tests require. Beside its own answers, every operation declares
+//! [`TransportProblemResponses`]: the `400`, `413`, and `500` problems the
+//! transport can answer with on any route (`413` and `500` come from the
+//! hardened chain, not from these handlers).
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -21,11 +24,22 @@ use axum::response::{IntoResponse, Response};
 use health::ReadinessReader;
 use utoipa::IntoResponses;
 
-use crate::problem::{BadRequest, InternalServerError, RequestEntityTooLarge};
+use crate::problem::responses::TransportProblemResponses;
+
+/// Route templates of the probes: the served path, the documented path, and
+/// the access log's skip list read these constants.
+pub(crate) const LIVE_PATH: &str = "/health/live";
+pub(crate) const READY_PATH: &str = "/health/ready";
+
+/// Probe bodies: what the handler sends and what the contract shows as the
+/// example, from one constant each.
+const LIVE_BODY: &str = "ok";
+const READY_BODY: &str = "ok";
+const NOT_READY_BODY: &str = "not ready";
 
 #[utoipa::path(
     get,
-    path = "/health/live",
+    path = LIVE_PATH,
     tag = "system",
     operation_id = "healthLive",
     summary = "Liveness probe",
@@ -35,27 +49,27 @@ use crate::problem::{BadRequest, InternalServerError, RequestEntityTooLarge};
         "rationale": "process-only platform liveness endpoint with no dependency details"
     }))),
     responses(
-        (status = 200, description = "ok", content_type = "text/plain", body = String, example = json!("ok")),
-        (status = 400, response = BadRequest),
-        (status = 413, response = RequestEntityTooLarge),
-        (status = 500, response = InternalServerError),
+        (status = 200, description = "ok", content_type = "text/plain", body = String, example = json!(LIVE_BODY)),
+        TransportProblemResponses,
     )
 )]
 pub(crate) async fn live() -> (StatusCode, &'static str) {
-    (StatusCode::OK, "ok")
+    (StatusCode::OK, LIVE_BODY)
 }
 
-/// The readiness verdict as the contract states it: one variant per status
-/// the handler can answer, so the document and the handler cannot disagree
-/// about which statuses exist. `IntoResponses` documents; `IntoResponse`
-/// below is the runtime rendering.
+/// The readiness verdict as the contract states it: one variant per answer
+/// the handler itself produces, so the document and the handler cannot
+/// disagree about those statuses (the shared problem responses belong to the
+/// transport). `IntoResponses` documents; `IntoResponse` below is the
+/// runtime rendering. The payload carries the body's schema; its value is
+/// always the matching constant.
 #[derive(Debug, IntoResponses)]
 pub(crate) enum HealthReadyResponse {
     /// ready
-    #[response(status = 200, content_type = "text/plain", example = json!("ok"))]
+    #[response(status = 200, content_type = "text/plain", example = json!(READY_BODY))]
     Ready(&'static str),
     /// not ready
-    #[response(status = 503, content_type = "text/plain", example = json!("not ready"))]
+    #[response(status = 503, content_type = "text/plain", example = json!(NOT_READY_BODY))]
     NotReady(&'static str),
 }
 
@@ -70,7 +84,7 @@ impl IntoResponse for HealthReadyResponse {
 
 #[utoipa::path(
     get,
-    path = "/health/ready",
+    path = READY_PATH,
     tag = "system",
     operation_id = "healthReady",
     summary = "Readiness probe",
@@ -79,16 +93,11 @@ impl IntoResponse for HealthReadyResponse {
         "exposure": "public",
         "rationale": "platform readiness endpoint exposing only generic ready state"
     }))),
-    responses(
-        HealthReadyResponse,
-        (status = 400, response = BadRequest),
-        (status = 413, response = RequestEntityTooLarge),
-        (status = 500, response = InternalServerError),
-    )
+    responses(HealthReadyResponse, TransportProblemResponses)
 )]
 pub(crate) async fn ready(State(readiness): State<ReadinessReader>) -> HealthReadyResponse {
     match readiness.verdict() {
-        Ok(()) => HealthReadyResponse::Ready("ok"),
-        Err(_) => HealthReadyResponse::NotReady("not ready"),
+        Ok(()) => HealthReadyResponse::Ready(READY_BODY),
+        Err(_) => HealthReadyResponse::NotReady(NOT_READY_BODY),
     }
 }
