@@ -1,0 +1,90 @@
+# Build, Test, And Development Commands
+
+The human-facing explanation of every make target. `make/template.mk` owns
+the composition (`make help` lists the targets from it); a derived service
+adds its own in `make/service.mk`. Every Cargo command runs with `--locked`,
+so a lockfile change is part of a change, never a side effect of running
+one. [AGENTS.md](../AGENTS.md#validation-budget) owns which of these a change
+needs; [Validation Routing](validation-routing.md) selects beyond that.
+
+## Everyday development
+
+| Command | Does | Needs |
+| --- | --- | --- |
+| `make build` | `cargo build --workspace` in debug | toolchain |
+| `make run` | Start the service with `env/config/local.toml` (`text` logs, `127.0.0.1` listeners) | toolchain |
+| `make test` | The workspace test suite, including the process tests of the built binary and the OpenAPI drift and contract tests | toolchain |
+| `make test-package PKG=<crate>` | One crate's tests | toolchain |
+| `make test-changed PKGS="<crate> <crate>"` | The tests of the crates `scripts/ci/affected-crates.sh` prints for a change | toolchain |
+| `make fmt` / `make fmt-check` | rustfmt over the workspace; the check fails on a diff | toolchain |
+| `make lint` | clippy over all targets at the workspace lint levels, warnings as errors | toolchain |
+| `make lint-changed PKGS="<crate> <crate>"` | The same clippy over the selected crates | toolchain |
+| `make clean` | `cargo clean` | toolchain |
+
+Crate names are package names: `service`, `service-config` (the
+`crates/config` directory), `health`, `infra-http`, `infra-telemetry`.
+
+## Contract
+
+| Command | Does | Needs |
+| --- | --- | --- |
+| `make openapi-generate` | Render `api/openapi/service.yaml` from the handlers' `#[utoipa::path]` annotations through the `openapi` binary | toolchain |
+| `make openapi-lint` | Redocly CLI over the committed document (`.redocly.yaml`) | Node.js (`npx`) |
+| `make openapi-check` | `openapi-lint` plus the `service` contract tests: byte-exact drift, every operation's security decision, closed problem schemas | toolchain, Node.js |
+| `make openapi-breaking BASE_OPENAPI=<file>` | oasdiff breaking-change comparison; `api/openapi/breaking-changes-approvals.txt` lists accepted breaks | Go (`go run`) |
+
+## Dependency, secret, and workflow gates
+
+| Command | Does | Needs |
+| --- | --- | --- |
+| `make deny` | cargo-deny: advisories, licenses, bans, sources over the locked graph under `deny.toml` | Cargo tool (built once) |
+| `make unused-deps` | cargo-shear: a declared dependency no crate uses fails | Cargo tool (built once) |
+| `make secret-scan` | Gitleaks over the worktree and the commits since `BASE_REF` (`origin/main`) | Go |
+| `ALLOW_HEAVY=1 make secret-scan-history` | Gitleaks over every commit on every branch | Go |
+| `make actionlint` | Workflow syntax and expression checks (host shellcheck and pyflakes integrations off) | Go |
+| `make zizmor` | Workflow security audit; `GH_TOKEN=$(gh auth token)` enables the online audits | Cargo tool (built once) |
+| `make shellcheck` | ShellCheck over every tracked script; `SHELL_FILES='a.sh b.sh'` scopes it | Docker |
+| `make docs-check` | Every relative Markdown link and `#fragment` resolves; offline | Docker |
+| `make check-skills` | The shape of `.agents/skills/*` | Python 3 |
+| `make tools-check` | `tools/versions.env` shape and digests; each Cargo tool reports its pin; the Dockerfile `ARG` defaults and `FROM` tags agree with the manifest and `rust-toolchain.toml` | Cargo tools (built once) |
+
+The Cargo tools (`cargo-deny`, `cargo-shear`, `zizmor`) build from
+crates.io into `<git-common-dir>/tools/<crate>-<version>` the first time a
+target needs them (about six minutes in total), then never again for that
+version. CI installs the same versions as prebuilt binaries.
+
+## Image
+
+| Command | Does | Needs |
+| --- | --- | --- |
+| `make dockerfile-check` | BuildKit's built-in Dockerfile checks | Docker |
+| `ALLOW_HEAVY=1 make runtime-image-build RUNTIME_IMAGE=service:ci` | Build the production image; `VCS_REF`, `APP_VERSION`, `SOURCE_URL`, `SOURCE_DATE_EPOCH`, `RUNTIME_IMAGE_CACHE_FROM`, `RUNTIME_IMAGE_CACHE_TO` are honoured | Docker with BuildKit |
+| `ALLOW_HEAVY=1 make runtime-image-check RUNTIME_IMAGE=service:ci RUNTIME_EXPECTED_COMMIT=<sha>` | Start it `--read-only --cap-drop=ALL --security-opt=no-new-privileges`, await `/health/ready`, assert `app.commit`, require exit `0` from `docker stop --time 45` | Docker, curl |
+| `ALLOW_HEAVY=1 make container-security CONTAINER_IMAGE=service:ci` | Trivy: fixable HIGH and CRITICAL findings fail; Debian and `rustbinary` targets | Docker |
+| `ALLOW_HEAVY=1 make container-sbom CONTAINER_IMAGE=service:ci SBOM_OUTPUT=sbom.cdx.json` | CycloneDX SBOM of the image | Docker |
+| `make publish-image-metadata-check` | Self-test of the publication naming and tag promotion script | — |
+
+## Routing and aggregates
+
+| Command | Does |
+| --- | --- |
+| `make plan` | Classify the worktree's changes since `BASE_REF` and print the route: files, surfaces, commands with reasons and cost, surfaces with nothing to run |
+| `make verify` | Run that route under the validation lock; write an attempt record and, on a complete pass, a receipt under `<git-common-dir>/codex/verify` |
+| `make changed-surfaces-check`, `make affected-crates-check`, `make validation-lock-self-test`, `make verify-check` | The validation scripts' self-tests |
+| `ALLOW_FULL=1 make check` | The full repository gate under the lock: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-skills`, `docs-check`, and the four self-tests |
+
+## Guards and variables
+
+| Variable | Meaning |
+| --- | --- |
+| `ALLOW_FULL=1` | Opt into `make check`; not a routine follow-up to every edit |
+| `ALLOW_HEAVY=1` | Opt into the image targets and the history-wide secret scan |
+| `CI=true` | Set by CI; satisfies both guards, resolves the Cargo tools from `PATH`, and skips the worktree half of `secret-scan`. Do not set it locally |
+| `BASE_REF` | Comparison base for `plan`, `verify`, and `secret-scan` (default `origin/main`) |
+| `PKG` / `PKGS` | One crate for `test-package`; a space-separated list for `lint-changed` and `test-changed` |
+| `VERIFY_FORCE=1` | Rerun `make verify` even when an identical receipt exists |
+| `TOOLS_ROOT` | Where the Cargo tools are built (default `<git-common-dir>/tools`) |
+| `RUNTIME_IMAGE`, `CONTAINER_IMAGE`, `RUNTIME_EXPECTED_COMMIT`, `SBOM_OUTPUT` | Image targets' tag, scan target, expected `app.commit`, SBOM path |
+
+`make help` prints the current catalog; when this document and `make help`
+disagree, `make/template.mk` is right and this document is stale.

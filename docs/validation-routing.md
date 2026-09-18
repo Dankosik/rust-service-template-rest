@@ -4,9 +4,10 @@ Use this router for mixed surfaces or a verification claim beyond the
 ordinary local budget. [AGENTS.md](../AGENTS.md#validation-budget) owns
 ordinary local completion. This router selects existing commands; a file path,
 a domain label, or an available command does not create a local acceptance
-gate. `make/template.mk` owns command composition, and
-`scripts/ci/changed-surfaces.sh` is the one classifier CI and `make verify`
-share.
+gate. `make/template.mk` owns command composition
+([Commands](build-test-and-development-commands.md) explains every target),
+and `scripts/ci/changed-surfaces.sh` is the one classifier CI and
+`make verify` share.
 
 ## Ordinary local completion
 

@@ -63,10 +63,13 @@ only for stable domain decisions.
 | Startup, readiness, drain, shutdown, exit codes, or process-resource lifetime | [Runtime Lifecycle](architecture/runtime-lifecycle.md) |
 | System neighbour, outbound provider, cross-service contract, or runtime evidence path | [Integration Boundaries](architecture/integration.md) |
 | Configuration source, precedence, secret input, telemetry environment, or runtime budget | [Configuration Source Policy](configuration-source-policy.md) |
+| File placement or the full repository tree | [Project Structure](project-structure-and-module-organization.md) |
 | Proof or validation must be selected | [Validation Routing](validation-routing.md) |
-| Build, test, or generator command composition | [`make/template.mk`](../make/template.mk) and [CONTRIBUTING.md](../CONTRIBUTING.md) |
+| Build, test, or generator command composition | [Commands](build-test-and-development-commands.md) and [`make/template.mk`](../make/template.mk) |
 | Delivery gates, the image, publication, and production readiness | [CI/CD Production Readiness](ci-cd-production-ready.md) |
 | Deployment policy for a derived service | [Railway Deployment Profile](railway-deployment-profile.md) |
+| The first feature on the scaffold | [First Production Feature](first-production-feature.md) |
+| What a service must decide before production | [Production Contract](production-contract.md) |
 
 Queue, job, outbox, and event architecture (`architecture/async.md`) and
 PostgreSQL architecture (`architecture/persistence.md`) arrive with their

@@ -60,7 +60,17 @@ A change to an HTTP operation is made in the handler's `#[utoipa::path]`
 attributes and schema derives, then `make openapi-generate` rewrites
 `api/openapi/service.yaml`; commit the YAML with the change and review its
 diff as the contract change. `make test` fails on a stale copy.
-[HTTP Architecture](docs/architecture/http.md) has the full workflow.
+[HTTP Architecture](docs/architecture/http.md) has the full workflow, and
+[First Production Feature](docs/first-production-feature.md) walks a new
+feature crate from the business rule to the merged, documented, tested
+operation.
+
+Every make target, what it needs, and the guard variables are explained in
+[Commands](docs/build-test-and-development-commands.md); where a crate,
+module, file, or test belongs is decided by
+[Project Structure](docs/project-structure-and-module-organization.md), and
+[Repository Architecture](docs/repo-architecture.md) selects the leaf for a
+change that can move an ownership boundary.
 
 [AGENTS.md](AGENTS.md#validation-budget) owns the local stop rule. Missing
 optional infrastructure is a gap to disclose, not a blocker to repair; a known
