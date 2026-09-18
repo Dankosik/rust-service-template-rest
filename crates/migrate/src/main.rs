@@ -11,9 +11,9 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use infra_postgres::Dsn;
+use infra_postgres::{Dsn, DsnError};
 use infra_telemetry::{LogFormat, LoggingOptions, install_subscriber};
-use migrate::{FailedRun, MIGRATOR, RunOptions, RunResult};
+use migrate::{FailedRun, MIGRATOR, RunOptions, RunResult, Stage};
 use secrecy::ExposeSecret;
 use service_config::{BuildInfo, Config, LoadOptions};
 
@@ -23,20 +23,41 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
 enum Failure {
-    #[error("{0}")]
-    Config(String),
+    #[error("postgres.enabled must be true to run migrations")]
+    PostgresDisabled,
+    #[error(transparent)]
+    Dsn(#[from] DsnError),
     #[error(transparent)]
     Run(#[from] FailedRun),
     #[error("interrupted by {0}")]
     Interrupted(&'static str),
 }
 
-impl Failure {
-    fn stage(&self) -> &'static str {
+/// Words on the `migration_run` `stage` field: migrator [`Stage`] plus the
+/// process-level failures this binary adds.
+#[derive(Clone, Copy)]
+enum TerminalStage {
+    Run(Stage),
+    Config,
+    Interrupted,
+}
+
+impl TerminalStage {
+    fn as_str(self) -> &'static str {
         match self {
-            Self::Config(_) => "config",
-            Self::Run(failure) => failure.stage().as_str(),
-            Self::Interrupted(_) => "interrupted",
+            Self::Run(stage) => stage.as_str(),
+            Self::Config => "config",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
+
+impl Failure {
+    fn stage(&self) -> TerminalStage {
+        match self {
+            Self::PostgresDisabled | Self::Dsn(_) => TerminalStage::Config,
+            Self::Run(failure) => TerminalStage::Run(failure.stage()),
+            Self::Interrupted(_) => TerminalStage::Interrupted,
         }
     }
 
@@ -45,7 +66,7 @@ impl Failure {
     fn observed(&self) -> RunResult {
         match self {
             Self::Run(failure) => failure.observed.clone(),
-            Self::Config(_) | Self::Interrupted(_) => RunResult {
+            Self::PostgresDisabled | Self::Dsn(_) | Self::Interrupted(_) => RunResult {
                 target: MIGRATOR.iter().map(|m| m.version).max(),
                 ..RunResult::default()
             },
@@ -54,17 +75,9 @@ impl Failure {
 }
 
 fn main() -> ExitCode {
-    let options = match LoadOptions::parse_args(std::env::args_os()) {
+    let options = match LoadOptions::from_args(std::env::args_os()) {
         Ok(options) => options,
-        Err(err) => {
-            let success = err.exit_code() == 0;
-            let _ = err.print();
-            return if success {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            };
-        }
+        Err(code) => return code,
     };
     let config = match service_config::load(&options, BUILD_INFO) {
         Ok(config) => config,
@@ -114,12 +127,9 @@ fn startup_failure(message: &str) -> ExitCode {
 
 async fn apply(config: &Config) -> Result<RunResult, Failure> {
     if !config.postgres.enabled {
-        return Err(Failure::Config(
-            "postgres.enabled must be true to run migrations".to_owned(),
-        ));
+        return Err(Failure::PostgresDisabled);
     }
-    let dsn = Dsn::parse(config.postgres.dsn.expose_secret())
-        .map_err(|err| Failure::Config(err.to_string()))?;
+    let dsn = Dsn::parse(config.postgres.dsn.expose_secret())?;
     tracing::info!(
         app.env = %config.app.env,
         app.version = %config.app.version,
@@ -128,7 +138,7 @@ async fn apply(config: &Config) -> Result<RunResult, Failure> {
         postgres.port = dsn.port(),
         postgres.database = dsn.database(),
         postgres.sslmode = dsn.ssl_mode_name(),
-        migration.target = recorded_version(MIGRATOR.iter().map(|m| m.version).max()),
+        migration.target = version_or_zero(MIGRATOR.iter().map(|m| m.version).max()),
         "migration_starting"
     );
     let options = RunOptions::defaults(&dsn, &config.observability.otel.service_name);
@@ -145,33 +155,29 @@ async fn apply(config: &Config) -> Result<RunResult, Failure> {
 async fn run_until_stop(options: &RunOptions<'_>) -> Result<RunResult, Failure> {
     #[cfg(unix)]
     {
+        use std::future::pending;
         use tokio::signal::unix::{SignalKind, signal};
-        match (
-            signal(SignalKind::terminate()),
-            signal(SignalKind::interrupt()),
-        ) {
-            (Ok(mut terminate), Ok(mut interrupt)) => {
-                tokio::select! {
-                    result = migrate::run(&MIGRATOR, options) => result.map_err(Failure::from),
-                    _ = terminate.recv() => Err(Failure::Interrupted("SIGTERM")),
-                    _ = interrupt.recv() => Err(Failure::Interrupted("SIGINT")),
+
+        let mut terminate = signal(SignalKind::terminate()).ok();
+        let mut interrupt = signal(SignalKind::interrupt()).ok();
+        tokio::select! {
+            result = migrate::run(&MIGRATOR, options) => result.map_err(Failure::from),
+            () = async {
+                match terminate.as_mut() {
+                    Some(stream) => {
+                        stream.recv().await;
+                    }
+                    None => pending().await,
                 }
-            }
-            (Ok(mut terminate), Err(_)) => {
-                tokio::select! {
-                    result = migrate::run(&MIGRATOR, options) => result.map_err(Failure::from),
-                    _ = terminate.recv() => Err(Failure::Interrupted("SIGTERM")),
+            } => Err(Failure::Interrupted("SIGTERM")),
+            () = async {
+                match interrupt.as_mut() {
+                    Some(stream) => {
+                        stream.recv().await;
+                    }
+                    None => pending().await,
                 }
-            }
-            (Err(_), Ok(mut interrupt)) => {
-                tokio::select! {
-                    result = migrate::run(&MIGRATOR, options) => result.map_err(Failure::from),
-                    _ = interrupt.recv() => Err(Failure::Interrupted("SIGINT")),
-                }
-            }
-            (Err(_), Err(_)) => migrate::run(&MIGRATOR, options)
-                .await
-                .map_err(Failure::from),
+            } => Err(Failure::Interrupted("SIGINT")),
         }
     }
     #[cfg(not(unix))]
@@ -185,7 +191,7 @@ async fn run_until_stop(options: &RunOptions<'_>) -> Result<RunResult, Failure> 
 
 /// `0` is reserved for absent or unobserved versions: source rules require
 /// a positive version, so this sentinel cannot collide with a real one.
-fn recorded_version(version: Option<i64>) -> i64 {
+fn version_or_zero(version: Option<i64>) -> i64 {
     version.unwrap_or(0)
 }
 
@@ -194,22 +200,22 @@ fn log_terminal(result: &RunResult, failure: Option<&Failure>) {
     let duration_ms = u64::try_from(result.duration.as_millis()).unwrap_or(u64::MAX);
     match failure {
         None => tracing::info!(
-            migration.before = recorded_version(result.before),
-            migration.target = recorded_version(result.target),
-            migration.after = recorded_version(result.after),
+            migration.before = version_or_zero(result.before),
+            migration.target = version_or_zero(result.target),
+            migration.after = version_or_zero(result.after),
             migration.applied_count = result.applied,
             migration.duration_ms = duration_ms,
             outcome = result.outcome(),
             "migration_run"
         ),
         Some(failure) => tracing::error!(
-            migration.before = recorded_version(result.before),
-            migration.target = recorded_version(result.target),
-            migration.after = recorded_version(result.after),
+            migration.before = version_or_zero(result.before),
+            migration.target = version_or_zero(result.target),
+            migration.after = version_or_zero(result.after),
             migration.applied_count = result.applied,
             migration.duration_ms = duration_ms,
             outcome = "error",
-            stage = failure.stage(),
+            stage = failure.stage().as_str(),
             error = %failure,
             "migration_run"
         ),

@@ -4,7 +4,10 @@
 //! files in order → `APP__SECTION__KEY` environment variables. Unknown keys
 //! anywhere fail startup. Secret-like keys may carry a value only through the
 //! environment. Each section owns its type, defaults, and validation in one
-//! file; cross-section rules live in [`Config::validate`].
+//! file. [`Config::validate`] runs those section validators; intra-HTTP key
+//! relations stay in [`http::HttpConfig::validate`]. Rules that need process
+//! structure, such as the drain-plus-teardown tail against the grace period,
+//! stay in the composition root.
 //!
 //! The loader is [`config`](https://docs.rs/config) with `serde`; see
 //! `docs/configuration-source-policy.md` for why, and for what the two
@@ -50,7 +53,8 @@ pub struct Config {
 }
 
 impl Config {
-    /// Validate every section, then the rules that span sections.
+    /// Validate every section. Cross-key rules that live on a section type
+    /// run there; process-structure ceilings are not encoded here.
     ///
     /// # Errors
     ///

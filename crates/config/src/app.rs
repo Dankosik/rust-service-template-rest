@@ -70,10 +70,6 @@ impl AppConfig {
         if self.commit.trim().is_empty() {
             build.commit.clone_into(&mut self.commit);
         }
-        match self.instance_id.as_deref().map(str::trim) {
-            None | Some("") => self.instance_id = None,
-            Some(id) => self.instance_id = Some(id.to_owned()),
-        }
     }
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {

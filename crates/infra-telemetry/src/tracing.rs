@@ -125,7 +125,7 @@ pub fn install_tracer_provider(
 
     let mut builder = SdkTracerProvider::builder()
         .with_resource(resource(options))
-        .with_sampler(sampler(options.sampler));
+        .with_sampler(options.sampler.to_sdk());
 
     let exporter = match endpoint_source {
         None => ExporterState::Disabled,
@@ -154,7 +154,7 @@ pub fn install_tracer_provider(
 impl TracerProviderHandle {
     /// A tracer for the subscriber layer.
     #[must_use]
-    pub fn tracer(&self, name: &str) -> SdkTracer {
+    pub(crate) fn tracer(&self, name: &str) -> SdkTracer {
         self.provider.tracer(name.to_owned())
     }
 
@@ -281,13 +281,15 @@ fn resource(options: &TracingOptions) -> Resource {
         .build()
 }
 
-fn sampler(sampler: Sampler) -> sdktrace::Sampler {
-    match sampler {
-        Sampler::AlwaysOn => sdktrace::Sampler::AlwaysOn,
-        Sampler::AlwaysOff => sdktrace::Sampler::AlwaysOff,
-        Sampler::TraceIdRatio(ratio) => sdktrace::Sampler::TraceIdRatioBased(ratio),
-        Sampler::ParentBasedTraceIdRatio(ratio) => {
-            sdktrace::Sampler::ParentBased(Box::new(sdktrace::Sampler::TraceIdRatioBased(ratio)))
+impl Sampler {
+    fn to_sdk(self) -> sdktrace::Sampler {
+        match self {
+            Self::AlwaysOn => sdktrace::Sampler::AlwaysOn,
+            Self::AlwaysOff => sdktrace::Sampler::AlwaysOff,
+            Self::TraceIdRatio(ratio) => sdktrace::Sampler::TraceIdRatioBased(ratio),
+            Self::ParentBasedTraceIdRatio(ratio) => sdktrace::Sampler::ParentBased(Box::new(
+                sdktrace::Sampler::TraceIdRatioBased(ratio),
+            )),
         }
     }
 }

@@ -1,8 +1,11 @@
 //! Loader controls accepted on the command line.
 //!
 //! Flags select configuration sources; they never set individual keys.
+//! `--version` is not a loader flag: binaries publish identity through
+//! [`crate::BuildInfo`] / `app.version`, not clap's crate version.
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::Parser;
 
@@ -25,6 +28,8 @@ impl LoadOptions {
     /// and starting with the wrong configuration is worse than not starting.
     ///
     /// Returns [`clap::Error`] instead of exiting so destructors still run.
+    /// Production binaries should call [`Self::from_args`], which prints and
+    /// maps the error without naming clap at the call site.
     ///
     /// # Errors
     ///
@@ -35,6 +40,32 @@ impl LoadOptions {
         T: Into<std::ffi::OsString> + Clone,
     {
         Self::try_parse_from(args)
+    }
+
+    /// Parse argv, printing clap's message on failure.
+    ///
+    /// `--help` maps to success; other clap errors map to failure. Does not
+    /// call `process::exit`, so destructors still run.
+    ///
+    /// # Errors
+    ///
+    /// Returns the process exit code after printing the clap message.
+    pub fn from_args<I, T>(args: I) -> Result<Self, ExitCode>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        Self::parse_args(args).map_err(|err| Self::clap_failure(&err))
+    }
+
+    fn clap_failure(err: &clap::Error) -> ExitCode {
+        let success = err.exit_code() == 0;
+        let _ = err.print();
+        if success {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }
     }
 
     /// Base file first, then overlays in order.
@@ -87,5 +118,17 @@ mod tests {
         assert!(LoadOptions::parse_args(["service", "stray"]).is_err());
         assert!(LoadOptions::parse_args(["service", "--unknown"]).is_err());
         assert!(LoadOptions::parse_args(["service", "--config"]).is_err());
+        assert!(
+            LoadOptions::parse_args(["service", "--version"]).is_err(),
+            "version is not a loader flag"
+        );
+    }
+
+    #[test]
+    fn from_args_maps_unknown_flag_to_failure() {
+        assert_eq!(
+            LoadOptions::from_args(["service", "--unknown"]).unwrap_err(),
+            ExitCode::FAILURE
+        );
     }
 }
