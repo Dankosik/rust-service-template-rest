@@ -32,12 +32,12 @@ pub(crate) const SHUTDOWN_TAIL: Duration = Duration::from_secs(
 
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "http.grace_period ({grace:?}) must be >= http.shutdown_timeout ({drain:?}) plus the \
+    "http.grace_period ({grace:?}) must be >= http.shutdown_timeout ({shutdown_timeout:?}) plus the \
      {tail:?} teardown tail (diagnostics, background join, dependency close, telemetry flush)"
 )]
 pub(crate) struct GraceBudgetError {
     grace: Duration,
-    drain: Duration,
+    shutdown_timeout: Duration,
     tail: Duration,
 }
 
@@ -47,7 +47,7 @@ pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudget
     if http.grace_period < http.shutdown_timeout + SHUTDOWN_TAIL {
         return Err(GraceBudgetError {
             grace: http.grace_period,
-            drain: http.shutdown_timeout,
+            shutdown_timeout: http.shutdown_timeout,
             tail: SHUTDOWN_TAIL,
         });
     }
@@ -89,6 +89,8 @@ pub(crate) struct Signals {
     terminate: tokio::signal::unix::Signal,
     #[cfg(unix)]
     interrupt: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    ctrl_c: tokio::signal::windows::CtrlC,
 }
 
 impl Signals {
@@ -101,7 +103,13 @@ impl Signals {
                 interrupt: signal(SignalKind::interrupt())?,
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                ctrl_c: tokio::signal::windows::ctrl_c()?,
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             Ok(Self {})
         }
@@ -116,10 +124,17 @@ impl Signals {
                 _ = self.interrupt.recv() => tracing::info!(signal = "SIGINT", "stop requested"),
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            let _ = tokio::signal::ctrl_c().await;
+            let _ = self.ctrl_c.recv().await;
             tracing::info!(signal = "ctrl-c", "stop requested");
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => tracing::info!(signal = "ctrl-c", "stop requested"),
+                Err(err) => tracing::error!(error = %err, "failed to listen for ctrl-c"),
+            }
         }
     }
 }
@@ -131,7 +146,7 @@ pub(crate) struct Plan<'a> {
     pub(crate) diagnostics: Option<Server>,
     pub(crate) cancel: CancellationToken,
     pub(crate) tracker: TaskTracker,
-    pub(crate) tracer: TracerProviderHandle,
+    pub(crate) tracer_provider: TracerProviderHandle,
     pub(crate) signals: &'a mut Signals,
 }
 
@@ -158,7 +173,9 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     tracing::info!(budget = ?drain, "drain_started");
     match plan.api.shutdown(drain).await {
         Ok(Drained::Complete) => tracing::info!("drain_completed"),
-        Ok(Drained::TimedOut { remaining }) => {
+        Ok(Drained::TimedOut {
+            remaining_connections: remaining,
+        }) => {
             // The connections it gave up on are dropped by the runtime
             // shutdown; the alternative is the same abrupt end at SIGKILL,
             // minus the telemetry.
@@ -188,6 +205,8 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
                     reason = "scrape_outlived_shutdown_budget",
                     "diagnostics_forced"
                 );
+                // A scrape overrun is forced closed so telemetry can flush;
+                // it does not vote `degraded`.
             }
             Err(err) => tracing::warn!(error = %err, "diagnostics_shutdown_failed"),
         }
@@ -209,7 +228,11 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     // theirs here under `budget.stage(DEPENDENCY_CLOSE)`.
     let _ = DEPENDENCY_CLOSE;
 
-    if plan.tracer.shutdown(budget.stage(TELEMETRY_FLUSH)).await {
+    if plan
+        .tracer_provider
+        .shutdown(budget.stage(TELEMETRY_FLUSH))
+        .await
+    {
         tracing::info!("telemetry_flushed");
     } else {
         degraded = true;

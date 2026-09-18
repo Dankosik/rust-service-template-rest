@@ -13,10 +13,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use health::{Readiness, RefreshPolicy};
-use infra_http::{HardenOptions, Server, ServerOptions};
+use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
 use infra_telemetry::{
-    ExporterState, LoggingOptions, Metrics, Sampler, TracingOptions, build_tracer_provider,
-    diagnostics_router, install_subscriber,
+    ExporterState, LoggingOptions, Metrics, Sampler, TracingOptions, diagnostics_router,
+    install_subscriber, install_tracer_provider,
 };
 use secrecy::ExposeSecret;
 use service_config::{BuildInfo, Config, LoadOptions, LogFormat, TracesSampler};
@@ -60,15 +60,27 @@ pub(crate) enum BootstrapError {
     Server(#[from] infra_http::ServerError),
 }
 
-/// Parse flags, load configuration, run the service, and map the result to
-/// an exit code. Never calls `process::exit`, so destructors run.
+/// Parse flags (consuming argv0), load configuration, run the service, and
+/// map the result to an exit code. Never calls `process::exit`, so
+/// destructors run. `--help` and `--version` exit 0; other clap errors exit
+/// 1.
 pub(crate) fn run<I>(args: I) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
+    let mut args = args.into_iter();
+    let _argv0 = args.next();
     let options = match LoadOptions::parse_args(args) {
         Ok(options) => options,
-        Err(err) => return startup_failure(&err.to_string()),
+        Err(err) => {
+            let success = err.exit_code() == 0;
+            let _ = err.print();
+            return if success {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
+        }
     };
     let config = match service_config::load(&options, BUILD_INFO) {
         Ok(config) => config,
@@ -113,21 +125,22 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // process; install the handlers first and keep them for the lifetime.
     let mut signals = Signals::install().map_err(BootstrapError::Signals)?;
 
-    let telemetry_tracer = build_tracer_provider(&tracing_options(&config))?;
-    install_subscriber(LoggingOptions {
+    let tracer_provider = install_tracer_provider(&tracing_options(&config))?;
+    install_subscriber(&LoggingOptions {
         level: config.log.level.clone(),
         format: match config.log.format {
             LogFormat::Json => infra_telemetry::LogFormat::Json,
             LogFormat::Text => infra_telemetry::LogFormat::Text,
         },
-        tracer: Some(telemetry_tracer.tracer(&config.observability.otel.service_name)),
+        tracer_provider: Some(&tracer_provider),
+        service_name: &config.observability.otel.service_name,
     })?;
-    let metrics = Metrics::install(axum_prometheus::AXUM_HTTP_REQUESTS_DURATION_SECONDS)?;
+    let metrics = Metrics::install(HTTP_REQUESTS_DURATION_SECONDS)?;
     metrics.record_trace_exporter_initialized(matches!(
-        telemetry_tracer.exporter,
+        tracer_provider.exporter_state,
         ExporterState::Initialized { .. }
     ));
-    log_startup_summary(&config, &telemetry_tracer.exporter);
+    log_startup_summary(&config, &tracer_provider.exporter_state);
 
     let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
@@ -146,7 +159,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     let readiness = Readiness::new(Vec::new());
     let policy = RefreshPolicy {
         interval: config.health.refresh_interval,
-        probe_budget: config.http.readiness_timeout,
+        probe_budget: config.health.readiness_timeout,
         failure_threshold: config.health.failure_threshold,
     };
     readiness
@@ -201,7 +214,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
         diagnostics,
         cancel,
         tracker,
-        tracer: telemetry_tracer,
+        tracer_provider,
         signals: &mut signals,
     })
     .await)
@@ -217,11 +230,10 @@ fn tracing_options(config: &Config) -> TracingOptions {
             Sampler::ParentBasedTraceIdRatio(otel.traces_sampler_arg)
         }
     };
-    let instance_id = if config.app.instance_id.trim().is_empty() {
-        gethostname::gethostname().to_string_lossy().into_owned()
-    } else {
-        config.app.instance_id.clone()
-    };
+    let instance_id = config.app.instance_id().map_or_else(
+        || gethostname::gethostname().to_string_lossy().into_owned(),
+        str::to_owned,
+    );
     TracingOptions {
         service_name: otel.service_name.clone(),
         service_version: config.app.version.clone(),

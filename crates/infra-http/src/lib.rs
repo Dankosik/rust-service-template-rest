@@ -19,7 +19,9 @@ mod request_id;
 mod router;
 mod server;
 
-pub use harden::{HTTP_METRICS_NAMES, HardenOptions, SHED_REQUESTS_METRIC, harden};
+pub use harden::{
+    HTTP_METRICS_NAMES, HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, SHED_REQUESTS_METRIC, harden,
+};
 pub use problem::{Code, InvalidParam, Problem};
 pub use request_id::{REQUEST_ID_HEADER, request_id};
 pub use router::router;

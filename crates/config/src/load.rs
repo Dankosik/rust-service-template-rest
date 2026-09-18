@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::app::BuildInfo;
-use crate::secret_policy::first_secret_value;
+use crate::secret_policy::first_secret_like_key;
 use crate::{Config, LoadOptions, ValidationError};
 
 /// Environment namespace. `APP__HTTP__ADDR` sets `http.addr`.
@@ -142,7 +142,7 @@ fn reject_file_secrets(path: &Path) -> Result<(), Error> {
         path: path.to_owned(),
         source,
     })?;
-    if let Some(key) = first_secret_value(&table) {
+    if let Some(key) = first_secret_like_key(&table) {
         return Err(Error::SecretInFile {
             key,
             path: path.to_owned(),

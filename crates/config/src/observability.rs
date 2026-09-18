@@ -63,7 +63,8 @@ pub struct OtelConfig {
     /// default for a derived service.
     pub service_name: String,
     pub traces_sampler: TracesSampler,
-    /// Ratio for the ratio-based samplers, in `[0, 1]`.
+    /// Ratio for the ratio-based samplers, in `[0, 1]`. Always validated
+    /// (finite and in range) even when the selected sampler ignores it.
     pub traces_sampler_arg: f64,
     pub exporter: OtelExporterConfig,
 }

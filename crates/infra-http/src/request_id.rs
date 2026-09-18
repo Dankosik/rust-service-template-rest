@@ -5,8 +5,8 @@
 //! grammar before that layer runs, so an attacker cannot inject log or header
 //! content, and reads the accepted value back for problem bodies and logs.
 
+use axum::http::Request;
 use axum::http::header::HeaderName;
-use axum::http::{HeaderMap, Request};
 use tower_http::request_id::RequestId;
 
 /// The correlation header shared with outbound sanitizers.
@@ -35,22 +35,16 @@ pub(crate) fn strip_invalid<B>(mut request: Request<B>) -> Request<B> {
     request
 }
 
+/// The accepted request id, if the correlation layer ran.
+#[must_use]
+pub(crate) fn from_request_id(id: &RequestId) -> Option<String> {
+    id.header_value().to_str().ok().map(str::to_owned)
+}
+
 /// The accepted request id for this request, if the correlation layer ran.
 #[must_use]
 pub fn request_id(extensions: &axum::http::Extensions) -> Option<String> {
-    extensions
-        .get::<RequestId>()
-        .and_then(|id| id.header_value().to_str().ok())
-        .map(str::to_owned)
-}
-
-/// The request id echoed on a response, if any.
-#[must_use]
-pub(crate) fn response_request_id(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(&REQUEST_ID_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
+    extensions.get::<RequestId>().and_then(from_request_id)
 }
 
 #[cfg(test)]

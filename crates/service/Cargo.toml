@@ -24,7 +24,6 @@ path = "src/bin/openapi.rs"
 workspace = true
 
 [dependencies]
-axum-prometheus = { workspace = true, features = ["prometheus"] }
 gethostname = { workspace = true }
 health = { workspace = true }
 infra-http = { workspace = true }

@@ -73,8 +73,8 @@ impl ExporterState {
 pub enum TracingError {
     #[error(
         "ambient OpenTelemetry credential or trust variable {name} is present while \
-         observability.otel.exporter.otlp_endpoint selects the collector; unset it or \
-         configure the credential through APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS"
+         a typed OTLP endpoint selects the collector; unset it or configure the \
+         credential through the typed OTLP headers field"
     )]
     AmbientCredential { name: String },
 }
@@ -83,7 +83,7 @@ pub enum TracingError {
 #[derive(Debug)]
 pub struct TracerProviderHandle {
     provider: SdkTracerProvider,
-    pub exporter: ExporterState,
+    pub exporter_state: ExporterState,
 }
 
 /// Ambient variables that carry credentials or trust material.
@@ -103,17 +103,21 @@ const AMBIENT_ENDPOINT_VARS: &[&str] = &[
     "OTEL_EXPORTER_OTLP_ENDPOINT",
 ];
 
-/// Build and install the global tracer provider and the W3C propagator.
+/// Join slack around `spawn_blocking` after the SDK's own shutdown timeout.
+/// Not extra flush time.
+const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
+
+/// Install the global tracer provider and the W3C propagator.
 ///
 /// Call inside the Tokio runtime and before the subscriber is installed, so
-/// the returned tracer can feed the OpenTelemetry layer.
+/// the returned handle can feed the OpenTelemetry layer.
 ///
 /// # Errors
 ///
 /// Returns [`TracingError::AmbientCredential`] when the typed endpoint is
 /// set and an ambient credential variable is present. Exporter build
 /// failures do not error; they degrade and are reported in the handle.
-pub fn build_tracer_provider(
+pub fn install_tracer_provider(
     options: &TracingOptions,
 ) -> Result<TracerProviderHandle, TracingError> {
     let endpoint_source =
@@ -133,7 +137,7 @@ pub fn build_tracer_provider(
                 }
             }
             Err(err) => ExporterState::Degraded {
-                reason: sanitize(&err.to_string()),
+                reason: truncate(&err.to_string()),
             },
         },
     };
@@ -141,7 +145,10 @@ pub fn build_tracer_provider(
     let provider = builder.build();
     global::set_text_map_propagator(TraceContextPropagator::new());
     global::set_tracer_provider(provider.clone());
-    Ok(TracerProviderHandle { provider, exporter })
+    Ok(TracerProviderHandle {
+        provider,
+        exporter_state: exporter,
+    })
 }
 
 impl TracerProviderHandle {
@@ -154,10 +161,12 @@ impl TracerProviderHandle {
     /// Flush and stop the provider inside `budget`, off the async workers.
     ///
     /// Returns `false` when the budget expired or the SDK reported an error.
+    /// [`SHUTDOWN_JOIN_SLACK`] is join time around `spawn_blocking`, not extra
+    /// flush budget: the SDK already times out at `budget`.
     pub async fn shutdown(self, budget: Duration) -> bool {
         let provider = self.provider;
         let job = tokio::task::spawn_blocking(move || provider.shutdown_with_timeout(budget));
-        match tokio::time::timeout(budget + Duration::from_millis(500), job).await {
+        match tokio::time::timeout(budget + SHUTDOWN_JOIN_SLACK, job).await {
             Ok(Ok(Ok(()))) => true,
             Ok(Ok(Err(err))) => {
                 ::tracing::warn!(error = %err, "tracer provider shutdown reported an error");
@@ -269,7 +278,7 @@ fn sampler(sampler: Sampler) -> sdktrace::Sampler {
 }
 
 /// Exporter errors can echo the endpoint, never a header; keep them short.
-fn sanitize(message: &str) -> String {
+fn truncate(message: &str) -> String {
     message.chars().take(200).collect()
 }
 
