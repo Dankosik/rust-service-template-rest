@@ -1,5 +1,3 @@
-model = "gpt-6-astra"
-model_reasoning_effort = "high"
 features.multi_agent_v2 = true
 
 developer_instructions = """
@@ -14,5 +12,3 @@ a healthy agent for status.
 [agents]
 enabled = true
 max_concurrent_threads_per_session = 20
-default_subagent_model = "gpt-6-astra"
-default_subagent_reasoning_effort = "high"

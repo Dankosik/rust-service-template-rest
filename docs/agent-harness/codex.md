@@ -51,14 +51,17 @@ bounded work locally within current role authority; do not create App chats.
 
 ## Models
 
-Use `gpt-6-astra` for every decision-owning role: the root coordinator,
-Ledger Orchestrator, phase owner, Acceptance-Unit Lead, domain specialist,
-independent reviewer, and adjudicator. [Agent Harness](../agent-harness.md)
-owns role authority and context lifetime.
+When this session assigns a model, use `gpt-6-astra` for every
+decision-owning role: Ledger Orchestrator, phase owner, Acceptance-Unit Lead,
+domain specialist, independent reviewer, and adjudicator. Do not rewrite the
+root session model or effort to satisfy that preference; the Codex picker and
+user config own them. [Agent Harness](../agent-harness.md) owns role authority
+and context lifetime.
 
 The installed Codex catalog supports `low`, `medium`, `high`, `xhigh`, `max`,
-and `ultra` for Astra, with a native default of `medium`; this project chooses
-`high`. The [Astra API model page](https://developers.openai.com/api/docs/models/gpt-6-astra)
+and `ultra` for Astra, with a native default of `medium`. When this session
+assigns Astra effort and the user has not selected one, prefer `high`. The
+[Astra API model page](https://developers.openai.com/api/docs/models/gpt-6-astra)
 lists the first five. Codex `ultra` adds automatic task delegation to maximum
 reasoning; it is not an additional API reasoning level. Recheck the callable
 schema when the harness changes.
@@ -80,9 +83,11 @@ reasoning. Do not select `ultra` automatically for a critical role; use it only
 when the installed harness semantics and accepted delegation topology justify
 it. After a difficult unit closes, choose effort afresh for the next unit.
 
-Project and subagent defaults use Astra; inheritance and explicit overrides
-still require effective-model verification. Override those defaults through
-native model and effort fields only for bounded execution or evidence work:
+The portable runtime does not pin session or subagent `model` or
+`model_reasoning_effort`; those stay with the Codex picker and user config.
+Inheritance and explicit overrides still require effective-model verification.
+Override the inherited model through native model and effort fields only for
+bounded execution or evidence work:
 `gpt-5.6-luna` at `low` for closed mechanical work, `gpt-5.6-terra` at `medium`
 for ordinary implementation and at `high` or `xhigh` for harder implementation
 within an accepted contract. These models may reason about implementation
@@ -104,8 +109,9 @@ Resolve supported values from the callable schema and verify the effective
 model before assigning decision authority.
 If Astra is unavailable or its selection is rejected, retain the native
 failure and stop the dependent decision or acceptance; never silently fall
-back to an execution model. Preserve an explicit user-selected model, but assigning
-a non-Astra model decision authority requires an explicit exception to this
+back to an execution model. Preserve an explicit user-selected model and
+effort, including a non-Astra root. Assigning a non-Astra model decision
+authority without that user selection requires an explicit exception to this
 policy. A model name in prompt prose alone is not a native selection.
 
 ## Dispatch And Coordination
