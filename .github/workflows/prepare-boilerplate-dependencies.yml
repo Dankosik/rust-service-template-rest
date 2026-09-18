@@ -1,7 +1,7 @@
 name: prepare-boilerplate-dependencies
 
-# One-off dependency authoring on this branch, removed before opening the PR.
-# This does not replace or weaken the existing CI workflow.
+# Temporary authoring workspace, removed before opening the PR.
+# The permanent CI workflow and its validation gates are unchanged.
 on:
   push:
     branches: [refactor/backend-boilerplate-libraries]
@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  resolve:
+  apply-and-format:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -19,73 +19,44 @@ jobs:
         with:
           persist-credentials: false
           ref: refactor/backend-boilerplate-libraries
-      - name: Add the three selected workspace dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          def replace(path, before, after):
-              file = Path(path)
-              text = file.read_text()
-              if after in text:
-                  return
-              if text.count(before) != 1:
-                  raise SystemExit(f'{path}: expected one replacement anchor')
-              file.write_text(text.replace(before, after, 1))
-
-          replace('Cargo.toml', '# Build metadata\n',
-                  'strum = { version = "0.28.0", default-features = false }\n\n# Build metadata\n')
-          replace('Cargo.toml', '# Test support\n',
-                  '# Test support\naxum-test = { version = "21.1.0", default-features = false }\nrstest = { version = "0.27.0", default-features = false }\n')
-          replace('crates/infra-http/Cargo.toml', 'thiserror = { workspace = true }\n',
-                  'strum = { workspace = true, features = ["derive"] }\nthiserror = { workspace = true }\n')
-          replace('crates/infra-http/Cargo.toml', '[dev-dependencies]\n',
-                  '[dev-dependencies]\naxum-test = { workspace = true }\n')
-          for path in ['crates/config/Cargo.toml', 'crates/service/Cargo.toml']:
-              replace(path, '[dev-dependencies]\n',
-                      '[dev-dependencies]\nrstest = { workspace = true }\n')
-          PY
+      - name: Apply the scoped source and documentation edits
+        run: python3 .github/boilerplate-edit.py
       - name: Install the repository toolchain
         run: |
           rustup toolchain install
           rustup show active-toolchain
-      - name: Resolve the intentional lockfile change with Cargo
+      - name: Format and inspect the exact diff
         shell: bash
         run: |
           set -euo pipefail
-          # Dependency authoring, not validation: preserve the existing lock
-          # while resolving the newly declared dependencies. Never edit it by hand.
-          cargo metadata --format-version 1 > /tmp/boilerplate-metadata.json
-          cargo tree --locked --duplicates
-          cargo tree --locked -e features -i strum
-          cargo tree --locked -e features -i rstest
-          cargo tree --locked -e features -i axum-test
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          metadata = json.loads(Path('/tmp/boilerplate-metadata.json').read_text())
-          selected = {'axum-test', 'rstest', 'strum'}
-          for package in metadata['packages']:
-              if package['name'] in selected:
-                  print(package['name'], package['version'], package['license'], package.get('rust_version'))
-          PY
+          make fmt
           git diff --check
+          git diff --exit-code -- Cargo.lock
+          python3 - <<'PY'
+          import subprocess
+          allowed = {
+              'crates/infra-http/src/problem.rs',
+              'crates/infra-http/src/harden.rs',
+              'crates/config/src/validate.rs',
+              'crates/service/tests/openapi.rs',
+              'CONTRIBUTING.md',
+              'docs/first-production-feature.md',
+          }
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          if changed != allowed:
+              raise SystemExit(f'unexpected changed paths: {changed ^ allowed}')
+          PY
           git diff --stat
-          git diff -- Cargo.lock
-      - name: Commit only manifests and the Cargo-generated lockfile
+          git diff
+      - name: Commit the formatted source and documentation only
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          git add Cargo.toml Cargo.lock crates/infra-http/Cargo.toml crates/config/Cargo.toml crates/service/Cargo.toml
-          if git diff --cached --quiet; then
-            exit 0
-          fi
+          git add crates/infra-http/src/problem.rs crates/infra-http/src/harden.rs crates/config/src/validate.rs crates/service/tests/openapi.rs CONTRIBUTING.md docs/first-production-feature.md
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'build: add narrowly scoped boilerplate reduction dependencies'
+          git commit -m 'refactor: replace enum and test boilerplate with selected libraries'
           gh auth setup-git
           git push origin HEAD:refs/heads/refactor/backend-boilerplate-libraries
