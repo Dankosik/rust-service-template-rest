@@ -29,17 +29,30 @@ a matching build and relevant tests pass, and known in-scope defects are fixed:
 ```bash
 make build
 make test-package PKG=<crate>      # one crate
+make test-changed PKGS="a b"       # the crates scripts/ci/affected-crates.sh prints
 make test                          # several crates or a manifest change
+make plan                          # the route the changed surfaces select
+make verify                        # run that route and record a receipt
 ```
 
-`make check` (`fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`,
-`check-skills`) is the explicit full-repository gate; it is not a routine
-follow-up to every edit. Format with `make fmt`. Every Cargo command runs
-with `--locked`: if a change needs a lockfile update, make it deliberately
-and commit `Cargo.lock` with the change. `make deny` (advisories, licenses,
-bans, sources) and `make secret-scan` are the dependency and secret gates CI
-runs; run them locally when a change touches `Cargo.toml`, `Cargo.lock`,
-`deny.toml`, or adds anything that could look like a credential.
+`make plan` classifies the changed paths (`scripts/ci/changed-surfaces.sh`,
+fail-closed on an unknown path) and prints the make targets that prove them;
+`make verify` runs them under the shared validation lock and writes a receipt
+under `<git-common-dir>/codex/verify` keyed by the changed files, the plan,
+and the environment. CI runs the same classifier.
+
+`ALLOW_FULL=1 make check` (`fmt-check`, `lint`, `test`, `unused-deps`,
+`openapi-lint`, `check-skills`, and the validation-system self-tests) is the
+explicit full-repository gate; it is not a routine follow-up to every edit,
+and the guard exists so it is never launched by accident. `ALLOW_HEAVY=1`
+guards the history-wide and container-backed commands the same way; CI sets
+`CI=true`, which satisfies both. Format with `make fmt`. Every Cargo command
+runs with `--locked`: if a change needs a lockfile update, make it
+deliberately and commit `Cargo.lock` with the change. `make deny`
+(advisories, licenses, bans, sources) and `make secret-scan` are the
+dependency and secret gates CI runs; run them locally when a change touches
+`Cargo.toml`, `Cargo.lock`, `deny.toml`, or adds anything that could look
+like a credential.
 
 A change to an HTTP operation is made in the handler's `#[utoipa::path]`
 attributes and schema derives, then `make openapi-generate` rewrites
