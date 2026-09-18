@@ -27,12 +27,14 @@ version) and starts only the jobs its surfaces select:
 | `secrets` | every event except a schedule without a policy change | Gitleaks over the commits since the base; the whole history on tags, manual runs, and a push without a readable base |
 | `delivery` | shell, workflows, tool manifest, image, publication metadata | actionlint; ShellCheck over the changed scripts; `tools-check`; BuildKit Dockerfile checks; the publication metadata self-test |
 | `image` | `build/docker/*`, `.dockerignore`, the image scripts | one `service:ci` image: build (layers restored from the Actions cache, written only by pushes to `main` and schedules), hardened lifecycle check asserting `app.commit`, Trivy |
+| `docs` | any `*.md`, `docs/`, `specs/` | every relative link and `#fragment` resolves (lychee, offline, pinned container); no toolchain |
 | `required` | always | fails when any job failed or was cancelled; accepts skipped jobs |
 
 A weekly schedule and manual dispatch select every surface, because advisory
 databases move without a commit. Tags select every surface too. A docs-only
-pull request runs `changes`, `secrets`, and `required` and no Rust job
-(verified on [#11](https://github.com/Dankosik/rust-service-template-rest/pull/11)).
+pull request runs `changes`, `docs`, `secrets`, and `required` and no Rust job
+(verified on [#11](https://github.com/Dankosik/rust-service-template-rest/pull/11)
+before the `docs` job existed; it adds a link check, not a toolchain).
 Every action is pinned by commit SHA with its version beside it; tool
 versions come from `tools/versions.env` through `GITHUB_ENV` and
 `taiki-e/install-action`.

@@ -418,9 +418,22 @@ jobs:
       - name: Image vulnerabilities
         run: bash ./scripts/ci/measure.sh image-security -- make container-security CONTAINER_IMAGE=service:ci
 
+  docs:
+    needs: changes
+    if: needs.changes.outputs.documentation == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Links
+        # Relative links and #fragments only (offline); no toolchain.
+        run: bash ./scripts/ci/measure.sh docs-links -- make docs-check
+
   required:
     if: always()
-    needs: [changes, quality, security, secrets, delivery, image]
+    needs: [changes, quality, security, secrets, delivery, image, docs]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

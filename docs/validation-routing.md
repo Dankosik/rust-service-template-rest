@@ -14,6 +14,7 @@ share.
 | --- | --- | --- |
 | Rust behavior, tests, or crate manifests | [Rust](validation/rust.md) | matching build and relevant tests |
 | Agent instructions or skills | [Instructions](validation/instructions.md) | static consistency review and `make check-skills` |
+| Documentation | — | `make docs-check`: every relative link and `#fragment` resolves (lychee, offline, pinned container) |
 
 Stop when that boundary passes. Unrun optional image, security, or
 publication checks do not block local completion; a missing required build or

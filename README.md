@@ -99,7 +99,7 @@ load balancers, drains in-flight requests, flushes telemetry, and exits `0`
 | Workspace | Pinned stable toolchain, edition 2024, workspace-level dependency versions and lints (`clippy::pedantic`, `unsafe_code = "forbid"`), committed `Cargo.lock`, `--locked` everywhere |
 | Commands | `Makefile` + `make/template.mk`: `build`, `run`, `test`, `test-package`, `test-changed`, `fmt`, `fmt-check`, `lint`, `lint-changed`, `openapi-generate`, `openapi-check`, `openapi-lint`, `openapi-breaking`, `check-skills`, `deny`, `unused-deps`, `secret-scan`, `actionlint`, `zizmor`, `shellcheck`, `tools-check`, `plan`, `verify`, `check`; every tool pinned once in `tools/versions.env` |
 | Validation routing | `scripts/ci/changed-surfaces.sh` classifies changed paths into surfaces (fail-closed), `affected-crates.sh` selects the crates to lint and test through `cargo tree -i`, `verify.sh` plans, runs under one validation lock, and records a receipt; CI and `make verify` share the classifier |
-| Delivery | GitHub Actions CI selected by changed surface: `quality` (format, affected or workspace clippy, build, and tests, cargo-shear, OpenAPI lint, drift, and compatibility, skills, validation-system self-tests), `security` (cargo-deny, Dependency Review, zizmor), `secrets` (Gitleaks range or history), `delivery` (actionlint, ShellCheck, tool manifest, Dockerfile checks), `image` (build, hardened lifecycle check, Trivy), an always-reported `required` job; CodeQL for Rust and Actions with `codeql-required`; weekly schedule runs every surface; pinned action SHAs; Dependabot for Cargo, Actions, and the Dockerfile base images |
+| Delivery | GitHub Actions CI selected by changed surface: `quality` (format, affected or workspace clippy, build, and tests, cargo-shear, OpenAPI lint, drift, and compatibility, skills, validation-system self-tests), `security` (cargo-deny, Dependency Review, zizmor), `secrets` (Gitleaks range or history), `delivery` (actionlint, ShellCheck, tool manifest, Dockerfile checks), `image` (build, hardened lifecycle check, Trivy), `docs` (link check), an always-reported `required` job; CodeQL for Rust and Actions with `codeql-required`; weekly schedule runs every surface; pinned action SHAs; Dependabot for Cargo, Actions, and the Dockerfile base images |
 | Runtime image | `build/docker/Dockerfile`: `rust:<toolchain>-slim-trixie` builder with cargo-chef dependency layers and `cargo auditable build`, `gcr.io/distroless/cc-debian13:nonroot` runtime, commit baked as `app.commit`, `STOPSIGNAL SIGTERM`, OCI labels; ~45 MiB; the lifecycle check starts it `--read-only --cap-drop=ALL --security-opt=no-new-privileges` and proves a clean stop inside the 45 s grace budget |
 | Publication (opt-in) | `cd.yml` runs only when the repository variable `ENABLE_GHCR_PUBLISH` is `true`: after ci and CodeQL pass on `main` (or on a `v*` tag that equals the crate version), `.github/actions/publish-image` builds a run-scoped candidate, repeats the lifecycle check and Trivy scan, writes a CycloneDX SBOM, pushes, signs keyless with cosign, attests provenance and SBOM, verifies both back out of GHCR, and only then promotes `sha-<12>` + `main` or `v*` + `latest` with a digest read-back per tag |
 | Agent workflow | `AGENTS.md` repository contract, 17 model-invoked skills under `.agents/skills`, `CLAUDE.md`, and the [roadmap](docs/roadmap.md) that names the Go-template source for every planned owner |
@@ -153,6 +153,7 @@ deny.toml, .gitleaks.toml   dependency and secret-scanning policy
 | `make openapi-check` | Redocly lint plus the contract tests (drift, security decisions, closed schemas) |
 | `make openapi-breaking BASE_OPENAPI=<file>` | oasdiff breaking-change comparison against a base document |
 | `make check-skills` | Validate the shape of `.agents/skills` |
+| `make docs-check` | Every relative Markdown link and `#fragment` resolves (lychee, offline, pinned container) |
 | `make deny` | cargo-deny: advisories, licenses, bans, sources (`deny.toml`) |
 | `make unused-deps` | cargo-shear: fail on a declared dependency no crate uses |
 | `make secret-scan` / `make secret-scan-history` | Gitleaks over the worktree and the commits since `BASE_REF`, or over the whole history (`ALLOW_HEAVY=1`) |
@@ -163,13 +164,13 @@ deny.toml, .gitleaks.toml   dependency and secret-scanning policy
 | `make publish-image-metadata-check` | Self-test of the publication naming and tag promotion |
 | `make lint-changed PKGS="a b"` / `make test-changed PKGS="a b"` | Clippy or tests over the crates `scripts/ci/affected-crates.sh` selects |
 | `make plan` / `make verify` | Show the route the changed surfaces select, or run it under the validation lock and record a receipt |
-| `ALLOW_FULL=1 make check` | Full repository gate: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-skills`, and the validation-system self-tests |
+| `ALLOW_FULL=1 make check` | Full repository gate: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-skills`, `docs-check`, and the validation-system self-tests |
 
 Every tool version is pinned once in `tools/versions.env`. Cargo tools
 (`cargo-deny`, `cargo-shear`, `zizmor`) are built once per version into the
 Git common directory on first use; `make openapi-lint` needs Node.js (Redocly
 CLI through `npx`); `make openapi-breaking`, `make secret-scan`, and `make
-actionlint` need Go (`go run`); `make shellcheck` needs Docker. Stop at the
+actionlint` need Go (`go run`); `make shellcheck` and `make docs-check` need Docker. Stop at the
 local completion criterion in [AGENTS.md](AGENTS.md#validation-budget) rather
 than adding checks for confidence.
 

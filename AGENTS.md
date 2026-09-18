@@ -121,7 +121,7 @@ Select commands from [`make/template.mk`](make/template.mk):
 | One crate's behavior or tests | `make build` and `make test-package PKG=<crate>`, or `make test-changed PKGS="<crates>"` with the list `scripts/ci/affected-crates.sh` prints |
 | Several crates, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` | `make build` and `make test` |
 | Formatting or lint configuration | `make fmt-check` and `make lint` |
-| Documentation or agent instructions | Static consistency review; every link resolves; `make check-skills` for skills |
+| Documentation or agent instructions | Static consistency review; `make docs-check` proves every relative link and fragment resolves; `make check-skills` for skills |
 | Mixed or unclear surfaces | `make plan` shows the route the changed surfaces select; `make verify` runs it and records a receipt |
 | Full-repository claim, explicitly requested | `ALLOW_FULL=1 make check` |
 
