@@ -163,11 +163,14 @@ uncertain or contested.
 | Contribution, pull-request, or evidence expectations | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | Configuration key, secret source, telemetry environment, or runtime budget changes | [Configuration Source Policy](docs/configuration-source-policy.md) |
 | A skill or agent instruction is added or edited | [Skill Authoring](docs/skill-authoring.md), then `make check-skills` |
+| A verification claim beyond the budget table, or a mixed surface | [Validation Routing](docs/validation-routing.md) and the matching leaf under `docs/validation/` |
+| A CI job, tool pin, Dockerfile, image check, or publication step changes what may ship | [CI/CD Production Readiness](docs/ci-cd-production-ready.md); the `rust-delivery-platform` skill owns the method |
+| Deployment policy for a derived service on Railway | [Railway Deployment Profile](docs/railway-deployment-profile.md) |
 
-The spec-first workflow router, architecture front door, validation routing,
-agent harness adapters, and Rust skills are planned owners; until their stage
-lands, the roadmap names the source document in the Go template to port from,
-and Direct Work applies.
+The spec-first workflow router, architecture front door, agent harness
+adapters, and the remaining capability skills are planned owners; until their
+stage lands, the roadmap names the source document in the Go template to port
+from, and Direct Work applies.
 
 ## Rust Change Surface
 

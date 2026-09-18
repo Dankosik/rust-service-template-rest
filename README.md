@@ -102,15 +102,16 @@ load balancers, drains in-flight requests, flushes telemetry, and exits `0`
 | Delivery | GitHub Actions CI selected by changed surface: `quality` (format, affected or workspace clippy, build, and tests, cargo-shear, OpenAPI lint, drift, and compatibility, skills, validation-system self-tests), `security` (cargo-deny, Dependency Review, zizmor), `secrets` (Gitleaks range or history), `delivery` (actionlint, ShellCheck, tool manifest, Dockerfile checks), `image` (build, hardened lifecycle check, Trivy), an always-reported `required` job; CodeQL for Rust and Actions with `codeql-required`; weekly schedule runs every surface; pinned action SHAs; Dependabot for Cargo, Actions, and the Dockerfile base images |
 | Runtime image | `build/docker/Dockerfile`: `rust:<toolchain>-slim-trixie` builder with cargo-chef dependency layers and `cargo auditable build`, `gcr.io/distroless/cc-debian13:nonroot` runtime, commit baked as `app.commit`, `STOPSIGNAL SIGTERM`, OCI labels; ~45 MiB; the lifecycle check starts it `--read-only --cap-drop=ALL --security-opt=no-new-privileges` and proves a clean stop inside the 45 s grace budget |
 | Publication (opt-in) | `cd.yml` runs only when the repository variable `ENABLE_GHCR_PUBLISH` is `true`: after ci and CodeQL pass on `main` (or on a `v*` tag that equals the crate version), `.github/actions/publish-image` builds a run-scoped candidate, repeats the lifecycle check and Trivy scan, writes a CycloneDX SBOM, pushes, signs keyless with cosign, attests provenance and SBOM, verifies both back out of GHCR, and only then promotes `sha-<12>` + `main` or `v*` + `latest` with a digest read-back per tag |
-| Agent workflow | `AGENTS.md` repository contract, 16 model-invoked skills under `.agents/skills`, `CLAUDE.md`, and the [roadmap](docs/roadmap.md) that names the Go-template source for every planned owner |
+| Agent workflow | `AGENTS.md` repository contract, 17 model-invoked skills under `.agents/skills`, `CLAUDE.md`, and the [roadmap](docs/roadmap.md) that names the Go-template source for every planned owner |
 | Community | MIT license, code of conduct, security policy, issue forms, pull-request template, `CODEOWNERS` |
 
 ## What comes next
 
 The [roadmap](docs/roadmap.md) decomposes the port into twelve stages with
 exit criteria and a concept map from Go mechanisms to their Rust equivalents.
-Next is changed-surface CI, security gates, and the production image
-(stage 4), then the repository documentation graph (stage 5).
+Stages 1–4 are done (bootstrap, runtime core, OpenAPI contract, validation
+routing and delivery). Next is the repository documentation graph (stage 5),
+then the agent harness and spec-first workflow (stage 6).
 
 ## Repository map
 
@@ -202,9 +203,11 @@ instead of creating a parallel one.
 | [rust-structural-quality](.agents/skills/rust-structural-quality/SKILL.md) | Deletion test | New crates, modules, traits, layers, helpers, placement |
 | [rust-dependencies](.agents/skills/rust-dependencies/SKILL.md) | Verified resolution | New crates or features, toolchain pin, library vs template code |
 | [rust-verification](.agents/skills/rust-verification/SKILL.md) | Evidence boundary | What existing evidence supports a claim |
+| [rust-delivery-platform](.agents/skills/rust-delivery-platform/SKILL.md) | Gate chain | CI jobs, tool pins, the Dockerfile, image checks, publication, deployment profile |
 
 Skills for a capability arrive with its stage (`rust-api-contract` came with
-the contract stage; `rust-sqlx`, `rust-tonic`, and delivery follow theirs).
+the contract stage, `rust-delivery-platform` with the delivery stage;
+`rust-sqlx` and `rust-tonic` follow theirs).
 Authoring rules and the structural
 check live in [Skill Authoring](docs/skill-authoring.md) and
 `make check-skills`. The decisions build on rust-cli-skills and the Go
@@ -215,6 +218,9 @@ template's `go-*` skills where they carry over to a long-running service.
 - Plan and status: [Roadmap](docs/roadmap.md)
 - Request path, contract workflow, compatibility: [HTTP Architecture](docs/architecture/http.md)
 - Configuration, secrets, telemetry environment, runtime budgets: [Configuration Source Policy](docs/configuration-source-policy.md)
+- Which checks a change selects, `make plan` and `make verify`: [Validation Routing](docs/validation-routing.md) and its leaves under `docs/validation/`
+- What CI and publication prove: [CI/CD Production Readiness](docs/ci-cd-production-ready.md)
+- Deploying a derived service on Railway: [Railway Deployment Profile](docs/railway-deployment-profile.md)
 - Writing skills: [Skill Authoring](docs/skill-authoring.md)
 - Contributing and validation: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Agent contract: [AGENTS.md](AGENTS.md)
