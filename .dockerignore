@@ -8,5 +8,10 @@
 !Cargo.toml
 !Cargo.lock
 !crates/
-# Integration tests are not compiled by `cargo build --bin service`.
+# The migrate binary embeds the migration set at compile time.
+!migrations/
+# A workspace member cargo must see; its tests and fixtures are not built.
+!test/Cargo.toml
+!test/src/
+# Integration tests are not compiled by `cargo build --bin`.
 crates/*/tests/

@@ -48,6 +48,8 @@ jobs:
       runtime_image: ${{ steps.surfaces.outputs.runtime_image }}
       publication_metadata: ${{ steps.surfaces.outputs.publication_metadata }}
       secret_scanning: ${{ steps.surfaces.outputs.secret_scanning }}
+      db_integration: ${{ steps.surfaces.outputs.db_integration }}
+      migrations: ${{ steps.surfaces.outputs.migrations }}
       agent_instructions: ${{ steps.surfaces.outputs.agent_instructions }}
       documentation: ${{ steps.surfaces.outputs.documentation }}
       validation_system: ${{ steps.surfaces.outputs.validation_system }}
@@ -91,6 +93,7 @@ jobs:
       needs.changes.outputs.cargo_dependencies == 'true' ||
       needs.changes.outputs.lint_config == 'true' ||
       needs.changes.outputs.openapi == 'true' ||
+      needs.changes.outputs.migrations == 'true' ||
       needs.changes.outputs.agent_instructions == 'true' ||
       needs.changes.outputs.validation_system == 'true'
     runs-on: ubuntu-latest
@@ -101,6 +104,7 @@ jobs:
             needs.changes.outputs.cargo_dependencies == 'true' ||
             needs.changes.outputs.lint_config == 'true' ||
             needs.changes.outputs.openapi == 'true' ||
+            needs.changes.outputs.migrations == 'true' ||
             needs.changes.outputs.validation_system == 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -201,6 +205,23 @@ jobs:
           git fetch --no-tags --depth=1 origin "${BASE_SHA}"
           git show "${BASE_SHA}:api/openapi/service.yaml" >/tmp/openapi-base.yaml
           bash ./scripts/ci/measure.sh quality-openapi-breaking -- make openapi-breaking BASE_OPENAPI=/tmp/openapi-base.yaml
+      - name: Migrations
+        # Static append-only history against the base plus the source rules
+        # over the embedded set; the runtime checksum check runs in
+        # test-integration-db and the image rehearsal.
+        if: needs.changes.outputs.migrations == 'true'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == pull_request || "${EVENT_NAME}" == merge_group ]]; then
+            git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+            bash ./scripts/ci/measure.sh quality-migrations -- make migration-check BASE_REF="${BASE_SHA}"
+          else
+            bash ./scripts/ci/measure.sh quality-migrations -- make migration-check BASE_REF=HEAD
+          fi
+          bash ./scripts/ci/measure.sh quality-migration-history -- make migration-history-self-test
       - name: Instructions
         # Skill shape plus the generated harness carriers against their sources.
         if: needs.changes.outputs.agent_instructions == 'true'
@@ -391,7 +412,7 @@ jobs:
 
   image:
     needs: changes
-    if: needs.changes.outputs.runtime_image == 'true'
+    if: needs.changes.outputs.runtime_image == 'true' || needs.changes.outputs.migrations == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -417,11 +438,64 @@ jobs:
           RUNTIME_IMAGE_CACHE_TO: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'type=gha,mode=max,scope=runtime-image' || '' }}
         run: bash ./scripts/ci/measure.sh image-build -- make runtime-image-build RUNTIME_IMAGE=service:ci
       - name: Runtime image lifecycle
+        if: needs.changes.outputs.migrations != 'true'
         env:
           VCS_REF: ${{ github.sha }}
         run: bash ./scripts/ci/measure.sh image-lifecycle -- make runtime-image-check RUNTIME_IMAGE=service:ci RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+      - name: Migration rehearsal
+        # Contains the lifecycle check, with the PostgreSQL profile enabled
+        # against a compose database the image's /migrate prepared.
+        if: needs.changes.outputs.migrations == 'true'
+        env:
+          VCS_REF: ${{ github.sha }}
+        run: bash ./scripts/ci/measure.sh image-migration-rehearsal -- env REQUIRE_DOCKER=1 make migration-validate RUNTIME_IMAGE=service:ci RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
       - name: Image vulnerabilities
+        if: needs.changes.outputs.runtime_image == 'true'
         run: bash ./scripts/ci/measure.sh image-security -- make container-security CONTAINER_IMAGE=service:ci
+
+  integration:
+    needs: changes
+    if: needs.changes.outputs.db_integration == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - name: Restore cargo caches
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-integration-${{ runner.os }}-${{ runner.arch }}-
+      - name: Database-backed proof
+        # PostgreSQL from env/docker-compose.yml; the runner has Docker, so a
+        # missing daemon is a failure here, never a refusal.
+        run: bash ./scripts/ci/measure.sh integration-db -- env REQUIRE_DOCKER=1 make test-integration-db
+      - name: Save cargo caches
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.cargo-cache.outcome == 'success' &&
+          steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   docs:
     needs: changes
@@ -438,7 +512,7 @@ jobs:
 
   required:
     if: always()
-    needs: [changes, quality, security, secrets, delivery, image, docs]
+    needs: [changes, quality, security, secrets, delivery, image, integration, docs]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

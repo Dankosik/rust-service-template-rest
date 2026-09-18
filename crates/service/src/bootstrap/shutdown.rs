@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use health::Readiness;
 use infra_http::{Drained, Server};
+use infra_postgres::PgPool;
 use infra_telemetry::TracerProviderHandle;
 use service_config::HttpConfig;
 use tokio::time::Instant;
@@ -19,7 +20,8 @@ use tokio_util::task::TaskTracker;
 /// structure, not configuration, so they live here.
 const DIAGNOSTICS_SHUTDOWN: Duration = Duration::from_secs(2);
 const BACKGROUND_JOIN: Duration = Duration::from_secs(5);
-const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
+/// Also the bound for closing a pool that outlived a failed startup.
+pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
 const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
 
 /// What the stages after the drain need at worst.
@@ -146,6 +148,9 @@ pub(crate) struct Plan<'a> {
     pub(crate) diagnostics: Option<Server>,
     pub(crate) cancel: CancellationToken,
     pub(crate) tracker: TaskTracker,
+    /// Closed after background tasks joined, so no task still holds a
+    /// connection when the pool waits for them to return.
+    pub(crate) postgres: Option<PgPool>,
     pub(crate) tracer_provider: TracerProviderHandle,
     pub(crate) signals: &'a mut Signals,
 }
@@ -224,9 +229,14 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         tracing::info!("background_joined");
     }
 
-    // Dependency close: no pooled dependencies exist yet; profiles add
-    // theirs here under `budget.stage(DEPENDENCY_CLOSE)`.
-    let _ = DEPENDENCY_CLOSE;
+    if let Some(pool) = plan.postgres {
+        if infra_postgres::close(&pool, budget.stage(DEPENDENCY_CLOSE)).await {
+            tracing::info!("postgres_pool_closed");
+        } else {
+            tracing::warn!("postgres pool outlived its close budget");
+            degraded = true;
+        }
+    }
 
     if plan
         .tracer_provider

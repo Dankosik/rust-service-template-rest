@@ -91,6 +91,7 @@ TRIVY_CACHE_VOLUME ?= trivy-cache
 	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck docs-check \
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
 	publish-image-metadata-check \
+	compose-up compose-down test-integration-db migration-check migration-history-self-test migration-validate \
 	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test
 
 help: ## List available commands
@@ -119,12 +120,16 @@ fmt: ## Format every crate
 fmt-check: ## Fail when formatting differs from rustfmt output
 	$(CARGO) fmt --all --check
 
+# The database-backed tests compile only with their feature; lint them
+# without running them.
+INTEGRATION_LINT_FEATURES = --features integration-tests/integration
+
 lint: ## Clippy over all targets, warnings are errors
-	$(CARGO) clippy --workspace --all-targets $(CARGO_FLAGS) -- -D warnings
+	$(CARGO) clippy --workspace --all-targets $(INTEGRATION_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
 
 lint-changed: ## Clippy over the crates in PKGS="<crate> <crate>", warnings are errors
 	$(REQUIRE_PKGS)
-	$(CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets $(CARGO_FLAGS) -- -D warnings
+	$(CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
 
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py
@@ -231,6 +236,27 @@ container-security: ## Trivy over CONTAINER_IMAGE: fixable HIGH and CRITICAL fin
 		--format table \
 		"$(CONTAINER_IMAGE)"
 
+compose-up: ## Start the local PostgreSQL from env/docker-compose.yml on port POSTGRES_PORT (default 5432)
+	docker compose -f env/docker-compose.yml up -d --wait postgres
+
+compose-down: ## Stop the local PostgreSQL and drop its volume
+	docker compose -f env/docker-compose.yml down -v --remove-orphans
+
+test-integration-db: ## Database-backed proof against a throwaway compose PostgreSQL; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
+	$(HEAVY_GUARD)
+	$(VALIDATION_LOCK) bash scripts/ci/test-integration-db.sh
+
+migration-check: ## Static append-only history check (BASE_REF for a range) and the source rules over the embedded set
+	BASE_REF="$(BASE_REF)" bash scripts/ci/migration-history-check.sh
+	$(CARGO) test -p migrate $(CARGO_FLAGS)
+
+migration-history-self-test: ## Self-test of scripts/ci/migration-history-check.sh
+	bash scripts/ci/migration-history-check.sh --self-test
+
+migration-validate: ## Rehearse RUNTIME_IMAGE: /migrate against a fresh compose PostgreSQL, replay is no_change, lifecycle check with the profile on; ALLOW_HEAVY=1
+	$(HEAVY_GUARD)
+	$(VALIDATION_LOCK) bash scripts/ci/migration-validate.sh "$(RUNTIME_IMAGE)" "$(RUNTIME_EXPECTED_COMMIT)"
+
 # The SBOM describes the shipped artifact: Debian packages plus the Rust
 # dependency list cargo-auditable embedded in the binary.
 SBOM_OUTPUT ?= sbom.cdx.json
@@ -295,6 +321,7 @@ check: ## Full repository gate under the validation lock; ALLOW_FULL=1 (CI sets 
 	$(VALIDATION_LOCK) $(MAKE) check-unlocked
 
 check-unlocked: fmt-check lint test unused-deps openapi-lint check-instructions docs-check \
+	migration-check migration-history-self-test \
 	changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
 
 clean: ## Remove build output

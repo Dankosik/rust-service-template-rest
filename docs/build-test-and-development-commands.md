@@ -13,11 +13,11 @@ needs; [Validation Routing](validation-routing.md) selects beyond that.
 | --- | --- | --- |
 | `make build` | `cargo build --workspace` in debug | toolchain |
 | `make run` | Start the service with `env/config/local.toml` (`text` logs, `127.0.0.1` listeners) | toolchain |
-| `make test` | The workspace test suite, including the process tests of the built binary and the OpenAPI drift and contract tests | toolchain |
+| `make test` | The workspace test suite, including the process tests of the built binary and the OpenAPI drift and contract tests; the database tests compile with their feature off and need no Docker | toolchain |
 | `make test-package PKG=<crate>` | One crate's tests | toolchain |
 | `make test-changed PKGS="<crate> <crate>"` | The tests of the crates `scripts/ci/affected-crates.sh` prints for a change | toolchain |
 | `make fmt` / `make fmt-check` | rustfmt over the workspace; the check fails on a diff | toolchain |
-| `make lint` | clippy over all targets at the workspace lint levels, warnings as errors | toolchain |
+| `make lint` | clippy over all targets at the workspace lint levels, warnings as errors; includes the database tests through `--features integration-tests/integration` | toolchain |
 | `make lint-changed PKGS="<crate> <crate>"` | The same clippy over the selected crates | toolchain |
 | `make clean` | `cargo clean` | toolchain |
 
@@ -66,6 +66,16 @@ version. CI installs the same versions as prebuilt binaries.
 | `ALLOW_HEAVY=1 make container-sbom CONTAINER_IMAGE=service:ci SBOM_OUTPUT=sbom.cdx.json` | CycloneDX SBOM of the image | Docker |
 | `make publish-image-metadata-check` | Self-test of the publication naming and tag promotion script | — |
 
+## PostgreSQL
+
+| Command | Does | Needs |
+| --- | --- | --- |
+| `make compose-up` / `make compose-down` | Start or drop the local PostgreSQL from `env/docker-compose.yml` (`postgres://app:app@127.0.0.1:${POSTGRES_PORT:-5432}/app?sslmode=disable`) | Docker |
+| `ALLOW_HEAVY=1 make test-integration-db` | The database-backed proof: a throwaway compose PostgreSQL on an ephemeral port, `cargo test -p integration-tests --features integration` with `DATABASE_URL`, teardown; `REQUIRE_DOCKER=1` fails instead of refusing without Docker | Docker |
+| `make migration-check` | Static append-only history (`BASE_REF` for a range; the worktree with untracked files by default) and the `migrate` crate's source-rule tests over the embedded set | toolchain |
+| `make migration-history-self-test` | Self-test of `scripts/ci/migration-history-check.sh` | — |
+| `ALLOW_HEAVY=1 make migration-validate RUNTIME_IMAGE=service:ci RUNTIME_EXPECTED_COMMIT=<sha>` | Rehearse the image: `/migrate` against a fresh compose database, replay must be `no_change`, then `runtime-image-check` with the profile enabled; builds `service:migration` when no image is named | Docker, curl |
+
 ## Routing and aggregates
 
 | Command | Does |
@@ -73,20 +83,22 @@ version. CI installs the same versions as prebuilt binaries.
 | `make plan` | Classify the worktree's changes since `BASE_REF` and print the route: files, surfaces, commands with reasons and cost, surfaces with nothing to run |
 | `make verify` | Run that route under the validation lock; write an attempt record and, on a complete pass, a receipt under `<git-common-dir>/codex/verify` |
 | `make changed-surfaces-check`, `make affected-crates-check`, `make validation-lock-self-test`, `make verify-check` | The validation scripts' self-tests |
-| `ALLOW_FULL=1 make check` | The full repository gate under the lock: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-instructions`, `docs-check`, and the four self-tests |
+| `ALLOW_FULL=1 make check` | The full repository gate under the lock: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-instructions`, `docs-check`, `migration-check`, and the five self-tests |
 
 ## Guards and variables
 
 | Variable | Meaning |
 | --- | --- |
 | `ALLOW_FULL=1` | Opt into `make check`; not a routine follow-up to every edit |
-| `ALLOW_HEAVY=1` | Opt into the image targets and the history-wide secret scan |
+| `ALLOW_HEAVY=1` | Opt into the image targets, the database-backed proof, the migration rehearsal, and the history-wide secret scan |
+| `REQUIRE_DOCKER=1` | Make a missing Docker daemon fail `test-integration-db` and `migration-validate` instead of refusing with exit 2; CI sets it |
 | `CI=true` | Set by CI; satisfies both guards, resolves the Cargo tools from `PATH`, and skips the worktree half of `secret-scan`. Do not set it locally |
-| `BASE_REF` | Comparison base for `plan`, `verify`, and `secret-scan` (default `origin/main`) |
+| `BASE_REF` | Comparison base for `plan`, `verify`, `secret-scan`, and `migration-check` (default `origin/main`) |
 | `PKG` / `PKGS` | One crate for `test-package`; a space-separated list for `lint-changed` and `test-changed` |
 | `VERIFY_FORCE=1` | Rerun `make verify` even when an identical receipt exists |
 | `TOOLS_ROOT` | Where the Cargo tools are built (default `<git-common-dir>/tools`) |
 | `RUNTIME_IMAGE`, `CONTAINER_IMAGE`, `RUNTIME_EXPECTED_COMMIT`, `SBOM_OUTPUT` | Image targets' tag, scan target, expected `app.commit`, SBOM path |
+| `POSTGRES_PORT` | Host port of `make compose-up` (default `5432`); the proof scripts use an ephemeral port |
 
 `make help` prints the current catalog; when this document and `make help`
 disagree, `make/template.mk` is right and this document is stale.

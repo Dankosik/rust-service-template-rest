@@ -27,6 +27,7 @@ workspace = true
 gethostname = { workspace = true }
 health = { workspace = true }
 infra-http = { workspace = true }
+infra-postgres = { workspace = true }
 infra-telemetry = { workspace = true }
 secrecy = { workspace = true }
 service-config = { workspace = true }

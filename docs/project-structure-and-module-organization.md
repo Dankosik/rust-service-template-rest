@@ -10,16 +10,19 @@ Do not create a crate, module, or directory before its first real artifact.
 | --- | --- |
 | Business behavior, types, invariants, domain errors | `crates/<feature>/src/lib.rs` and its modules |
 | The feature's HTTP operations (handlers, schemas, typed responses, router) | `crates/<feature>/src/http.rs`; merged in `crates/service/src/api.rs` |
-| Concrete provider or transport adapters | `crates/infra-<provider>/` |
+| Concrete provider or transport adapters | `crates/infra-<provider>/` (`infra-postgres` is one) |
 | Process composition and lifecycle | `crates/service/src/bootstrap/` |
 | The one route tree and the API document identity | `crates/service/src/api.rs` |
 | A second binary that shares the service's composition | `crates/service/src/bin/<name>.rs` (`openapi` is one) |
-| A binary with its own lifecycle | its own crate |
+| A binary with its own lifecycle | its own crate (`crates/migrate` is one: library plus binary) |
+| Schema | `migrations/<version>_<snake_case>.sql`, embedded by `crates/migrate` ([rules](../migrations/README.md)) |
+| Repository code over the schema | the feature crate's persistence port and a `crates/infra-postgres`-backed adapter, joining a caller transaction only through `infra_postgres::in_tx` ([Persistence](architecture/persistence.md)) |
 | Client-visible REST contract | `#[utoipa::path]` and schema derives in the code; `api/openapi/service.yaml` is the generated, committed form |
 | Runtime configuration | the existing `crates/config/src/<section>.rs` owner |
 | Ordinary behavior and boundary tests | `#[cfg(test)] mod tests` beside the owner |
 | Black-box tests of one crate's public surface, including the built binary | `crates/<crate>/tests/<owner>.rs` (`crates/service/tests/lifecycle.rs` drives the binary; `openapi.rs` holds the contract tests) |
-| Real container or external-process proof | a `test/` workspace crate behind `ALLOW_HEAVY=1`, created with the first such proof (stage 8) |
+| Database-backed proof | `test/tests/<owner>.rs` in the `integration-tests` crate behind its `integration` feature, fixtures under `test/fixtures/`; runs through `ALLOW_HEAVY=1 make test-integration-db` |
+| Local dependency for development and proof | `env/docker-compose.yml` |
 | Delivery scripts | `scripts/ci/<owner>.sh` with a `--self-test` |
 | Task decisions | `specs/<topic>/` while open |
 | Repository agent policy and methods | the narrow `docs/` leaf or `.agents/skills/<name>/` |
@@ -76,7 +79,10 @@ cache, queue, store, or shared crate needs its accepted architecture force.
 - Lints are workspace-level in `Cargo.toml`; a site-local `#[allow]` carries
   its reason in a comment, and there is no per-crate relaxation.
 - Tool versions live once in `tools/versions.env`; base images live once in
-  the Dockerfile `FROM` lines.
+  the Dockerfile `FROM` lines and the compose `image` line.
+- The `test` directory holds the `integration-tests` package: a package
+  named `test` collides with the built-in test crate. Its tests compile only
+  with the `integration` feature, so `make test` never needs Docker.
 
 ## Filenames
 
@@ -96,6 +102,7 @@ files under `tests/` name what they prove (`lifecycle.rs`, `openapi.rs`).
 | `.agents/roles/*.toml`, `.agents/role-classes/*.md`, `.agents/codex-project.toml` | `.codex`, `.claude`, `.qwen`, `.grok`, `.cursor`, `.opencode` role carriers and `.codex/config.toml` | `make check-instructions` |
 | `tools/versions.env` and the Dockerfile `ARG` defaults and `FROM` tags | — | `make tools-check` |
 | `scripts/ci/changed-surfaces.sh` rows | CI job selection and the `make verify` plan | `make changed-surfaces-check`, `make verify-check` |
+| `migrations/*.sql` | The set embedded in the `migrate` binary; the `_sqlx_migrations` history of every database it ran against | `make migration-check` (static, source rules); `ALLOW_HEAVY=1 make test-integration-db` and `make migration-validate` (checksums against a live history) |
 
 Use the narrowest real proof owner. A `tests/` file is for a black-box
 invariant of the crate's public surface or the built binary, not a

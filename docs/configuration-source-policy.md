@@ -12,7 +12,7 @@ is what the template adds on top. The `service-config` crate owns it.
 - Environment variables (`APP__SECTION__KEY`) hold per-environment overrides
   and every application-owned secret. `APP__HTTP__ADDR` sets `http.addr`;
   `APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS` sets the collector
-  credential.
+  credential; `APP__POSTGRES__DSN` sets the database connection string.
 - CLI flags are loader controls: `--config PATH` selects the base file and
   `--config-overlay PATH` (repeatable, ordered) adds overlays. They never set
   individual keys, and a positional argument is refused.
@@ -48,6 +48,13 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
 - Files are read as the process user; relative paths and symlinks are
   accepted because Kubernetes projected volumes depend on symlinks for atomic
   updates. Each file is bounded to 1 MiB before parsing.
+- `postgres.dsn` is the only PostgreSQL connection source. It must be a
+  `postgres://` URL with explicit host, port, user, password, database, and
+  `sslmode` (`disable`, `require`, `verify-ca`, `verify-full`) and nothing
+  else; the libpq environment (`PGHOST`, `PGPASSWORD`, `PGSSLMODE`, ...),
+  `.pgpass`, service files, socket paths, and TLS key or certificate files
+  are refused at startup, and the diagnostic never carries the value
+  ([Persistence](architecture/persistence.md#connection-admission)).
 
 ## OpenTelemetry Environment Policy
 
@@ -145,6 +152,15 @@ every record inside a request) or `text` (local development).
   background readiness refresher. A cached verdict older than three refresh
   periods plus one probe budget is refused, so a dead refresher cannot leave
   a stale "healthy" standing.
+- `postgres.enabled` (default `false`) selects the PostgreSQL profile;
+  `postgres.max_connections` (default `4`, `1..500`) is the pool's upper
+  bound and the one database capacity value an operator sets. The acquire
+  budget (`3s`), the session `statement_timeout` and
+  `idle_in_transaction_session_timeout` (`8s`), and the migration budgets
+  are constants in the adapter
+  ([Persistence](architecture/persistence.md#budgets)); the readiness probe
+  draws `health.readiness_timeout`, and the pool closes inside the `5s`
+  dependency-close stage.
 
 ## Adding A Config Key
 

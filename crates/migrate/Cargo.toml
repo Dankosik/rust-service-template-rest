@@ -1,0 +1,33 @@
+[package]
+name = "migrate"
+description = "Forward-only schema migrations for the PostgreSQL profile: embedded source, session lock, deadline, one terminal record."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+# The library embeds `migrations/` and runs a migrator over one connection;
+# the binary loads the service configuration and applies the embedded set.
+[[bin]]
+name = "migrate"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+infra-postgres = { workspace = true }
+infra-telemetry = { workspace = true }
+log = { workspace = true }
+secrecy = { workspace = true }
+service-config = { workspace = true }
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki", "migrate", "macros"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing = { workspace = true, features = ["std"] }
+
+[build-dependencies]
+vergen-gitcl = { workspace = true }

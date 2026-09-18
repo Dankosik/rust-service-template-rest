@@ -23,11 +23,12 @@ version) and starts only the jobs its surfaces select:
 
 | Job | Selected by | Proves |
 | --- | --- | --- |
-| `quality` | Rust source, manifests, lint config, OpenAPI, instructions, validation system | format; on pull requests clippy and tests of the affected crates and their dependents, on `main` and on any manifest change the workspace; cargo-shear; Redocly lint plus the drift and contract tests; oasdiff against the base; skills; the validation scripts' self-tests |
+| `quality` | Rust source, manifests, lint config, OpenAPI, migrations, instructions, validation system | format; on pull requests clippy and tests of the affected crates and their dependents, on `main` and on any manifest change the workspace; cargo-shear; Redocly lint plus the drift and contract tests; oasdiff against the base; the static migration history check against the base and the source rules over the embedded set; skills; the validation scripts' self-tests |
 | `security` | manifests, `deny.toml`, workflows; tool manifest and image on pull requests | cargo-deny (advisories, licenses, bans, sources); Dependency Review, fail on high, pull requests only; zizmor with the online audits |
 | `secrets` | every event except a schedule without a policy change | Gitleaks over the commits since the base; the whole history on tags, manual runs, and a push without a readable base |
 | `delivery` | shell, workflows, tool manifest, image, publication metadata | actionlint; ShellCheck over the changed scripts; `tools-check`; BuildKit Dockerfile checks; the publication metadata self-test |
-| `image` | `build/docker/*`, `.dockerignore`, the image scripts | one `service:ci` image: build (layers restored from the Actions cache, written only by pushes to `main` and schedules), hardened lifecycle check asserting `app.commit`, Trivy |
+| `image` | `build/docker/*`, `.dockerignore`, the image scripts; the migration set and its rehearsal | one `service:ci` image: build (layers restored from the Actions cache, written only by pushes to `main` and schedules), then either the hardened lifecycle check asserting `app.commit` or, when migrations changed, the migration rehearsal (`/migrate` against a compose database, replay `no_change`, lifecycle check with the profile enabled); Trivy when the image inputs changed |
+| `integration` | `crates/infra-postgres`, `crates/migrate`, `test/`, the compose file, the database scripts | the database-backed proof on a compose PostgreSQL (`REQUIRE_DOCKER=1 make test-integration-db`) with its own cargo cache |
 | `docs` | any `*.md`, `docs/`, `specs/` | every relative link and `#fragment` resolves (lychee, offline, pinned container); no toolchain |
 | `required` | always | fails when any job failed or was cancelled; accepts skipped jobs |
 
@@ -144,7 +145,8 @@ later change reopens one only with new evidence.
 | Ported `changed-surfaces.sh` and `git-changed-paths.sh`, fail-closed, `--union BASE`, self-tests | `dorny/paths-filter`, `tj-actions/changed-files` | no action classifies fail-closed, reports unclassified paths, unions the base classifier, and runs unchanged under `make verify` |
 | `affected-crates.sh` over `cargo tree --locked --workspace -i <pkg> -e normal,build,dev` | a hand-maintained dependency map | the dev edge reselects a dependent's tests (*verified*: `health` → `infra-http`, `service`); a manifest, lockfile, or toolchain change and a closure at 80% of the workspace fall back to the workspace because feature unification can change an untouched crate |
 | One `changes` job feeding conditional jobs and an always-reported `required`; `quality` installs the toolchain only when a Rust surface is selected | one job with conditional steps | a docs-only pull request runs no Rust job |
-| `ALLOW_FULL` guards `make check` only; `ALLOW_HEAVY` guards the image targets and the history scan; `CI=true` satisfies both | guarding `lint` and `test` too | `make build`, `make test`, and `make lint` are the ordinary commands AGENTS.md names |
+| `ALLOW_FULL` guards `make check` only; `ALLOW_HEAVY` guards the image targets, the database proof, the migration rehearsal, and the history scan; `CI=true` satisfies both | guarding `lint` and `test` too | `make build`, `make test`, and `make lint` are the ordinary commands AGENTS.md names |
+| `db_integration` and `migrations` are two surfaces: the first selects the database proof, the second the static history check and the image rehearsal in place of the plain lifecycle check | one database surface | a schema change must be rehearsed from the image; an adapter change need not rebuild it |
 
 ### Runtime image
 
@@ -173,6 +175,15 @@ no shell or curl. `app.version` stays the Cargo version and the check asserts
 `app.commit`; the Go `sha-<12>` version was a workaround for having no module
 version. `distroless` tags are mutable, so the digest is pinned and moved by
 Dependabot.
+
+Since stage 8 the image also carries `/migrate`, built and cooked in the
+same stages (`-p service -p migrate`) so the migration job runs the same
+image with `--entrypoint /migrate` and needs no migration directory: the
+set is embedded at compile time, which is why `migrations/` and the
+`test/` manifest enter the build context. `runtime-image-check.sh` accepts
+`RUNTIME_IMAGE_NETWORK` and `RUNTIME_IMAGE_POSTGRES_DSN`, so the rehearsal
+observes readiness with the pool open (`postgres_pool_opened`) under the
+same hardened flags.
 
 ### Publication and deployment
 
@@ -204,7 +215,8 @@ stage 9 initializer may generate `.railway/`.
 
 ### Deferred, with the change that reopens each
 
-- `cargo-nextest`: stage 8 integration tests.
+- `cargo-nextest`: a hung database test; the stage 8 budgets bound every
+  test today ([Persistence](architecture/persistence.md#decisions-recorded-here)).
 - Static musl image: stage 11 allocator decision.
 - `.railway/railway.ts` generation: stage 9 initializer.
 - `mise`: the tool set outgrows Cargo + Go + Node + Docker.

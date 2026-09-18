@@ -2,9 +2,9 @@
 //! process lifecycle.
 //!
 //! Startup order: flags → config → signal handlers → tracer provider →
-//! subscriber → metrics recorder → background tasks → readiness admission →
-//! HTTP listeners → ready. Shutdown order lives in [`shutdown`]. Handlers and
-//! feature code never own this sequence.
+//! subscriber → metrics recorder → background tasks → dependency pools →
+//! readiness admission → HTTP listeners → ready. Shutdown order lives in
+//! [`shutdown`]. Handlers and feature code never own this sequence.
 
 mod shutdown;
 
@@ -12,8 +12,9 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use health::{Readiness, RefreshPolicy};
+use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
+use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe};
 use infra_telemetry::{
     ExporterState, LoggingOptions, Metrics, Sampler, TracingOptions, diagnostics_router,
     install_subscriber, install_tracer_provider,
@@ -56,6 +57,10 @@ pub(crate) enum BootstrapError {
     Admission(health::NotReady),
     #[error("configuration is invalid: {0}")]
     Config(#[from] service_config::ValidationError),
+    #[error("configuration is invalid: postgres.dsn: {0}")]
+    PostgresDsn(#[from] infra_postgres::DsnError),
+    #[error(transparent)]
+    Postgres(#[from] infra_postgres::ConnectError),
     #[error(transparent)]
     Server(#[from] infra_http::ServerError),
 }
@@ -154,14 +159,99 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
         cancel.child_token(),
     ));
 
-    // No dependency probes exist yet; profiles add theirs here. Admission
-    // still runs so the first probe after bind answers from an evaluation.
-    let readiness = Readiness::new(Vec::new());
+    // Dependency pools open before admission so the first readiness
+    // evaluation already includes them. The PostgreSQL profile is inert
+    // unless selected; a selected profile whose database is unreachable
+    // fails startup here rather than serving a readiness that never passes.
+    let mut probes: Vec<Box<dyn Probe>> = Vec::new();
+    let postgres = if config.postgres.enabled {
+        let pool = open_postgres(&config).await?;
+        probes.push(Box::new(PostgresProbe::new(pool.clone())));
+        tracker.spawn(infra_postgres::record_metrics_periodically(
+            pool.clone(),
+            METRICS_MAINTENANCE_INTERVAL,
+            cancel.child_token(),
+        ));
+        Some(pool)
+    } else {
+        None
+    };
+
+    // Admission runs even without probes so the first probe after bind
+    // answers from an evaluation.
+    let readiness = Readiness::new(probes);
     let policy = RefreshPolicy {
         interval: config.health.refresh_interval,
         probe_budget: config.health.readiness_timeout,
         failure_threshold: config.health.failure_threshold,
     };
+
+    let outcome = serve_transports(Transports {
+        config: &config,
+        signals: &mut signals,
+        tracer_provider,
+        metrics,
+        cancel,
+        tracker,
+        readiness,
+        policy,
+        postgres: postgres.clone(),
+    })
+    .await;
+    // Partial-startup cleanup: a pool opened before a later stage failed is
+    // closed explicitly instead of being left to the runtime teardown.
+    if let (Err(_), Some(pool)) = (&outcome, &postgres) {
+        let _ = infra_postgres::close(pool, shutdown::DEPENDENCY_CLOSE).await;
+    }
+    outcome
+}
+
+async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
+    let dsn = Dsn::parse(config.postgres.dsn.expose_secret())?;
+    let pool = infra_postgres::connect(
+        &dsn,
+        &PoolOptions {
+            max_connections: config.postgres.max_connections,
+            application_name: &config.observability.otel.service_name,
+        },
+    )
+    .await?;
+    tracing::info!(
+        postgres.host = dsn.host(),
+        postgres.port = dsn.port(),
+        postgres.database = dsn.database(),
+        postgres.sslmode = dsn.ssl_mode_name(),
+        postgres.max_connections = config.postgres.max_connections,
+        "postgres_pool_opened"
+    );
+    Ok(pool)
+}
+
+/// Everything [`serve`] built before the listeners bind.
+struct Transports<'a> {
+    config: &'a Config,
+    signals: &'a mut Signals,
+    tracer_provider: infra_telemetry::TracerProviderHandle,
+    metrics: Metrics,
+    cancel: CancellationToken,
+    tracker: TaskTracker,
+    readiness: Readiness,
+    policy: RefreshPolicy,
+    postgres: Option<PgPool>,
+}
+
+async fn serve_transports(transports: Transports<'_>) -> Result<Outcome, BootstrapError> {
+    let Transports {
+        config,
+        signals,
+        tracer_provider,
+        metrics,
+        cancel,
+        tracker,
+        readiness,
+        policy,
+        postgres,
+    } = transports;
     readiness
         .refresh(policy)
         .await
@@ -214,8 +304,9 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
         diagnostics,
         cancel,
         tracker,
+        postgres,
         tracer_provider,
-        signals: &mut signals,
+        signals,
     })
     .await)
 }
@@ -269,6 +360,7 @@ fn log_startup_summary(config: &Config, exporter: &ExporterState) {
         http.shutdown_timeout = ?config.http.shutdown_timeout,
         http.grace_period = ?config.http.grace_period,
         observability.metrics.addr = %config.observability.metrics.addr,
+        postgres.enabled = config.postgres.enabled,
         log.level = %config.log.level,
         tracing.exporter = exporter.as_str(),
         "service_starting"

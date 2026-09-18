@@ -36,6 +36,7 @@ authority.
 | `env/config/*.toml`, `APP__SECTION__KEY`, `--config`, `--config-overlay` | Inputs whose precedence and secret rules live in [Configuration Source Policy](configuration-source-policy.md) |
 | `crates/health` | The readiness verdict `/health/ready` serves and the drain flag teardown flips |
 | `crates/service/src/bootstrap` | Startup order, the shutdown plan, exit codes |
+| `migrations/*.sql` | The schema; `crates/migrate` embeds and applies it, access code adapts to it ([Persistence](architecture/persistence.md)) |
 | `crates/<feature>` (none yet) | Behavior consumed by transports and future binaries |
 | `tools/versions.env`, `deny.toml`, `.gitleaks.toml`, `build/docker/Dockerfile` | Tool pins and gate policy consumed by `make` and CI ([CI/CD Production Readiness](ci-cd-production-ready.md)) |
 
@@ -62,6 +63,7 @@ only for stable domain decisions.
 | HTTP contract, routing, middleware, exposure, or handler composition | [HTTP Architecture](architecture/http.md) |
 | Startup, readiness, drain, shutdown, exit codes, or process-resource lifetime | [Runtime Lifecycle](architecture/runtime-lifecycle.md) |
 | System neighbour, outbound provider, cross-service contract, or runtime evidence path | [Integration Boundaries](architecture/integration.md) |
+| PostgreSQL pool, repository, transaction, migration, query, or durable schema | [Persistence Architecture](architecture/persistence.md) |
 | Configuration source, precedence, secret input, telemetry environment, or runtime budget | [Configuration Source Policy](configuration-source-policy.md) |
 | File placement or the full repository tree | [Project Structure](project-structure-and-module-organization.md) |
 | Proof or validation must be selected | [Validation Routing](validation-routing.md) |
@@ -71,7 +73,6 @@ only for stable domain decisions.
 | The first feature on the scaffold | [First Production Feature](first-production-feature.md) |
 | What a service must decide before production | [Production Contract](production-contract.md) |
 
-Queue, job, outbox, and event architecture (`architecture/async.md`) and
-PostgreSQL architecture (`architecture/persistence.md`) arrive with their
-profiles; until then there is no owner to load. Load another leaf only for an
-independent changed pressure.
+Queue, job, outbox, and event architecture (`architecture/async.md`) arrives
+with its profile; until then there is no owner to load. Load another leaf
+only for an independent changed pressure.

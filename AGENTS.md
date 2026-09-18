@@ -103,7 +103,9 @@ Ownership boundaries are crates. `crates/service` is the composition root and
 the only crate that knows the concrete runtime, signals, and process lifecycle.
 `crates/config` owns the typed snapshot and its validation; `crates/health`
 owns readiness; `crates/infra-<provider>` crates adapt one transport or
-provider and own no business rule. Business behavior will live in
+provider and own no business rule (`crates/infra-postgres` is the first);
+`crates/migrate` owns the embedded migration set and its runner;
+`migrations/` owns the schema. Business behavior will live in
 `crates/<feature>` crates that depend on no transport or provider crate. Do
 not create a crate, module, or directory before its first real artifact.
 
@@ -120,6 +122,7 @@ Select commands from [`make/template.mk`](make/template.mk):
 | --- | --- |
 | One crate's behavior or tests | `make build` and `make test-package PKG=<crate>`, or `make test-changed PKGS="<crates>"` with the list `scripts/ci/affected-crates.sh` prints |
 | Several crates, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` | `make build` and `make test` |
+| A claim about observed PostgreSQL behavior (transaction, lock, commit outcome, migration, readiness with the pool) | `ALLOW_HEAVY=1 make test-integration-db`; a new migration also `make migration-check`; the image's migration path `ALLOW_HEAVY=1 make migration-validate` ([PostgreSQL Validation](docs/validation/postgres.md)) |
 | Formatting or lint configuration | `make fmt-check` and `make lint` |
 | Documentation or agent instructions | Static consistency review; `make docs-check` proves every relative link and fragment resolves; `make check-instructions` for skills, roles, and their generated carriers |
 | Mixed or unclear surfaces | `make plan` shows the route the changed surfaces select; `make verify` runs it and records a receipt |
@@ -167,7 +170,7 @@ retain their boundaries.
 | Authorized external, costly, sensitive, destructive, or irreversible action | [External Effects](docs/spec-first-workflow/shared/external-effects.md) |
 | Accepted work first enters another checkout | [Repository Boundaries](docs/spec-first-workflow/shared/repository-boundaries.md) |
 | Work adds, completes, or re-scopes a roadmap stage or its fixed decisions | [Roadmap](docs/roadmap.md) |
-| Crate ownership, dependency direction, request path, lifecycle, or an integration boundary can change | [Repository Architecture](docs/repo-architecture.md), then the one leaf it selects |
+| Crate ownership, dependency direction, request path, lifecycle, persistence, or an integration boundary can change | [Repository Architecture](docs/repo-architecture.md), then the one leaf it selects |
 | A crate, binary, dependency, or CI gate is added or removed | [Roadmap concept map and stage scope](docs/roadmap.md#concept-map), then [CONTRIBUTING.md](CONTRIBUTING.md) |
 | A non-obvious technical decision must survive the current session | `specs/<topic>/` while open; the owning document once accepted |
 | Contribution, pull-request, or evidence expectations | [CONTRIBUTING.md](CONTRIBUTING.md) |
@@ -179,9 +182,8 @@ retain their boundaries.
 | A CI job, tool pin, Dockerfile, image check, or publication step changes what may ship | [CI/CD Production Readiness](docs/ci-cd-production-ready.md); the `rust-delivery-platform` skill owns the method |
 | Deployment policy for a derived service on Railway | [Railway Deployment Profile](docs/railway-deployment-profile.md) |
 
-The remaining capability skills (`rust-sqlx`, `rust-tonic`, and the profile
-skills) arrive with their stages; until then the roadmap names the Go source
-to port from.
+The remaining capability skills (`rust-tonic` and the profile skills) arrive
+with their stages; until then the roadmap names the Go source to port from.
 
 ## Rust Change Surface
 
