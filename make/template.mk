@@ -7,30 +7,67 @@
 SHELL := /bin/sh
 .DEFAULT_GOAL := help
 
+# Every tool version is pinned once in tools/versions.env; CI reads the same
+# file. `make tools-check` proves the pins resolve.
+include tools/versions.env
+
 CARGO ?= cargo
 CARGO_FLAGS ?= --locked
 SERVICE_BIN ?= service
 # Baseline configuration for `make run`; deployments pass their own file or
 # rely on APP__* environment variables.
 LOCAL_CONFIG ?= env/config/local.toml
+# Default comparison base for range-scoped gates (secret scan); CI passes the
+# event's base commit.
+BASE_REF ?= origin/main
+# Not a security boundary: stops an agent from launching a costly command by
+# accident. CI systems set CI=true, which is enough.
+ALLOW_HEAVY ?=
+HEAVY_GUARD = @if [ "$(ALLOW_HEAVY)" != "1" ] && [ "$(CI)" != "true" ]; then printf 'refusing %s: set ALLOW_HEAVY=1 (CI sets CI=true)\n' "$@" >&2; exit 2; fi
 
 # The OpenAPI document is generated from the Rust contract by the `openapi`
 # binary and committed; `make test` refuses a stale copy. Redocly CLI lints
 # the committed file (Node.js via npx), oasdiff compares it with the
-# pull-request base (Go via `go run`). Versions are pinned here until the
-# delivery stage introduces one tool manifest.
+# pull-request base (Go via `go run`).
 OPENAPI_FILE := api/openapi/service.yaml
 OPENAPI_BREAKING_APPROVALS ?= api/openapi/breaking-changes-approvals.txt
-REDOCLY_CLI_VERSION := 2.53.3
 REDOCLY_CLI ?= npx --yes @redocly/cli@$(REDOCLY_CLI_VERSION)
-OASDIFF_VERSION := 1.32.1
 OASDIFF ?= go run github.com/oasdiff/oasdiff@v$(OASDIFF_VERSION)
 
+# Pinned Cargo tools. Locally each one is built once from crates.io into its
+# own root under the Git common directory (shared by worktrees, untouched by
+# `cargo clean`); the binary path is the prerequisite, so an installed version
+# is never rebuilt and needs no PATH lookup or version check. CI installs the
+# same versions as prebuilt binaries (taiki-e/install-action) and runs them
+# from PATH.
+TOOLS_ROOT ?= $(abspath $(or $(shell git rev-parse --git-common-dir 2>/dev/null),.git))/tools
+ifeq ($(CI),true)
+CARGO_DENY ?= cargo-deny
+CARGO_SHEAR ?= cargo-shear
+ZIZMOR ?= zizmor
+else
+CARGO_DENY ?= $(TOOLS_ROOT)/cargo-deny-$(CARGO_DENY_VERSION)/bin/cargo-deny
+CARGO_SHEAR ?= $(TOOLS_ROOT)/cargo-shear-$(CARGO_SHEAR_VERSION)/bin/cargo-shear
+ZIZMOR ?= $(TOOLS_ROOT)/zizmor-$(ZIZMOR_VERSION)/bin/zizmor
+endif
+# Only binaries under TOOLS_ROOT are build prerequisites; PATH names are not.
+CARGO_TOOLS := $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY) $(CARGO_SHEAR) $(ZIZMOR))
+
+# Go tools resolve through the module checksum database; the first run
+# compiles and caches them.
+REQUIRE_GO = @command -v go >/dev/null 2>&1 || { echo "$@ requires Go for $(1)" >&2; exit 2; }
+GITLEAKS ?= go run github.com/zricethezav/gitleaks/v8@v$(GITLEAKS_VERSION)
+GITLEAKS_FLAGS := --no-banner --redact --verbose --exit-code 1 --config .gitleaks.toml
+ACTIONLINT ?= go run github.com/rhysd/actionlint/cmd/actionlint@v$(ACTIONLINT_VERSION)
+# Tracked and untracked shell scripts that exist in the worktree.
+SHELL_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standard -- '*.sh'))
+
 .PHONY: help build run test test-package fmt fmt-check lint check check-skills clean \
-	openapi-generate openapi-check openapi-lint openapi-breaking
+	openapi-generate openapi-check openapi-lint openapi-breaking \
+	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck
 
 help: ## List available commands
-	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 build: ## Build every workspace crate in debug mode
 	$(CARGO) build --workspace $(CARGO_FLAGS)
@@ -57,6 +94,44 @@ lint: ## Clippy over all targets, warnings are errors
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py
 
+# $(TOOLS_ROOT)/<crate>-<version>/bin/<crate>: build the pinned crate once.
+$(TOOLS_ROOT)/%:
+	$(CARGO) install --locked --root "$(TOOLS_ROOT)/$(firstword $(subst /, ,$*))" --version "$(patsubst $(notdir $@)-%,%,$(firstword $(subst /, ,$*)))" $(notdir $@)
+
+tools-check: $(CARGO_TOOLS) ## Prove tools/versions.env: shape, image digests, pinned Cargo tools resolve
+	CARGO_DENY="$(CARGO_DENY)" CARGO_SHEAR="$(CARGO_SHEAR)" ZIZMOR="$(ZIZMOR)" bash scripts/ci/tools-check.sh
+
+deny: $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY)) ## Advisories, licenses, bans, and sources over the locked graph (deny.toml)
+	$(CARGO_DENY) --locked check
+
+unused-deps: $(filter $(TOOLS_ROOT)/%,$(CARGO_SHEAR)) ## Fail on a declared dependency no crate uses (cargo-shear)
+	$(CARGO_SHEAR) --locked
+
+secret-scan: ## Gitleaks over the worktree (locally) and the commits since BASE_REF
+	$(call REQUIRE_GO,gitleaks@v$(GITLEAKS_VERSION))
+	@if [ "$(CI)" != "true" ]; then $(GITLEAKS) dir $(GITLEAKS_FLAGS) .; fi
+	@git cat-file -e "$(BASE_REF)^{commit}" 2>/dev/null || { echo "secret scan base is unavailable: $(BASE_REF)" >&2; exit 2; }
+	$(GITLEAKS) git $(GITLEAKS_FLAGS) --log-opts="$(BASE_REF)..HEAD" .
+
+secret-scan-history: ## Gitleaks over every commit on every branch; ALLOW_HEAVY=1
+	$(HEAVY_GUARD)
+	$(call REQUIRE_GO,gitleaks@v$(GITLEAKS_VERSION))
+	$(GITLEAKS) git $(GITLEAKS_FLAGS) --log-opts=--all .
+
+# The shellcheck and pyflakes integrations would run whatever binary the host
+# has on PATH; they are off so the result is the same everywhere. Shell
+# scripts get the pinned ShellCheck through `make shellcheck`.
+actionlint: ## Lint GitHub Actions workflows
+	$(call REQUIRE_GO,actionlint@v$(ACTIONLINT_VERSION))
+	$(ACTIONLINT) -shellcheck= -pyflakes=
+
+zizmor: $(filter $(TOOLS_ROOT)/%,$(ZIZMOR)) ## Audit GitHub Actions workflows for security weaknesses; GH_TOKEN enables the online audits
+	$(ZIZMOR) --persona regular .
+
+shellcheck: ## ShellCheck every shell script through the pinned container
+	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }
+	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
+
 openapi-generate: ## Regenerate api/openapi/service.yaml from the Rust contract
 	@tmp="$$(mktemp)" && $(CARGO) run -q -p $(SERVICE_BIN) --bin openapi $(CARGO_FLAGS) > "$$tmp" && mv "$$tmp" $(OPENAPI_FILE)
 
@@ -69,14 +144,14 @@ openapi-lint: ## Lint and validate the committed document with Redocly CLI
 
 openapi-breaking: ## Compare the document with BASE_OPENAPI=<file> for breaking changes
 	@test -n "$(BASE_OPENAPI)" || { echo "openapi-breaking requires BASE_OPENAPI=<path to the base document>" >&2; exit 2; }
-	@command -v go >/dev/null 2>&1 || { echo "openapi-breaking requires Go for oasdiff@v$(OASDIFF_VERSION)" >&2; exit 2; }
+	$(call REQUIRE_GO,oasdiff@v$(OASDIFF_VERSION))
 	@if [ -s "$(OPENAPI_BREAKING_APPROVALS)" ]; then \
 		$(OASDIFF) breaking --fail-on ERR --err-ignore "$(OPENAPI_BREAKING_APPROVALS)" "$(BASE_OPENAPI)" $(OPENAPI_FILE); \
 	else \
 		$(OASDIFF) breaking --fail-on ERR "$(BASE_OPENAPI)" $(OPENAPI_FILE); \
 	fi
 
-check: fmt-check lint test openapi-lint check-skills ## Full local gate: formatting, lint, tests, OpenAPI lint, skills
+check: fmt-check lint test unused-deps openapi-lint check-skills ## Full local gate: formatting, lint, tests, unused dependencies, OpenAPI lint, skills
 
 clean: ## Remove build output
 	$(CARGO) clean

@@ -38,7 +38,8 @@ jobs:
           rustup toolchain install
           rustup show active-toolchain
       - name: Restore cargo caches
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -55,6 +56,21 @@ jobs:
         run: make build
       - name: Test
         run: make test
+      - name: Save cargo caches
+        # Only a push to main writes the cache, so a pull request or tag build
+        # cannot poison what later runs restore.
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
       - name: OpenAPI lint
         # The drift check is part of `make test`; this is Redocly over the
         # committed document. Node.js is preinstalled on the runner.

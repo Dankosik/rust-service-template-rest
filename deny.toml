@@ -1,0 +1,53 @@
+# cargo-deny policy: advisories, licenses, bans, and sources over the locked
+# dependency graph. `make deny` runs every check; CI runs it on the
+# `cargo_dependencies` and `dependency_policy` surfaces and on schedule,
+# because the advisory database moves without a commit.
+# Decisions: specs/validation-delivery/research/synthesis.md.
+
+[graph]
+# Only the targets the service is built and tested for. Without this list
+# cargo-deny evaluates every target, and macOS-only crates (libproc, mach2,
+# bindgen) would enter license and advisory decisions about the Linux binary.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+all-features = false
+
+[advisories]
+yanked = "deny"
+# Every ignore names the crate, why it is acceptable, and what reopens it.
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but is a proc-macro used only at compile time by utoipa-axum 0.2.0, the latest release; the unreleased utoipa-axum moves to pastey. Reopen: next utoipa-axum release." },
+]
+
+[licenses]
+# Permissive licenses that the current graph uses; cargo-deny warns on an
+# allowance no crate matches, so a new license is added when a crate brings
+# it. CC0-1.0 covers axum-tracing-opentelemetry and
+# tracing-opentelemetry-instrumentation-sdk; dual-licensed crates (r-efi, ryu,
+# memchr, zerocopy) are satisfied by MIT or Apache-2.0.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate versions are reported, not refused: base64, getrandom, hashbrown,
+# syn, and tower-http currently resolve twice through upstream crates that
+# have not converged; the synthesis lists them as deferred.
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace crates depend on each other by path without a version; cargo-deny
+# treats a bare path dependency as a wildcard unless this is set.
+allow-wildcard-paths = true
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
