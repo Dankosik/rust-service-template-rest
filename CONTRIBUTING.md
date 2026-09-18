@@ -83,6 +83,13 @@ real defect still requires correction.
   graph; enable Dependabot alerts (Settings → Code security, or
   `gh api -X PUT repos/<owner>/<repo>/vulnerability-alerts`) once in a
   derived repository, or the job fails on its first pull request.
+- Publication to GHCR (`cd.yml`) is off until the repository variable
+  `ENABLE_GHCR_PUBLISH` is `true`. A `v*` tag must equal `v<crate version>`
+  from `Cargo.toml`; the publication refuses any other tag. Consumers verify
+  with `cosign verify --certificate-identity
+  https://github.com/<owner>/<repo>/.github/workflows/cd.yml@refs/heads/main`
+  (or `@refs/tags/v…`) and `gh attestation verify oci://<image> --repo
+  <owner>/<repo>`.
 - Treat `.github/workflows/ci.yml` as the source of truth for current check
   names instead of copying a list into scripts or docs. Jobs are selected by
   `scripts/ci/changed-surfaces.sh`, the classifier `make plan` uses; a new

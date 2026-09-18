@@ -26,6 +26,20 @@ updates:
         patterns:
           - "*"
 
+  # Actions used inside the composite publication action.
+  - package-ecosystem: "github-actions"
+    directory: "/.github/actions/publish-image"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "ci"
+    groups:
+      publish-image-actions:
+        patterns:
+          - "*"
+
   # FROM digests in the Dockerfile. A rust:<version> bump must land with the
   # same version in rust-toolchain.toml; `make tools-check` refuses drift.
   - package-ecosystem: "docker"

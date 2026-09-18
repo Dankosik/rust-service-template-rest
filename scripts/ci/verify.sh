@@ -236,6 +236,11 @@ self_test() (
 	output=$(bash "${script}" --plan --files .gitleaks.toml)
 	grep -q '^  make secret-scan$' <<<"${output}"
 
+	output=$(bash "${script}" --plan --files scripts/ci/publish-image-metadata.sh .github/actions/publish-image/action.yml)
+	grep -q '^  make publish-image-metadata-check$' <<<"${output}"
+	grep -q '^  make actionlint$' <<<"${output}"
+	if grep -q 'runtime-image-build' <<<"${output}"; then return 1; fi
+
 	output=$(bash "${script}" --plan --files .github/dependabot.yml)
 	grep -q 'dependency_automation: GitHub validates' <<<"${output}"
 
@@ -551,6 +556,7 @@ if is_true shell; then
 	if [[ -n ${shell_files} ]]; then add_command shell "${shell_files}" "shell sources changed" "make shellcheck SHELL_FILES='${shell_files}'" docker false true; else add_na shell "no changed shell source remains"; fi
 fi
 if is_true agent_instructions; then add_command make check-skills "agent instructions or skills changed" "make check-skills" cheap false false; fi
+if is_true publication_metadata; then add_command make publish-image-metadata-check "publication naming or promotion changed" "make publish-image-metadata-check" cheap false false; fi
 if is_true secret_scanning; then add_command make secret-scan "secret scanning policy changed" "make secret-scan" cpu false false; fi
 if is_true runtime_image; then
 	image=${VERIFY_RUNTIME_IMAGE:-service:verify}

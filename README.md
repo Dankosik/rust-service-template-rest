@@ -101,6 +101,7 @@ load balancers, drains in-flight requests, flushes telemetry, and exits `0`
 | Validation routing | `scripts/ci/changed-surfaces.sh` classifies changed paths into surfaces (fail-closed), `affected-crates.sh` selects the crates to lint and test through `cargo tree -i`, `verify.sh` plans, runs under one validation lock, and records a receipt; CI and `make verify` share the classifier |
 | Delivery | GitHub Actions CI selected by changed surface: `quality` (format, affected or workspace clippy, build, and tests, cargo-shear, OpenAPI lint, drift, and compatibility, skills, validation-system self-tests), `security` (cargo-deny, Dependency Review, zizmor), `secrets` (Gitleaks range or history), `delivery` (actionlint, ShellCheck, tool manifest, Dockerfile checks), `image` (build, hardened lifecycle check, Trivy), an always-reported `required` job; CodeQL for Rust and Actions with `codeql-required`; weekly schedule runs every surface; pinned action SHAs; Dependabot for Cargo, Actions, and the Dockerfile base images |
 | Runtime image | `build/docker/Dockerfile`: `rust:<toolchain>-slim-trixie` builder with cargo-chef dependency layers and `cargo auditable build`, `gcr.io/distroless/cc-debian13:nonroot` runtime, commit baked as `app.commit`, `STOPSIGNAL SIGTERM`, OCI labels; ~45 MiB; the lifecycle check starts it `--read-only --cap-drop=ALL --security-opt=no-new-privileges` and proves a clean stop inside the 45 s grace budget |
+| Publication (opt-in) | `cd.yml` runs only when the repository variable `ENABLE_GHCR_PUBLISH` is `true`: after ci and CodeQL pass on `main` (or on a `v*` tag that equals the crate version), `.github/actions/publish-image` builds a run-scoped candidate, repeats the lifecycle check and Trivy scan, writes a CycloneDX SBOM, pushes, signs keyless with cosign, attests provenance and SBOM, verifies both back out of GHCR, and only then promotes `sha-<12>` + `main` or `v*` + `latest` with a digest read-back per tag |
 | Agent workflow | `AGENTS.md` repository contract, 16 model-invoked skills under `.agents/skills`, `CLAUDE.md`, and the [roadmap](docs/roadmap.md) that names the Go-template source for every planned owner |
 | Community | MIT license, code of conduct, security policy, issue forms, pull-request template, `CODEOWNERS` |
 
@@ -134,6 +135,7 @@ tools/versions.env          one pin per developer and delivery tool
 deny.toml, .gitleaks.toml   dependency and secret-scanning policy
 .github/workflows/ci.yml    surface-selected CI jobs; the source of truth for check names
 .github/workflows/codeql.yml CodeQL for Rust and Actions on the same surfaces
+.github/workflows/cd.yml    opt-in GHCR publication through .github/actions/publish-image
 ```
 
 ## Everyday commands
@@ -156,7 +158,8 @@ deny.toml, .gitleaks.toml   dependency and secret-scanning policy
 | `make actionlint` / `make zizmor` / `make shellcheck` | Workflow lint, workflow security audit, shell lint |
 | `make tools-check` | Prove every pin in `tools/versions.env` resolves and the Dockerfile agrees with it |
 | `make dockerfile-check` | BuildKit's built-in Dockerfile checks |
-| `ALLOW_HEAVY=1 make runtime-image-build` / `runtime-image-check` / `container-security` | Build the production image, start it hardened and assert readiness, commit, and a clean `SIGTERM` exit inside the grace budget, scan it with Trivy |
+| `ALLOW_HEAVY=1 make runtime-image-build` / `runtime-image-check` / `container-security` / `container-sbom` | Build the production image, start it hardened and assert readiness, commit, and a clean `SIGTERM` exit inside the grace budget, scan it with Trivy, write its CycloneDX SBOM |
+| `make publish-image-metadata-check` | Self-test of the publication naming and tag promotion |
 | `make lint-changed PKGS="a b"` / `make test-changed PKGS="a b"` | Clippy or tests over the crates `scripts/ci/affected-crates.sh` selects |
 | `make plan` / `make verify` | Show the route the changed surfaces select, or run it under the validation lock and record a receipt |
 | `ALLOW_FULL=1 make check` | Full repository gate: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-skills`, and the validation-system self-tests |

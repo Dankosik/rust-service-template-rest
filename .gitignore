@@ -9,6 +9,7 @@
 
 # Local artifacts
 .artifacts/
+/sbom.cdx.json
 *.profraw
 *.profdata
 
