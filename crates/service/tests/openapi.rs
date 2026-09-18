@@ -132,13 +132,19 @@ fn committed_document_matches_the_generator() {
 
 #[test]
 fn document_has_the_probe_operations() {
+    // Feature operations join the document beside the probes; the probes
+    // themselves are platform behavior every derived service keeps.
     let document = document();
-    let mut ids: Vec<_> = operations(&document)
+    let ids: Vec<_> = operations(&document)
         .iter()
         .map(|(_, _, operation)| operation["operationId"].as_str().unwrap().to_owned())
         .collect();
-    ids.sort_unstable();
-    assert_eq!(ids, ["healthLive", "healthReady"]);
+    for probe in ["healthLive", "healthReady"] {
+        assert!(
+            ids.contains(&probe.to_owned()),
+            "missing {probe} in {ids:?}"
+        );
+    }
 }
 
 #[test]

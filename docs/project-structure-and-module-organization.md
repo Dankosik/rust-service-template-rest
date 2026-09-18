@@ -1,0 +1,101 @@
+# Project Structure And Module Organization
+
+Use only when placement is not forced by current code, crate documentation,
+generated-source ownership, or [Component Boundaries](architecture/boundaries.md).
+Do not create a crate, module, or directory before its first real artifact.
+
+## Placement
+
+| Responsibility | Owner |
+| --- | --- |
+| Business behavior, types, invariants, domain errors | `crates/<feature>/src/lib.rs` and its modules |
+| The feature's HTTP operations (handlers, schemas, typed responses, router) | `crates/<feature>/src/http.rs`; merged in `crates/service/src/api.rs` |
+| Concrete provider or transport adapters | `crates/infra-<provider>/` |
+| Process composition and lifecycle | `crates/service/src/bootstrap/` |
+| The one route tree and the API document identity | `crates/service/src/api.rs` |
+| A second binary that shares the service's composition | `crates/service/src/bin/<name>.rs` (`openapi` is one) |
+| A binary with its own lifecycle | its own crate |
+| Client-visible REST contract | `#[utoipa::path]` and schema derives in the code; `api/openapi/service.yaml` is the generated, committed form |
+| Runtime configuration | the existing `crates/config/src/<section>.rs` owner |
+| Ordinary behavior and boundary tests | `#[cfg(test)] mod tests` beside the owner |
+| Black-box tests of one crate's public surface, including the built binary | `crates/<crate>/tests/<owner>.rs` (`crates/service/tests/lifecycle.rs` drives the binary; `openapi.rs` holds the contract tests) |
+| Real container or external-process proof | a `test/` workspace crate behind `ALLOW_HEAVY=1`, created with the first such proof (stage 8) |
+| Delivery scripts | `scripts/ci/<owner>.sh` with a `--self-test` |
+| Task decisions | `specs/<topic>/` while open |
+| Repository agent policy and methods | the narrow `docs/` leaf or `.agents/skills/<name>/` |
+
+There is no shared `common`, `util`, or `helpers` crate or module; a helper
+survives only where it uniquely carries a protocol or ownership rule (the
+request-id grammar, the secret-key predicate). A new crate needs an
+independent reason: a dependency direction the graph must enforce, a
+compile-time boundary, or an independent lifecycle. A new network boundary,
+cache, queue, store, or shared crate needs its accepted architecture force.
+
+## Placement algorithm
+
+1. Does an owner already exist for the responsibility? Extend it. A parallel
+   path beside an existing owner is the wrong default.
+2. Is it business behavior? `crates/<feature>`; the feature's HTTP surface is
+   its `http` module. Feature crates depend on `axum`, `utoipa`, and
+   `infra-http` (for the problem catalog and shared responses) but never on
+   `infra_http::harden`, `infra_http::Server`, or a provider crate; a feature
+   never depends on another feature's transport module.
+3. Does it adapt one provider or transport? `crates/infra-<provider>`, owning
+   admission, budgets, and mapping into feature-owned types, with no business
+   rule.
+4. Is it a configuration key? The section file in `crates/config/src/`;
+   the reason a value was chosen sits beside the rule that enforces it.
+5. Does it compose or tear down? `bootstrap`: a new background task joins the
+   task tracker with a child cancellation token; a new dependency joins
+   admission, the readiness refresher, and the `DEPENDENCY_CLOSE` stage.
+6. Is it a check? A make target in `make/template.mk` (portable) or
+   `make/service.mk` (service-owned), backed by a script in `scripts/ci/`
+   with a self-test, and a row in `scripts/ci/changed-surfaces.sh` so CI and
+   `make verify` select it.
+7. Nothing fits? Reopen [Repository Architecture](repo-architecture.md)
+   rather than creating a generic module.
+
+## Non-obvious repository rules
+
+- The `config` directory holds the `service-config` package: the package
+  name avoids colliding with the `config` crate it wraps. Paths map to
+  packages through the manifest (`scripts/ci/affected-crates.sh` reads it),
+  never by directory name.
+- Inside `infra-http`, the local `health` module (probe handlers) shadows
+  the `health` crate; the crate is written `::health::…`.
+- The probe handlers, the `Problem` type, and the shared problem responses
+  live in `infra-http` because every derived service keeps them; a feature
+  adds a `ToResponse` component there only when a new shared status appears.
+- Adapter-owned instruments stay with the adapter through the `metrics`
+  facade; a caller-provided recorder alone does not justify a `metrics.rs`.
+- Every Cargo dependency is declared once in `[workspace.dependencies]` with
+  `default-features = false`; a crate enables its features. `cargo-shear`
+  fails on a declared dependency no crate uses.
+- Lints are workspace-level in `Cargo.toml`; a site-local `#[allow]` carries
+  its reason in a comment, and there is no per-crate relaxation.
+- Tool versions live once in `tools/versions.env`; base images live once in
+  the Dockerfile `FROM` lines.
+
+## Filenames
+
+Rust files use lowercase snake case and name the owned behavior, not
+chronology or size: `harden.rs`, `request_id.rs`, `shutdown.rs`,
+`secret_policy.rs`. Reject `util.rs`, `common.rs`, `helpers.rs`, `misc.rs`,
+`*_v2.rs`, and `*_extra.rs`. A module splits by independent lifecycle,
+audience, authority, or operator flow; line count alone is not an owner. Test
+files under `tests/` name what they prove (`lifecycle.rs`, `openapi.rs`).
+
+## Generated and proof boundaries
+
+| Source | Derived output | Drift proof |
+| --- | --- | --- |
+| `#[utoipa::path]` and schema derives; the router merge in `api.rs` | `api/openapi/service.yaml` | `make openapi-check`; part of `make test` |
+| `.agents/skills/<name>/SKILL.md` shape rules | — | `make check-skills` |
+| `tools/versions.env` and the Dockerfile `ARG` defaults and `FROM` tags | — | `make tools-check` |
+| `scripts/ci/changed-surfaces.sh` rows | CI job selection and the `make verify` plan | `make changed-surfaces-check`, `make verify-check` |
+
+Use the narrowest real proof owner. A `tests/` file is for a black-box
+invariant of the crate's public surface or the built binary, not a
+stronger-sounding unit test; ordinary crate tests need no Docker. The
+compiler owns dependency direction; the drift test owns the contract;
+`make tools-check` owns the pins.

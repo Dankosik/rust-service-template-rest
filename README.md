@@ -223,6 +223,10 @@ template's `go-*` skills where they carry over to a long-running service.
 - Request path, contract workflow, compatibility: [HTTP Architecture](docs/architecture/http.md)
 - Startup, readiness, staged shutdown, exit codes: [Runtime Lifecycle](docs/architecture/runtime-lifecycle.md)
 - Neighbours and outbound dependencies: [Integration Boundaries](docs/architecture/integration.md)
+- Where a crate, module, file, or test goes: [Project Structure](docs/project-structure-and-module-organization.md)
+- Every make target explained: [Commands](docs/build-test-and-development-commands.md)
+- From the scaffold to one vertical slice, verified: [First Production Feature](docs/first-production-feature.md)
+- What a service decides before promotion: [Production Contract](docs/production-contract.md)
 - Configuration, secrets, telemetry environment, runtime budgets: [Configuration Source Policy](docs/configuration-source-policy.md)
 - Which checks a change selects, `make plan` and `make verify`: [Validation Routing](docs/validation-routing.md) and its leaves under `docs/validation/`
 - What CI and publication prove: [CI/CD Production Readiness](docs/ci-cd-production-ready.md)
