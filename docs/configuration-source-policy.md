@@ -203,6 +203,11 @@ no-op provider silently; check `cargo tree -d -i opentelemetry` after a
 dependency change. A dependency enabling `opentelemetry-otlp/reqwest-client`
 flips the exporter to the async client, which the batch processor does not
 support; check `cargo tree -e features -i opentelemetry-otlp`.
+`reqwest-rustls` must stay enabled: without it an `https://` collector
+fails at export with reqwest's "URL scheme is not allowed". That feature
+selects rustls + `aws-lc-rs` and the platform verifier (system roots in
+the distroless image). Do not add `reqwest-client` beside
+`reqwest-blocking-client`.
 `metrics-exporter-prometheus` default features pull `push-gateway` and a TLS
 stack; keep them off. OTLP metric push and OTLP logs
 (`opentelemetry-appender-tracing`) are deferred until a platform requires

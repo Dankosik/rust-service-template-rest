@@ -139,7 +139,7 @@ replay is `no_change`, then the lifecycle check with the profile enabled.
 From the stage 8 research (versions read 2026-09-18; behavior verified in a
 scratch project against `postgres:18.4`):
 
-- **`sqlx` 0.9** (`postgres`, `runtime-tokio`, `tls-rustls-ring-webpki`,
+- **`sqlx` 0.9** (`postgres`, `runtime-tokio`, `tls-rustls-aws-lc-rs`,
   `migrate`; `macros` only where `migrate!` or `#[sqlx::test]` is used) over
   `tokio-postgres` + `deadpool-postgres` + `refinery` (four crates, no lock in
   `refinery`), `diesel-async` (a schema DSL and a code generation step with no
@@ -148,11 +148,18 @@ scratch project against `postgres:18.4`):
   pool, migrations with checksums and an advisory lock, and per-test
   databases; `SqlSafeStr` makes a dynamic SQL string a compile error unless
   wrapped in `AssertSqlSafe`, so every such use is a review item.
-- **`ring` over `aws-lc-rs`, webpki roots over native roots**: the slim
-  builder image has no cmake, and the distroless runtime is the deployment
-  target; the DSN policy admits no root-certificate file anyway. The
-  workspace had no TLS stack before; the delta is 46 crates, and ISC plus
-  CDLA-Permissive-2.0 joined the license allow list for it.
+- **`aws-lc-rs` over `ring`, webpki roots for PostgreSQL**: rustls's
+  process-default provider is `aws-lc-rs`, the same one `reqwest` uses for
+  OTLP HTTPS; enabling both providers leaves rustls without a default and
+  panics at first use. sqlx 0.9's aws-lc-rs feature only ships
+  `webpki-roots` (no native-roots variant); the DSN policy admits no
+  root-certificate file. `aws-lc-sys` lists `cmake` as a build dependency,
+  but Linux `gnu`/`aarch64` and `x86_64` use the `cc` builder with
+  pregenerated bindings, not cmake-the-tool. The slim builder already
+  compiles C through `cc`. `ring` stays in the lockfile as an optional
+  dependency of `rustls-webpki` and `quinn-proto` and is not selected on
+  the Linux targets cargo-deny evaluates. ISC plus CDLA-Permissive-2.0
+  remain on the license allow list for `rustls-webpki` and `webpki-roots`.
 - **`Dsn` is template-owned** because no crate refuses what the policy
   refuses: `sqlx` seeds every `PgConnectOptions` from the libpq environment
   (there is no environment-free constructor), reads `.pgpass` when the URL
