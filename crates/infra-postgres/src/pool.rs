@@ -9,7 +9,8 @@
 use std::time::Duration;
 
 use sqlx::ConnectOptions;
-use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
+use sqlx::Connection;
+use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
 use crate::dsn::Dsn;
@@ -18,11 +19,16 @@ use crate::dsn::Dsn;
 /// The startup connection draws the same budget.
 pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Session default for `statement_timeout` and
-/// `idle_in_transaction_session_timeout` on every pooled connection. Longer
-/// than any request budget the HTTP layer allows, so the server cancels
-/// only work whose caller has already given up.
+/// Session default for `statement_timeout` on every pooled connection.
+/// Longer than any request budget the HTTP layer allows, so the server
+/// cancels only work whose caller has already given up.
 pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Session default for `idle_in_transaction_session_timeout` on every
+/// pooled connection. Same duration as [`STATEMENT_TIMEOUT`] by policy, but
+/// a separate constant so a later edit of one setting does not silently
+/// retune the other.
+pub const IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Statements slower than this are logged at `warn` with their SQL text and
 /// duration. Statement-level logging is otherwise off: it would repeat every
@@ -66,13 +72,22 @@ pub struct PoolOptions<'a> {
 ///
 /// # Errors
 ///
-/// [`ConnectError::PoolSize`] for a zero size; [`ConnectError::Connect`]
-/// when the first connection cannot be opened inside [`ACQUIRE_TIMEOUT`].
+/// [`ConnectError::PoolSize`] for a zero size; [`ConnectError::Timeout`]
+/// when no connection is established inside [`ACQUIRE_TIMEOUT`];
+/// [`ConnectError::Connect`] when the first attempt is refused
+/// (credentials, TLS, or the server).
 pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, ConnectError> {
     if options.max_connections == 0 {
         return Err(ConnectError::PoolSize);
     }
-    let connect_options = session_options(dsn.connect_options(), options.application_name);
+    let connect_options = attach_session(
+        dsn,
+        options.application_name,
+        STATEMENT_TIMEOUT,
+        IDLE_IN_TRANSACTION_TIMEOUT,
+        &[],
+        Some(SLOW_STATEMENT_THRESHOLD),
+    );
     PgPoolOptions::new()
         .max_connections(options.max_connections)
         .acquire_timeout(ACQUIRE_TIMEOUT)
@@ -86,23 +101,61 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
         })
 }
 
-/// Publish the template's budgets as session defaults through the startup
-/// packet, so a connection the pool opens later carries them too.
+/// Open one connection with the caller's session parameters.
+///
+/// Used by the migration runner, whose budgets and extra GUCs differ from
+/// the pool's. [`PgConnectOptions`] stay in this crate.
+///
+/// # Errors
+///
+/// The driver's connect error; the caller bounds the wait.
+pub async fn connect_session(
+    dsn: &Dsn,
+    application_name: &str,
+    statement_timeout: Duration,
+    idle_in_transaction_timeout: Duration,
+    extra: &[(&str, &str)],
+) -> Result<PgConnection, sqlx::Error> {
+    let options = attach_session(
+        dsn,
+        application_name,
+        statement_timeout,
+        idle_in_transaction_timeout,
+        extra,
+        None,
+    );
+    PgConnection::connect_with(&options).await
+}
+
+/// Publish session defaults through the startup packet so a connection
+/// opened later carries them too.
 ///
 /// `idle_in_transaction_session_timeout` covers what `statement_timeout`
 /// cannot: a transaction that ran a fast statement and then lost its client
 /// holds its locks while no statement is running at all.
-#[must_use]
-pub fn session_options(options: PgConnectOptions, application_name: &str) -> PgConnectOptions {
-    let timeout = runtime_param_millis(STATEMENT_TIMEOUT);
-    options
+fn attach_session(
+    dsn: &Dsn,
+    application_name: &str,
+    statement_timeout: Duration,
+    idle_in_transaction_timeout: Duration,
+    extra: &[(&str, &str)],
+    slow_statement_threshold: Option<Duration>,
+) -> PgConnectOptions {
+    let statement = runtime_param_millis(statement_timeout);
+    let idle = runtime_param_millis(idle_in_transaction_timeout);
+    let core = [
+        ("statement_timeout", statement.as_str()),
+        ("idle_in_transaction_session_timeout", idle.as_str()),
+    ];
+    let mut options = dsn
+        .connect_options()
         .application_name(application_name)
-        .options([
-            ("statement_timeout", timeout.as_str()),
-            ("idle_in_transaction_session_timeout", timeout.as_str()),
-        ])
-        .log_statements(log::LevelFilter::Off)
-        .log_slow_statements(log::LevelFilter::Warn, SLOW_STATEMENT_THRESHOLD)
+        .options(core.into_iter().chain(extra.iter().copied()))
+        .log_statements(log::LevelFilter::Off);
+    if let Some(threshold) = slow_statement_threshold {
+        options = options.log_slow_statements(log::LevelFilter::Warn, threshold);
+    }
+    options
 }
 
 /// Render a duration as a PostgreSQL runtime-parameter value.
@@ -163,11 +216,18 @@ mod tests {
     }
 
     #[test]
-    fn session_options_carry_the_budgets_and_the_name() {
+    fn attach_session_carries_the_named_budgets() {
         let dsn =
             Dsn::parse_with_environment("postgres://app:pw@h:5432/app?sslmode=disable", |_| None)
                 .unwrap();
-        let options = session_options(dsn.connect_options(), "svc");
+        let options = attach_session(
+            &dsn,
+            "svc",
+            STATEMENT_TIMEOUT,
+            IDLE_IN_TRANSACTION_TIMEOUT,
+            &[("lock_timeout", "15s")],
+            Some(SLOW_STATEMENT_THRESHOLD),
+        );
         assert_eq!(options.get_application_name(), Some("svc"));
         let options = options.get_options().unwrap_or_default();
         assert!(options.contains("-c statement_timeout=8000ms"), "{options}");
@@ -175,6 +235,7 @@ mod tests {
             options.contains("-c idle_in_transaction_session_timeout=8000ms"),
             "{options}"
         );
+        assert!(options.contains("-c lock_timeout=15s"), "{options}");
     }
 
     #[tokio::test]

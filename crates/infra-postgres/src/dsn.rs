@@ -44,6 +44,10 @@ pub enum DsnError {
     Scheme,
     #[error("postgres dsn could not be parsed as a URL (value redacted)")]
     Invalid,
+    #[error("postgres dsn must not include a URL fragment")]
+    Fragment,
+    #[error("postgres dsn was admitted but is not usable as connect options (value redacted)")]
+    Unusable,
     #[error("postgres dsn requires an explicit {0}")]
     Missing(&'static str),
     #[error("postgres dsn must name one tcp host; unix sockets are not supported")]
@@ -118,7 +122,7 @@ impl Dsn {
         }
         let url = Url::parse(raw).map_err(|_| DsnError::Invalid)?;
         if url.fragment().is_some() {
-            return Err(DsnError::Invalid);
+            return Err(DsnError::Fragment);
         }
 
         let host = url.host_str().unwrap_or_default();
@@ -167,7 +171,7 @@ impl Dsn {
 
         // Every rule held and the environment is clean, so what `sqlx`
         // parses is exactly what the operator wrote.
-        let options = PgConnectOptions::from_str(raw).map_err(|_| DsnError::Invalid)?;
+        let options = PgConnectOptions::from_str(raw).map_err(|_| DsnError::Unusable)?;
         Ok(Self {
             options,
             host: host.to_owned(),
@@ -179,7 +183,7 @@ impl Dsn {
 
     /// Connect options for `sqlx`, before the template's session defaults.
     #[must_use]
-    pub fn connect_options(&self) -> PgConnectOptions {
+    pub(crate) fn connect_options(&self) -> PgConnectOptions {
         self.options.clone()
     }
 
@@ -290,7 +294,7 @@ mod tests {
             ("mysql://app:pw@h:5432/app", DsnError::Scheme),
             (
                 "postgres://app:pw@h:5432/app?sslmode=require#frag",
-                DsnError::Invalid,
+                DsnError::Fragment,
             ),
             (
                 "postgres://app:pw@:5432/app?sslmode=require",
@@ -434,6 +438,15 @@ mod tests {
     fn an_empty_ambient_variable_is_ignored() {
         let result = Dsn::parse_with_environment(VALID, |_| Some(OsString::new()));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn a_fragment_is_refused_as_its_own_rule() {
+        let err = parse("postgres://app:pw@h:5432/app?sslmode=require#frag").unwrap_err();
+        assert_eq!(err, DsnError::Fragment);
+        let message = err.to_string();
+        assert!(message.contains("fragment"), "{message}");
+        assert!(!message.contains("parsed as a URL"), "{message}");
     }
 
     #[test]
