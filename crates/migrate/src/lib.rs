@@ -100,6 +100,24 @@ impl RunError {
     }
 }
 
+/// A failed run with what it had observed by then, so the terminal record
+/// reports the real `target` and `before` instead of zeros. The error is
+/// boxed because `MigrateError` is large and the `Ok` path is the common one.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct RunFailure {
+    #[source]
+    pub error: Box<RunError>,
+    pub observed: RunResult,
+}
+
+impl RunFailure {
+    #[must_use]
+    pub fn stage(&self) -> Stage {
+        self.error.stage()
+    }
+}
+
 /// What a run observed, for the terminal record.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunResult {
@@ -155,12 +173,26 @@ impl<'a> Options<'a> {
 ///
 /// # Errors
 ///
-/// [`RunError`], whose [`RunError::stage`] names where the run stopped.
+/// [`RunFailure`], whose [`RunFailure::stage`] names where the run stopped.
 /// Nothing partial is left behind: each migration and its history row share
 /// one transaction, and a dropped connection releases the session lock.
-pub async fn run(migrator: &Migrator, options: &Options<'_>) -> Result<RunResult, RunError> {
+pub async fn run(migrator: &Migrator, options: &Options<'_>) -> Result<RunResult, RunFailure> {
     let started = std::time::Instant::now();
-    validate_source(migrator).map_err(RunError::Source)?;
+    let mut observed = RunResult {
+        target: migrator.iter().map(|m| m.version).max(),
+        ..RunResult::default()
+    };
+    let fail = |error: RunError, mut observed: RunResult| {
+        observed.duration = started.elapsed();
+        RunFailure {
+            error: Box::new(error),
+            observed,
+        }
+    };
+
+    if let Err(message) = validate_source(migrator) {
+        return Err(fail(RunError::Source(message), observed));
+    }
 
     let statement_timeout = runtime_param_millis(options.statement_timeout);
     let lock_timeout = runtime_param_millis(options.lock_timeout);
@@ -175,26 +207,43 @@ pub async fn run(migrator: &Migrator, options: &Options<'_>) -> Result<RunResult
                 statement_timeout.as_str(),
             ),
             ("lock_timeout", lock_timeout.as_str()),
+            // `CREATE TABLE IF NOT EXISTS` on the history table raises a
+            // notice on every run after the first; the terminal record is
+            // the operator's evidence, not the server's chatter.
+            ("client_min_messages", "warning"),
         ])
         .log_statements(log::LevelFilter::Off);
-    let mut conn = tokio::time::timeout(
+    let mut conn = match tokio::time::timeout(
         ACQUIRE_TIMEOUT,
         PgConnection::connect_with(&connect_options),
     )
     .await
-    .map_err(|_| RunError::ConnectTimeout {
-        budget: ACQUIRE_TIMEOUT,
-    })?
-    .map_err(RunError::Connect)?;
+    {
+        Ok(Ok(conn)) => conn,
+        Ok(Err(err)) => return Err(fail(RunError::Connect(err), observed)),
+        Err(_) => {
+            return Err(fail(
+                RunError::ConnectTimeout {
+                    budget: ACQUIRE_TIMEOUT,
+                },
+                observed,
+            ));
+        }
+    };
 
-    let target = migrator.iter().map(|m| m.version).max();
     let outcome = tokio::time::timeout(options.deadline, async {
-        // A first run on an empty database reads an empty history instead
-        // of failing; `Migrator::run` repeats the idempotent statement.
+        // The session lock is taken here, before the history is read, so
+        // `before` and `applied` describe this run and not a concurrent
+        // one. `Migrator::run` takes the same advisory lock again (it is
+        // re-entrant within a session) and releases its own count; the
+        // `unlock` below releases ours.
+        conn.lock().await?;
         conn.ensure_migrations_table(&migrator.table_name).await?;
         let before = applied_versions(&mut conn, migrator).await?;
+        observed.before = before.last().copied();
         migrator.run(&mut conn).await?;
         let after = applied_versions(&mut conn, migrator).await?;
+        conn.unlock().await?;
         Ok::<_, MigrateError>((before, after))
     })
     .await;
@@ -203,25 +252,30 @@ pub async fn run(migrator: &Migrator, options: &Options<'_>) -> Result<RunResult
     let (before, after) = match outcome {
         Ok(Ok(versions)) => versions,
         Ok(Err(source)) => {
-            return Err(RunError::Migrate {
-                stage: stage_of(&source),
-                source,
-            });
+            return Err(fail(
+                RunError::Migrate {
+                    stage: stage_of(&source),
+                    source,
+                },
+                observed,
+            ));
         }
         Err(_) => {
-            return Err(RunError::Deadline {
-                budget: options.deadline,
-            });
+            return Err(fail(
+                RunError::Deadline {
+                    budget: options.deadline,
+                },
+                observed,
+            ));
         }
     };
     let _ = conn.close().await;
 
     Ok(RunResult {
-        before: before.last().copied(),
-        target,
         after: after.last().copied(),
         applied: after.len().saturating_sub(before.len()),
         duration: started.elapsed(),
+        ..observed
     })
 }
 

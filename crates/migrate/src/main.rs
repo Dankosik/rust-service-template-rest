@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use infra_postgres::Dsn;
 use infra_telemetry::{LogFormat, LoggingOptions, install_subscriber};
-use migrate::{MIGRATOR, Options, RunError, RunResult};
+use migrate::{MIGRATOR, Options, RunFailure, RunResult};
 use secrecy::ExposeSecret;
 use service_config::{BuildInfo, Config, LoadOptions};
 
@@ -29,7 +29,7 @@ enum Failure {
     #[error("{0}")]
     Config(String),
     #[error(transparent)]
-    Run(#[from] RunError),
+    Run(#[from] RunFailure),
     #[error("interrupted by {0}")]
     Interrupted(&'static str),
 }
@@ -38,8 +38,20 @@ impl Failure {
     fn stage(&self) -> &'static str {
         match self {
             Self::Config(_) => "config",
-            Self::Run(err) => err.stage().as_str(),
+            Self::Run(failure) => failure.stage().as_str(),
             Self::Interrupted(_) => "interrupted",
+        }
+    }
+
+    /// What the run had observed before failing; the target is known even
+    /// when nothing else is.
+    fn observed(&self) -> RunResult {
+        match self {
+            Self::Run(failure) => failure.observed.clone(),
+            Self::Config(_) | Self::Interrupted(_) => RunResult {
+                target: MIGRATOR.iter().map(|m| m.version).max(),
+                ..RunResult::default()
+            },
         }
     }
 }
@@ -91,7 +103,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(failure) => {
-            log_terminal(&RunResult::default(), Some(&failure));
+            log_terminal(&failure.observed(), Some(&failure));
             ExitCode::FAILURE
         }
     }

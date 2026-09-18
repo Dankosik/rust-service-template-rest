@@ -291,7 +291,7 @@ async fn an_edited_applied_migration_fails_in_the_state_stage(pool: PgPool) {
     assert_eq!(err.stage(), Stage::State);
     assert!(
         matches!(
-            err,
+            *err.error,
             RunError::Migrate {
                 source: MigrateError::VersionMismatch(20_260_918_000_001),
                 ..
@@ -299,6 +299,8 @@ async fn an_edited_applied_migration_fails_in_the_state_stage(pool: PgPool) {
         ),
         "{err}"
     );
+    assert_eq!(err.observed.before, Some(20_260_918_000_002));
+    assert_eq!(err.observed.target, Some(20_260_918_000_002));
     assert_eq!(applied_count(&pool).await, 2, "nothing was re-applied");
 }
 
@@ -315,7 +317,7 @@ async fn a_removed_applied_migration_fails_in_the_state_stage(pool: PgPool) {
     assert_eq!(err.stage(), Stage::State);
     assert!(
         matches!(
-            err,
+            *err.error,
             RunError::Migrate {
                 source: MigrateError::VersionMissing(20_260_918_000_002),
                 ..
@@ -339,6 +341,11 @@ async fn a_held_session_lock_fails_in_the_lock_stage(pool: PgPool) {
         .unwrap_err();
     assert_eq!(err.stage(), Stage::Lock, "{err}");
     assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(
+        err.observed.before, None,
+        "the history was not read without the lock"
+    );
+    assert_eq!(err.observed.target, Some(20_260_918_000_002));
     holder.unlock().await.unwrap();
 
     migrate::run(&fixture("widgets").await, &options)

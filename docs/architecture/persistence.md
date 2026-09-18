@@ -92,14 +92,16 @@ already did.
 
 `crates/migrate` embeds `migrations/` with `sqlx::migrate!` (the image needs
 no migration directory) and runs `sqlx::migrate::Migrator` over one
-connection whose session defaults are the migration budgets above, under
-`pg_advisory_lock` on a key derived from the database name and a
-`tokio::time::timeout`. `sqlx` owns the append-only history: a checksum
-mismatch (`VersionMismatch`) or an applied version missing from the source
-(`VersionMissing`) fails the run before anything is applied, and each
-migration shares one transaction with its history row. On any failure the
-connection is dropped, which ends the session, the lock, and any open
-transaction.
+connection whose session defaults are the migration budgets above, under a
+`tokio::time::timeout`. The runner takes the `pg_advisory_lock` (key derived
+from the database name) before it reads the history, so `before` and
+`applied` describe this run and not a concurrent one; `Migrator::run` takes
+the same re-entrant lock again and releases its own count. `sqlx` owns the
+append-only history: a checksum mismatch (`VersionMismatch`) or an applied
+version missing from the source (`VersionMissing`) fails the run before
+anything is applied, and each migration shares one transaction with its
+history row. On any failure the connection is dropped, which ends the
+session, the lock, and any open transaction.
 
 Source rules beyond the resolver's are a unit test over the embedded set
 (`cargo test -p migrate`, part of `make migration-check`): positive version,
@@ -113,7 +115,8 @@ The `migrate` binary loads the same configuration as the service, requires
 `migration_run` record (`before`, `target`, `after`, `applied_count`,
 `duration_ms`, `outcome` in `success`/`no_change`/`error`, and on error
 `stage` in `config`/`source`/`connect`/`lock`/`state`/`execute`/`deadline`/
-`interrupted`), and exits 1 on failure. In the image it runs as
+`interrupted` with the `target` and any `before` the run had observed), and
+exits 1 on failure. In the image it runs as
 `--entrypoint /migrate`; a stop signal drops the run.
 
 ## Proof
