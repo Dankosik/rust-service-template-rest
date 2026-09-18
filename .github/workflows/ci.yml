@@ -1,5 +1,11 @@
 name: ci
 
+# Jobs are selected by the changed surfaces that scripts/ci/changed-surfaces.sh
+# reports; `make verify` reads the same classifier. `required` is the one
+# status to protect: it fails on any failed or cancelled gate and accepts a
+# gate the surfaces did not select. Job layout and the reason for each gate:
+# specs/validation-delivery/research/synthesis.md.
+
 on:
   push:
     branches: [main]
@@ -7,6 +13,9 @@ on:
   pull_request:
     branches: [main]
   merge_group:
+  schedule:
+    # Weekly: advisory databases move without a commit, so every surface runs.
+    - cron: "41 4 * * 2"
   workflow_dispatch:
 
 concurrency:
@@ -23,21 +32,90 @@ env:
   RUST_BACKTRACE: short
 
 jobs:
-  # One gate for now. Changed-surface classification, security, delivery, and
-  # integration jobs arrive with the validation-and-delivery roadmap stage.
-  quality:
+  changes:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
+    outputs:
+      rust_source: ${{ steps.surfaces.outputs.rust_source }}
+      cargo_dependencies: ${{ steps.surfaces.outputs.cargo_dependencies }}
+      dependency_policy: ${{ steps.surfaces.outputs.dependency_policy }}
+      lint_config: ${{ steps.surfaces.outputs.lint_config }}
+      openapi: ${{ steps.surfaces.outputs.openapi }}
+      tool_manifest: ${{ steps.surfaces.outputs.tool_manifest }}
+      github_workflows: ${{ steps.surfaces.outputs.github_workflows }}
+      dependency_automation: ${{ steps.surfaces.outputs.dependency_automation }}
+      shell: ${{ steps.surfaces.outputs.shell }}
+      secret_scanning: ${{ steps.surfaces.outputs.secret_scanning }}
+      agent_instructions: ${{ steps.surfaces.outputs.agent_instructions }}
+      documentation: ${{ steps.surfaces.outputs.documentation }}
+      validation_system: ${{ steps.surfaces.outputs.validation_system }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
+      - name: Fetch exact comparison base
+        if: >-
+          !startsWith(github.ref, 'refs/tags/') &&
+          github.event_name != 'workflow_dispatch' &&
+          github.event_name != 'schedule' &&
+          (github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before) != '' &&
+          (github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before) != '0000000000000000000000000000000000000000'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+      - name: Classify changed surfaces
+        id: surfaces
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        # Tags, schedules, manual runs, and a push without a readable base
+        # select every surface; a diff event is classified by both the base
+        # and the head classifier.
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == schedule || "${EVENT_NAME}" == workflow_dispatch || "${GITHUB_REF}" == refs/tags/* ]]; then
+            bash ./scripts/ci/changed-surfaces.sh --all | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
+          elif [[ -n "${BASE_SHA}" && "${BASE_SHA}" != 0000000000000000000000000000000000000000 ]]; then
+            bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD | bash ./scripts/ci/changed-surfaces.sh --union "${BASE_SHA}" | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
+          else
+            bash ./scripts/ci/changed-surfaces.sh --all | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
+          fi
+
+  quality:
+    needs: changes
+    if: >-
+      needs.changes.outputs.rust_source == 'true' ||
+      needs.changes.outputs.cargo_dependencies == 'true' ||
+      needs.changes.outputs.lint_config == 'true' ||
+      needs.changes.outputs.openapi == 'true' ||
+      needs.changes.outputs.agent_instructions == 'true' ||
+      needs.changes.outputs.validation_system == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUST_SELECTED: >-
+        ${{ needs.changes.outputs.rust_source == 'true' ||
+            needs.changes.outputs.cargo_dependencies == 'true' ||
+            needs.changes.outputs.lint_config == 'true' ||
+            needs.changes.outputs.openapi == 'true' ||
+            needs.changes.outputs.validation_system == 'true' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Load tool manifest
+        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
       - name: Install pinned toolchain
         # No argument: rustup reads rust-toolchain.toml, including components.
+        # The affected-crate planner and its self-test also need cargo.
+        if: env.RUST_SELECTED == 'true'
         run: |
           rustup toolchain install
           rustup show active-toolchain
       - name: Restore cargo caches
+        if: env.RUST_SELECTED == 'true'
         id: cargo-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -48,20 +126,92 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install pinned Cargo tools
+        if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
+        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2.87.14
+        with:
+          tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Format
-        run: make fmt-check
-      - name: Lint
-        run: make lint
-      - name: Build
-        run: make build
-      - name: Test
-        run: make test
+        if: >-
+          needs.changes.outputs.rust_source == 'true' ||
+          needs.changes.outputs.cargo_dependencies == 'true' ||
+          needs.changes.outputs.lint_config == 'true'
+        run: bash ./scripts/ci/measure.sh quality-format -- make fmt-check
+      - name: Affected crates
+        # Pull requests select the changed crates and their dependents; every
+        # other event, and any manifest, lockfile, or toolchain change, runs
+        # the workspace.
+        if: >-
+          (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+          needs.changes.outputs.rust_source == 'true' &&
+          needs.changes.outputs.cargo_dependencies != 'true'
+        id: affected
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+          bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD | bash ./scripts/ci/affected-crates.sh | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
+      - name: Lint, build, test
+        if: >-
+          needs.changes.outputs.rust_source == 'true' ||
+          needs.changes.outputs.cargo_dependencies == 'true' ||
+          needs.changes.outputs.lint_config == 'true'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CARGO_DEPENDENCIES: ${{ needs.changes.outputs.cargo_dependencies }}
+          LINT_CONFIG: ${{ needs.changes.outputs.lint_config }}
+          RUST_SOURCE: ${{ needs.changes.outputs.rust_source }}
+          FALLBACK: ${{ steps.affected.outputs.fallback }}
+          LINT_PACKAGES: ${{ steps.affected.outputs.lint_packages }}
+          TEST_PACKAGES: ${{ steps.affected.outputs.test_packages }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" != pull_request && "${EVENT_NAME}" != merge_group ]] || [[ "${CARGO_DEPENDENCIES}" == true || "${FALLBACK}" == true ]]; then
+            bash ./scripts/ci/measure.sh quality-workspace -- make lint build test
+            exit 0
+          fi
+          if [[ "${LINT_CONFIG}" == true ]]; then
+            bash ./scripts/ci/measure.sh quality-lint -- make lint
+          elif [[ -n "${LINT_PACKAGES}" ]]; then
+            bash ./scripts/ci/measure.sh quality-lint-changed -- make lint-changed PKGS="${LINT_PACKAGES}"
+          fi
+          if [[ -n "${TEST_PACKAGES}" ]]; then
+            bash ./scripts/ci/measure.sh quality-test-changed -- make test-changed PKGS="${TEST_PACKAGES}"
+          elif [[ "${RUST_SOURCE}" == true ]]; then
+            echo "no crate selected for tests"
+          fi
+      - name: Unused dependencies
+        if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
+        run: bash ./scripts/ci/measure.sh quality-unused-deps -- make unused-deps
+      - name: OpenAPI
+        # Redocly over the committed document plus the drift and contract
+        # tests. Node.js is preinstalled on the runner.
+        if: needs.changes.outputs.openapi == 'true'
+        run: bash ./scripts/ci/measure.sh quality-openapi -- make openapi-check
+      - name: OpenAPI compatibility
+        # oasdiff against the pull-request base. Go is preinstalled on the runner.
+        if: github.event_name == 'pull_request' && needs.changes.outputs.openapi == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+          git show "${BASE_SHA}:api/openapi/service.yaml" >/tmp/openapi-base.yaml
+          bash ./scripts/ci/measure.sh quality-openapi-breaking -- make openapi-breaking BASE_OPENAPI=/tmp/openapi-base.yaml
+      - name: Skills
+        if: needs.changes.outputs.agent_instructions == 'true'
+        run: bash ./scripts/ci/measure.sh quality-skills -- make check-skills
+      - name: Validation routing
+        if: needs.changes.outputs.validation_system == 'true'
+        run: bash ./scripts/ci/measure.sh quality-validation-system -- make changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
       - name: Save cargo caches
         # Only a push to main writes the cache, so a pull request or tag build
         # cannot poison what later runs restore.
         if: >-
           github.event_name == 'push' &&
           github.ref == 'refs/heads/main' &&
+          steps.cargo-cache.outcome == 'success' &&
           steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -71,35 +221,167 @@ jobs:
             ~/.cargo/git/db
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
-      - name: OpenAPI lint
-        # The drift check is part of `make test`; this is Redocly over the
-        # committed document. Node.js is preinstalled on the runner.
-        run: make openapi-lint
-      - name: OpenAPI compatibility
-        # oasdiff against the pull-request base. The base has no document
-        # before the stage that introduced it, so an absent file is a skip,
-        # not a failure. Go is preinstalled on the runner.
-        if: github.event_name == 'pull_request'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+
+  security:
+    needs: changes
+    if: >-
+      needs.changes.outputs.cargo_dependencies == 'true' ||
+      needs.changes.outputs.dependency_policy == 'true' ||
+      needs.changes.outputs.github_workflows == 'true' ||
+      (github.event_name == 'pull_request' && needs.changes.outputs.tool_manifest == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Load tool manifest
+        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
+      - name: Dependency review
+        # New vulnerable dependencies on a pull request, from the lockfile
+        # and the workflow action pins.
+        if: >-
+          github.event_name == 'pull_request' && (
+            needs.changes.outputs.cargo_dependencies == 'true' ||
+            needs.changes.outputs.tool_manifest == 'true' ||
+            needs.changes.outputs.github_workflows == 'true'
+          )
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: never
+      - name: Install pinned toolchain
+        # cargo-deny resolves the locked graph through cargo.
+        if: needs.changes.outputs.cargo_dependencies == 'true' || needs.changes.outputs.dependency_policy == 'true'
         run: |
-          git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-          if ! git show "${BASE_SHA}:api/openapi/service.yaml" >/tmp/openapi-base.yaml 2>/dev/null; then
-            echo "base ${BASE_SHA} has no api/openapi/service.yaml; nothing to compare"
-            exit 0
+          rustup toolchain install
+          rustup show active-toolchain
+      - name: Restore cargo registry
+        if: needs.changes.outputs.cargo_dependencies == 'true' || needs.changes.outputs.dependency_policy == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install pinned Cargo tools
+        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2.87.14
+        with:
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
+      - name: Dependency policy
+        if: needs.changes.outputs.cargo_dependencies == 'true' || needs.changes.outputs.dependency_policy == 'true'
+        run: bash ./scripts/ci/measure.sh security-deny -- make deny
+      - name: Workflow security
+        if: needs.changes.outputs.github_workflows == 'true'
+        env:
+          # Enables the online audits (known-vulnerable-actions, impostor-commit).
+          GH_TOKEN: ${{ github.token }}
+        run: bash ./scripts/ci/measure.sh security-zizmor -- make zizmor
+
+  secrets:
+    needs: changes
+    if: github.event_name != 'schedule' || needs.changes.outputs.secret_scanning == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Load tool manifest
+        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
+      - name: Restore Go tool caches
+        id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/versions.env') }}
+      - name: Secret scan
+        # Tags, manual runs, and a push without a readable base scan the whole
+        # history; every other event scans the commits since the base.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* || "${EVENT_NAME}" == workflow_dispatch || "${EVENT_NAME}" == schedule || -z "${BASE_SHA}" || "${BASE_SHA}" == 0000000000000000000000000000000000000000 ]]; then
+            bash ./scripts/ci/measure.sh secrets-history -- make secret-scan-history
+          else
+            bash ./scripts/ci/measure.sh secrets-range -- make secret-scan BASE_REF="${BASE_SHA}"
           fi
-          make openapi-breaking BASE_OPENAPI=/tmp/openapi-base.yaml
-      - name: Skills
-        run: make check-skills
+      - name: Save Go tool caches
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
+  delivery:
+    needs: changes
+    if: >-
+      needs.changes.outputs.shell == 'true' ||
+      needs.changes.outputs.github_workflows == 'true' ||
+      needs.changes.outputs.tool_manifest == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Load tool manifest
+        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
+      - name: Restore Go tool caches
+        if: needs.changes.outputs.github_workflows == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/versions.env') }}
+      - name: Workflows
+        if: needs.changes.outputs.github_workflows == 'true'
+        run: bash ./scripts/ci/measure.sh delivery-actionlint -- make actionlint
+      - name: Shell
+        # Changed scripts on a diff event, every script otherwise.
+        if: needs.changes.outputs.shell == 'true'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* || "${EVENT_NAME}" == workflow_dispatch || "${EVENT_NAME}" == schedule || -z "${BASE_SHA}" || "${BASE_SHA}" == 0000000000000000000000000000000000000000 ]]; then
+            bash ./scripts/ci/measure.sh delivery-shellcheck -- make shellcheck
+          else
+            git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+            files=$(bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD | while IFS= read -r file; do [[ ${file} == *.sh && -f ${file} ]] && printf '%s ' "${file}"; done)
+            bash ./scripts/ci/measure.sh delivery-shellcheck -- make shellcheck SHELL_FILES="${files% }"
+          fi
+      - name: Install pinned Cargo tools
+        if: needs.changes.outputs.tool_manifest == 'true'
+        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2.87.14
+        with:
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
+      - name: Tool manifest
+        if: needs.changes.outputs.tool_manifest == 'true'
+        run: bash ./scripts/ci/measure.sh delivery-tools -- make tools-check
 
   required:
     if: always()
-    needs: [quality]
+    needs: [changes, quality, security, secrets, delivery]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Reject failed or cancelled gates
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
-      - name: Accept passed gates
+      - name: Accept passed and intentionally skipped gates
         run: echo "all applicable CI gates passed"
