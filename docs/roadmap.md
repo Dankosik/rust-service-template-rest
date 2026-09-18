@@ -60,7 +60,7 @@ independent of each other and each depends on 9 for its profile marker.
 | `slog` + `logctx` | `tracing` + `tracing-subscriber` + `json-subscriber` | Typed `log.level` directive and `log.format`; `RUST_LOG` is not read. |
 | OpenTelemetry Go traces and metrics + Prometheus | Traces: `opentelemetry` 0.32 + `tracing-opentelemetry` + `axum-tracing-opentelemetry`. Metrics: the `metrics` facade + `metrics-exporter-prometheus` + `axum-prometheus` + `metrics-process` + `tokio-metrics` | The facade is the Rust idiom; OTLP metric push is deferred. Diagnostics stay on a separate listener (`:9090`). |
 | RFC 9457 `problem` package | `infra_http::problem` | Closed transport catalog, stable codes, no submitted values echoed; a `failure` leaf splits out with the gRPC profile. |
-| oapi-codegen strict server, hand-written `service.yaml`, runtime request validator | `utoipa` + `utoipa-axum`: handlers carry the contract, the generated `api/openapi/service.yaml` is committed and byte-compared by a test, Redocly lints it, oasdiff compares it with the pull-request base | No maintained Rust-native spec-first server generator exists for axum; the JVM `openapi-generator` output was rejected on quality (`specs/api-contract/research/synthesis.md`). The committed document stays the reviewed authority. Extractors are the request validator. |
+| oapi-codegen strict server, hand-written `service.yaml`, runtime request validator | `utoipa` + `utoipa-axum`: handlers carry the contract, the generated `api/openapi/service.yaml` is committed and byte-compared by a test, Redocly lints it, oasdiff compares it with the pull-request base | No maintained Rust-native spec-first server generator exists for axum; the JVM `openapi-generator` output was rejected on quality ([HTTP Architecture](architecture/http.md#decisions-recorded-here)). The committed document stays the reviewed authority. Extractors are the request validator. |
 | `pgx` + `sqlc` + Goose | Decision in stage 8 | `sqlx` with compile-time checked queries and offline metadata is the leading candidate; migrations via `sqlx migrate` or `refinery`. |
 | River jobs | Decision in stage 10 | Candidates: `apalis`, `underway`, or a template-owned PostgreSQL queue. |
 | NATS JetStream (`nats.go`) | `async-nats` | |
@@ -103,9 +103,12 @@ address or an occupied port.
 
 ### Stage 2: Runtime core (done)
 
-Research and decisions: `specs/runtime-core/research/synthesis.md` and the
-four lane reports beside it. The bundle stays open until the architecture
-documents of stage 5 exist to receive its durable decisions.
+Research and decisions: absorbed in stage 5 into
+[Configuration Source Policy](configuration-source-policy.md#decisions-recorded-here),
+[HTTP Architecture](architecture/http.md#decisions-recorded-here),
+[Runtime Lifecycle](architecture/runtime-lifecycle.md#decisions-recorded-here),
+and [Component Boundaries](architecture/boundaries.md#decisions-recorded-here);
+the research bundle (`specs/runtime-core/`) lives in Git history.
 
 Delivered:
 
@@ -150,9 +153,10 @@ logs and proven by the process test.
 
 ### Stage 3: OpenAPI-first contract (done)
 
-Research and decisions: `specs/api-contract/research/synthesis.md` (candidate
-survey, verified behaviour, deviations, gotchas). The bundle stays open with
-the stage 2 bundle until the stage 5 architecture documents absorb both.
+Research and decisions: absorbed in stage 5 into
+[HTTP Architecture](architecture/http.md#decisions-recorded-here) (candidate
+survey outcome, deviations, deferred items, gotchas); the research bundle
+(`specs/api-contract/`) lives in Git history.
 
 Goal: `api/openapi/service.yaml` is the reviewed source of truth for the HTTP
 contract, and the handlers cannot disagree with it.

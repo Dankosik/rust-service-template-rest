@@ -7,7 +7,7 @@
 //! file; cross-section rules live in [`Config::validate`].
 //!
 //! The loader is [`config`](https://docs.rs/config) with `serde`; see
-//! `specs/runtime-core/research/synthesis.md` for why, and for what the two
+//! `docs/configuration-source-policy.md` for why, and for what the two
 //! pre-scans in [`load`] add that the crate does not.
 
 pub mod app;

@@ -28,12 +28,12 @@ tokio-util = { version = "0.7.19", default-features = false }
 tower = { version = "0.5.3", default-features = false }
 tower-http = { version = "0.7.1", default-features = false }
 
-# API contract (see specs/api-contract/research/synthesis.md). The document is
-# derived from the handlers and committed as api/openapi/service.yaml.
+# API contract (docs/architecture/http.md). The document is derived from the
+# handlers and committed as api/openapi/service.yaml.
 utoipa = { version = "5.5.0", default-features = false }
 utoipa-axum = { version = "0.2.0", default-features = false }
 
-# Configuration (see specs/runtime-core/research/configuration.md)
+# Configuration (docs/configuration-source-policy.md)
 config = { version = "0.15.25", default-features = false }
 clap = { version = "4.6.7", default-features = false }
 serde = { version = "1", default-features = false }
@@ -45,8 +45,8 @@ bytesize = { version = "2.7.0", default-features = false }
 secrecy = { version = "0.10.3", default-features = false }
 gethostname = "1.1.0"
 
-# Diagnostics (see specs/runtime-core/research/observability.md). The
-# OpenTelemetry family moves together; tracing-opentelemetry is one minor ahead.
+# Diagnostics (docs/configuration-source-policy.md). The OpenTelemetry family
+# moves together; tracing-opentelemetry is one minor ahead.
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false }
 json-subscriber = { version = "0.3.0", default-features = false }

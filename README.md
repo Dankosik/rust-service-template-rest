@@ -127,7 +127,8 @@ crates/infra-<provider>/    database, messaging, and provider adapters (per prof
 .agents/skills/             model-invoked skills encoding this repository's decisions
 env/config/local.toml       local baseline configuration
 docs/roadmap.md             stages, fixed decisions, Go-to-Rust concept map
-docs/architecture/http.md   request path, contract workflow, compatibility rules
+docs/repo-architecture.md   architecture front door: invariants, sources of truth, one leaf per pressure
+docs/architecture/          boundaries, http, runtime-lifecycle, integration
 specs/<topic>/research/     library research behind the current stage
 make/template.mk            portable standard Make commands
 build/docker/Dockerfile     multi-stage production image (cargo-chef, cargo-auditable, distroless cc)
@@ -217,7 +218,11 @@ template's `go-*` skills where they carry over to a long-running service.
 ## Documentation
 
 - Plan and status: [Roadmap](docs/roadmap.md)
+- Architecture front door, invariants, one leaf per pressure: [Repository Architecture](docs/repo-architecture.md)
+- Crate ownership and dependency direction: [Component Boundaries](docs/architecture/boundaries.md)
 - Request path, contract workflow, compatibility: [HTTP Architecture](docs/architecture/http.md)
+- Startup, readiness, staged shutdown, exit codes: [Runtime Lifecycle](docs/architecture/runtime-lifecycle.md)
+- Neighbours and outbound dependencies: [Integration Boundaries](docs/architecture/integration.md)
 - Configuration, secrets, telemetry environment, runtime budgets: [Configuration Source Policy](docs/configuration-source-policy.md)
 - Which checks a change selects, `make plan` and `make verify`: [Validation Routing](docs/validation-routing.md) and its leaves under `docs/validation/`
 - What CI and publication prove: [CI/CD Production Readiness](docs/ci-cd-production-ready.md)

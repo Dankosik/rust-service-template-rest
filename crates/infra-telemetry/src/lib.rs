@@ -5,7 +5,7 @@
 //! logged reason and a no-op; ambient-credential conflicts, unparsable log
 //! directives, and recorder install failures still fail startup. Shutdown is
 //! bounded by the caller's budget. The crate decisions are recorded in
-//! `specs/runtime-core/research/synthesis.md`.
+//! `docs/configuration-source-policy.md`.
 
 pub mod logging;
 pub mod metrics;
