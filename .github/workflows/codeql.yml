@@ -1,0 +1,131 @@
+name: CodeQL
+
+# Advanced setup: the repository's default CodeQL setup is not configured, so
+# this workflow owns the analyses. Rust (GA since CodeQL 2.23.3) and Actions
+# run on the surfaces that change them; `codeql-required` is the one status
+# to protect and accepts an analysis the surfaces did not select.
+
+on:
+  push:
+    branches: [main]
+    tags: [v*]
+  pull_request:
+    branches: [main]
+  merge_group:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Only the analyze jobs upload results; they widen their own permissions.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rust_source: ${{ steps.surfaces.outputs.rust_source }}
+      cargo_dependencies: ${{ steps.surfaces.outputs.cargo_dependencies }}
+      github_workflows: ${{ steps.surfaces.outputs.github_workflows }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Classify changed surfaces
+        id: surfaces
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == schedule || "${EVENT_NAME}" == workflow_dispatch || "${GITHUB_REF}" == refs/tags/* ]]; then
+            bash ./scripts/ci/changed-surfaces.sh --all >>"${GITHUB_OUTPUT}"
+          elif [[ -n "${BASE_SHA}" && "${BASE_SHA}" != 0000000000000000000000000000000000000000 ]]; then
+            git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+            bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD | bash ./scripts/ci/changed-surfaces.sh --union "${BASE_SHA}" >>"${GITHUB_OUTPUT}"
+          else
+            bash ./scripts/ci/changed-surfaces.sh --all >>"${GITHUB_OUTPUT}"
+          fi
+
+  analyze-actions:
+    needs: changes
+    if: needs.changes.outputs.github_workflows == 'true'
+    name: Analyze (actions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          languages: actions
+          build-mode: none
+          queries: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'security-extended' || 'security-and-quality' }}
+      - name: Analyze
+        uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+
+  analyze-rust:
+    needs: changes
+    if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
+    name: Analyze (rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        # The Rust extractor reads the workspace through cargo; rust-toolchain.toml selects the compiler.
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - name: Restore cargo registry
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          languages: rust
+          build-mode: none
+          queries: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'security-extended' || 'security-and-quality' }}
+      - name: Analyze
+        uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+
+  codeql-required:
+    if: always()
+    needs: [changes, analyze-actions, analyze-rust]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Reject failed or cancelled analyses
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - name: Accept applicable analyses
+        run: echo "all applicable CodeQL analyses passed"

@@ -99,7 +99,7 @@ load balancers, drains in-flight requests, flushes telemetry, and exits `0`
 | Workspace | Pinned stable toolchain, edition 2024, workspace-level dependency versions and lints (`clippy::pedantic`, `unsafe_code = "forbid"`), committed `Cargo.lock`, `--locked` everywhere |
 | Commands | `Makefile` + `make/template.mk`: `build`, `run`, `test`, `test-package`, `test-changed`, `fmt`, `fmt-check`, `lint`, `lint-changed`, `openapi-generate`, `openapi-check`, `openapi-lint`, `openapi-breaking`, `check-skills`, `deny`, `unused-deps`, `secret-scan`, `actionlint`, `zizmor`, `shellcheck`, `tools-check`, `plan`, `verify`, `check`; every tool pinned once in `tools/versions.env` |
 | Validation routing | `scripts/ci/changed-surfaces.sh` classifies changed paths into surfaces (fail-closed), `affected-crates.sh` selects the crates to lint and test through `cargo tree -i`, `verify.sh` plans, runs under one validation lock, and records a receipt; CI and `make verify` share the classifier |
-| Delivery | GitHub Actions CI (format, clippy, build, test, OpenAPI lint and compatibility, skills) with pinned action SHAs and an always-reported `required` job; Dependabot for Cargo and Actions |
+| Delivery | GitHub Actions CI selected by changed surface: `quality` (format, affected or workspace clippy, build, and tests, cargo-shear, OpenAPI lint, drift, and compatibility, skills, validation-system self-tests), `security` (cargo-deny, Dependency Review, zizmor), `secrets` (Gitleaks range or history), `delivery` (actionlint, ShellCheck, tool manifest), an always-reported `required` job; CodeQL for Rust and Actions with `codeql-required`; weekly schedule runs every surface; pinned action SHAs; Dependabot for Cargo and Actions |
 | Agent workflow | `AGENTS.md` repository contract, 16 model-invoked skills under `.agents/skills`, `CLAUDE.md`, and the [roadmap](docs/roadmap.md) that names the Go-template source for every planned owner |
 | Community | MIT license, code of conduct, security policy, issue forms, pull-request template, `CODEOWNERS` |
 
@@ -130,7 +130,8 @@ make/template.mk            portable standard Make commands
 scripts/ci/                 surface classifier, affected-crate planner, verify, validation lock
 tools/versions.env          one pin per developer and delivery tool
 deny.toml, .gitleaks.toml   dependency and secret-scanning policy
-.github/workflows/ci.yml    the source of truth for CI check names
+.github/workflows/ci.yml    surface-selected CI jobs; the source of truth for check names
+.github/workflows/codeql.yml CodeQL for Rust and Actions on the same surfaces
 ```
 
 ## Everyday commands

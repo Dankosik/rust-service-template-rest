@@ -72,10 +72,16 @@ real defect still requires correction.
 - Update `docs/roadmap.md` when a stage completes or its scope changes, and
   update other docs with behavior, contract, CI, or operational changes.
 - Configure required reviews and status checks with GitHub Rulesets or
-  organization policy; require the `required` check. The repository does not
-  mutate its own GitHub settings.
+  organization policy; require the `required` check from `ci.yml` and
+  `codeql-required` from `codeql.yml`. Both accept a gate the changed
+  surfaces did not select and fail on any failed or cancelled one, so a
+  docs-only pull request passes without running a Rust job. The repository
+  does not mutate its own GitHub settings.
 - Treat `.github/workflows/ci.yml` as the source of truth for current check
-  names instead of copying a list into scripts or docs.
+  names instead of copying a list into scripts or docs. Jobs are selected by
+  `scripts/ci/changed-surfaces.sh`, the classifier `make plan` uses; a new
+  path family joins the classifier with its gate, never as an unclassified
+  path (the classifier fails closed).
 
 ## Code and workspace
 
