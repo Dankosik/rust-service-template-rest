@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Production image for the service binary. Measurements and the reasons for
-# each choice: specs/validation-delivery/research/synthesis.md (Runtime image).
+# each choice: docs/ci-cd-production-ready.md (Decisions Recorded Here).
 #
 # - The builder tag is the toolchain authority for the image; .dockerignore
 #   keeps rust-toolchain.toml out of the context so rustup does not download

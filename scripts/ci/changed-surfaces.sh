@@ -13,8 +13,8 @@
 #                                      manual runs)
 #   changed-surfaces.sh --self-test
 #
-# Surface table: specs/validation-delivery/research/synthesis.md. A surface
-# joins this list with its first artifact and its consumer, never ahead.
+# Surface table: docs/ci-cd-production-ready.md. A surface joins this list
+# with its first artifact and its consumer, never ahead.
 set -euo pipefail
 
 names=(
@@ -294,7 +294,7 @@ self_test() {
 	assert_case docs/roadmap.md \
 		"documentation" \
 		"agent_instructions"
-	assert_case specs/validation-delivery/research/synthesis.md \
+	assert_case specs/rust-skills/research/synthesis.md \
 		"documentation" \
 		"agent_instructions"
 	assert_case .github/pull_request_template.md \

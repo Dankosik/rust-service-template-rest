@@ -109,9 +109,9 @@ load balancers, drains in-flight requests, flushes telemetry, and exits `0`
 
 The [roadmap](docs/roadmap.md) decomposes the port into twelve stages with
 exit criteria and a concept map from Go mechanisms to their Rust equivalents.
-Stages 1–4 are done (bootstrap, runtime core, OpenAPI contract, validation
-routing and delivery). Next is the repository documentation graph (stage 5),
-then the agent harness and spec-first workflow (stage 6).
+Stages 1–5 are done (bootstrap, runtime core, OpenAPI contract, validation
+routing and delivery, the documentation graph). Next is the agent harness and
+spec-first workflow (stage 6), then the PostgreSQL profile (stage 8).
 
 ## Repository map
 
