@@ -225,6 +225,10 @@ self_test() (
 	output=$(bash "${script}" --plan --files scripts/ci/fixture.sh)
 	grep -q "^  make shellcheck SHELL_FILES='scripts/ci/fixture.sh'$" <<<"${output}"
 	grep -q 'requires_docker=true' <<<"${output}"
+	# A deleted script selects the surface but leaves nothing to lint.
+	output=$(bash "${script}" --plan --files scripts/ci/removed.sh)
+	grep -q 'shell: no changed shell source remains' <<<"${output}"
+	if grep -q 'make shellcheck' <<<"${output}"; then return 1; fi
 
 	output=$(bash "${script}" --plan --files api/openapi/service.yaml)
 	grep -q '^  make openapi-check$' <<<"${output}"
@@ -542,7 +546,7 @@ if is_true github_workflows; then
 fi
 if is_true dependency_automation; then add_na dependency_automation "GitHub validates the Dependabot schema; Dependency Review stays a CI gate"; fi
 if is_true shell; then
-	shell_files=$(awk '/\.sh$/ { print }' "${files_path}" | while IFS= read -r file; do [[ -f ${file} ]] && printf '%s ' "${file}"; done)
+	shell_files=$(awk '/\.sh$/ { print }' "${files_path}" | while IFS= read -r file; do if [[ -f ${file} ]]; then printf '%s ' "${file}"; fi; done)
 	shell_files=${shell_files% }
 	if [[ -n ${shell_files} ]]; then add_command shell "${shell_files}" "shell sources changed" "make shellcheck SHELL_FILES='${shell_files}'" docker false true; else add_na shell "no changed shell source remains"; fi
 fi

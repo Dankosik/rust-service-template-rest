@@ -368,7 +368,7 @@ jobs:
             bash ./scripts/ci/measure.sh delivery-shellcheck -- make shellcheck
           else
             git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-            files=$(bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD | while IFS= read -r file; do [[ ${file} == *.sh && -f ${file} ]] && printf '%s ' "${file}"; done)
+            files=$(bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD | while IFS= read -r file; do if [[ ${file} == *.sh && -f ${file} ]]; then printf '%s ' "${file}"; fi; done)
             bash ./scripts/ci/measure.sh delivery-shellcheck -- make shellcheck SHELL_FILES="${files% }"
           fi
       - name: Install pinned Cargo tools
