@@ -12,8 +12,8 @@
 
 ## Test Evidence
 
-- [ ] `make build` and the relevant tests passed
-- [ ] `make check` passed when the change spans the full repository
+- [ ] `make build` and the relevant tests passed, or `make verify` recorded a passing receipt for the changed surfaces
+- [ ] `ALLOW_FULL=1 make check` passed when the change spans the full repository
 - [ ] Unverified remainder named, or none
 
 Commands/output summary:
