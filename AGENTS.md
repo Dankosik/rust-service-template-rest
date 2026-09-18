@@ -158,6 +158,7 @@ uncertain or contested.
 | Trigger | Owner |
 | --- | --- |
 | Work adds, completes, or re-scopes a roadmap stage or its fixed decisions | [Roadmap](docs/roadmap.md) |
+| Crate ownership, dependency direction, request path, lifecycle, or an integration boundary can change | [Repository Architecture](docs/repo-architecture.md), then the one leaf it selects |
 | A crate, binary, dependency, or CI gate is added or removed | [Roadmap concept map and stage scope](docs/roadmap.md#concept-map), then [CONTRIBUTING.md](CONTRIBUTING.md) |
 | A non-obvious technical decision must survive the current session | `specs/<topic>/` while open; the owning document once accepted |
 | Contribution, pull-request, or evidence expectations | [CONTRIBUTING.md](CONTRIBUTING.md) |
@@ -167,10 +168,10 @@ uncertain or contested.
 | A CI job, tool pin, Dockerfile, image check, or publication step changes what may ship | [CI/CD Production Readiness](docs/ci-cd-production-ready.md); the `rust-delivery-platform` skill owns the method |
 | Deployment policy for a derived service on Railway | [Railway Deployment Profile](docs/railway-deployment-profile.md) |
 
-The spec-first workflow router, architecture front door, agent harness
-adapters, and the remaining capability skills are planned owners; until their
-stage lands, the roadmap names the source document in the Go template to port
-from, and Direct Work applies.
+The spec-first workflow router, agent harness adapters, and the remaining
+capability skills are planned owners; until their stage lands, the roadmap
+names the source document in the Go template to port from, and Direct Work
+applies.
 
 ## Rust Change Surface
 

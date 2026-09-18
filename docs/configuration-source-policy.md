@@ -163,3 +163,31 @@ every record inside a request) or `text` (local development).
 `#[serde(deny_unknown_fields, default)]` on the section type is what makes an
 undeclared key fail and a missing key take its default; there is no second
 registry to maintain.
+
+## Decisions Recorded Here
+
+Made in stage 2 with the research behind them; a later change reopens one
+only with new evidence.
+
+| Decision | Alternative rejected | Why |
+| --- | --- | --- |
+| The `config` crate (`toml` feature only) with `serde`, layered builder, `#[serde(deny_unknown_fields, default)]` per section | `figment` | no release since 2024 and it silently drops a malformed environment name; config-rs reports the unknown field, and the template's pre-scan names the variable |
+| TOML baseline files | YAML | the Rust convention with a maintained crate; `serde_yaml` is archived, `serde_yml` carries RUSTSEC-2025-0068; config-rs's `yaml` feature stays available for a service that must consume YAML |
+| Secrets as `secrecy::SecretString`; environment is the only secret source; each file is pre-scanned for non-empty secret-like keys (`password`, `secret`, `token`, `dsn`, `authorization`, `api_key`, `private_key`, `otlp_headers`) | trusting file contents | a committed baseline cannot leak a credential; `Debug` prints `[REDACTED]` |
+| `tracing` + `tracing-subscriber` `EnvFilter`; `json-subscriber` for `log.format = json`, `fmt::layer()` for `text`; `log` records bridged | a bespoke JSON layer | flattened event and span fields plus trace and span ids on every record inside a request come from the crate |
+| Tracer provider always installed; the OTLP HTTP/protobuf batch exporter added only when a typed endpoint or a standard `OTEL_EXPORTER_OTLP_*ENDPOINT` resolves one; `TraceContextPropagator` installed explicitly | exporter `disabled` when no endpoint, provider absent | trace ids in every log line cost nothing without an exporter and avoid connection-refused noise against the SDK's `localhost:4318` default |
+| Ambient `OTEL_EXPORTER_OTLP_*HEADERS`, `*_CERTIFICATE`, `*_CLIENT_KEY`, `*_CLIENT_CERTIFICATE` fail validation when the typed endpoint selects the destination | letting the SDK merge them | one collector's credential is never sent to another; the mechanism stays the SDK's, the safety property is a validation rule |
+| The `metrics` facade with `metrics-exporter-prometheus` (`default-features = false`), `axum-prometheus` (`MatchedPathWithFallbackFn` → `UNMATCHED`), `metrics-process`, `tokio-metrics` | OpenTelemetry SDK metrics with `opentelemetry-prometheus` and OTLP push | the facade is the dominant Rust idiom, process and Tokio metrics have no OTel-native crates, and `opentelemetry-prometheus` was deprecated, un-deprecated, and is still Beta. A collector `prometheus` receiver scraping `:9090` serves OTLP-only platforms |
+| `log.format` added; `runtime.memory_limit_ratio`, `GOMAXPROCS` awareness, and `observability.pprof` not ported | Go parity | human-readable local logs are a Rust convention; there is no garbage collector, `available_parallelism` honours cgroup quotas, and there is no standard-library profiler to expose |
+
+Version discipline: every OpenTelemetry crate stays on one minor and moves
+together, with `tracing-opentelemetry` one ahead (0.33 ↔ 0.32). A dependency
+that pins another minor creates a second `global::` whose data goes to a
+no-op provider silently; check `cargo tree -d -i opentelemetry` after a
+dependency change. A dependency enabling `opentelemetry-otlp/reqwest-client`
+flips the exporter to the async client, which the batch processor does not
+support; check `cargo tree -e features -i opentelemetry-otlp`.
+`metrics-exporter-prometheus` default features pull `push-gateway` and a TLS
+stack; keep them off. OTLP metric push and OTLP logs
+(`opentelemetry-appender-tracing`) are deferred until a platform requires
+them; both resolve into the same version set.

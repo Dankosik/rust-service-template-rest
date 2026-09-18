@@ -6,9 +6,8 @@
 //! lifecycle; the composition root in the `service` crate wires those
 //! together and assembles the full API document.
 //!
-//! Most of the chain is `tower-http`; the template-owned pieces are named
-//! in `specs/runtime-core/research/synthesis.md` and the contract decisions
-//! in `specs/api-contract/research/synthesis.md`.
+//! Most of the chain is `tower-http`; the template-owned pieces and the
+//! contract decisions are recorded in `docs/architecture/http.md`.
 
 pub mod problem;
 
