@@ -201,9 +201,10 @@ jobs:
           git fetch --no-tags --depth=1 origin "${BASE_SHA}"
           git show "${BASE_SHA}:api/openapi/service.yaml" >/tmp/openapi-base.yaml
           bash ./scripts/ci/measure.sh quality-openapi-breaking -- make openapi-breaking BASE_OPENAPI=/tmp/openapi-base.yaml
-      - name: Skills
+      - name: Instructions
+        # Skill shape plus the generated harness carriers against their sources.
         if: needs.changes.outputs.agent_instructions == 'true'
-        run: bash ./scripts/ci/measure.sh quality-skills -- make check-skills
+        run: bash ./scripts/ci/measure.sh quality-instructions -- make check-instructions
       - name: Validation routing
         if: needs.changes.outputs.validation_system == 'true'
         run: bash ./scripts/ci/measure.sh quality-validation-system -- make changed-surfaces-check affected-crates-check validation-lock-self-test verify-check

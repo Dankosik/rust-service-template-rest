@@ -102,7 +102,7 @@ load balancers, drains in-flight requests, flushes telemetry, and exits `0`
 | Delivery | GitHub Actions CI selected by changed surface: `quality` (format, affected or workspace clippy, build, and tests, cargo-shear, OpenAPI lint, drift, and compatibility, skills, validation-system self-tests), `security` (cargo-deny, Dependency Review, zizmor), `secrets` (Gitleaks range or history), `delivery` (actionlint, ShellCheck, tool manifest, Dockerfile checks), `image` (build, hardened lifecycle check, Trivy), `docs` (link check), an always-reported `required` job; CodeQL for Rust and Actions with `codeql-required`; weekly schedule runs every surface; pinned action SHAs; Dependabot for Cargo, Actions, and the Dockerfile base images |
 | Runtime image | `build/docker/Dockerfile`: `rust:<toolchain>-slim-trixie` builder with cargo-chef dependency layers and `cargo auditable build`, `gcr.io/distroless/cc-debian13:nonroot` runtime, commit baked as `app.commit`, `STOPSIGNAL SIGTERM`, OCI labels; ~45 MiB; the lifecycle check starts it `--read-only --cap-drop=ALL --security-opt=no-new-privileges` and proves a clean stop inside the 45 s grace budget |
 | Publication (opt-in) | `cd.yml` runs only when the repository variable `ENABLE_GHCR_PUBLISH` is `true`: after ci and CodeQL pass on `main` (or on a `v*` tag that equals the crate version), `.github/actions/publish-image` builds a run-scoped candidate, repeats the lifecycle check and Trivy scan, writes a CycloneDX SBOM, pushes, signs keyless with cosign, attests provenance and SBOM, verifies both back out of GHCR, and only then promotes `sha-<12>` + `main` or `v*` + `latest` with a digest read-back per tag |
-| Agent workflow | `AGENTS.md` repository contract, 17 model-invoked skills under `.agents/skills`, `CLAUDE.md`, and the [roadmap](docs/roadmap.md) that names the Go-template source for every planned owner |
+| Agent workflow | `AGENTS.md` repository contract; 18 decision skills and 9 workflow skills under `.agents/skills`; the [workflow router](docs/spec-first-workflow.md) with its phases, interfaces, shared methods, and rubrics; the [agent harness](docs/agent-harness.md) with adapters for Codex, Claude Code, Qwen Code, Grok Build, Cursor, and OpenCode, canonical roles in `.agents/roles` and generated carriers checked by `make check-instructions`; the [roadmap](docs/roadmap.md) that names the Go-template source for every planned owner |
 | Community | MIT license, code of conduct, security policy, issue forms, pull-request template, `CODEOWNERS` |
 
 ## What comes next
@@ -179,13 +179,28 @@ than adding checks for confidence.
 
 `AGENTS.md` gives every supported agent the repository rules: authority,
 decision ownership, engineering constraints, the validation budget, and the
-crate-boundary model. `.agents/skills` holds small, independent skills in the
-[rust-cli-skills](https://github.com/Dankosik/rust-cli-skills) shape, one
-`SKILL.md` and `LICENSE` per skill, that encode this repository's decisions;
-Cursor, Codex, Grok, and OpenCode read them directly, and the Claude Code
-and Qwen views arrive with the harness stage. Each skill names the
-repository owner it decides against, so an agent extends the existing path
-instead of creating a parallel one.
+crate-boundary model. Direct Work covers a clear, local, reversible change;
+anything else goes through the [workflow router](docs/spec-first-workflow.md)
+(Intake, Research, Specification, System / Integration Design, Rust Code /
+Ownership Design, Planning, Implementation, and their reviews) and, when
+coordination is material, the [agent harness](docs/agent-harness.md), whose
+adapters say how Codex, Claude Code, Qwen Code, Grok Build, Cursor, and
+OpenCode each provide delegation, isolation, and durable execution.
+
+`.agents/skills` holds two classes of skill. Decision skills (`rust-*`) are
+small, independent prose in the
+[rust-cli-skills](https://github.com/Dankosik/rust-cli-skills) shape that a
+model selects from the description; each names the repository owner it
+decides against, so an agent extends the existing path instead of creating a
+parallel one. Workflow skills (`orchestrator`, `acceptance-unit-lead`,
+`spec-first-brainstorming`, `spec-document-designer`, `idea-refine`,
+`planning-and-task-breakdown`, `grilling`, `agent-prompt-composer`,
+`thermo-nuclear-code-quality-review`) are user- or role-invoked entry points
+into the workflow, ported from the Go template. Cursor, Codex, Grok, and
+OpenCode read `.agents/skills` directly; `.claude/skills` and `.qwen/skills`
+are generated views. Canonical roles live in `.agents/roles` and generate
+the per-harness agent carriers (`make agent-roles-sync`); `make
+check-instructions` proves every carrier matches its source.
 
 | Skill | Leading concept | Use it for |
 | --- | --- | --- |
@@ -207,12 +222,13 @@ instead of creating a parallel one.
 | [rust-verification](.agents/skills/rust-verification/SKILL.md) | Evidence boundary | What existing evidence supports a claim |
 | [rust-delivery-platform](.agents/skills/rust-delivery-platform/SKILL.md) | Gate chain | CI jobs, tool pins, the Dockerfile, image checks, publication, deployment profile |
 
+| [merge-conflict-resolution](.agents/skills/merge-conflict-resolution/SKILL.md) | Intent reconstruction | Conflicted hunks in a merge, rebase, cherry-pick, or revert |
+
 Skills for a capability arrive with its stage (`rust-api-contract` came with
 the contract stage, `rust-delivery-platform` with the delivery stage;
-`rust-sqlx` and `rust-tonic` follow theirs).
-Authoring rules and the structural
-check live in [Skill Authoring](docs/skill-authoring.md) and
-`make check-skills`. The decisions build on rust-cli-skills and the Go
+`rust-sqlx` and `rust-tonic` follow theirs). Authoring rules for both classes
+and the structural check live in [Skill Authoring](docs/skill-authoring.md)
+and `make check-skills`. The decisions build on rust-cli-skills and the Go
 template's `go-*` skills where they carry over to a long-running service.
 
 ## Documentation
@@ -234,6 +250,8 @@ template's `go-*` skills where they carry over to a long-running service.
 - Writing skills: [Skill Authoring](docs/skill-authoring.md)
 - Contributing and validation: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Agent contract: [AGENTS.md](AGENTS.md)
+- Structured and orchestrated work: [Workflow Router](docs/spec-first-workflow.md); delegation, isolation, and durable execution per harness: [Agent Harness](docs/agent-harness.md)
+- Writing prompts and maintaining instructions: [Prompt Composition](docs/prompt-composition.md), [Prompt Maintenance](docs/prompt-maintenance.md)
 
 ## Community
 

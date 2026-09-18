@@ -44,7 +44,7 @@ under `<git-common-dir>/codex/verify` keyed by the changed files, the plan,
 and the environment. CI runs the same classifier.
 
 `ALLOW_FULL=1 make check` (`fmt-check`, `lint`, `test`, `unused-deps`,
-`openapi-lint`, `check-skills`, `docs-check`, and the validation-system self-tests) is the
+`openapi-lint`, `check-instructions`, `docs-check`, and the validation-system self-tests) is the
 explicit full-repository gate; it is not a routine follow-up to every edit,
 and the guard exists so it is never launched by accident. `ALLOW_HEAVY=1`
 guards the history-wide and container-backed commands the same way; CI sets

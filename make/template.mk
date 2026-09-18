@@ -84,7 +84,9 @@ CONTAINER_IMAGE ?= $(RUNTIME_IMAGE)
 TRIVY_CACHE_VOLUME ?= trivy-cache
 
 .PHONY: help build run test test-package test-changed fmt fmt-check lint lint-changed \
-	check check-unlocked check-skills clean \
+	check check-unlocked check-skills check-instructions clean \
+	agent-roles-sync agent-roles-check codex-agents-sync codex-agents-check \
+	claude-skills-sync claude-skills-check qwen-skills-sync qwen-skills-check \
 	openapi-generate openapi-check openapi-lint openapi-breaking \
 	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck docs-check \
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
@@ -126,6 +128,35 @@ lint-changed: ## Clippy over the crates in PKGS="<crate> <crate>", warnings are 
 
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py
+
+# Harness carriers are generated from .agents/roles, .agents/codex-project.toml,
+# and .agents/skills; the *-check targets prove the committed carriers are
+# byte-stable against their sources.
+agent-roles-sync: ## Regenerate the Codex, Claude, Qwen, Grok, Cursor, and OpenCode role carriers
+	bash scripts/agent-roles-sync.sh --apply --repo .
+
+agent-roles-check: ## Fail when a role carrier differs from its canonical source
+	bash scripts/agent-roles-sync.sh --check --repo .
+
+codex-agents-sync: ## Regenerate the Codex project runtime and role registry in .codex/config.toml
+	bash scripts/codex-agents-sync.sh --apply --repo .
+
+codex-agents-check: ## Fail when .codex/config.toml drifts from .agents/codex-project.toml and the roles
+	bash scripts/codex-agents-sync.sh --check --repo .
+
+claude-skills-sync: ## Regenerate the Claude Code skill view (.claude/skills)
+	bash scripts/harness-skills-sync.sh claude --apply --repo .
+
+claude-skills-check: ## Fail when .claude/skills does not mirror .agents/skills
+	bash scripts/harness-skills-sync.sh claude --check --repo .
+
+qwen-skills-sync: ## Regenerate the Qwen Code skill view (.qwen/skills)
+	bash scripts/harness-skills-sync.sh qwen --apply --repo .
+
+qwen-skills-check: ## Fail when .qwen/skills does not mirror .agents/skills
+	bash scripts/harness-skills-sync.sh qwen --check --repo .
+
+check-instructions: check-skills agent-roles-check codex-agents-check claude-skills-check qwen-skills-check ## Every instruction carrier: skill shape, role carriers, Codex registry, skill views
 
 # $(TOOLS_ROOT)/<crate>-<version>/bin/<crate>: build the pinned crate once.
 $(TOOLS_ROOT)/%:
@@ -263,7 +294,7 @@ check: ## Full repository gate under the validation lock; ALLOW_FULL=1 (CI sets 
 	$(FULL_GUARD)
 	$(VALIDATION_LOCK) $(MAKE) check-unlocked
 
-check-unlocked: fmt-check lint test unused-deps openapi-lint check-skills docs-check \
+check-unlocked: fmt-check lint test unused-deps openapi-lint check-instructions docs-check \
 	changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
 
 clean: ## Remove build output

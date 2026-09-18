@@ -103,8 +103,12 @@ classify() {
 		case "${file}" in
 		.gitleaks.toml) mark secret_scanning ;;
 		esac
+		# Instructions, roles, skills, their generated harness carriers, the
+		# workflow and harness documents, and the scripts that check them.
 		case "${file}" in
-		AGENTS.md | CLAUDE.md | .agents/* | docs/skill-authoring.md | scripts/check-skills.py) mark agent_instructions ;;
+		AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | .agents/* | .claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | docs/skill-authoring.md | docs/agent-harness.md | docs/agent-harness/* | docs/spec-first-workflow.md | docs/spec-first-workflow/* | docs/prompt-composition.md | docs/prompt-maintenance.md | docs/subagent-brief-template.md | scripts/check-skills.py | scripts/agent-roles-sync.sh | scripts/codex-agents-sync.sh | scripts/harness-skills-sync.sh | scripts/lib/sync-cli.sh)
+			mark agent_instructions
+			;;
 		esac
 		case "${file}" in
 		*.md | docs/* | specs/*) mark documentation ;;
@@ -288,6 +292,19 @@ self_test() {
 	assert_case scripts/check-skills.py \
 		"agent_instructions" \
 		"shell documentation"
+	for file in QWEN.md Grok.md docs/agent-harness.md docs/agent-harness/cursor.md docs/spec-first-workflow.md docs/spec-first-workflow/phases/intake.md docs/prompt-composition.md .agents/roles/worker-agent.toml .agents/contracts/specialist-neighbors.json .claude/agents/worker-agent.md .codex/config.toml .cursor/rules/agent-harness.mdc .qwen/settings.json .grok/roles/worker-agent.toml .opencode/plugins/task-subagents.js; do
+		assert_case "${file}" \
+			"agent_instructions" \
+			"rust_source shell validation_system github_workflows"
+	done
+	assert_case opencode.json \
+		"agent_instructions" \
+		"documentation no_validation_required"
+	for file in scripts/agent-roles-sync.sh scripts/codex-agents-sync.sh scripts/harness-skills-sync.sh scripts/lib/sync-cli.sh; do
+		assert_case "${file}" \
+			"agent_instructions shell" \
+			"validation_system tool_manifest"
+	done
 	assert_case README.md \
 		"documentation" \
 		"agent_instructions rust_source cargo_dependencies"

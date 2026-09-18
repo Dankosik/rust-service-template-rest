@@ -1,0 +1,346 @@
+{
+  "schema_version": 1,
+  "clusters": {
+    "http_contract": [
+      "rust-api-contract",
+      "rust-axum",
+      "rust-observability",
+      "rust-reliability",
+      "rust-security"
+    ],
+    "runtime_ownership": [
+      "rust-tokio",
+      "rust-reliability",
+      "rust-config",
+      "rust-errors"
+    ],
+    "code_design": [
+      "rust-coder",
+      "rust-idiomatic",
+      "rust-structural-quality",
+      "rust-dependencies",
+      "rust-errors"
+    ],
+    "proof_diagnosis": [
+      "rust-coder",
+      "rust-debugging",
+      "rust-testing",
+      "rust-verification",
+      "rust-performance"
+    ],
+    "operations": [
+      "rust-delivery-platform",
+      "rust-observability",
+      "rust-performance",
+      "rust-reliability"
+    ],
+    "change_control": [
+      "rust-coder",
+      "rust-delivery-platform",
+      "rust-verification",
+      "merge-conflict-resolution"
+    ]
+  },
+  "edges": [
+    {
+      "skills": [
+        "rust-api-contract",
+        "rust-axum"
+      ],
+      "decisive_axis": {
+        "rust-api-contract": "client-visible outcome and the committed document",
+        "rust-axum": "route tree, extractors, and layer order"
+      }
+    },
+    {
+      "skills": [
+        "rust-api-contract",
+        "rust-errors"
+      ],
+      "decisive_axis": {
+        "rust-api-contract": "published status and problem responses",
+        "rust-errors": "error identity, code selection, and degradation"
+      }
+    },
+    {
+      "skills": [
+        "rust-api-contract",
+        "rust-reliability"
+      ],
+      "decisive_axis": {
+        "rust-api-contract": "published failure and recovery semantics",
+        "rust-reliability": "budget and lifecycle policy behind them"
+      }
+    },
+    {
+      "skills": [
+        "rust-axum",
+        "rust-observability"
+      ],
+      "decisive_axis": {
+        "rust-axum": "route template source and middleware position",
+        "rust-observability": "signal policy, labels, cardinality, privacy, cost"
+      }
+    },
+    {
+      "skills": [
+        "rust-axum",
+        "rust-security"
+      ],
+      "decisive_axis": {
+        "rust-axum": "where an extractor or layer runs",
+        "rust-security": "what an attacker can reach and the denial proof"
+      }
+    },
+    {
+      "skills": [
+        "rust-coder",
+        "rust-idiomatic"
+      ],
+      "decisive_axis": {
+        "rust-coder": "closed causal implementation at the earliest owner",
+        "rust-idiomatic": "caller-visible ownership, trait, and error-identity semantics"
+      }
+    },
+    {
+      "skills": [
+        "rust-coder",
+        "rust-debugging"
+      ],
+      "decisive_axis": {
+        "rust-coder": "closed cause and accepted implementation",
+        "rust-debugging": "unknown cause and first broken invariant"
+      }
+    },
+    {
+      "skills": [
+        "rust-coder",
+        "rust-testing"
+      ],
+      "decisive_axis": {
+        "rust-coder": "routine proof coupled to the implementation",
+        "rust-testing": "non-obvious falsifier, deterministic control, or proving layer"
+      }
+    },
+    {
+      "skills": [
+        "rust-coder",
+        "rust-structural-quality"
+      ],
+      "decisive_axis": {
+        "rust-coder": "extending the existing owner",
+        "rust-structural-quality": "whether an added structure survives the deletion test"
+      }
+    },
+    {
+      "skills": [
+        "rust-coder",
+        "rust-dependencies"
+      ],
+      "decisive_axis": {
+        "rust-coder": "using a declared dependency",
+        "rust-dependencies": "adding, upgrading, or replacing one"
+      }
+    },
+    {
+      "skills": [
+        "rust-tokio",
+        "rust-reliability"
+      ],
+      "decisive_axis": {
+        "rust-tokio": "task lifetime, cancellation, join, and channel ownership",
+        "rust-reliability": "timeout, retry, overload, and failure disposition"
+      }
+    },
+    {
+      "skills": [
+        "rust-tokio",
+        "rust-idiomatic"
+      ],
+      "decisive_axis": {
+        "rust-tokio": "runtime ownership and completion guarantees",
+        "rust-idiomatic": "Send/Sync bounds and borrow semantics at the async boundary"
+      }
+    },
+    {
+      "skills": [
+        "rust-tokio",
+        "rust-debugging"
+      ],
+      "decisive_axis": {
+        "rust-tokio": "known ordering or lifetime rule",
+        "rust-debugging": "unknown cause of a hang or flake"
+      }
+    },
+    {
+      "skills": [
+        "rust-config",
+        "rust-security"
+      ],
+      "decisive_axis": {
+        "rust-config": "key ownership, default, validation, precedence",
+        "rust-security": "secret exposure and ambient-credential paths"
+      }
+    },
+    {
+      "skills": [
+        "rust-config",
+        "rust-reliability"
+      ],
+      "decisive_axis": {
+        "rust-config": "where a budget is declared and validated",
+        "rust-reliability": "what the budget must be and why"
+      }
+    },
+    {
+      "skills": [
+        "rust-errors",
+        "rust-reliability"
+      ],
+      "decisive_axis": {
+        "rust-errors": "how a failure is represented and reported",
+        "rust-reliability": "whether to fail, degrade, retry, or shed"
+      }
+    },
+    {
+      "skills": [
+        "rust-errors",
+        "rust-idiomatic"
+      ],
+      "decisive_axis": {
+        "rust-errors": "problem codes, exit codes, and cleanup semantics",
+        "rust-idiomatic": "typed versus opaque error identity across crates"
+      }
+    },
+    {
+      "skills": [
+        "rust-structural-quality",
+        "rust-idiomatic"
+      ],
+      "decisive_axis": {
+        "rust-structural-quality": "whole-diff responsibility and deletion cost",
+        "rust-idiomatic": "local readability and contract clarity"
+      }
+    },
+    {
+      "skills": [
+        "rust-structural-quality",
+        "rust-dependencies"
+      ],
+      "decisive_axis": {
+        "rust-structural-quality": "template-owned structure versus none",
+        "rust-dependencies": "library versus template-owned code"
+      }
+    },
+    {
+      "skills": [
+        "rust-observability",
+        "rust-reliability"
+      ],
+      "decisive_axis": {
+        "rust-observability": "operator question and signal",
+        "rust-reliability": "resilience behavior and failure disposition"
+      }
+    },
+    {
+      "skills": [
+        "rust-observability",
+        "rust-security"
+      ],
+      "decisive_axis": {
+        "rust-observability": "which fields answer an operational question",
+        "rust-security": "which fields leak identity or secrets"
+      }
+    },
+    {
+      "skills": [
+        "rust-performance",
+        "rust-reliability"
+      ],
+      "decisive_axis": {
+        "rust-performance": "measured workload, capacity, and optimization delta",
+        "rust-reliability": "overload and failure disposition"
+      }
+    },
+    {
+      "skills": [
+        "rust-performance",
+        "rust-testing"
+      ],
+      "decisive_axis": {
+        "rust-performance": "measurement design and evidence for a claim",
+        "rust-testing": "behavioral falsifier and proving layer"
+      }
+    },
+    {
+      "skills": [
+        "rust-debugging",
+        "rust-reliability"
+      ],
+      "decisive_axis": {
+        "rust-debugging": "unknown cause",
+        "rust-reliability": "known cause with open failure-handling policy"
+      }
+    },
+    {
+      "skills": [
+        "rust-debugging",
+        "rust-verification"
+      ],
+      "decisive_axis": {
+        "rust-debugging": "why existing proof fails",
+        "rust-verification": "what existing proof establishes"
+      }
+    },
+    {
+      "skills": [
+        "rust-testing",
+        "rust-verification"
+      ],
+      "decisive_axis": {
+        "rust-testing": "design a future falsifier",
+        "rust-verification": "bound an existing proof to a claim"
+      }
+    },
+    {
+      "skills": [
+        "rust-delivery-platform",
+        "rust-observability"
+      ],
+      "decisive_axis": {
+        "rust-delivery-platform": "release gate and rollout acceptance",
+        "rust-observability": "operator signal semantics and evidence cost"
+      }
+    },
+    {
+      "skills": [
+        "rust-delivery-platform",
+        "rust-verification"
+      ],
+      "decisive_axis": {
+        "rust-delivery-platform": "which gate must observe a surface",
+        "rust-verification": "whether a run's evidence covers the claim"
+      }
+    },
+    {
+      "skills": [
+        "rust-delivery-platform",
+        "rust-dependencies"
+      ],
+      "decisive_axis": {
+        "rust-delivery-platform": "tool pins and image contents",
+        "rust-dependencies": "workspace crates and features"
+      }
+    },
+    {
+      "skills": [
+        "rust-coder",
+        "merge-conflict-resolution"
+      ],
+      "decisive_axis": {
+        "rust-coder": "ordinary accepted implementation",
+        "merge-conflict-resolution": "reconstructing two intents at conflicted hunks"
+      }
+    }
+  ]
+}

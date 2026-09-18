@@ -2,17 +2,30 @@
 
 This file owns the shape of repository skills under
 `.agents/skills/<name>/`. Read it before adding or editing a skill.
-`make check-skills` enforces the mechanical part. The shape is the one used
-by [rust-cli-skills](https://github.com/Dankosik/rust-cli-skills): each
-skill is self-contained, decision-focused, and readable without the rest of
-the repository.
+`make check-skills` enforces the mechanical part. Two classes share the
+directory:
+
+- **Decision skills** (`rust-*`, `merge-conflict-resolution`) follow the
+  shape used by [rust-cli-skills](https://github.com/Dankosik/rust-cli-skills):
+  self-contained, decision-focused prose that a model selects from the
+  description. The rest of this document describes them.
+- **Workflow skills** (`orchestrator`, `acceptance-unit-lead`,
+  `spec-first-brainstorming`, `spec-document-designer`, `idea-refine`,
+  `planning-and-task-breakdown`, `grilling`, `agent-prompt-composer`,
+  `thermo-nuclear-code-quality-review`) are ported from the Go template with
+  path changes only. They are carriers for the [workflow](spec-first-workflow.md)
+  and the [harness](agent-harness.md): a user or a role invokes them, never
+  the model on its own, and their bodies link to the phase, interface, and
+  contract documents instead of restating them. See [Workflow skills](#workflow-skills).
 
 ## Files
 
-A skill is one directory holding exactly `SKILL.md` and `LICENSE` (a copy of
-the repository license). No reference trees, scripts, or assets; material
-that needs them is documentation, not a skill. Cursor, Codex, Grok, and
-OpenCode read `.agents/skills` directly.
+A decision skill is one directory holding exactly `SKILL.md` and `LICENSE`
+(a copy of the repository license). No reference trees, scripts, or assets;
+material that needs them is documentation, not a skill. Cursor, Codex, Grok,
+and OpenCode read `.agents/skills` directly; `.claude/skills` and
+`.qwen/skills` are generated symlink views (`make claude-skills-sync`,
+`make qwen-skills-sync`, checked by `make check-instructions`).
 
 ## Frontmatter
 
@@ -70,3 +83,21 @@ Skills for a capability arrive with that capability's stage
 (`rust-api-contract` came with the OpenAPI contract, `rust-sqlx` comes with
 PostgreSQL, `rust-tonic` with gRPC); do not add a skill for code that does
 not exist.
+
+## Workflow skills
+
+A workflow skill's frontmatter holds exactly `name`, `description`,
+`metadata` with `invocation` (`role` for a ledger carrier bound by a harness
+role, `user` for an entry the user invokes) and `kind` (`carrier` or
+`workflow`), and `disable-model-invocation: true`, so no harness selects it
+implicitly. The description states its trigger the same way and stays within
+two sentences. The body is one H1 and at most 600 words; it may hold lists
+and links to `docs/spec-first-workflow/**`, `docs/agent-harness*`, and the
+`.agents/contracts/*`, because the skill is the entry point and those
+documents own the method. Besides `SKILL.md` and `LICENSE`, a workflow skill
+may hold `references/*.md` (examples the body names) and `agents/openai.yaml`,
+the Codex carrier with `allow_implicit_invocation: false`.
+
+A decision skill carries no `metadata` block; the harness sync treats its
+absence as `invocation: model`, `kind: method`. Changing a workflow skill's
+method means changing the workflow document it links, not the skill.
