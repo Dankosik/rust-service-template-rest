@@ -38,6 +38,7 @@ utoipa = { workspace = true, features = ["macros", "yaml"] }
 utoipa-axum = { workspace = true }
 
 [dev-dependencies]
+rstest = { workspace = true }
 nix = { workspace = true, features = ["signal"] }
 tokio = { workspace = true, features = ["test-util"] }
 serde_json = { workspace = true, features = ["std"] }
