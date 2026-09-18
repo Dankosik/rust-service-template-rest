@@ -22,7 +22,7 @@ is not a supported template state.
 | 5 | Repository documentation: architecture, placement, commands, production contract | done |
 | 6 | Agent harness and spec-first workflow | done |
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
-| 8 | PostgreSQL profile | planned |
+| 8 | PostgreSQL profile | done |
 | 9 | Template initializer, profiles, and template sync | planned |
 | 10 | Optional capability profiles | planned |
 | 11 | Benchmarking and performance evidence | planned |
@@ -61,7 +61,7 @@ independent of each other and each depends on 9 for its profile marker.
 | OpenTelemetry Go traces and metrics + Prometheus | Traces: `opentelemetry` 0.32 + `tracing-opentelemetry` + `axum-tracing-opentelemetry`. Metrics: the `metrics` facade + `metrics-exporter-prometheus` + `axum-prometheus` + `metrics-process` + `tokio-metrics` | The facade is the Rust idiom; OTLP metric push is deferred. Diagnostics stay on a separate listener (`:9090`). |
 | RFC 9457 `problem` package | `infra_http::problem` | Closed transport catalog, stable codes, no submitted values echoed; a `failure` leaf splits out with the gRPC profile. |
 | oapi-codegen strict server, hand-written `service.yaml`, runtime request validator | `utoipa` + `utoipa-axum`: handlers carry the contract, the generated `api/openapi/service.yaml` is committed and byte-compared by a test, Redocly lints it, oasdiff compares it with the pull-request base | No maintained Rust-native spec-first server generator exists for axum; the JVM `openapi-generator` output was rejected on quality ([HTTP Architecture](architecture/http.md#decisions-recorded-here)). The committed document stays the reviewed authority. Extractors are the request validator. |
-| `pgx` + `sqlc` + Goose | Decision in stage 8 | `sqlx` with compile-time checked queries and offline metadata is the leading candidate; migrations via `sqlx migrate` or `refinery`. |
+| `pgx` + `sqlc` + Goose | `sqlx` 0.9 (`postgres`, `runtime-tokio`, `tls-rustls-ring-webpki`, `migrate`): pool, transactions, embedded migrations under an advisory lock with checksums, `#[sqlx::test]` per-test databases; template-owned `Dsn` admission and commit-outcome policy in `crates/infra-postgres`; `crates/migrate` library plus binary; compose + `#[sqlx::test]` for proof | `refinery`, `diesel-async`, `sea-orm`, `testcontainers`, `cargo-nextest` rejected or deferred with reasons in [Persistence](architecture/persistence.md#decisions-recorded-here). `query!` macros with offline `.sqlx` metadata and `sqlx-cli` arrive with the first repository (stage 10). |
 | River jobs | Decision in stage 10 | Candidates: `apalis`, `underway`, or a template-owned PostgreSQL queue. |
 | NATS JetStream (`nats.go`) | `async-nats` | |
 | gRPC (`grpc-go`, buf) | `tonic` + `prost`, buf for lint and breaking checks | |
@@ -415,9 +415,11 @@ body, word budget, LICENSE copy) wired into `make check` and CI; `AGENTS.md`
 routing to the catalog. `rust-api-contract` arrived with stage 3 and
 `rust-delivery-platform` with stage 4; the harness-neutral workflow skills,
 `merge-conflict-resolution`, and the Claude/Qwen views with stage 6.
-Remaining for this stage: capability skills with their stages
-(`rust-sqlx`, `rust-tonic`, the profile skills), universal disciplines when
-a capability reaches them, and behavioural evaluation fixtures under
+`rust-sqlx` arrived with stage 8 (the `persistence` neighbor cluster and
+its edges to `rust-reliability`, `rust-errors`, `rust-security`,
+`rust-testing`, `rust-config`). Remaining for this stage: capability skills
+with their stages (`rust-tonic`, the profile skills), universal disciplines
+when a capability reaches them, and behavioural evaluation fixtures under
 `evals/` now that the reviewer roles exist.
 
 Original mapping from the CLI pack:
@@ -461,26 +463,79 @@ any skill whose decision differs from its Go or CLI source.
 Exit criteria: skill catalog validates; the neighbor map has no collisions;
 each new or changed skill has at least one positive and one negative fixture.
 
-### Stage 8: PostgreSQL profile
+### Stage 8: PostgreSQL profile (done)
 
-Goal: `DATABASE=postgres` adds a pool, migrations, transactions, and proof.
+Goal: `postgres.enabled = true` adds a pool, migrations, transactions, and
+proof; the profile is inert otherwise.
 
-- Decision spike: `sqlx` (compile-time checked SQL, offline `.sqlx` metadata,
-  `sqlx migrate`) vs. alternatives; record in `specs/`.
-- `crates/infra-postgres`: strict DSN admission mirroring the Go rules (URL
-  form, explicit `sslmode`, no libpq environment or passfile side channels),
-  pool with connection and statement timeouts, readiness probe, transaction
-  helper with commit-outcome policy.
-- `crates/migrate` binary with session lock, orchestration deadline, and
-  append-only history check; `migrations/*.sql`.
-- Integration tests through `testcontainers` behind `ALLOW_HEAVY=1` /
-  `REQUIRE_DOCKER=1`; `make test-integration-db`; `make migration-validate`
-  rehearsal against the runtime image.
-- `docs/architecture/persistence.md`, `docs/validation/postgres.md`,
-  `env/docker-compose.yml` for local PostgreSQL.
+Research: `sqlx` 0.9 against `tokio-postgres` + `deadpool-postgres` +
+`refinery`, `diesel-async`, `sea-orm`, and `bb8-postgres`; compose +
+`#[sqlx::test]` against `testcontainers`; `cargo-nextest` reopened and not
+adopted. The driver's behavior was verified in a scratch project against
+`postgres:18.4` (environment overlay, `sslmode` parsing, session defaults
+through the startup packet, `lock_timeout` on `pg_advisory_lock`, checksum
+mismatch, per-test databases). The synthesis was absorbed into
+[Persistence Architecture](architecture/persistence.md#decisions-recorded-here)
+and deleted.
 
-Exit criteria: the profile is inert unless selected; unit tests need no
-Docker; integration proof runs in CI on the `db_integration` surface.
+Delivered in one pull request:
+
+- `crates/infra-postgres`: `Dsn` admission mirroring the Go rules (URL form,
+  explicit `sslmode` in `disable`/`require`/`verify-ca`/`verify-full`, no
+  libpq environment, passfile, socket, fallback host, TLS file, or unknown
+  parameter; diagnostics never carry the value), the pool with `acquire` 3 s
+  and session `statement_timeout`/`idle_in_transaction_session_timeout` 8 s,
+  `PostgresProbe`, `db_client_connection_count` gauges, `in_tx`/`in_tx_with`
+  over an `AsyncFnOnce` with `CommitFailed` versus `CommitUnknown` and
+  `retryable`.
+- `crates/migrate`: `MIGRATOR` embedded from `migrations/`, `run` over one
+  connection (`lock_timeout` 15 s, statement 2 min, deadline 5 min) with
+  stages `source`/`connect`/`lock`/`state`/`execute`/`deadline`, source rules
+  as a test, the `migrate` binary with one terminal `migration_run` record;
+  `migrations/README.md` states the rules (the set is empty until the first
+  durable feature).
+- `service-config` `postgres` section; bootstrap opens the pool before
+  admission, registers the probe and the gauge task, closes the pool in the
+  dependency-close stage, and cleans up a partial startup.
+- `env/docker-compose.yml` (`postgres:18`, digest-pinned, Dependabot
+  `docker-compose`); `test/` (`integration-tests`) with fifteen
+  database-backed tests behind the `integration` feature and fixture
+  migration sets; `scripts/ci/test-integration-db.sh`,
+  `migration-validate.sh`, `migration-history-check.sh` (with self-test),
+  `scripts/lib/compose-postgres.sh`; `runtime-image-check.sh` learns
+  `RUNTIME_IMAGE_NETWORK` and `RUNTIME_IMAGE_POSTGRES_DSN`.
+- Make: `compose-up`, `compose-down`, `test-integration-db`,
+  `migration-check`, `migration-history-self-test`, `migration-validate`;
+  `lint` covers the feature-gated tests; `check` gains `migration-check`.
+- Surfaces `db_integration` and `migrations`; CI `integration` job, the
+  migration steps in `quality`, the rehearsal in `image` in place of the
+  plain lifecycle check when migrations changed; `make verify` plans them.
+- The image builds and ships `/migrate`; `.dockerignore` admits
+  `migrations/` and the `test/` manifest.
+- `deny.toml` admits ISC and CDLA-Permissive-2.0 for the TLS stack.
+- Docs: [Persistence Architecture](architecture/persistence.md),
+  [PostgreSQL Validation](validation/postgres.md), `test/README.md`,
+  `migrations/README.md`; boundaries, lifecycle, configuration policy,
+  routing, structure, commands, CI/CD, README, CONTRIBUTING, AGENTS updated;
+  the `rust-sqlx` skill.
+
+Deviations from the Go template are listed in the persistence document:
+embedded forward-only migrations instead of a runtime directory with Goose
+sections, the advisory lock bounded by `lock_timeout` instead of a locker
+with its own timeouts, a dropped connection instead of a cancel request at
+the deadline, `max_connections` instead of `max_open_conns`, the callback
+error returned and the rollback failure logged instead of `errors.Join`,
+compose + `#[sqlx::test]` instead of `testcontainers`.
+
+Exit criteria met: the default configuration starts without PostgreSQL and
+`make test` needs no Docker (the database tests compile with their feature
+off); `ALLOW_HEAVY=1 make test-integration-db` passes fifteen tests on
+`postgres:18`; `ALLOW_HEAVY=1 make migration-validate` migrates a fresh
+database from the image, replays as `no_change`, and passes the lifecycle
+check with the pool open; CI runs the proof on the `db_integration` surface
+and the rehearsal on `migrations`. Orchestration: the stage was small enough
+for one actor with the research synthesis as its artifact; the harness'
+first dispatched ledger is still owed to stage 9 or 10.
 
 ### Stage 9: Template initializer, profiles, and sync
 

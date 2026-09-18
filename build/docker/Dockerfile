@@ -34,7 +34,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 ENV CARGO_INCREMENTAL=0
 COPY --from=planner /src/recipe.json recipe.json
-RUN cargo chef cook --release --locked --recipe-path recipe.json -p service
+RUN cargo chef cook --release --locked --recipe-path recipe.json -p service -p migrate
 ARG VCS_REF=unknown
 ARG RAILWAY_GIT_COMMIT_SHA
 ARG SOURCE_DATE_EPOCH=0
@@ -42,9 +42,9 @@ ARG SOURCE_DATE_EPOCH=0
 # crates/service/build.rs); this is what the binary logs as app.commit.
 ENV VERGEN_GIT_SHA=${RAILWAY_GIT_COMMIT_SHA:-${VCS_REF}}
 COPY . .
-RUN cargo auditable build --release --locked -p service --bin service \
- && mkdir -p /out && cp target/release/service /out/service \
- && touch -d "@${SOURCE_DATE_EPOCH}" /out/service
+RUN cargo auditable build --release --locked -p service --bin service -p migrate --bin migrate \
+ && mkdir -p /out && cp target/release/service target/release/migrate /out/ \
+ && touch -d "@${SOURCE_DATE_EPOCH}" /out/service /out/migrate
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97
 # The version is the Cargo package version; scripts/ci/runtime-image-build.sh
@@ -57,6 +57,9 @@ LABEL org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.revision="${RAILWAY_GIT_COMMIT_SHA:-$VCS_REF}" \
       org.opencontainers.image.source="${SOURCE_URL}"
 COPY --from=builder /out/service /service
+# The migration job runs the same image with `--entrypoint /migrate`
+# (docs/architecture/persistence.md); it needs no migration directory.
+COPY --from=builder /out/migrate /migrate
 EXPOSE 8080
 STOPSIGNAL SIGTERM
 USER nonroot:nonroot

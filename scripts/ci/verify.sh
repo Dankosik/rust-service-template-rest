@@ -89,6 +89,7 @@ prepare_command() {
 	image-build) step_command=(env "VCS_REF=${execution_head}" make runtime-image-build "RUNTIME_IMAGE=${argument}") ;;
 	image-check) step_command=(make runtime-image-check "RUNTIME_IMAGE=${argument}" "RUNTIME_EXPECTED_COMMIT=${execution_head}") ;;
 	image-security) step_command=(make container-security "CONTAINER_IMAGE=${argument}") ;;
+	migration-validate) step_command=(make migration-validate "RUNTIME_IMAGE=${argument}" "RUNTIME_EXPECTED_COMMIT=${execution_head}") ;;
 	*)
 		echo "unknown verification command kind: ${kind}" >&2
 		return 2
@@ -264,6 +265,25 @@ self_test() (
 	grep -q '^  make runtime-image-build' <<<"${output}"
 	if grep -q 'tools-check' <<<"${output}"; then return 1; fi
 
+	# A migration selects the static history check, the database proof for
+	# the runner, and the image rehearsal in place of the plain lifecycle
+	# check; the scan stays with the image inputs.
+	output=$(bash "${script}" --plan --files migrations/20260918120000_create_widgets.sql)
+	grep -q '^  make migration-check$' <<<"${output}"
+	grep -q '^  make migration-history-self-test$' <<<"${output}"
+	grep -q '^  make runtime-image-build RUNTIME_IMAGE=service:verify$' <<<"${output}"
+	grep -q '^  make migration-validate RUNTIME_IMAGE=service:verify$' <<<"${output}"
+	if grep -q 'runtime-image-check' <<<"${output}"; then return 1; fi
+	if grep -q 'container-security' <<<"${output}"; then return 1; fi
+	if grep -q 'test-integration-db' <<<"${output}"; then return 1; fi
+	output=$(bash "${script}" --plan --files crates/infra-postgres/src/dsn.rs)
+	grep -q '^  make test-integration-db$' <<<"${output}"
+	grep -q 'requires_heavy=true' <<<"${output}"
+	if grep -q 'migration-validate' <<<"${output}"; then return 1; fi
+	output=$(bash "${script}" --plan --files crates/migrate/src/lib.rs)
+	grep -q '^  make test-integration-db$' <<<"${output}"
+	grep -q '^  make migration-validate RUNTIME_IMAGE=service:verify$' <<<"${output}"
+
 	if CI='' ALLOW_HEAVY='' bash "${script}" --files build/docker/Dockerfile >/dev/null 2>"${TMPDIR:-/tmp}/verify-heavy.$$"; then
 		echo "verify self-test accepted a heavy route without ALLOW_HEAVY=1" >&2
 		return 1
@@ -397,7 +417,7 @@ printf 'VCS_REF=%s\n' "${VCS_REF:-}"
 printf '%s\n' "$@"
 SH
 		execution_head='fixture-source-head'
-		for kind in image-build image-check image-security; do
+		for kind in image-build image-check image-security migration-validate; do
 			prepare_command "${kind}" 'fixture:tag; unexpected-shell-command'
 			actual=$("${step_command[@]}")
 			replayed=$(bash -c "${step_display}")
@@ -407,7 +427,7 @@ SH
 				grep -q '^VCS_REF=fixture-source-head$' <<<"${replayed}"
 				grep -q '^RUNTIME_IMAGE=fixture:tag; unexpected-shell-command$' <<<"${replayed}"
 				;;
-			image-check)
+			image-check | migration-validate)
 				grep -q '^RUNTIME_IMAGE=fixture:tag; unexpected-shell-command$' <<<"${replayed}"
 				grep -q '^RUNTIME_EXPECTED_COMMIT=fixture-source-head$' <<<"${replayed}"
 				;;
@@ -564,12 +584,28 @@ fi
 if is_true agent_instructions; then add_command make check-instructions "agent instructions, skills, roles, or carriers changed" "make check-instructions" cheap false false; fi
 if is_true publication_metadata; then add_command make publish-image-metadata-check "publication naming or promotion changed" "make publish-image-metadata-check" cheap false false; fi
 if is_true secret_scanning; then add_command make secret-scan "secret scanning policy changed" "make secret-scan" cpu false false; fi
-if is_true runtime_image; then
+if is_true migrations; then
+	add_command make migration-check "migration set or its runner changed" "make migration-check" cpu false false
+	add_command make migration-history-self-test "migration set or its runner changed" "make migration-history-self-test" cheap false false
+fi
+if is_true db_integration; then
+	add_command make test-integration-db "database adapter, runner, or database proof changed" "make test-integration-db" docker true true
+fi
+if is_true runtime_image || is_true migrations; then
 	image=${VERIFY_RUNTIME_IMAGE:-service:verify}
-	add_command make dockerfile-check "runtime image inputs changed" "make dockerfile-check" docker false true
+	if is_true runtime_image; then
+		add_command make dockerfile-check "runtime image inputs changed" "make dockerfile-check" docker false true
+	fi
 	add_command image-build "${image}" "one image is shared by the selected runtime gates" "make runtime-image-build RUNTIME_IMAGE=${image}" docker true true
-	add_command image-check "${image}" "runtime image lifecycle changed" "make runtime-image-check RUNTIME_IMAGE=${image}" docker true true
-	add_command image-security "${image}" "runtime image inputs changed" "make container-security CONTAINER_IMAGE=${image}" docker true true
+	# The rehearsal contains the lifecycle check, with the profile enabled.
+	if is_true migrations; then
+		add_command migration-validate "${image}" "migration set or its rehearsal changed" "make migration-validate RUNTIME_IMAGE=${image}" docker true true
+	else
+		add_command image-check "${image}" "runtime image lifecycle changed" "make runtime-image-check RUNTIME_IMAGE=${image}" docker true true
+	fi
+	if is_true runtime_image; then
+		add_command image-security "${image}" "runtime image inputs changed" "make container-security CONTAINER_IMAGE=${image}" docker true true
+	fi
 fi
 if is_true documentation; then add_command make docs-check "Markdown changed" "make docs-check" docker false true; fi
 

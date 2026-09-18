@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "test"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,7 +17,15 @@ publish = false
 service-config = { path = "crates/config" }
 health = { path = "crates/health" }
 infra-http = { path = "crates/infra-http" }
+infra-postgres = { path = "crates/infra-postgres" }
 infra-telemetry = { path = "crates/infra-telemetry" }
+migrate = { path = "crates/migrate" }
+
+# Persistence (docs/architecture/persistence.md). `macros` only where
+# `sqlx::migrate!` or `#[sqlx::test]` is used.
+sqlx = { version = "0.9.0", default-features = false }
+url = { version = "2.5", default-features = false }
+log = { version = "0.4", default-features = false }
 
 # Runtime and transport
 axum = { version = "0.8.9", default-features = false }

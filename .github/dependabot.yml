@@ -50,3 +50,17 @@ updates:
       default-days: 7
     commit-message:
       prefix: "build"
+
+  # The PostgreSQL image digest in the local compose file.
+  - package-ecosystem: "docker-compose"
+    directory: "/env"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "build"
+    groups:
+      docker-compose:
+        patterns:
+          - "*"

@@ -33,6 +33,7 @@ does not make every available check mandatory locally.
 | Dependency advisories, licenses, unused dependencies, secrets, workflow security, image vulnerabilities | [Security](validation/security.md) | matching security target |
 | CI workflows, shell scripts, tool pins, Dockerfile lint, publication naming | [Delivery](validation/delivery.md) | matching delivery leaf |
 | Runtime image build, lifecycle, scan, or SBOM | [Containers](validation/containers.md) | `ALLOW_HEAVY=1 make runtime-image-build` and the required scenario |
+| Observed transaction, locking, commit-outcome, readiness, or migration behavior on a real PostgreSQL; the image's migration rehearsal | [PostgreSQL](validation/postgres.md) | `ALLOW_HEAVY=1 make test-integration-db`, `make migration-check`, `ALLOW_HEAVY=1 make migration-validate` |
 
 Existing CI and publication gates keep their own admission scope
 ([CI/CD Production Readiness](ci-cd-production-ready.md)). Do not change the
@@ -68,6 +69,7 @@ of the workspace runs the workspace instead. `make lint-changed PKGS=…` and
 `make test-changed PKGS=…` consume the list it prints.
 
 `ALLOW_FULL=1 make check` remains the explicit deterministic full-repository
-gate, never a default follow-up. `ALLOW_HEAVY=1` guards the image targets and
-the history-wide secret scan. CI sets `CI=true`, which satisfies both; do not
-set it locally to impersonate CI.
+gate, never a default follow-up. `ALLOW_HEAVY=1` guards the image targets,
+the database-backed proof, the migration rehearsal, and the history-wide
+secret scan. CI sets `CI=true`, which satisfies both; do not set it locally
+to impersonate CI.

@@ -1,0 +1,26 @@
+# Local PostgreSQL for the profile: `make compose-up`, then
+#   APP__POSTGRES__ENABLED=true \
+#   APP__POSTGRES__DSN='postgres://app:app@127.0.0.1:5432/app?sslmode=disable' make run
+# The same file serves `make test-integration-db` and the image rehearsal,
+# which set POSTGRES_PORT=0 for an ephemeral host port and read it back.
+services:
+  postgres:
+    image: postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      # initdb fsyncs a cluster this container recreates on every `down -v`,
+      # and that sync is most of the startup a caller waits on. It bounds
+      # nothing after initialization: the running server keeps its default
+      # durability.
+      POSTGRES_INITDB_ARGS: --no-sync
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 30s
+      start_interval: 1s
+      start_period: 30s
+      timeout: 3s
+      retries: 20

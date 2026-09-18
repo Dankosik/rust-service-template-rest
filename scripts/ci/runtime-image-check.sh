@@ -6,11 +6,26 @@
 # code 0 inside the 45 s grace budget (docs/configuration-source-policy.md).
 #
 #   runtime-image-check.sh IMAGE [EXPECTED_COMMIT]
+#   RUNTIME_IMAGE_NETWORK      Docker network to join (a compose project's)
+#   RUNTIME_IMAGE_POSTGRES_DSN Enable the PostgreSQL profile with this DSN, so
+#                              readiness is observed with the pool open
 set -euo pipefail
 
 image=${1:?runtime image is required}
 expected_commit=${2:-}
 container="service-runtime-check-$$"
+
+# Never empty, so the expansion below is safe under `set -u` on bash 3.2.
+docker_args=(--label "runtime-check=${container}")
+if [[ -n ${RUNTIME_IMAGE_NETWORK:-} ]]; then
+	docker_args+=(--network "${RUNTIME_IMAGE_NETWORK}")
+fi
+if [[ -n ${RUNTIME_IMAGE_POSTGRES_DSN:-} ]]; then
+	docker_args+=(
+		-e APP__POSTGRES__ENABLED=true
+		-e "APP__POSTGRES__DSN=${RUNTIME_IMAGE_POSTGRES_DSN}"
+	)
+fi
 
 cleanup() {
 	docker rm -f "${container}" >/dev/null 2>&1 || true
@@ -29,6 +44,7 @@ docker run -d --name "${container}" \
 	--read-only \
 	--cap-drop=ALL \
 	--security-opt=no-new-privileges \
+	"${docker_args[@]}" \
 	"${image}" >/dev/null
 
 address=$(docker port "${container}" 8080/tcp 2>/dev/null | head -n 1 || true)
@@ -71,6 +87,14 @@ if [[ -n ${expected_commit} ]] && ! grep -Fq "\"app.commit\":\"${expected_commit
 	exit 1
 fi
 echo "runtime image ready: $(grep -oE '"app\.(version|commit)":"[^"]*"' <<<"${starting}" | tr '\n' ' ')"
+if [[ -n ${RUNTIME_IMAGE_POSTGRES_DSN:-} ]]; then
+	grep -Fq '"message":"postgres_pool_opened"' <<<"${logs}" || {
+		echo "runtime image did not open the postgres pool" >&2
+		printf '%s\n' "${logs}" >&2
+		exit 1
+	}
+	echo "runtime image opened the postgres pool"
+fi
 
 stop_started=$(date +%s)
 docker stop --time 45 "${container}" >/dev/null

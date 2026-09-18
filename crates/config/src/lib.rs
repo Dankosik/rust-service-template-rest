@@ -15,6 +15,7 @@ pub mod health;
 pub mod http;
 pub mod log;
 pub mod observability;
+pub mod postgres;
 
 mod cli;
 mod load;
@@ -32,6 +33,7 @@ pub use log::{LogConfig, LogFormat};
 pub use observability::{
     MetricsConfig, ObservabilityConfig, OtelConfig, OtelExporterConfig, TracesSampler,
 };
+pub use postgres::PostgresConfig;
 pub use secret_policy::is_secret_like_key;
 pub use validate::ValidationError;
 
@@ -44,6 +46,7 @@ pub struct Config {
     pub health: HealthConfig,
     pub log: LogConfig,
     pub observability: ObservabilityConfig,
+    pub postgres: PostgresConfig,
 }
 
 impl Config {
@@ -58,6 +61,7 @@ impl Config {
         self.health.validate()?;
         self.log.validate()?;
         self.observability.validate()?;
+        self.postgres.validate()?;
         Ok(())
     }
 }

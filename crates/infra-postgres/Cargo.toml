@@ -1,0 +1,27 @@
+[package]
+name = "infra-postgres"
+description = "PostgreSQL adapter: DSN admission, pool with template timeouts, readiness probe, transaction seam."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+health = { workspace = true }
+# `sqlx::ConnectOptions` takes statement-log levels as `log::LevelFilter`.
+log = { workspace = true }
+metrics = { workspace = true }
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time", "macros"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true, features = ["std"] }
+url = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }

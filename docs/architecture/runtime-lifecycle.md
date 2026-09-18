@@ -21,11 +21,17 @@ it against the built binary.
    log level, and the exporter state (`initialized`, `disabled`, `degraded`).
 4. Background tasks (metrics upkeep, Tokio runtime metrics, the readiness
    refresher) join a `TaskTracker` with child `CancellationToken`s.
-5. Readiness admission: the refresher evaluates every registered probe once
+5. Dependency pools open when their profile is selected. With
+   `postgres.enabled`, the DSN is admitted, the pool's first connection is
+   established inside the acquire budget (`postgres_pool_opened`), the
+   probe joins the readiness set, and the pool gauge task joins the tracker;
+   an unreachable database is a startup failure, not a readiness that never
+   passes ([Persistence](persistence.md)).
+6. Readiness admission: the refresher evaluates every registered probe once
    under `health.readiness_timeout`; a failure is a startup failure (exit
-   `1`). No probes exist on the scaffold, so admission proves the mechanism
-   and profiles register theirs here.
-6. The route tree comes from `service::api::contract()`, is given the
+   `1`). Without a selected profile the set is empty and admission proves
+   the mechanism.
+7. The route tree comes from `service::api::contract()`, is given the
    readiness reader as state, wrapped by `infra_http::harden`, and bound by
    the bounded `Server`; the diagnostics listener binds second when
    `observability.metrics.addr` is set. `service_ready` is logged only after
@@ -34,7 +40,9 @@ it against the built binary.
 
 Configuration and dependency admission precede traffic acceptance.
 Bootstrap, not handlers or feature code, owns process lifecycle and the
-cleanup of a partial startup.
+cleanup of a partial startup: a pool opened before a later stage failed is
+closed explicitly under the dependency-close budget before the process
+exits `1`.
 
 ## Readiness and liveness
 
@@ -59,7 +67,7 @@ instead of pushing the process into `SIGKILL`.
 | HTTP drain: stop accepting, finish in-flight requests | `http.shutdown_timeout` minus the delay (`10s`) | `drain_started`, then `drain_completed`, or `shutdown_forced` with `remaining` connections |
 | Diagnostics listener close | `2s` | `diagnostics_stopped` or `diagnostics_forced` |
 | Cancel and join background tasks | `5s` | `background_joined` |
-| Close pooled dependencies (none on the scaffold) | `5s` | — |
+| Close pooled dependencies (the PostgreSQL pool when enabled) | `5s` | `postgres_pool_closed`; an overrun votes `degraded` |
 | Flush telemetry | `5s` | `telemetry_flushed`, then `shutdown_completed` |
 
 The `17s` tail after the drain is process structure, not configuration;

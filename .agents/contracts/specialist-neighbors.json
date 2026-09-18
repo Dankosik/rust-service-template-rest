@@ -39,6 +39,13 @@
       "rust-delivery-platform",
       "rust-verification",
       "merge-conflict-resolution"
+    ],
+    "persistence": [
+      "rust-sqlx",
+      "rust-reliability",
+      "rust-errors",
+      "rust-security",
+      "rust-testing"
     ]
   },
   "edges": [
@@ -340,6 +347,56 @@
       "decisive_axis": {
         "rust-coder": "ordinary accepted implementation",
         "merge-conflict-resolution": "reconstructing two intents at conflicted hunks"
+      }
+    },
+    {
+      "skills": [
+        "rust-sqlx",
+        "rust-reliability"
+      ],
+      "decisive_axis": {
+        "rust-sqlx": "what a commit result lets the caller do next",
+        "rust-reliability": "the budget a database wait draws from"
+      }
+    },
+    {
+      "skills": [
+        "rust-sqlx",
+        "rust-errors"
+      ],
+      "decisive_axis": {
+        "rust-sqlx": "CommitFailed versus CommitUnknown and retryability",
+        "rust-errors": "how the failure is reported to the caller and the operator"
+      }
+    },
+    {
+      "skills": [
+        "rust-sqlx",
+        "rust-security"
+      ],
+      "decisive_axis": {
+        "rust-sqlx": "the admitted DSN and the SQL string boundary",
+        "rust-security": "what a leaked value or injected string lets an attacker reach"
+      }
+    },
+    {
+      "skills": [
+        "rust-sqlx",
+        "rust-testing"
+      ],
+      "decisive_axis": {
+        "rust-sqlx": "which claim needs a live server",
+        "rust-testing": "the smallest layer and the deterministic control"
+      }
+    },
+    {
+      "skills": [
+        "rust-sqlx",
+        "rust-config"
+      ],
+      "decisive_axis": {
+        "rust-sqlx": "DSN shape and the adapter's constant budgets",
+        "rust-config": "the key, its default, and where its value may come from"
       }
     }
   ]

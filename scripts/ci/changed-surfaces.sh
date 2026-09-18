@@ -20,6 +20,7 @@ set -euo pipefail
 names=(
 	rust_source cargo_dependencies dependency_policy lint_config openapi tool_manifest
 	github_workflows dependency_automation shell runtime_image publication_metadata secret_scanning
+	db_integration migrations
 	agent_instructions documentation validation_system no_validation_required
 )
 
@@ -69,10 +70,23 @@ classify() {
 
 		# One path may select several surfaces; each case is independent.
 		case "${file}" in
-		*.rs | crates/*/src/* | crates/*/tests/* | env/config/*) mark rust_source ;;
+		*.rs | crates/*/src/* | crates/*/tests/* | test/src/* | test/tests/* | env/config/*) mark rust_source ;;
 		esac
 		case "${file}" in
-		Cargo.toml | Cargo.lock | crates/*/Cargo.toml | rust-toolchain.toml) mark cargo_dependencies ;;
+		Cargo.toml | Cargo.lock | crates/*/Cargo.toml | test/Cargo.toml | rust-toolchain.toml) mark cargo_dependencies ;;
+		esac
+		# Database-backed proof: the adapter, the runner, the test crate and
+		# its fixtures, the compose file, and the scripts that drive them.
+		case "${file}" in
+		crates/infra-postgres/* | crates/migrate/* | test/* | env/docker-compose.yml | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh)
+			mark db_integration
+			;;
+		esac
+		# The migration set and everything that rehearses it against the image.
+		case "${file}" in
+		migrations/*.sql | crates/migrate/* | env/docker-compose.yml | scripts/ci/migration-validate.sh | scripts/ci/migration-history-check.sh | scripts/lib/compose-postgres.sh)
+			mark migrations
+			;;
 		esac
 		case "${file}" in
 		deny.toml) mark dependency_policy ;;
@@ -305,6 +319,48 @@ self_test() {
 			"agent_instructions shell" \
 			"validation_system tool_manifest"
 	done
+	assert_case crates/infra-postgres/src/dsn.rs \
+		"rust_source db_integration" \
+		"migrations cargo_dependencies"
+	assert_case crates/infra-postgres/Cargo.toml \
+		"cargo_dependencies db_integration" \
+		"rust_source migrations"
+	assert_case crates/migrate/src/main.rs \
+		"rust_source db_integration migrations" \
+		"cargo_dependencies"
+	assert_case migrations/20260918120000_create_widgets.sql \
+		"migrations" \
+		"rust_source db_integration documentation"
+	assert_case migrations/README.md \
+		"documentation" \
+		"migrations db_integration"
+	assert_case test/tests/postgres.rs \
+		"rust_source db_integration" \
+		"migrations"
+	assert_case test/fixtures/migrations/widgets/20260918000001_create_widgets.sql \
+		"db_integration" \
+		"rust_source migrations"
+	assert_case test/Cargo.toml \
+		"cargo_dependencies db_integration" \
+		"rust_source"
+	assert_case test/README.md \
+		"documentation db_integration" \
+		"rust_source"
+	assert_case env/docker-compose.yml \
+		"db_integration migrations" \
+		"rust_source runtime_image"
+	assert_case scripts/ci/test-integration-db.sh \
+		"db_integration shell" \
+		"migrations validation_system"
+	assert_case scripts/ci/migration-validate.sh \
+		"migrations shell" \
+		"db_integration runtime_image"
+	assert_case scripts/ci/migration-history-check.sh \
+		"migrations shell" \
+		"db_integration validation_system"
+	assert_case scripts/lib/compose-postgres.sh \
+		"db_integration migrations shell" \
+		"validation_system"
 	assert_case README.md \
 		"documentation" \
 		"agent_instructions rust_source cargo_dependencies"

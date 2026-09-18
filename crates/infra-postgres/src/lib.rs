@@ -1,0 +1,27 @@
+//! PostgreSQL adapter over `sqlx`.
+//!
+//! Owns what the driver leaves to the application: admission of the one
+//! connection string ([`Dsn`]), the pool with the template's session
+//! budgets ([`connect`]), readiness participation ([`PostgresProbe`]), and
+//! the transaction seam with its commit-outcome policy ([`in_tx`]). Owns no
+//! business rule and no process lifecycle: the composition root decides when
+//! the pool opens and closes, features decide what runs inside a
+//! transaction. Rationale and the decisions behind each budget:
+//! `docs/architecture/persistence.md`.
+
+mod dsn;
+mod pool;
+mod probe;
+mod transaction;
+
+pub use dsn::{AMBIENT_ENVIRONMENT, Dsn, DsnError};
+pub use pool::{
+    ACQUIRE_TIMEOUT, CONNECTION_COUNT_METRIC, ConnectError, PoolOptions, SLOW_STATEMENT_THRESHOLD,
+    STATEMENT_TIMEOUT, close, connect, record_metrics, record_metrics_periodically,
+    runtime_param_millis, session_options,
+};
+pub use probe::PostgresProbe;
+pub use sqlx::postgres::PgPool;
+pub use transaction::{
+    Isolation, ROLLBACK_TIMEOUT, TxError, TxOptions, in_tx, in_tx_with, retryable,
+};

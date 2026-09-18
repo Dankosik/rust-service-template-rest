@@ -25,3 +25,11 @@ format = "text"
 # Point at a local collector to see traces, e.g. "http://127.0.0.1:4318".
 otlp_endpoint = ""
 otlp_headers = ""
+
+[postgres]
+# The profile is inert until enabled. With `make compose-up`:
+#   APP__POSTGRES__ENABLED=true \
+#   APP__POSTGRES__DSN='postgres://app:app@127.0.0.1:5432/app?sslmode=disable' make run
+enabled = false
+dsn = ""
+max_connections = 4
