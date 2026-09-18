@@ -152,7 +152,7 @@ async fn middleware_error(id: Option<Extension<RequestId>>, err: BoxError) -> Re
             .into_response();
     }
     tracing::error!(error = %err, "unclassified middleware error");
-    Problem::new(Code::InternalError)
+    Problem::new(Code::InternalServerError)
         .detail(SANITIZED_DETAIL)
         .request_id(request_id)
         .into_response()
@@ -169,7 +169,7 @@ fn panic_to_problem(payload: Box<dyn Any + Send + 'static>) -> Response {
         .or_else(|| payload.downcast_ref::<&str>().copied())
         .unwrap_or("non-string panic payload");
     tracing::error!(panic = message, "handler panicked");
-    Problem::new(Code::InternalError)
+    Problem::new(Code::InternalServerError)
         .detail(SANITIZED_DETAIL)
         .into_response()
 }
@@ -192,10 +192,7 @@ async fn enforce_body_limit(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok());
     if declared.is_some_and(|length| length > limit) {
-        return Problem::new(Code::RequestEntityTooLarge)
-            .detail("request body exceeds the configured limit")
-            .request_id(request_id)
-            .into_response();
+        return payload_too_large(request_id);
     }
     let request = request.map(|body| Body::new(Limited::new(body, limit)));
     let response = next.run(request).await;
@@ -204,12 +201,16 @@ async fn enforce_body_limit(
     {
         // An extractor hit the limit while streaming and answered with
         // axum's plain-text rejection; keep the envelope uniform.
-        return Problem::new(Code::RequestEntityTooLarge)
-            .detail("request body exceeds the configured limit")
-            .request_id(request_id)
-            .into_response();
+        return payload_too_large(request_id);
     }
     response
+}
+
+fn payload_too_large(request_id: Option<String>) -> Response {
+    Problem::new(Code::RequestEntityTooLarge)
+        .detail("request body exceeds the configured limit")
+        .request_id(request_id)
+        .into_response()
 }
 
 async fn not_found(request: Request) -> Response {

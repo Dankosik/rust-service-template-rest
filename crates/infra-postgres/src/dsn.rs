@@ -12,7 +12,7 @@
 use std::ffi::OsString;
 use std::str::FromStr;
 
-use sqlx::postgres::{PgConnectOptions, PgSslMode};
+use sqlx::postgres::PgConnectOptions;
 use url::Url;
 
 /// Environment variables `sqlx` reads while building connect options
@@ -66,6 +66,27 @@ pub enum DsnError {
     Ambient(&'static str),
 }
 
+/// Modes the template admits: each has one TLS outcome, never a per-attempt
+/// negotiation (`allow` / `prefer`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdmittedSslMode {
+    Disable,
+    Require,
+    VerifyCa,
+    VerifyFull,
+}
+
+impl AdmittedSslMode {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Disable => "disable",
+            Self::Require => "require",
+            Self::VerifyCa => "verify-ca",
+            Self::VerifyFull => "verify-full",
+        }
+    }
+}
+
 /// An admitted connection string, ready to become connect options.
 #[derive(Clone)]
 pub struct Dsn {
@@ -73,7 +94,7 @@ pub struct Dsn {
     host: String,
     port: u16,
     database: String,
-    ssl_mode: PgSslMode,
+    ssl_mode: AdmittedSslMode,
 }
 
 impl std::fmt::Debug for Dsn {
@@ -205,27 +226,19 @@ impl Dsn {
     /// The admitted `sslmode`, as the operator spelled it.
     #[must_use]
     pub fn ssl_mode_name(&self) -> &'static str {
-        match self.ssl_mode {
-            PgSslMode::Disable => "disable",
-            PgSslMode::Require => "require",
-            PgSslMode::VerifyCa => "verify-ca",
-            PgSslMode::VerifyFull => "verify-full",
-            // Refused at admission; kept exhaustive for the compiler.
-            PgSslMode::Allow => "allow",
-            PgSslMode::Prefer => "prefer",
-        }
+        self.ssl_mode.name()
     }
 }
 
 /// `allow` and `prefer` negotiate TLS per attempt, so two connections from
 /// one pool could differ in what they protect; the policy admits only modes
 /// with one outcome.
-fn parse_ssl_mode(value: &str) -> Result<PgSslMode, DsnError> {
+fn parse_ssl_mode(value: &str) -> Result<AdmittedSslMode, DsnError> {
     match value {
-        "disable" => Ok(PgSslMode::Disable),
-        "require" => Ok(PgSslMode::Require),
-        "verify-ca" => Ok(PgSslMode::VerifyCa),
-        "verify-full" => Ok(PgSslMode::VerifyFull),
+        "disable" => Ok(AdmittedSslMode::Disable),
+        "require" => Ok(AdmittedSslMode::Require),
+        "verify-ca" => Ok(AdmittedSslMode::VerifyCa),
+        "verify-full" => Ok(AdmittedSslMode::VerifyFull),
         _ => Err(DsnError::SslMode),
     }
 }

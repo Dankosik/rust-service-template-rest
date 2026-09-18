@@ -20,8 +20,7 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 /// Stable machine-readable failure code a client matches on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Code {
     BadRequest,
     Unauthorized,
@@ -34,7 +33,7 @@ pub enum Code {
     RequestHeaderFieldsTooLarge,
     UnprocessableContent,
     TooManyRequests,
-    InternalError,
+    InternalServerError,
     ServiceUnavailable,
     GatewayTimeout,
 }
@@ -61,7 +60,7 @@ impl Code {
         Code::RequestHeaderFieldsTooLarge,
         Code::UnprocessableContent,
         Code::TooManyRequests,
-        Code::InternalError,
+        Code::InternalServerError,
         Code::ServiceUnavailable,
         Code::GatewayTimeout,
     ];
@@ -130,6 +129,8 @@ impl Code {
                 wire: "already_exists",
                 status: StatusCode::CONFLICT,
                 title: "conflict",
+                // 409 has one RFC type URI and title; Conflict vs AlreadyExists
+                // are sibling `code` values in that class, not two problem types.
                 type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.10"),
             },
             Code::RequestEntityTooLarge => CodeMeta {
@@ -157,7 +158,7 @@ impl Code {
                 title: "too many requests",
                 type_uri: concat!("https://www.rfc-editor.org/rfc/rfc6585", "#section-4"),
             },
-            Code::InternalError => CodeMeta {
+            Code::InternalServerError => CodeMeta {
                 wire: "internal_error",
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 title: "internal server error",
@@ -176,6 +177,15 @@ impl Code {
                 type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.5"),
             },
         }
+    }
+}
+
+impl Serialize for Code {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
     }
 }
 

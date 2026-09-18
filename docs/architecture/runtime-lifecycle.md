@@ -88,7 +88,8 @@ tasks that outlived the drain.
 | `3` | The process shut down on its own but a stage overran (degraded shutdown); the platform and the process test can tell it from a crash |
 | `1` | Startup failure: invalid configuration, unknown key, malformed `APP__` name, secret in a file, bind failure, admission failure |
 
-`--help` and `--version` exit `0`. `process::exit` is never called, so
+`--help` exits `0`. `--version` is not a loader flag: identity is
+`BuildInfo` / `app.version`. `process::exit` is never called, so
 destructors run.
 
 ## Decisions Recorded Here

@@ -133,7 +133,7 @@ pub struct ReadinessReader {
 
 impl Readiness {
     /// A readiness owner over `probes`. Nothing is evaluated until
-    /// [`Readiness::refresh`] or [`Readiness::watch`] runs.
+    /// [`Readiness::refresh`] or [`Readiness::refresh_until`] runs.
     #[must_use]
     pub fn new(probes: Vec<Box<dyn Probe>>) -> Self {
         let (tx, _rx) = watch::channel(Snapshot {
@@ -178,11 +178,12 @@ impl Readiness {
     /// Returns the first failing probe, or [`NotReady::TimedOut`] when the
     /// evaluation exceeds `policy.probe_budget`.
     pub async fn refresh(&self, policy: RefreshPolicy) -> Result<(), NotReady> {
-        let observed = tokio::time::timeout(policy.probe_budget, self.evaluate())
-            .await
-            .unwrap_or(Err(NotReady::TimedOut {
+        let observed = match tokio::time::timeout(policy.probe_budget, self.evaluate()).await {
+            Ok(observed) => observed,
+            Err(_elapsed) => Err(NotReady::TimedOut {
                 budget: policy.probe_budget,
-            }));
+            }),
+        };
         let evaluated_at = Instant::now();
         self.tx.send_modify(|snapshot| {
             let previous = snapshot.evaluation.clone();
@@ -202,30 +203,41 @@ impl Readiness {
     /// so a refresher that dies on its first pass still leaves readers able
     /// to refuse the verdict it never wrote. The first evaluation runs
     /// immediately unless startup admission already seeded the cache.
-    pub async fn watch(&self, policy: RefreshPolicy, cancel: CancellationToken) {
+    /// Cancel is selected against in-flight `refresh` so tracker join can
+    /// finish before dependency close.
+    pub async fn refresh_until(&self, policy: RefreshPolicy, cancel: CancellationToken) {
         self.tx.send_modify(|snapshot| {
             snapshot.stale_after = Some(policy.stale_after());
         });
         if self.tx.borrow().evaluation.is_none() {
-            let _ = self.refresh(policy).await;
+            tokio::select! {
+                () = cancel.cancelled() => return,
+                _ = self.refresh(policy) => {}
+            }
         }
         let mut ticker = tokio::time::interval(policy.interval);
         // Delay, not Burst: a late tick is skipped rather than fired in a
         // catch-up burst that would pile probe work onto a recovering
         // dependency.
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        ticker.tick().await; // the first tick completes immediately
+        // Consume the immediate first tick so the interval does not repeat
+        // the evaluation already performed above or by startup admission.
+        ticker.tick().await;
         loop {
             tokio::select! {
                 () = cancel.cancelled() => return,
                 _ = ticker.tick() => {
                     let before = self.reader().verdict();
-                    let _ = self.refresh(policy).await;
-                    let after = self.reader().verdict();
-                    if before.is_ok() != after.is_ok() {
-                        match &after {
-                            Ok(()) => tracing::info!("readiness recovered"),
-                            Err(reason) => tracing::warn!(%reason, "readiness lost"),
+                    tokio::select! {
+                        () = cancel.cancelled() => return,
+                        _ = self.refresh(policy) => {
+                            let after = self.reader().verdict();
+                            if before.is_ok() != after.is_ok() {
+                                match &after {
+                                    Ok(()) => tracing::info!("readiness recovered"),
+                                    Err(reason) => tracing::warn!(%reason, "readiness lost"),
+                                }
+                            }
                         }
                     }
                 }
@@ -285,6 +297,9 @@ impl ReadinessReader {
     /// A verdict older than the refresher's own cadence is refused rather
     /// than served: a stopped refresher leaves its last verdict standing,
     /// and the last thing a healthy service writes is "healthy".
+    /// Staleness applies only after [`Readiness::refresh_until`] publishes
+    /// `stale_after`; `None` means the refresher is not running, not "never
+    /// stale-check".
     ///
     /// # Errors
     ///
@@ -450,7 +465,7 @@ mod tests {
         let watcher = tokio::spawn({
             let readiness = readiness.clone();
             let cancel = cancel.clone();
-            async move { readiness.watch(policy(), cancel).await }
+            async move { readiness.refresh_until(policy(), cancel).await }
         });
         let mut reader = readiness.reader();
         reader.changed().await;
@@ -468,13 +483,13 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn watch_refreshes_on_the_interval_and_stops_on_cancel() {
+    async fn refreshes_on_the_interval_and_stops_on_cancel() {
         let (readiness, flag, calls) = flaky(true);
         let cancel = CancellationToken::new();
         let watcher = tokio::spawn({
             let readiness = readiness.clone();
             let cancel = cancel.clone();
-            async move { readiness.watch(policy(), cancel).await }
+            async move { readiness.refresh_until(policy(), cancel).await }
         });
         let mut reader = readiness.reader();
         reader.changed().await;
@@ -494,7 +509,26 @@ mod tests {
         cancel.cancel();
         tokio::time::timeout(Duration::from_secs(1), watcher)
             .await
-            .expect("watch must return on cancel")
+            .expect("refresh_until must return on cancel")
             .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_until_stops_while_an_evaluation_is_in_flight() {
+        let readiness = Readiness::new(vec![Box::new(Hanging)]);
+        let cancel = CancellationToken::new();
+        let watcher = tokio::spawn({
+            let readiness = readiness.clone();
+            let cancel = cancel.clone();
+            async move { readiness.refresh_until(policy(), cancel).await }
+        });
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        tokio::task::yield_now().await;
+        assert!(
+            watcher.is_finished(),
+            "cancel must drop the in-flight refresh, not wait for probe_budget"
+        );
+        watcher.await.unwrap();
     }
 }

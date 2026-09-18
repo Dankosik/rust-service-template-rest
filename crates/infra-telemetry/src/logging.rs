@@ -62,6 +62,9 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
         LogFormat::Json => Box::new(
             json_subscriber::layer()
                 .flatten_event(true)
+                // Nested current-span objects are outside the documented JSON
+                // shape; span fields flatten at the top level and trace/span
+                // ids come from `with_opentelemetry_ids`.
                 .with_current_span(false)
                 .flatten_span_list_on_top_level(true)
                 .with_opentelemetry_ids(true),
