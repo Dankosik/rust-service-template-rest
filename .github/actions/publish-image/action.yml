@@ -81,6 +81,11 @@ runs:
     - name: Set up Buildx
       uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
+    - name: Expose the Actions runtime to buildx
+      # `type=gha` needs ACTIONS_RUNTIME_TOKEN and ACTIONS_RESULTS_URL in a
+      # `run:` step; GitHub hands them to actions only.
+      uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
+
     # Publication runs only on pushes to main and on tags, so writing the
     # layer cache here is safe.
     - name: Build image
