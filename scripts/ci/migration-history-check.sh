@@ -111,8 +111,14 @@ if [[ -n ${BASE_REF:-} ]]; then
 		echo "migration history: BASE_REF ${BASE_REF} is not a readable commit" >&2
 		exit 1
 	}
-	base=$(git merge-base "${BASE_REF}" HEAD)
-	scope="merge-base:${base}"
+	# A shallow CI checkout has no merge base; there HEAD is the pull
+	# request's merge commit, so the base tip itself is the right comparison.
+	if base=$(git merge-base "${BASE_REF}" HEAD 2>/dev/null); then
+		scope="merge-base:${base}"
+	else
+		base=$(git rev-parse "${BASE_REF}^{commit}")
+		scope="base:${base}"
+	fi
 	include_untracked=false
 else
 	base=HEAD
