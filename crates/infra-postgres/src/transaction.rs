@@ -160,7 +160,7 @@ fn commit_definitely_failed(code: &str) -> bool {
 }
 
 fn sqlstate(err: &sqlx::Error) -> Option<std::borrow::Cow<'_, str>> {
-    err.as_database_error().and_then(|db| db.code())
+    err.as_database_error().and_then(sqlx::error::DatabaseError::code)
 }
 
 #[cfg(test)]
