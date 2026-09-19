@@ -13,10 +13,11 @@ use unicode_segmentation::UnicodeSegmentation;
 
 #[test]
 fn names_and_text_patterns_use_existing_utilities() {
-    assert_eq!("XMLHttpRequest".to_snake_case(), "xml_http_request");
-    assert_eq!("UserProfile".to_kebab_case(), "user-profile");
     static JOB_ID: LazyLock<regex::Regex> =
         LazyLock::new(|| regex::Regex::new(r"^job-([0-9]+)$").unwrap());
+
+    assert_eq!("XMLHttpRequest".to_snake_case(), "xml_http_request");
+    assert_eq!("UserProfile".to_kebab_case(), "user-profile");
     let captures = JOB_ID.captures("job-123").unwrap();
     assert_eq!(&captures[1], "123");
     assert!(JOB_ID.captures("job-123-extra").is_none());

@@ -45,6 +45,9 @@ fn nested_adapters_replace_a_post_deserialization_conversion_pass() {
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct UpdateName {
+    // The library adapter uses both layers: missing preserves, null clears,
+    // and a value replaces. Flattening to Option<String> loses that contract.
+    #[allow(clippy::option_option)]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
