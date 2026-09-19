@@ -189,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_instance_id_is_occupancy_none() {
+    fn empty_instance_id_is_vacant_none() {
         let empty = load_from(
             &LoadOptions::default(),
             BUILD,
@@ -204,6 +204,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(set.app.instance_id.as_deref(), Some("pod-a"));
+    }
+
+    #[test]
+    fn empty_dsn_and_otlp_headers_are_vacant_none() {
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__POSTGRES__DSN", ""),
+                ("APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS", "  "),
+            ]),
+        )
+        .unwrap();
+        assert!(!cfg.postgres.has_dsn());
+        assert!(!cfg.observability.otel.exporter.has_headers());
     }
 
     #[test]
@@ -395,6 +410,35 @@ mod tests {
             load_from(&options, BUILD, env(&[])),
             Err(Error::FileTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn drain_timeout_and_probe_budget_accept_legacy_keys() {
+        let canonical = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__HTTP__DRAIN_TIMEOUT", "20s"),
+                ("APP__HTTP__REQUEST_TIMEOUT", "4s"),
+                ("APP__HEALTH__PROBE_BUDGET", "3s"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(canonical.http.drain_timeout, Duration::from_secs(20));
+        assert_eq!(canonical.health.probe_budget, Duration::from_secs(3));
+
+        let legacy = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__HTTP__SHUTDOWN_TIMEOUT", "22s"),
+                ("APP__HTTP__REQUEST_TIMEOUT", "4s"),
+                ("APP__HEALTH__READINESS_TIMEOUT", "5s"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(legacy.http.drain_timeout, Duration::from_secs(22));
+        assert_eq!(legacy.health.probe_budget, Duration::from_secs(5));
     }
 
     #[test]

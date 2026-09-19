@@ -69,6 +69,22 @@ pub struct PoolOptions<'a> {
     pub application_name: &'a str,
 }
 
+/// What a one-off session (the migrator) decides per connection.
+///
+/// The two `Duration` fields are PostgreSQL session GUCs, not the client
+/// connect wait. The caller bounds that wait; this function does not.
+#[derive(Clone, Debug)]
+pub struct SessionOptions<'a> {
+    /// Reported as `application_name` in `pg_stat_activity`.
+    pub application_name: &'a str,
+    /// Session `statement_timeout`.
+    pub statement_timeout: Duration,
+    /// Session `idle_in_transaction_session_timeout`.
+    pub idle_in_transaction_timeout: Duration,
+    /// Extra startup-packet GUCs, already rendered as `(name, value)`.
+    pub extra: &'a [(&'a str, &'a str)],
+}
+
 /// Open the pool and establish its first connection.
 ///
 /// # Errors
@@ -108,20 +124,17 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
 /// The driver's connect error; the caller bounds the wait.
 pub async fn connect_session(
     dsn: &Dsn,
-    application_name: &str,
-    statement_timeout: Duration,
-    idle_in_transaction_timeout: Duration,
-    extra: &[(&str, &str)],
+    options: &SessionOptions<'_>,
 ) -> Result<PgConnection, sqlx::Error> {
-    let options = attach_session(
+    let connect_options = attach_session(
         dsn,
-        application_name,
-        statement_timeout,
-        idle_in_transaction_timeout,
-        extra,
+        options.application_name,
+        options.statement_timeout,
+        options.idle_in_transaction_timeout,
+        options.extra,
         None,
     );
-    PgConnection::connect_with(&options).await
+    PgConnection::connect_with(&connect_options).await
 }
 
 /// Publish session defaults through the startup packet so a connection
@@ -157,11 +170,15 @@ fn attach_session(
 
 /// Render a duration as a PostgreSQL runtime-parameter value.
 ///
-/// Rounded up rather than truncated so a caller never publishes less time
-/// than its budget: one millisecond more cannot fail a statement that would
-/// have succeeded; one millisecond less can cancel one. The unit is written
-/// out because a bare integer is read against each setting's own default
-/// unit.
+/// Rounded up rather than truncated so a non-zero caller never publishes
+/// less time than its budget: one millisecond more cannot fail a statement
+/// that would have succeeded; one millisecond less can cancel one. The unit
+/// is written out because a bare integer is read against each setting's own
+/// default unit.
+///
+/// `Duration::ZERO` renders `0ms`. PostgreSQL treats `0` as disable for
+/// `statement_timeout`, `idle_in_transaction_session_timeout`, and
+/// `lock_timeout` — that is not a zero-length bound.
 #[must_use]
 pub fn to_runtime_param(duration: Duration) -> String {
     format!("{}ms", duration.as_nanos().div_ceil(1_000_000))

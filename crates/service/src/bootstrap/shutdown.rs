@@ -34,22 +34,22 @@ pub(crate) const SHUTDOWN_TAIL: Duration = Duration::from_secs(
 
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "http.grace_period ({grace:?}) must be >= http.shutdown_timeout ({shutdown_timeout:?}) plus the \
+    "http.grace_period ({grace:?}) must be >= http.drain_timeout ({drain_timeout:?}) plus the \
      {tail:?} teardown tail (diagnostics, background join, dependency close, telemetry flush)"
 )]
 pub(crate) struct GraceBudgetError {
     grace: Duration,
-    shutdown_timeout: Duration,
+    drain_timeout: Duration,
     tail: Duration,
 }
 
 /// Reject a drain budget that cannot fit inside the grace period alongside
 /// the teardown that follows it.
 pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudgetError> {
-    if http.grace_period < http.shutdown_timeout + SHUTDOWN_TAIL {
+    if http.grace_period < http.drain_timeout + SHUTDOWN_TAIL {
         return Err(GraceBudgetError {
             grace: http.grace_period,
-            shutdown_timeout: http.shutdown_timeout,
+            drain_timeout: http.drain_timeout,
             tail: SHUTDOWN_TAIL,
         });
     }
@@ -119,7 +119,7 @@ impl Budget {
         }
     }
 
-    fn stage(&self, want: Duration) -> Duration {
+    fn remaining(&self, want: Duration) -> Duration {
         want.min(self.deadline.saturating_duration_since(Instant::now()))
     }
 }
@@ -187,9 +187,9 @@ impl Signals {
 }
 
 pub(crate) struct Plan<'a> {
-    pub(crate) http: &'a HttpConfig,
+    pub(crate) http_config: &'a HttpConfig,
     pub(crate) readiness: &'a Readiness,
-    pub(crate) api: Server,
+    pub(crate) app_listener: Server,
     pub(crate) diagnostics: Option<Server>,
     pub(crate) cancel: CancellationToken,
     pub(crate) tracker: TaskTracker,
@@ -203,15 +203,15 @@ pub(crate) struct Plan<'a> {
 }
 
 pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
-    let budget = Budget::start(plan.http.grace_period);
-    tracing::info!(grace = ?plan.http.grace_period, "shutdown_started");
+    let budget = Budget::start(plan.http_config.grace_period);
+    tracing::info!(grace = ?plan.http_config.grace_period, "shutdown_started");
 
     plan.readiness.start_drain();
     tracing::info!("readiness_disabled");
 
     // Keep serving while load balancers notice readiness failing. A second
     // stop signal skips the wait: the operator has decided to hurry.
-    let delay = budget.stage(plan.http.readiness_propagation_delay);
+    let delay = budget.remaining(plan.http_config.readiness_propagation_delay);
     if !delay.is_zero() {
         tracing::info!(delay = ?delay, "readiness_propagation_wait");
         tokio::select! {
@@ -220,9 +220,9 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         }
     }
 
-    let http_drain_budget = budget.stage(plan.http.effective_drain_budget());
+    let http_drain_budget = budget.remaining(plan.http_config.effective_drain_budget());
     tracing::info!(budget = ?http_drain_budget, "drain_started");
-    let drain_overran = match plan.api.shutdown(http_drain_budget).await {
+    let drain_overran = match plan.app_listener.shutdown(http_drain_budget).await {
         Ok(Drained::Complete) => {
             tracing::info!("drain_completed");
             false
@@ -251,7 +251,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         // flush. A scrape overrun is forced closed so telemetry can flush;
         // it does not vote `degraded`.
         match diagnostics
-            .shutdown(budget.stage(DIAGNOSTICS_SHUTDOWN))
+            .shutdown(budget.remaining(DIAGNOSTICS_SHUTDOWN))
             .await
         {
             Ok(Drained::Complete) => tracing::info!("diagnostics_stopped"),
@@ -269,8 +269,8 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         &plan.cancel,
         &plan.tracker,
         plan.postgres_pool.as_ref(),
-        budget.stage(BACKGROUND_JOIN),
-        budget.stage(DEPENDENCY_CLOSE),
+        budget.remaining(BACKGROUND_JOIN),
+        budget.remaining(DEPENDENCY_CLOSE),
     )
     .await;
     let join_overran = if joined {
@@ -294,7 +294,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
 
     let telemetry_overran = match plan
         .tracer_provider
-        .shutdown(budget.stage(TELEMETRY_FLUSH))
+        .shutdown(budget.remaining(TELEMETRY_FLUSH))
         .await
     {
         ProviderShutdown::Flushed => {
@@ -328,7 +328,7 @@ mod tests {
     fn a_drain_that_starves_the_tail_is_rejected() {
         let http = HttpConfig {
             grace_period: Duration::from_secs(30),
-            shutdown_timeout: Duration::from_secs(25),
+            drain_timeout: Duration::from_secs(25),
             ..HttpConfig::default()
         };
         let err = validate_grace_budget(&http).unwrap_err();
@@ -338,10 +338,16 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn stages_are_clamped_to_the_remaining_deadline() {
         let budget = Budget::start(Duration::from_secs(10));
-        assert_eq!(budget.stage(Duration::from_secs(4)), Duration::from_secs(4));
+        assert_eq!(
+            budget.remaining(Duration::from_secs(4)),
+            Duration::from_secs(4)
+        );
         tokio::time::advance(Duration::from_secs(8)).await;
-        assert_eq!(budget.stage(Duration::from_secs(4)), Duration::from_secs(2));
+        assert_eq!(
+            budget.remaining(Duration::from_secs(4)),
+            Duration::from_secs(2)
+        );
         tokio::time::advance(Duration::from_secs(5)).await;
-        assert_eq!(budget.stage(Duration::from_secs(4)), Duration::ZERO);
+        assert_eq!(budget.remaining(Duration::from_secs(4)), Duration::ZERO);
     }
 }

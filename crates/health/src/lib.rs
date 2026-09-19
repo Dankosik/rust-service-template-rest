@@ -81,12 +81,13 @@ impl RefreshPolicy {
     /// How old a verdict may get before it is refused.
     ///
     /// `stale_after = probe_budget + period * 3` where
-    /// `period = interval.max(probe_budget)`. Evaluations are serial, so a
-    /// probe budget above the interval makes the loop run at the budget's
-    /// pace; sizing from the interval alone would expire a verdict that is
-    /// being refreshed as fast as it can be. Three periods so an ordinary
-    /// missed tick does not flip readiness, finite so a dead refresher
-    /// cannot leave a verdict standing forever.
+    /// `period = interval.max(probe_budget)`. The leading `probe_budget`
+    /// covers one in-flight evaluation after the last stamp. Evaluations are
+    /// serial, so a probe budget above the interval makes the loop run at
+    /// the budget's pace; sizing from the interval alone would expire a
+    /// verdict that is being refreshed as fast as it can be. Three periods
+    /// so an ordinary missed tick does not flip readiness, finite so a dead
+    /// refresher cannot leave a verdict standing forever.
     #[must_use]
     pub fn stale_after(&self) -> Duration {
         let period = self.interval.max(self.probe_budget);
@@ -97,9 +98,10 @@ impl RefreshPolicy {
 /// The immutable result of one evaluation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Evaluation {
-    /// Published ready, including a hysteresis hold after observed failures
-    /// below the threshold. `consecutive_failures` is the observed streak.
-    Ready {
+    /// Published ready with a clean success streak.
+    Ready { evaluated_at: Instant },
+    /// Published ready while counting probe failures below the threshold.
+    Holding {
         consecutive_failures: u32,
         evaluated_at: Instant,
     },
@@ -113,7 +115,9 @@ pub(crate) enum Evaluation {
 impl Evaluation {
     fn evaluated_at(&self) -> Instant {
         match *self {
-            Self::Ready { evaluated_at, .. } | Self::Unready { evaluated_at, .. } => evaluated_at,
+            Self::Ready { evaluated_at }
+            | Self::Holding { evaluated_at, .. }
+            | Self::Unready { evaluated_at, .. } => evaluated_at,
         }
     }
 }
@@ -266,12 +270,23 @@ fn fold_evaluation(
     evaluated_at: Instant,
 ) -> Evaluation {
     match observed {
-        Ok(()) => Evaluation::Ready {
-            consecutive_failures: 0,
-            evaluated_at,
-        },
+        Ok(()) => Evaluation::Ready { evaluated_at },
         Err(failure) => match previous {
-            Some(Evaluation::Ready {
+            Some(Evaluation::Ready { .. }) => {
+                let consecutive_failures = 1;
+                if consecutive_failures < policy.failure_threshold {
+                    Evaluation::Holding {
+                        consecutive_failures,
+                        evaluated_at,
+                    }
+                } else {
+                    Evaluation::Unready {
+                        reason: failure.clone(),
+                        evaluated_at,
+                    }
+                }
+            }
+            Some(Evaluation::Holding {
                 consecutive_failures,
                 ..
             }) => {
@@ -280,7 +295,7 @@ fn fold_evaluation(
                 // the threshold. Always stamp `evaluated_at` for this check
                 // so holding a healthy verdict does not age into `Stale`.
                 if consecutive_failures < policy.failure_threshold {
-                    Evaluation::Ready {
+                    Evaluation::Holding {
                         consecutive_failures,
                         evaluated_at,
                     }
@@ -329,7 +344,7 @@ impl ReadinessReader {
             }
         }
         match evaluation {
-            Evaluation::Ready { .. } => Ok(()),
+            Evaluation::Ready { .. } | Evaluation::Holding { .. } => Ok(()),
             Evaluation::Unready { reason, .. } => Err(reason),
         }
     }

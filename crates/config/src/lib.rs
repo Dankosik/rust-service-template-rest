@@ -28,7 +28,7 @@ mod validate;
 use serde::Deserialize;
 
 pub use app::{AppConfig, BuildInfo};
-pub use cli::LoadOptions;
+pub use cli::{FromArgs, LoadOptions, process_failure};
 pub use health::HealthConfig;
 pub use http::HttpConfig;
 pub use load::{ENV_PREFIX, Error, MAX_FILE_BYTES, load};

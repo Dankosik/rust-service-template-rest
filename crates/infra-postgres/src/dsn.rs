@@ -113,7 +113,9 @@ impl Dsn {
 
     /// [`Dsn::parse`] with an explicit occupancy lookup, so the ambient
     /// rule can be tested without mutating the process environment.
-    /// `true` means the named variable is set to a non-empty value.
+    /// `true` means the named variable is set to a **non-empty** value
+    /// (empty `PG*` is ignored). This is the opposite of OpenTelemetry
+    /// credential occupancy, where `var_os` presence including empty counts.
     ///
     /// # Errors
     ///

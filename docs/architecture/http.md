@@ -17,8 +17,9 @@ alternatives they beat, are recorded at the end of this document.
 3. The hardened chain (`crates/infra-http/src/harden.rs`) owns request-level
    policy, outermost first: request-id admission and propagation, `nosniff`,
    the OpenTelemetry server span, HTTP metrics, the access log, error mapping
-   (`503` shedding with `Retry-After`, `504` timeout), load shedding, the
-   in-flight limit, the request timeout, panic recovery (`500`), and the body
+   (`503` shedding with `Retry-After`, `504` timeout with code
+   `request_timeout`), load shedding, the in-flight limit, the request timeout,
+   panic recovery (`500`), and the body
    limit (`413`). Every layer is applied with `Router::layer`, so the `404`
    and `405` fallbacks travel through the same chain. There is no CORS
    layer: browser cross-origin requests are fail-closed by omission.

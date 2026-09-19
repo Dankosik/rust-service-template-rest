@@ -4,6 +4,18 @@
 //! in a file only as an empty placeholder that documents the key; a non-empty
 //! value there is a leaked credential waiting to be committed.
 
+use secrecy::SecretString;
+use serde::Deserialize;
+
+/// Missing, empty, or whitespace-only secret is absent (`None`).
+pub(crate) fn occupied_secret<'de, D>(deserializer: D) -> Result<Option<SecretString>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(raw.and_then(|s| (!s.trim().is_empty()).then(|| SecretString::from(s))))
+}
+
 /// Whether a dotted key names a credential.
 ///
 /// Segments are split on `.`, `_`, and `-`, so `otlp_headers`, `api_key`,

@@ -17,8 +17,8 @@ mod transaction;
 pub use dsn::{AMBIENT_ENVIRONMENT, Dsn, DsnError};
 pub use pool::{
     ACQUIRE_TIMEOUT, CONNECTION_COUNT_METRIC, Closed, ConnectError, IDLE_IN_TRANSACTION_TIMEOUT,
-    PoolOptions, SLOW_STATEMENT_THRESHOLD, STATEMENT_TIMEOUT, close, connect, connect_session,
-    record_metrics, record_metrics_periodically, to_runtime_param,
+    PoolOptions, SLOW_STATEMENT_THRESHOLD, STATEMENT_TIMEOUT, SessionOptions, close, connect,
+    connect_session, record_metrics, record_metrics_periodically, to_runtime_param,
 };
 pub use probe::PostgresProbe;
 pub use sqlx::postgres::PgPool;

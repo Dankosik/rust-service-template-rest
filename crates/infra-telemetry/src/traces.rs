@@ -42,12 +42,32 @@ pub struct TracingOptions {
     pub otlp_headers: SecretString,
 }
 
+/// Which configuration selected the OTLP endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndpointSource {
+    /// `observability.otel.exporter.otlp_endpoint` was non-empty.
+    Typed,
+    /// An `OTEL_EXPORTER_OTLP_*ENDPOINT` variable was present (including empty).
+    Environment,
+}
+
+impl EndpointSource {
+    /// Bounded label for the startup log field.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Typed => "typed",
+            Self::Environment => "environment",
+        }
+    }
+}
+
 /// How the exporter ended up after startup. A startup-configuration signal,
 /// not continuous delivery health.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExporterState {
     /// An OTLP exporter is attached to the provider.
-    Initialized { endpoint_source: &'static str },
+    Initialized { endpoint_source: EndpointSource },
     /// No endpoint resolved; spans get ids but are not exported.
     Disabled,
     /// An endpoint resolved but the exporter could not be built.
@@ -114,7 +134,8 @@ const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
 /// # Errors
 ///
 /// Returns [`TracingError::AmbientCredential`] when the typed endpoint is
-/// set and an ambient credential variable is present. Exporter build
+/// set and an ambient credential variable is present (`var_os` is `Some`,
+/// including empty). Exporter build
 /// failures do not error; they degrade and are reported in the handle.
 pub fn install_tracer_provider(
     options: &TracingOptions,
@@ -205,10 +226,14 @@ pub enum ProviderShutdown {
 }
 
 /// Which source selects the endpoint, or `None` for disabled.
+///
+/// `env_present` is `var_os` occupancy: `true` when the variable is set,
+/// including to an empty value. That is stricter than DSN ambient occupancy,
+/// which ignores empty `PG*`.
 fn resolve_endpoint_source(
     options: &TracingOptions,
     env_present: impl Fn(&str) -> bool,
-) -> Result<Option<&'static str>, TracingError> {
+) -> Result<Option<EndpointSource>, TracingError> {
     if !options.otlp_endpoint.trim().is_empty() {
         if let Some(name) = AMBIENT_CREDENTIAL_VARS
             .iter()
@@ -218,12 +243,12 @@ fn resolve_endpoint_source(
                 name: (*name).to_owned(),
             });
         }
-        return Ok(Some("typed"));
+        return Ok(Some(EndpointSource::Typed));
     }
     Ok(AMBIENT_ENDPOINT_VARS
         .iter()
         .find(|name| env_present(name))
-        .map(|_| "environment"))
+        .map(|_| EndpointSource::Environment))
 }
 
 fn span_exporter(
@@ -326,7 +351,7 @@ mod tests {
         let typed = options("http://collector:4318");
         assert_eq!(
             resolve_endpoint_source(&typed, |_| false).unwrap(),
-            Some("typed")
+            Some(EndpointSource::Typed)
         );
         let err = resolve_endpoint_source(&typed, |name| name == "OTEL_EXPORTER_OTLP_HEADERS")
             .unwrap_err();
@@ -337,7 +362,7 @@ mod tests {
         // typed one wins inside the SDK.
         assert_eq!(
             resolve_endpoint_source(&typed, |name| name == "OTEL_EXPORTER_OTLP_ENDPOINT").unwrap(),
-            Some("typed")
+            Some(EndpointSource::Typed)
         );
     }
 
@@ -348,14 +373,14 @@ mod tests {
         assert_eq!(
             resolve_endpoint_source(&untyped, |name| name == "OTEL_EXPORTER_OTLP_ENDPOINT")
                 .unwrap(),
-            Some("environment")
+            Some(EndpointSource::Environment)
         );
         // Ambient credentials are the platform's business when the platform
         // also supplies the endpoint.
         assert_eq!(
             resolve_endpoint_source(&untyped, |name| name.starts_with("OTEL_EXPORTER_OTLP_"))
                 .unwrap(),
-            Some("environment")
+            Some(EndpointSource::Environment)
         );
     }
 

@@ -20,19 +20,22 @@ pub struct HttpConfig {
     /// (`0.0.0.0`).
     pub addr: String,
     /// Total time the platform allows between SIGTERM and SIGKILL. Every
-    /// teardown stage draws from it; `shutdown_timeout` bounds only the HTTP
-    /// drain.
+    /// teardown stage draws from it; `drain_timeout` bounds only the HTTP
+    /// drain envelope.
     ///
-    /// This crate checks `shutdown_timeout <= grace_period`. The composition
+    /// This crate checks `drain_timeout <= grace_period`. The composition
     /// root still requires leftover budget after the drain for diagnostics,
     /// background join, dependency close, and telemetry flush; that full
     /// rule is not encoded here.
     #[serde(with = "humantime_serde")]
     pub grace_period: Duration,
     /// Bound for the HTTP drain, including the readiness propagation delay
-    /// in front of it.
-    #[serde(with = "humantime_serde")]
-    pub shutdown_timeout: Duration,
+    /// in front of it. Not the process SIGTERM-to-exit window (`grace_period`)
+    /// and not Tokio's leftover-task drop (`runtime.shutdown_timeout`).
+    ///
+    /// The previous operator key `http.shutdown_timeout` is still accepted.
+    #[serde(alias = "shutdown_timeout", with = "humantime_serde")]
+    pub drain_timeout: Duration,
     /// How long the listener keeps serving after readiness flips off, so a
     /// load balancer notices `/health/ready` failing before connections stop
     /// being accepted. Production-shaped on purpose; local overlays set `0s`.
@@ -76,7 +79,7 @@ impl Default for HttpConfig {
             // drain (diagnostics, background join, dependency close,
             // telemetry flush) needs the remaining budget. Load does not
             // encode that tail; the composition root does.
-            shutdown_timeout: Duration::from_secs(25),
+            drain_timeout: Duration::from_secs(25),
             readiness_propagation_delay: Duration::from_secs(15),
             header_read_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(8),
@@ -105,7 +108,7 @@ impl HttpConfig {
     /// Drain budget left after the readiness propagation delay.
     #[must_use]
     pub fn effective_drain_budget(&self) -> Duration {
-        self.shutdown_timeout
+        self.drain_timeout
             .saturating_sub(self.readiness_propagation_delay)
     }
 
@@ -117,24 +120,24 @@ impl HttpConfig {
         let hundred_ms = Duration::from_millis(100);
         duration_range("http.grace_period", self.grace_period, second, ten_minutes)?;
         duration_range(
-            "http.shutdown_timeout",
-            self.shutdown_timeout,
+            "http.drain_timeout",
+            self.drain_timeout,
             second,
             ten_minutes,
         )?;
-        if self.shutdown_timeout > self.grace_period {
+        if self.drain_timeout > self.grace_period {
             return Err(ValidationError::new(
-                "http.shutdown_timeout",
+                "http.drain_timeout",
                 format!(
                     "must be <= http.grace_period ({})",
                     humantime::format_duration(self.grace_period)
                 ),
             ));
         }
-        if self.readiness_propagation_delay >= self.shutdown_timeout {
+        if self.readiness_propagation_delay >= self.drain_timeout {
             return Err(ValidationError::new(
                 "http.readiness_propagation_delay",
-                "must be less than http.shutdown_timeout",
+                "must be less than http.drain_timeout",
             ));
         }
         duration_range(

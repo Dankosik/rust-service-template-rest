@@ -69,9 +69,13 @@ pub const SHED_REQUESTS_METRIC: &str = "http_server_shed_requests_total";
 /// Request-level policy for [`harden`].
 #[derive(Clone, Debug)]
 pub struct HardenOptions {
-    /// Request body ceiling; overflow answers 413.
+    /// Request body ceiling; overflow answers 413. Applied both to the
+    /// streaming `Limited` wrapper and to axum's extractor `DefaultBodyLimit`;
+    /// axum's own default is independent, so omitting the extractor layer
+    /// would keep a different ceiling than `http.max_body_bytes`.
     pub max_body_bytes: usize,
-    /// Per-request handler budget; expiry answers 504.
+    /// Per-request handler budget; expiry answers 504 with code
+    /// `request_timeout`.
     pub request_timeout: Duration,
     /// Concurrent handler executions before 503; `None` disables shedding.
     pub max_in_flight: Option<NonZeroU32>,
@@ -146,7 +150,7 @@ async fn middleware_error(id: Option<Extension<RequestId>>, err: BoxError) -> Re
             .into_response();
     }
     if err.is::<Elapsed>() {
-        return Problem::new(Code::GatewayTimeout)
+        return Problem::new(Code::RequestTimeout)
             .detail("request budget expired before a response could be committed")
             .request_id(request_id)
             .into_response();
@@ -349,7 +353,7 @@ mod tests {
         response.assert_status(StatusCode::GATEWAY_TIMEOUT);
         response.assert_header(CONTENT_TYPE, "application/problem+json");
         let json = response.json::<Value>();
-        assert_eq!(json["code"], "gateway_timeout");
+        assert_eq!(json["code"], "request_timeout");
         let id = response.header(REQUEST_ID_HEADER);
         assert_eq!(json["request_id"].as_str(), Some(id.to_str().unwrap()));
     }
