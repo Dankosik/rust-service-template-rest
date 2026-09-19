@@ -8,6 +8,10 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 /// Missing, empty, or whitespace-only secret is absent (`None`).
+///
+/// Trim decides vacancy only; a present secret keeps the deserialized
+/// bytes, including padding. Downstream parsers (DSN, OTLP headers) trim
+/// their own input.
 pub(crate) fn occupied_secret<'de, D>(deserializer: D) -> Result<Option<SecretString>, D::Error>
 where
     D: serde::Deserializer<'de>,

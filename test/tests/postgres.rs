@@ -405,6 +405,6 @@ async fn a_migration_that_fails_is_the_execute_stage(pool: PgPool) {
     let err = migrate::run(&fixture("widgets").await, &options(&dsn))
         .await
         .unwrap_err();
-    assert_eq!(err.stage(), Stage::Execute, "{err}");
+    assert_eq!(err.stage(), Stage::MigrationSql, "{err}");
     assert_eq!(applied_count(&pool).await, 0);
 }

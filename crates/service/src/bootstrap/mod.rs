@@ -9,7 +9,6 @@
 mod shutdown;
 
 use std::ffi::OsString;
-use std::num::NonZeroU32;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -146,51 +145,49 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // evaluation already includes them. The PostgreSQL profile is inert
     // unless selected; a selected profile whose database is unreachable
     // fails startup here rather than serving a readiness that never passes.
-    let mut probes: Vec<Box<dyn Probe>> = Vec::new();
-    let postgres_pool = if config.postgres.enabled {
-        match open_postgres(&config).await {
-            Ok(pool) => {
-                probes.push(Box::new(PostgresProbe::new(pool.clone())));
-                tracker.spawn(infra_postgres::record_metrics_periodically(
-                    pool.clone(),
-                    METRICS_MAINTENANCE_INTERVAL,
-                    cancel.child_token(),
-                ));
-                Some(pool)
-            }
-            Err(err) => {
-                shutdown::close_opened_dependencies(&cancel, &tracker, None).await;
-                return Err(err);
-            }
+    // One error exit owns cancel/join/close, including the path where the
+    // pool never opened (`postgres_pool` stays `None`).
+    let mut postgres_pool = None;
+    let outcome = async {
+        let mut probes: Vec<Box<dyn Probe>> = Vec::new();
+        if config.postgres.enabled {
+            let pool = open_postgres(&config).await?;
+            probes.push(Box::new(PostgresProbe::new(pool.clone())));
+            tracker.spawn(infra_postgres::record_metrics_periodically(
+                pool.clone(),
+                METRICS_MAINTENANCE_INTERVAL,
+                cancel.child_token(),
+            ));
+            postgres_pool = Some(pool);
         }
-    } else {
-        None
-    };
 
-    // Admission runs even without probes so the first probe after bind
-    // answers from an evaluation.
-    let readiness = Readiness::new(probes);
-    let policy = RefreshPolicy {
-        interval: config.health.refresh_interval,
-        probe_budget: config.health.probe_budget,
-        failure_threshold: config.health.failure_threshold,
-    };
+        // Admission runs even without probes so the first probe after bind
+        // answers from an evaluation.
+        let readiness = Readiness::new(probes);
+        let policy = RefreshPolicy {
+            interval: config.health.refresh_interval,
+            probe_budget: config.health.probe_budget,
+            failure_threshold: config.health.failure_threshold,
+        };
 
-    let outcome = admit_and_serve(Prepared {
-        config: &config,
-        signals: &mut signals,
-        tracer_provider,
-        metrics,
-        cancel: cancel.clone(),
-        tracker: tracker.clone(),
-        readiness,
-        policy,
-        postgres_pool: postgres_pool.clone(),
-    })
+        admit_and_serve(Prepared {
+            config: &config,
+            signals: &mut signals,
+            tracer_provider,
+            metrics,
+            cancel: cancel.clone(),
+            tracker: tracker.clone(),
+            readiness,
+            policy,
+            postgres_pool: postgres_pool.clone(),
+        })
+        .await
+    }
     .await;
-    // Bind or admission failure: cancel and join tracked tasks, then close
-    // the pool. `Server` only cancels accept. Dropping `TracerProviderHandle`
-    // is not last-ref: the global SDK clone remains until process teardown.
+    // Bind, admission, or connect failure: cancel and join tracked tasks,
+    // then close any opened pool. `Server` only cancels accept. Dropping
+    // `TracerProviderHandle` is not last-ref: the global SDK clone remains
+    // until process teardown.
     if outcome.is_err() {
         shutdown::close_opened_dependencies(&cancel, &tracker, postgres_pool.as_ref()).await;
     }
@@ -203,6 +200,7 @@ async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
         &dsn,
         &PoolOptions {
             max_connections: config.postgres.pool_max_connections()?,
+            // Same process identity as traces (`service.name`).
             application_name: &config.observability.otel.service_name,
         },
     )
@@ -263,7 +261,7 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         header_read_timeout: config.http.header_read_timeout,
         max_header_bytes: usize::try_from(config.http.max_header_bytes.as_u64())
             .unwrap_or(usize::MAX),
-        max_connections: NonZeroU32::new(config.http.max_connections),
+        max_connections: config.http.connection_cap(),
     };
     // The routes and the committed OpenAPI document are the two halves of
     // one contract; only the routes are needed here.
@@ -274,7 +272,7 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
             max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64())
                 .unwrap_or(usize::MAX),
             request_timeout: config.http.request_timeout,
-            max_in_flight: NonZeroU32::new(config.http.max_in_flight),
+            max_in_flight: config.http.in_flight_cap(),
             log_health_probes: config.http.access_log_health_probes,
         },
     );
@@ -332,7 +330,7 @@ fn tracing_options(config: &Config, instance_id: String) -> TracingOptions {
         deployment_environment: config.app.env.clone(),
         sampler,
         otlp_endpoint: otel.exporter.otlp_endpoint.clone(),
-        otlp_headers: otel.exporter.otlp_headers.clone().unwrap_or_default(),
+        otlp_headers: otel.exporter.otlp_headers.clone(),
     }
 }
 

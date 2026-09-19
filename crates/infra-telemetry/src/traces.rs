@@ -38,8 +38,9 @@ pub struct TracingOptions {
     pub sampler: Sampler,
     /// Typed OTLP/HTTP traces endpoint; empty falls back to the environment.
     pub otlp_endpoint: String,
-    /// Typed collector headers as `key=value,key=value`.
-    pub otlp_headers: SecretString,
+    /// Typed collector headers as `key=value,key=value`. `None` means no
+    /// extra headers.
+    pub otlp_headers: Option<SecretString>,
 }
 
 /// Which configuration selected the OTLP endpoint.
@@ -261,9 +262,11 @@ fn span_exporter(
     if !endpoint.is_empty() {
         builder = builder.with_endpoint(endpoint);
     }
-    let headers = parse_headers(options.otlp_headers.expose_secret());
-    if !headers.is_empty() {
-        builder = builder.with_headers(headers);
+    if let Some(raw) = options.otlp_headers.as_ref() {
+        let headers = parse_headers(raw.expose_secret());
+        if !headers.is_empty() {
+            builder = builder.with_headers(headers);
+        }
     }
     builder.build()
 }
@@ -342,7 +345,7 @@ mod tests {
             deployment_environment: "test".into(),
             sampler: Sampler::AlwaysOn,
             otlp_endpoint: endpoint.into(),
-            otlp_headers: SecretString::default(),
+            otlp_headers: None,
         }
     }
 

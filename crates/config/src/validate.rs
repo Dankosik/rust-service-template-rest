@@ -58,8 +58,9 @@ pub(crate) fn non_empty(key: &str, value: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Parse `host:port`, or the Go-style `:port` meaning IPv4 all-interfaces
-/// (`0.0.0.0`). Explicit IPv6 forms such as `[::1]:9000` are unchanged.
+/// Parse an IP listen address: `ip:port`, or the Go-style `:port` meaning
+/// IPv4 all-interfaces (`0.0.0.0`). Hostnames are refused; load does not
+/// do DNS. Explicit IPv6 forms such as `[::1]:9000` are unchanged.
 pub(crate) fn socket_addr(key: &str, value: &str) -> Result<std::net::SocketAddr, ValidationError> {
     let trimmed = value.trim();
     let candidate = match trimmed.strip_prefix(':') {
@@ -69,7 +70,9 @@ pub(crate) fn socket_addr(key: &str, value: &str) -> Result<std::net::SocketAddr
     candidate.parse().map_err(|_| {
         ValidationError::new(
             key,
-            format!("{value:?} is not a socket address (expected host:port or :port)"),
+            format!(
+                "{value:?} is not a socket address (expected an IP address and port, or :port; hostnames are not resolved)"
+            ),
         )
     })
 }

@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use infra_postgres::{ACQUIRE_TIMEOUT, Dsn, SessionOptions, connect_session, to_runtime_param};
+use infra_postgres::{ACQUIRE_TIMEOUT, Dsn, SessionOptions, connect_session};
 use sqlx::Connection;
 use sqlx::migrate::{Migrate, MigrateError, MigrationType, Migrator};
 use sqlx::postgres::PgConnection;
@@ -51,7 +51,7 @@ pub enum Stage {
     /// could not be read.
     History,
     /// A migration's SQL failed.
-    Execute,
+    MigrationSql,
     /// The orchestration deadline elapsed; the connection was dropped and
     /// the server rolls back whatever was in flight.
     Deadline,
@@ -65,7 +65,7 @@ impl Stage {
             Self::Connect => "connect",
             Self::Lock => "lock",
             Self::History => "history",
-            Self::Execute => "execute",
+            Self::MigrationSql => "execute",
             Self::Deadline => "deadline",
         }
     }
@@ -77,10 +77,29 @@ impl std::fmt::Display for Stage {
     }
 }
 
+/// Why [`validate_source`] rejected the embedded set.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SourceError {
+    #[error("migration {version} must have a positive version")]
+    NonPositiveVersion { version: i64 },
+    #[error(
+        "migration {version} is reversible; the template is forward-only, write a new migration instead of a .down.sql"
+    )]
+    Reversible { version: i64 },
+    #[error(
+        "migration {version} disables its transaction (-- no-transaction); every migration runs in one"
+    )]
+    TransactionDisabled { version: i64 },
+    #[error(
+        "migration {version} must be named <version>_<lowercase_snake_case>.sql, got description {description:?}"
+    )]
+    Description { version: i64, description: String },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
     #[error("migration source: {0}")]
-    Source(String),
+    Source(#[source] SourceError),
     #[error("migration connect: {0}")]
     Connect(#[source] sqlx::Error),
     #[error("migration connect exceeded {budget:?}")]
@@ -199,11 +218,10 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<RunRes
         }
     };
 
-    if let Err(message) = validate_source(migrator) {
-        return Err(fail(RunError::Source(message), observed));
+    if let Err(error) = validate_source(migrator) {
+        return Err(fail(RunError::Source(error), observed));
     }
 
-    let lock_timeout = to_runtime_param(options.lock_timeout);
     let mut conn = match tokio::time::timeout(
         ACQUIRE_TIMEOUT,
         connect_session(
@@ -212,8 +230,8 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<RunRes
                 application_name: options.application_name,
                 statement_timeout: options.statement_timeout,
                 idle_in_transaction_timeout: options.idle_in_transaction_timeout,
+                lock_timeout: options.lock_timeout,
                 extra: &[
-                    ("lock_timeout", lock_timeout.as_str()),
                     // `CREATE TABLE IF NOT EXISTS` on the history table raises a
                     // notice on every run after the first; the terminal record is
                     // the operator's evidence, not the server's chatter.
@@ -300,7 +318,8 @@ fn stage_of(err: &MigrateError) -> Stage {
     match err {
         MigrateError::Source(_) => Stage::Source,
         // Bookkeeping `Execute`: lock wait, then I/O/TLS as connect, else history.
-        // `Execute` never maps to `Stage::Execute`; that word is named-file SQL.
+        // `MigrateError::Execute` never maps to `Stage::MigrationSql`; that
+        // word is named-file SQL.
         MigrateError::Execute(sqlx::Error::Database(db))
             if db.code().as_deref() == Some("55P03") =>
         {
@@ -315,7 +334,7 @@ fn stage_of(err: &MigrateError) -> Stage {
         | MigrateError::VersionTooOld(..)
         | MigrateError::VersionTooNew(..) => Stage::History,
         // `ExecuteMigration` is the named file's SQL; `_` is later variants.
-        MigrateError::ExecuteMigration(..) | _ => Stage::Execute,
+        MigrateError::ExecuteMigration(..) | _ => Stage::MigrationSql,
     }
 }
 
@@ -324,28 +343,24 @@ fn stage_of(err: &MigrateError) -> Stage {
 ///
 /// # Errors
 ///
-/// The first violated rule, naming the migration version.
-pub fn validate_source(migrator: &Migrator) -> Result<(), String> {
+/// The first violated rule as [`SourceError`], naming the migration version.
+pub fn validate_source(migrator: &Migrator) -> Result<(), SourceError> {
     for migration in migrator.iter() {
         let version = migration.version;
         if version <= 0 {
-            return Err(format!("migration {version} must have a positive version"));
+            return Err(SourceError::NonPositiveVersion { version });
         }
         if migration.migration_type != MigrationType::Simple {
-            return Err(format!(
-                "migration {version} is reversible; the template is forward-only, write a new migration instead of a .down.sql"
-            ));
+            return Err(SourceError::Reversible { version });
         }
         if migration.no_tx {
-            return Err(format!(
-                "migration {version} disables its transaction (-- no-transaction); every migration runs in one"
-            ));
+            return Err(SourceError::TransactionDisabled { version });
         }
         if !is_canonical_description(&migration.description) {
-            return Err(format!(
-                "migration {version} must be named <version>_<lowercase_snake_case>.sql, got description {:?}",
-                migration.description
-            ));
+            return Err(SourceError::Description {
+                version,
+                description: migration.description.to_string(),
+            });
         }
     }
     Ok(())
@@ -441,8 +456,9 @@ mod tests {
         for (bad, expected) in cases {
             let version = bad.version;
             let err = validate_source(&Migrator::with_migrations(vec![bad])).unwrap_err();
-            assert!(err.contains(expected), "{err}");
-            assert!(err.contains(&version.to_string()), "{err}");
+            let message = err.to_string();
+            assert!(message.contains(expected), "{message}");
+            assert!(message.contains(&version.to_string()), "{message}");
         }
     }
 
@@ -472,7 +488,7 @@ mod tests {
                 sqlx::Error::PoolTimedOut,
                 3
             )),
-            Stage::Execute
+            Stage::MigrationSql
         );
         assert_eq!(
             stage_of(&MigrateError::Execute(sqlx::Error::Io(
@@ -487,6 +503,9 @@ mod tests {
             .stage(),
             Stage::Deadline
         );
-        assert_eq!(RunError::Source(String::new()).stage(), Stage::Source);
+        assert_eq!(
+            RunError::Source(SourceError::NonPositiveVersion { version: 0 }).stage(),
+            Stage::Source
+        );
     }
 }

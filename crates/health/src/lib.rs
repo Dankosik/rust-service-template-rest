@@ -25,6 +25,11 @@ use tokio_util::sync::CancellationToken;
 /// when that budget elapses the future is dropped. Implementations must not
 /// detach work that would outlive that cancellation. A check that ignores
 /// cancellation holds the whole evaluation past its budget.
+///
+/// `async_trait` boxes the future so this trait stays object-safe for
+/// `Box<dyn Probe>`. A native `async fn` in a trait is not `dyn`-safe on
+/// this edition, so removing the attribute is a public shape change, not a
+/// cleanup.
 #[async_trait::async_trait]
 pub trait Probe: Send + Sync + 'static {
     /// Bounded label used in log lines and verdict messages.
@@ -271,48 +276,37 @@ fn fold_evaluation(
 ) -> Evaluation {
     match observed {
         Ok(()) => Evaluation::Ready { evaluated_at },
-        Err(failure) => match previous {
-            Some(Evaluation::Ready { .. }) => {
-                let consecutive_failures = 1;
-                if consecutive_failures < policy.failure_threshold {
-                    Evaluation::Holding {
-                        consecutive_failures,
-                        evaluated_at,
-                    }
-                } else {
-                    Evaluation::Unready {
+        Err(failure) => {
+            let consecutive_failures = match previous {
+                Some(Evaluation::Ready { .. }) => 1,
+                Some(Evaluation::Holding {
+                    consecutive_failures,
+                    ..
+                }) => consecutive_failures + 1,
+                // Already failing keeps reporting the newest cause;
+                // never-healthy fails on the first observation.
+                Some(Evaluation::Unready { .. }) | None => {
+                    return Evaluation::Unready {
                         reason: failure.clone(),
                         evaluated_at,
-                    }
+                    };
+                }
+            };
+            // Hold the previous healthy verdict until the streak reaches
+            // the threshold. Always stamp `evaluated_at` for this check
+            // so holding a healthy verdict does not age into `Stale`.
+            if consecutive_failures < policy.failure_threshold {
+                Evaluation::Holding {
+                    consecutive_failures,
+                    evaluated_at,
+                }
+            } else {
+                Evaluation::Unready {
+                    reason: failure.clone(),
+                    evaluated_at,
                 }
             }
-            Some(Evaluation::Holding {
-                consecutive_failures,
-                ..
-            }) => {
-                let consecutive_failures = consecutive_failures + 1;
-                // Hold the previous healthy verdict until the streak reaches
-                // the threshold. Always stamp `evaluated_at` for this check
-                // so holding a healthy verdict does not age into `Stale`.
-                if consecutive_failures < policy.failure_threshold {
-                    Evaluation::Holding {
-                        consecutive_failures,
-                        evaluated_at,
-                    }
-                } else {
-                    Evaluation::Unready {
-                        reason: failure.clone(),
-                        evaluated_at,
-                    }
-                }
-            }
-            // Already failing keeps reporting the newest cause; never-healthy
-            // fails on the first observation.
-            Some(Evaluation::Unready { .. }) | None => Evaluation::Unready {
-                reason: failure.clone(),
-                evaluated_at,
-            },
-        },
+        }
     }
 }
 
