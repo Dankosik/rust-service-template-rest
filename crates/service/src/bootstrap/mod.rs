@@ -16,7 +16,7 @@ use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
 use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe};
 use infra_telemetry::{
-    ExporterState, LoggingFormat, LoggingOptions, Metrics, Sampler, TracingOptions,
+    ExporterState, LoggingFormat, LoggingOptions, Metrics, ResolvedSampler, TracingOptions,
     diagnostics_router, install_subscriber, install_tracer_provider,
 };
 use secrecy::ExposeSecret;
@@ -282,6 +282,8 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
     let diagnostics = match config.observability.metrics.listen_addr()? {
         None => None,
         Some(addr) => {
+            // Intentionally unhardened: Prometheus text on a private listener.
+            // `server_options` is shared HTTP transport policy, not `harden`.
             let server =
                 Server::bind(addr, diagnostics_router(metrics.clone()), server_options).await?;
             tracing::info!(addr = %server.local_addr(), "diagnostics listener bound");
@@ -315,11 +317,11 @@ fn replica_instance_id(app: &AppConfig) -> String {
 fn tracing_options(config: &Config, instance_id: String) -> TracingOptions {
     let otel = &config.observability.otel;
     let sampler = match otel.traces_sampler {
-        TracesSampler::AlwaysOn => Sampler::AlwaysOn,
-        TracesSampler::AlwaysOff => Sampler::AlwaysOff,
-        TracesSampler::TraceIdRatio => Sampler::TraceIdRatio(otel.traces_sampler_arg),
+        TracesSampler::AlwaysOn => ResolvedSampler::AlwaysOn,
+        TracesSampler::AlwaysOff => ResolvedSampler::AlwaysOff,
+        TracesSampler::TraceIdRatio => ResolvedSampler::TraceIdRatio(otel.traces_sampler_arg),
         TracesSampler::ParentBasedTraceIdRatio => {
-            Sampler::ParentBasedTraceIdRatio(otel.traces_sampler_arg)
+            ResolvedSampler::ParentBasedTraceIdRatio(otel.traces_sampler_arg)
         }
     };
     TracingOptions {
@@ -379,12 +381,12 @@ mod tests {
             ..OtelConfig::default()
         };
         let options = tracing_options(&config, "i".into());
-        assert!(matches!(options.sampler, Sampler::AlwaysOn));
+        assert!(matches!(options.sampler, ResolvedSampler::AlwaysOn));
 
         config.observability.otel.traces_sampler = TracesSampler::TraceIdRatio;
         let options = tracing_options(&config, "i".into());
         assert!(
-            matches!(options.sampler, Sampler::TraceIdRatio(ratio) if (ratio - 0.5).abs() < f64::EPSILON)
+            matches!(options.sampler, ResolvedSampler::TraceIdRatio(ratio) if (ratio - 0.5).abs() < f64::EPSILON)
         );
     }
 }

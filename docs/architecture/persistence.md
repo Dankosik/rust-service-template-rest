@@ -79,7 +79,7 @@ with the connection (not the transaction, so the closure cannot commit or
 roll back on its own), commits on `Ok`, and rolls back on `Err` inside the
 rollback budget, returning the closure's error; a rollback failure is logged.
 `in_tx_with(TxOptions { isolation, read_only })` renders the `BEGIN`
-statement for `Connection::begin_with`. `Isolation::Default` omits the
+statement for `Connection::begin_with`. `Isolation::ServerDefault` omits the
 isolation clause (server `default_transaction_isolation`);
 `Isolation::ReadCommitted` always sends `BEGIN ISOLATION LEVEL READ COMMITTED`.
 

@@ -40,13 +40,13 @@ pub enum TxError {
 pub enum Isolation {
     /// Omit the isolation clause; the server uses `default_transaction_isolation`.
     #[default]
-    Default,
+    ServerDefault,
     ReadCommitted,
     RepeatableRead,
     Serializable,
 }
 
-/// How the transaction is opened. [`Isolation::Default`] is the server default.
+/// How the transaction is opened. [`Isolation::ServerDefault`] omits the clause.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TxOptions {
     pub isolation: Isolation,
@@ -57,8 +57,8 @@ impl TxOptions {
     /// The `BEGIN` statement; `None` when the server default applies.
     fn begin_statement(self) -> Option<&'static str> {
         match (self.isolation, self.read_only) {
-            (Isolation::Default, false) => None,
-            (Isolation::Default, true) => Some("BEGIN READ ONLY"),
+            (Isolation::ServerDefault, false) => None,
+            (Isolation::ServerDefault, true) => Some("BEGIN READ ONLY"),
             (Isolation::ReadCommitted, false) => Some("BEGIN ISOLATION LEVEL READ COMMITTED"),
             (Isolation::ReadCommitted, true) => {
                 Some("BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY")
@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(TxOptions::default().begin_statement(), None);
         assert_eq!(
             TxOptions {
-                isolation: Isolation::Default,
+                isolation: Isolation::ServerDefault,
                 read_only: true,
             }
             .begin_statement(),

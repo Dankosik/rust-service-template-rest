@@ -326,6 +326,8 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<RunRes
             ));
         }
     };
+    // Success closes gracefully after unlock. A close error must not fail
+    // an already-applied run; failure still drops and does not wait on close.
     let _ = conn.close().await;
 
     Ok(RunResult {

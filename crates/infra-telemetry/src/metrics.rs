@@ -105,6 +105,12 @@ impl Metrics {
 
 /// The diagnostics router: `GET /metrics` only. Serve it on the private
 /// diagnostics listener, never on the application listener.
+///
+/// That listener is intentionally outside the application `harden` chain:
+/// Prometheus text, not Problem JSON; no scrape-on-scrape HTTP metrics,
+/// spans, or access logs; the address is trusted-private. `http.*`
+/// `ServerOptions` still apply as shared transport policy (header timeout
+/// and size, connection cap, drain), not request-level policy.
 pub fn diagnostics_router(metrics: Metrics) -> Router {
     Router::new()
         .route("/metrics", get(render))
