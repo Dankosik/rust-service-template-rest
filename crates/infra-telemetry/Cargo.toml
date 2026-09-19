@@ -34,4 +34,5 @@ tracing-opentelemetry = { workspace = true, features = ["tracing-log"] }
 tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter", "registry", "tracing-log", "ansi"] }
 
 [dev-dependencies]
+futures-util = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

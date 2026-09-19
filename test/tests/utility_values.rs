@@ -73,7 +73,9 @@ fn value_types_round_trip_with_explicit_wire_formats() {
 
 #[test]
 fn decimal_arithmetic_keeps_overflow_explicit() {
-    let total = Decimal::new(10, 2).checked_add(Decimal::new(20, 2)).unwrap();
+    let total = Decimal::new(10, 2)
+        .checked_add(Decimal::new(20, 2))
+        .unwrap();
     assert_eq!(total, Decimal::new(30, 2));
     assert!(Decimal::MAX.checked_add(Decimal::ONE).is_none());
 }

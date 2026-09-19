@@ -24,21 +24,32 @@ struct ProviderPayload {
 fn nested_adapters_replace_a_post_deserialization_conversion_pass() {
     let value: ProviderPayload = serde_json::from_value(json!({
         "ids": ["12", "34"], "timeout": 1500
-    })).unwrap();
+    }))
+    .unwrap();
     assert_eq!(value.ids, [12, 34]);
     assert_eq!(value.timeout, Duration::from_millis(1500));
-    assert!(serde_json::from_value::<ProviderPayload>(json!({
-        "ids": ["not-a-number"], "timeout": 1500
-    })).is_err());
-    assert!(serde_json::from_value::<ProviderPayload>(json!({
-        "ids": [], "timeout": 1500, "unexpected": true
-    })).is_err());
+    assert!(
+        serde_json::from_value::<ProviderPayload>(json!({
+            "ids": ["not-a-number"], "timeout": 1500
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<ProviderPayload>(json!({
+            "ids": [], "timeout": 1500, "unexpected": true
+        }))
+        .is_err()
+    );
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct UpdateName {
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_with::rust::double_option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_with::rust::double_option"
+    )]
     name: Option<Option<String>>,
 }
 
@@ -79,20 +90,35 @@ struct NameRequest {
 // Intentionally specific to this DTO. Do not stringify ValidationErrors or
 // its params: those can contain the submitted value. A real operation also
 // supplies request_id, field paths and matching OpenAPI constraints.
-fn validate_name(input: &NameRequest) -> Result<(), Problem> {
+fn validate_name(input: &NameRequest) -> Result<(), Box<Problem>> {
     input.validate().map_err(|_| {
-        Problem::new(Code::UnprocessableContent)
-            .invalid_param("/name", "length must be between 1 and 4 characters")
+        Box::new(
+            Problem::new(Code::UnprocessableContent)
+                .invalid_param("/name", "length must be between 1 and 4 characters"),
+        )
     })
 }
 
 #[test]
 fn validation_checks_boundaries_without_echoing_submitted_values() {
     assert!(validate_name(&NameRequest { name: "a".into() }).is_ok());
-    assert!(validate_name(&NameRequest { name: "abcd".into() }).is_ok());
-    assert!(validate_name(&NameRequest { name: String::new() }).is_err());
+    assert!(
+        validate_name(&NameRequest {
+            name: "abcd".into()
+        })
+        .is_ok()
+    );
+    assert!(
+        validate_name(&NameRequest {
+            name: String::new()
+        })
+        .is_err()
+    );
     let submitted = "DO_NOT_ECHO_THIS_VALUE";
-    let problem = validate_name(&NameRequest { name: submitted.into() }).unwrap_err();
+    let problem = validate_name(&NameRequest {
+        name: submitted.into(),
+    })
+    .unwrap_err();
     let wire = serde_json::to_value(problem).unwrap();
     assert_eq!(wire["code"], "unprocessable_content");
     assert_eq!(wire["invalid_params"][0]["name"], "/name");
@@ -112,7 +138,8 @@ fn fallible_json_patch_is_applied_to_a_candidate_before_publication() {
     let patch: json_patch::Patch = serde_json::from_value(json!([
         {"op": "replace", "path": "/name", "value": "new"},
         {"op": "remove", "path": "/missing"}
-    ])).unwrap();
+    ]))
+    .unwrap();
     let mut candidate = original.clone();
     assert!(json_patch::patch(&mut candidate, &patch).is_err());
     // Never publish a partially changed candidate after a failed patch.

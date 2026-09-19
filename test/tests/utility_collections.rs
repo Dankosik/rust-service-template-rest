@@ -29,10 +29,16 @@ fn deduplicate_in_first_seen_order() {
 fn ordered_map_replaces_values_without_reordering_other_keys() {
     let mut values = IndexMap::from([("first", 1), ("second", 2), ("third", 3)]);
     assert_eq!(values.insert("second", 20), Some(2));
-    assert_eq!(values.keys().copied().collect_vec(), ["first", "second", "third"]);
+    assert_eq!(
+        values.keys().copied().collect_vec(),
+        ["first", "second", "third"]
+    );
     // shift_remove, not swap_remove: relative order is part of this example.
     assert_eq!(values.shift_remove("first"), Some(1));
-    assert_eq!(values.into_iter().collect_vec(), [("second", 20), ("third", 3)]);
+    assert_eq!(
+        values.into_iter().collect_vec(),
+        [("second", 20), ("third", 3)]
+    );
 }
 
 #[derive(Debug, derive_more::Display, derive_more::AsRef)]
@@ -79,5 +85,8 @@ fn a_builder_keeps_required_inputs_and_optional_defaults_distinct() {
         .destination("orders.csv".into())
         .build();
     assert_eq!(configured.batch_size, 256);
-    assert_eq!(configured.destination.unwrap(), std::path::Path::new("orders.csv"));
+    assert_eq!(
+        configured.destination.unwrap(),
+        std::path::Path::new("orders.csv")
+    );
 }

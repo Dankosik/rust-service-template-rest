@@ -12,6 +12,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+strum = { workspace = true, features = ["derive"] }
+async-trait = { workspace = true }
 health = { workspace = true }
 # `sqlx::ConnectOptions` takes statement-log levels as `log::LevelFilter`.
 log = { workspace = true }

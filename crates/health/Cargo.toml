@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt"] }
 tokio-util = { workspace = true }

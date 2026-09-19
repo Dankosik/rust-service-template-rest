@@ -40,6 +40,7 @@ mod tests {
     use axum::http::{Method, Request, StatusCode};
     use axum::response::Response;
     use health::{Readiness, RefreshPolicy};
+    use itertools::Itertools;
     use tower::ServiceExt;
 
     use super::*;
@@ -108,11 +109,16 @@ mod tests {
     #[test]
     fn document_paths_are_the_access_log_probe_routes() {
         let (_, document) = router().split_for_parts();
-        let mut paths: Vec<_> = document.paths.paths.keys().cloned().collect();
-        paths.sort_unstable();
-        let mut expected: Vec<_> = HEALTH_PROBE_ROUTES.iter().map(|&p| p.to_owned()).collect();
-        expected.sort_unstable();
-        assert_eq!(paths, expected);
+        assert_eq!(
+            document
+                .paths
+                .paths
+                .keys()
+                .map(String::as_str)
+                .sorted()
+                .collect_vec(),
+            HEALTH_PROBE_ROUTES.iter().copied().sorted().collect_vec(),
+        );
     }
 
     #[tokio::test]

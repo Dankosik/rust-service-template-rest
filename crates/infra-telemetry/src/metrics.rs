@@ -96,10 +96,7 @@ impl Metrics {
         let reporter = tokio_metrics::RuntimeMetricsReporterBuilder::default()
             .with_interval(interval)
             .describe_and_run();
-        tokio::select! {
-            () = cancel.cancelled() => {},
-            () = reporter => {},
-        }
+        let _ = cancel.run_until_cancelled(reporter).await;
     }
 }
 
