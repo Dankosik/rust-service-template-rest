@@ -14,11 +14,20 @@ Cargo-generated lockfile. Recheck compatibility, maintenance, licensing and
 advisories at adoption time; a recommendation is not a permanent approval of
 all future versions. Do not hand-edit checksums or weaken dependency gates.
 
+## Production utility toolkit
+
+[Executable utility recipes](backend-utility-recipes.md) records the full
+utility selection, runnable cases, actual source migrations and alternatives.
+The recipes are normal tests in the existing test package; only production
+consumers add normal dependencies. `Probe` now uses `async-trait`, cancellation
+uses `tokio-util`, and `Code` serialization uses `derive_more` plus `serde_with`
+without changing its wire identity.
+
 ## Adopted for existing code
 
 | Library | Owner and use | Boundary |
 | --- | --- | --- |
-| `strum` with `derive` | `infra-http`: derive the complete `Code` variant array and keep `Code::ALL` as the public alias. | Keep the exhaustive `Code::meta()` match, wire names, `const` methods, statuses and URIs explicit. Do not derive serde `snake_case` Serialize: the wire token comes from `as_str` (`internal_error`, not `internal_server_error`). Do not derive unrestricted error policy. |
+| `strum` with `derive` | `infra-http`: derive the complete `Code` variant array and keep `Code::ALL` as the public alias. | Keep the exhaustive `Code::meta()` match, wire names, `const` methods, statuses and URIs explicit. Do not derive serde `snake_case` Serialize: `SerializeDisplay` delegates through `Display` to `as_str` (`internal_error`, not `internal_server_error`). Do not derive unrestricted error policy. |
 | `axum-test`, no optional features | `infra-http` dev-dependency: ordinary router requests, response decoding and assertions. | Use in-process mock transport. Keep raw `Request<Body>` and `oneshot` where byte framing, streaming body limits, concurrency or response extensions are the subject; keep real server/process tests for connection and lifecycle behavior. |
 | `rstest`, no default features | `service-config` and `service` dev-dependency: named parameterized cases for range checks, addresses and the OpenAPI security classifier. | Keep semantic expectations visible in each case. Do not build a fixture framework for simple values or hide lifecycle setup. |
 
@@ -59,15 +68,16 @@ The implementation must preserve all of these contracts:
   accepted boundary and rejected boundary, nested paths, unknown fields and
   secret-free error output for the new operation.
 
-The first operation owns this integration; no unused generic validator,
-placeholder DTO or validation dependency is added to the health-only scaffold.
+The first operation owns production integration. The executable HTTP recipe
+exercises `validator` as a dev-dependency; it does not publish a generic
+validator API, placeholder endpoint or authentication mechanism.
 See [HTTP Architecture](architecture/http.md#adding-an-operation).
 
 ## Serialization, value types and construction
 
 | Trigger | Preferred candidate | What must remain explicit |
 | --- | --- | --- |
-| Repeated custom serializers or a nonstandard external representation | [`serde_with`](https://docs.rs/serde_with/latest/serde_with/) adapters | The wire contract, unknown-field policy and OpenAPI shape. Do not replace working `humantime-serde` or `bytesize` merely for uniformity. A few repeated `skip_serializing_if` attributes alone are not a reason to add it. |
+| Repeated custom serializers or a nonstandard external representation | [`serde_with`](https://docs.rs/serde_with/latest/serde_with/) adapters | The wire contract, unknown-field policy and OpenAPI shape. Do not replace working `humantime-serde` or `bytesize` merely for uniformity. It is now used for `Code` serialization and omission of optional `Problem` fields; the recipe suite also exercises nested adapters and PATCH states. |
 | PATCH distinguishes missing, null and a value | `serde_with::rust::double_option` with the documented `default` and omission attributes | Missing means unchanged, null means clear, and a value means set. Test all three states and schema agreement; do not collapse them into `Option<T>`. |
 | Repeated mechanical standard-trait implementations on newtypes | [`derive_more`](https://docs.rs/derive_more/latest/derive_more/), only the used derives | Preserve checked `TryFrom` construction. Do not generate `From<String>`, mutable dereferencing or setters that bypass a type's invariants. Keep `thiserror` for typed errors. |
 | A genuinely complex constructor with required and optional inputs | Evaluate [`bon`](https://docs.rs/bon/latest/bon/) first | Preserve construction invariants and the actual API. Simple struct literals and `Problem::new(code)` remain appropriate. Never generate independent setters for status/title/URI derived from `code`. |
@@ -106,9 +116,9 @@ rather than assuming any SeaORM release can share the current pool.
 | A complex stable output warrants a reviewed snapshot | [`insta`](https://docs.rs/insta/latest/insta/) | Assert important semantics separately. Redact only irrelevant nondeterminism; never hide the ID or timestamp relationship being tested. Do not create a second snapshot authority for the already committed OpenAPI document. |
 | A parser/transformation has useful algebraic or grammar invariants | [`proptest`](https://docs.rs/proptest/latest/proptest/) | State the property independently of the implementation, retain useful explicit boundary cases, and bound generation. It is not mandatory for every helper. |
 
-These are adoption triggers, not unfinished work in this change. The owning
-feature/profile introduces the dependency, implementation, focused tests and
-configuration only when its real requirement exists.
+The recipe suite exercises the selected utility mechanisms without installing
+a cache, HTTP provider, retry policy or new endpoint in the running service.
+The owning feature/profile still supplies production policy and wiring.
 
 ## Retained mechanisms and rejected blanket changes
 

@@ -22,9 +22,20 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 /// Stable machine-readable failure code a client matches on.
-/// `Serialize` is manual via [`Code::as_str`]: `InternalServerError`'s wire
-/// token is `internal_error`, not serde `snake_case`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, strum::VariantArray)]
+/// `Display` and serialization delegate to [`Code::as_str`], not to the
+/// Rust variant name: `InternalServerError` stays `internal_error` on the wire.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::VariantArray,
+    derive_more::Display,
+    serde_with::SerializeDisplay,
+)]
+#[display("{}", self.as_str())]
 pub enum Code {
     BadRequest,
     Unauthorized,
@@ -171,15 +182,6 @@ impl Code {
     }
 }
 
-impl Serialize for Code {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
 struct CodeMeta {
     wire: &'static str,
     status: StatusCode,
@@ -216,6 +218,7 @@ pub struct InvalidParam {
 // only serialized and exists to render `additionalProperties: false`. The
 // examples are `Code::BadRequest` as the catalog renders it, so a catalog
 // edit regenerates them instead of leaving a stale copy.
+#[serde_with::skip_serializing_none]
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Problem {
@@ -233,15 +236,12 @@ pub struct Problem {
     title: &'static str,
     #[schema(example = json!(Code::BadRequest.status().as_u16()))]
     status: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, example = "invalid request framing")]
     detail: Option<String>,
     /// URI reference identifying this occurrence when the service exposes
     /// one.
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, format = "uri-reference")]
     instance: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, example = "9ccecdfd-92c9-4665-a464-06f8ba73cd77")]
     request_id: Option<String>,
     /// Which parts of the request failed validation, following the RFC 9457
@@ -404,9 +404,10 @@ mod tests {
 
     #[test]
     fn every_code_has_a_distinct_wire_form_and_consistent_status() {
-        let mut seen = std::collections::HashSet::new();
+        use itertools::Itertools;
+        assert!(Code::ALL.iter().map(|code| code.as_str()).all_unique());
         for code in Code::ALL {
-            assert!(seen.insert(code.as_str()), "{} duplicated", code.as_str());
+            assert_eq!(code.to_string(), code.as_str());
             assert_eq!(
                 serde_json::to_string(code).unwrap(),
                 format!("\"{}\"", code.as_str())

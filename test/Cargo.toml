@@ -1,6 +1,6 @@
 [package]
 name = "integration-tests"
-description = "Database-backed proof for the PostgreSQL profile; runs only with the `integration` feature and a live DATABASE_URL."
+description = "Executable utility recipes and opt-in database-backed PostgreSQL proof."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,8 +12,8 @@ publish.workspace = true
 workspace = true
 
 [features]
-# `make test` builds this crate with the feature off, so no test here needs
-# Docker; `scripts/ci/test-integration-db.sh` turns it on with a live server.
+# Utility recipes run with `make test` and need no Docker or external service.
+# PostgreSQL tests alone require `integration` and a live DATABASE_URL.
 integration = []
 
 [dependencies]
@@ -22,5 +22,45 @@ sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-
 url = { workspace = true }
 
 [dev-dependencies]
+reqwest = { workspace = true, features = ["json"] }
+wiremock = { workspace = true }
+moka = { workspace = true, features = ["future"] }
+backon = { workspace = true, features = ["tokio-sleep"] }
+proptest = { workspace = true, features = ["std"] }
+insta = { workspace = true, features = ["json"] }
+validator = { workspace = true, features = ["derive"] }
+bon = { workspace = true }
+time = { workspace = true, features = ["std", "serde", "serde-well-known", "formatting", "parsing", "macros"] }
+rust_decimal = { workspace = true, features = ["std", "serde-with-str"] }
+uuid = { workspace = true, features = ["std", "serde", "v4"] }
+json-patch = { workspace = true }
+semver = { workspace = true, features = ["std"] }
+ipnet = { workspace = true, features = ["std"] }
+base64 = { workspace = true, features = ["std"] }
+csv = { workspace = true }
+camino = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+fs-err = { workspace = true }
+strsim = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-normalization = { workspace = true, features = ["std"] }
+regex = { workspace = true, features = ["std", "unicode", "perf"] }
+bstr = { workspace = true, features = ["std"] }
+heck = { workspace = true }
+bytes = { workspace = true, features = ["std"] }
+tokio-util = { workspace = true, features = ["io", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "test-util"] }
+futures-util = { workspace = true, features = ["std", "async-await"] }
+infra-http = { workspace = true }
+axum-test = { workspace = true }
+axum-extra = { workspace = true, features = ["query", "typed-header"] }
+axum = { workspace = true, features = ["json", "query"] }
+derive_more = { workspace = true, features = ["display", "as_ref"] }
+serde_with = { workspace = true, features = ["std", "macros"] }
+serde_json = { workspace = true, features = ["std"] }
+serde = { workspace = true, features = ["std", "derive"] }
+indexmap = { workspace = true, features = ["std"] }
+itertools = { workspace = true, features = ["use_std"] }
 health = { workspace = true }
 migrate = { workspace = true }

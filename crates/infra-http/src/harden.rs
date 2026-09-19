@@ -298,7 +298,9 @@ mod tests {
         response.assert_text("ok");
         let id = response.header(REQUEST_ID_HEADER);
         let id = id.to_str().unwrap();
-        assert_eq!(id.len(), 36, "generated UUIDv4: {id}");
+        let parsed = uuid::Uuid::parse_str(id).expect("generated request ID is a UUID");
+        assert_eq!(parsed.get_version_num(), 4);
+        assert_eq!(parsed.get_variant(), uuid::Variant::RFC4122);
     }
 
     #[tokio::test]
@@ -316,7 +318,9 @@ mod tests {
             .await;
         let id = response.header(REQUEST_ID_HEADER);
         assert_ne!(id, "bad id with spaces");
-        assert_eq!(id.to_str().unwrap().len(), 36);
+        let parsed = uuid::Uuid::parse_str(id.to_str().unwrap()).unwrap();
+        assert_eq!(parsed.get_version_num(), 4);
+        assert_eq!(parsed.get_variant(), uuid::Variant::RFC4122);
     }
 
     #[tokio::test]

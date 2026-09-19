@@ -13,8 +13,6 @@
 //! The snapshot travels through [`tokio::sync::watch`], so tests and the
 //! shutdown sequence await transitions instead of sleeping.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,11 +24,12 @@ use tokio_util::sync::CancellationToken;
 /// One dependency check. Implementations must respect the deadline carried
 /// by the caller's timeout; a check that ignores it holds the whole
 /// evaluation past its budget.
+#[async_trait::async_trait]
 pub trait Probe: Send + Sync + 'static {
     /// Bounded label used in log lines and verdict messages.
     fn name(&self) -> &'static str;
     /// Resolve `Ok` when the dependency can serve requests.
-    fn check(&self) -> Pin<Box<dyn Future<Output = Result<(), ProbeError>> + Send + '_>>;
+    async fn check(&self) -> Result<(), ProbeError>;
 }
 
 /// Why one probe failed, without dependency internals.
@@ -202,40 +201,34 @@ impl Readiness {
         self.tx.send_modify(|snapshot| {
             snapshot.stale_after = Some(policy.stale_after());
         });
-        if self.tx.borrow().evaluation.is_none() {
-            tokio::select! {
-                () = cancel.cancelled() => return,
-                () = self.refresh(policy) => {}
-            }
-        }
-        let mut ticker = tokio::time::interval(policy.interval);
-        // Delay, not Burst: a late tick is skipped rather than fired in a
-        // catch-up burst that would pile probe work onto a recovering
-        // dependency.
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // Consume the immediate first tick so the interval does not repeat
-        // the evaluation already performed above or by startup admission.
-        ticker.tick().await;
-        loop {
-            tokio::select! {
-                () = cancel.cancelled() => return,
-                _ = ticker.tick() => {
+        // Cancel covers both the timer and an in-flight probe. An already
+        // cancelled token never polls the work; no detached task is created.
+        let _ = cancel
+            .run_until_cancelled(async {
+                if self.tx.borrow().evaluation.is_none() {
+                    self.refresh(policy).await;
+                }
+                let mut ticker = tokio::time::interval(policy.interval);
+                // Delay, not Burst: a late tick is skipped rather than fired in a
+                // catch-up burst that would pile probe work onto a recovering
+                // dependency.
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // The first evaluation was done above or by startup admission.
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
                     let before = self.reader().verdict();
-                    tokio::select! {
-                        () = cancel.cancelled() => return,
-                        () = self.refresh(policy) => {
-                            let after = self.reader().verdict();
-                            if before.is_ok() != after.is_ok() {
-                                match &after {
-                                    Ok(()) => tracing::info!("readiness recovered"),
-                                    Err(reason) => tracing::warn!(%reason, "readiness lost"),
-                                }
-                            }
+                    self.refresh(policy).await;
+                    let after = self.reader().verdict();
+                    if before.is_ok() != after.is_ok() {
+                        match &after {
+                            Ok(()) => tracing::info!("readiness recovered"),
+                            Err(reason) => tracing::warn!(%reason, "readiness lost"),
                         }
                     }
                 }
-            }
-        }
+            })
+            .await;
     }
 
     async fn evaluate(&self) -> Result<(), NotReady> {
@@ -334,30 +327,30 @@ mod tests {
         calls: Arc<AtomicU32>,
     }
 
+    #[async_trait::async_trait]
     impl Probe for Flaky {
         fn name(&self) -> &'static str {
             "flaky"
         }
-        fn check(&self) -> Pin<Box<dyn Future<Output = Result<(), ProbeError>> + Send + '_>> {
-            Box::pin(async move {
-                self.calls.fetch_add(1, Ordering::Relaxed);
-                if self.healthy.load(Ordering::Relaxed) {
-                    Ok(())
-                } else {
-                    Err(ProbeError::new("connection refused"))
-                }
-            })
+        async fn check(&self) -> Result<(), ProbeError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if self.healthy.load(Ordering::Relaxed) {
+                Ok(())
+            } else {
+                Err(ProbeError::new("connection refused"))
+            }
         }
     }
 
     struct Hanging;
 
+    #[async_trait::async_trait]
     impl Probe for Hanging {
         fn name(&self) -> &'static str {
             "hanging"
         }
-        fn check(&self) -> Pin<Box<dyn Future<Output = Result<(), ProbeError>> + Send + '_>> {
-            Box::pin(std::future::pending())
+        async fn check(&self) -> Result<(), ProbeError> {
+            std::future::pending().await
         }
     }
 
@@ -524,5 +517,38 @@ mod tests {
             "cancel must drop the in-flight refresh, not wait for probe_budget"
         );
         watcher.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_already_cancelled_refresher_never_checks_a_probe() {
+        let (readiness, _, calls) = flaky(true);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        readiness.refresh_until(policy(), cancel).await;
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(readiness.reader().verdict(), Err(NotReady::NotEvaluated));
+    }
+
+    #[tokio::test]
+    async fn a_failed_probe_does_not_start_the_next_probe() {
+        let first_calls = Arc::new(AtomicU32::new(0));
+        let second_calls = Arc::new(AtomicU32::new(0));
+        let readiness = Readiness::new(vec![
+            Box::new(Flaky {
+                healthy: Arc::new(AtomicBool::new(false)),
+                calls: first_calls.clone(),
+            }),
+            Box::new(Flaky {
+                healthy: Arc::new(AtomicBool::new(true)),
+                calls: second_calls.clone(),
+            }),
+        ]);
+        readiness.refresh(policy()).await;
+        assert!(matches!(
+            readiness.reader().verdict(),
+            Err(NotReady::ProbeFailed { .. })
+        ));
+        assert_eq!(first_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(second_calls.load(Ordering::Relaxed), 0);
     }
 }
