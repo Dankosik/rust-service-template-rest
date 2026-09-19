@@ -106,7 +106,7 @@ pub(crate) enum Evaluation {
     /// Published ready with a clean success streak.
     Ready { evaluated_at: Instant },
     /// Published ready while counting probe failures below the threshold.
-    Holding {
+    ReadyHolding {
         consecutive_failures: u32,
         evaluated_at: Instant,
     },
@@ -121,7 +121,7 @@ impl Evaluation {
     fn evaluated_at(&self) -> Instant {
         match *self {
             Self::Ready { evaluated_at }
-            | Self::Holding { evaluated_at, .. }
+            | Self::ReadyHolding { evaluated_at, .. }
             | Self::Unready { evaluated_at, .. } => evaluated_at,
         }
     }
@@ -217,9 +217,10 @@ impl Readiness {
 
     /// Refresh on `policy.interval` until `cancel` fires.
     ///
-    /// Publishes the staleness budget before awaiting the first evaluation
-    /// so a refresher that dies on its first pass still leaves readers able
-    /// to refuse the verdict it never wrote. The first evaluation runs
+    /// Publishes the staleness budget before the first loop iteration so a
+    /// verdict already written (admission seed) or written later becomes
+    /// subject to that bound even if the refresher dies immediately after.
+    /// `NotEvaluated` does not use `stale_after`. The first evaluation runs
     /// immediately unless startup admission already seeded the cache.
     /// Cancel is selected against in-flight `refresh` so tracker join can
     /// finish before dependency close.
@@ -279,7 +280,7 @@ fn fold_evaluation(
         Err(failure) => {
             let consecutive_failures = match previous {
                 Some(Evaluation::Ready { .. }) => 1,
-                Some(Evaluation::Holding {
+                Some(Evaluation::ReadyHolding {
                     consecutive_failures,
                     ..
                 }) => consecutive_failures + 1,
@@ -296,7 +297,7 @@ fn fold_evaluation(
             // the threshold. Always stamp `evaluated_at` for this check
             // so holding a healthy verdict does not age into `Stale`.
             if consecutive_failures < policy.failure_threshold {
-                Evaluation::Holding {
+                Evaluation::ReadyHolding {
                     consecutive_failures,
                     evaluated_at,
                 }
@@ -338,7 +339,7 @@ impl ReadinessReader {
             }
         }
         match evaluation {
-            Evaluation::Ready { .. } | Evaluation::Holding { .. } => Ok(()),
+            Evaluation::Ready { .. } | Evaluation::ReadyHolding { .. } => Ok(()),
             Evaluation::Unready { reason, .. } => Err(reason),
         }
     }

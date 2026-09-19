@@ -101,17 +101,28 @@ impl std::fmt::Debug for Dsn {
 
 impl Dsn {
     /// Admit `raw` against the template rules and the process environment.
+    /// Occupancy of a non-empty `PG*` variable is part of this call, not
+    /// only the URL text.
     ///
     /// # Errors
     ///
     /// The first violated rule, without the offending value.
-    pub fn parse(raw: &str) -> Result<Self, DsnError> {
+    pub fn admit(raw: &str) -> Result<Self, DsnError> {
         Self::parse_with_environment(raw, |name| {
             std::env::var_os(name).is_some_and(|value| !value.is_empty())
         })
     }
 
-    /// [`Dsn::parse`] with an explicit occupancy lookup, so the ambient
+    /// [`Self::admit`] under the older one-string name.
+    ///
+    /// # Errors
+    ///
+    /// The first violated rule, without the offending value.
+    pub fn parse(raw: &str) -> Result<Self, DsnError> {
+        Self::admit(raw)
+    }
+
+    /// [`Dsn::admit`] with an explicit occupancy lookup, so the ambient
     /// rule can be tested without mutating the process environment.
     /// `true` means the named variable is set to a **non-empty** value
     /// (empty `PG*` is ignored). This is the opposite of OpenTelemetry

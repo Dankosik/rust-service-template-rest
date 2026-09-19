@@ -68,7 +68,9 @@ OpenTelemetry environment stays a supported platform fallback:
   `OTEL_RESOURCE_ATTRIBUTES` survive underneath them. A missing or empty
   `app.instance_id` is occupancy: the composition root fills the hostname,
   which is the pod name on Kubernetes.
-- A typed `observability.otel.exporter.otlp_endpoint` wins. Otherwise the SDK
+- A typed `observability.otel.exporter.otlp_endpoint` wins. Missing, empty, or
+  whitespace-only is vacant occupancy, the same rule as `app.instance_id`.
+  Otherwise the SDK
   reads `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, then `OTEL_EXPORTER_OTLP_ENDPOINT`
   as the collector root. When neither is set the exporter stays disabled:
   spans still get trace ids for log correlation but nothing is exported.

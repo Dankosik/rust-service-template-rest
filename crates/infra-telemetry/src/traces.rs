@@ -36,8 +36,8 @@ pub struct TracingOptions {
     pub instance_id: String,
     pub deployment_environment: String,
     pub sampler: Sampler,
-    /// Typed OTLP/HTTP traces endpoint; empty falls back to the environment.
-    pub otlp_endpoint: String,
+    /// Typed OTLP/HTTP traces endpoint; `None` falls back to the environment.
+    pub otlp_endpoint: Option<String>,
     /// Typed collector headers as `key=value,key=value`. `None` means no
     /// extra headers.
     pub otlp_headers: Option<SecretString>,
@@ -46,7 +46,7 @@ pub struct TracingOptions {
 /// Which configuration selected the OTLP endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndpointSource {
-    /// `observability.otel.exporter.otlp_endpoint` was non-empty.
+    /// `observability.otel.exporter.otlp_endpoint` was occupied.
     Typed,
     /// An `OTEL_EXPORTER_OTLP_*ENDPOINT` variable was present (including empty).
     Environment,
@@ -235,7 +235,11 @@ fn resolve_endpoint_source(
     options: &TracingOptions,
     env_present: impl Fn(&str) -> bool,
 ) -> Result<Option<EndpointSource>, TracingError> {
-    if !options.otlp_endpoint.trim().is_empty() {
+    if options
+        .otlp_endpoint
+        .as_deref()
+        .is_some_and(|endpoint| !endpoint.is_empty())
+    {
         if let Some(name) = AMBIENT_CREDENTIAL_VARS
             .iter()
             .find(|name| env_present(name))
@@ -258,8 +262,7 @@ fn span_exporter(
     let mut builder = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
         .with_protocol(opentelemetry_otlp::Protocol::HttpBinary);
-    let endpoint = options.otlp_endpoint.trim();
-    if !endpoint.is_empty() {
+    if let Some(endpoint) = options.otlp_endpoint.as_deref() {
         builder = builder.with_endpoint(endpoint);
     }
     if let Some(raw) = options.otlp_headers.as_ref() {
@@ -344,7 +347,7 @@ mod tests {
             instance_id: String::new(),
             deployment_environment: "test".into(),
             sampler: Sampler::AlwaysOn,
-            otlp_endpoint: endpoint.into(),
+            otlp_endpoint: (!endpoint.is_empty()).then(|| endpoint.to_owned()),
             otlp_headers: None,
         }
     }

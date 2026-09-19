@@ -87,11 +87,12 @@ impl Default for OtelConfig {
 #[serde(deny_unknown_fields, default)]
 pub struct OtelExporterConfig {
     /// OTLP/HTTP traces endpoint. A collector root without a path resolves
-    /// to `/v1/traces`. Empty falls back to the standard
-    /// `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `OTEL_EXPORTER_OTLP_ENDPOINT`
-    /// variables; when those variables are unset (not merely empty), the
-    /// exporter stays disabled.
-    pub otlp_endpoint: String,
+    /// to `/v1/traces`. Missing, empty, or whitespace-only (after trim) is
+    /// vacant and falls back to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` then
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT` presence, including empty; when those
+    /// variables are unset the exporter stays disabled.
+    #[serde(default, deserialize_with = "crate::app::occupied_string")]
+    pub otlp_endpoint: Option<String>,
     /// Collector credential as `key=value,key=value`. Environment only.
     /// Missing, empty, or whitespace-only is absent (`None`).
     #[serde(default, deserialize_with = "crate::secret_policy::occupied_secret")]
@@ -123,13 +124,14 @@ impl ObservabilityConfig {
                 format!("must be in range [0, 1], got {arg}"),
             ));
         }
-        let endpoint = self.otel.exporter.otlp_endpoint.trim();
-        let is_http_url = endpoint.starts_with("http://") || endpoint.starts_with("https://");
-        if !endpoint.is_empty() && !is_http_url {
-            return Err(ValidationError::new(
-                "observability.otel.exporter.otlp_endpoint",
-                "must be an http:// or https:// URL",
-            ));
+        if let Some(endpoint) = self.otel.exporter.otlp_endpoint.as_deref() {
+            let is_http_url = endpoint.starts_with("http://") || endpoint.starts_with("https://");
+            if !is_http_url {
+                return Err(ValidationError::new(
+                    "observability.otel.exporter.otlp_endpoint",
+                    "must be an http:// or https:// URL",
+                ));
+            }
         }
         Ok(())
     }
@@ -189,6 +191,18 @@ mod tests {
     fn empty_metrics_addr_disables_the_listener() {
         let mut cfg = ObservabilityConfig::default();
         cfg.metrics.addr = String::new();
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn occupied_otlp_endpoint_must_be_http() {
+        let mut cfg = ObservabilityConfig::default();
+        cfg.otel.exporter.otlp_endpoint = Some("collector:4318".into());
+        assert_eq!(
+            cfg.validate().unwrap_err().key,
+            "observability.otel.exporter.otlp_endpoint"
+        );
+        cfg.otel.exporter.otlp_endpoint = Some("http://collector:4318".into());
         cfg.validate().unwrap();
     }
 }

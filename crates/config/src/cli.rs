@@ -20,6 +20,24 @@ pub enum FromArgs {
     Exit(ExitCode),
 }
 
+impl FromArgs {
+    /// Parse argv, printing clap's message when clap does not yield options.
+    ///
+    /// `--help` is [`Self::Exit`] with success; other clap errors are
+    /// [`Self::Exit`] with failure. Does not call `process::exit`, so
+    /// destructors still run.
+    pub fn from_argv<I, T>(args: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        match LoadOptions::parse_args(args) {
+            Ok(options) => Self::Run(options),
+            Err(err) => Self::Exit(LoadOptions::clap_exit(&err)),
+        }
+    }
+}
+
 /// Print `message` to stderr and return [`ExitCode::FAILURE`].
 ///
 /// Does not call `process::exit`, so destructors still run. Use this when
@@ -52,8 +70,8 @@ impl LoadOptions {
     /// and starting with the wrong configuration is worse than not starting.
     ///
     /// Returns [`clap::Error`] instead of exiting so destructors still run.
-    /// Production binaries should call [`Self::from_args`], which prints and
-    /// maps the outcome without naming clap at the call site.
+    /// Production binaries should call [`FromArgs::from_argv`], which prints
+    /// and maps the outcome without naming clap at the call site.
     ///
     /// # Errors
     ///
@@ -66,20 +84,13 @@ impl LoadOptions {
         Self::try_parse_from(args)
     }
 
-    /// Parse argv, printing clap's message when clap does not yield options.
-    ///
-    /// `--help` is [`FromArgs::Exit`] with success; other clap errors are
-    /// [`FromArgs::Exit`] with failure. Does not call `process::exit`, so
-    /// destructors still run.
+    /// [`FromArgs::from_argv`] under the older `LoadOptions` name.
     pub fn from_args<I, T>(args: I) -> FromArgs
     where
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        match Self::parse_args(args) {
-            Ok(options) => FromArgs::Run(options),
-            Err(err) => FromArgs::Exit(Self::clap_exit(&err)),
-        }
+        FromArgs::from_argv(args)
     }
 
     fn clap_exit(err: &clap::Error) -> ExitCode {
@@ -151,7 +162,7 @@ mod tests {
     #[test]
     fn from_args_maps_unknown_flag_to_failure() {
         assert!(matches!(
-            LoadOptions::from_args(["service", "--unknown"]),
+            FromArgs::from_argv(["service", "--unknown"]),
             FromArgs::Exit(_)
         ));
         assert_ne!(
@@ -165,7 +176,7 @@ mod tests {
     #[test]
     fn from_args_maps_help_to_success() {
         assert!(matches!(
-            LoadOptions::from_args(["service", "--help"]),
+            FromArgs::from_argv(["service", "--help"]),
             FromArgs::Exit(_)
         ));
         assert_eq!(
