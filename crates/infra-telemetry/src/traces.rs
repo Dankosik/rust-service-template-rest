@@ -15,9 +15,6 @@ use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
-use opentelemetry_sdk::resource::{
-    EnvResourceDetector, SdkProvidedResourceDetector, TelemetryResourceDetector,
-};
 use opentelemetry_sdk::trace::{self as sdktrace, SdkTracer, SdkTracerProvider};
 use opentelemetry_semantic_conventions::attribute;
 use secrecy::{ExposeSecret, SecretString};
@@ -266,11 +263,6 @@ fn parse_headers(raw: &str) -> HashMap<String, String> {
 /// Typed identity over the SDK detectors: detector values (including
 /// `OTEL_RESOURCE_ATTRIBUTES`) fill in first, typed attributes override.
 fn resource(options: &TracingOptions) -> Resource {
-    let detectors: Vec<Box<dyn opentelemetry_sdk::resource::ResourceDetector>> = vec![
-        Box::new(SdkProvidedResourceDetector),
-        Box::new(TelemetryResourceDetector),
-        Box::new(EnvResourceDetector::new()),
-    ];
     let mut attributes = vec![
         KeyValue::new(attribute::SERVICE_NAME, options.service_name.clone()),
         KeyValue::new(attribute::SERVICE_VERSION, options.service_version.clone()),
@@ -291,10 +283,7 @@ fn resource(options: &TracingOptions) -> Resource {
             options.instance_id.clone(),
         ));
     }
-    Resource::builder_empty()
-        .with_detectors(&detectors)
-        .with_attributes(attributes)
-        .build()
+    Resource::builder().with_attributes(attributes).build()
 }
 
 impl Sampler {
@@ -328,7 +317,7 @@ mod tests {
             deployment_environment: "test".into(),
             sampler: Sampler::AlwaysOn,
             otlp_endpoint: endpoint.into(),
-            otlp_headers: SecretString::from(String::new()),
+            otlp_headers: SecretString::default(),
         }
     }
 
