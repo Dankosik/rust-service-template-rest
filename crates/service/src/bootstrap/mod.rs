@@ -65,22 +65,14 @@ pub(crate) enum BootstrapError {
 
 /// Parse flags, load configuration, run the service, and map the result to
 /// an exit code. Never calls `process::exit`, so destructors run. `--help`
-/// and `--version` exit 0; other clap errors exit 1.
+/// exits 0; other clap errors exit 1. Version is not a loader flag.
 pub(crate) fn run<I>(args: I) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
-    let options = match LoadOptions::parse_args(args) {
+    let options = match LoadOptions::from_args(args) {
         Ok(options) => options,
-        Err(err) => {
-            let success = err.exit_code() == 0;
-            let _ = err.print();
-            return if success {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            };
-        }
+        Err(code) => return code,
     };
     let config = match service_config::load(&options, BUILD_INFO) {
         Ok(config) => config,
@@ -263,7 +255,7 @@ async fn serve_transports(transports: Transports<'_>) -> Result<Outcome, Bootstr
     tracker.spawn({
         let readiness = readiness.clone();
         let cancel = cancel.child_token();
-        async move { readiness.watch(policy, cancel).await }
+        async move { readiness.refresh_until(policy, cancel).await }
     });
 
     let server_options = ServerOptions {

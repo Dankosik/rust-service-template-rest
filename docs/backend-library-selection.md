@@ -18,7 +18,7 @@ all future versions. Do not hand-edit checksums or weaken dependency gates.
 
 | Library | Owner and use | Boundary |
 | --- | --- | --- |
-| `strum` with `derive` | `infra-http`: derive the complete `Code` variant array and keep `Code::ALL` as the public alias. | Keep the exhaustive `Code::meta()` match, wire names, `const` methods, statuses and URIs explicit. Do not derive unrestricted error policy. |
+| `strum` with `derive` | `infra-http`: derive the complete `Code` variant array and keep `Code::ALL` as the public alias. | Keep the exhaustive `Code::meta()` match, wire names, `const` methods, statuses and URIs explicit. Do not derive serde `snake_case` Serialize: the wire token comes from `as_str` (`internal_error`, not `internal_server_error`). Do not derive unrestricted error policy. |
 | `axum-test`, no optional features | `infra-http` dev-dependency: ordinary router requests, response decoding and assertions. | Use in-process mock transport. Keep raw `Request<Body>` and `oneshot` where byte framing, streaming body limits, concurrency or response extensions are the subject; keep real server/process tests for connection and lifecycle behavior. |
 | `rstest`, no default features | `service-config` and `service` dev-dependency: named parameterized cases for range checks, addresses and the OpenAPI security classifier. | Keep semantic expectations visible in each case. Do not build a fixture framework for simple values or hide lifecycle setup. |
 

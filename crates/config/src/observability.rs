@@ -102,12 +102,6 @@ impl Default for OtelExporterConfig {
 }
 
 impl OtelExporterConfig {
-    /// Whether a typed endpoint selects the collector.
-    #[must_use]
-    pub fn has_typed_endpoint(&self) -> bool {
-        !self.otlp_endpoint.trim().is_empty()
-    }
-
     /// Whether a typed credential is configured.
     #[must_use]
     pub fn has_headers(&self) -> bool {

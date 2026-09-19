@@ -141,9 +141,13 @@ impl Signals {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
+            // Install SIGINT first so a failed SIGTERM install cannot drop a
+            // live SIGTERM stream: hyper never unregisters the libc handler.
+            let interrupt = signal(SignalKind::interrupt())?;
+            let terminate = signal(SignalKind::terminate())?;
             Ok(Self {
-                terminate: signal(SignalKind::terminate())?,
-                interrupt: signal(SignalKind::interrupt())?,
+                terminate,
+                interrupt,
             })
         }
         #[cfg(windows)]
