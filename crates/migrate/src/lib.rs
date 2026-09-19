@@ -354,6 +354,7 @@ async fn applied_summary(
 const LOCK_NOT_AVAILABLE: &str = "55P03";
 
 fn stage_of(err: &MigrateError) -> Stage {
+    #[allow(clippy::match_same_arms)] // ExecuteMigration is named-file SQL; `_` is later variants.
     match err {
         MigrateError::Source(_) => Stage::Source,
         // Bookkeeping `Execute` never means named-file SQL.
