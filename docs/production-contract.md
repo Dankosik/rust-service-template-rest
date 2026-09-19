@@ -56,7 +56,7 @@ readiness probe; every operation's deadline fits inside
   with `503` + `Retry-After: 1` above `http.max_in_flight` and has no rate
   limiter.
 - Metrics listener reachability: Unresolved. The shipped
-  `observability.metrics.addr` binds every interface; deployment keeps it
+  `observability.metrics.addr` binds IPv4 all-interfaces (`0.0.0.0`); deployment keeps it
   private.
 - Egress, identity, and authorization authorities: Unresolved. The template
   ships no authentication and no outbound client; every operation carries an

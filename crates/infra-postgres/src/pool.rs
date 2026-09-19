@@ -6,6 +6,7 @@
 //! and comes from configuration, because the right value depends on the
 //! database and on how many instances share it.
 
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use sqlx::ConnectOptions;
@@ -46,8 +47,6 @@ const POOL_NAME: &str = "postgres";
 /// Why the pool could not be opened.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
-    #[error("postgres pool size must be > 0")]
-    PoolSize,
     /// No connection could be established inside [`ACQUIRE_TIMEOUT`]; the
     /// pool retries a refused or unreachable target until the budget ends,
     /// so this is what an unreachable database looks like at startup.
@@ -62,8 +61,9 @@ pub enum ConnectError {
 /// What the composition root decides per process.
 #[derive(Clone, Debug)]
 pub struct PoolOptions<'a> {
-    /// `postgres.max_connections`.
-    pub max_connections: u32,
+    /// `postgres.max_connections`. Zero is unrepresentable; disable the
+    /// profile instead of opening a pool.
+    pub max_connections: NonZeroU32,
     /// Reported as `application_name`, so `pg_stat_activity` attributes a
     /// session to the service instead of to an anonymous driver.
     pub application_name: &'a str,
@@ -73,14 +73,10 @@ pub struct PoolOptions<'a> {
 ///
 /// # Errors
 ///
-/// [`ConnectError::PoolSize`] for a zero size; [`ConnectError::Timeout`]
-/// when no connection is established inside [`ACQUIRE_TIMEOUT`];
-/// [`ConnectError::Connect`] when the first attempt is refused
-/// (credentials, TLS, or the server).
+/// [`ConnectError::Timeout`] when no connection is established inside
+/// [`ACQUIRE_TIMEOUT`]; [`ConnectError::Connect`] when the first attempt is
+/// refused (credentials, TLS, or the server).
 pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, ConnectError> {
-    if options.max_connections == 0 {
-        return Err(ConnectError::PoolSize);
-    }
     let connect_options = attach_session(
         dsn,
         options.application_name,
@@ -90,7 +86,7 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
         Some(SLOW_STATEMENT_THRESHOLD),
     );
     PgPoolOptions::new()
-        .max_connections(options.max_connections)
+        .max_connections(options.max_connections.get())
         .acquire_timeout(ACQUIRE_TIMEOUT)
         .connect_with(connect_options)
         .await
@@ -200,14 +196,16 @@ pub fn record_metrics(pool: &PgPool) {
         .set((size - idle).max(0.0));
 }
 
-/// Publish the gauges every `interval` until `cancel` fires. Runs on the
-/// composition root's metrics upkeep cadence.
+/// Publish the gauges every `interval` until `cancel` fires. Same missed-tick
+/// policy as histogram upkeep (`Delay`): a late tick is skipped rather than
+/// replayed. Runs on the composition root's metrics upkeep cadence.
 pub async fn record_metrics_periodically(
     pool: PgPool,
     interval: Duration,
     cancel: CancellationToken,
 ) {
     let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             () = cancel.cancelled() => return,
@@ -252,23 +250,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_zero_pool_size_is_refused_before_connecting() {
-        let dsn =
-            Dsn::parse_with_environment("postgres://app:pw@h:5432/app?sslmode=disable", |_| None)
-                .unwrap();
-        let err = connect(
-            &dsn,
-            &PoolOptions {
-                max_connections: 0,
-                application_name: "svc",
-            },
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(err, ConnectError::PoolSize));
-    }
-
-    #[tokio::test]
     async fn an_unreachable_host_fails_inside_the_acquire_budget() {
         // Port 1 on loopback is refused at once; the pool keeps retrying
         // until the acquire budget ends, which is the bound asserted here.
@@ -281,7 +262,7 @@ mod tests {
         let err = connect(
             &dsn,
             &PoolOptions {
-                max_connections: 1,
+                max_connections: NonZeroU32::MIN,
                 application_name: "svc",
             },
         )

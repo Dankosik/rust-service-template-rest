@@ -4,7 +4,9 @@
 //! wrong type URI is what a client keys its retry policy off. `Code` is the
 //! stable machine-readable identity; status, title, and type URI derive from
 //! it. A code with no matching response in a service's contract is
-//! unreachable, not wrong.
+//! unreachable, not wrong. Connection-layer outcomes (hyper 431, the
+//! accept-cap close, a silent first-byte close) are not `Problem` values
+//! even when a matching `Code` exists in the catalog.
 //!
 //! The same types describe themselves in the OpenAPI document: `ToSchema`
 //! renders the `Problem` and `InvalidParam` schemas from the serializer, and
@@ -43,6 +45,8 @@ pub enum Code {
     Conflict,
     AlreadyExists,
     RequestEntityTooLarge,
+    /// Catalog identity for 431. The accept loop answers hyper-native 431
+    /// before routing; this code is not emitted as [`Problem`].
     RequestHeaderFieldsTooLarge,
     UnprocessableContent,
     TooManyRequests,
@@ -363,10 +367,13 @@ pub mod responses {
     #[response(content_type = "application/problem+json")]
     pub struct InternalServerError(pub Problem);
 
-    /// The problem responses every operation declares, because the transport
-    /// can answer any route with them regardless of the handler. Name this
-    /// type in `responses(...)` beside the operation's own answers; a new
-    /// shared status joins here once instead of in every operation.
+    /// The problem responses the OpenAPI document declares on every
+    /// operation as shared transport answers. The hardened chain emits
+    /// `Problem` for 413, 500, 503, 504, and 405 on registered routes; 400
+    /// is handler vocabulary. Header overflow is hyper-native 431 before
+    /// the router, not a `Problem`. Name this type in `responses(...)`
+    /// beside the operation's own answers; a new shared *Problem* status
+    /// joins here once instead of in every operation.
     #[derive(Debug, IntoResponses)]
     pub enum TransportProblemResponses {
         #[response(status = 400)]

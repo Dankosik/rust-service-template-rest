@@ -193,8 +193,10 @@ pub(crate) struct Plan<'a> {
     pub(crate) diagnostics: Option<Server>,
     pub(crate) cancel: CancellationToken,
     pub(crate) tracker: TaskTracker,
-    /// Closed after background tasks joined, so no task still holds a
-    /// connection when the pool waits for them to return.
+    /// Closed after tracked background tasks joined. HTTP connection tasks
+    /// are not in the tracker; `close` waits for any pooled connections they
+    /// still hold. Work that outlives close is dropped by
+    /// `runtime.shutdown_timeout`.
     pub(crate) postgres_pool: Option<PgPool>,
     pub(crate) tracer_provider: TracerProviderHandle,
     pub(crate) signals: &'a mut Signals,
@@ -226,12 +228,12 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         Ok(Drained::TimedOut {
             remaining_connections: remaining,
         }) => {
-            // The connections it gave up on are dropped by the runtime
-            // shutdown; the alternative is the same abrupt end at SIGKILL,
-            // minus the telemetry.
+            // Remaining HTTP connection tasks are not in TaskTracker. The
+            // next wait for pooled connections they still hold is
+            // `pool.close`; `runtime.shutdown_timeout` is the last drop.
             tracing::warn!(
                 remaining,
-                reason = "in_flight_requests_outlived_shutdown_timeout",
+                reason = "in_flight_requests_outlived_drain_budget",
                 "shutdown_forced"
             );
             degraded = true;

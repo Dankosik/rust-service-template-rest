@@ -36,7 +36,7 @@ alternatives they beat, are recorded at the end of this document.
    carry an explicit label. `/metrics` stays on the separate diagnostics
    listener owned by
    [Configuration Source Policy](../configuration-source-policy.md#opentelemetry-environment-policy),
-   which binds every interface and must be kept private by deployment.
+   which binds IPv4 all-interfaces (`0.0.0.0`) by default and must be kept private by deployment.
 
 ## The contract
 
@@ -67,7 +67,9 @@ regenerated fails everywhere tests run.
 3. Write the handler with `#[utoipa::path]`: `operation_id`, `summary`,
    `tag`, the extension, `security()` for a public operation, and every
    response. Name `infra_http::problem::responses::TransportProblemResponses`
-   in `responses(...)` for the shared `400`/`413`/`500` problems, reference
+   in `responses(...)` for the shared OpenAPI `400`/`413`/`500` Problems.
+   The hardened chain also emits Problem `503`/`504`/`405`; header overflow
+   is hyper-native `431`, not a Problem. Reference
    an operation-specific one as `(status = <code>, response = <Name>)`, and
    add a new component to `infra_http::problem::responses` only when a new
    status appears. Request and response types derive `ToSchema`;

@@ -26,12 +26,15 @@ use tokio_util::sync::CancellationToken;
 pub struct ServerOptions {
     /// Time a connection may take to deliver a complete request head. hyper
     /// restarts it whenever an HTTP/1 connection goes idle, so it is also
-    /// the keep-alive idle bound. Also bounds a client that connects and
-    /// sends nothing, which hyper's protocol sniff would otherwise leave
-    /// open forever.
+    /// the HTTP/1 keep-alive idle bound. Also bounds a client that connects
+    /// and sends nothing, which hyper's protocol sniff would otherwise leave
+    /// open forever. HTTP/2 idle uses a separate PING cadence, not this
+    /// value.
     pub header_read_timeout: Duration,
-    /// Read-buffer ceiling for one request head; overflow answers 431.
-    /// hyper refuses values below 8 KiB.
+    /// Read-buffer ceiling for one request head. HTTP/1 overflow answers
+    /// hyper-native 431 before the router (not a [`crate::Problem`]). HTTP/2
+    /// applies the same number as uncompressed header-list size.
+    /// hyper refuses HTTP/1 values below 8 KiB.
     pub max_header_bytes: usize,
     /// Accepted connections at once; `None` accepts without a bound.
     pub max_connections: Option<NonZeroU32>,
@@ -55,9 +58,11 @@ pub enum ServerError {
 pub enum Drained {
     /// Every connection closed inside the budget.
     Complete,
-    /// The budget expired with connections still open; they are dropped
-    /// when the runtime shuts down. `remaining_connections` is the count
-    /// at cancel, not after the wait.
+    /// The budget expired with connections still open. Those tasks are not
+    /// in the process `TaskTracker`. `pool.close` waits for any pooled
+    /// connections they still hold; the composition root's
+    /// `runtime.shutdown_timeout` is the last drop if they outlive close.
+    /// `remaining_connections` is the count at cancel, not after the wait.
     TimedOut { remaining_connections: usize },
 }
 
@@ -134,22 +139,31 @@ impl Drop for Server {
     }
 }
 
+/// hyper refuses an HTTP/1 read buffer below this size.
+const HYPER_MIN_HEADER_BUF: usize = 8 * 1024;
+/// Template HTTP/2 PING cadence. Independent of `header_read_timeout`,
+/// which is the HTTP/1 idle bound.
+const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
+const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
 fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
     let mut builder = auto::Builder::new(TokioExecutor::new());
     builder
         .http1()
         .timer(TokioTimer::new())
         .header_read_timeout(options.header_read_timeout)
-        .max_buf_size(options.max_header_bytes.max(8 * 1024))
+        .max_buf_size(options.max_header_bytes.max(HYPER_MIN_HEADER_BUF))
         .keep_alive(true);
     builder
         .http2()
         .timer(TokioTimer::new())
         .max_header_list_size(u32::try_from(options.max_header_bytes).unwrap_or(u32::MAX))
-        // HTTP/2 PING keep-alive is independent of `header_read_timeout`,
-        // which is the HTTP/1 idle bound.
-        .keep_alive_interval(Some(Duration::from_secs(20)))
-        .keep_alive_timeout(Duration::from_secs(20));
+        // HTTP/2 PING keep-alive is not `http.header_read_timeout`: that
+        // key is the HTTP/1 idle bound. `max_header_bytes` here is
+        // uncompressed HTTP/2 header-list size, not the HTTP/1 read buffer
+        // whose overflow is hyper-native 431.
+        .keep_alive_interval(Some(HTTP2_KEEP_ALIVE_INTERVAL))
+        .keep_alive_timeout(HTTP2_KEEP_ALIVE_TIMEOUT);
     builder
 }
 

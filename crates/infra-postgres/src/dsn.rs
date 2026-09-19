@@ -67,7 +67,9 @@ pub enum DsnError {
 }
 
 /// Modes the template admits: each has one TLS outcome, never a per-attempt
-/// negotiation (`allow` / `prefer`).
+/// negotiation (`allow` / `prefer`). `verify-ca` and `verify-full` use
+/// sqlx's rustls-aws-lc-rs webpki-roots bundle, not OS trust stores and not
+/// URL file parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::EnumString, strum::IntoStaticStr)]
 #[strum(serialize_all = "kebab-case")]
 enum AdmittedSslMode {
@@ -166,7 +168,12 @@ impl Dsn {
         let mut ssl_mode = None;
         for (key, value) in url.query_pairs() {
             match key.as_ref() {
-                "sslmode" if ssl_mode.is_none() => ssl_mode = Some(parse_ssl_mode(&value)?),
+                "sslmode" => {
+                    if ssl_mode.is_some() {
+                        return Err(DsnError::Parameter(bounded(&key)));
+                    }
+                    ssl_mode = Some(parse_ssl_mode(&value)?);
+                }
                 "service" | "servicefile" | "passfile" => {
                     return Err(DsnError::ServiceSource(bounded(&key)));
                 }
@@ -174,7 +181,6 @@ impl Dsn {
                 | "ssl-ca" | "sslpassword" | "sslcrl" => {
                     return Err(DsnError::TlsFileSource(bounded(&key)));
                 }
-                // Includes a repeated `sslmode`.
                 _ => return Err(DsnError::Parameter(bounded(&key))),
             }
         }
@@ -222,7 +228,9 @@ impl Dsn {
 
 /// `allow` and `prefer` negotiate TLS per attempt, so two connections from
 /// one pool could differ in what they protect; the policy admits only modes
-/// with one outcome.
+/// with one outcome. `verify-ca` / `verify-full` verify against webpki-roots
+/// shipped with sqlx's `tls-rustls-aws-lc-rs` feature; `sslrootcert` and
+/// other TLS file parameters are refused as a connection side channel.
 fn parse_ssl_mode(value: &str) -> Result<AdmittedSslMode, DsnError> {
     value.parse().map_err(|_| DsnError::SslMode)
 }

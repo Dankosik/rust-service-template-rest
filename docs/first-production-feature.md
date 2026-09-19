@@ -286,7 +286,7 @@ Replace the unresolved entries in [Production Contract](production-contract.md)
 with service-owned scope, dependency, capacity, durability, trust, SLO, and
 recovery decisions; keep promotion blocked until their owner supplies them.
 Prometheus exposition stays on the separate diagnostics listener, which
-binds every interface and must be kept private by deployment. Add
+binds IPv4 all-interfaces (`0.0.0.0`) and must be kept private by deployment. Add
 low-cardinality feature metrics or spans only where they answer an
 operational question ([Runtime Lifecycle](architecture/runtime-lifecycle.md),
 [Railway Deployment Profile](railway-deployment-profile.md)).

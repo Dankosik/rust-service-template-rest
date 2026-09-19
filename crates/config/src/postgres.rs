@@ -8,6 +8,8 @@
 //! as well; the pool size is the one capacity value without a universal
 //! safe answer, so it is the one an operator sets.
 
+use std::num::NonZeroU32;
+
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
@@ -44,6 +46,18 @@ impl PostgresConfig {
     #[must_use]
     pub fn has_dsn(&self) -> bool {
         !self.dsn.expose_secret().trim().is_empty()
+    }
+
+    /// Pool size for the adapter. [`Self::validate`] already rejects 0;
+    /// this is the typed form `connect` takes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same key as validation when the size is 0.
+    pub fn pool_max_connections(&self) -> Result<NonZeroU32, ValidationError> {
+        NonZeroU32::new(self.max_connections).ok_or_else(|| {
+            ValidationError::new("postgres.max_connections", "must be greater than 0")
+        })
     }
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {

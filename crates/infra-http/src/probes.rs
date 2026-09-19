@@ -14,9 +14,11 @@
 //! `x-security-decision` and its OpenAPI `security`; an empty `security()`
 //! renders `security: []`, the explicit public override the linter and the
 //! contract tests require. Beside its own answers, every operation declares
-//! [`TransportProblemResponses`]: the `400`, `413`, and `500` problems the
-//! transport can answer with on any route (`413` and `500` come from the
-//! hardened chain, not from these handlers).
+//! [`TransportProblemResponses`]: the OpenAPI group for shared transport
+//! Problems (`400`, `413`, `500`). The hardened chain also emits Problem
+//! `503`/`504`/`405`; header overflow is hyper-native `431` before routing,
+//! not a Problem (`413` and `500` come from the chain, not from these
+//! handlers).
 
 use axum::extract::State;
 use axum::http::StatusCode;

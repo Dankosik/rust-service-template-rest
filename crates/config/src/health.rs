@@ -17,9 +17,10 @@ pub struct HealthConfig {
     #[serde(with = "humantime_serde")]
     pub refresh_interval: Duration,
     /// Budget for one background readiness evaluation across every probe.
-    /// `/health/ready` itself never runs a probe.
-    #[serde(with = "humantime_serde")]
-    pub readiness_timeout: Duration,
+    /// `/health/ready` itself never runs a probe. The operator key remains
+    /// `health.readiness_timeout`.
+    #[serde(rename = "readiness_timeout", with = "humantime_serde")]
+    pub probe_budget: Duration,
     /// Consecutive failed evaluations before readiness flips off. One slow
     /// round-trip must not evict an instance that is still serving.
     pub failure_threshold: u32,
@@ -29,7 +30,7 @@ impl Default for HealthConfig {
     fn default() -> Self {
         Self {
             refresh_interval: Duration::from_secs(2),
-            readiness_timeout: Duration::from_secs(4),
+            probe_budget: Duration::from_secs(4),
             failure_threshold: 3,
         }
     }
@@ -45,7 +46,7 @@ impl HealthConfig {
         )?;
         duration_range(
             "health.readiness_timeout",
-            self.readiness_timeout,
+            self.probe_budget,
             Duration::from_millis(100),
             Duration::from_secs(30),
         )?;
