@@ -71,10 +71,14 @@ metrics-process = { version = "2.4.3", default-features = false }
 tokio-metrics = { version = "0.5.2", default-features = false }
 thiserror = { version = "2.0.20", default-features = false }
 
+strum = { version = "0.28.0", default-features = false }
+
 # Build metadata
 vergen-gitcl = { version = "10.0.3", default-features = false }
 
 # Test support
+axum-test = { version = "21.1.0", default-features = false }
+rstest = { version = "0.27.0", default-features = false }
 futures-util = { version = "0.3", default-features = false }
 tempfile = "3"
 nix = { version = "0.31.3", default-features = false }

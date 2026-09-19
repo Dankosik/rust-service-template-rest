@@ -64,6 +64,11 @@ features off; the crate enables what it uses. Add the crate to the workspace
 table too (`greeting = { path = "crates/greeting" }` under the workspace
 crates in `Cargo.toml`).
 
+Consult [Backend library selection](backend-library-selection.md) before
+adding validators, serialization adapters, builders, persistence machinery or
+outbound clients. It distinguishes adopted test helpers from choices that
+need a real feature; do not install the deferred libraries speculatively.
+
 ```rust
 // crates/greeting/src/lib.rs
 pub mod http;
@@ -196,6 +201,12 @@ Test the operation as a caller sees it, with `tower::ServiceExt::oneshot`
 against `router::<()>().split_for_parts().0`: status, `Content-Type`, body,
 and for the failure the problem `code`. The walkthrough's two tests are
 `greets_with_json` and `reserved_name_is_a_not_found_problem`.
+
+For new ordinary router tests, the workspace now provides `axum-test` as a
+dev-dependency: `TestServer::new(router::<()>().split_for_parts().0)` uses the
+in-process transport. The hardened-chain tests demonstrate request, header,
+status and JSON assertions. Keep the direct `oneshot` form above where raw
+bodies, framing, concurrency or response extensions are the subject.
 
 ## 4. Merge the router in the composition root
 

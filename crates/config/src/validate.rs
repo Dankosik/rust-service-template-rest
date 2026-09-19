@@ -77,16 +77,40 @@ pub(crate) fn socket_addr(key: &str, value: &str) -> Result<std::net::SocketAddr
 mod tests {
     use super::*;
 
-    #[test]
-    fn socket_addr_accepts_go_style_port_only() {
+    #[rstest::rstest]
+    #[case::port_only(":8080", "0.0.0.0:8080")]
+    #[case::ipv6("[::1]:9000", "[::1]:9000")]
+    #[case::ipv4("127.0.0.1:8080", "127.0.0.1:8080")]
+    #[case::trimmed("  :8080  ", "0.0.0.0:8080")]
+    fn socket_addr_accepts_supported_forms(#[case] input: &str, #[case] expected: &str) {
         assert_eq!(
-            socket_addr("k", ":8080").unwrap(),
-            "0.0.0.0:8080".parse().unwrap()
+            socket_addr("k", input).unwrap(),
+            expected.parse::<std::net::SocketAddr>().unwrap()
         );
-        assert_eq!(
-            socket_addr("k", "[::1]:9000").unwrap(),
-            "[::1]:9000".parse().unwrap()
+    }
+
+    #[rstest::rstest]
+    #[case::below_minimum(0, false)]
+    #[case::minimum(1, true)]
+    #[case::maximum(10, true)]
+    #[case::above_maximum(11, false)]
+    fn int_range_is_inclusive(#[case] value: u64, #[case] valid: bool) {
+        assert_eq!(int_range("limit", value, 1, 10).is_ok(), valid);
+    }
+
+    #[rstest::rstest]
+    #[case::below_minimum(99, false)]
+    #[case::minimum(100, true)]
+    #[case::maximum(600_000, true)]
+    #[case::above_maximum(600_001, false)]
+    fn duration_range_is_inclusive(#[case] milliseconds: u64, #[case] valid: bool) {
+        let result = duration_range(
+            "http.request_timeout",
+            Duration::from_millis(milliseconds),
+            Duration::from_millis(100),
+            Duration::from_secs(600),
         );
+        assert_eq!(result.is_ok(), valid);
     }
 
     #[test]

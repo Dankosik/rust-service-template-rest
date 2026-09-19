@@ -20,7 +20,9 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 /// Stable machine-readable failure code a client matches on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// `Serialize` is manual via [`Code::as_str`]: `InternalServerError`'s wire
+/// token is `internal_error`, not serde `snake_case`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, strum::VariantArray)]
 pub enum Code {
     BadRequest,
     Unauthorized,
@@ -48,22 +50,7 @@ pub const AT_CAPACITY_DETAIL: &str = "server is at capacity";
 
 impl Code {
     /// Every published code, for catalog rendering and coverage tests.
-    pub const ALL: &'static [Code] = &[
-        Code::BadRequest,
-        Code::Unauthorized,
-        Code::Forbidden,
-        Code::NotFound,
-        Code::MethodNotAllowed,
-        Code::Conflict,
-        Code::AlreadyExists,
-        Code::RequestEntityTooLarge,
-        Code::RequestHeaderFieldsTooLarge,
-        Code::UnprocessableContent,
-        Code::TooManyRequests,
-        Code::InternalServerError,
-        Code::ServiceUnavailable,
-        Code::GatewayTimeout,
-    ];
+    pub const ALL: &'static [Code] = <Self as strum::VariantArray>::VARIANTS;
 
     /// The `snake_case` wire form.
     #[must_use]

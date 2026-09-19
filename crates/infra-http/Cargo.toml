@@ -21,6 +21,7 @@ hyper-util = { workspace = true, features = ["server", "server-auto", "server-gr
 metrics = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
+strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
 tokio-util = { workspace = true }
@@ -31,6 +32,7 @@ utoipa = { workspace = true, features = ["macros"] }
 utoipa-axum = { workspace = true }
 
 [dev-dependencies]
+axum-test = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util"] }
 tower = { workspace = true, features = ["util"] }

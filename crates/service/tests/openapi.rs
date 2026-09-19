@@ -219,8 +219,24 @@ fn probe_operations_declare_the_shared_problem_responses() {
 /// The classifier fails closed on every alternative that is not exactly the
 /// wired bearer scheme, so a protected operation cannot slip through with
 /// an anonymous or unsupported path.
-#[test]
-fn bearer_security_alternatives_fail_closed() {
+#[rstest::rstest]
+#[case::inherited_bearer(&json!({}), false, true)]
+#[case::explicit_bearer(&json!({"security": [{"bearerAuth": []}]}), false, true)]
+#[case::explicit_public(&json!({"security": []}), true, false)]
+#[case::anonymous_alternative(&json!({"security": [{"bearerAuth": []}, {}]}), false, false)]
+#[case::unauthorized_scopes(&json!({"security": [{"bearerAuth": ["admin"]}]}), false, false)]
+#[case::unknown_scheme(&json!({"security": [{"missingAuth": []}]}), false, false)]
+#[case::unsupported_alternative(&json!({"security": [{"apiKeyAuth": []}]}), false, false)]
+#[case::unsupported_and_requirement(
+    &json!({"security": [{"bearerAuth": [], "apiKeyAuth": []}]}),
+    false,
+    false
+)]
+fn bearer_security_alternatives_fail_closed(
+    #[case] operation: &Value,
+    #[case] public: bool,
+    #[case] protected: bool,
+) {
     let document = json!({
         "components": {"securitySchemes": {
             "bearerAuth": {"type": "http", "scheme": "bearer"},
@@ -228,52 +244,6 @@ fn bearer_security_alternatives_fail_closed() {
         }},
         "security": [{"bearerAuth": []}]
     });
-    let cases: &[(&str, Value, bool, bool)] = &[
-        ("inherited bearer", json!({}), false, true),
-        (
-            "explicit bearer",
-            json!({"security": [{"bearerAuth": []}]}),
-            false,
-            true,
-        ),
-        ("explicit public", json!({"security": []}), true, false),
-        (
-            "anonymous alternative",
-            json!({"security": [{"bearerAuth": []}, {}]}),
-            false,
-            false,
-        ),
-        (
-            "bearer scopes are not authorized",
-            json!({"security": [{"bearerAuth": ["admin"]}]}),
-            false,
-            false,
-        ),
-        (
-            "unknown scheme",
-            json!({"security": [{"missingAuth": []}]}),
-            false,
-            false,
-        ),
-        (
-            "unsupported alternative",
-            json!({"security": [{"apiKeyAuth": []}]}),
-            false,
-            false,
-        ),
-        (
-            "unsupported AND requirement",
-            json!({"security": [{"bearerAuth": [], "apiKeyAuth": []}]}),
-            false,
-            false,
-        ),
-    ];
-    for (name, operation, public, protected) in cases {
-        assert_eq!(is_public(&document, operation), *public, "{name}: public");
-        assert_eq!(
-            uses_bearer_only(&document, operation),
-            *protected,
-            "{name}: bearer only"
-        );
-    }
+    assert_eq!(is_public(&document, operation), public);
+    assert_eq!(uses_bearer_only(&document, operation), protected);
 }
