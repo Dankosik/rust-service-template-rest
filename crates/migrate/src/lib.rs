@@ -284,9 +284,7 @@ async fn applied_summary(
     conn: &mut PgConnection,
     migrator: &Migrator,
 ) -> Result<(Option<i64>, usize), MigrateError> {
-    let applied = conn
-        .list_applied_migrations(&migrator.table_name)
-        .await?;
+    let applied = conn.list_applied_migrations(&migrator.table_name).await?;
     Ok((
         applied.iter().map(|migration| migration.version).max(),
         applied.len(),

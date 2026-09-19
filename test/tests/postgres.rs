@@ -20,8 +20,8 @@ use infra_postgres::{
 };
 use integration_tests::{dsn_for, fixture_dir};
 use migrate::{MIGRATOR, RunError, RunOptions, Stage};
-use sqlx::migrate::{Migrate, MigrateError, Migrator};
 use sqlx::Executor;
+use sqlx::migrate::{Migrate, MigrateError, Migrator};
 
 const APP: &str = "integration-tests";
 

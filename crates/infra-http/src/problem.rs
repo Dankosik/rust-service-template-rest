@@ -326,10 +326,9 @@ impl IntoResponse for Problem {
         )
             .into_response();
         if let Some(after) = retry_after {
-            response.headers_mut().insert(
-                RETRY_AFTER,
-                HeaderValue::from(after.as_secs().max(1)),
-            );
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from(after.as_secs().max(1)));
         }
         response
     }
