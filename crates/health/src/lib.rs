@@ -114,7 +114,7 @@ pub(crate) struct Snapshot {
 /// Readiness owner: holds the probes and publishes snapshots.
 #[derive(Clone, Debug)]
 pub struct Readiness {
-    tx: Arc<watch::Sender<Snapshot>>,
+    tx: watch::Sender<Snapshot>,
     probes: Arc<Vec<Box<dyn Probe>>>,
 }
 
@@ -135,13 +135,12 @@ impl Readiness {
     /// [`Readiness::refresh`] or [`Readiness::refresh_until`] runs.
     #[must_use]
     pub fn new(probes: Vec<Box<dyn Probe>>) -> Self {
-        let (tx, _rx) = watch::channel(Snapshot {
-            draining: false,
-            evaluation: None,
-            stale_after: None,
-        });
         Self {
-            tx: Arc::new(tx),
+            tx: watch::Sender::new(Snapshot {
+                draining: false,
+                evaluation: None,
+                stale_after: None,
+            }),
             probes: Arc::new(probes),
         }
     }
@@ -179,13 +178,13 @@ impl Readiness {
         };
         let evaluated_at = Instant::now();
         self.tx.send_modify(|snapshot| {
-            let previous = snapshot.evaluation.clone();
-            snapshot.evaluation = Some(fold_evaluation(
-                previous.as_ref(),
+            let next = fold_evaluation(
+                snapshot.evaluation.as_ref(),
                 &observed,
                 policy,
                 evaluated_at,
-            ));
+            );
+            snapshot.evaluation = Some(next);
         });
     }
 
@@ -391,6 +390,18 @@ mod tests {
             1,
             "verdict() must not run probes"
         );
+    }
+
+    #[tokio::test]
+    async fn cloned_owner_preserves_updates_without_readers() {
+        let (readiness, _, _) = flaky(true);
+        let other = readiness.clone();
+        readiness.refresh(policy()).await;
+        assert_eq!(other.reader().verdict(), Ok(()));
+
+        drop(readiness);
+        other.start_drain();
+        assert_eq!(other.reader().verdict(), Err(NotReady::Draining));
     }
 
     #[tokio::test]

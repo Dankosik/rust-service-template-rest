@@ -33,9 +33,7 @@ impl Service {
             .env("APP__LOG__FORMAT", "json")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        for (key, value) in env {
-            command.env(key, value);
-        }
+        command.envs(env.iter().copied());
         let mut child = command.spawn().expect("spawn service binary");
         let stdout = child.stdout.take().expect("piped stdout");
         let (tx, lines) = mpsc::channel();

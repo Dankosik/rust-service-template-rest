@@ -239,18 +239,18 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<RunRes
         // `unlock` below releases ours.
         conn.lock().await?;
         conn.ensure_migrations_table(&migrator.table_name).await?;
-        let before = applied_versions(&mut conn, migrator).await?;
-        observed.before = before.last().copied();
+        let (before, before_count) = applied_summary(&mut conn, migrator).await?;
+        observed.before = before;
         migrator.run(&mut conn).await?;
-        let after = applied_versions(&mut conn, migrator).await?;
+        let (after, after_count) = applied_summary(&mut conn, migrator).await?;
         conn.unlock().await?;
-        Ok::<_, MigrateError>((before, after))
+        Ok::<_, MigrateError>((after, after_count.saturating_sub(before_count)))
     })
     .await;
     // Dropping the connection on any failure ends the session and, with it,
     // the advisory lock and any open transaction.
-    let (before, after) = match outcome {
-        Ok(Ok(versions)) => versions,
+    let (after, applied) = match outcome {
+        Ok(Ok(summary)) => summary,
         Ok(Err(source)) => {
             return Err(fail(
                 RunError::Migrate {
@@ -272,26 +272,23 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<RunRes
     let _ = conn.close().await;
 
     Ok(RunResult {
-        after: after.last().copied(),
-        applied: after.len().saturating_sub(before.len()),
+        after,
+        applied,
         duration: started.elapsed(),
         ..observed
     })
 }
 
-/// Applied versions in ascending order.
-async fn applied_versions(
+/// Highest applied version and count, independent of history row order.
+async fn applied_summary(
     conn: &mut PgConnection,
     migrator: &Migrator,
-) -> Result<Vec<i64>, MigrateError> {
-    let mut versions: Vec<i64> = conn
-        .list_applied_migrations(&migrator.table_name)
-        .await?
-        .into_iter()
-        .map(|applied| applied.version)
-        .collect();
-    versions.sort_unstable();
-    Ok(versions)
+) -> Result<(Option<i64>, usize), MigrateError> {
+    let applied = conn.list_applied_migrations(&migrator.table_name).await?;
+    Ok((
+        applied.iter().map(|migration| migration.version).max(),
+        applied.len(),
+    ))
 }
 
 // `ExecuteMigration` and `_` both yield `Execute`; the named arm is the
@@ -385,10 +382,6 @@ mod tests {
         )
     }
 
-    fn migrator(migrations: Vec<Migration>) -> Migrator {
-        Migrator::with_migrations(migrations)
-    }
-
     #[test]
     fn the_embedded_set_follows_the_template_rules() {
         validate_source(&MIGRATOR).unwrap();
@@ -396,7 +389,7 @@ mod tests {
 
     #[test]
     fn canonical_simple_migrations_pass() {
-        let m = migrator(vec![
+        let m = Migrator::with_migrations(vec![
             migration(
                 20_260_918_120_000,
                 "create widgets",
@@ -447,7 +440,7 @@ mod tests {
         ];
         for (bad, expected) in cases {
             let version = bad.version;
-            let err = validate_source(&migrator(vec![bad])).unwrap_err();
+            let err = validate_source(&Migrator::with_migrations(vec![bad])).unwrap_err();
             assert!(err.contains(expected), "{err}");
             assert!(err.contains(&version.to_string()), "{err}");
         }

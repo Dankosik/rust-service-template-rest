@@ -34,7 +34,7 @@ impl Default for PostgresConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            dsn: SecretString::from(String::new()),
+            dsn: SecretString::default(),
             max_connections: 4,
         }
     }

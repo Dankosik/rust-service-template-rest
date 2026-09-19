@@ -109,7 +109,7 @@ impl Default for OtelConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct OtelExporterConfig {
     /// OTLP/HTTP traces endpoint. A collector root without a path resolves
@@ -119,15 +119,6 @@ pub struct OtelExporterConfig {
     pub otlp_endpoint: String,
     /// Collector credential as `key=value,key=value`. Environment only.
     pub otlp_headers: SecretString,
-}
-
-impl Default for OtelExporterConfig {
-    fn default() -> Self {
-        Self {
-            otlp_endpoint: String::new(),
-            otlp_headers: SecretString::from(String::new()),
-        }
-    }
 }
 
 impl OtelExporterConfig {

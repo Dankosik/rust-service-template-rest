@@ -20,8 +20,8 @@ use infra_postgres::{
 };
 use integration_tests::{dsn_for, fixture_dir};
 use migrate::{MIGRATOR, RunError, RunOptions, Stage};
+use sqlx::Executor;
 use sqlx::migrate::{Migrate, MigrateError, Migrator};
-use sqlx::{Executor, Row};
 
 const APP: &str = "integration-tests";
 
@@ -44,7 +44,7 @@ async fn show(pool: &PgPool, setting: &'static str) -> String {
         "application_name" => "SHOW application_name",
         other => panic!("unexpected setting {other}"),
     };
-    sqlx::query(sql).fetch_one(pool).await.unwrap().get(0)
+    sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
 }
 
 async fn fixture(name: &str) -> Migrator {
@@ -64,23 +64,12 @@ async fn applied_count(pool: &PgPool) -> i64 {
         .unwrap()
 }
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::From)]
 enum AppError {
     Tx(TxError),
     Query(sqlx::Error),
+    #[from(skip)]
     Business,
-}
-
-impl From<TxError> for AppError {
-    fn from(err: TxError) -> Self {
-        Self::Tx(err)
-    }
-}
-
-impl From<sqlx::Error> for AppError {
-    fn from(err: sqlx::Error) -> Self {
-        Self::Query(err)
-    }
 }
 
 #[sqlx::test(migrations = false)]

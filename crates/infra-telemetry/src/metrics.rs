@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
-use axum::http::HeaderValue;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -109,10 +108,9 @@ pub fn diagnostics_router(metrics: Metrics) -> Router {
 }
 
 async fn render(State(metrics): State<Metrics>) -> Response {
-    let mut response = metrics.render().into_response();
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
-    );
-    response
+    (
+        [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        metrics.render(),
+    )
+        .into_response()
 }

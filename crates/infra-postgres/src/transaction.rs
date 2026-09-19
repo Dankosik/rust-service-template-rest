@@ -159,11 +159,8 @@ fn commit_definitely_failed(code: &str) -> bool {
     code.starts_with("23") || (code.starts_with("40") && code != "40003")
 }
 
-fn sqlstate(err: &sqlx::Error) -> Option<String> {
-    match err {
-        sqlx::Error::Database(db) => db.code().map(std::borrow::Cow::into_owned),
-        _ => None,
-    }
+fn sqlstate(err: &sqlx::Error) -> Option<std::borrow::Cow<'_, str>> {
+    err.as_database_error()?.code()
 }
 
 #[cfg(test)]

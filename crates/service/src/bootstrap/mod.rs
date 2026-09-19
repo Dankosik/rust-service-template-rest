@@ -331,9 +331,7 @@ fn tracing_options(config: &Config, instance_id: String) -> TracingOptions {
         deployment_environment: config.app.env.clone(),
         sampler,
         otlp_endpoint: otel.exporter.otlp_endpoint.clone(),
-        otlp_headers: secrecy::SecretString::from(
-            otel.exporter.otlp_headers.expose_secret().to_owned(),
-        ),
+        otlp_headers: otel.exporter.otlp_headers.clone(),
     }
 }
 
