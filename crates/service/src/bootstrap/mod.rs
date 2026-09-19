@@ -21,7 +21,9 @@ use infra_telemetry::{
     diagnostics_router, install_subscriber, install_tracer_provider,
 };
 use secrecy::ExposeSecret;
-use service_config::{AppConfig, BuildInfo, Config, LoadOptions, LogFormat, TracesSampler};
+use service_config::{
+    AppConfig, BuildInfo, Config, FromArgs, LoadOptions, LogFormat, TracesSampler, process_failure,
+};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -72,22 +74,22 @@ where
     I: IntoIterator<Item = OsString>,
 {
     let options = match LoadOptions::from_args(args) {
-        Ok(options) => options,
-        Err(code) => return code,
+        FromArgs::Run(options) => options,
+        FromArgs::Exit(code) => return code,
     };
     let config = match service_config::load(&options, BUILD_INFO) {
         Ok(config) => config,
-        Err(err) => return startup_failure(&err.to_string()),
+        Err(err) => return process_failure(&err.to_string()),
     };
     if let Err(err) = shutdown::validate_grace_budget(&config.http) {
-        return startup_failure(&err.to_string());
+        return process_failure(&err.to_string());
     }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
         Ok(runtime) => runtime,
-        Err(err) => return startup_failure(&format!("build tokio runtime: {err}")),
+        Err(err) => return process_failure(&format!("build tokio runtime: {err}")),
     };
 
     let outcome = runtime.block_on(serve(config));
@@ -100,17 +102,9 @@ where
         Err(err) => {
             // The subscriber may or may not be installed; report both ways.
             tracing::error!(error = %err, "startup failed");
-            startup_failure(&err.to_string())
+            process_failure(&err.to_string())
         }
     }
-}
-
-fn startup_failure(message: &str) -> ExitCode {
-    #[allow(clippy::print_stderr)]
-    {
-        eprintln!("{message}");
-    }
-    ExitCode::FAILURE
 }
 
 async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
@@ -178,7 +172,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     let readiness = Readiness::new(probes);
     let policy = RefreshPolicy {
         interval: config.health.refresh_interval,
-        probe_budget: config.health.readiness_timeout,
+        probe_budget: config.health.probe_budget,
         failure_threshold: config.health.failure_threshold,
     };
 
@@ -204,7 +198,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
 }
 
 async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
-    let dsn = Dsn::parse(config.postgres.dsn.expose_secret())?;
+    let dsn = Dsn::parse(config.postgres.required_dsn()?.expose_secret())?;
     let pool = infra_postgres::connect(
         &dsn,
         &PoolOptions {
@@ -225,6 +219,11 @@ async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
 }
 
 /// Runtime pieces built before listeners bind: admission, then serve.
+///
+/// `cancel`, `tracker`, and `postgres_pool` are shared clones: `serve` still
+/// owns `close_opened_dependencies` on the error path. `tracer_provider` and
+/// `metrics` are unique moves; Drop in this callee is enough on `Err`, and
+/// success transfers them into [`shutdown::Plan`].
 struct Prepared<'a> {
     config: &'a Config,
     signals: &'a mut Signals,
@@ -279,8 +278,8 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
             log_health_probes: config.http.access_log_health_probes,
         },
     );
-    let api = Server::bind(config.http.listen_addr()?, app, server_options).await?;
-    tracing::info!(addr = %api.local_addr(), "http listener bound");
+    let app_listener = Server::bind(config.http.listen_addr()?, app, server_options).await?;
+    tracing::info!(addr = %app_listener.local_addr(), "http listener bound");
 
     let diagnostics = match config.observability.metrics.listen_addr()? {
         None => None,
@@ -296,9 +295,9 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
     signals.wait().await;
 
     Ok(shutdown::run(shutdown::Plan {
-        http: &config.http,
+        http_config: &config.http,
         readiness: &readiness,
-        api,
+        app_listener,
         diagnostics,
         cancel,
         tracker,
@@ -333,7 +332,7 @@ fn tracing_options(config: &Config, instance_id: String) -> TracingOptions {
         deployment_environment: config.app.env.clone(),
         sampler,
         otlp_endpoint: otel.exporter.otlp_endpoint.clone(),
-        otlp_headers: otel.exporter.otlp_headers.clone(),
+        otlp_headers: otel.exporter.otlp_headers.clone().unwrap_or_default(),
     }
 }
 
@@ -345,7 +344,10 @@ fn log_startup_summary(config: &Config, exporter: &ExporterState) {
             "trace exporter degraded; spans are recorded but not exported"
         ),
         ExporterState::Initialized { endpoint_source } => {
-            tracing::info!(endpoint_source, "trace exporter initialized");
+            tracing::info!(
+                endpoint_source = endpoint_source.as_str(),
+                "trace exporter initialized"
+            );
         }
         ExporterState::Disabled => {}
     }
@@ -355,7 +357,7 @@ fn log_startup_summary(config: &Config, exporter: &ExporterState) {
         app.commit = %config.app.commit,
         http.addr = %config.http.addr,
         http.request_timeout = ?config.http.request_timeout,
-        http.shutdown_timeout = ?config.http.shutdown_timeout,
+        http.drain_timeout = ?config.http.drain_timeout,
         http.grace_period = ?config.http.grace_period,
         observability.metrics.addr = %config.observability.metrics.addr,
         postgres.enabled = config.postgres.enabled,

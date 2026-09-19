@@ -4,21 +4,15 @@
 use std::io::Write;
 use std::process::ExitCode;
 
+use service_config::process_failure;
+
 fn main() -> ExitCode {
     let rendered = match service::api::render() {
         Ok(rendered) => rendered,
-        Err(err) => return failure(&format!("render OpenAPI document: {err}")),
+        Err(err) => return process_failure(&format!("render OpenAPI document: {err}")),
     };
     match std::io::stdout().write_all(rendered.as_bytes()) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(err) => failure(&format!("write OpenAPI document: {err}")),
+        Err(err) => process_failure(&format!("write OpenAPI document: {err}")),
     }
-}
-
-fn failure(message: &str) -> ExitCode {
-    #[allow(clippy::print_stderr)] // The process's only failure channel.
-    {
-        eprintln!("{message}");
-    }
-    ExitCode::FAILURE
 }

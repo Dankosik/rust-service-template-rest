@@ -1,6 +1,6 @@
 //! Diagnostics listener and OpenTelemetry trace export.
 
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::validate::{ValidationError, non_empty, socket_addr};
@@ -87,17 +87,20 @@ pub struct OtelExporterConfig {
     /// OTLP/HTTP traces endpoint. A collector root without a path resolves
     /// to `/v1/traces`. Empty falls back to the standard
     /// `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `OTEL_EXPORTER_OTLP_ENDPOINT`
-    /// variables; when none is set, the exporter stays disabled.
+    /// variables; when those variables are unset (not merely empty), the
+    /// exporter stays disabled.
     pub otlp_endpoint: String,
     /// Collector credential as `key=value,key=value`. Environment only.
-    pub otlp_headers: SecretString,
+    /// Missing, empty, or whitespace-only is absent (`None`).
+    #[serde(default, deserialize_with = "crate::secret_policy::occupied_secret")]
+    pub otlp_headers: Option<SecretString>,
 }
 
 impl OtelExporterConfig {
     /// Whether a typed credential is configured.
     #[must_use]
     pub fn has_headers(&self) -> bool {
-        !self.otlp_headers.expose_secret().trim().is_empty()
+        self.otlp_headers.is_some()
     }
 }
 
@@ -170,7 +173,9 @@ mod tests {
     #[test]
     fn headers_never_appear_in_debug_output() {
         let cfg = OtelExporterConfig {
-            otlp_headers: SecretString::from("authorization=Bearer topsecret".to_owned()),
+            otlp_headers: Some(SecretString::from(
+                "authorization=Bearer topsecret".to_owned(),
+            )),
             ..OtelExporterConfig::default()
         };
         let rendered = format!("{cfg:?}");

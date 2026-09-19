@@ -28,7 +28,7 @@ impl Service {
             .env("APP__HTTP__ADDR", "127.0.0.1:0")
             .env("APP__OBSERVABILITY__METRICS__ADDR", "127.0.0.1:0")
             .env("APP__HTTP__READINESS_PROPAGATION_DELAY", "300ms")
-            .env("APP__HTTP__SHUTDOWN_TIMEOUT", "3s")
+            .env("APP__HTTP__DRAIN_TIMEOUT", "3s")
             .env("APP__HTTP__REQUEST_TIMEOUT", "2s")
             .env("APP__LOG__FORMAT", "json")
             .stdout(Stdio::piped())
@@ -190,7 +190,7 @@ fn unknown_key_and_malformed_env_exit_one() {
 fn grace_period_must_cover_the_teardown_tail() {
     let (code, stderr) = Service::spawn(&[
         ("APP__HTTP__GRACE_PERIOD", "10s"),
-        ("APP__HTTP__SHUTDOWN_TIMEOUT", "5s"),
+        ("APP__HTTP__DRAIN_TIMEOUT", "5s"),
     ])
     .wait();
     assert_eq!(code, Some(1));

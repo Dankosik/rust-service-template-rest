@@ -10,9 +10,10 @@
 
 use std::num::NonZeroU32;
 
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::Deserialize;
 
+use crate::secret_policy::occupied_secret;
 use crate::validate::{ValidationError, int_range};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -22,8 +23,10 @@ pub struct PostgresConfig {
     /// readiness.
     pub enabled: bool,
     /// `postgres://user:password@host:port/database?sslmode=<mode>`.
-    /// Environment only (`APP__POSTGRES__DSN`).
-    pub dsn: SecretString,
+    /// Environment only (`APP__POSTGRES__DSN`). Missing, empty, or
+    /// whitespace-only is absent (`None`); `enabled` is a separate axis.
+    #[serde(default, deserialize_with = "occupied_secret")]
+    pub dsn: Option<SecretString>,
     /// Upper bound on pooled connections. Size it from the database's
     /// `max_connections` divided across every instance and job that shares
     /// the database, not from the service's concurrency.
@@ -34,7 +37,7 @@ impl Default for PostgresConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            dsn: SecretString::default(),
+            dsn: None,
             max_connections: 4,
         }
     }
@@ -45,7 +48,18 @@ impl PostgresConfig {
     /// persistence crate, which owns the admission rules.
     #[must_use]
     pub fn has_dsn(&self) -> bool {
-        !self.dsn.expose_secret().trim().is_empty()
+        self.dsn.is_some()
+    }
+
+    /// The occupied DSN, or the same validation error `enabled` uses.
+    ///
+    /// # Errors
+    ///
+    /// Returns `postgres.dsn` when the value is absent.
+    pub fn required_dsn(&self) -> Result<&SecretString, ValidationError> {
+        self.dsn.as_ref().ok_or_else(|| {
+            ValidationError::new("postgres.dsn", "is required when postgres.enabled = true")
+        })
     }
 
     /// Pool size for the adapter. [`Self::validate`] already rejects 0;
@@ -61,11 +75,8 @@ impl PostgresConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        if self.enabled && !self.has_dsn() {
-            return Err(ValidationError::new(
-                "postgres.dsn",
-                "is required when postgres.enabled = true",
-            ));
+        if self.enabled {
+            self.required_dsn()?;
         }
         int_range(
             "postgres.max_connections",
@@ -98,13 +109,16 @@ mod tests {
         };
         let err = config.validate().unwrap_err();
         assert_eq!(err.key, "postgres.dsn");
+        assert!(PostgresConfig::default().required_dsn().is_err());
     }
 
     #[test]
     fn a_disabled_profile_may_keep_its_dsn_placeholder() {
         let config = PostgresConfig {
             enabled: false,
-            dsn: SecretString::from("postgres://u:p@h:5432/d?sslmode=require".to_owned()),
+            dsn: Some(SecretString::from(
+                "postgres://u:p@h:5432/d?sslmode=require".to_owned(),
+            )),
             ..PostgresConfig::default()
         };
         config.validate().unwrap();
@@ -125,7 +139,9 @@ mod tests {
     #[test]
     fn debug_output_redacts_the_dsn() {
         let config = PostgresConfig {
-            dsn: SecretString::from("postgres://u:hunter2@h:5432/d?sslmode=require".to_owned()),
+            dsn: Some(SecretString::from(
+                "postgres://u:hunter2@h:5432/d?sslmode=require".to_owned(),
+            )),
             ..PostgresConfig::default()
         };
         let rendered = format!("{config:?}");

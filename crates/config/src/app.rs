@@ -41,12 +41,12 @@ pub struct AppConfig {
     pub commit: String,
     /// Replica identity published as `service.instance.id`.
     ///
-    /// `None` (missing or empty wire value) is occupancy: the composition
-    /// root fills the hostname (the pod name on Kubernetes). Version and
-    /// commit empty sentinels are replaced from [`BuildInfo`] before
-    /// validation; this field is not. Without an instance identity every
-    /// replica pushes the same resource and their cumulative counters
-    /// collide into one series.
+    /// `None` (missing, empty, or whitespace-only wire value) is a vacant
+    /// replica id: the composition root fills the hostname (the pod name on
+    /// Kubernetes). Version and commit empty sentinels are replaced from
+    /// [`BuildInfo`] before validation; this field is not. Without an
+    /// instance identity every replica pushes the same resource and their
+    /// cumulative counters collide into one series.
     #[serde(default, deserialize_with = "occupied_string")]
     pub instance_id: Option<String>,
 }
@@ -80,7 +80,7 @@ impl AppConfig {
     }
 }
 
-/// Missing, empty, or whitespace-only replica id is occupancy (`None`).
+/// Missing, empty, or whitespace-only replica id is vacant (`None`).
 fn occupied_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,

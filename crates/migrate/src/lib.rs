@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use infra_postgres::{ACQUIRE_TIMEOUT, Dsn, connect_session, to_runtime_param};
+use infra_postgres::{ACQUIRE_TIMEOUT, Dsn, SessionOptions, connect_session, to_runtime_param};
 use sqlx::Connection;
 use sqlx::migrate::{Migrate, MigrateError, MigrationType, Migrator};
 use sqlx::postgres::PgConnection;
@@ -21,16 +21,19 @@ use sqlx::postgres::PgConnection;
 /// The repository's migration set.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
-/// Bound on the whole run: connect, lock, every pending migration.
+/// Bound on lock, history, and every pending migration after a live session
+/// exists. Connect is a separate [`ACQUIRE_TIMEOUT`] and is not inside this
+/// value.
 pub const DEADLINE: Duration = Duration::from_secs(300);
 /// Session `statement_timeout` for the migration connection. DDL on a
-/// large table legitimately runs longer than a request; the deadline above
-/// still bounds the run.
-pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(120);
+/// large table legitimately runs longer than a request; [`DEADLINE`] still
+/// bounds the run after connect.
+pub const MIGRATION_STATEMENT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Session `idle_in_transaction_session_timeout` for the migration
-/// connection. Same duration as [`STATEMENT_TIMEOUT`] by policy, kept
-/// separate so a later edit of one setting does not silently retune the other.
-pub const IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(120);
+/// connection. Same duration as [`MIGRATION_STATEMENT_TIMEOUT`] by policy,
+/// kept separate so a later edit of one setting does not silently retune
+/// the other.
+pub const MIGRATION_IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(120);
 /// Session `lock_timeout`, which also bounds the wait for the advisory
 /// session lock another migrator may hold.
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
@@ -168,8 +171,8 @@ impl<'a> RunOptions<'a> {
             dsn,
             application_name,
             deadline: DEADLINE,
-            statement_timeout: STATEMENT_TIMEOUT,
-            idle_in_transaction_timeout: IDLE_IN_TRANSACTION_TIMEOUT,
+            statement_timeout: MIGRATION_STATEMENT_TIMEOUT,
+            idle_in_transaction_timeout: MIGRATION_IDLE_IN_TRANSACTION_TIMEOUT,
             lock_timeout: LOCK_TIMEOUT,
         }
     }
@@ -205,16 +208,18 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<RunRes
         ACQUIRE_TIMEOUT,
         connect_session(
             options.dsn,
-            options.application_name,
-            options.statement_timeout,
-            options.idle_in_transaction_timeout,
-            &[
-                ("lock_timeout", lock_timeout.as_str()),
-                // `CREATE TABLE IF NOT EXISTS` on the history table raises a
-                // notice on every run after the first; the terminal record is
-                // the operator's evidence, not the server's chatter.
-                ("client_min_messages", "warning"),
-            ],
+            &SessionOptions {
+                application_name: options.application_name,
+                statement_timeout: options.statement_timeout,
+                idle_in_transaction_timeout: options.idle_in_transaction_timeout,
+                extra: &[
+                    ("lock_timeout", lock_timeout.as_str()),
+                    // `CREATE TABLE IF NOT EXISTS` on the history table raises a
+                    // notice on every run after the first; the terminal record is
+                    // the operator's evidence, not the server's chatter.
+                    ("client_min_messages", "warning"),
+                ],
+            },
         ),
     )
     .await
@@ -291,33 +296,26 @@ async fn applied_summary(
     ))
 }
 
-// `ExecuteMigration` and `_` both yield `Execute`; the named arm is the
-// SQL-failed stage, `_` is only the non-exhaustive remainder.
-#[allow(clippy::match_same_arms)]
 fn stage_of(err: &MigrateError) -> Stage {
     match err {
         MigrateError::Source(_) => Stage::Source,
-        MigrateError::Execute(source) => execute_stage(source),
-        // `Execute` bookkeeping, dirty history, and version-mismatch variants.
-        MigrateError::Dirty(_)
+        // Bookkeeping `Execute`: lock wait, then I/O/TLS as connect, else history.
+        // `Execute` never maps to `Stage::Execute`; that word is named-file SQL.
+        MigrateError::Execute(sqlx::Error::Database(db))
+            if db.code().as_deref() == Some("55P03") =>
+        {
+            Stage::Lock
+        }
+        MigrateError::Execute(sqlx::Error::Io(_) | sqlx::Error::Tls(_)) => Stage::Connect,
+        MigrateError::Execute(_)
+        | MigrateError::Dirty(_)
         | MigrateError::VersionMismatch(_)
         | MigrateError::VersionMissing(_)
         | MigrateError::VersionNotPresent(_)
         | MigrateError::VersionTooOld(..)
         | MigrateError::VersionTooNew(..) => Stage::History,
-        // `ExecuteMigration` is the named file's SQL.
-        MigrateError::ExecuteMigration(..) => Stage::Execute,
-        // `ForceNotSupported`, `CreateSchemasNotSupported`, and later variants.
-        _ => Stage::Execute,
-    }
-}
-
-fn execute_stage(err: &sqlx::Error) -> Stage {
-    match err {
-        // `55P03` is `lock_timeout` while waiting for `pg_advisory_lock`.
-        sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03") => Stage::Lock,
-        sqlx::Error::Io(_) | sqlx::Error::Tls(_) => Stage::Connect,
-        _ => Stage::History,
+        // `ExecuteMigration` is the named file's SQL; `_` is later variants.
+        MigrateError::ExecuteMigration(..) | _ => Stage::Execute,
     }
 }
 

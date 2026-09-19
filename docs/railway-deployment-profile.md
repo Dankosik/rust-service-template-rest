@@ -82,7 +82,7 @@ export default defineRailway(() => {
 ## Grace budget
 
 The [runtime budget policy](configuration-source-policy.md) owns the
-derivation: `http.shutdown_timeout` (`25s`, including the `15s` readiness
+derivation: `http.drain_timeout` (`25s`, including the `15s` readiness
 propagation delay) plus the `17s` teardown tail (diagnostics, background
 join, dependency close, telemetry flush) is a `42s` worst case, and
 `http.grace_period` (`45s`) is the platform window that must cover it. The

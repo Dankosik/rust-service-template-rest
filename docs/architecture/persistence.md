@@ -51,7 +51,7 @@ different ones changes them in one reviewed place.
 | `idle_in_transaction_session_timeout` | 8 s | Same duration as `statement_timeout` by policy; a separate constant |
 | Slow statement warning | 1 s | `warn` with SQL text and duration; statement logging is otherwise off |
 | Rollback after a failed closure | 3 s | `tokio::time::timeout` around `Transaction::rollback` |
-| Readiness probe | health `readiness_timeout` | The refresher bounds the acquire plus ping |
+| Readiness probe | health `probe_budget` | The refresher bounds the acquire plus ping |
 | Pool close at shutdown | 5 s (`DEPENDENCY_CLOSE`) | After background tasks joined, before the telemetry flush |
 | Migration `statement_timeout`, idle-in-transaction | 2 min | Session defaults of the one migration connection |
 | Migration `lock_timeout` | 15 s | Also bounds the wait for the advisory session lock |

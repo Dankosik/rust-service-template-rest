@@ -108,19 +108,21 @@ every record inside a request) or `text` (local development).
 - `http.request_timeout` (default `8s`) is the per-request handler budget and
   the only bound on how long one request may hold a task and its pooled
   resources. Body reads happen inside it because extractors run inside the
-  handler future. Expiry answers a `504` problem. It must not exceed the
-  drain budget left after readiness propagation, so in-flight requests can
-  finish inside the drain.
+  handler future. Expiry answers a `504` problem with code `request_timeout`.
+  It must not exceed the drain budget left after readiness propagation, so
+  in-flight requests can finish inside the drain.
 - `http.header_read_timeout` (default `5s`) bounds delivery of a request head
   and, because hyper restarts it whenever an HTTP/1 connection goes idle, is
   also the HTTP/1 keep-alive idle bound. HTTP/2 idle uses a separate PING
   cadence. It also closes a client that connects and sends nothing.
-- `health.readiness_timeout` (default `4s`) bounds one background readiness
+- `health.probe_budget` (default `4s`) bounds one background readiness
   evaluation across every probe; `/health/ready` itself never runs a probe.
-- `http.shutdown_timeout` (default `25s`) bounds the HTTP drain, including
+  The previous operator key `health.readiness_timeout` is still accepted.
+- `http.drain_timeout` (default `25s`) bounds the HTTP drain, including
   the `http.readiness_propagation_delay` (default `15s`) in front of it.
+  The previous operator key `http.shutdown_timeout` is still accepted.
   `http.grace_period` (default `45s`) is the platform's SIGTERM-to-SIGKILL
-  window; it must cover `shutdown_timeout` plus the `17s` teardown tail
+  window; it must cover `drain_timeout` plus the `17s` teardown tail
   (diagnostics close `2s`, background join `5s`, dependency close `5s`,
   telemetry flush `5s`). The default worst case is 42 seconds inside 45.
 
@@ -134,7 +136,7 @@ every record inside a request) or `text` (local development).
   | Compose | `stop_grace_period: 45s` |
   | ECS | `stopTimeout: 45` |
 
-  Changing `http.shutdown_timeout` changes this number; re-derive it.
+  Changing `http.drain_timeout` changes this number; re-derive it.
 - `http.max_header_bytes` (default `16 KiB`) is the HTTP/1 read-buffer
   ceiling for one request head; overflow answers hyper-native `431` before
   the router, not a Problem. HTTP/2 applies the same number as uncompressed
@@ -149,7 +151,7 @@ every record inside a request) or `text` (local development).
   `GET /health/live` and `GET /health/ready` requests are served without an
   access-log line. The exclusion is by route template: an unmatched path that
   merely resembles a probe is still recorded.
-- `health.refresh_interval` (default `2s`), `health.readiness_timeout`
+- `health.refresh_interval` (default `2s`), `health.probe_budget`
   (default `4s`), and `health.failure_threshold` (default `3`) drive the
   background readiness refresher. A cached verdict older than three refresh
   periods plus one probe budget is refused, so a dead refresher cannot leave
@@ -161,7 +163,7 @@ every record inside a request) or `text` (local development).
   `idle_in_transaction_session_timeout` (`8s`), and the migration budgets
   are constants in the adapter
   ([Persistence](architecture/persistence.md#budgets)); the readiness probe
-  draws `health.readiness_timeout`, and the pool closes inside the `5s`
+  draws `health.probe_budget`, and the pool closes inside the `5s`
   dependency-close stage.
 
 ## Adding A Config Key

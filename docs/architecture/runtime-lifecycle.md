@@ -28,7 +28,7 @@ it against the built binary.
    an unreachable database is a startup failure, not a readiness that never
    passes ([Persistence](persistence.md)).
 6. Readiness admission: the refresher evaluates every registered probe once
-   under `health.readiness_timeout`; a failure is a startup failure (exit
+   under `health.probe_budget`; a failure is a startup failure (exit
    `1`). Without a selected profile the set is empty and admission proves
    the mechanism.
 7. The route tree comes from `service::api::contract()`, is given the
@@ -64,7 +64,7 @@ instead of pushing the process into `SIGKILL`.
 | --- | --- | --- |
 | Readiness off (drain flag) | immediate | `readiness_disabled` |
 | Propagation delay: keep serving while load balancers notice | `http.readiness_propagation_delay` (`15s`); a second signal skips it | `readiness_propagation_wait` |
-| HTTP drain: stop accepting, finish in-flight requests | `http.shutdown_timeout` minus the delay (`10s`) | `drain_started`, then `drain_completed`, or `shutdown_forced` with `remaining` connections |
+| HTTP drain: stop accepting, finish in-flight requests | `http.drain_timeout` minus the delay (`10s`) | `drain_started`, then `drain_completed`, or `shutdown_forced` with `remaining` connections |
 | Diagnostics listener close | `2s` | `diagnostics_stopped` or `diagnostics_forced` |
 | Cancel and join background tasks | `5s` | `background_joined` |
 | Close pooled dependencies (the PostgreSQL pool when enabled) | `5s` | `postgres_pool_closed`; an overrun votes `degraded` |
@@ -72,7 +72,7 @@ instead of pushing the process into `SIGKILL`.
 
 The `17s` tail after the drain is process structure, not configuration;
 `validate_grace_budget` refuses a configuration whose grace period cannot
-hold `shutdown_timeout` plus the tail. The default worst case is `42s`
+hold `drain_timeout` plus the tail. The default worst case is `42s`
 inside `45s`; the platform grace derivation lives in
 [Configuration Source Policy](../configuration-source-policy.md#runtime-budget-policy)
 and the image check proves it with `docker stop --time 45`.

@@ -52,7 +52,10 @@ pub enum Code {
     TooManyRequests,
     InternalServerError,
     ServiceUnavailable,
-    GatewayTimeout,
+    /// Local handler budget expired (`HardenOptions.request_timeout`).
+    /// HTTP status stays 504; the machine identity is not a gateway/proxy
+    /// failure.
+    RequestTimeout,
 }
 
 /// Caller-visible text for every failure the transport refuses to describe:
@@ -172,10 +175,10 @@ impl Code {
                 title: "service unavailable",
                 type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4"),
             },
-            Code::GatewayTimeout => CodeMeta {
-                wire: "gateway_timeout",
+            Code::RequestTimeout => CodeMeta {
+                wire: "request_timeout",
                 status: StatusCode::GATEWAY_TIMEOUT,
-                title: "gateway timeout",
+                title: "request timeout",
                 type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.5"),
             },
         }
@@ -422,6 +425,8 @@ mod tests {
         }
         assert_eq!(Code::AlreadyExists.status(), StatusCode::CONFLICT);
         assert_eq!(Code::AlreadyExists.type_uri(), Code::Conflict.type_uri());
+        assert_eq!(Code::RequestTimeout.as_str(), "request_timeout");
+        assert_eq!(Code::RequestTimeout.status(), StatusCode::GATEWAY_TIMEOUT);
     }
 
     #[tokio::test]

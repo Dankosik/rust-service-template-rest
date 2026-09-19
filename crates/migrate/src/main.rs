@@ -15,7 +15,7 @@ use infra_postgres::{Dsn, DsnError};
 use infra_telemetry::{LoggingFormat, LoggingOptions, install_subscriber};
 use migrate::{FailedRun, MIGRATOR, RunOptions, RunResult, Stage};
 use secrecy::ExposeSecret;
-use service_config::{BuildInfo, Config, LoadOptions};
+use service_config::{BuildInfo, Config, FromArgs, LoadOptions, ValidationError, process_failure};
 
 const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
@@ -25,6 +25,8 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 enum Failure {
     #[error("postgres.enabled must be true to run migrations")]
     PostgresDisabled,
+    #[error(transparent)]
+    Config(#[from] ValidationError),
     #[error(transparent)]
     Dsn(#[from] DsnError),
     #[error(transparent)]
@@ -55,7 +57,7 @@ impl TerminalStage {
 impl Failure {
     fn stage(&self) -> TerminalStage {
         match self {
-            Self::PostgresDisabled | Self::Dsn(_) => TerminalStage::Config,
+            Self::PostgresDisabled | Self::Config(_) | Self::Dsn(_) => TerminalStage::Config,
             Self::Run(failure) => TerminalStage::Run(failure.stage()),
             Self::Interrupted(_) => TerminalStage::Interrupted,
         }
@@ -66,22 +68,24 @@ impl Failure {
     fn observed(&self) -> RunResult {
         match self {
             Self::Run(failure) => failure.observed.clone(),
-            Self::PostgresDisabled | Self::Dsn(_) | Self::Interrupted(_) => RunResult {
-                target: MIGRATOR.iter().map(|m| m.version).max(),
-                ..RunResult::default()
-            },
+            Self::PostgresDisabled | Self::Config(_) | Self::Dsn(_) | Self::Interrupted(_) => {
+                RunResult {
+                    target: MIGRATOR.iter().map(|m| m.version).max(),
+                    ..RunResult::default()
+                }
+            }
         }
     }
 }
 
 fn main() -> ExitCode {
     let options = match LoadOptions::from_args(std::env::args_os()) {
-        Ok(options) => options,
-        Err(code) => return code,
+        FromArgs::Run(options) => options,
+        FromArgs::Exit(code) => return code,
     };
     let config = match service_config::load(&options, BUILD_INFO) {
         Ok(config) => config,
-        Err(err) => return startup_failure(&err.to_string()),
+        Err(err) => return process_failure(&err.to_string()),
     };
     if let Err(err) = install_subscriber(&LoggingOptions {
         level: &config.log.level,
@@ -92,14 +96,14 @@ fn main() -> ExitCode {
         tracer_provider: None,
         service_name: &config.observability.otel.service_name,
     }) {
-        return startup_failure(&err.to_string());
+        return process_failure(&err.to_string());
     }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
         Ok(runtime) => runtime,
-        Err(err) => return startup_failure(&format!("build tokio runtime: {err}")),
+        Err(err) => return process_failure(&format!("build tokio runtime: {err}")),
     };
 
     let outcome = runtime.block_on(apply(&config));
@@ -117,19 +121,11 @@ fn main() -> ExitCode {
     }
 }
 
-fn startup_failure(message: &str) -> ExitCode {
-    #[allow(clippy::print_stderr)]
-    {
-        eprintln!("{message}");
-    }
-    ExitCode::FAILURE
-}
-
 async fn apply(config: &Config) -> Result<RunResult, Failure> {
     if !config.postgres.enabled {
         return Err(Failure::PostgresDisabled);
     }
-    let dsn = Dsn::parse(config.postgres.dsn.expose_secret())?;
+    let dsn = Dsn::parse(config.postgres.required_dsn()?.expose_secret())?;
     tracing::info!(
         app.env = %config.app.env,
         app.version = %config.app.version,
