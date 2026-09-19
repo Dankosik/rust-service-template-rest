@@ -9,11 +9,11 @@
 
 pub mod logging;
 pub mod metrics;
-pub mod tracing;
+pub mod traces;
 
 pub use logging::{LogFormat, LoggingError, LoggingOptions, install_subscriber};
 pub use metrics::{Metrics, MetricsError, TRACE_EXPORTER_ACTIVE_METRIC, diagnostics_router};
-pub use tracing::{
+pub use traces::{
     ExporterState, ProviderShutdown, Sampler, TracerProviderHandle, TracingError, TracingOptions,
     install_tracer_provider,
 };

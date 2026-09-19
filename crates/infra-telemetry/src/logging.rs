@@ -6,7 +6,7 @@
 //! JSON records carry `traceId` and `spanId`. `log` records are bridged by
 //! `tracing-subscriber`'s `tracing-log` feature during `try_init`.
 
-use crate::tracing::TracerProviderHandle;
+use crate::traces::TracerProviderHandle;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};

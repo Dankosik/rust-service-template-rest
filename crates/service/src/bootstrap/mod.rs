@@ -21,7 +21,7 @@ use infra_telemetry::{
     install_subscriber, install_tracer_provider,
 };
 use secrecy::ExposeSecret;
-use service_config::{AppConfig, BuildInfo, Config, LoadOptions, LogFormat, TracesSampler};
+use service_config::{AppConfig, BuildInfo, Config, LoadOptions, LogFormat, ResolvedSampler};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -35,7 +35,8 @@ pub(crate) const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("C
 const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 
 /// Bound for dropping whatever the runtime still owns after the ordered
-/// teardown, such as connection tasks that outlived the drain.
+/// teardown: HTTP connection tasks that outlived drain and `pool.close`,
+/// and any blocking tracer-provider shutdown that outlived its budget.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Interval for Prometheus histogram upkeep and Tokio runtime metrics.
@@ -177,11 +178,11 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     let readiness = Readiness::new(probes);
     let policy = RefreshPolicy {
         interval: config.health.refresh_interval,
-        probe_budget: config.health.readiness_timeout,
+        probe_budget: config.health.probe_budget,
         failure_threshold: config.health.failure_threshold,
     };
 
-    let outcome = serve_transports(Transports {
+    let outcome = admit_and_serve(Prepared {
         config: &config,
         signals: &mut signals,
         tracer_provider,
@@ -194,8 +195,8 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     })
     .await;
     // Bind or admission failure: cancel and join tracked tasks, then close
-    // the pool. `Server` and `TracerProviderHandle` take their Drop path
-    // (stop accepting / SDK drop), not `shutdown(budget)`.
+    // the pool. `Server` only cancels accept. Dropping `TracerProviderHandle`
+    // is not last-ref: the global SDK clone remains until process teardown.
     if outcome.is_err() {
         shutdown::close_opened_dependencies(&cancel, &tracker, postgres_pool.as_ref()).await;
     }
@@ -207,7 +208,7 @@ async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
     let pool = infra_postgres::connect(
         &dsn,
         &PoolOptions {
-            max_connections: config.postgres.max_connections,
+            max_connections: config.postgres.pool_max_connections()?,
             application_name: &config.observability.otel.service_name,
         },
     )
@@ -223,8 +224,8 @@ async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
     Ok(pool)
 }
 
-/// Everything [`serve`] built before the listeners bind.
-struct Transports<'a> {
+/// Runtime pieces built before listeners bind: admission, then serve.
+struct Prepared<'a> {
     config: &'a Config,
     signals: &'a mut Signals,
     tracer_provider: infra_telemetry::TracerProviderHandle,
@@ -236,8 +237,8 @@ struct Transports<'a> {
     postgres_pool: Option<PgPool>,
 }
 
-async fn serve_transports(transports: Transports<'_>) -> Result<Outcome, BootstrapError> {
-    let Transports {
+async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapError> {
+    let Prepared {
         config,
         signals,
         tracer_provider,
@@ -247,10 +248,11 @@ async fn serve_transports(transports: Transports<'_>) -> Result<Outcome, Bootstr
         readiness,
         policy,
         postgres_pool,
-    } = transports;
+    } = prepared;
+    readiness.refresh(policy).await;
     readiness
-        .refresh(policy)
-        .await
+        .reader()
+        .verdict()
         .map_err(BootstrapError::Admission)?;
     tracker.spawn({
         let readiness = readiness.clone();
@@ -315,13 +317,11 @@ fn replica_instance_id(app: &AppConfig) -> String {
 
 fn tracing_options(config: &Config, instance_id: String) -> TracingOptions {
     let otel = &config.observability.otel;
-    let sampler = match otel.traces_sampler {
-        TracesSampler::AlwaysOn => Sampler::AlwaysOn,
-        TracesSampler::AlwaysOff => Sampler::AlwaysOff,
-        TracesSampler::TraceIdRatio => Sampler::TraceIdRatio(otel.traces_sampler_arg),
-        TracesSampler::ParentBasedTraceIdRatio => {
-            Sampler::ParentBasedTraceIdRatio(otel.traces_sampler_arg)
-        }
+    let sampler = match otel.resolved_sampler() {
+        ResolvedSampler::AlwaysOn => Sampler::AlwaysOn,
+        ResolvedSampler::AlwaysOff => Sampler::AlwaysOff,
+        ResolvedSampler::TraceIdRatio(ratio) => Sampler::TraceIdRatio(ratio),
+        ResolvedSampler::ParentBasedTraceIdRatio(ratio) => Sampler::ParentBasedTraceIdRatio(ratio),
     };
     TracingOptions {
         service_name: otel.service_name.clone(),

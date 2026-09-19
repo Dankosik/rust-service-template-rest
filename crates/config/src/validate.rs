@@ -58,7 +58,8 @@ pub(crate) fn non_empty(key: &str, value: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Parse `host:port`, or the Go-style `:port` meaning every interface.
+/// Parse `host:port`, or the Go-style `:port` meaning IPv4 all-interfaces
+/// (`0.0.0.0`). Explicit IPv6 forms such as `[::1]:9000` are unchanged.
 pub(crate) fn socket_addr(key: &str, value: &str) -> Result<std::net::SocketAddr, ValidationError> {
     let trimmed = value.trim();
     let candidate = match trimmed.strip_prefix(':') {

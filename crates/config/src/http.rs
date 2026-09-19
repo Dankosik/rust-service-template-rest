@@ -15,7 +15,8 @@ pub const MIN_HEADER_BYTES: u64 = 8 * 1024;
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct HttpConfig {
-    /// Listen address as `host:port`, or `:port` for every interface.
+    /// Listen address as `host:port`, or `:port` for IPv4 all-interfaces
+    /// (`0.0.0.0`).
     pub addr: String,
     /// Total time the platform allows between SIGTERM and SIGKILL. Every
     /// teardown stage draws from it; `shutdown_timeout` bounds only the HTTP
@@ -38,7 +39,8 @@ pub struct HttpConfig {
     pub readiness_propagation_delay: Duration,
     /// Time a connection may take to deliver a complete request head. hyper
     /// restarts this timer whenever an HTTP/1 connection goes idle, so it is
-    /// also the keep-alive idle bound.
+    /// also the HTTP/1 keep-alive idle bound. HTTP/2 idle uses a separate
+    /// PING cadence.
     #[serde(with = "humantime_serde")]
     pub header_read_timeout: Duration,
     /// Per-request handler budget. It is the only bound on how long one
@@ -46,7 +48,9 @@ pub struct HttpConfig {
     /// inside it because extractors run inside the handler future.
     #[serde(with = "humantime_serde")]
     pub request_timeout: Duration,
-    /// Read-buffer ceiling for one request head; overflow answers 431.
+    /// HTTP/1 read-buffer ceiling for one request head; overflow answers
+    /// hyper-native 431 before the router, not a Problem. HTTP/2 applies the
+    /// same number as uncompressed header-list size.
     pub max_header_bytes: ByteSize,
     /// Request body ceiling; overflow answers 413.
     pub max_body_bytes: ByteSize,

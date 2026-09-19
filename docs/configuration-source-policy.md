@@ -91,7 +91,7 @@ logged with a bounded reason and the process continues with the exporter
 signal, not continuous delivery health.
 
 `observability.metrics.addr` owns the Prometheus diagnostics listener. It
-defaults to `:9090`, which binds every interface so a scraper in another pod
+defaults to `:9090`, which binds IPv4 all-interfaces (`0.0.0.0`) so a scraper in another pod
 can reach it; an empty value disables HTTP exposition. Binding failure blocks
 startup. Deployment network policy must keep this listener private.
 
@@ -113,8 +113,8 @@ every record inside a request) or `text` (local development).
   finish inside the drain.
 - `http.header_read_timeout` (default `5s`) bounds delivery of a request head
   and, because hyper restarts it whenever an HTTP/1 connection goes idle, is
-  also the keep-alive idle bound. It also closes a client that connects and
-  sends nothing.
+  also the HTTP/1 keep-alive idle bound. HTTP/2 idle uses a separate PING
+  cadence. It also closes a client that connects and sends nothing.
 - `health.readiness_timeout` (default `4s`) bounds one background readiness
   evaluation across every probe; `/health/ready` itself never runs a probe.
 - `http.shutdown_timeout` (default `25s`) bounds the HTTP drain, including
@@ -135,9 +135,11 @@ every record inside a request) or `text` (local development).
   | ECS | `stopTimeout: 45` |
 
   Changing `http.shutdown_timeout` changes this number; re-derive it.
-- `http.max_header_bytes` (default `16 KiB`) is the read-buffer ceiling for
-  one request head; overflow answers `431`. hyper refuses values below
-  `8 KiB`. `http.max_body_bytes` (default `1 MiB`) answers `413`.
+- `http.max_header_bytes` (default `16 KiB`) is the HTTP/1 read-buffer
+  ceiling for one request head; overflow answers hyper-native `431` before
+  the router, not a Problem. HTTP/2 applies the same number as uncompressed
+  header-list size. hyper refuses HTTP/1 values below `8 KiB`.
+  `http.max_body_bytes` (default `1 MiB`) answers `413`.
 - `http.max_in_flight` (default `256`) bounds concurrent handler executions;
   the excess is shed with `503` and `Retry-After: 1` without queueing. Zero
   disables shedding. `http.max_connections` (default `4096`) bounds accepted

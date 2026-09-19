@@ -62,8 +62,7 @@ mod tests {
                 probe_budget: Duration::from_secs(1),
                 failure_threshold: 1,
             })
-            .await
-            .unwrap();
+            .await;
         readiness.reader()
     }
 

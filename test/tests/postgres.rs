@@ -10,6 +10,7 @@
 // for unwrap/expect/panic do not apply to them.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use health::Probe;
@@ -28,7 +29,7 @@ async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
     infra_postgres::connect(
         dsn,
         &PoolOptions {
-            max_connections,
+            max_connections: NonZeroU32::new(max_connections).expect("pool size in tests"),
             application_name: APP,
         },
     )
@@ -291,7 +292,7 @@ async fn an_edited_applied_migration_fails_in_the_state_stage(pool: PgPool) {
     let err = migrate::run(&fixture("widgets_edited").await, &options(&dsn))
         .await
         .unwrap_err();
-    assert_eq!(err.stage(), Stage::State);
+    assert_eq!(err.stage(), Stage::History);
     assert!(
         matches!(
             *err.error,
@@ -317,7 +318,7 @@ async fn a_removed_applied_migration_fails_in_the_state_stage(pool: PgPool) {
     let err = migrate::run(&fixture("widgets_partial").await, &options(&dsn))
         .await
         .unwrap_err();
-    assert_eq!(err.stage(), Stage::State);
+    assert_eq!(err.stage(), Stage::History);
     assert!(
         matches!(
             *err.error,

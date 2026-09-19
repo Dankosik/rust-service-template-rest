@@ -165,19 +165,13 @@ impl Readiness {
         });
     }
 
-    /// Run one evaluation, fold it into the snapshot, and return what was
-    /// observed (not necessarily what callers now see, because of the
-    /// failure threshold).
+    /// Run one evaluation and fold it into the snapshot.
     ///
-    /// Startup admission calls this directly: it needs the verdict to decide
-    /// whether to admit traffic, and the seeded cache so the first probe
-    /// after admission is answered from a real evaluation.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first failing probe, or [`NotReady::TimedOut`] when the
-    /// evaluation exceeds `policy.probe_budget`.
-    pub async fn refresh(&self, policy: RefreshPolicy) -> Result<(), NotReady> {
+    /// Published readiness is [`ReadinessReader::verdict`]. After a healthy
+    /// streak, a single observed failure below `failure_threshold` does not
+    /// flip that verdict. Startup admission reads `verdict` after this call
+    /// so the first probe after bind is answered from a real evaluation.
+    pub async fn refresh(&self, policy: RefreshPolicy) {
         let observed = match tokio::time::timeout(policy.probe_budget, self.evaluate()).await {
             Ok(observed) => observed,
             Err(_elapsed) => Err(NotReady::TimedOut {
@@ -194,7 +188,6 @@ impl Readiness {
                 evaluated_at,
             ));
         });
-        observed
     }
 
     /// Refresh on `policy.interval` until `cancel` fires.
@@ -212,7 +205,7 @@ impl Readiness {
         if self.tx.borrow().evaluation.is_none() {
             tokio::select! {
                 () = cancel.cancelled() => return,
-                _ = self.refresh(policy) => {}
+                () = self.refresh(policy) => {}
             }
         }
         let mut ticker = tokio::time::interval(policy.interval);
@@ -230,7 +223,7 @@ impl Readiness {
                     let before = self.reader().verdict();
                     tokio::select! {
                         () = cancel.cancelled() => return,
-                        _ = self.refresh(policy) => {
+                        () = self.refresh(policy) => {
                             let after = self.reader().verdict();
                             if before.is_ok() != after.is_ok() {
                                 match &after {
@@ -395,7 +388,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_seeds_the_verdict_and_reads_do_not_probe() {
         let (readiness, _, calls) = flaky(true);
-        readiness.refresh(policy()).await.unwrap();
+        readiness.refresh(policy()).await;
         let reader = readiness.reader();
         for _ in 0..10 {
             assert_eq!(reader.verdict(), Ok(()));
@@ -410,13 +403,13 @@ mod tests {
     #[tokio::test]
     async fn healthy_instance_survives_blips_below_the_threshold() {
         let (readiness, flag, _) = flaky(true);
-        readiness.refresh(policy()).await.unwrap();
+        readiness.refresh(policy()).await;
         flag.store(false, Ordering::Relaxed);
-        assert!(readiness.refresh(policy()).await.is_err());
+        readiness.refresh(policy()).await;
         assert_eq!(readiness.reader().verdict(), Ok(()), "1 of 3 failures");
-        assert!(readiness.refresh(policy()).await.is_err());
+        readiness.refresh(policy()).await;
         assert_eq!(readiness.reader().verdict(), Ok(()), "2 of 3 failures");
-        assert!(readiness.refresh(policy()).await.is_err());
+        readiness.refresh(policy()).await;
         assert!(
             matches!(
                 readiness.reader().verdict(),
@@ -425,14 +418,14 @@ mod tests {
             "3 of 3 failures flips"
         );
         flag.store(true, Ordering::Relaxed);
-        readiness.refresh(policy()).await.unwrap();
+        readiness.refresh(policy()).await;
         assert_eq!(readiness.reader().verdict(), Ok(()), "one success recovers");
     }
 
     #[tokio::test]
     async fn never_healthy_instance_fails_immediately() {
         let (readiness, _, _) = flaky(false);
-        assert!(readiness.refresh(policy()).await.is_err());
+        readiness.refresh(policy()).await;
         assert!(matches!(
             readiness.reader().verdict(),
             Err(NotReady::ProbeFailed { .. })
@@ -443,7 +436,8 @@ mod tests {
     async fn hanging_probe_is_bounded_by_the_budget() {
         let readiness = Readiness::new(vec![Box::new(Hanging)]);
         let started = Instant::now();
-        let err = readiness.refresh(policy()).await.unwrap_err();
+        readiness.refresh(policy()).await;
+        let err = readiness.reader().verdict().unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(matches!(err, NotReady::TimedOut { .. }), "{err}");
     }
@@ -451,7 +445,7 @@ mod tests {
     #[tokio::test]
     async fn draining_wins_over_a_healthy_verdict_immediately() {
         let (readiness, _, _) = flaky(true);
-        readiness.refresh(policy()).await.unwrap();
+        readiness.refresh(policy()).await;
         let mut reader = readiness.reader();
         readiness.start_drain();
         reader.changed().await;

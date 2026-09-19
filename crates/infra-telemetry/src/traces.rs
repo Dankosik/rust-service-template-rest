@@ -110,7 +110,9 @@ const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
 /// Install the global tracer provider and the W3C propagator.
 ///
 /// Call inside the Tokio runtime and before the subscriber is installed, so
-/// the returned handle can feed the OpenTelemetry layer.
+/// the returned handle can feed the OpenTelemetry layer. The SDK provider
+/// is also cloned into the global tracer provider; the handle is not the
+/// sole owner.
 ///
 /// # Errors
 ///
@@ -160,9 +162,17 @@ impl TracerProviderHandle {
 
     /// Flush and stop the provider inside `budget`, off the async workers.
     ///
-    /// Dropping the handle without this method is the failed-bind path: the
-    /// SDK provider drops without a flush budget. Call this only from the
-    /// ordered success-path teardown.
+    /// The SDK's `set_tracer_provider` keeps a clone of the provider, so
+    /// this handle is not the sole owner. Dropping the handle on the
+    /// failed-bind path is not last-ref release: the global clone remains
+    /// until process teardown, and the SDK's default drop shutdown then runs
+    /// without this method's budget. Call this only from the ordered
+    /// success-path teardown.
+    ///
+    /// If the wait exceeds `budget` plus [`SHUTDOWN_JOIN_SLACK`], the
+    /// `spawn_blocking` job is detached. The next wait is
+    /// `runtime.shutdown_timeout` in the composition root, not another call
+    /// on this handle.
     ///
     /// [`SHUTDOWN_JOIN_SLACK`] is join time around `spawn_blocking`, not extra
     /// flush budget: the SDK already times out at `budget`.
@@ -236,15 +246,21 @@ fn span_exporter(
     builder.build()
 }
 
-/// `key=value,key=value` into a map; malformed pairs are dropped.
+/// `key=value,key=value` into a map; malformed pairs are dropped, not
+/// treated as install failures.
 fn parse_headers(raw: &str) -> HashMap<String, String> {
-    raw.split(',')
-        .filter_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            let key = key.trim();
-            (!key.is_empty()).then(|| (key.to_owned(), value.trim().to_owned()))
-        })
-        .collect()
+    let mut headers = HashMap::new();
+    for pair in raw.split(',') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        headers.insert(key.to_owned(), value.trim().to_owned());
+    }
+    headers
 }
 
 /// Typed identity over the SDK detectors: detector values (including

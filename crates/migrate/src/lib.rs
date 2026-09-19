@@ -46,7 +46,7 @@ pub enum Stage {
     Lock,
     /// The recorded history disagrees with the source, or the history table
     /// could not be read.
-    State,
+    History,
     /// A migration's SQL failed.
     Execute,
     /// The orchestration deadline elapsed; the connection was dropped and
@@ -61,7 +61,7 @@ impl Stage {
             Self::Source => "source",
             Self::Connect => "connect",
             Self::Lock => "lock",
-            Self::State => "state",
+            Self::History => "history",
             Self::Execute => "execute",
             Self::Deadline => "deadline",
         }
@@ -314,7 +314,7 @@ fn stage_of(err: &MigrateError) -> Stage {
         | MigrateError::VersionMissing(_)
         | MigrateError::VersionNotPresent(_)
         | MigrateError::VersionTooOld(..)
-        | MigrateError::VersionTooNew(..) => Stage::State,
+        | MigrateError::VersionTooNew(..) => Stage::History,
         // `ExecuteMigration` is the named file's SQL.
         MigrateError::ExecuteMigration(..) => Stage::Execute,
         // `ForceNotSupported`, `CreateSchemasNotSupported`, and later variants.
@@ -468,11 +468,11 @@ mod tests {
 
     #[test]
     fn stages_map_from_migrate_errors() {
-        assert_eq!(stage_of(&MigrateError::VersionMismatch(3)), Stage::State);
-        assert_eq!(stage_of(&MigrateError::Dirty(3)), Stage::State);
+        assert_eq!(stage_of(&MigrateError::VersionMismatch(3)), Stage::History);
+        assert_eq!(stage_of(&MigrateError::Dirty(3)), Stage::History);
         assert_eq!(
             stage_of(&MigrateError::Execute(sqlx::Error::PoolTimedOut)),
-            Stage::State
+            Stage::History
         );
         assert_eq!(
             stage_of(&MigrateError::ExecuteMigration(
