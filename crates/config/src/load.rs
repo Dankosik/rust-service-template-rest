@@ -153,7 +153,6 @@ fn reject_file_secrets(path: &Path) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use std::time::Duration;
 
     use super::*;
@@ -166,8 +165,7 @@ mod tests {
 
     fn write(dir: &tempfile::TempDir, name: &str, body: &str) -> PathBuf {
         let path = dir.path().join(name);
-        let mut file = std::fs::File::create(&path).unwrap();
-        file.write_all(body.as_bytes()).unwrap();
+        std::fs::write(&path, body).unwrap();
         path
     }
 
