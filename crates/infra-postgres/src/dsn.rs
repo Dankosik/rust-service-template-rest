@@ -108,18 +108,9 @@ impl Dsn {
     ///
     /// The first violated rule, without the offending value.
     pub fn admit(raw: &str) -> Result<Self, DsnError> {
-        Self::parse_with_environment(raw, |name| {
+        Self::admit_with_environment(raw, |name| {
             std::env::var_os(name).is_some_and(|value| !value.is_empty())
         })
-    }
-
-    /// [`Self::admit`] under the older one-string name.
-    ///
-    /// # Errors
-    ///
-    /// The first violated rule, without the offending value.
-    pub fn parse(raw: &str) -> Result<Self, DsnError> {
-        Self::admit(raw)
     }
 
     /// [`Dsn::admit`] with an explicit occupancy lookup, so the ambient
@@ -131,7 +122,7 @@ impl Dsn {
     /// # Errors
     ///
     /// The first violated rule, without the offending value.
-    pub fn parse_with_environment<F>(raw: &str, occupied: F) -> Result<Self, DsnError>
+    pub fn admit_with_environment<F>(raw: &str, occupied: F) -> Result<Self, DsnError>
     where
         F: Fn(&str) -> bool,
     {
@@ -271,7 +262,7 @@ mod tests {
     }
 
     fn parse(raw: &str) -> Result<Dsn, DsnError> {
-        Dsn::parse_with_environment(raw, no_env)
+        Dsn::admit_with_environment(raw, no_env)
     }
 
     #[test]
@@ -444,14 +435,14 @@ mod tests {
     #[test]
     fn a_non_empty_ambient_variable_refuses_the_dsn() {
         for name in AMBIENT_ENVIRONMENT {
-            let result = Dsn::parse_with_environment(VALID, |candidate| candidate == name);
+            let result = Dsn::admit_with_environment(VALID, |candidate| candidate == name);
             assert_eq!(result.err(), Some(DsnError::Ambient(name)), "{name}");
         }
     }
 
     #[test]
     fn an_empty_ambient_variable_is_ignored() {
-        let result = Dsn::parse_with_environment(VALID, |_| false);
+        let result = Dsn::admit_with_environment(VALID, |_| false);
         assert!(result.is_ok());
     }
 

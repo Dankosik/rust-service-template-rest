@@ -127,10 +127,11 @@ const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
 
 /// Install the global tracer provider and the W3C propagator.
 ///
-/// Call inside the Tokio runtime and before the subscriber is installed, so
-/// the returned handle can feed the OpenTelemetry layer. The SDK provider
-/// is also cloned into the global tracer provider; the handle is not the
-/// sole owner.
+/// Call before the subscriber is installed so the returned handle can feed
+/// the OpenTelemetry layer. This process installs it after the Tokio
+/// runtime exists; that placement is composition-root order, not an SDK
+/// install-time requirement. The SDK provider is also cloned into the
+/// global tracer provider; the handle is not the sole owner.
 ///
 /// # Errors
 ///
@@ -148,11 +149,11 @@ pub fn install_tracer_provider(
         .with_resource(resource(options))
         .with_sampler(options.sampler.to_sdk());
 
-    let exporter = match endpoint_source {
+    let exporter_state = match endpoint_source {
         None => ExporterState::Disabled,
         Some(source) => match span_exporter(options) {
-            Ok(exporter) => {
-                builder = builder.with_batch_exporter(exporter);
+            Ok(span_exporter) => {
+                builder = builder.with_batch_exporter(span_exporter);
                 ExporterState::Initialized {
                     endpoint_source: source,
                 }
@@ -168,7 +169,7 @@ pub fn install_tracer_provider(
     global::set_tracer_provider(provider.clone());
     Ok(TracerProviderHandle {
         provider,
-        exporter_state: exporter,
+        exporter_state,
     })
 }
 

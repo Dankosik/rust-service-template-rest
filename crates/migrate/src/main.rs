@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use infra_postgres::{Dsn, DsnError};
 use infra_telemetry::{LoggingFormat, LoggingOptions, install_subscriber};
-use migrate::{FailedRun, MIGRATOR, RunOptions, RunResult, Stage};
+use migrate::{FailedRun, MIGRATOR, RunObservation, RunOptions, RunResult, Stage};
 use secrecy::ExposeSecret;
 use service_config::{BuildInfo, Config, FromArgs, ValidationError, process_failure};
 
@@ -65,13 +65,13 @@ impl Failure {
 
     /// What the run had observed before failing; the target is known even
     /// when nothing else is.
-    fn observed(&self) -> RunResult {
+    fn observed(&self) -> RunObservation {
         match self {
             Self::Run(failure) => failure.observed.clone(),
             Self::PostgresDisabled | Self::Config(_) | Self::Dsn(_) | Self::Interrupted(_) => {
-                RunResult {
+                RunObservation {
                     target: MIGRATOR.iter().map(|m| m.version).max(),
-                    ..RunResult::default()
+                    ..RunObservation::default()
                 }
             }
         }
@@ -111,11 +111,11 @@ fn main() -> ExitCode {
 
     match outcome {
         Ok(result) => {
-            log_terminal(&result, None);
+            log_success(&result);
             ExitCode::SUCCESS
         }
         Err(failure) => {
-            log_terminal(&failure.observed(), Some(&failure));
+            log_failure(&failure.observed(), &failure);
             ExitCode::FAILURE
         }
     }
@@ -187,29 +187,33 @@ fn version_or_zero(version: Option<i64>) -> i64 {
     version.unwrap_or(0)
 }
 
-/// One record per run with the fields an operator or a deploy hook reads.
-fn log_terminal(result: &RunResult, failure: Option<&Failure>) {
+/// One record per successful run with the fields an operator or a deploy hook reads.
+fn log_success(result: &RunResult) {
     let duration_ms = u64::try_from(result.duration.as_millis()).unwrap_or(u64::MAX);
-    match failure {
-        None => tracing::info!(
-            migration.before = version_or_zero(result.before),
-            migration.target = version_or_zero(result.target),
-            migration.after = version_or_zero(result.after),
-            migration.applied_count = result.applied,
-            migration.duration_ms = duration_ms,
-            outcome = result.outcome().as_str(),
-            "migration_run"
-        ),
-        Some(failure) => tracing::error!(
-            migration.before = version_or_zero(result.before),
-            migration.target = version_or_zero(result.target),
-            migration.after = version_or_zero(result.after),
-            migration.applied_count = result.applied,
-            migration.duration_ms = duration_ms,
-            outcome = "error",
-            stage = failure.stage().as_str(),
-            error = %failure,
-            "migration_run"
-        ),
-    }
+    tracing::info!(
+        migration.before = version_or_zero(result.before),
+        migration.target = version_or_zero(result.target),
+        migration.after = version_or_zero(result.after),
+        migration.applied_count = result.applied,
+        migration.duration_ms = duration_ms,
+        outcome = result.outcome().as_str(),
+        "migration_run"
+    );
+}
+
+/// Same field set as [`log_success`], with unobserved apply results left at
+/// the `0` sentinel instead of reused success vocabulary.
+fn log_failure(observed: &RunObservation, failure: &Failure) {
+    let duration_ms = u64::try_from(observed.duration.as_millis()).unwrap_or(u64::MAX);
+    tracing::error!(
+        migration.before = version_or_zero(observed.before),
+        migration.target = version_or_zero(observed.target),
+        migration.after = 0,
+        migration.applied_count = 0,
+        migration.duration_ms = duration_ms,
+        outcome = "error",
+        stage = failure.stage().as_str(),
+        error = %failure,
+        "migration_run"
+    );
 }

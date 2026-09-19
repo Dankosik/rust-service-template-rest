@@ -43,7 +43,8 @@ pub const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
 pub enum Stage {
     /// The embedded set violates a template rule.
     Source,
-    /// The connection could not be established inside its budget.
+    /// A connection-class failure: acquire timed out, or the live session
+    /// dropped (`Io`/`Tls`) during bookkeeping `Execute`.
     Connect,
     /// The session lock was not acquired inside `lock_timeout`.
     Lock,
@@ -134,7 +135,21 @@ impl RunError {
 pub struct FailedRun {
     #[source]
     pub error: Box<RunError>,
-    pub observed: RunResult,
+    pub observed: RunObservation,
+}
+
+/// Partial progress of a run that did not finish applying.
+///
+/// This is not a completed [`RunResult`]: `after` and `applied` are not
+/// counted here, so `0` cannot be read as [`ApplyOutcome::NoChange`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunObservation {
+    /// Highest applied version before the run; `None` if history was not
+    /// read, or the history is empty.
+    pub before: Option<i64>,
+    /// Highest version in the source; `None` for an empty set.
+    pub target: Option<i64>,
+    pub duration: Duration,
 }
 
 impl FailedRun {
@@ -144,7 +159,7 @@ impl FailedRun {
     }
 }
 
-/// What a run observed, for the terminal record.
+/// A finished apply, for the terminal record.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunResult {
     /// Highest applied version before the run; `None` on an empty history.
@@ -225,11 +240,11 @@ impl<'a> RunOptions<'a> {
 /// one transaction, and a dropped connection releases the session lock.
 pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<RunResult, FailedRun> {
     let started = std::time::Instant::now();
-    let mut observed = RunResult {
+    let mut observed = RunObservation {
         target: migrator.iter().map(|m| m.version).max(),
-        ..RunResult::default()
+        ..RunObservation::default()
     };
-    let fail = |error: RunError, mut observed: RunResult| {
+    let fail = |error: RunError, mut observed: RunObservation| {
         observed.duration = started.elapsed();
         FailedRun {
             error: Box::new(error),
@@ -314,10 +329,11 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<RunRes
     let _ = conn.close().await;
 
     Ok(RunResult {
+        before: observed.before,
+        target: observed.target,
         after,
         applied,
         duration: started.elapsed(),
-        ..observed
     })
 }
 
@@ -333,12 +349,20 @@ async fn applied_summary(
     ))
 }
 
+/// PostgreSQL `lock_not_available`: `lock_timeout` fired while waiting,
+/// including on `pg_advisory_lock`. Bookkeeping `Execute` only.
+const LOCK_NOT_AVAILABLE: &str = "55P03";
+
 fn stage_of(err: &MigrateError) -> Stage {
     match err {
         MigrateError::Source(_) => Stage::Source,
         // Bookkeeping `Execute` never means named-file SQL.
         MigrateError::Execute(source) => match source {
-            sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03") => Stage::Lock,
+            sqlx::Error::Database(db) if db.code().as_deref() == Some(LOCK_NOT_AVAILABLE) => {
+                Stage::Lock
+            }
+            // Session drop after connect succeeded; `Connect` is the
+            // terminal word for that connection class.
             sqlx::Error::Io(_) | sqlx::Error::Tls(_) => Stage::Connect,
             _ => Stage::History,
         },
