@@ -34,8 +34,7 @@ pub use http::HttpConfig;
 pub use load::{ENV_PREFIX, Error, MAX_FILE_BYTES, load};
 pub use log::{LogConfig, LogFormat};
 pub use observability::{
-    MetricsConfig, ObservabilityConfig, OtelConfig, OtelExporterConfig, ResolvedSampler,
-    TracesSampler,
+    MetricsConfig, ObservabilityConfig, OtelConfig, OtelExporterConfig, TracesSampler,
 };
 pub use postgres::PostgresConfig;
 pub use secret_policy::is_secret_like_key;

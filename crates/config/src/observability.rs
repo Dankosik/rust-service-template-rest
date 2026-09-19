@@ -57,19 +57,6 @@ pub enum TracesSampler {
     ParentBasedTraceIdRatio,
 }
 
-/// Sampler after the two operator keys are combined.
-///
-/// Wire config keeps `traces_sampler` and `traces_sampler_arg` independent
-/// so file and env can set them separately. This is the snapshot view the
-/// composition root maps into the telemetry adapter.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ResolvedSampler {
-    AlwaysOn,
-    AlwaysOff,
-    TraceIdRatio(f64),
-    ParentBasedTraceIdRatio(f64),
-}
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct OtelConfig {
@@ -81,21 +68,6 @@ pub struct OtelConfig {
     /// (finite and in range) even when the selected sampler ignores it.
     pub traces_sampler_arg: f64,
     pub exporter: OtelExporterConfig,
-}
-
-impl OtelConfig {
-    /// Kind and ratio as one concept after deserialize.
-    #[must_use]
-    pub fn resolved_sampler(&self) -> ResolvedSampler {
-        match self.traces_sampler {
-            TracesSampler::AlwaysOn => ResolvedSampler::AlwaysOn,
-            TracesSampler::AlwaysOff => ResolvedSampler::AlwaysOff,
-            TracesSampler::TraceIdRatio => ResolvedSampler::TraceIdRatio(self.traces_sampler_arg),
-            TracesSampler::ParentBasedTraceIdRatio => {
-                ResolvedSampler::ParentBasedTraceIdRatio(self.traces_sampler_arg)
-            }
-        }
-    }
 }
 
 impl Default for OtelConfig {
@@ -181,22 +153,6 @@ mod tests {
             assert_eq!(probe.sampler, expected, "{text}");
         }
         assert!(toml::from_str::<Probe>("sampler = \"jaeger_remote\"").is_err());
-    }
-
-    #[test]
-    fn resolved_sampler_attaches_the_ratio_only_to_ratio_variants() {
-        let always_on = OtelConfig {
-            traces_sampler: TracesSampler::AlwaysOn,
-            traces_sampler_arg: 0.5,
-            ..OtelConfig::default()
-        };
-        assert_eq!(always_on.resolved_sampler(), ResolvedSampler::AlwaysOn);
-        let ratio = OtelConfig {
-            traces_sampler: TracesSampler::TraceIdRatio,
-            traces_sampler_arg: 0.5,
-            ..OtelConfig::default()
-        };
-        assert_eq!(ratio.resolved_sampler(), ResolvedSampler::TraceIdRatio(0.5));
     }
 
     #[test]

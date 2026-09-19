@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use infra_postgres::{Dsn, DsnError};
-use infra_telemetry::{LogFormat, LoggingOptions, install_subscriber};
+use infra_telemetry::{LoggingFormat, LoggingOptions, install_subscriber};
 use migrate::{FailedRun, MIGRATOR, RunOptions, RunResult, Stage};
 use secrecy::ExposeSecret;
 use service_config::{BuildInfo, Config, LoadOptions};
@@ -84,10 +84,10 @@ fn main() -> ExitCode {
         Err(err) => return startup_failure(&err.to_string()),
     };
     if let Err(err) = install_subscriber(&LoggingOptions {
-        level: config.log.level.clone(),
+        level: &config.log.level,
         format: match config.log.format {
-            service_config::LogFormat::Json => LogFormat::Json,
-            service_config::LogFormat::Text => LogFormat::Text,
+            service_config::LogFormat::Json => LoggingFormat::Json,
+            service_config::LogFormat::Text => LoggingFormat::Text,
         },
         tracer_provider: None,
         service_name: &config.observability.otel.service_name,
@@ -156,28 +156,23 @@ async fn run_until_stop(options: &RunOptions<'_>) -> Result<RunResult, Failure> 
     #[cfg(unix)]
     {
         use std::future::pending;
-        use tokio::signal::unix::{SignalKind, signal};
+        use tokio::signal::unix::{Signal, SignalKind, signal};
+
+        async fn recv_or_pending(stream: Option<&mut Signal>) {
+            match stream {
+                Some(stream) => {
+                    stream.recv().await;
+                }
+                None => pending().await,
+            }
+        }
 
         let mut terminate = signal(SignalKind::terminate()).ok();
         let mut interrupt = signal(SignalKind::interrupt()).ok();
         tokio::select! {
             result = migrate::run(&MIGRATOR, options) => result.map_err(Failure::from),
-            () = async {
-                match terminate.as_mut() {
-                    Some(stream) => {
-                        stream.recv().await;
-                    }
-                    None => pending().await,
-                }
-            } => Err(Failure::Interrupted("SIGTERM")),
-            () = async {
-                match interrupt.as_mut() {
-                    Some(stream) => {
-                        stream.recv().await;
-                    }
-                    None => pending().await,
-                }
-            } => Err(Failure::Interrupted("SIGINT")),
+            () = recv_or_pending(terminate.as_mut()) => Err(Failure::Interrupted("SIGTERM")),
+            () = recv_or_pending(interrupt.as_mut()) => Err(Failure::Interrupted("SIGINT")),
         }
     }
     #[cfg(not(unix))]

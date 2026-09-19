@@ -9,7 +9,6 @@
 //! diagnostic never carries the value. This module enforces that before
 //! `sqlx` sees the string.
 
-use std::ffi::OsString;
 use std::str::FromStr;
 
 use sqlx::postgres::PgConnectOptions;
@@ -107,27 +106,27 @@ impl Dsn {
     ///
     /// The first violated rule, without the offending value.
     pub fn parse(raw: &str) -> Result<Self, DsnError> {
-        Self::parse_with_environment(raw, |name| std::env::var_os(name))
+        Self::parse_with_environment(raw, |name| {
+            std::env::var_os(name).is_some_and(|value| !value.is_empty())
+        })
     }
 
-    /// [`Dsn::parse`] with an explicit environment lookup, so the ambient
+    /// [`Dsn::parse`] with an explicit occupancy lookup, so the ambient
     /// rule can be tested without mutating the process environment.
+    /// `true` means the named variable is set to a non-empty value.
     ///
     /// # Errors
     ///
     /// The first violated rule, without the offending value.
-    pub fn parse_with_environment<F>(raw: &str, environment: F) -> Result<Self, DsnError>
+    pub fn parse_with_environment<F>(raw: &str, occupied: F) -> Result<Self, DsnError>
     where
-        F: Fn(&str) -> Option<OsString>,
+        F: Fn(&str) -> bool,
     {
         let raw = raw.trim();
         if raw.is_empty() {
             return Err(DsnError::Empty);
         }
-        if let Some(name) = AMBIENT_ENVIRONMENT
-            .into_iter()
-            .find(|name| environment(name).is_some_and(|value| !value.is_empty()))
-        {
+        if let Some(name) = AMBIENT_ENVIRONMENT.into_iter().find(|name| occupied(name)) {
             return Err(DsnError::Ambient(name));
         }
         if !raw.starts_with("postgres://") && !raw.starts_with("postgresql://") {
@@ -254,8 +253,8 @@ mod tests {
 
     const VALID: &str = "postgres://app:s3cret@db.internal:5432/app?sslmode=require";
 
-    fn no_env(_: &str) -> Option<OsString> {
-        None
+    fn no_env(_: &str) -> bool {
+        false
     }
 
     fn parse(raw: &str) -> Result<Dsn, DsnError> {
@@ -432,16 +431,14 @@ mod tests {
     #[test]
     fn a_non_empty_ambient_variable_refuses_the_dsn() {
         for name in AMBIENT_ENVIRONMENT {
-            let result = Dsn::parse_with_environment(VALID, |candidate| {
-                (candidate == name).then(|| OsString::from("set"))
-            });
+            let result = Dsn::parse_with_environment(VALID, |candidate| candidate == name);
             assert_eq!(result.err(), Some(DsnError::Ambient(name)), "{name}");
         }
     }
 
     #[test]
     fn an_empty_ambient_variable_is_ignored() {
-        let result = Dsn::parse_with_environment(VALID, |_| Some(OsString::new()));
+        let result = Dsn::parse_with_environment(VALID, |_| false);
         assert!(result.is_ok());
     }
 

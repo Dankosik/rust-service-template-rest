@@ -138,8 +138,8 @@ fn attach_session(
     extra: &[(&str, &str)],
     slow_statement_threshold: Option<Duration>,
 ) -> PgConnectOptions {
-    let statement = runtime_param_millis(statement_timeout);
-    let idle = runtime_param_millis(idle_in_transaction_timeout);
+    let statement = to_runtime_param(statement_timeout);
+    let idle = to_runtime_param(idle_in_transaction_timeout);
     let core = [
         ("statement_timeout", statement.as_str()),
         ("idle_in_transaction_session_timeout", idle.as_str()),
@@ -163,7 +163,7 @@ fn attach_session(
 /// out because a bare integer is read against each setting's own default
 /// unit.
 #[must_use]
-pub fn runtime_param_millis(duration: Duration) -> String {
+pub fn to_runtime_param(duration: Duration) -> String {
     format!("{}ms", duration.as_nanos().div_ceil(1_000_000))
 }
 
@@ -220,16 +220,16 @@ mod tests {
 
     #[test]
     fn runtime_params_round_up_and_name_the_unit() {
-        assert_eq!(runtime_param_millis(Duration::from_secs(8)), "8000ms");
-        assert_eq!(runtime_param_millis(Duration::from_micros(1_500)), "2ms");
-        assert_eq!(runtime_param_millis(Duration::from_nanos(1)), "1ms");
-        assert_eq!(runtime_param_millis(Duration::ZERO), "0ms");
+        assert_eq!(to_runtime_param(Duration::from_secs(8)), "8000ms");
+        assert_eq!(to_runtime_param(Duration::from_micros(1_500)), "2ms");
+        assert_eq!(to_runtime_param(Duration::from_nanos(1)), "1ms");
+        assert_eq!(to_runtime_param(Duration::ZERO), "0ms");
     }
 
     #[test]
     fn attach_session_carries_the_named_budgets() {
         let dsn =
-            Dsn::parse_with_environment("postgres://app:pw@h:5432/app?sslmode=disable", |_| None)
+            Dsn::parse_with_environment("postgres://app:pw@h:5432/app?sslmode=disable", |_| false)
                 .unwrap();
         let options = attach_session(
             &dsn,
@@ -255,7 +255,7 @@ mod tests {
         // until the acquire budget ends, which is the bound asserted here.
         let dsn = Dsn::parse_with_environment(
             "postgres://app:pw@127.0.0.1:1/app?sslmode=disable",
-            |_| None,
+            |_| false,
         )
         .unwrap();
         let started = std::time::Instant::now();

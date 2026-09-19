@@ -71,7 +71,7 @@ pub enum Drained {
 pub struct Server {
     local_addr: SocketAddr,
     stop_accepting: CancellationToken,
-    accept_loop: JoinHandle<GracefulShutdown>,
+    accept_loop: Option<JoinHandle<GracefulShutdown>>,
 }
 
 impl Server {
@@ -99,7 +99,7 @@ impl Server {
         Ok(Self {
             local_addr,
             stop_accepting,
-            accept_loop,
+            accept_loop: Some(accept_loop),
         })
     }
 
@@ -117,9 +117,10 @@ impl Server {
     /// Returns [`ServerError::AcceptTask`] when the accept loop panicked.
     pub async fn shutdown(mut self, budget: Duration) -> Result<Drained, ServerError> {
         self.stop_accepting.cancel();
-        let graceful = (&mut self.accept_loop)
-            .await
-            .map_err(ServerError::AcceptTask)?;
+        let Some(accept_loop) = self.accept_loop.take() else {
+            return Ok(Drained::Complete);
+        };
+        let graceful = accept_loop.await.map_err(ServerError::AcceptTask)?;
         let remaining_connections = graceful.count();
         match tokio::time::timeout(budget, graceful.shutdown()).await {
             Ok(()) => Ok(Drained::Complete),
@@ -135,11 +136,16 @@ impl Drop for Server {
         // Reached only when `shutdown` was not awaited: stop accepting so the
         // listener is released, but do not abort in-flight connections. This
         // is the failed-bind / partial-startup path, not the ordered drain.
+        // `take()` detaches the accept task; Drop must not wait for drain.
         self.stop_accepting.cancel();
+        drop(self.accept_loop.take());
     }
 }
 
-/// hyper refuses an HTTP/1 read buffer below this size.
+/// hyper refuses an HTTP/1 read buffer below this size (builder panic
+/// minimum). Config admission rejects the same floor so operators never see
+/// a silent raise; this clamp still protects `Server::bind` when validation
+/// did not run.
 const HYPER_MIN_HEADER_BUF: usize = 8 * 1024;
 /// Template HTTP/2 PING cadence. Independent of `header_read_timeout`,
 /// which is the HTTP/1 idle bound.
@@ -150,6 +156,8 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
     let mut builder = auto::Builder::new(TokioExecutor::new());
     builder
         .http1()
+        // `header_read_timeout` is inert on this builder without a timer;
+        // omitting the timer does not disable the timeout.
         .timer(TokioTimer::new())
         .header_read_timeout(options.header_read_timeout)
         .max_buf_size(options.max_header_bytes.max(HYPER_MIN_HEADER_BUF))
@@ -238,7 +246,10 @@ pub const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_to
 
 /// hyper's protocol sniff reads the first bytes without a timer, so a client
 /// that connects and stays silent is never timed out (hyper #3756). Peek
-/// with our own bound before handing the socket over.
+/// with our own bound before handing the socket over. The first byte must
+/// stay queued for that sniff: this is `peek`, not `read`. `true` means a
+/// byte is available and still in the stream; timeout, peek I/O error, and
+/// EOF are the same close-without-response.
 async fn wait_for_first_byte(stream: &TcpStream, timeout: Duration) -> bool {
     let mut probe = [0u8; 1];
     match tokio::time::timeout(timeout, stream.peek(&mut probe)).await {

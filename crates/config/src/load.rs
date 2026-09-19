@@ -116,6 +116,8 @@ where
         }
         let value = value.into();
         let value = value.to_string_lossy().into_owned();
+        // `Environment::source` keeps keys that still carry the `APP__` prefix;
+        // inserting the stripped path would make every override disappear.
         namespace.insert(name.to_owned(), value);
     }
     Ok(namespace)

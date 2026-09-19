@@ -8,8 +8,9 @@ use serde::Deserialize;
 
 use crate::validate::{ValidationError, duration_range, int_range, non_empty, socket_addr};
 
-/// hyper refuses a read buffer below this size; the header-bytes bound is
-/// implemented through that buffer.
+/// Operator-facing floor for `http.max_header_bytes`. hyper refuses an HTTP/1
+/// read buffer below this size; the adapter still clamps independently so
+/// `Server::bind` cannot pass a smaller value even if validation was skipped.
 pub const MIN_HEADER_BYTES: u64 = 8 * 1024;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]

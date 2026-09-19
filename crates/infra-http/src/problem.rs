@@ -368,12 +368,14 @@ pub mod responses {
     pub struct InternalServerError(pub Problem);
 
     /// The problem responses the OpenAPI document declares on every
-    /// operation as shared transport answers. The hardened chain emits
-    /// `Problem` for 413, 500, 503, 504, and 405 on registered routes; 400
-    /// is handler vocabulary. Header overflow is hyper-native 431 before
-    /// the router, not a `Problem`. Name this type in `responses(...)`
-    /// beside the operation's own answers; a new shared *Problem* status
-    /// joins here once instead of in every operation.
+    /// operation as shared transport answers. This is the Problem set every
+    /// operation can name without colliding with probe-owned 503 `text/plain`.
+    /// The hardened chain also emits Problem 503/504/405 at runtime; those
+    /// stay out of this group (ready already documents 503 as `text/plain`).
+    /// Header overflow is hyper-native 431 before the router, not a
+    /// `Problem`. Name this type in `responses(...)` beside the operation's
+    /// own answers; a new shared *Problem* status joins here once instead
+    /// of in every operation.
     #[derive(Debug, IntoResponses)]
     pub enum TransportProblemResponses {
         #[response(status = 400)]

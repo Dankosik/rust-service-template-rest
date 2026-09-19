@@ -21,9 +21,10 @@ use tokio::time::Instant;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-/// One dependency check. Implementations must respect the deadline carried
-/// by the caller's timeout; a check that ignores it holds the whole
-/// evaluation past its budget.
+/// One dependency check. The refresher wraps [`Probe::check`] in a timeout;
+/// when that budget elapses the future is dropped. Implementations must not
+/// detach work that would outlive that cancellation. A check that ignores
+/// cancellation holds the whole evaluation past its budget.
 #[async_trait::async_trait]
 pub trait Probe: Send + Sync + 'static {
     /// Bounded label used in log lines and verdict messages.
@@ -50,8 +51,11 @@ pub enum NotReady {
     Draining,
     #[error("readiness has not been evaluated yet")]
     NotEvaluated,
-    #[error("readiness verdict is stale: last evaluated {age:?} ago, budget {budget:?}")]
-    Stale { age: Duration, budget: Duration },
+    #[error("readiness verdict is stale: last evaluated {age:?} ago, stale_after {stale_after:?}")]
+    Stale {
+        age: Duration,
+        stale_after: Duration,
+    },
     #[error("readiness evaluation exceeded the {budget:?} budget")]
     TimedOut { budget: Duration },
     #[error("{probe} probe failed: {error}")]
@@ -92,12 +96,26 @@ impl RefreshPolicy {
 
 /// The immutable result of one evaluation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Evaluation {
-    /// The verdict a caller should see; `None` means ready.
-    pub failure: Option<NotReady>,
-    /// Failed evaluations since the last healthy one.
-    pub consecutive_failures: u32,
-    pub evaluated_at: Instant,
+pub(crate) enum Evaluation {
+    /// Published ready, including a hysteresis hold after observed failures
+    /// below the threshold. `consecutive_failures` is the observed streak.
+    Ready {
+        consecutive_failures: u32,
+        evaluated_at: Instant,
+    },
+    /// Published unreadiness and its cause.
+    Unready {
+        reason: NotReady,
+        evaluated_at: Instant,
+    },
+}
+
+impl Evaluation {
+    fn evaluated_at(&self) -> Instant {
+        match *self {
+            Self::Ready { evaluated_at, .. } | Self::Unready { evaluated_at, .. } => evaluated_at,
+        }
+    }
 }
 
 /// Published readiness state.
@@ -248,31 +266,38 @@ fn fold_evaluation(
     evaluated_at: Instant,
 ) -> Evaluation {
     match observed {
-        Ok(()) => Evaluation {
-            failure: None,
+        Ok(()) => Evaluation::Ready {
             consecutive_failures: 0,
             evaluated_at,
         },
-        Err(failure) => {
-            let consecutive_failures = previous.map_or(0, |p| p.consecutive_failures) + 1;
-            // Hold the previous healthy verdict until the streak reaches
-            // the threshold. One that was already failing keeps reporting
-            // the newest cause; one that has never been healthy fails
-            // immediately.
-            let reported = match previous {
-                Some(p)
-                    if p.failure.is_none() && consecutive_failures < policy.failure_threshold =>
-                {
-                    None
-                }
-                _ => Some(failure.clone()),
-            };
-            Evaluation {
-                failure: reported,
+        Err(failure) => match previous {
+            Some(Evaluation::Ready {
                 consecutive_failures,
-                evaluated_at,
+                ..
+            }) => {
+                let consecutive_failures = consecutive_failures + 1;
+                // Hold the previous healthy verdict until the streak reaches
+                // the threshold. Always stamp `evaluated_at` for this check
+                // so holding a healthy verdict does not age into `Stale`.
+                if consecutive_failures < policy.failure_threshold {
+                    Evaluation::Ready {
+                        consecutive_failures,
+                        evaluated_at,
+                    }
+                } else {
+                    Evaluation::Unready {
+                        reason: failure.clone(),
+                        evaluated_at,
+                    }
+                }
             }
-        }
+            // Already failing keeps reporting the newest cause; never-healthy
+            // fails on the first observation.
+            Some(Evaluation::Unready { .. }) | None => Evaluation::Unready {
+                reason: failure.clone(),
+                evaluated_at,
+            },
+        },
     }
 }
 
@@ -297,15 +322,15 @@ impl ReadinessReader {
         let Some(evaluation) = snapshot.evaluation else {
             return Err(NotReady::NotEvaluated);
         };
-        if let Some(budget) = snapshot.stale_after {
-            let age = evaluation.evaluated_at.elapsed();
-            if age > budget {
-                return Err(NotReady::Stale { age, budget });
+        if let Some(stale_after) = snapshot.stale_after {
+            let age = evaluation.evaluated_at().elapsed();
+            if age > stale_after {
+                return Err(NotReady::Stale { age, stale_after });
             }
         }
-        match evaluation.failure {
-            None => Ok(()),
-            Some(reason) => Err(reason),
+        match evaluation {
+            Evaluation::Ready { .. } => Ok(()),
+            Evaluation::Unready { reason, .. } => Err(reason),
         }
     }
 
