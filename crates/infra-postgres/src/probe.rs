@@ -6,9 +6,6 @@
 //! it. The refresher's budget bounds the whole check; the acquire budget
 //! bounds the wait for a connection inside it.
 
-use std::future::Future;
-use std::pin::Pin;
-
 use health::{Probe, ProbeError};
 use sqlx::Connection;
 use sqlx::postgres::PgPool;
@@ -26,16 +23,15 @@ impl PostgresProbe {
     }
 }
 
+#[async_trait::async_trait]
 impl Probe for PostgresProbe {
     fn name(&self) -> &'static str {
         "postgres"
     }
 
-    fn check(&self) -> Pin<Box<dyn Future<Output = Result<(), ProbeError>> + Send + '_>> {
-        Box::pin(async move {
-            let mut conn = self.pool.acquire().await.map_err(|err| probe_error(&err))?;
-            conn.ping().await.map_err(|err| probe_error(&err))
-        })
+    async fn check(&self) -> Result<(), ProbeError> {
+        let mut conn = self.pool.acquire().await.map_err(|err| probe_error(&err))?;
+        conn.ping().await.map_err(|err| probe_error(&err))
     }
 }
 

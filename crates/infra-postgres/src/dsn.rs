@@ -68,23 +68,13 @@ pub enum DsnError {
 
 /// Modes the template admits: each has one TLS outcome, never a per-attempt
 /// negotiation (`allow` / `prefer`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::EnumString, strum::IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
 enum AdmittedSslMode {
     Disable,
     Require,
     VerifyCa,
     VerifyFull,
-}
-
-impl AdmittedSslMode {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Disable => "disable",
-            Self::Require => "require",
-            Self::VerifyCa => "verify-ca",
-            Self::VerifyFull => "verify-full",
-        }
-    }
 }
 
 /// An admitted connection string, ready to become connect options.
@@ -226,7 +216,7 @@ impl Dsn {
     /// The admitted `sslmode`, as the operator spelled it.
     #[must_use]
     pub fn ssl_mode_name(&self) -> &'static str {
-        self.ssl_mode.name()
+        self.ssl_mode.into()
     }
 }
 
@@ -234,13 +224,7 @@ impl Dsn {
 /// one pool could differ in what they protect; the policy admits only modes
 /// with one outcome.
 fn parse_ssl_mode(value: &str) -> Result<AdmittedSslMode, DsnError> {
-    match value {
-        "disable" => Ok(AdmittedSslMode::Disable),
-        "require" => Ok(AdmittedSslMode::Require),
-        "verify-ca" => Ok(AdmittedSslMode::VerifyCa),
-        "verify-full" => Ok(AdmittedSslMode::VerifyFull),
-        _ => Err(DsnError::SslMode),
-    }
+    value.parse().map_err(|_| DsnError::SslMode)
 }
 
 /// A parameter key for a diagnostic: the operator's own spelling, capped so
