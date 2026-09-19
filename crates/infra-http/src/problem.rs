@@ -311,25 +311,26 @@ impl Problem {
 
 impl IntoResponse for Problem {
     fn into_response(self) -> Response {
-        let status = self.code.status();
         let code = self.code;
         let retry_after = self.retry_after;
-        // Serializing a struct of strings and integers cannot fail.
-        let body = serde_json::to_vec(&self).unwrap_or_default();
-        let mut response = (status, body).into_response();
-        response.headers_mut().insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/problem+json"),
-        );
+        // Problem contains only infallibly serializable strings and integers.
+        // The extension lets the access log distinguish codes sharing a status.
+        let mut response = (
+            code.status(),
+            [(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/problem+json"),
+            )],
+            axum::Extension(code),
+            axum::Json(self),
+        )
+            .into_response();
         if let Some(after) = retry_after {
-            let seconds = after.as_secs().max(1);
-            if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
-                response.headers_mut().insert(RETRY_AFTER, value);
-            }
+            response.headers_mut().insert(
+                RETRY_AFTER,
+                HeaderValue::from(after.as_secs().max(1)),
+            );
         }
-        // The access log reads the code back to separate failures that
-        // share a status.
-        response.extensions_mut().insert(code);
         response
     }
 }
@@ -424,11 +425,12 @@ mod tests {
 
     #[tokio::test]
     async fn renders_problem_json_with_optional_members() {
-        let response = Problem::new(Code::ServiceUnavailable)
+        let problem = Problem::new(Code::ServiceUnavailable)
             .detail(AT_CAPACITY_DETAIL)
             .request_id(Some("req-1".to_owned()))
-            .retry_after(Duration::from_millis(200))
-            .into_response();
+            .retry_after(Duration::from_millis(200));
+        let expected = serde_json::to_vec(&problem).unwrap();
+        let response = problem.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             response.headers().get(CONTENT_TYPE).unwrap(),
@@ -440,6 +442,7 @@ mod tests {
             Some(&Code::ServiceUnavailable)
         );
         let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), expected.as_slice());
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["code"], "service_unavailable");
         assert_eq!(json["status"], 503);
@@ -449,6 +452,28 @@ mod tests {
         assert_eq!(json["type"], Code::ServiceUnavailable.type_uri());
         assert!(json.get("invalid_params").is_none());
         assert!(json.get("instance").is_none());
+    }
+
+    #[test]
+    fn retry_after_keeps_whole_seconds_with_a_minimum_of_one() {
+        for (duration, expected) in [
+            (Duration::ZERO, "1"),
+            (Duration::from_millis(1_999), "1"),
+            (Duration::from_secs(2), "2"),
+            (Duration::from_secs(u64::MAX), "18446744073709551615"),
+        ] {
+            let response = Problem::new(Code::TooManyRequests)
+                .retry_after(duration)
+                .into_response();
+            assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), expected);
+        }
+        assert!(
+            Problem::new(Code::BadRequest)
+                .into_response()
+                .headers()
+                .get(RETRY_AFTER)
+                .is_none()
+        );
     }
 
     #[tokio::test]
