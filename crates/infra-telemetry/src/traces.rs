@@ -3,9 +3,11 @@
 //! The provider is always installed so every request has a trace id for log
 //! correlation. The OTLP exporter is added only when an endpoint resolves:
 //! the typed endpoint first, then the standard `OTEL_EXPORTER_OTLP_*`
-//! variables, which the SDK reads itself. When the typed endpoint selects
-//! the collector, ambient credential and trust variables are refused so one
-//! collector's credential is never sent to another.
+//! endpoint variables, which the SDK reads itself. This template always
+//! builds OTLP/HTTP protobuf and does not honor `OTEL_EXPORTER_OTLP_PROTOCOL`.
+//! When the typed endpoint selects the collector, ambient credential and
+//! trust variables are refused so one collector's credential is never sent
+//! to another.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -19,9 +21,10 @@ use opentelemetry_sdk::trace::{self as sdktrace, SdkTracer, SdkTracerProvider};
 use opentelemetry_semantic_conventions::attribute;
 use secrecy::{ExposeSecret, SecretString};
 
-/// Trace sampler selected by typed configuration.
+/// Trace sampler selected by typed configuration, with the ratio already
+/// attached to the variants that use it.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Sampler {
+pub enum ResolvedSampler {
     AlwaysOn,
     AlwaysOff,
     TraceIdRatio(f64),
@@ -35,7 +38,7 @@ pub struct TracingOptions {
     pub vcs_revision: String,
     pub instance_id: String,
     pub deployment_environment: String,
-    pub sampler: Sampler,
+    pub sampler: ResolvedSampler,
     /// Typed OTLP/HTTP traces endpoint; `None` falls back to the environment.
     pub otlp_endpoint: Option<String>,
     /// Typed collector headers as `key=value,key=value`. `None` means no
@@ -260,6 +263,8 @@ fn resolve_endpoint_source(
 fn span_exporter(
     options: &TracingOptions,
 ) -> Result<opentelemetry_otlp::SpanExporter, opentelemetry_otlp::ExporterBuildError> {
+    // Always OTLP/HTTP protobuf. An environment endpoint still lets the SDK
+    // pick the URL; it does not select gRPC or another protocol.
     let mut builder = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
         .with_protocol(opentelemetry_otlp::Protocol::HttpBinary);
@@ -318,7 +323,7 @@ fn resource(options: &TracingOptions) -> Resource {
     Resource::builder().with_attributes(attributes).build()
 }
 
-impl Sampler {
+impl ResolvedSampler {
     fn to_sdk(self) -> sdktrace::Sampler {
         match self {
             Self::AlwaysOn => sdktrace::Sampler::AlwaysOn,
@@ -347,7 +352,7 @@ mod tests {
             vcs_revision: "abc".into(),
             instance_id: String::new(),
             deployment_environment: "test".into(),
-            sampler: Sampler::AlwaysOn,
+            sampler: ResolvedSampler::AlwaysOn,
             otlp_endpoint: (!endpoint.is_empty()).then(|| endpoint.to_owned()),
             otlp_headers: None,
         }
