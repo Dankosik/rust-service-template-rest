@@ -49,6 +49,12 @@ impl ProbeError {
     }
 }
 
+/// The last [`Readiness`] owner was dropped, so no further verdicts will
+/// be published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("readiness owner dropped")]
+pub struct OwnerDropped;
+
 /// Why the service is not ready.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum NotReady {
@@ -345,8 +351,12 @@ impl ReadinessReader {
     }
 
     /// Resolve after the next published change.
-    pub async fn changed(&mut self) {
-        let _ = self.rx.changed().await;
+    ///
+    /// # Errors
+    ///
+    /// [`OwnerDropped`] when the last [`Readiness`] sender is gone.
+    pub async fn changed(&mut self) -> Result<(), OwnerDropped> {
+        self.rx.changed().await.map_err(|_| OwnerDropped)
     }
 }
 
@@ -487,7 +497,7 @@ mod tests {
         readiness.refresh(policy()).await;
         let mut reader = readiness.reader();
         readiness.start_drain();
-        reader.changed().await;
+        reader.changed().await.unwrap();
         assert_eq!(reader.verdict(), Err(NotReady::Draining));
     }
 
@@ -501,7 +511,7 @@ mod tests {
             async move { readiness.refresh_until(policy(), cancel).await }
         });
         let mut reader = readiness.reader();
-        reader.changed().await;
+        reader.changed().await.unwrap();
         tokio::task::yield_now().await;
         assert_eq!(reader.verdict(), Ok(()));
 
@@ -525,7 +535,7 @@ mod tests {
             async move { readiness.refresh_until(policy(), cancel).await }
         });
         let mut reader = readiness.reader();
-        reader.changed().await;
+        reader.changed().await.unwrap();
         assert_eq!(reader.verdict(), Ok(()));
 
         flag.store(false, Ordering::Relaxed);
@@ -596,5 +606,13 @@ mod tests {
         ));
         assert_eq!(first_calls.load(Ordering::Relaxed), 1);
         assert_eq!(second_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn changed_reports_when_the_owner_is_dropped() {
+        let readiness = Readiness::new(Vec::new());
+        let mut reader = readiness.reader();
+        drop(readiness);
+        assert_eq!(reader.changed().await, Err(OwnerDropped));
     }
 }

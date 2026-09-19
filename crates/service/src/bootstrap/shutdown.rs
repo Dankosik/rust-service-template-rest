@@ -223,7 +223,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
 
     let http_drain_budget = budget.remaining(plan.http_config.effective_drain_budget());
     tracing::info!(budget = ?http_drain_budget, "drain_started");
-    let drain_overran = match plan.app_listener.shutdown(http_drain_budget).await {
+    let drain_overran = match plan.app_listener.drain(http_drain_budget).await {
         Ok(Drained::Complete) => {
             tracing::info!("drain_completed");
             false
@@ -252,7 +252,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         // flush. A scrape overrun is forced closed so telemetry can flush;
         // it does not vote `degraded`.
         match diagnostics
-            .shutdown(budget.remaining(DIAGNOSTICS_SHUTDOWN))
+            .drain(budget.remaining(DIAGNOSTICS_SHUTDOWN))
             .await
         {
             Ok(Drained::Complete) => tracing::info!("diagnostics_stopped"),

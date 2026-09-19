@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn attach_session_carries_the_named_budgets() {
         let dsn =
-            Dsn::parse_with_environment("postgres://app:pw@h:5432/app?sslmode=disable", |_| false)
+            Dsn::admit_with_environment("postgres://app:pw@h:5432/app?sslmode=disable", |_| false)
                 .unwrap();
         let options = attach_session(
             &dsn,
@@ -282,7 +282,7 @@ mod tests {
     async fn an_unreachable_host_fails_inside_the_acquire_budget() {
         // Port 1 on loopback is refused at once; the pool keeps retrying
         // until the acquire budget ends, which is the bound asserted here.
-        let dsn = Dsn::parse_with_environment(
+        let dsn = Dsn::admit_with_environment(
             "postgres://app:pw@127.0.0.1:1/app?sslmode=disable",
             |_| false,
         )

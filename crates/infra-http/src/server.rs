@@ -117,7 +117,7 @@ impl Server {
     /// # Errors
     ///
     /// Returns [`ServerError::AcceptTask`] when the accept loop panicked.
-    pub async fn shutdown(mut self, budget: Duration) -> Result<Drained, ServerError> {
+    pub async fn drain(mut self, budget: Duration) -> Result<Drained, ServerError> {
         self.stop_accepting.cancel();
         let Some(accept_loop) = self.accept_loop.take() else {
             return Ok(Drained::Complete);
@@ -135,7 +135,7 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        // Reached only when `shutdown` was not awaited: stop accepting so the
+        // Reached only when `drain` was not awaited: stop accepting so the
         // listener is released, but do not abort in-flight connections. This
         // is the failed-bind / partial-startup path, not the ordered drain.
         // `take()` detaches the accept task; Drop must not wait for drain.
@@ -310,7 +310,7 @@ mod tests {
         let server = Server::bind(loopback(), app(), options()).await.unwrap();
         let addr = server.local_addr();
         assert!(fetch(addr, "/ok").await.starts_with("HTTP/1.1 200 "));
-        let drained = server.shutdown(Duration::from_secs(2)).await.unwrap();
+        let drained = server.drain(Duration::from_secs(2)).await.unwrap();
         assert_eq!(drained, Drained::Complete);
         assert!(
             TcpStream::connect(addr).await.is_err(),
@@ -324,7 +324,7 @@ mod tests {
         let addr = server.local_addr();
         let slow = tokio::spawn(async move { fetch(addr, "/slow").await });
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let drained = server.shutdown(Duration::from_secs(2)).await.unwrap();
+        let drained = server.drain(Duration::from_secs(2)).await.unwrap();
         assert_eq!(drained, Drained::Complete);
         assert!(slow.await.unwrap().ends_with("late"));
     }
@@ -335,7 +335,7 @@ mod tests {
         let addr = server.local_addr();
         let slow = tokio::spawn(async move { fetch(addr, "/slow").await });
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let drained = server.shutdown(Duration::from_millis(50)).await.unwrap();
+        let drained = server.drain(Duration::from_millis(50)).await.unwrap();
         assert_eq!(
             drained,
             Drained::TimedOut {
@@ -355,7 +355,7 @@ mod tests {
             matches!(closed, Ok(Ok(0))),
             "expected EOF from the server, got {closed:?}"
         );
-        server.shutdown(Duration::from_secs(1)).await.unwrap();
+        server.drain(Duration::from_secs(1)).await.unwrap();
     }
 
     #[tokio::test]
@@ -377,7 +377,7 @@ mod tests {
             "{}",
             &text[..text.len().min(80)]
         );
-        server.shutdown(Duration::from_secs(1)).await.unwrap();
+        server.drain(Duration::from_secs(1)).await.unwrap();
     }
 
     #[tokio::test]
@@ -407,7 +407,7 @@ mod tests {
             "refused connection must not receive a response"
         );
         drop(first);
-        server.shutdown(Duration::from_secs(1)).await.unwrap();
+        server.drain(Duration::from_secs(1)).await.unwrap();
     }
 
     #[tokio::test]
@@ -417,6 +417,6 @@ mod tests {
             .await
             .expect_err("second bind must fail");
         assert!(matches!(err, ServerError::Bind { .. }), "{err}");
-        occupied.shutdown(Duration::from_secs(1)).await.unwrap();
+        occupied.drain(Duration::from_secs(1)).await.unwrap();
     }
 }

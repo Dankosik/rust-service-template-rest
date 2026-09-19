@@ -84,15 +84,6 @@ impl LoadOptions {
         Self::try_parse_from(args)
     }
 
-    /// [`FromArgs::from_argv`] under the older `LoadOptions` name.
-    pub fn from_args<I, T>(args: I) -> FromArgs
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<std::ffi::OsString> + Clone,
-    {
-        FromArgs::from_argv(args)
-    }
-
     fn clap_exit(err: &clap::Error) -> ExitCode {
         let success = err.exit_code() == 0;
         let _ = err.print();
