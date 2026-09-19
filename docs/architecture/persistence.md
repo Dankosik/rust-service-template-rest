@@ -36,8 +36,10 @@ parameter, a TLS certificate or key file parameter, any other parameter, a
 non-empty libpq variable (`PGHOST`, `PGPASSWORD`, `PGSSLMODE`, ... the
 thirteen names in `AMBIENT_ENVIRONMENT`), and a string the driver still
 cannot turn into connect options. The result is exactly what the
-operator wrote; `application_name` is added by the template from the service
-name so `pg_stat_activity` attributes sessions.
+operator wrote; `application_name` is added by the template from
+`observability.otel.service_name` (the same identity traces publish) so
+`pg_stat_activity` attributes sessions. A distinct database session label
+is not a configuration axis.
 
 ## Budgets
 

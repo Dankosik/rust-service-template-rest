@@ -78,11 +78,11 @@ impl LoadOptions {
     {
         match Self::parse_args(args) {
             Ok(options) => FromArgs::Run(options),
-            Err(err) => FromArgs::Exit(Self::clap_failure(&err)),
+            Err(err) => FromArgs::Exit(Self::clap_exit(&err)),
         }
     }
 
-    fn clap_failure(err: &clap::Error) -> ExitCode {
+    fn clap_exit(err: &clap::Error) -> ExitCode {
         let success = err.exit_code() == 0;
         let _ = err.print();
         if success {

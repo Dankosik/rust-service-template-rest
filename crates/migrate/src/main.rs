@@ -137,6 +137,7 @@ async fn apply(config: &Config) -> Result<RunResult, Failure> {
         migration.target = version_or_zero(MIGRATOR.iter().map(|m| m.version).max()),
         "migration_starting"
     );
+    // Same service identity as traces; not a separate Postgres label.
     let options = RunOptions::defaults(&dsn, &config.observability.otel.service_name);
     run_until_stop(&options).await
 }

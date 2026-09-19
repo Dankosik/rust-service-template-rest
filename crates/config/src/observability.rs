@@ -17,8 +17,8 @@ pub struct ObservabilityConfig {
 pub struct MetricsConfig {
     /// Private Prometheus diagnostics listener. `:port` binds IPv4
     /// all-interfaces (`0.0.0.0`) because the scraper runs in another pod;
-    /// deployment network policy must keep it private. Empty disables HTTP
-    /// exposition.
+    /// deployment network policy must keep it private. Hostnames are
+    /// refused; load does not look them up. Empty disables HTTP exposition.
     pub addr: String,
 }
 
@@ -60,8 +60,10 @@ pub enum TracesSampler {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct OtelConfig {
-    /// `service.name` resource attribute. The initializer rewrites this
-    /// default for a derived service.
+    /// `service.name` resource attribute and the PostgreSQL
+    /// `application_name` for pooled and migrator sessions. The initializer
+    /// rewrites this default for a derived service. A distinct database
+    /// session label is not a configuration axis.
     pub service_name: String,
     pub traces_sampler: TracesSampler,
     /// Ratio for the ratio-based samplers, in `[0, 1]`. Always validated

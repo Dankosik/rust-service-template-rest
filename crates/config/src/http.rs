@@ -1,6 +1,7 @@
 //! HTTP listener, request budgets, capacity bounds, and the drain budget.
 
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use bytesize::ByteSize;
@@ -16,8 +17,9 @@ pub const MIN_HEADER_BYTES: u64 = 8 * 1024;
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct HttpConfig {
-    /// Listen address as `host:port`, or `:port` for IPv4 all-interfaces
-    /// (`0.0.0.0`).
+    /// Listen address as an IP `host:port`, or `:port` for IPv4
+    /// all-interfaces (`0.0.0.0`). Hostnames are refused; load does not
+    /// look them up.
     pub addr: String,
     /// Total time the platform allows between SIGTERM and SIGKILL. Every
     /// teardown stage draws from it; `drain_timeout` bounds only the HTTP
@@ -103,6 +105,18 @@ impl HttpConfig {
     /// Returns the validation error for a malformed `http.addr`.
     pub fn listen_addr(&self) -> Result<SocketAddr, ValidationError> {
         socket_addr("http.addr", &self.addr)
+    }
+
+    /// Adapter form of `http.max_connections`: `None` means unbounded.
+    #[must_use]
+    pub fn connection_cap(&self) -> Option<NonZeroU32> {
+        NonZeroU32::new(self.max_connections)
+    }
+
+    /// Adapter form of `http.max_in_flight`: `None` means shedding is off.
+    #[must_use]
+    pub fn in_flight_cap(&self) -> Option<NonZeroU32> {
+        NonZeroU32::new(self.max_in_flight)
     }
 
     /// Drain budget left after the readiness propagation delay.
@@ -241,6 +255,20 @@ mod tests {
             ..HttpConfig::default()
         };
         unbounded.validate().unwrap();
+        assert_eq!(unbounded.connection_cap(), None);
+        assert_eq!(
+            HttpConfig::default().connection_cap().map(NonZeroU32::get),
+            Some(4096)
+        );
+        assert_eq!(
+            HttpConfig {
+                max_in_flight: 0,
+                max_connections: 0,
+                ..HttpConfig::default()
+            }
+            .in_flight_cap(),
+            None
+        );
     }
 
     #[test]

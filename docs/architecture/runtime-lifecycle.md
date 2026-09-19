@@ -72,7 +72,9 @@ instead of pushing the process into `SIGKILL`.
 
 The `17s` tail after the drain is process structure, not configuration;
 `validate_grace_budget` refuses a configuration whose grace period cannot
-hold `drain_timeout` plus the tail. The default worst case is `42s`
+hold `drain_timeout` plus the tail. Tracer-provider shutdown may still
+spend a short join slack after the telemetry flush budget; that slack is
+not part of the encoded tail. The default worst case is `42s`
 inside `45s`; the platform grace derivation lives in
 [Configuration Source Policy](../configuration-source-policy.md#runtime-budget-policy)
 and the image check proves it with `docker stop --time 45`.

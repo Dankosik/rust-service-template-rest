@@ -71,7 +71,7 @@ pub struct PoolOptions<'a> {
 
 /// What a one-off session (the migrator) decides per connection.
 ///
-/// The two `Duration` fields are PostgreSQL session GUCs, not the client
+/// The `Duration` fields are PostgreSQL session GUCs, not the client
 /// connect wait. The caller bounds that wait; this function does not.
 #[derive(Clone, Debug)]
 pub struct SessionOptions<'a> {
@@ -81,6 +81,8 @@ pub struct SessionOptions<'a> {
     pub statement_timeout: Duration,
     /// Session `idle_in_transaction_session_timeout`.
     pub idle_in_transaction_timeout: Duration,
+    /// Session `lock_timeout`, including the wait for the advisory lock.
+    pub lock_timeout: Duration,
     /// Extra startup-packet GUCs, already rendered as `(name, value)`.
     pub extra: &'a [(&'a str, &'a str)],
 }
@@ -98,6 +100,7 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
         options.application_name,
         STATEMENT_TIMEOUT,
         IDLE_IN_TRANSACTION_TIMEOUT,
+        None,
         &[],
         Some(SLOW_STATEMENT_THRESHOLD),
     );
@@ -131,6 +134,7 @@ pub async fn connect_session(
         options.application_name,
         options.statement_timeout,
         options.idle_in_transaction_timeout,
+        Some(options.lock_timeout),
         options.extra,
         None,
     );
@@ -148,19 +152,22 @@ fn attach_session(
     application_name: &str,
     statement_timeout: Duration,
     idle_in_transaction_timeout: Duration,
+    lock_timeout: Option<Duration>,
     extra: &[(&str, &str)],
     slow_statement_threshold: Option<Duration>,
 ) -> PgConnectOptions {
     let statement = to_runtime_param(statement_timeout);
     let idle = to_runtime_param(idle_in_transaction_timeout);
+    let lock = lock_timeout.map(to_runtime_param);
     let core = [
-        ("statement_timeout", statement.as_str()),
-        ("idle_in_transaction_session_timeout", idle.as_str()),
+        Some(("statement_timeout", statement.as_str())),
+        Some(("idle_in_transaction_session_timeout", idle.as_str())),
+        lock.as_ref().map(|value| ("lock_timeout", value.as_str())),
     ];
     let mut options = dsn
         .connect_options()
         .application_name(application_name)
-        .options(core.into_iter().chain(extra.iter().copied()))
+        .options(core.into_iter().flatten().chain(extra.iter().copied()))
         .log_statements(log::LevelFilter::Off);
     if let Some(threshold) = slow_statement_threshold {
         options = options.log_slow_statements(log::LevelFilter::Warn, threshold);
@@ -257,7 +264,8 @@ mod tests {
             "svc",
             STATEMENT_TIMEOUT,
             IDLE_IN_TRANSACTION_TIMEOUT,
-            &[("lock_timeout", "15s")],
+            Some(Duration::from_secs(15)),
+            &[],
             Some(SLOW_STATEMENT_THRESHOLD),
         );
         assert_eq!(options.get_application_name(), Some("svc"));
@@ -267,7 +275,7 @@ mod tests {
             options.contains("-c idle_in_transaction_session_timeout=8000ms"),
             "{options}"
         );
-        assert!(options.contains("-c lock_timeout=15s"), "{options}");
+        assert!(options.contains("-c lock_timeout=15000ms"), "{options}");
     }
 
     #[tokio::test]

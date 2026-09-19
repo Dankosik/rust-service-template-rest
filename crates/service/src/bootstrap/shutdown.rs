@@ -24,13 +24,14 @@ pub(crate) const BACKGROUND_JOIN: Duration = Duration::from_secs(5);
 pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
 const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
 
-/// What the stages after the drain need at worst.
-pub(crate) const SHUTDOWN_TAIL: Duration = Duration::from_secs(
-    DIAGNOSTICS_SHUTDOWN.as_secs()
-        + BACKGROUND_JOIN.as_secs()
-        + DEPENDENCY_CLOSE.as_secs()
-        + TELEMETRY_FLUSH.as_secs(),
-);
+/// What the stages after the drain need at worst: the four ceilings above,
+/// summed as durations. Tracer-provider shutdown also waits a short join
+/// slack around `spawn_blocking` after its SDK timeout; that slack is not
+/// part of this tail and may use leftover grace after these stages.
+pub(crate) const SHUTDOWN_TAIL: Duration = DIAGNOSTICS_SHUTDOWN
+    .saturating_add(BACKGROUND_JOIN)
+    .saturating_add(DEPENDENCY_CLOSE)
+    .saturating_add(TELEMETRY_FLUSH);
 
 #[derive(Debug, thiserror::Error)]
 #[error(
