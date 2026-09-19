@@ -245,7 +245,7 @@ async fn migrations_apply_once_and_then_report_no_change(pool: PgPool) {
     assert_eq!(first.target, Some(20_260_918_000_002));
     assert_eq!(first.after, Some(20_260_918_000_002));
     assert_eq!(first.applied, 2);
-    assert_eq!(first.outcome(), "success");
+    assert_eq!(first.outcome().as_str(), "success");
     assert_eq!(applied_count(&pool).await, 2);
     pool.execute("INSERT INTO widgets (id, name, sku) VALUES (1, 'w', 's')")
         .await
@@ -255,7 +255,7 @@ async fn migrations_apply_once_and_then_report_no_change(pool: PgPool) {
     assert_eq!(second.before, Some(20_260_918_000_002));
     assert_eq!(second.after, Some(20_260_918_000_002));
     assert_eq!(second.applied, 0);
-    assert_eq!(second.outcome(), "no_change");
+    assert_eq!(second.outcome().as_str(), "no_change");
 }
 
 #[sqlx::test(migrations = false)]
@@ -390,7 +390,7 @@ async fn a_source_rule_violation_fails_before_connecting(pool: PgPool) {
 #[sqlx::test(migrations = false)]
 async fn an_unreachable_target_fails_in_the_connect_stage(pool: PgPool) {
     let _ = pool;
-    let dsn = Dsn::parse("postgres://app:pw@127.0.0.1:1/app?sslmode=disable").unwrap();
+    let dsn = Dsn::admit("postgres://app:pw@127.0.0.1:1/app?sslmode=disable").unwrap();
     let err = migrate::run(&fixture("widgets").await, &options(&dsn))
         .await
         .unwrap_err();
@@ -405,6 +405,6 @@ async fn a_migration_that_fails_is_the_execute_stage(pool: PgPool) {
     let err = migrate::run(&fixture("widgets").await, &options(&dsn))
         .await
         .unwrap_err();
-    assert_eq!(err.stage(), Stage::MigrationSql, "{err}");
+    assert_eq!(err.stage(), Stage::SqlExecute, "{err}");
     assert_eq!(applied_count(&pool).await, 0);
 }

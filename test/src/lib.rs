@@ -39,5 +39,5 @@ pub async fn dsn_for(pool: &PgPool) -> Dsn {
     let raw = std::env::var(DATABASE_URL).expect("DATABASE_URL must be set for integration tests");
     let mut url = Url::parse(&raw).expect("DATABASE_URL is a URL");
     url.set_path(&database);
-    Dsn::parse(url.as_str()).expect("DATABASE_URL must be an admitted DSN")
+    Dsn::admit(url.as_str()).expect("DATABASE_URL must be an admitted DSN")
 }

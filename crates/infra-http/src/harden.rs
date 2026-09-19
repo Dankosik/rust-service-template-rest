@@ -104,8 +104,11 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
     // `Router::layer` so 404 and 405 take the same chain.
     let chain = ServiceBuilder::new()
         .map_request(request_id::strip_invalid)
-        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::new(
+            request_id::REQUEST_ID_HEADER,
+            MakeRequestUuid,
+        ))
+        .layer(PropagateRequestIdLayer::new(request_id::REQUEST_ID_HEADER))
         .layer(SetResponseHeaderLayer::overriding(
             X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
@@ -217,18 +220,24 @@ fn payload_too_large(request_id: Option<String>) -> Response {
         .into_response()
 }
 
-async fn not_found(request: Request) -> Response {
+async fn not_found(id: Option<Extension<RequestId>>) -> Response {
     Problem::new(Code::NotFound)
         .detail("no resource at this path")
-        .request_id(request_id::request_id(request.extensions()))
+        .request_id(
+            id.as_ref()
+                .and_then(|Extension(id)| request_id::from_request_id(id)),
+        )
         .into_response()
 }
 
-async fn method_not_allowed(request: Request) -> Response {
+async fn method_not_allowed(id: Option<Extension<RequestId>>) -> Response {
     // axum appends the computed `Allow` header to this response.
     Problem::new(Code::MethodNotAllowed)
         .detail("method is not allowed for this resource")
-        .request_id(request_id::request_id(request.extensions()))
+        .request_id(
+            id.as_ref()
+                .and_then(|Extension(id)| request_id::from_request_id(id)),
+        )
         .into_response()
 }
 

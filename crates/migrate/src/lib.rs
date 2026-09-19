@@ -51,7 +51,7 @@ pub enum Stage {
     /// could not be read.
     History,
     /// A migration's SQL failed.
-    MigrationSql,
+    SqlExecute,
     /// The orchestration deadline elapsed; the connection was dropped and
     /// the server rolls back whatever was in flight.
     Deadline,
@@ -65,7 +65,7 @@ impl Stage {
             Self::Connect => "connect",
             Self::Lock => "lock",
             Self::History => "history",
-            Self::MigrationSql => "execute",
+            Self::SqlExecute => "execute",
             Self::Deadline => "deadline",
         }
     }
@@ -158,14 +158,33 @@ pub struct RunResult {
     pub duration: Duration,
 }
 
-impl RunResult {
-    /// `success` when something was applied, `no_change` otherwise.
+/// Success-path words on the terminal `migration_run` record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplyOutcome {
+    /// At least one migration was applied.
+    Success,
+    /// History already matched the source.
+    NoChange,
+}
+
+impl ApplyOutcome {
     #[must_use]
-    pub fn outcome(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::NoChange => "no_change",
+        }
+    }
+}
+
+impl RunResult {
+    /// [`ApplyOutcome::Success`] when something was applied, [`ApplyOutcome::NoChange`] otherwise.
+    #[must_use]
+    pub fn outcome(&self) -> ApplyOutcome {
         if self.applied == 0 {
-            "no_change"
+            ApplyOutcome::NoChange
         } else {
-            "success"
+            ApplyOutcome::Success
         }
     }
 }
@@ -317,24 +336,21 @@ async fn applied_summary(
 fn stage_of(err: &MigrateError) -> Stage {
     match err {
         MigrateError::Source(_) => Stage::Source,
-        // Bookkeeping `Execute`: lock wait, then I/O/TLS as connect, else history.
-        // `MigrateError::Execute` never maps to `Stage::MigrationSql`; that
-        // word is named-file SQL.
-        MigrateError::Execute(sqlx::Error::Database(db))
-            if db.code().as_deref() == Some("55P03") =>
-        {
-            Stage::Lock
-        }
-        MigrateError::Execute(sqlx::Error::Io(_) | sqlx::Error::Tls(_)) => Stage::Connect,
-        MigrateError::Execute(_)
-        | MigrateError::Dirty(_)
+        // Bookkeeping `Execute` never means named-file SQL.
+        MigrateError::Execute(source) => match source {
+            sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03") => Stage::Lock,
+            sqlx::Error::Io(_) | sqlx::Error::Tls(_) => Stage::Connect,
+            _ => Stage::History,
+        },
+        MigrateError::Dirty(_)
         | MigrateError::VersionMismatch(_)
         | MigrateError::VersionMissing(_)
         | MigrateError::VersionNotPresent(_)
         | MigrateError::VersionTooOld(..)
         | MigrateError::VersionTooNew(..) => Stage::History,
         // `ExecuteMigration` is the named file's SQL; `_` is later variants.
-        MigrateError::ExecuteMigration(..) | _ => Stage::MigrationSql,
+        MigrateError::ExecuteMigration(..) => Stage::SqlExecute,
+        _ => Stage::SqlExecute,
     }
 }
 
@@ -464,15 +480,17 @@ mod tests {
 
     #[test]
     fn outcome_reflects_applied_count() {
-        assert_eq!(RunResult::default().outcome(), "no_change");
+        assert_eq!(RunResult::default().outcome(), ApplyOutcome::NoChange);
         assert_eq!(
             RunResult {
                 applied: 1,
                 ..RunResult::default()
             }
             .outcome(),
-            "success"
+            ApplyOutcome::Success
         );
+        assert_eq!(ApplyOutcome::NoChange.as_str(), "no_change");
+        assert_eq!(ApplyOutcome::Success.as_str(), "success");
     }
 
     #[test]
@@ -488,7 +506,7 @@ mod tests {
                 sqlx::Error::PoolTimedOut,
                 3
             )),
-            Stage::MigrationSql
+            Stage::SqlExecute
         );
         assert_eq!(
             stage_of(&MigrateError::Execute(sqlx::Error::Io(
