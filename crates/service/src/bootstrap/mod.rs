@@ -21,7 +21,7 @@ use infra_telemetry::{
 };
 use secrecy::ExposeSecret;
 use service_config::{
-    AppConfig, BuildInfo, Config, FromArgs, LoadOptions, LogFormat, TracesSampler, process_failure,
+    AppConfig, BuildInfo, Config, FromArgs, LogFormat, TracesSampler, process_failure,
 };
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -72,7 +72,7 @@ pub(crate) fn run<I>(args: I) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
-    let options = match LoadOptions::from_args(args) {
+    let options = match FromArgs::from_argv(args) {
         FromArgs::Run(options) => options,
         FromArgs::Exit(code) => return code,
     };
@@ -195,7 +195,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
 }
 
 async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
-    let dsn = Dsn::parse(config.postgres.required_dsn()?.expose_secret())?;
+    let dsn = Dsn::admit(config.postgres.required_dsn()?.expose_secret())?;
     let pool = infra_postgres::connect(
         &dsn,
         &PoolOptions {

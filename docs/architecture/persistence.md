@@ -28,7 +28,7 @@ access code from that schema.
 
 `postgres.dsn` is a `postgres://` or `postgresql://` URL with an explicit
 host, port, user, password, database, and `sslmode` in `disable`, `require`,
-`verify-ca`, or `verify-full`, and no other parameter. `Dsn::parse` refuses,
+`verify-ca`, or `verify-full`, and no other parameter. `Dsn::admit` refuses,
 in this order and without ever quoting the value: an empty string, another
 scheme, an unparsable URL, a URL fragment, a missing component, a Unix socket
 host, a comma-separated host list, `allow`/`prefer`, a service or passfile

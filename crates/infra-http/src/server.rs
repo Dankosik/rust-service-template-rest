@@ -28,8 +28,10 @@ pub struct ServerOptions {
     /// restarts it whenever an HTTP/1 connection goes idle, so it is also
     /// the HTTP/1 keep-alive idle bound. Also bounds a client that connects
     /// and sends nothing, which hyper's protocol sniff would otherwise leave
-    /// open forever. HTTP/2 idle uses a separate PING cadence, not this
-    /// value.
+    /// open forever. The accept loop peeks for that first byte with this
+    /// same duration, then hyper's timer starts for the rest of the head:
+    /// a slow first byte plus a slow remainder can add, not replace.
+    /// HTTP/2 idle uses a separate PING cadence, not this value.
     pub header_read_timeout: Duration,
     /// Read-buffer ceiling for one request head. HTTP/1 overflow answers
     /// hyper-native 431 before the router (not a [`crate::Problem`]). HTTP/2
@@ -156,8 +158,9 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
     let mut builder = auto::Builder::new(TokioExecutor::new());
     builder
         .http1()
-        // `header_read_timeout` is inert on this builder without a timer;
-        // omitting the timer does not disable the timeout.
+        // Without a timer, `header_read_timeout` is not enforced; the timer
+        // is installed so this builder does not repeat `axum::serve`'s
+        // silent disable.
         .timer(TokioTimer::new())
         .header_read_timeout(options.header_read_timeout)
         .max_buf_size(options.max_header_bytes.max(HYPER_MIN_HEADER_BUF))
@@ -247,9 +250,11 @@ pub const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_to
 /// hyper's protocol sniff reads the first bytes without a timer, so a client
 /// that connects and stays silent is never timed out (hyper #3756). Peek
 /// with our own bound before handing the socket over. The first byte must
-/// stay queued for that sniff: this is `peek`, not `read`. `true` means a
-/// byte is available and still in the stream; timeout, peek I/O error, and
-/// EOF are the same close-without-response.
+/// stay queued for that sniff: this is `peek`, not `read`. Peek only
+/// waits for the first queued byte; hyper's header-read timer starts
+/// after handoff, so the operator key is shared and the two waits add.
+/// `true` means a byte is available and still in the stream; timeout,
+/// peek I/O error, and EOF are the same close-without-response.
 async fn wait_for_first_byte(stream: &TcpStream, timeout: Duration) -> bool {
     let mut probe = [0u8; 1];
     match tokio::time::timeout(timeout, stream.peek(&mut probe)).await {

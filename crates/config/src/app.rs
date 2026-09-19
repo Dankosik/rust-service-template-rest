@@ -80,8 +80,9 @@ impl AppConfig {
     }
 }
 
-/// Missing, empty, or whitespace-only replica id is vacant (`None`).
-fn occupied_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+/// Missing, empty, or whitespace-only text is vacant (`None`); a present
+/// value is stored trimmed.
+pub(crate) fn occupied_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

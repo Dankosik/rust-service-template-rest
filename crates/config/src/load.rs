@@ -214,11 +214,13 @@ mod tests {
             env(&[
                 ("APP__POSTGRES__DSN", ""),
                 ("APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS", "  "),
+                ("APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_ENDPOINT", "  "),
             ]),
         )
         .unwrap();
         assert!(!cfg.postgres.has_dsn());
         assert!(!cfg.observability.otel.exporter.has_headers());
+        assert_eq!(cfg.observability.otel.exporter.otlp_endpoint, None);
     }
 
     #[test]

@@ -15,7 +15,7 @@ use infra_postgres::{Dsn, DsnError};
 use infra_telemetry::{LoggingFormat, LoggingOptions, install_subscriber};
 use migrate::{FailedRun, MIGRATOR, RunOptions, RunResult, Stage};
 use secrecy::ExposeSecret;
-use service_config::{BuildInfo, Config, FromArgs, LoadOptions, ValidationError, process_failure};
+use service_config::{BuildInfo, Config, FromArgs, ValidationError, process_failure};
 
 const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
@@ -79,7 +79,7 @@ impl Failure {
 }
 
 fn main() -> ExitCode {
-    let options = match LoadOptions::from_args(std::env::args_os()) {
+    let options = match FromArgs::from_argv(std::env::args_os()) {
         FromArgs::Run(options) => options,
         FromArgs::Exit(code) => return code,
     };
@@ -125,7 +125,7 @@ async fn apply(config: &Config) -> Result<RunResult, Failure> {
     if !config.postgres.enabled {
         return Err(Failure::PostgresDisabled);
     }
-    let dsn = Dsn::parse(config.postgres.required_dsn()?.expose_secret())?;
+    let dsn = Dsn::admit(config.postgres.required_dsn()?.expose_secret())?;
     tracing::info!(
         app.env = %config.app.env,
         app.version = %config.app.version,
@@ -197,7 +197,7 @@ fn log_terminal(result: &RunResult, failure: Option<&Failure>) {
             migration.after = version_or_zero(result.after),
             migration.applied_count = result.applied,
             migration.duration_ms = duration_ms,
-            outcome = result.outcome(),
+            outcome = result.outcome().as_str(),
             "migration_run"
         ),
         Some(failure) => tracing::error!(
