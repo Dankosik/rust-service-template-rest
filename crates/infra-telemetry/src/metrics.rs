@@ -79,14 +79,18 @@ impl Metrics {
     /// Drain histogram samples periodically so the recorder does not grow
     /// unboundedly between scrapes. Run under the background task tracker.
     pub async fn upkeep(self, interval: Duration, cancel: CancellationToken) {
-        let mut ticker = tokio::time::interval(interval);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                () = cancel.cancelled() => return,
-                _ = ticker.tick() => self.handle.run_upkeep(),
-            }
-        }
+        // An already cancelled token never polls the work; no detached
+        // task is created.
+        let _ = cancel
+            .run_until_cancelled(async {
+                let mut ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticker.tick().await;
+                    self.handle.run_upkeep();
+                }
+            })
+            .await;
     }
 
     /// Publish Tokio runtime metrics on `interval` until cancelled. Uses the

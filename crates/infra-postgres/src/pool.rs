@@ -204,14 +204,18 @@ pub async fn record_metrics_periodically(
     interval: Duration,
     cancel: CancellationToken,
 ) {
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            () = cancel.cancelled() => return,
-            _ = ticker.tick() => record_metrics(&pool),
-        }
-    }
+    // An already cancelled token never polls the work; no detached task
+    // is created.
+    let _ = cancel
+        .run_until_cancelled(async {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                record_metrics(&pool);
+            }
+        })
+        .await;
 }
 
 #[cfg(test)]
