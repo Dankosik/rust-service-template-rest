@@ -17,11 +17,11 @@ use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
 use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe};
 use infra_telemetry::{
-    ExporterState, LoggingOptions, Metrics, Sampler, TracingOptions, diagnostics_router,
-    install_subscriber, install_tracer_provider,
+    ExporterState, LoggingFormat, LoggingOptions, Metrics, Sampler, TracingOptions,
+    diagnostics_router, install_subscriber, install_tracer_provider,
 };
 use secrecy::ExposeSecret;
-use service_config::{AppConfig, BuildInfo, Config, LoadOptions, LogFormat, ResolvedSampler};
+use service_config::{AppConfig, BuildInfo, Config, LoadOptions, LogFormat, TracesSampler};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -121,10 +121,10 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     let tracer_provider =
         install_tracer_provider(&tracing_options(&config, replica_instance_id(&config.app)))?;
     install_subscriber(&LoggingOptions {
-        level: config.log.level.clone(),
+        level: &config.log.level,
         format: match config.log.format {
-            LogFormat::Json => infra_telemetry::LogFormat::Json,
-            LogFormat::Text => infra_telemetry::LogFormat::Text,
+            LogFormat::Json => LoggingFormat::Json,
+            LogFormat::Text => LoggingFormat::Text,
         },
         tracer_provider: Some(&tracer_provider),
         service_name: &config.observability.otel.service_name,
@@ -178,7 +178,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     let readiness = Readiness::new(probes);
     let policy = RefreshPolicy {
         interval: config.health.refresh_interval,
-        probe_budget: config.health.probe_budget,
+        probe_budget: config.health.readiness_timeout,
         failure_threshold: config.health.failure_threshold,
     };
 
@@ -317,11 +317,13 @@ fn replica_instance_id(app: &AppConfig) -> String {
 
 fn tracing_options(config: &Config, instance_id: String) -> TracingOptions {
     let otel = &config.observability.otel;
-    let sampler = match otel.resolved_sampler() {
-        ResolvedSampler::AlwaysOn => Sampler::AlwaysOn,
-        ResolvedSampler::AlwaysOff => Sampler::AlwaysOff,
-        ResolvedSampler::TraceIdRatio(ratio) => Sampler::TraceIdRatio(ratio),
-        ResolvedSampler::ParentBasedTraceIdRatio(ratio) => Sampler::ParentBasedTraceIdRatio(ratio),
+    let sampler = match otel.traces_sampler {
+        TracesSampler::AlwaysOn => Sampler::AlwaysOn,
+        TracesSampler::AlwaysOff => Sampler::AlwaysOff,
+        TracesSampler::TraceIdRatio => Sampler::TraceIdRatio(otel.traces_sampler_arg),
+        TracesSampler::ParentBasedTraceIdRatio => {
+            Sampler::ParentBasedTraceIdRatio(otel.traces_sampler_arg)
+        }
     };
     TracingOptions {
         service_name: otel.service_name.clone(),
@@ -363,4 +365,28 @@ fn log_startup_summary(config: &Config, exporter: &ExporterState) {
         tracing.exporter = exporter.as_str(),
         "service_starting"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use service_config::OtelConfig;
+
+    #[test]
+    fn tracing_options_attaches_the_ratio_only_to_ratio_variants() {
+        let mut config = Config::default();
+        config.observability.otel = OtelConfig {
+            traces_sampler: TracesSampler::AlwaysOn,
+            traces_sampler_arg: 0.5,
+            ..OtelConfig::default()
+        };
+        let options = tracing_options(&config, "i".into());
+        assert!(matches!(options.sampler, Sampler::AlwaysOn));
+
+        config.observability.otel.traces_sampler = TracesSampler::TraceIdRatio;
+        let options = tracing_options(&config, "i".into());
+        assert!(
+            matches!(options.sampler, Sampler::TraceIdRatio(ratio) if (ratio - 0.5).abs() < f64::EPSILON)
+        );
+    }
 }

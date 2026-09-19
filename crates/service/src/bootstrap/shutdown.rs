@@ -204,7 +204,6 @@ pub(crate) struct Plan<'a> {
 
 pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     let budget = Budget::start(plan.http.grace_period);
-    let mut degraded = false;
     tracing::info!(grace = ?plan.http.grace_period, "shutdown_started");
 
     plan.readiness.start_drain();
@@ -221,10 +220,13 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         }
     }
 
-    let drain = budget.stage(plan.http.effective_drain_budget());
-    tracing::info!(budget = ?drain, "drain_started");
-    match plan.api.shutdown(drain).await {
-        Ok(Drained::Complete) => tracing::info!("drain_completed"),
+    let http_drain_budget = budget.stage(plan.http.effective_drain_budget());
+    tracing::info!(budget = ?http_drain_budget, "drain_started");
+    let drain_overran = match plan.api.shutdown(http_drain_budget).await {
+        Ok(Drained::Complete) => {
+            tracing::info!("drain_completed");
+            false
+        }
         Ok(Drained::TimedOut {
             remaining_connections: remaining,
         }) => {
@@ -236,17 +238,18 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
                 reason = "in_flight_requests_outlived_drain_budget",
                 "shutdown_forced"
             );
-            degraded = true;
+            true
         }
         Err(err) => {
             tracing::error!(error = %err, "drain_failed");
-            degraded = true;
+            true
         }
-    }
+    };
 
     if let Some(diagnostics) = plan.diagnostics {
         // An in-flight scrape must not park the process past the telemetry
-        // flush.
+        // flush. A scrape overrun is forced closed so telemetry can flush;
+        // it does not vote `degraded`.
         match diagnostics
             .shutdown(budget.stage(DIAGNOSTICS_SHUTDOWN))
             .await
@@ -257,8 +260,6 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
                     reason = "scrape_outlived_shutdown_budget",
                     "diagnostics_forced"
                 );
-                // A scrape overrun is forced closed so telemetry can flush;
-                // it does not vote `degraded`.
             }
             Err(err) => tracing::warn!(error = %err, "diagnostics_shutdown_failed"),
         }
@@ -272,31 +273,38 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         budget.stage(DEPENDENCY_CLOSE),
     )
     .await;
-    if joined {
+    let join_overran = if joined {
         tracing::info!("background_joined");
+        false
     } else {
         tracing::warn!("background tasks outlived their join budget");
-        degraded = true;
-    }
-    match closed {
-        None => {}
-        Some(Closed::Complete) => tracing::info!("postgres_pool_closed"),
+        true
+    };
+    let pool_overran = match closed {
+        None => false,
+        Some(Closed::Complete) => {
+            tracing::info!("postgres_pool_closed");
+            false
+        }
         Some(Closed::TimedOut) => {
             tracing::warn!("postgres pool outlived its close budget");
-            degraded = true;
+            true
         }
-    }
+    };
 
-    match plan
+    let telemetry_overran = match plan
         .tracer_provider
         .shutdown(budget.stage(TELEMETRY_FLUSH))
         .await
     {
-        ProviderShutdown::Flushed => tracing::info!("telemetry_flushed"),
-        ProviderShutdown::Incomplete => degraded = true,
-    }
+        ProviderShutdown::Flushed => {
+            tracing::info!("telemetry_flushed");
+            false
+        }
+        ProviderShutdown::Incomplete => true,
+    };
 
-    let outcome = if degraded {
+    let outcome = if drain_overran || join_overran || pool_overran || telemetry_overran {
         Outcome::Degraded
     } else {
         Outcome::Graceful

@@ -11,9 +11,10 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 
-/// Output format for the process logger.
+/// Output format for the process logger, distinct from the configuration
+/// snapshot's `json` / `text` wire enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LogFormat {
+pub enum LoggingFormat {
     /// One JSON object per line, flattened, with OpenTelemetry ids.
     Json,
     /// Human-readable single-line output for local use.
@@ -23,8 +24,8 @@ pub enum LogFormat {
 #[derive(Debug)]
 pub struct LoggingOptions<'a> {
     /// An `EnvFilter` directive such as `info` or `info,hyper=warn`.
-    pub level: String,
-    pub format: LogFormat,
+    pub level: &'a str,
+    pub format: LoggingFormat,
     /// Installed tracer provider; `None` leaves spans without an
     /// OpenTelemetry context.
     pub tracer_provider: Option<&'a TracerProviderHandle>,
@@ -51,15 +52,15 @@ pub enum LoggingError {
 /// Returns an error for an unparsable directive or a second installation in
 /// the same process.
 pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingError> {
-    let filter = EnvFilter::try_new(&options.level).map_err(|source| LoggingError::Directive {
-        directive: options.level.clone(),
+    let filter = EnvFilter::try_new(options.level).map_err(|source| LoggingError::Directive {
+        directive: options.level.to_owned(),
         source,
     })?;
     let otel = options.tracer_provider.map(|handle| {
         tracing_opentelemetry::layer().with_tracer(handle.tracer(options.service_name))
     });
     let format: Box<dyn Layer<_> + Send + Sync> = match options.format {
-        LogFormat::Json => Box::new(
+        LoggingFormat::Json => Box::new(
             json_subscriber::layer()
                 .flatten_event(true)
                 // Nested current-span objects are outside the documented JSON
@@ -69,7 +70,7 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
                 .flatten_span_list_on_top_level(true)
                 .with_opentelemetry_ids(true),
         ),
-        LogFormat::Text => Box::new(tracing_subscriber::fmt::layer().with_target(false)),
+        LoggingFormat::Text => Box::new(tracing_subscriber::fmt::layer().with_target(false)),
     };
     Registry::default()
         .with(filter)

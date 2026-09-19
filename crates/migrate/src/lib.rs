@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use infra_postgres::{ACQUIRE_TIMEOUT, Dsn, connect_session, runtime_param_millis};
+use infra_postgres::{ACQUIRE_TIMEOUT, Dsn, connect_session, to_runtime_param};
 use sqlx::Connection;
 use sqlx::migrate::{Migrate, MigrateError, MigrationType, Migrator};
 use sqlx::postgres::PgConnection;
@@ -200,7 +200,7 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<RunRes
         return Err(fail(RunError::Source(message), observed));
     }
 
-    let lock_timeout = runtime_param_millis(options.lock_timeout);
+    let lock_timeout = to_runtime_param(options.lock_timeout);
     let mut conn = match tokio::time::timeout(
         ACQUIRE_TIMEOUT,
         connect_session(
@@ -300,16 +300,9 @@ async fn applied_versions(
 fn stage_of(err: &MigrateError) -> Stage {
     match err {
         MigrateError::Source(_) => Stage::Source,
-        // `55P03` is `lock_timeout` while waiting for `pg_advisory_lock`.
-        MigrateError::Execute(sqlx::Error::Database(db))
-            if db.code().as_deref() == Some("55P03") =>
-        {
-            Stage::Lock
-        }
-        MigrateError::Execute(sqlx::Error::Io(_) | sqlx::Error::Tls(_)) => Stage::Connect,
-        // `Execute` is lock, history table, and list-applied bookkeeping.
-        MigrateError::Execute(_)
-        | MigrateError::Dirty(_)
+        MigrateError::Execute(source) => execute_stage(source),
+        // `Execute` bookkeeping, dirty history, and version-mismatch variants.
+        MigrateError::Dirty(_)
         | MigrateError::VersionMismatch(_)
         | MigrateError::VersionMissing(_)
         | MigrateError::VersionNotPresent(_)
@@ -319,6 +312,15 @@ fn stage_of(err: &MigrateError) -> Stage {
         MigrateError::ExecuteMigration(..) => Stage::Execute,
         // `ForceNotSupported`, `CreateSchemasNotSupported`, and later variants.
         _ => Stage::Execute,
+    }
+}
+
+fn execute_stage(err: &sqlx::Error) -> Stage {
+    match err {
+        // `55P03` is `lock_timeout` while waiting for `pg_advisory_lock`.
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03") => Stage::Lock,
+        sqlx::Error::Io(_) | sqlx::Error::Tls(_) => Stage::Connect,
+        _ => Stage::History,
     }
 }
 
