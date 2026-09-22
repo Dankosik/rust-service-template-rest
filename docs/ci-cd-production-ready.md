@@ -23,19 +23,30 @@ version) and starts only the jobs its surfaces select:
 
 | Job | Selected by | Proves |
 | --- | --- | --- |
-| `quality` | Rust source, manifests, lint config, OpenAPI, migrations, instructions, validation system | format; on pull requests clippy and tests of the affected crates and their dependents, on `main` and on any manifest change the workspace; cargo-shear; Redocly lint plus the drift and contract tests; oasdiff against the base; the static migration history check against the base and the source rules over the embedded set; skills; the validation scripts' self-tests |
+| `quality` | Rust source, manifests, lint config, OpenAPI, instructions, validation system | format; on pull requests clippy and tests of affected crates and dependents, on `main` and manifest changes the workspace; cargo-shear; Redocly and contract drift; oasdiff against the base; skills; validation self-tests |
 | `security` | manifests, `deny.toml`, workflows; tool manifest and image on pull requests | cargo-deny (advisories, licenses, bans, sources); Dependency Review, fail on high, pull requests only; zizmor with the online audits |
 | `secrets` | every event except a schedule without a policy change | Gitleaks over the commits since the base; the whole history on tags, manual runs, and a push without a readable base |
 | `delivery` | shell, workflows, tool manifest, image, publication metadata | actionlint; ShellCheck over the changed scripts; `tools-check`; BuildKit Dockerfile checks; the publication metadata self-test |
-| `image` | `build/docker/*`, `.dockerignore`, the image scripts; the migration set and its rehearsal | one `service:ci` image: build (layers restored from the Actions cache, written only by pushes to `main` and schedules), then either the hardened lifecycle check asserting `app.commit` or, when migrations changed, the migration rehearsal (`/migrate` against a compose database, replay `no_change`, lifecycle check with the profile enabled); Trivy when the image inputs changed |
-| `integration` | `crates/infra-postgres`, `crates/migrate`, `test/`, the compose file, the database scripts | the database-backed proof on a compose PostgreSQL (`REQUIRE_DOCKER=1 make test-integration-db`) with its own cargo cache |
+| `image` | Docker/image sources and any selected profile image path | one local-default image: cached build, hardened lifecycle asserting `app.commit`, and Trivy for image changes; retained profile details below |
 | `docs` | any `*.md`, `docs/`, `specs/` | every relative link and `#fragment` resolves (lychee, offline, pinned container); no toolchain |
-| `required` | always | fails when any job failed or was cancelled; accepts skipped jobs |
+| `required` | always | fails when any job failed or was cancelled; requires terminal success for a selected initializer matrix |
+
+<!-- template:begin postgres:docs-ci-postgres-gates -->
+With PostgreSQL retained, `quality` also checks migration history and embedded
+source rules. `integration` runs the real database proof on provider, migrator,
+DB-test, Compose or DB-script changes. A migration change selects the image
+rehearsal in place of plain lifecycle: `/migrate` against a fresh database,
+`no_change` replay, then lifecycle with the pool open.
+<!-- template:end postgres:docs-ci-postgres-gates -->
+
+The source template additionally selects the serial 16-output initializer job
+on `module_initializer`. The runner and its source-only Make include are removed
+from derived services; source matrix checks cannot recur there.
 
 A weekly schedule and manual dispatch select every surface, because advisory
 databases move without a commit. Tags select every surface too. A docs-only
 pull request runs `changes`, `docs`, `secrets`, and `required` and no Rust job
-(verified on [#11](https://github.com/Dankosik/rust-service-template-rest/pull/11)
+(historical upstream evidence: [#11](https://github.com/Dankosik/rust-service-template-rest/pull/11)
 before the `docs` job existed; it adds a link check, not a toolchain).
 Every action is pinned by commit SHA with its version beside it; tool
 versions come from `tools/versions.env` through `GITHUB_ENV` and
@@ -146,7 +157,13 @@ later change reopens one only with new evidence.
 | `affected-crates.sh` over `cargo tree --locked --workspace -i <pkg> -e normal,build,dev` | a hand-maintained dependency map | the dev edge reselects a dependent's tests (*verified*: `health` → `infra-http`, `service`); a manifest, lockfile, or toolchain change and a closure at 80% of the workspace fall back to the workspace because feature unification can change an untouched crate |
 | One `changes` job feeding conditional jobs and an always-reported `required`; `quality` installs the toolchain only when a Rust surface is selected | one job with conditional steps | a docs-only pull request runs no Rust job |
 | `ALLOW_FULL` guards `make check` only; `ALLOW_HEAVY` guards the image targets, the database proof, the migration rehearsal, and the history scan; `CI=true` satisfies both | guarding `lint` and `test` too | `make build`, `make test`, and `make lint` are the ordinary commands AGENTS.md names |
-| `db_integration` and `migrations` are two surfaces: the first selects the database proof, the second the static history check and the image rehearsal in place of the plain lifecycle check | one database surface | a schema change must be rehearsed from the image; an adapter change need not rebuild it |
+
+<!-- template:begin postgres:docs-ci-postgres-routing -->
+`db_integration` selects database proof; `migrations` selects static history
+and the image rehearsal in place of the plain lifecycle check. Separate
+surfaces let a schema change require image rehearsal without rebuilding for
+every adapter-only change.
+<!-- template:end postgres:docs-ci-postgres-routing -->
 
 ### Runtime image
 
@@ -176,14 +193,16 @@ no shell or curl. `app.version` stays the Cargo version and the check asserts
 version. `distroless` tags are mutable, so the digest is pinned and moved by
 Dependabot.
 
-Since stage 8 the image also carries `/migrate`, built and cooked in the
-same stages (`-p service -p migrate`) so the migration job runs the same
+<!-- template:begin postgres:docs-ci-migrator-image -->
+When PostgreSQL is retained the image also carries `/migrate`, built and cooked in the
+same stages as the main binary so the migration job runs the same
 image with `--entrypoint /migrate` and needs no migration directory: the
 set is embedded at compile time, which is why `migrations/` and the
 `test/` manifest enter the build context. `runtime-image-check.sh` accepts
 `RUNTIME_IMAGE_NETWORK` and `RUNTIME_IMAGE_POSTGRES_DSN`, so the rehearsal
 observes readiness with the pool open (`postgres_pool_opened`) under the
 same hardened flags.
+<!-- template:end postgres:docs-ci-migrator-image -->
 
 ### Publication and deployment
 
@@ -193,8 +212,8 @@ identity `…/.github/workflows/cd.yml@<ref>`; a release tag must equal
 (`railway.toml`) is deprecated with a hard cutoff and closed to new services,
 and `.railway/railway.ts` needs a `package.json` and a linked project a
 template does not own, so the deployment policy is a document with an IaC
-snippet ([Railway Deployment Profile](railway-deployment-profile.md)); the
-stage 9 initializer may generate `.railway/`.
+snippet ([Railway Deployment Profile](railway-deployment-profile.md)).
+The initializer does not create linked Railway inputs or deployment resources.
 
 ### Deviations from the Go template
 
@@ -215,10 +234,11 @@ stage 9 initializer may generate `.railway/`.
 
 ### Deferred, with the change that reopens each
 
-- `cargo-nextest`: a hung database test; the stage 8 budgets bound every
-  test today ([Persistence](architecture/persistence.md#decisions-recorded-here)).
+- `cargo-nextest`: a measured test-runner need; retained persistence proof
+  follows its local [availability and decisions](architecture/persistence.md#decisions-recorded-here).
 - Static musl image: stage 11 allocator decision.
-- `.railway/railway.ts` generation: stage 9 initializer.
+- `.railway/railway.ts` generation: an explicitly authorized deployment setup
+  with owner-supplied project and provider inputs.
 - `mise`: the tool set outgrows Cargo + Go + Node + Docker.
 - `cargo-vet` and a Renovate regex manager: a derived repository's policy.
 - Multi-platform image: a consumer that deploys on another architecture;

@@ -25,6 +25,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+from template_state import load_lock  # noqa: E402
+
 SKILLS = ROOT / ".agents" / "skills"
 ROOT_LICENSE = ROOT / "LICENSE"
 MIN_WORDS, MAX_WORDS = 250, 500
@@ -147,8 +151,42 @@ def check_entries(name: str, skill_dir: Path, workflow: bool) -> list[str]:
     return problems
 
 
-def check(skill_dir: Path) -> list[str]:
+def check_service_owned(name: str, skill_dir: Path) -> list[str]:
+    """Validate the narrow reservation grammar without imposing template policy."""
+    marker = skill_dir / ".service-owned"
+    problems: list[str] = []
+    if marker.is_symlink() or not marker.is_file() or marker.read_bytes():
+        return [f"{name}: .service-owned must be an empty regular file"]
+
+    skill = skill_dir / "SKILL.md"
+    if skill.is_symlink() or not skill.is_file():
+        return [f"{name}: .service-owned requires a real SKILL.md"]
+    try:
+        fields, _ = parse_frontmatter(skill.read_text())
+    except ValueError as err:
+        return [f"{name}: .service-owned SKILL.md {err}"]
+
+    problems.extend(check_description(name, fields))
+    metadata = fields.get("metadata")
+    if metadata is not None:
+        if not isinstance(metadata, dict) or set(metadata) != set(WORKFLOW_METADATA):
+            problems.append(f"{name}: .service-owned metadata must hold exactly {sorted(WORKFLOW_METADATA)}")
+        else:
+            for key, allowed in WORKFLOW_METADATA.items():
+                if metadata.get(key) not in allowed:
+                    problems.append(f"{name}: .service-owned metadata.{key} must be one of {sorted(allowed)}, got {metadata.get(key)!r}")
+    return problems
+
+
+def check(skill_dir: Path, lock: dict[str, object] | None) -> list[str]:
     name = skill_dir.name
+    marker = skill_dir / ".service-owned"
+    if marker.exists() or marker.is_symlink():
+        if lock is None:
+            return [f"{name}: canonical source must not contain .service-owned"]
+        if lock["state"] != "complete":
+            return [f"{name}: .service-owned requires a complete initialized template.lock"]
+        return check_service_owned(name, skill_dir)
     skill = skill_dir / "SKILL.md"
     if not skill.is_file():
         return [f"{name}: missing SKILL.md"]
@@ -184,14 +222,20 @@ def main() -> int:
     if not SKILLS.is_dir():
         print(f"no skills directory at {SKILLS}", file=sys.stderr)
         return 1
+    try:
+        lock = load_lock(ROOT, required=False)
+    except ValueError as err:
+        print(f"template.lock: {err}", file=sys.stderr)
+        return 1
     dirs = sorted(p for p in SKILLS.iterdir() if p.is_dir())
-    problems = [problem for skill_dir in dirs for problem in check(skill_dir)]
+    problems = [problem for skill_dir in dirs for problem in check(skill_dir, lock)]
     for problem in problems:
         print(problem, file=sys.stderr)
     if problems:
         return 1
-    workflow = sum(1 for d in dirs if "metadata:" in (d / "SKILL.md").read_text().split("\n---\n", 1)[0])
-    print(f"{len(dirs)} skills ok ({len(dirs) - workflow} decision, {workflow} workflow)")
+    template_dirs = [d for d in dirs if not ((d / ".service-owned").exists() or (d / ".service-owned").is_symlink())]
+    workflow = sum(1 for d in template_dirs if "metadata:" in (d / "SKILL.md").read_text().split("\n---\n", 1)[0])
+    print(f"{len(dirs)} skills ok ({len(template_dirs) - workflow} decision, {workflow} workflow, {len(dirs) - len(template_dirs)} service-owned)")
     return 0
 
 

@@ -11,6 +11,9 @@ publish.workspace = true
 # The library holds the API contract assembly (`api`); the `service` binary
 # is the runtime, and `openapi` renders the committed document from the same
 # assembly.
+[lib]
+name = "service"
+
 [[bin]]
 name = "service"
 path = "src/main.rs"
@@ -26,9 +29,11 @@ workspace = true
 gethostname = { workspace = true }
 health = { workspace = true }
 infra-http = { workspace = true }
+# template:begin postgres:service-postgres-dependency
 infra-postgres = { workspace = true }
-infra-telemetry = { workspace = true }
 secrecy = { workspace = true }
+# template:end postgres:service-postgres-dependency
+infra-telemetry = { workspace = true }
 service-config = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }

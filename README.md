@@ -1,219 +1,117 @@
-<h1 align="center">Rust REST API &amp; Microservice Template</h1>
+# rust-service-template-rest
 
-<p align="center">
-  An OpenAPI-first Rust service template on Tokio and axum with safe runtime defaults, optional PostgreSQL and agent-workflow profiles, observability, and CI.
-</p>
+OpenAPI-first Rust HTTP service on Tokio and axum.
 
-<p align="center">
-  <a href="https://github.com/Dankosik/rust-service-template-rest/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Dankosik/rust-service-template-rest/actions/workflows/ci.yml/badge.svg?branch=main&amp;event=push"></a>
-  <a href="rust-toolchain.toml"><img alt="Rust 1.98" src="https://img.shields.io/badge/rust-1.98-B7410E?logo=rust"></a>
-  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/github/license/Dankosik/rust-service-template-rest"></a>
-</p>
+Repository: https://github.com/Dankosik/rust-service-template-rest
 
-<p align="center">
-  <a href="https://github.com/new?template_owner=Dankosik&template_name=rust-service-template-rest"><strong>Use this template</strong></a>
-  ·
-  <a href="#quickstart">Quickstart</a>
-  ·
-  <a href="docs/roadmap.md">Roadmap</a>
-</p>
+The HTTP core includes typed configuration, health and readiness, structured
+logs and telemetry, bounded request handling, joined graceful shutdown, a
+committed OpenAPI contract generated from Rust, and surface-selected CI.
+The local architecture and deployment policy remain owned by this repository.
 
-> **Status: stage 3 of 12.** The repository is a runnable health-only service
-> with layered configuration, structured logs, OpenTelemetry traces,
-> Prometheus metrics, a hardened HTTP chain, cached readiness, a staged
-> graceful shutdown, and an OpenAPI contract generated from the handlers,
-> committed, drift-checked, linted, and compared for breaking changes. The
-> delivery gates, profiles, and the full agent harness are being ported stage
-> by stage from
-> [go-service-template-rest](https://github.com/Dankosik/go-service-template-rest).
-> [The roadmap](docs/roadmap.md) is the source of truth for what exists and
-> what is next.
-
-## What this repository is
-
-A starting point for a Rust HTTP API or microservice. It connects the pieces
-most services need: layered configuration, health checks, graceful shutdown,
-telemetry, a hardened HTTP server, an OpenAPI contract, an opt-in PostgreSQL
-profile with migrations, tests, surface-selected CI with security gates, a
-production image, and repository instructions for coding agents. It is a port of the *decisions* in the Go template, re-derived for
-what Rust's type system and ecosystem already provide: every stage starts with
-a survey of the crates that already solve the problem, and template-owned code
-exists only for a documented gap.
-
-The initialized service is small by default. PostgreSQL is the first
-profile and stays inert until `postgres.enabled` is set; jobs, messaging,
-gRPC, authentication, and webhooks will arrive as profiles you select, and
-the initializer removes everything else instead of leaving dormant code
-behind.
-
-## Why use it
-
-- Start with a runnable service and spend the first commit on domain behavior.
-- Keep the API contract, generated bindings, runtime wiring, and checks in one
-  repository, with the crate graph enforcing dependency direction.
-- Give people and coding agents the same ownership rules and validation paths.
+Upstream template provenance:
+[rust-service-template-rest](https://github.com/Dankosik/rust-service-template-rest),
+which ports decisions from
+[go-service-template-rest](https://github.com/Dankosik/go-service-template-rest).
+These links describe origin, not the current service's owners or support route.
 
 ## Quickstart
 
-Requires [rustup](https://rustup.rs) and GNU Make. The pinned toolchain in
-`rust-toolchain.toml` installs itself on first use.
+Install Git, Python 3.11+, GNU Make and rustup. Use the pinned toolchain in
+`rust-toolchain.toml`; Cargo commands use the committed lockfile.
 
-```bash
-gh repo create my-service \
-  --template Dankosik/rust-service-template-rest \
-  --public \
-  --clone
-
-cd my-service
+```sh
 make build
 make test
 make run
 ```
 
-Then, in another terminal:
+`make run` uses `env/config/local.toml`. The default service needs no external
+services. Check `http://127.0.0.1:8080/health/live` and `/health/ready`;
+Prometheus metrics use the separate listener at `http://127.0.0.1:9090/metrics`.
+`APP__SECTION__KEY` overrides configuration. Unknown keys and secrets in files
+fail startup. A stop signal drains admitted work, joins background tasks and
+flushes telemetry. [Configuration](docs/configuration-source-policy.md) and
+[Runtime Lifecycle](docs/architecture/runtime-lifecycle.md) own the details.
 
-```bash
-curl -i http://127.0.0.1:8080/health/live    # 200 ok
-curl -i http://127.0.0.1:8080/health/ready   # 200 ok, 503 not ready while draining
-curl -i http://127.0.0.1:8080/missing        # 404 application/problem+json
-curl -s http://127.0.0.1:9090/metrics        # Prometheus exposition
+## Initialize a fresh template checkout
+
+A clean tracked checkout can select one of 16 combinations: database `none` or
+`postgres`, and agent harness `core`, `codex`, `claude`, `qwen`, `cursor`, `grok`,
+`opencode`, or `all`. `none`/`all` are the defaults.
+
+```sh
+make template-init SERVICE_NAME=catalog-api \
+  REPOSITORY=https://github.com/example/catalog-api \
+  DESCRIPTION='Catalog API' CODEOWNER=@example/platform \
+  DATABASE=none AGENT_HARNESS=claude
 ```
 
-`make run` loads `env/config/local.toml` (text logs, no readiness propagation
-delay). Every key can be overridden with `APP__SECTION__KEY`, for example
-`APP__HTTP__ADDR=:9000` or `APP__LOG__LEVEL=debug`; unknown keys and secrets
-in files fail startup. `SIGINT` or `SIGTERM` flips readiness off, waits for
-load balancers, drains in-flight requests, flushes telemetry, and exits `0`
-(`3` when a teardown stage overran its budget). See
-[Configuration Source Policy](docs/configuration-source-policy.md).
+Initialization changes package and executable identity, configuration defaults,
+OpenAPI, owners and local command data, and removes unselected packs. It keeps
+the stable `crates/service` directory and library name. `template.lock` records
+local source provenance and selected profiles. Exact replay is a structural
+no-op; changing an established profile is a separate operation. The command
+never stages or commits the result. Review and commit the initialized diff.
+[Initialization and portable updates](docs/template-sync.md) owns admission,
+prerequisites, refusal and recovery.
 
-## What is here now
+## Profiles and local owners
 
-| Area | Included |
-| --- | --- |
-| Configuration | `config` crate + serde: code defaults → `--config` → `--config-overlay` → `APP__*` env; unknown keys, malformed names, and secrets in files fail; `SecretString` secrets; durations and byte sizes in human form |
-| HTTP | axum router behind a `tower-http` chain: request id, `nosniff`, OpenTelemetry span, metrics, access log, `503` shedding, `504` timeout, sanitized `500`, `413`, RFC 9457 problems for `404`/`405`; hyper accept loop with header timeout, `431` header bound, connection cap |
-| API contract | `api/openapi/service.yaml` (OpenAPI 3.1) generated by `utoipa` from the handlers and committed; the served router and the document are one value; `make test` refuses a stale copy; Redocly lint; oasdiff breaking-change check on pull requests; every operation declares `x-security-decision` and `security` |
-| Readiness | Background probe refresher with failure threshold and staleness guard; `/health/ready` is a cached O(1) read; liveness is process-only |
-| Observability | JSON or text logs with trace and span ids on every record; OpenTelemetry traces with OTLP/HTTP export when an endpoint is configured; Prometheus metrics (HTTP, process, Tokio runtime) on a private `:9090` listener |
-| Lifecycle | Staged shutdown under one grace deadline: readiness off → propagation delay → drain → diagnostics → background join → dependency close → telemetry flush; process-level tests of the built binary |
-| PostgreSQL (profile) | `sqlx` pool behind strict DSN admission (URL form, explicit `sslmode`, no libpq environment, passfile, socket, or TLS-file side channels), session `statement_timeout` and idle-in-transaction defaults, a readiness probe, pool gauges, `in_tx` with a commit-outcome policy (`CommitFailed` vs `CommitUnknown`) and `retryable`; a `migrate` binary with the migration set embedded, an advisory session lock bounded by `lock_timeout`, a run deadline, checksum-enforced append-only history, and one terminal `migration_run` record; `env/docker-compose.yml`; database-backed tests behind `ALLOW_HEAVY=1 make test-integration-db`, and an image rehearsal that migrates a fresh database and proves readiness with the pool open |
-| Workspace | Pinned stable toolchain, edition 2024, workspace-level dependency versions and lints (`clippy::pedantic`, `unsafe_code = "forbid"`), committed `Cargo.lock`, `--locked` everywhere |
-| Commands | `Makefile` + `make/template.mk`: `build`, `run`, `test`, `test-package`, `test-changed`, `fmt`, `fmt-check`, `lint`, `lint-changed`, `openapi-generate`, `openapi-check`, `openapi-lint`, `openapi-breaking`, `check-skills`, `deny`, `unused-deps`, `secret-scan`, `actionlint`, `zizmor`, `shellcheck`, `tools-check`, `compose-up`, `test-integration-db`, `migration-check`, `migration-validate`, `plan`, `verify`, `check`; every tool pinned once in `tools/versions.env` |
-| Validation routing | `scripts/ci/changed-surfaces.sh` classifies changed paths into surfaces (fail-closed), `affected-crates.sh` selects the crates to lint and test through `cargo tree -i`, `verify.sh` plans, runs under one validation lock, and records a receipt; CI and `make verify` share the classifier |
-| Delivery | GitHub Actions CI selected by changed surface: `quality` (format, affected or workspace clippy, build, and tests, cargo-shear, OpenAPI lint, drift, and compatibility, skills, validation-system self-tests), `security` (cargo-deny, Dependency Review, zizmor), `secrets` (Gitleaks range or history), `delivery` (actionlint, ShellCheck, tool manifest, Dockerfile checks), `image` (build, hardened lifecycle check or migration rehearsal, Trivy), `integration` (database-backed proof on a compose PostgreSQL), `docs` (link check), an always-reported `required` job; CodeQL for Rust and Actions with `codeql-required`; weekly schedule runs every surface; pinned action SHAs; Dependabot for Cargo, Actions, the Dockerfile base images, and the compose image |
-| Runtime image | `build/docker/Dockerfile`: `rust:<toolchain>-slim-trixie` builder with cargo-chef dependency layers and `cargo auditable build`, `gcr.io/distroless/cc-debian13:nonroot` runtime with `/service` and `/migrate`, commit baked as `app.commit`, `STOPSIGNAL SIGTERM`, OCI labels; the lifecycle check starts it `--read-only --cap-drop=ALL --security-opt=no-new-privileges` and proves a clean stop inside the 45 s grace budget |
-| Publication (opt-in) | `cd.yml` runs only when the repository variable `ENABLE_GHCR_PUBLISH` is `true`: after ci and CodeQL pass on `main` (or on a `v*` tag that equals the crate version), `.github/actions/publish-image` builds a run-scoped candidate, repeats the lifecycle check and Trivy scan, writes a CycloneDX SBOM, pushes, signs keyless with cosign, attests provenance and SBOM, verifies both back out of GHCR, and only then promotes `sha-<12>` + `main` or `v*` + `latest` with a digest read-back per tag |
-| Agent workflow | `AGENTS.md` repository contract; 18 decision skills and 9 workflow skills under `.agents/skills`; the [workflow router](docs/spec-first-workflow.md) with its phases, interfaces, shared methods, and rubrics; the [agent harness](docs/agent-harness.md) with adapters for Codex, Claude Code, Qwen Code, Grok Build, Cursor, and OpenCode, canonical roles in `.agents/roles` and generated carriers checked by `make check-instructions`; the [roadmap](docs/roadmap.md) that names the Go-template source for every planned owner |
-| Community | MIT license, code of conduct, security policy, issue forms, pull-request template, `CODEOWNERS` |
+The database and installed adapters are selected by `template.lock`; the source
+checkout without a lock carries PostgreSQL and all six adapters. A retained
+PostgreSQL profile remains inert until configured. The
+[local persistence record](docs/architecture/persistence.md) describes its
+availability, and [PostgreSQL Validation](docs/validation/postgres.md) names
+proof only when that profile exists. An absent profile contributes no provider,
+migrator, configuration, database tests or executable database gate.
 
-## What comes next
+`make/service.mk` owns the service package/bin, image tag, configuration and
+OpenAPI paths, and local recipes. `make/template.mk` owns the portable standard
+commands. `make help` lists the actual selected surface; the
+[command policy](docs/build-test-and-development-commands.md) names its proof
+boundaries. Ordinary development finishes after the matching build and tests;
+`ALLOW_FULL=1 make check` is the explicit aggregate. Container-backed work
+additionally requires `ALLOW_HEAVY=1`.
 
-The [roadmap](docs/roadmap.md) decomposes the port into twelve stages with
-exit criteria and a concept map from Go mechanisms to their Rust equivalents.
-Stages 1–6 and 8 are done (bootstrap, runtime core, OpenAPI contract,
-validation routing and delivery, the documentation graph, the agent harness
-and spec-first workflow, the PostgreSQL profile). Next is the template
-initializer with profile selection and sync (stage 9).
+The image uses the pinned Dockerfile and the local image default:
 
-## Repository map
-
-```text
-api/openapi/service.yaml    the HTTP contract, generated from the handlers and committed
-crates/service/             entrypoint, composition root, API document assembly, process tests
-crates/config/              typed configuration snapshot, loader, validation
-crates/health/              readiness refresher, cached verdict, drain flag
-crates/infra-http/          hardened middleware chain, problem details, probes, bounded server
-crates/infra-telemetry/     subscriber, tracer provider, metrics, diagnostics router
-crates/infra-postgres/      DSN admission, pool with session budgets, readiness probe, transaction seam
-crates/migrate/             embedded migration set, runner with lock and deadline, the migrate binary
-crates/<feature>/           business behavior (created with the first feature)
-crates/infra-<provider>/    messaging and further provider adapters (per profile)
-migrations/                 forward-only SQL migrations (rules in its README)
-test/                       database-backed proof behind the `integration` feature; fixtures
-.agents/skills/             model-invoked skills encoding this repository's decisions
-env/config/local.toml       local baseline configuration
-env/docker-compose.yml      local PostgreSQL for development, tests, and the image rehearsal
-docs/roadmap.md             stages, fixed decisions, Go-to-Rust concept map
-docs/repo-architecture.md   architecture front door: invariants, sources of truth, one leaf per pressure
-docs/architecture/          boundaries, http, runtime-lifecycle, integration, persistence
-specs/<topic>/research/     library research behind the current stage
-make/template.mk            portable standard Make commands
-build/docker/Dockerfile     multi-stage production image (cargo-chef, cargo-auditable, distroless cc)
-scripts/ci/                 surface classifier, affected-crate planner, verify, validation lock, image build and check, database proof, migration rehearsal
-tools/versions.env          one pin per developer and delivery tool
-deny.toml, .gitleaks.toml   dependency and secret-scanning policy
-.github/workflows/ci.yml    surface-selected CI jobs; the source of truth for check names
-.github/workflows/codeql.yml CodeQL for Rust and Actions on the same surfaces
-.github/workflows/cd.yml    opt-in GHCR publication through .github/actions/publish-image
+```sh
+ALLOW_HEAVY=1 make runtime-image-build
 ```
 
-## Everyday commands
+Image execution, scanning and publication require the corresponding accepted
+claim and authority. [CI/CD Production Readiness](docs/ci-cd-production-ready.md)
+and [Railway Deployment Profile](docs/railway-deployment-profile.md) retain the
+local gate and rollout decisions. Initialization does not deploy a service.
 
-| Command | Use it for |
-| --- | --- |
-| `make run` | Start the service with `env/config/local.toml` |
-| `make build` | Build every workspace crate |
-| `make test` | Run the workspace unit-test suite |
-| `make test-package PKG=<crate>` | Run one crate's tests |
-| `make fmt` / `make fmt-check` | Format, or fail on unformatted code |
-| `make lint` | Clippy over all targets with warnings as errors |
-| `make openapi-generate` | Rewrite `api/openapi/service.yaml` from the Rust contract |
-| `make openapi-check` | Redocly lint plus the contract tests (drift, security decisions, closed schemas) |
-| `make openapi-breaking BASE_OPENAPI=<file>` | oasdiff breaking-change comparison against a base document |
-| `make check-skills` | Validate the shape of `.agents/skills` |
-| `make docs-check` | Every relative Markdown link and `#fragment` resolves (lychee, offline, pinned container) |
-| `make deny` | cargo-deny: advisories, licenses, bans, sources (`deny.toml`) |
-| `make unused-deps` | cargo-shear: fail on a declared dependency no crate uses |
-| `make secret-scan` / `make secret-scan-history` | Gitleaks over the worktree and the commits since `BASE_REF`, or over the whole history (`ALLOW_HEAVY=1`) |
-| `make actionlint` / `make zizmor` / `make shellcheck` | Workflow lint, workflow security audit, shell lint |
-| `make tools-check` | Prove every pin in `tools/versions.env` resolves and the Dockerfile agrees with it |
-| `make dockerfile-check` | BuildKit's built-in Dockerfile checks |
-| `ALLOW_HEAVY=1 make runtime-image-build` / `runtime-image-check` / `container-security` / `container-sbom` | Build the production image, start it hardened and assert readiness, commit, and a clean `SIGTERM` exit inside the grace budget, scan it with Trivy, write its CycloneDX SBOM |
-| `make compose-up` / `make compose-down` | Start or drop the local PostgreSQL from `env/docker-compose.yml` |
-| `ALLOW_HEAVY=1 make test-integration-db` | Database-backed proof on a throwaway compose PostgreSQL (`REQUIRE_DOCKER=1` fails instead of refusing without Docker) |
-| `make migration-check` | Static append-only history check and the source rules over the embedded migration set |
-| `ALLOW_HEAVY=1 make migration-validate` | Rehearse the image: `/migrate` on a fresh database, replay is `no_change`, lifecycle check with the profile enabled |
-| `make publish-image-metadata-check` | Self-test of the publication naming and tag promotion |
-| `make lint-changed PKGS="a b"` / `make test-changed PKGS="a b"` | Clippy or tests over the crates `scripts/ci/affected-crates.sh` selects |
-| `make plan` / `make verify` | Show the route the changed surfaces select, or run it under the validation lock and record a receipt |
-| `ALLOW_FULL=1 make check` | Full repository gate: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-instructions`, `docs-check`, `migration-check`, and the validation-system self-tests |
+## Portable updates
 
-Every tool version is pinned once in `tools/versions.env`. Cargo tools
-(`cargo-deny`, `cargo-shear`, `zizmor`) are built once per version into the
-Git common directory on first use; `make openapi-lint` needs Node.js (Redocly
-CLI through `npx`); `make openapi-breaking`, `make secret-scan`, and `make
-actionlint` need Go (`go run`); `make shellcheck`, `make docs-check`, and the
-database-backed targets need Docker. Stop at the
-local completion criterion in [AGENTS.md](AGENTS.md#validation-budget) rather
-than adding checks for confidence.
+Use one committed template checkout as the source and this service as target:
+
+```sh
+scripts/template-sync.sh --check --from /path/to/template --repo .
+scripts/template-sync.sh --apply --from /path/to/template --repo .
+```
+
+The ownership manifest selects portable files. Runtime/Cargo sources, local
+configuration, OpenAPI, migrations, README, owners, CI activation and architecture
+remain service-owned. `--instructions-only` adopts selected instruction and
+adapter views while leaving tooling untouched. Commit adopted changes before
+checking parity; dirty owned paths refuse even when their bytes already match.
+See [synchronization](docs/template-sync.md) for local skills, managed settings
+leaves, selective dirty refusal and recovery.
 
 ## Working with coding agents
 
-`AGENTS.md` gives every supported agent the repository rules: authority,
-decision ownership, engineering constraints, the validation budget, and the
-crate-boundary model. Direct Work covers a clear, local, reversible change;
-anything else goes through the [workflow router](docs/spec-first-workflow.md)
-(Intake, Research, Specification, System / Integration Design, Rust Code /
-Ownership Design, Planning, Implementation, and their reviews) and, when
-coordination is material, the [agent harness](docs/agent-harness.md), whose
-adapters say how Codex, Claude Code, Qwen Code, Grok Build, Cursor, and
-OpenCode each provide delegation, isolation, and durable execution.
-
-`.agents/skills` holds two classes of skill. Decision skills (`rust-*`) are
-small, independent prose in the
-[rust-cli-skills](https://github.com/Dankosik/rust-cli-skills) shape that a
-model selects from the description; each names the repository owner it
-decides against, so an agent extends the existing path instead of creating a
-parallel one. Workflow skills (`orchestrator`, `acceptance-unit-lead`,
-`spec-first-brainstorming`, `spec-document-designer`, `idea-refine`,
-`planning-and-task-breakdown`, `grilling`, `agent-prompt-composer`,
-`thermo-nuclear-code-quality-review`) are user- or role-invoked entry points
-into the workflow, ported from the Go template. Cursor, Codex, Grok, and
-OpenCode read `.agents/skills` directly; `.claude/skills` and `.qwen/skills`
-are generated views. Canonical roles live in `.agents/roles` and generate
-the per-harness agent carriers (`make agent-roles-sync`); `make
-check-instructions` proves every carrier matches its source.
+[AGENTS.md](AGENTS.md) owns authority, engineering and local completion.
+[Workflow Router](docs/spec-first-workflow.md) selects the phase for non-direct
+work; [Agent Harness](docs/agent-harness.md) describes native delegation.
+Canonical skills and roles remain under `.agents` for every selection. Only
+adapters selected in `template.lock` are installed and checked by
+`make check-instructions`. Product-specific commands refuse when unselected;
+`core` uses canonical instructions without product views. The adapter documents
+remain reference guidance for each product, not declarations of installation.
 
 | Skill | Leading concept | Use it for |
 | --- | --- | --- |
@@ -235,45 +133,23 @@ check-instructions` proves every carrier matches its source.
 | [rust-verification](.agents/skills/rust-verification/SKILL.md) | Evidence boundary | What existing evidence supports a claim |
 | [rust-delivery-platform](.agents/skills/rust-delivery-platform/SKILL.md) | Gate chain | CI jobs, tool pins, the Dockerfile, image checks, publication, deployment profile |
 | [rust-sqlx](.agents/skills/rust-sqlx/SKILL.md) | Durable outcome | PostgreSQL pool, DSN admission, transactions, commit outcome, migrations, database-backed proof |
-
 | [merge-conflict-resolution](.agents/skills/merge-conflict-resolution/SKILL.md) | Intent reconstruction | Conflicted hunks in a merge, rebase, cherry-pick, or revert |
 
-Skills for a capability arrive with its stage (`rust-api-contract` came with
-the contract stage, `rust-delivery-platform` with the delivery stage,
-`rust-sqlx` with the PostgreSQL profile; `rust-tonic` follows its own). Authoring rules for both classes
-and the structural check live in [Skill Authoring](docs/skill-authoring.md)
-and `make check-skills`. The decisions build on rust-cli-skills and the Go
-template's `go-*` skills where they carry over to a long-running service.
+Capability methods apply only when the local architecture provides their
+capability. [Skill Authoring](docs/skill-authoring.md) owns their shape and
+[Prompt Maintenance](docs/prompt-maintenance.md) owns instruction changes.
 
 ## Documentation
 
-- Plan and status: [Roadmap](docs/roadmap.md)
-- Architecture front door, invariants, one leaf per pressure: [Repository Architecture](docs/repo-architecture.md)
-- Crate ownership and dependency direction: [Component Boundaries](docs/architecture/boundaries.md)
-- Request path, contract workflow, compatibility: [HTTP Architecture](docs/architecture/http.md)
-- Startup, readiness, staged shutdown, exit codes: [Runtime Lifecycle](docs/architecture/runtime-lifecycle.md)
-- Neighbours and outbound dependencies: [Integration Boundaries](docs/architecture/integration.md)
-- PostgreSQL pool, transactions, migrations, database proof: [Persistence Architecture](docs/architecture/persistence.md)
-- Where a crate, module, file, or test goes: [Project Structure](docs/project-structure-and-module-organization.md)
-- Every make target explained: [Commands](docs/build-test-and-development-commands.md)
-- From the scaffold to one vertical slice, verified: [First Production Feature](docs/first-production-feature.md)
-- What a service decides before promotion: [Production Contract](docs/production-contract.md)
-- Configuration, secrets, telemetry environment, runtime budgets: [Configuration Source Policy](docs/configuration-source-policy.md)
-- Which checks a change selects, `make plan` and `make verify`: [Validation Routing](docs/validation-routing.md) and its leaves under `docs/validation/`
-- What CI and publication prove: [CI/CD Production Readiness](docs/ci-cd-production-ready.md)
-- Deploying a derived service on Railway: [Railway Deployment Profile](docs/railway-deployment-profile.md)
-- Writing skills: [Skill Authoring](docs/skill-authoring.md)
-- Contributing and validation: [CONTRIBUTING.md](CONTRIBUTING.md)
-- Agent contract: [AGENTS.md](AGENTS.md)
-- Structured and orchestrated work: [Workflow Router](docs/spec-first-workflow.md); delegation, isolation, and durable execution per harness: [Agent Harness](docs/agent-harness.md)
-- Writing prompts and maintaining instructions: [Prompt Composition](docs/prompt-composition.md), [Prompt Maintenance](docs/prompt-maintenance.md)
+- [Repository Architecture](docs/repo-architecture.md) and [Component Boundaries](docs/architecture/boundaries.md).
+- [HTTP Architecture](docs/architecture/http.md), [Integration Boundaries](docs/architecture/integration.md), and [Project Structure](docs/project-structure-and-module-organization.md).
+- [First Production Feature](docs/first-production-feature.md) and [Production Contract](docs/production-contract.md).
+- [Validation Routing](docs/validation-routing.md), [Commands](docs/build-test-and-development-commands.md), and [CONTRIBUTING.md](CONTRIBUTING.md).
+- [Backend Library Selection](docs/backend-library-selection.md) and [Backend Utility Recipes](docs/backend-utility-recipes.md).
+- [Prompt Composition](docs/prompt-composition.md) and [Initialization and portable updates](docs/template-sync.md).
 
 ## Community
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md), use the
-issue forms for bugs and feature proposals, and follow the
-[Code of Conduct](CODE_OF_CONDUCT.md).
-
+Use the repository issue forms and follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 Report vulnerabilities privately through [SECURITY.md](SECURITY.md).
-
 Released under the [MIT License](LICENSE).

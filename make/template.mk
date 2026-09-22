@@ -13,10 +13,6 @@ include tools/versions.env
 
 CARGO ?= cargo
 CARGO_FLAGS ?= --locked
-SERVICE_BIN ?= service
-# Baseline configuration for `make run`; deployments pass their own file or
-# rely on APP__* environment variables.
-LOCAL_CONFIG ?= env/config/local.toml
 # Default comparison base for range-scoped gates (secret scan, verify); CI
 # passes the event's base commit.
 BASE_REF ?= origin/main
@@ -42,8 +38,6 @@ VERIFY := bash scripts/ci/verify.sh
 # binary and committed; `make test` refuses a stale copy. Redocly CLI lints
 # the committed file (Node.js via npx), oasdiff compares it with the
 # pull-request base (Go via `go run`).
-OPENAPI_FILE := api/openapi/service.yaml
-OPENAPI_BREAKING_APPROVALS ?= api/openapi/breaking-changes-approvals.txt
 REDOCLY_CLI ?= npx --yes @redocly/cli@$(REDOCLY_CLI_VERSION)
 OASDIFF ?= go run github.com/oasdiff/oasdiff@v$(OASDIFF_VERSION)
 
@@ -77,25 +71,46 @@ SHELL_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standa
 # Tracked and untracked Markdown files; `git ls-files` keeps target/ out.
 MARKDOWN_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standard -- '*.md'))
 
-# Runtime image: one tag shared by build, lifecycle check, and scan.
-RUNTIME_IMAGE ?= service:ci
-CONTAINER_IMAGE ?= $(RUNTIME_IMAGE)
 # Trivy keeps its vulnerability database in a named volume between runs.
 TRIVY_CACHE_VOLUME ?= trivy-cache
 
-.PHONY: help build run test test-package test-changed fmt fmt-check lint lint-changed \
+# The only portable registry of standard target names. Local service recipes
+# may not override these names; the selected profile extension implements the
+# registered PostgreSQL subset during normal Make execution.
+TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test-changed fmt fmt-check lint lint-changed \
 	check check-unlocked check-skills check-instructions clean \
 	agent-roles-sync agent-roles-check codex-agents-sync codex-agents-check \
 	claude-skills-sync claude-skills-check qwen-skills-sync qwen-skills-check \
 	openapi-generate openapi-check openapi-lint openapi-breaking \
 	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck docs-check \
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
-	publish-image-metadata-check \
-	compose-up compose-down test-integration-db migration-check migration-history-self-test migration-validate \
+	publish-image-metadata-check compose-up compose-down test-integration-db migration-check migration-history-self-test migration-validate \
 	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test
+
+# Source-only checks are contributed by make/source.mk in the template source.
+SOURCE_CHECK_TARGETS ?=
+
+# `template_state.py` is the sole profile authority. Its source default is
+# postgres/all; a derived service must have a complete lock. Synchronization
+# never invokes Make, so this lookup is limited to normal local commands.
+POSTGRES_PROFILE_TARGETS := compose-up compose-down test-integration-db migration-check migration-history-self-test migration-validate
+DATABASE_PROFILE := $(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field database))
+ifeq ($(DATABASE_PROFILE),postgres)
+include make/profile-postgres.mk
+ACTIVE_TEMPLATE_STANDARD_TARGETS := $(TEMPLATE_STANDARD_TARGETS)
+else ifeq ($(DATABASE_PROFILE),none)
+ACTIVE_TEMPLATE_STANDARD_TARGETS := $(filter-out $(POSTGRES_PROFILE_TARGETS),$(TEMPLATE_STANDARD_TARGETS))
+else
+$(error unable to select database profile; template.lock must be complete and supported)
+endif
+
+.PHONY: $(ACTIVE_TEMPLATE_STANDARD_TARGETS)
 
 help: ## List available commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+template-init: ## Initialize the service identity and selected profiles once
+	@bash scripts/init-module.sh --repo .
 
 build: ## Build every workspace crate in debug mode
 	$(CARGO) build --workspace $(CARGO_FLAGS)
@@ -120,9 +135,8 @@ fmt: ## Format every crate
 fmt-check: ## Fail when formatting differs from rustfmt output
 	$(CARGO) fmt --all --check
 
-# The database-backed tests compile only with their feature; lint them
-# without running them.
-INTEGRATION_LINT_FEATURES = --features integration-tests/integration
+# Retained profiles extend this without changing portable lint semantics.
+INTEGRATION_LINT_FEATURES ?=
 
 lint: ## Clippy over all targets, warnings are errors
 	$(CARGO) clippy --workspace --all-targets $(INTEGRATION_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
@@ -161,7 +175,16 @@ qwen-skills-sync: ## Regenerate the Qwen Code skill view (.qwen/skills)
 qwen-skills-check: ## Fail when .qwen/skills does not mirror .agents/skills
 	bash scripts/harness-skills-sync.sh qwen --check --repo .
 
-check-instructions: check-skills agent-roles-check codex-agents-check claude-skills-check qwen-skills-check ## Every instruction carrier: skill shape, role carriers, Codex registry, skill views
+check-instructions: check-skills agent-roles-check ## Every selected instruction carrier: skill shape, role carriers, and selected generated views
+	@harness="$$(python3 scripts/lib/template_state.py profile --repo . --field agent_harness)" || exit $$?; \
+	case "$$harness" in \
+		all) $(MAKE) codex-agents-check claude-skills-check qwen-skills-check ;; \
+		codex) $(MAKE) codex-agents-check ;; \
+		claude) $(MAKE) claude-skills-check ;; \
+		qwen) $(MAKE) qwen-skills-check ;; \
+		core|cursor|grok|opencode) ;; \
+		*) printf 'unsupported agent harness: %s\\n' "$$harness" >&2; exit 2 ;; \
+	esac
 
 # $(TOOLS_ROOT)/<crate>-<version>/bin/<crate>: build the pinned crate once.
 $(TOOLS_ROOT)/%:
@@ -236,27 +259,6 @@ container-security: ## Trivy over CONTAINER_IMAGE: fixable HIGH and CRITICAL fin
 		--format table \
 		"$(CONTAINER_IMAGE)"
 
-compose-up: ## Start the local PostgreSQL from env/docker-compose.yml on port POSTGRES_PORT (default 5432)
-	docker compose -f env/docker-compose.yml up -d --wait postgres
-
-compose-down: ## Stop the local PostgreSQL and drop its volume
-	docker compose -f env/docker-compose.yml down -v --remove-orphans
-
-test-integration-db: ## Database-backed proof against a throwaway compose PostgreSQL; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
-	$(HEAVY_GUARD)
-	$(VALIDATION_LOCK) bash scripts/ci/test-integration-db.sh
-
-migration-check: ## Static append-only history check (BASE_REF for a range) and the source rules over the embedded set
-	BASE_REF="$(BASE_REF)" bash scripts/ci/migration-history-check.sh
-	$(CARGO) test -p migrate $(CARGO_FLAGS)
-
-migration-history-self-test: ## Self-test of scripts/ci/migration-history-check.sh
-	bash scripts/ci/migration-history-check.sh --self-test
-
-migration-validate: ## Rehearse RUNTIME_IMAGE: /migrate against a fresh compose PostgreSQL, replay is no_change, lifecycle check with the profile on; ALLOW_HEAVY=1
-	$(HEAVY_GUARD)
-	$(VALIDATION_LOCK) bash scripts/ci/migration-validate.sh "$(RUNTIME_IMAGE)" "$(RUNTIME_EXPECTED_COMMIT)"
-
 # The SBOM describes the shipped artifact: Debian packages plus the Rust
 # dependency list cargo-auditable embedded in the binary.
 SBOM_OUTPUT ?= sbom.cdx.json
@@ -321,7 +323,7 @@ check: ## Full repository gate under the validation lock; ALLOW_FULL=1 (CI sets 
 	$(VALIDATION_LOCK) $(MAKE) check-unlocked
 
 check-unlocked: fmt-check lint test unused-deps openapi-lint check-instructions docs-check \
-	migration-check migration-history-self-test \
+	$(POSTGRES_CHECK_TARGETS) $(SOURCE_CHECK_TARGETS) \
 	changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
 
 clean: ## Remove build output

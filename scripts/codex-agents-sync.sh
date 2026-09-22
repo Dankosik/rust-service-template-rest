@@ -19,6 +19,7 @@ usage:
   --apply  replace the managed project runtime and role registry in .codex/config.toml
   --check  verify portable runtime and exact role coverage without changing files
   --repo   repository root (default: current working directory)
+  --harness staged harness selection; must include Codex
 EOF
 }
 
@@ -32,6 +33,7 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/lib/sync-cli.sh"
 sync_cli_parse "preflight apply check" "$@"
 mode="${SYNC_MODE}"
 repo="${SYNC_REPO}"
+sync_cli_require_harness codex
 
 roles_root="${repo}/.codex/agents"
 config="${repo}/.codex/config.toml"
@@ -72,6 +74,7 @@ validate_portable_source() {
 
 validate_config_shape() {
 	local runtime_start_count=0 runtime_end_count=0 start_count=0 end_count=0
+	local runtime_start_line='' runtime_end_line='' start_line='' end_line=''
 	[[ -f "${config}" ]] || return 0
 	runtime_start_count=$(grep -Fxc "${runtime_start_marker}" "${config}" || true)
 	runtime_end_count=$(grep -Fxc "${runtime_end_marker}" "${config}" || true)
@@ -81,6 +84,22 @@ validate_config_shape() {
 		fail ".codex/config.toml has an invalid managed runtime marker pair"
 	[[ "${start_count}" -le 1 && "${end_count}" -le 1 && "${start_count}" == "${end_count}" ]] ||
 		fail ".codex/config.toml has an invalid managed registry marker pair"
+	if [[ "${runtime_start_count}" == 1 ]]; then
+		runtime_start_line=$(grep -Fnx "${runtime_start_marker}" "${config}" | cut -d: -f1)
+		runtime_end_line=$(grep -Fnx "${runtime_end_marker}" "${config}" | cut -d: -f1)
+		((runtime_start_line < runtime_end_line)) ||
+			fail ".codex/config.toml has reversed managed runtime markers"
+	fi
+	if [[ "${start_count}" == 1 ]]; then
+		start_line=$(grep -Fnx "${start_marker}" "${config}" | cut -d: -f1)
+		end_line=$(grep -Fnx "${end_marker}" "${config}" | cut -d: -f1)
+		((start_line < end_line)) ||
+			fail ".codex/config.toml has reversed managed registry markers"
+	fi
+	if [[ "${runtime_start_count}" == 1 && "${start_count}" == 1 ]]; then
+		((runtime_end_line < start_line)) ||
+			fail ".codex/config.toml has interleaved managed marker pairs"
+	fi
 }
 
 validate_config_shape

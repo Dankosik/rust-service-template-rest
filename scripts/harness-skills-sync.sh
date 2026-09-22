@@ -14,6 +14,7 @@ usage:
   --apply      rebuild the harness skill view from `.agents/skills`
   --check      verify exact link coverage and targets without changing files
   --repo       repository root (default: current working directory)
+  --harness    staged harness selection; must include the positional adapter
 EOF
 }
 
@@ -36,6 +37,7 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/lib/sync-cli.sh"
 sync_cli_parse "preflight apply check" "$@"
 mode="${SYNC_MODE}"
 repo="${SYNC_REPO}"
+sync_cli_require_harness "${harness}"
 
 skills_root="${repo}/.agents/skills"
 harness_root="${repo}/.${harness}"
@@ -99,6 +101,19 @@ validate_metadata() {
 	fi
 }
 
+validate_service_owned_marker() {
+	local entry marker
+	entry="$1"
+	marker="${entry}/.service-owned"
+	[[ ! -e "${marker}" && ! -L "${marker}" ]] && return 0
+	[[ -f "${repo}/template.lock" ]] ||
+		fail "${marker#"${repo}/"} is only valid in an initialized derived service"
+	[[ ! -L "${marker}" && -f "${marker}" ]] ||
+		fail "${marker#"${repo}/"} must be an empty regular file"
+	[[ ! -s "${marker}" ]] ||
+		fail "${marker#"${repo}/"} must be empty"
+}
+
 preflight() {
 	local entry
 	local -a entries=()
@@ -136,6 +151,7 @@ skill_directories() {
 		[[ -d "${entry}" ]] || continue
 		[[ ! -L "${entry}" ]] ||
 			fail "${entry#"${repo}/"} is a symlink; canonical skill directories must be real"
+		validate_service_owned_marker "${entry}"
 		validate_metadata "${entry}"
 		skill_dirs+=("${entry}")
 	done

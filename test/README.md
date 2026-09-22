@@ -1,5 +1,9 @@
 # Integration tests
 
+This service retains this crate for utility-recipe tests. PostgreSQL-specific
+proof is available only when the local PostgreSQL profile is retained.
+
+<!-- template:begin postgres:test-readme-postgres -->
 Workspace crate `integration-tests`: database-backed proof for the PostgreSQL
 profile. `make test` compiles it with the `integration` feature off, so
 nothing here runs without Docker; `ALLOW_HEAVY=1 make test-integration-db`
@@ -17,3 +21,4 @@ Selection and the claims each command supports:
 [PostgreSQL Validation](../docs/validation/postgres.md). Process and
 container proof for the built image stays in `crates/service/tests/` and
 `scripts/ci/runtime-image-check.sh`.
+<!-- template:end postgres:test-readme-postgres -->

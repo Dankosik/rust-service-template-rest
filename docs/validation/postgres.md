@@ -1,5 +1,11 @@
 # PostgreSQL Validation
 
+Read [local persistence availability](../architecture/persistence.md) first.
+When `template.lock` selects `database: none`, database validation commands are
+absent; this record does not authorize reconstructing the removed profile.
+A retained profile uses the real-server proof below when its claim requires it.
+
+<!-- template:begin postgres:docs-postgres-validation -->
 Use for an explicitly required database observation or a bounded diagnostic.
 Changing a PostgreSQL file does not add a local integration gate; ordinary
 completion for `crates/infra-postgres`, `crates/migrate`, and `test/` still
@@ -41,7 +47,7 @@ The runtime rehearsal, when the image's migration path or readiness with the
 pool open is the claim:
 
 ```bash
-ALLOW_HEAVY=1 make migration-validate RUNTIME_IMAGE=service:ci RUNTIME_EXPECTED_COMMIT="$(git rev-parse HEAD)"
+ALLOW_HEAVY=1 make migration-validate RUNTIME_EXPECTED_COMMIT="$(git rev-parse HEAD)"
 ```
 
 It runs `/migrate` from the image against a fresh compose database under the
@@ -49,8 +55,9 @@ hardened flags, requires a `migration_run` record with `outcome`
 `success` or `no_change`, requires `no_change` from a second run, and then
 runs the lifecycle check with `APP__POSTGRES__ENABLED=true`, asserting the
 `postgres_pool_opened` record beside the usual readiness and `SIGTERM`
-evidence. Without `RUNTIME_IMAGE` it builds `service:migration` first.
+evidence. The Make target uses the local runtime-image default from `make/service.mk`.
 
 Missing Docker is not a pass for a required scenario. If the scenario is
 optional, disclose the gap and stop without building or repairing a test
 environment; it does not block local completion.
+<!-- template:end postgres:docs-postgres-validation -->

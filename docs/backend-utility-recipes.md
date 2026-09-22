@@ -7,7 +7,7 @@ same workspace versions. The recipes are ordinary tests in the existing
 `integration-tests` package, not an exported `common` crate or new endpoints.
 
 [Library selection](backend-library-selection.md) owns the decision rules and
-[the research synthesis](../specs/production-utility-toolbox/research/synthesis.md)
+[the upstream research synthesis](https://github.com/Dankosik/rust-service-template-rest/blob/81bbd16b320c90d430522e69fc2d52a2aaa049de/specs/production-utility-toolbox/research/synthesis.md)
 records this change's baseline and API evidence. Do not confuse a tested
 recipe with a configured production cache, provider, validator or import API.
 

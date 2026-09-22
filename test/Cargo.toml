@@ -1,6 +1,6 @@
 [package]
 name = "integration-tests"
-description = "Executable utility recipes and opt-in database-backed PostgreSQL proof."
+description = "Executable utility recipes and selected integration proof."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,17 +11,22 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# template:begin postgres:test-integration-feature
 [features]
 # Utility recipes run with `make test` and need no Docker or external service.
 # PostgreSQL tests alone require `integration` and a live DATABASE_URL.
 integration = []
+# template:end postgres:test-integration-feature
 
+# template:begin postgres:test-postgres-dependencies
 [dependencies]
+url = { workspace = true }
 infra-postgres = { workspace = true }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "migrate", "macros"] }
-url = { workspace = true }
+# template:end postgres:test-postgres-dependencies
 
 [dev-dependencies]
+url = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 wiremock = { workspace = true }
 moka = { workspace = true, features = ["future"] }
@@ -62,5 +67,9 @@ serde_json = { workspace = true, features = ["std"] }
 serde = { workspace = true, features = ["std", "derive"] }
 indexmap = { workspace = true, features = ["std"] }
 itertools = { workspace = true, features = ["use_std"] }
+# template:begin postgres:test-postgres-health-dependency
 health = { workspace = true }
+# template:end postgres:test-postgres-health-dependency
+# template:begin postgres:test-migrate-dependency
 migrate = { workspace = true }
+# template:end postgres:test-migrate-dependency

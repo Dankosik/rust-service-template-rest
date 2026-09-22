@@ -133,8 +133,10 @@ mod tests {
 
     #[test]
     fn usage_names_the_real_program() {
+        // template:begin postgres:cli-migrate-test
         let migrate = LoadOptions::parse_args(["migrate", "--unknown"]).unwrap_err();
         assert!(migrate.to_string().contains("migrate"), "{migrate}");
+        // template:end postgres:cli-migrate-test
         let service = LoadOptions::parse_args(["service", "--unknown"]).unwrap_err();
         assert!(service.to_string().contains("service"), "{service}");
     }

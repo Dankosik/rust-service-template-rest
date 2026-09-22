@@ -12,7 +12,8 @@ is what the template adds on top. The `service-config` crate owns it.
 - Environment variables (`APP__SECTION__KEY`) hold per-environment overrides
   and every application-owned secret. `APP__HTTP__ADDR` sets `http.addr`;
   `APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS` sets the collector
-  credential; `APP__POSTGRES__DSN` sets the database connection string.
+  credential. Profile-specific inputs are defined only when their section
+  exists in the local typed snapshot.
 - CLI flags are loader controls: `--config PATH` selects the base file and
   `--config-overlay PATH` (repeatable, ordered) adds overlays. They never set
   individual keys, and a positional argument is refused.
@@ -48,6 +49,7 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
 - Files are read as the process user; relative paths and symlinks are
   accepted because Kubernetes projected volumes depend on symlinks for atomic
   updates. Each file is bounded to 1 MiB before parsing.
+<!-- template:begin postgres:docs-config-postgres-source -->
 - `postgres.dsn` is the only PostgreSQL connection source. It must be a
   `postgres://` URL with explicit host, port, user, password, database, and
   `sslmode` (`disable`, `require`, `verify-ca`, `verify-full`) and nothing
@@ -55,6 +57,7 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   `.pgpass`, service files, socket paths, and TLS key or certificate files
   are refused at startup, and the diagnostic never carries the value
   ([Persistence](architecture/persistence.md#connection-admission)).
+<!-- template:end postgres:docs-config-postgres-source -->
 
 ## OpenTelemetry Environment Policy
 
@@ -158,6 +161,7 @@ every record inside a request) or `text` (local development).
   background readiness refresher. A cached verdict older than three refresh
   periods plus one probe budget is refused, so a dead refresher cannot leave
   a stale "healthy" standing.
+<!-- template:begin postgres:docs-config-postgres-budget -->
 - `postgres.enabled` (default `false`) selects the PostgreSQL profile;
   `postgres.max_connections` (default `4`, `1..500`) is the pool's upper
   bound and the one database capacity value an operator sets. The acquire
@@ -167,6 +171,7 @@ every record inside a request) or `text` (local development).
   ([Persistence](architecture/persistence.md#budgets)); the readiness probe
   draws `health.probe_budget`, and the pool closes inside the `5s`
   dependency-close stage.
+<!-- template:end postgres:docs-config-postgres-budget -->
 
 ## Adding A Config Key
 

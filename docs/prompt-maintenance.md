@@ -110,7 +110,7 @@ turning missing technical policy into a user decision.
 
 [Skill Authoring](skill-authoring.md) owns skill invocation, metadata,
 body/reference boundaries, and catalog constraints. Propagation to derived
-repositories arrives with the template-sync stage of the roadmap.
+repositories follows the portable-adoption policy when that lifecycle is in use.
 
 ## Change And Proof
 

@@ -1,0 +1,169 @@
+# Initialization and portable updates
+
+Initialization gives a clean template checkout its service identity and selects
+the existing database and agent-harness packs. Later synchronization adopts
+portable tooling and instructions from a committed source checkout. The
+[ownership manifest](../template-owned.paths) is the full-sync copy authority;
+the service keeps its application, configuration and local policies.
+
+## Initialize a service
+
+Work in a clean Git checkout with Python 3.11+, Git, the pinned Rust toolchain,
+and the locked dependency inputs already available locally. Initialization
+uses offline Cargo metadata and the existing OpenAPI generator before changing
+the checkout. Missing tools, dependencies or unsupported source shapes refuse
+without target writes.
+
+```sh
+make template-init \
+  SERVICE_NAME=catalog-api \
+  REPOSITORY=https://github.com/example/catalog-api \
+  DESCRIPTION='Catalog API' \
+  CODEOWNER=@example/platform \
+  DATABASE=none \
+  AGENT_HARNESS=claude
+```
+
+The direct entry accepts the same values:
+
+```sh
+scripts/init-module.sh --repo . \
+  --service-name catalog-api \
+  --repository https://github.com/example/catalog-api \
+  --description 'Catalog API' \
+  --codeowner @example/platform \
+  --database none --agent-harness claude
+```
+
+The four identity values are required. `DATABASE` defaults to `none` and accepts
+`none` or `postgres`. `AGENT_HARNESS` defaults to `all` and accepts `core`,
+`codex`, `claude`, `qwen`, `cursor`, `grok`, `opencode`, or `all`. Every pair is
+supported. `core` keeps canonical instructions without a product adapter;
+`all` keeps the six existing adapters. PostgreSQL remains disabled at runtime
+until configured when its pack is retained. The local
+[persistence authority](architecture/persistence.md) describes availability.
+
+Service names are lowercase ASCII, start with a letter, use single hyphens
+between letters or digits, end in a letter or digit, and have at most 64
+characters. Existing package/binary names and Rust reserved identifiers cannot
+be used. Repository URLs are HTTPS GitHub owner/repository URLs with no extra
+components, credentials, query, fragment or trailing slash. A code owner is
+one `@user` or `@org/team` token. Descriptions are nonempty single-line text of
+at most 256 Unicode characters without controls. Quotes and punctuation are
+data. Duplicate or conflicting inputs and unknown choices refuse.
+
+Initialization renames the service package and main executable while retaining
+the `crates/service` directory, library name and `openapi` auxiliary executable.
+It updates the repository identity, local commands/image, runtime identity,
+OpenAPI annotations and generated document. It physically removes unselected
+packs and source-only validation fixtures. The initializer itself remains
+local for one-shot replay.
+
+Review the resulting diff and commit it using the normal contribution process.
+No initializer command stages, commits, resets, stashes or cleans files.
+
+## Initialization record and replay
+
+`template.lock` is the local, versioned JSON initialization record. It contains
+identity, selected packs, the admitted local source HEAD, explicit local-checkout
+provenance, and initialization state. It is service-owned and sync never edits
+it. A complete record means that initialization postconditions passed; it is
+not a build, test, CI or deployment receipt.
+
+Repeating the exact initialization values checks identity and profile structure
+and succeeds without rewriting ordinary service edits. A different selection,
+incomplete record, malformed record, or inconsistent structure refuses. Profile
+migration of an established service is outside this command's scope.
+
+## Adopt a committed source
+
+SOURCE and TARGET must be separate, nonoverlapping Git roots, addressed without
+symlink root spellings. The command reads SOURCE HEAD once, reports that object
+ID and uses its Git blobs throughout. It does not fetch or use uncommitted
+source bytes. Applicable source dirt refuses; unrelated source work is ignored.
+
+```sh
+scripts/template-sync.sh --check --from /path/to/template --repo /path/to/service
+scripts/template-sync.sh --apply --from /path/to/template --repo /path/to/service
+```
+
+`--check` never writes the target. Exit `0` means selected parity, `1` means
+drift, and `2` means refusal or an operational failure. `--apply` admits the
+same complete plan, applies it, verifies it, and leaves changes uncommitted.
+Commit the adopted diff before checking parity again: dirty owned paths refuse
+even if their bytes already match the source. An already-current clean target
+is a no-op.
+
+Use `--instructions-only` with either mode to adopt the portable bootstrap,
+workflow/harness documents, canonical skills/roles and selected adapter views.
+It leaves Makefiles, scripts, tool pins, the manifest, receipts and unselected
+adapter data untouched. Dirty unselected tooling and a legacy Makefile do not
+block this mode. Success means instruction parity only.
+
+## Ownership and preservation
+
+Manifest files are replaced as whole files; directory entries end in `/` and
+own their descendants, including deletion of target-only owned content. Removing
+an entry from the source manifest relinquishes ownership of that target path.
+Standalone scripts are individual entries, so service siblings remain local.
+Generated adapters are rendered by the committed source helpers. Full sync
+prunes only the declared paths of unselected adapters and cannot restore an
+absent database pack.
+
+Application/Cargo sources, configuration, secrets, OpenAPI, migrations, README,
+CODEOWNERS, initialization provenance, CI activation and local architecture,
+validation and deployment policy stay service-owned. Put local Make data and
+nonstandard recipes in `make/service.mk`; standard targets belong to
+`make/template.mk`. Full sync refuses unsplit root Make recipes, unsafe service
+extension syntax and standard-target overrides. It parses this structure as
+data and never executes target Makefiles or hooks.
+
+To preserve an additional canonical skill, put an empty regular
+`.service-owned` file directly inside its real `.agents/skills/<name>/`
+directory beside a valid `SKILL.md`. Its name must not collide with a source
+skill. That entire skill tree, including local dirt, is preserved; selected
+Claude/Qwen discovery links are rendered from it. Malformed markers, unsafe
+links or colliding names refuse. Unmarked target-only skills remain owned
+drift and may be removed after normal dirty-path admission.
+
+Claude settings own only `env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`; Qwen settings
+own only `model.maxSubagentDepth`. Sync replaces or inserts that JSON value
+while preserving all existing other bytes. Duplicate keys, non-finite values,
+invalid JSON, or nonobject roots/managed parents refuse. Settings values are
+never included in diagnostics. Codex project config remains an exact generated
+view; machine-specific settings live outside it.
+
+## Refusal and recovery
+
+Both commands preflight all selected writes/removals, generated outputs, path
+types, parents and ownership before target mutation. Tracked/staged dirt or
+untracked/ignored overlap refuses, except valid service-owned skills and their
+canonical discovery links. Unrelated files are preserved. Unsafe manifest paths,
+symlink parents, ordinary symlinks, submodules, type collisions, missing local
+authorities, invalid projections and helper failures also refuse.
+
+Commands require exclusive access to their selected source/target paths while
+running. Admission is not filesystem transaction isolation from other writers.
+Deterministic refusal leaves target bytes and Git state unchanged.
+
+Unexpected I/O after writes start can leave command-produced changes. An
+interrupted initializer keeps an incomplete lock and never reports success;
+sync reports partial application. Inspect the diff and diagnostic. Recover
+initialization in a fresh clean template checkout, preserving the interrupted
+checkout for comparison; reconcile sync-produced changes explicitly. There is
+no automatic rollback, reset, retry or destructive resume.
+
+## Validation boundary
+
+Use the service's [command policy](build-test-and-development-commands.md) and
+[validation router](validation-routing.md) for ordinary development.
+The source template additionally owns `make template-owned-purity-check` and
+`make template-init-check`. The latter initializes all 16 choices, commits each
+isolated fixture, and runs its actual `make build` and
+`ALLOW_FULL=1 ALLOW_HEAVY=1 make check` serially. It also retains source-only
+safety and sync fixtures. These source runners are removed from generated
+services, so a service's standard check cannot recurse into the matrix.
+
+Local results describe their fixed candidate and commands. They do not claim a
+remote CI run, publication or deployment. The service's
+[CI/CD policy](ci-cd-production-ready.md) remains the authority for release gates.

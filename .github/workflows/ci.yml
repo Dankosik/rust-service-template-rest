@@ -53,6 +53,7 @@ jobs:
       agent_instructions: ${{ steps.surfaces.outputs.agent_instructions }}
       documentation: ${{ steps.surfaces.outputs.documentation }}
       validation_system: ${{ steps.surfaces.outputs.validation_system }}
+      module_initializer: ${{ steps.surfaces.outputs.module_initializer }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -205,6 +206,7 @@ jobs:
           git fetch --no-tags --depth=1 origin "${BASE_SHA}"
           git show "${BASE_SHA}:api/openapi/service.yaml" >/tmp/openapi-base.yaml
           bash ./scripts/ci/measure.sh quality-openapi-breaking -- make openapi-breaking BASE_OPENAPI=/tmp/openapi-base.yaml
+      # template:begin postgres:ci-quality-migrations
       - name: Migrations
         # Static append-only history against the base plus the source rules
         # over the embedded set; the runtime checksum check runs in
@@ -222,6 +224,7 @@ jobs:
             bash ./scripts/ci/measure.sh quality-migrations -- make migration-check BASE_REF=HEAD
           fi
           bash ./scripts/ci/measure.sh quality-migration-history -- make migration-history-self-test
+      # template:end postgres:ci-quality-migrations
       - name: Instructions
         # Skill shape plus the generated harness carriers against their sources.
         if: needs.changes.outputs.agent_instructions == 'true'
@@ -412,7 +415,7 @@ jobs:
 
   image:
     needs: changes
-    if: needs.changes.outputs.runtime_image == 'true' || needs.changes.outputs.migrations == 'true'
+    if: needs.changes.outputs.runtime_image == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -436,23 +439,28 @@ jobs:
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
           RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
           RUNTIME_IMAGE_CACHE_TO: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'type=gha,mode=max,scope=runtime-image' || '' }}
-        run: bash ./scripts/ci/measure.sh image-build -- make runtime-image-build RUNTIME_IMAGE=service:ci
+        run: bash ./scripts/ci/measure.sh image-build -- make runtime-image-build
       - name: Runtime image lifecycle
+        # template:begin postgres:ci-image-lifecycle-migration-branch
         if: needs.changes.outputs.migrations != 'true'
+        # template:end postgres:ci-image-lifecycle-migration-branch
         env:
           VCS_REF: ${{ github.sha }}
-        run: bash ./scripts/ci/measure.sh image-lifecycle -- make runtime-image-check RUNTIME_IMAGE=service:ci RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+        run: bash ./scripts/ci/measure.sh image-lifecycle -- make runtime-image-check RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+      # template:begin postgres:ci-image-migration-rehearsal
       - name: Migration rehearsal
         # Contains the lifecycle check, with the PostgreSQL profile enabled
         # against a compose database the image's /migrate prepared.
         if: needs.changes.outputs.migrations == 'true'
         env:
           VCS_REF: ${{ github.sha }}
-        run: bash ./scripts/ci/measure.sh image-migration-rehearsal -- env REQUIRE_DOCKER=1 make migration-validate RUNTIME_IMAGE=service:ci RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+        run: bash ./scripts/ci/measure.sh image-migration-rehearsal -- env REQUIRE_DOCKER=1 make migration-validate RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+      # template:end postgres:ci-image-migration-rehearsal
       - name: Image vulnerabilities
         if: needs.changes.outputs.runtime_image == 'true'
-        run: bash ./scripts/ci/measure.sh image-security -- make container-security CONTAINER_IMAGE=service:ci
+        run: bash ./scripts/ci/measure.sh image-security -- make container-security
 
+  # template:begin postgres:ci-integration-job
   integration:
     needs: changes
     if: needs.changes.outputs.db_integration == 'true'
@@ -496,6 +504,59 @@ jobs:
             ~/.cargo/git/db
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+  # template:end postgres:ci-integration-job
+
+  initializer:
+    needs: changes
+    if: needs.changes.outputs.module_initializer == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Load tool manifest
+        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
+      - name: Install pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - name: Restore cargo caches
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-initializer-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-initializer-${{ runner.os }}-${{ runner.arch }}-
+      - name: Fetch locked Cargo packages
+        run: cargo fetch --locked
+      - name: Install pinned Cargo tools
+        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2.87.14
+        with:
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Initialize every supported output
+        run: bash ./scripts/ci/measure.sh template-initializer -- env ALLOW_FULL=1 ALLOW_HEAVY=1 REQUIRE_DOCKER=1 make template-init-check
+      - name: Save cargo caches
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.cargo-cache.outcome == 'success' &&
+          steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   docs:
     needs: changes
@@ -512,12 +573,26 @@ jobs:
 
   required:
     if: always()
-    needs: [changes, quality, security, secrets, delivery, image, integration, docs]
+    needs:
+      - changes
+      - quality
+      - security
+      - secrets
+      - delivery
+      - image
+      # template:begin postgres:ci-required-integration-need
+      - integration
+      # template:end postgres:ci-required-integration-need
+      - initializer
+      - docs
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Reject failed or cancelled gates
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - name: Require selected initializer matrix success
+        if: needs.changes.outputs.module_initializer == 'true' && needs.initializer.result != 'success'
         run: exit 1
       - name: Accept passed and intentionally skipped gates
         run: echo "all applicable CI gates passed"

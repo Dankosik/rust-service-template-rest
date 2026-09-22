@@ -36,10 +36,9 @@ enforces it:
 | Telemetry labels with bounded cardinality | the adapter's instruments, through the `metrics` facade |
 | Proof | a negative test at the boundary beside the adapter; container-backed proof behind `ALLOW_HEAVY=1` once a `test/` crate exists |
 
-The bounded outbound HTTP client (fixed authority, post-DNS public-address
-admission, header and body ceilings, correlation stripping, no proxy), the
-PostgreSQL pool, and messaging adapters are stage 8 and 10 profiles; they
-add their rows to this document and to
-[Component Boundaries](boundaries.md) when they land. New executable surfaces
+Available providers are recorded in [Component Boundaries](boundaries.md);
+[Persistence](persistence.md) records whether PostgreSQL is retained. A new
+outbound or messaging capability needs its own accepted contract and adds its
+real owner here when implemented. New executable surfaces
 use their own binary in `crates/service/src/bin` only when they share the
 service's composition, otherwise their own crate with its own lifecycle.

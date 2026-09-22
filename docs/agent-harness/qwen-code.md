@@ -9,9 +9,10 @@ changes.
 - `/orchestrator` binds the current session as Ledger Orchestrator. Dispatch
   mutually independent ready units through `agent` with
   `subagent_type: "acceptance-unit-lead"`, within current capacity. The native
-  [Lead carrier](../../.qwen/agents/acceptance-unit-lead.md) loads the existing
-  role skill and returns its fixed unit as `Implemented`, without task proof
-  or review gates. The root integrates these candidates serially into the local
+  installed Lead carrier under `.qwen/agents/` loads the existing role skill
+  and returns its fixed unit as `Implemented`, without task proof or review
+  gates. This carrier exists only when Qwen is selected. The root integrates
+  these candidates serially into the local
   development tree from
   [Acceptance Result](../spec-first-workflow/interfaces/acceptance-result-v1.md)
   and unlocks dependent implementation immediately. One final delivery

@@ -212,13 +212,17 @@ mod tests {
             &LoadOptions::default(),
             BUILD,
             env(&[
+                // template:begin postgres:load-empty-dsn-env
                 ("APP__POSTGRES__DSN", ""),
+                // template:end postgres:load-empty-dsn-env
                 ("APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS", "  "),
                 ("APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_ENDPOINT", "  "),
             ]),
         )
         .unwrap();
+        // template:begin postgres:load-empty-dsn-assertion
         assert!(!cfg.postgres.has_dsn());
+        // template:end postgres:load-empty-dsn-assertion
         assert!(!cfg.observability.otel.exporter.has_headers());
         assert_eq!(cfg.observability.otel.exporter.otlp_endpoint, None);
     }

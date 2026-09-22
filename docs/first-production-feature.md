@@ -263,7 +263,7 @@ back to a default silently. The greeting needed no key.
 
 ```bash
 make build
-make test-changed PKGS="greeting service"   # what scripts/ci/affected-crates.sh selects
+make test                                 # the new manifest selects the workspace
 make openapi-check
 ALLOW_FULL=1 make check
 ```

@@ -13,6 +13,7 @@ usage:
   --apply      regenerate Codex, Claude, Qwen, Grok, Cursor, and OpenCode role carriers
   --check      verify byte-stable generated carriers without changing files
   --repo       repository root (default: current working directory)
+  --harness    staged harness selection; defaults to the local lock or all in source
 EOF
 }
 
@@ -26,6 +27,12 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/lib/sync-cli.sh"
 sync_cli_parse "preflight apply check" "$@"
 mode="${SYNC_MODE}"
 repo="${SYNC_REPO}"
+selected_harness=$(sync_cli_selected_harness) ||
+	fail "cannot determine selected agent harness"
+
+selected_adapter() {
+	[[ "${selected_harness}" == all || "${selected_harness}" == "$1" ]]
+}
 
 sources="${repo}/.agents/roles"
 classes="${repo}/.agents/role-classes"
@@ -419,23 +426,29 @@ check_generated() {
 
 case "${mode}" in
 apply)
-	sync_generated codex toml
-	sync_generated claude md
-	sync_generated qwen md
-	sync_generated grok md
-	sync_generated grok-roles toml
-	sync_generated cursor md
-	sync_generated opencode md
-	printf 'agent roles: %d role carriers generated for 6 harnesses\n' "${#role_names[@]}"
+	selected_adapter codex && sync_generated codex toml
+	selected_adapter claude && sync_generated claude md
+	selected_adapter qwen && sync_generated qwen md
+	if selected_adapter grok; then
+		sync_generated grok md
+		sync_generated grok-roles toml
+	fi
+	selected_adapter cursor && sync_generated cursor md
+	selected_adapter opencode && sync_generated opencode md
+	printf 'agent roles: %d canonical roles generated for selected %s harness\n' \
+		"${#role_names[@]}" "${selected_harness}"
 	;;
 check)
-	check_generated codex toml
-	check_generated claude md
-	check_generated qwen md
-	check_generated grok md
-	check_generated grok-roles toml
-	check_generated cursor md
-	check_generated opencode md
-	printf 'agent roles: %d canonical roles current for 6 harnesses\n' "${#role_names[@]}"
+	selected_adapter codex && check_generated codex toml
+	selected_adapter claude && check_generated claude md
+	selected_adapter qwen && check_generated qwen md
+	if selected_adapter grok; then
+		check_generated grok md
+		check_generated grok-roles toml
+	fi
+	selected_adapter cursor && check_generated cursor md
+	selected_adapter opencode && check_generated opencode md
+	printf 'agent roles: %d canonical roles current for selected %s harness\n' \
+		"${#role_names[@]}" "${selected_harness}"
 	;;
 esac

@@ -84,7 +84,9 @@ mod tests {
     #[test]
     fn classifies_secret_like_keys() {
         for key in [
+            // template:begin postgres:secret-key-vector
             "postgres.dsn",
+            // template:end postgres:secret-key-vector
             "authn.introspection_client_secret",
             "observability.otel.exporter.otlp_headers",
             "webhooks.static_secrets",
@@ -107,6 +109,7 @@ mod tests {
         }
     }
 
+    // template:begin postgres:secret-policy-postgres-fixture
     #[test]
     fn finds_first_non_empty_secret_value() {
         let table: toml::Table = toml::from_str(
@@ -126,6 +129,7 @@ mod tests {
             Some("postgres.dsn")
         );
     }
+    // template:end postgres:secret-policy-postgres-fixture
 
     #[test]
     fn empty_placeholders_are_allowed() {

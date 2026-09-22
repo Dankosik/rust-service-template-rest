@@ -14,8 +14,8 @@ Include the crates that depend on a changed crate's production code through
 the existing planner rather than a second selection mechanism:
 
 ```bash
-printf '%s\n' crates/health/src/lib.rs | bash scripts/ci/affected-crates.sh
-make test-changed PKGS="health infra-http service"
+printf '%s\n' path/to/changed.rs | bash scripts/ci/affected-crates.sh
+make test-changed PKGS="<packages printed by the planner>"
 ```
 
 `make plan` prints the same selection for the whole worktree without running
@@ -51,8 +51,7 @@ dependency.
 
 ## Full repository
 
-`ALLOW_FULL=1 make check` is the explicit full gate: format, workspace clippy,
-workspace tests, unused dependencies, OpenAPI lint, skills, and the
-validation-system self-tests, under the shared validation lock. It is what
-CI's `quality` job runs piecewise on `main`; it is not a routine follow-up to
-every edit, and the guard exists so it is never launched by accident.
+`ALLOW_FULL=1 make check` is the explicit full gate under the shared validation
+lock. The service's command and CI owners define its constituents and admission
+scope. It is not a routine follow-up to every edit, and the guard exists so it
+is never launched by accident.

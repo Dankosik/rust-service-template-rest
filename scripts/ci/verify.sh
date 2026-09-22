@@ -103,8 +103,9 @@ self_test() (
 	local output fixture scratch script attempt_path receipts_before crate
 	fixture=$(mktemp -d)
 	trap 'rm -rf -- "${fixture}"' EXIT
-	mkdir -p "${fixture}/scripts/ci" "${fixture}/make" "${fixture}/tools"
+	mkdir -p "${fixture}/scripts/ci" "${fixture}/scripts/lib" "${fixture}/make" "${fixture}/tools"
 	cp "${ROOT_DIR}/scripts/ci/"{verify,changed-surfaces,validation-lock,affected-crates,git-changed-paths}.sh "${fixture}/scripts/ci/"
+	cp "${ROOT_DIR}/scripts/lib/template_state.py" "${fixture}/scripts/lib/template_state.py"
 	cp "${ROOT_DIR}/make/template.mk" "${fixture}/make/template.mk"
 	cp "${ROOT_DIR}/tools/versions.env" "${fixture}/tools/versions.env"
 	cd "${fixture}"
@@ -165,7 +166,6 @@ self_test() (
 		echo "verify self-test accepted make check without ALLOW_FULL=1" >&2
 		return 1
 	fi
-	grep -q 'ALLOW_FULL=1' "${TMPDIR:-/tmp}/verify-full-guard.$$"
 	rm -f "${TMPDIR:-/tmp}/verify-full-guard.$$"
 
 	output=$(bash "${script}" --plan --files .agents/roles/worker-agent.toml)
@@ -177,6 +177,28 @@ self_test() (
 	if grep -q 'not applicable' <<<"${output}"; then return 1; fi
 	output=$(bash "${script}" --plan --files .github/dependabot.yml)
 	grep -q '^  none$' <<<"${output}"
+
+	# Source-only admission exists only when make/source.mk is present. The
+	# fixture deliberately models that source root, then returns to a derived
+	# root with an explicit complete none/core lock.
+	: >make/source.mk
+	output=$(bash "${script}" --plan --files scripts/init-module.sh)
+	grep -q '^  make template-init-check$' <<<"${output}"
+	grep -q 'requires_heavy=true' <<<"${output}"
+	if CI='' ALLOW_FULL='' ALLOW_HEAVY=1 bash "${script}" --files scripts/init-module.sh >/dev/null 2>"${TMPDIR:-/tmp}/verify-full-required.$$"; then
+		echo "verify self-test accepted the initializer matrix without ALLOW_FULL=1" >&2
+		return 1
+	fi
+	grep -q 'set ALLOW_FULL=1' "${TMPDIR:-/tmp}/verify-full-required.$$"
+	rm -f "${TMPDIR:-/tmp}/verify-full-required.$$"
+	rm make/source.mk
+	cat >template.lock <<EOF
+{"schema_version":1,"state":"complete","identity":{"service_name":"fixture-api","repository":"https://github.com/example/fixture-api","description":"Fixture API","codeowner":"@example/platform"},"profiles":{"database":"none","agent_harness":"core"},"source":{"repository":"https://github.com/Dankosik/rust-service-template-rest","checkout_revision":"$(git rev-parse HEAD)","provenance":"local-checkout"}}
+EOF
+	output=$(bash "${script}" --plan --files Cargo.toml)
+	grep -q 'module_initializer=false' <<<"${output}"
+	if grep -q 'template-init-check' <<<"${output}"; then return 1; fi
+	rm template.lock
 
 	output=$(bash "${script}" --plan --files tools/versions.env)
 	grep -q 'make tools-check' <<<"${output}"
@@ -273,8 +295,9 @@ self_test() (
 	grep -q '^  make migration-history-self-test$' <<<"${output}"
 	grep -q '^  make runtime-image-build RUNTIME_IMAGE=service:verify$' <<<"${output}"
 	grep -q '^  make migration-validate RUNTIME_IMAGE=service:verify$' <<<"${output}"
+	grep -q '^  make dockerfile-check$' <<<"${output}"
+	grep -q '^  make container-security CONTAINER_IMAGE=service:verify$' <<<"${output}"
 	if grep -q 'runtime-image-check' <<<"${output}"; then return 1; fi
-	if grep -q 'container-security' <<<"${output}"; then return 1; fi
 	if grep -q 'test-integration-db' <<<"${output}"; then return 1; fi
 	output=$(bash "${script}" --plan --files crates/infra-postgres/src/dsn.rs)
 	grep -q '^  make test-integration-db$' <<<"${output}"
@@ -524,6 +547,9 @@ if is_true validation_system; then
 	add_command make validation-lock-self-test "validation routing changed" "make validation-lock-self-test" cheap false false
 	add_command make verify-check "validation routing changed" "make verify-check" cpu false false
 fi
+if is_true module_initializer; then
+	add_command make template-init-check "initializer, profile, ownership, or source-only proof changed" "make template-init-check" docker true true
+fi
 
 workspace_rust=false
 if is_true cargo_dependencies; then workspace_rust=true; fi
@@ -651,8 +677,11 @@ blocked() {
 }
 
 if [[ ${requires_heavy} == true && ${ALLOW_HEAVY:-} != 1 && ${CI:-} != true ]]; then blocked "set ALLOW_HEAVY=1 before verification"; fi
+if is_true module_initializer && [[ ${ALLOW_FULL:-} != 1 && ${CI:-} != true ]]; then
+	blocked "set ALLOW_FULL=1 before verification"
+fi
 for binary in git make shasum; do command -v "${binary}" >/dev/null 2>&1 || blocked "required binary is unavailable: ${binary}"; done
-if is_true rust_source || is_true cargo_dependencies || is_true dependency_policy || is_true lint_config || is_true openapi || is_true validation_system || is_true tool_manifest; then
+if is_true rust_source || is_true cargo_dependencies || is_true dependency_policy || is_true lint_config || is_true openapi || is_true validation_system || is_true module_initializer || is_true tool_manifest; then
 	command -v cargo >/dev/null 2>&1 || blocked "required binary is unavailable: cargo"
 fi
 if is_true openapi; then command -v npx >/dev/null 2>&1 || blocked "required binary is unavailable: npx"; fi

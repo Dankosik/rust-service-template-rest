@@ -14,12 +14,16 @@ use std::time::Duration;
 
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
+// template:begin postgres:bootstrap-imports
 use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe};
+// template:end postgres:bootstrap-imports
 use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, ResolvedSampler, TracingOptions,
     diagnostics_router, install_subscriber, install_tracer_provider,
 };
+// template:begin postgres:bootstrap-postgres-secret-import
 use secrecy::ExposeSecret;
+// template:end postgres:bootstrap-postgres-secret-import
 use service_config::{
     AppConfig, BuildInfo, Config, FromArgs, LogFormat, TracesSampler, process_failure,
 };
@@ -57,10 +61,12 @@ pub(crate) enum BootstrapError {
     Admission(health::NotReady),
     #[error("configuration is invalid: {0}")]
     Config(#[from] service_config::ValidationError),
+    // template:begin postgres:bootstrap-errors
     #[error("configuration is invalid: postgres.dsn: {0}")]
     PostgresDsn(#[from] infra_postgres::DsnError),
     #[error(transparent)]
     Postgres(#[from] infra_postgres::ConnectError),
+    // template:end postgres:bootstrap-errors
     #[error(transparent)]
     Server(#[from] infra_http::ServerError),
 }
@@ -147,19 +153,15 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // fails startup here rather than serving a readiness that never passes.
     // One error exit owns cancel/join/close, including the path where the
     // pool never opened (`postgres_pool` stays `None`).
+    // template:begin postgres:bootstrap-startup-pool
     let mut postgres_pool = None;
+    // template:end postgres:bootstrap-startup-pool
     let outcome = async {
-        let mut probes: Vec<Box<dyn Probe>> = Vec::new();
-        if config.postgres.enabled {
-            let pool = open_postgres(&config).await?;
-            probes.push(Box::new(PostgresProbe::new(pool.clone())));
-            tracker.spawn(infra_postgres::record_metrics_periodically(
-                pool.clone(),
-                METRICS_MAINTENANCE_INTERVAL,
-                cancel.child_token(),
-            ));
-            postgres_pool = Some(pool);
-        }
+        let probes: Vec<Box<dyn Probe>> = Vec::new();
+        // template:begin postgres:bootstrap-postgres-startup
+        let (probes, pool) = prepare_postgres(probes, &config, &tracker, &cancel).await?;
+        postgres_pool = pool;
+        // template:end postgres:bootstrap-postgres-startup
 
         // Admission runs even without probes so the first probe after bind
         // answers from an evaluation.
@@ -179,7 +181,9 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             tracker: tracker.clone(),
             readiness,
             policy,
+            // template:begin postgres:bootstrap-prepared-pool
             postgres_pool: postgres_pool.clone(),
+            // template:end postgres:bootstrap-prepared-pool
         })
         .await
     }
@@ -189,9 +193,35 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // `TracerProviderHandle` is not last-ref: the global SDK clone remains
     // until process teardown.
     if outcome.is_err() {
-        shutdown::close_opened_dependencies(&cancel, &tracker, postgres_pool.as_ref()).await;
+        shutdown::close_opened_dependencies(&cancel, &tracker).await;
+        // template:begin postgres:bootstrap-startup-pool-close
+        if let Some(pool) = postgres_pool.as_ref() {
+            shutdown::close_opened_postgres(pool).await;
+        }
+        // template:end postgres:bootstrap-startup-pool-close
     }
     outcome
+}
+
+// template:begin postgres:bootstrap-open-postgres
+async fn prepare_postgres(
+    mut probes: Vec<Box<dyn Probe>>,
+    config: &Config,
+    tracker: &TaskTracker,
+    cancel: &CancellationToken,
+) -> Result<(Vec<Box<dyn Probe>>, Option<PgPool>), BootstrapError> {
+    let mut postgres_pool = None;
+    if config.postgres.enabled {
+        let pool = open_postgres(config).await?;
+        probes.push(Box::new(PostgresProbe::new(pool.clone())));
+        tracker.spawn(infra_postgres::record_metrics_periodically(
+            pool.clone(),
+            METRICS_MAINTENANCE_INTERVAL,
+            cancel.child_token(),
+        ));
+        postgres_pool = Some(pool);
+    }
+    Ok((probes, postgres_pool))
 }
 
 async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
@@ -215,6 +245,7 @@ async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
     );
     Ok(pool)
 }
+// template:end postgres:bootstrap-open-postgres
 
 /// Runtime pieces built before listeners bind: admission, then serve.
 ///
@@ -231,7 +262,9 @@ struct Prepared<'a> {
     tracker: TaskTracker,
     readiness: Readiness,
     policy: RefreshPolicy,
+    // template:begin postgres:bootstrap-prepared-field
     postgres_pool: Option<PgPool>,
+    // template:end postgres:bootstrap-prepared-field
 }
 
 async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapError> {
@@ -244,7 +277,9 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         tracker,
         readiness,
         policy,
+        // template:begin postgres:bootstrap-destructure-pool
         postgres_pool,
+        // template:end postgres:bootstrap-destructure-pool
     } = prepared;
     readiness.refresh(policy).await;
     readiness
@@ -301,7 +336,9 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         diagnostics,
         cancel,
         tracker,
+        // template:begin postgres:bootstrap-shutdown-plan-pool
         postgres_pool,
+        // template:end postgres:bootstrap-shutdown-plan-pool
         tracer_provider,
         signals,
     })
@@ -360,7 +397,9 @@ fn log_startup_summary(config: &Config, exporter: &ExporterState) {
         http.drain_timeout = ?config.http.drain_timeout,
         http.grace_period = ?config.http.grace_period,
         observability.metrics.addr = %config.observability.metrics.addr,
+        // template:begin postgres:bootstrap-startup-log-postgres
         postgres.enabled = config.postgres.enabled,
+        // template:end postgres:bootstrap-startup-log-postgres
         log.level = %config.log.level,
         tracing.exporter = exporter.as_str(),
         "service_starting"

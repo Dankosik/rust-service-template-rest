@@ -1,0 +1,21 @@
+# New, authorized candidate files that are not in the shared checkout index.
+# The matrix copies tracked worktree files plus only these regular paths into
+# a private source repository before it creates its fixture commit.
+scripts/init-module.sh
+scripts/template-sync.sh
+scripts/lib/template_init.py
+scripts/lib/template_sync.py
+scripts/lib/template_state.py
+scripts/lib/template_profiles.json
+template-owned.paths
+docs/template-sync.md
+make/service.mk
+make/profile-postgres.mk
+make/source.mk
+scripts/ci/template-init-check.sh
+scripts/tests/template-candidate-paths.txt
+scripts/tests/template-owned-purity.py
+scripts/tests/template-init-safety.py
+scripts/tests/template-sync-canary.py
+evals/template-initializer/
+specs/template-initializer/

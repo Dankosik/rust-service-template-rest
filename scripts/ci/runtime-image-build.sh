@@ -26,11 +26,13 @@ image=${1:-service:ci}
 
 vcs_ref=${VCS_REF:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}
 source_date_epoch=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2>/dev/null || echo 0)}
-app_version=${APP_VERSION:-}
-if [[ -z ${app_version} ]] && command -v cargo >/dev/null 2>&1; then
-	# cargo pkgid prints path+file:///…/crates/service#0.1.0
-	app_version=$(cargo pkgid --locked -p service 2>/dev/null | sed -n 's/.*#//p')
+package_id=
+if command -v cargo >/dev/null 2>&1; then
+	package_id=$(cargo pkgid --locked --manifest-path crates/service/Cargo.toml 2>/dev/null || true)
 fi
+service_package=${SERVICE_PACKAGE:-$(printf '%s' "${package_id}" | sed -n 's/.*#\([^@]*\)@.*/\1/p')}
+service_package=${service_package:-service}
+app_version=${APP_VERSION:-$(printf '%s' "${package_id}" | sed -E 's/.*#([^@]+@)?//')}
 app_version=${app_version:-unknown}
 
 build=(docker buildx build --load)
@@ -40,6 +42,8 @@ build=(docker buildx build --load)
 "${build[@]}" \
 	--build-arg "CARGO_CHEF_VERSION=${CARGO_CHEF_VERSION}" \
 	--build-arg "CARGO_AUDITABLE_VERSION=${CARGO_AUDITABLE_VERSION}" \
+	--build-arg "SERVICE_PACKAGE=${service_package}" \
+	--build-arg "SERVICE_BIN=${SERVICE_BIN:-${service_package}}" \
 	--build-arg "APP_VERSION=${app_version}" \
 	--build-arg "VCS_REF=${vcs_ref}" \
 	--build-arg "SOURCE_URL=${SOURCE_URL:-}" \

@@ -16,9 +16,12 @@ repository surface that can prove them.
 - Docker with BuildKit and Compose, for `make shellcheck` and
   `make docs-check` (pinned containers), `make dockerfile-check`, the image
   targets (`runtime-image-build`, `runtime-image-check`,
-  `container-security`), and the database-backed proof
-  (`test-integration-db`, `migration-validate`, `compose-up`), the heavy
-  ones behind `ALLOW_HEAVY=1`. Unit tests never need Docker.
+  `container-security`). Image targets are behind `ALLOW_HEAVY=1`.
+  <!-- template:begin postgres:contributing-postgres-prerequisites -->
+  PostgreSQL proof uses `test-integration-db`, `migration-validate`, and
+  `compose-up`; its heavy targets are also behind `ALLOW_HEAVY=1`.
+  <!-- template:end postgres:contributing-postgres-prerequisites -->
+  Unit tests never need Docker.
 
 Every tool version is pinned once in `tools/versions.env`; `make` and CI read
 the same file, and `make tools-check` proves the pins resolve. The Cargo tools
@@ -46,7 +49,7 @@ under `<git-common-dir>/codex/verify` keyed by the changed files, the plan,
 and the environment. CI runs the same classifier.
 
 `ALLOW_FULL=1 make check` (`fmt-check`, `lint`, `test`, `unused-deps`,
-`openapi-lint`, `check-instructions`, `docs-check`, `migration-check`, and
+`openapi-lint`, `check-instructions`, `docs-check`, selected profile checks, and
 the validation-system self-tests) is the explicit full-repository gate; it is not a routine follow-up to every edit,
 and the guard exists so it is never launched by accident. `ALLOW_HEAVY=1`
 guards the history-wide and container-backed commands the same way; CI sets
@@ -58,6 +61,7 @@ dependency and secret gates CI runs; run them locally when a change touches
 `Cargo.toml`, `Cargo.lock`, `deny.toml`, or adds anything that could look
 like a credential.
 
+<!-- template:begin postgres:contributing-postgres-proof -->
 A change under `crates/infra-postgres`, `crates/migrate`, `test/`, or
 `migrations/` keeps its unit tests Docker-free; the claim that a
 transaction, lock, commit outcome, or migration behaves as described is
@@ -67,6 +71,7 @@ file only: `make migration-check` refuses an edited, deleted, or renamed
 one and an out-of-order version, and `ALLOW_HEAVY=1 make migration-validate`
 rehearses the image against a fresh database
 ([PostgreSQL Validation](docs/validation/postgres.md)).
+<!-- template:end postgres:contributing-postgres-proof -->
 
 A change to an HTTP operation is made in the handler's `#[utoipa::path]`
 attributes and schema derives, then `make openapi-generate` rewrites
