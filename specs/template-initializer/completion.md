@@ -92,7 +92,10 @@ record accompany the implementation. A delivery-preparation repair disables
 bytecode output in `check-skills.py`: importing the profile helper had created
 an untracked `__pycache__` file that made the next `make plan` fail closed.
 The instruction check and subsequent planning are rerun for this delta; remote
-CI validates the assembled delivery candidate.
+CI validates the assembled delivery candidate. The first remote run also exposed
+a sync-canary fixture commit that depended on global Git identity. Path-scoped
+fixture commits now supply their own test identity; the canary is rerun with
+global/system Git configuration and ambient author/committer identity disabled.
 
 [The roadmap](../../docs/roadmap.md#stage-9-template-initializer-profiles-and-sync)
 closes stage 9 only when the delivery pull request lands on `main` after its

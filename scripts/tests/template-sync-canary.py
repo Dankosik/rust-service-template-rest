@@ -27,7 +27,7 @@ def commit(repo: Path, message: str) -> None:
 
 
 def commit_paths(repo: Path, message: str, *paths: str) -> None:
-    for args in (["git", "add", "--", *paths], ["git", "commit", "-qm", message, "--", *paths]):
+    for args in (["git", "add", "--", *paths], ["git", "-c", "user.email=template-sync-canary@example.invalid", "-c", "user.name=template-sync-canary", "commit", "-qm", message, "--", *paths]):
         result = run(list(args), cwd=repo)
         if result.returncode:
             raise AssertionError(result.stderr)
