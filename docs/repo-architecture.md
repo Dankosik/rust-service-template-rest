@@ -1,6 +1,7 @@
 # Repository Architecture
 
-This is the architecture front door for `rust-service-template-rest`. Select
+This is the architecture front door for the service identified by
+`crates/service/Cargo.toml`. Select
 only the leaf whose pressure can change the current decision; code, the
 committed contract, tests, and crate documentation remain the final factual
 authority.
@@ -36,9 +37,13 @@ authority.
 | `env/config/*.toml`, `APP__SECTION__KEY`, `--config`, `--config-overlay` | Inputs whose precedence and secret rules live in [Configuration Source Policy](configuration-source-policy.md) |
 | `crates/health` | The readiness verdict `/health/ready` serves and the drain flag teardown flips |
 | `crates/service/src/bootstrap` | Startup order, the shutdown plan, exit codes |
-| `migrations/*.sql` | The schema; `crates/migrate` embeds and applies it, access code adapts to it ([Persistence](architecture/persistence.md)) |
 | `crates/<feature>` (none yet) | Behavior consumed by transports and future binaries |
 | `tools/versions.env`, `deny.toml`, `.gitleaks.toml`, `build/docker/Dockerfile` | Tool pins and gate policy consumed by `make` and CI ([CI/CD Production Readiness](ci-cd-production-ready.md)) |
+
+<!-- template:begin postgres:docs-architecture-schema -->
+`migrations/*.sql` owns the PostgreSQL schema; `crates/migrate` embeds and applies
+it, and access code adapts to it ([Persistence](architecture/persistence.md)).
+<!-- template:end postgres:docs-architecture-schema -->
 
 Concrete adapter wiring belongs in the composition root. Generated outputs
 are never edited as the source of truth.
@@ -52,7 +57,7 @@ terms stay in their owning specification.
 | Term | Means here | Does not mean | Authority source | Semantic owner | Decision affected |
 | --- | --- | --- | --- | --- | --- |
 
-The template defines no service-specific terms. Derived services add rows
+The scaffold defines no service-specific terms. Add rows
 only for stable domain decisions.
 
 ## Select One Leaf

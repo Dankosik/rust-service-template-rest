@@ -3,7 +3,7 @@
 Use this guide when a feature needs a new dependency or starts repeating a
 mechanical implementation. It records the boilerplate-reduction decisions,
 not a bundle of dependencies every service must install. The
-[research synthesis](../specs/boilerplate-reduction/research/synthesis.md)
+[upstream research synthesis](https://github.com/Dankosik/rust-service-template-rest/blob/81bbd16b320c90d430522e69fc2d52a2aaa049de/specs/boilerplate-reduction/research/synthesis.md)
 records the inspected baseline and the evidence behind the immediate choices.
 
 A dependency earns its place by deleting a current mechanism or a manually

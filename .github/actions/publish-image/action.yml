@@ -54,7 +54,8 @@ runs:
       run: |
         set -euo pipefail
         test "$(git rev-parse HEAD)" = "${CANDIDATE_SHA}"
-        crate_version=$(cargo pkgid --locked -p service | sed -n 's/.*#//p')
+        crate_version=$(cargo pkgid --locked --manifest-path crates/service/Cargo.toml | sed -E 's/.*#([^@]+@)?//')
+        test -n "${crate_version}"
         bash ./scripts/ci/publish-image-metadata.sh metadata \
           "${MODE}" \
           "${CANDIDATE_SHA}" \

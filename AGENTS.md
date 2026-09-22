@@ -1,11 +1,8 @@
 # AGENTS.md
 
-OpenAPI-first Rust service template on Tokio and axum with safe runtime
-defaults, optional persistence profiles, observability, agent workflows, and CI.
-The template is being ported stage by stage from
-[go-service-template-rest](https://github.com/Dankosik/go-service-template-rest);
-[the roadmap](docs/roadmap.md) records what exists, what is planned, and which
-decisions are already fixed.
+OpenAPI-first Rust service with safe runtime defaults, optional profiles,
+observability, agent workflows, and CI. Service identity, supported profiles,
+and delivery policy remain local service decisions.
 
 Own the accepted outcome through the applicable workflow, review, repair, and
 acceptance criteria. Continue authorized work until that outcome is complete or
@@ -83,14 +80,9 @@ cost. Check supported configuration and extension points before adding a custom
 wrapper, fork, or replacement. Keep application-specific policy with its current
 owner; a ready-made mechanism need not own the surrounding business rules.
 
-Before a roadmap stage or a new capability starts, research the crates that
-already solve its problems and record the comparison and decision under
-`specs/<topic>/research/synthesis.md`, as [the roadmap's working
-rules](docs/roadmap.md#working-rules-for-every-stage) require. The Go template
-supplies each problem and the reasons behind its decision, not the shape of
-the solution: when Rust solves the problem differently, do it the Rust way and
-record the deviation. Template-owned code exists only for a gap the synthesis
-names.
+Before a new capability starts, research the crates that already solve its
+problems and record the comparison and decision in the service's accepted
+decision artifact. Use the service's local planning rules when they exist.
 
 Make failure and replacement decisions explicit. When an operation cannot
 establish the authority or preconditions required before an effect, reject it
@@ -99,15 +91,11 @@ contract. Retain a fallback, compatibility shim, or legacy path only for an
 accepted current requirement with one owner, observable activation, proof, and
 a removal condition; otherwise the replacement removes the superseded path.
 
-Ownership boundaries are crates. `crates/service` is the composition root and
-the only crate that knows the concrete runtime, signals, and process lifecycle.
-`crates/config` owns the typed snapshot and its validation; `crates/health`
-owns readiness; `crates/infra-<provider>` crates adapt one transport or
-provider and own no business rule (`crates/infra-postgres` is the first);
-`crates/migrate` owns the embedded migration set and its runner;
-`migrations/` owns the schema. Business behavior will live in
-`crates/<feature>` crates that depend on no transport or provider crate. Do
-not create a crate, module, or directory before its first real artifact.
+Service-local architecture owns the composition root, typed configuration,
+readiness, provider adapters, schema, and business boundaries. Load
+[Repository Architecture](docs/repo-architecture.md) before changing one of
+those boundaries. Do not create a crate, module, or directory before its first
+real artifact.
 
 ## Validation budget
 
@@ -122,7 +110,7 @@ Select commands from [`make/template.mk`](make/template.mk):
 | --- | --- |
 | One crate's behavior or tests | `make build` and `make test-package PKG=<crate>`, or `make test-changed PKGS="<crates>"` with the list `scripts/ci/affected-crates.sh` prints |
 | Several crates, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` | `make build` and `make test` |
-| A claim about observed PostgreSQL behavior (transaction, lock, commit outcome, migration, readiness with the pool) | `ALLOW_HEAVY=1 make test-integration-db`; a new migration also `make migration-check`; the image's migration path `ALLOW_HEAVY=1 make migration-validate` ([PostgreSQL Validation](docs/validation/postgres.md)) |
+| A claim about observed database behavior (transaction, lock, commit outcome, migration, or readiness) | Load the service-local persistence architecture and database validation owner, then run its required real-database proof |
 | Formatting or lint configuration | `make fmt-check` and `make lint` |
 | Documentation or agent instructions | Static consistency review; `make docs-check` proves every relative link and fragment resolves; `make check-instructions` for skills, roles, and their generated carriers |
 | Mixed or unclear surfaces | `make plan` shows the route the changed surfaces select; `make verify` runs it and records a receipt |
@@ -169,21 +157,21 @@ retain their boundaries.
 | --- | --- |
 | Authorized external, costly, sensitive, destructive, or irreversible action | [External Effects](docs/spec-first-workflow/shared/external-effects.md) |
 | Accepted work first enters another checkout | [Repository Boundaries](docs/spec-first-workflow/shared/repository-boundaries.md) |
-| Work adds, completes, or re-scopes a roadmap stage or its fixed decisions | [Roadmap](docs/roadmap.md) |
+| Work adds, completes, or re-scopes a roadmap stage or its fixed decisions | The service's local roadmap or accepted delivery plan |
 | Crate ownership, dependency direction, request path, lifecycle, persistence, or an integration boundary can change | [Repository Architecture](docs/repo-architecture.md), then the one leaf it selects |
-| A crate, binary, dependency, or CI gate is added or removed | [Roadmap concept map and stage scope](docs/roadmap.md#concept-map), then [CONTRIBUTING.md](CONTRIBUTING.md) |
-| A non-obvious technical decision must survive the current session | `specs/<topic>/` while open; the owning document once accepted |
-| Contribution, pull-request, or evidence expectations | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| A crate, binary, dependency, or CI gate is added or removed | [Repository Architecture](docs/repo-architecture.md), then the service's local contribution policy |
+| A non-obvious technical decision must survive the current session | The service's accepted decision artifact |
+| Contribution, pull-request, or evidence expectations | The service's local contribution policy |
 | Configuration key, secret source, telemetry environment, or runtime budget changes | [Configuration Source Policy](docs/configuration-source-policy.md) |
 | Instructions, tools, roles, or skills change | [Prompt Maintenance](docs/prompt-maintenance.md); [Skill Authoring](docs/skill-authoring.md) for skills; then `make check-instructions` |
 | A prompt for another agent, session, phase, or native entry skill must be written | [Prompt Composition](docs/prompt-composition.md) |
 | A durable control, carrier, model, or effort must be chosen or operated | [Agent Harness](docs/agent-harness.md) |
 | A verification claim beyond the budget table, or a mixed surface | [Validation Routing](docs/validation-routing.md) and the matching leaf under `docs/validation/` |
 | A CI job, tool pin, Dockerfile, image check, or publication step changes what may ship | [CI/CD Production Readiness](docs/ci-cd-production-ready.md); the `rust-delivery-platform` skill owns the method |
-| Deployment policy for a derived service on Railway | [Railway Deployment Profile](docs/railway-deployment-profile.md) |
+| Deployment policy for a derived service | The service's local deployment policy |
 
-The remaining capability skills (`rust-tonic` and the profile skills) arrive
-with their stages; until then the roadmap names the Go source to port from.
+Load a capability method only when its changed surface reaches its stated
+pressure.
 
 ## Rust Change Surface
 
@@ -192,8 +180,7 @@ whose descriptions match a pressure in the changed surface; each skill owns
 its method and completion condition. `rust-coder` owns ordinary
 implementation; `rust-dependencies` fires before any new crate, feature, or
 toolchain change; `rust-verification` decides what existing evidence
-supports. The catalog is listed in [README.md](README.md#working-with-coding-agents)
-and its authoring rules in [Skill Authoring](docs/skill-authoring.md).
+supports. Its authoring rules are in [Skill Authoring](docs/skill-authoring.md).
 
 Use the pinned toolchain in [`rust-toolchain.toml`](rust-toolchain.toml) and
 the workspace `edition` and `rust-version` in [`Cargo.toml`](Cargo.toml) for

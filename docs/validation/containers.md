@@ -4,7 +4,8 @@ Use only for a matching explicit verification requirement or a bounded
 diagnostic. A changed file or an available Docker daemon does not create a
 local image gate; `ALLOW_HEAVY=1` is the deliberate opt-in.
 
-Build with `ALLOW_HEAVY=1 make runtime-image-build RUNTIME_IMAGE=service:ci`.
+Build with `ALLOW_HEAVY=1 make runtime-image-build`; the image tag comes from
+`make/service.mk`.
 The script passes the manifest tool versions, `HEAD` as `VCS_REF`, the crate
 version, and the commit time as `SOURCE_DATE_EPOCH`; `RUNTIME_IMAGE_CACHE_FROM`
 and `RUNTIME_IMAGE_CACHE_TO` accept buildx cache specs. A successful build is
@@ -13,7 +14,7 @@ not a runtime observation.
 Prove the lifecycle with the same tag when it is required:
 
 ```bash
-ALLOW_HEAVY=1 make runtime-image-check RUNTIME_IMAGE=service:ci RUNTIME_EXPECTED_COMMIT="$(git rev-parse HEAD)"
+ALLOW_HEAVY=1 make runtime-image-check RUNTIME_EXPECTED_COMMIT="$(git rev-parse HEAD)"
 ```
 
 The check starts the container `--read-only --cap-drop=ALL
@@ -29,8 +30,8 @@ Reuse that image for the scan and the SBOM only when those claims are
 required:
 
 ```bash
-ALLOW_HEAVY=1 make container-security CONTAINER_IMAGE=service:ci
-ALLOW_HEAVY=1 make container-sbom CONTAINER_IMAGE=service:ci SBOM_OUTPUT=sbom.cdx.json
+ALLOW_HEAVY=1 make container-security
+ALLOW_HEAVY=1 make container-sbom SBOM_OUTPUT=sbom.cdx.json
 ```
 
 Trivy reports two targets: the Debian packages and the `rustbinary` list
@@ -39,7 +40,7 @@ service). A plain `cargo build` binary yields zero Rust packages; the empty
 target, not a clean scan, is the signal.
 
 `make verify` on a `runtime_image` change plans exactly this sequence on one
-shared `service:verify` tag and refuses to run without `ALLOW_HEAVY=1`.
+shared verification tag (overridable with `VERIFY_RUNTIME_IMAGE`) and refuses to run without `ALLOW_HEAVY=1`.
 Preserve layer caches; do not use `--no-cache` or broad pruning as iteration.
 An unavailable optional container check is a disclosed gap, not a reason to
 provision an environment before local completion.

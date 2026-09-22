@@ -60,8 +60,11 @@ pub enum TracesSampler {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct OtelConfig {
-    /// `service.name` resource attribute and the PostgreSQL
-    /// `application_name` for pooled and migrator sessions. The initializer
+    /// `service.name` resource attribute.
+    // template:begin postgres:otel-postgres-application-name-doc
+    /// It also supplies PostgreSQL `application_name` for pooled and migrator sessions.
+    // template:end postgres:otel-postgres-application-name-doc
+    /// The initializer
     /// rewrites this default for a derived service. A distinct database
     /// session label is not a configuration axis.
     pub service_name: String,

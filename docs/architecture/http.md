@@ -49,7 +49,7 @@ annotations are where a change is made. The document is OpenAPI 3.1.
 | Command | Does |
 | --- | --- |
 | `make openapi-generate` | Rewrite `api/openapi/service.yaml` from the `openapi` binary |
-| `make openapi-check` | Redocly lint plus the `service` contract tests: the committed file equals the generator output, every operation declares `x-security-decision` and `security`, protected operations declare their problem responses, problem schemas are closed |
+| `make openapi-check` | Redocly lint plus the service package's contract tests: the committed file equals the generator output, every operation declares `x-security-decision` and `security`, protected operations declare their problem responses, problem schemas are closed |
 | `make openapi-lint` | Redocly lint alone (`.redocly.yaml`); part of `make check` and CI |
 | `make openapi-breaking BASE_OPENAPI=<file>` | oasdiff breaking-change comparison; CI runs it on pull requests against the base branch |
 

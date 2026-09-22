@@ -23,7 +23,7 @@ is not a supported template state.
 | 6 | Agent harness and spec-first workflow | done |
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | done |
-| 9 | Template initializer, profiles, and template sync | planned |
+| 9 | Template initializer, profiles, and template sync | done on merge after required CI |
 | 10 | Optional capability profiles | planned |
 | 11 | Benchmarking and performance evidence | planned |
 | 12 | First release and derived-repository verification | planned |
@@ -393,8 +393,10 @@ skills, 5 roles for 6 harnesses); `AGENTS.md` has its final shape. Binding
 `/orchestrator` and dispatching a Lead is structurally in place (the skill,
 the Cursor and Codex carriers, and the adapters exist; Cursor discovers
 `.agents/skills` in this repository) but has not been exercised on a real
-ledger, because no ledger-sized task exists yet; the first orchestrated stage
-will exercise it and record the result here.
+ledger at that stage. Stage 9's [completion record](../specs/template-initializer/completion.md#first-dispatched-ledger)
+now records the first real dispatch, joined Implemented return, immutable
+candidate custody and serial local integration. These exercise the carried
+harness obligation separately from behavior and CI validation.
 
 ### Stage 7: Rust backend skills (core set done)
 
@@ -535,9 +537,14 @@ database from the image, replays as `no_change`, and passes the lifecycle
 check with the pool open; CI runs the proof on the `db_integration` surface
 and the rehearsal on `migrations`. Orchestration: the stage was small enough
 for one actor with the research synthesis as its artifact; the harness'
-first dispatched ledger is still owed to stage 9 or 10.
+first dispatched ledger is exercised by stage 9, with dispatch, joined return
+and integration custody recorded in its
+[completion record](../specs/template-initializer/completion.md#first-dispatched-ledger).
 
 ### Stage 9: Template initializer, profiles, and sync
+
+State: delivered by this change; completion takes effect on merge after the
+required CI gates pass.
 
 Goal: `make template-init` turns the template into one service, and
 `template-sync.sh` propagates portable instructions to derived repositories.
@@ -546,8 +553,12 @@ Goal: `make template-init` turns the template into one service, and
   name, description, `CODEOWNERS`, and `README` identity; selects profiles;
   removes unselected profile packs by marker; records `template.lock`;
   rejects unsupported combinations before mutation.
-- Profile markers (`# profile:<name>:start/end`) in Cargo manifests, source,
-  Dockerfile, config, OpenAPI, and docs.
+- Whole-line profile markers `template:begin postgres:<id>` and
+  `template:end postgres:<id>` use the host comment wrapper (`#`, `//`, or
+  `<!-- ... -->`). Registered identifiers are unique lowercase hyphenated
+  names with exact source paths in `scripts/lib/template_profiles.json`.
+  Mixed Cargo, Rust, Dockerfile, configuration, CI and local documentation
+  owners carry them; generated OpenAPI and portable owners never do.
 - `template-owned.paths`, `scripts/template-sync.sh` with `--check`,
   `--apply`, `--instructions-only`, all refusal rules, and the purity check.
 - `make template-init-check` matrix in CI on the `module_initializer` surface.
@@ -555,6 +566,33 @@ Goal: `make template-init` turns the template into one service, and
 
 Exit criteria: every supported profile combination initializes, builds, and
 passes `make check` in the CI matrix; a derived repository syncs cleanly.
+
+The [accepted contract](../specs/template-initializer/spec.md) fixes a 2 × 8
+matrix: database `none`/`postgres` and harness
+`core`/`codex`/`claude`/`qwen`/`cursor`/`grok`/`opencode`/`all`.
+[Technical Design](../specs/template-initializer/design/system.md) closes the
+committed Git snapshot, one-shot JSON provenance, guarded locked Cargo
+projection, exact ownership admission and consumer-preserving settings/skill
+mechanisms. The [local completion record](../specs/template-initializer/completion.md)
+retains the assembled implementation, proof and independent review evidence.
+
+Local implementation and validation are complete: the public sixteen-output
+matrix and source safety/purity/sync suites passed, retained real PostgreSQL
+and image lifecycle proof passed, and independent integrated review passed.
+Exact candidates, commands and scoped reuse are in the completion record.
+The first native dispatched-ledger exercise completed dispatch, the five
+descendants' joined
+Implemented return, immutable candidate handoff and serial local integration;
+the completion record preserves native actor identity and custody. Source-only
+static instruction fixtures cover reached stage-7 portability/preservation
+decisions; they make no measured model-behavior
+claim and add no universal discipline or capability skill.
+
+The delivery pull request closes this stage when its exact head passes the
+required CI gates, including the sixteen-output initializer matrix and sync
+suites, and lands on `main`. The completion record preserves the earlier local
+acceptance boundary separately from delivery. Neither acceptance establishes
+publication, deployment or stage-10 work.
 
 ### Stage 10: Optional capability profiles
 

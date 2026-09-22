@@ -1,5 +1,11 @@
 # Persistence Architecture
 
+The database selection in `template.lock` owns availability. A derived service
+with `database: none` has no PostgreSQL provider, migrator, database configuration
+or executable database commands. A retained `postgres` profile remains inert
+until configured. The source checkout without a lock carries that profile.
+
+<!-- template:begin postgres:docs-persistence-runtime -->
 Load for a PostgreSQL pool, repository, transaction, migration, query, or
 durable-schema change. Code and crate documentation remain the final factual
 authority; this leaf records the decisions and the reasons a later change
@@ -140,9 +146,13 @@ own database from `#[sqlx::test]`. `ALLOW_HEAVY=1 make migration-validate`
 rehearses the runtime image: `/migrate` against a fresh compose database,
 replay is `no_change`, then the lifecycle check with the profile enabled.
 [PostgreSQL Validation](../validation/postgres.md) selects the commands.
+<!-- template:end postgres:docs-persistence-runtime -->
 
 ## Decisions Recorded Here
 
+These decisions apply when the local selection retains PostgreSQL.
+
+<!-- template:begin postgres:docs-persistence-decisions -->
 From the stage 8 research (versions read 2026-09-18; behavior verified in a
 scratch project against `postgres:18.4`):
 
@@ -214,3 +224,4 @@ scratch project against `postgres:18.4`):
   the template's own exemption from the static history check while it
   authors profile migrations in place (arrives with the stage 9 profile
   markers).
+<!-- template:end postgres:docs-persistence-decisions -->

@@ -9,8 +9,9 @@
 #   changed-surfaces.sh --union BASE   OR of this classifier and the one at
 #                                      BASE, so a pull request that changes
 #                                      the classifier is judged by both
-#   changed-surfaces.sh --all          every surface true (tags, schedule,
-#                                      manual runs)
+#   changed-surfaces.sh --all          every applicable surface true (tags,
+#                                      schedule, manual runs); profile and
+#                                      source-only surfaces remain bounded
 #   changed-surfaces.sh --self-test
 #
 # Surface table: docs/ci-cd-production-ready.md. A surface joins this list
@@ -21,8 +22,37 @@ names=(
 	rust_source cargo_dependencies dependency_policy lint_config openapi tool_manifest
 	github_workflows dependency_automation shell runtime_image publication_metadata secret_scanning
 	db_integration migrations
-	agent_instructions documentation validation_system no_validation_required
+	agent_instructions documentation validation_system module_initializer no_validation_required
 )
+
+profile_database() {
+	local root database
+	root=$(pwd)
+	database=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field database) || {
+		echo "cannot resolve selected database profile" >&2
+		return 2
+	}
+	case "${database}" in
+	none | postgres) printf '%s\n' "${database}" ;;
+	*)
+		echo "invalid selected database profile: ${database}" >&2
+		return 2
+		;;
+	esac
+}
+
+all_surfaces() {
+	local database source_only=false
+	database=$(profile_database)
+	[[ -f make/source.mk ]] && source_only=true
+	reset
+	mark "${names[@]}"
+	if [[ ${database} == none ]]; then
+		clear_surface db_integration migrations
+	fi
+	[[ ${source_only} == true ]] || clear_surface module_initializer
+	emit
+}
 
 reset() {
 	local name
@@ -37,6 +67,13 @@ mark() {
 	[[ ${tracking_file:-false} == true ]] && matched=true
 	for name in "$@"; do
 		printf -v "${name}" '%s' true
+	done
+}
+
+clear_surface() {
+	local name
+	for name in "$@"; do
+		printf -v "${name}" '%s' false
 	done
 }
 
@@ -61,7 +98,9 @@ has_line() {
 }
 
 classify() {
-	local file matched
+	local file matched database source_only=false
+	database=$(profile_database)
+	[[ -f make/source.mk ]] && source_only=true
 	reset
 	while IFS= read -r file; do
 		[[ -n ${file} ]] || continue
@@ -77,7 +116,7 @@ classify() {
 		esac
 		# Database-backed proof: the adapter, the runner, the test crate and
 		# its fixtures, the compose file, and the scripts that drive them.
-		case "${file}" in
+		if [[ ${database} == postgres ]]; then case "${file}" in
 		crates/infra-postgres/* | crates/migrate/* | test/* | env/docker-compose.yml | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh)
 			mark db_integration
 			;;
@@ -85,9 +124,11 @@ classify() {
 		# The migration set and everything that rehearses it against the image.
 		case "${file}" in
 		migrations/*.sql | crates/migrate/* | env/docker-compose.yml | scripts/ci/migration-validate.sh | scripts/ci/migration-history-check.sh | scripts/lib/compose-postgres.sh)
-			mark migrations
+			# A migration source changes the image payload. The image surface
+			# stays profile-neutral; postgres is what admits this extra source.
+			mark migrations runtime_image
 			;;
-		esac
+		esac; fi
 		case "${file}" in
 		deny.toml) mark dependency_policy ;;
 		esac
@@ -120,7 +161,7 @@ classify() {
 		# Instructions, roles, skills, their generated harness carriers, the
 		# workflow and harness documents, and the scripts that check them.
 		case "${file}" in
-		AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | .agents/* | .claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | docs/skill-authoring.md | docs/agent-harness.md | docs/agent-harness/* | docs/spec-first-workflow.md | docs/spec-first-workflow/* | docs/prompt-composition.md | docs/prompt-maintenance.md | docs/subagent-brief-template.md | scripts/check-skills.py | scripts/agent-roles-sync.sh | scripts/codex-agents-sync.sh | scripts/harness-skills-sync.sh | scripts/lib/sync-cli.sh)
+		template.lock | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | .agents/* | .claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | docs/skill-authoring.md | docs/agent-harness.md | docs/agent-harness/* | docs/spec-first-workflow.md | docs/spec-first-workflow/* | docs/prompt-composition.md | docs/prompt-maintenance.md | docs/subagent-brief-template.md | scripts/check-skills.py | scripts/agent-roles-sync.sh | scripts/codex-agents-sync.sh | scripts/harness-skills-sync.sh | scripts/lib/sync-cli.sh)
 			mark agent_instructions
 			;;
 		esac
@@ -131,10 +172,32 @@ classify() {
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
 		esac
 		case "${file}" in
-		Makefile | make/*.mk | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/measure.sh)
+		template.lock | Makefile | make/*.mk | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/measure.sh)
 			mark validation_system
 			;;
 		esac
+		# This surface exists only in the source template. A derived service
+		# cannot select the source-only matrix because make/source.mk was removed.
+		if [[ ${source_only} == true ]]; then case "${file}" in
+		Cargo.toml | Cargo.lock | rust-toolchain.toml | template.lock | Makefile | make/*.mk | build/docker/Dockerfile | \
+		api/openapi/* | env/config/* | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | \
+		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | .github/workflows/ci.yml | \
+		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | \
+		scripts/init-module.sh | scripts/template-sync.sh | scripts/lib/template_*.py | scripts/lib/template_profiles.json | \
+		template-owned.paths | \
+		scripts/ci/template-init-check.sh | scripts/tests/template-* | \
+		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/runtime-image-build.sh | \
+		crates/config/src/* | crates/service/src/* | crates/service/tests/* | crates/infra-postgres/* | crates/migrate/* | \
+		test/* | migrations/* | .agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \
+		.claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | \
+		docs/repo-architecture.md | docs/architecture/* | docs/configuration-source-policy.md | docs/production-contract.md | \
+		docs/first-production-feature.md | docs/project-structure-and-module-organization.md | \
+		docs/backend-library-selection.md | docs/backend-utility-recipes.md | \
+		docs/build-test-and-development-commands.md | docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | \
+		docs/validation/* | docs/template-sync.md)
+			mark module_initializer
+			;;
+		esac; fi
 		if [[ ${matched} != true ]]; then unclassified_paths+=("${file}"); fi
 	done
 	tracking_file=false
@@ -191,7 +254,7 @@ union_classify() {
 
 assert_case() {
 	local file=$1 true_names=$2 false_names=$3 output name
-	output="$(printf '%s\n' "${file}" | classify)"
+	output="$(printf '%s\n' "${file}" | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
 	for name in ${true_names}; do
 		has_line "${output}" "${name}=true" || {
 			printf '%s: expected %s=true\n%s\n' "${file}" "${name}" "${output}" >&2
@@ -207,8 +270,27 @@ assert_case() {
 }
 
 self_test() {
-	local root output name file
+	local root output name file source_fixture derived_fixture head classifier_root
 	root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+	source_fixture=$(mktemp -d)
+	derived_fixture=$(mktemp -d)
+	trap 'rm -rf -- "${source_fixture}" "${derived_fixture}"' RETURN
+	for fixture in "${source_fixture}" "${derived_fixture}"; do
+		mkdir -p "${fixture}/scripts/ci" "${fixture}/scripts/lib"
+		cp "${root}/scripts/ci/changed-surfaces.sh" "${fixture}/scripts/ci/changed-surfaces.sh"
+		cp "${root}/scripts/lib/template_state.py" "${fixture}/scripts/lib/template_state.py"
+	done
+	mkdir -p "${source_fixture}/make"
+	: >"${source_fixture}/make/source.mk"
+	head=$(git -C "${root}" rev-parse HEAD)
+	cat >"${derived_fixture}/template.lock" <<EOF
+{"schema_version":1,"state":"complete","identity":{"service_name":"fixture-api","repository":"https://github.com/example/fixture-api","description":"Fixture API","codeowner":"@example/platform"},"profiles":{"database":"none","agent_harness":"core"},"source":{"repository":"https://github.com/Dankosik/rust-service-template-rest","checkout_revision":"${head}","provenance":"local-checkout"}}
+EOF
+	classifier_root=${source_fixture}
+
+	assert_case template.lock \
+		"agent_instructions validation_system module_initializer" \
+		"cargo_dependencies shell documentation"
 
 	assert_case crates/service/src/main.rs \
 		"rust_source" \
@@ -226,7 +308,7 @@ self_test() {
 		"rust_source" \
 		"cargo_dependencies lint_config documentation"
 	assert_case Cargo.toml \
-		"cargo_dependencies lint_config" \
+		"cargo_dependencies lint_config module_initializer" \
 		"rust_source dependency_policy documentation"
 	assert_case Cargo.lock \
 		"cargo_dependencies" \
@@ -271,7 +353,7 @@ self_test() {
 		"runtime_image shell" \
 		"tool_manifest validation_system"
 	assert_case .github/workflows/ci.yml \
-		"github_workflows" \
+		"github_workflows module_initializer" \
 		"dependency_automation documentation"
 	assert_case .github/actions/publish-image/action.yml \
 		"github_workflows publication_metadata" \
@@ -347,14 +429,14 @@ self_test() {
 		"documentation db_integration" \
 		"rust_source"
 	assert_case env/docker-compose.yml \
-		"db_integration migrations" \
-		"rust_source runtime_image"
+		"db_integration migrations runtime_image" \
+		"rust_source"
 	assert_case scripts/ci/test-integration-db.sh \
 		"db_integration shell" \
 		"migrations validation_system"
 	assert_case scripts/ci/migration-validate.sh \
-		"migrations shell" \
-		"db_integration runtime_image"
+		"migrations runtime_image shell" \
+		"db_integration"
 	assert_case scripts/ci/migration-history-check.sh \
 		"migrations shell" \
 		"db_integration validation_system"
@@ -380,7 +462,7 @@ self_test() {
 	done
 	for file in Makefile make/template.mk make/service.mk; do
 		assert_case "${file}" \
-			"validation_system" \
+			"validation_system module_initializer" \
 			"shell rust_source cargo_dependencies"
 	done
 	for file in changed-surfaces git-changed-paths affected-crates verify validation-lock measure; do
@@ -389,18 +471,29 @@ self_test() {
 			"tool_manifest rust_source"
 	done
 
-	output="$(printf '%s\n' Cargo.toml | classify)"
-	has_line "${output}" 'surface_count=2'
-	output="$(printf '%s\n' LICENSE | classify)"
+	output="$(printf '%s\n' Cargo.toml | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
+	has_line "${output}" 'surface_count=3'
+	output="$(printf '%s\n' LICENSE | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
 	has_line "${output}" 'surface_count=0'
 	has_line "${output}" 'classified=true'
 
-	output="$(bash "$0" --all)"
+	# A complete no-DB lock controls the derived fixture; source-only routing
+	# remains absent because the fixture has no make/source.mk.
+	output=$(printf '%s\n' Cargo.toml | (cd "${derived_fixture}" && bash scripts/ci/changed-surfaces.sh))
+	has_line "${output}" 'module_initializer=false'
+	has_line "${output}" 'db_integration=false'
+	has_line "${output}" 'migrations=false'
+
+	output="$(cd "${source_fixture}" && bash scripts/ci/changed-surfaces.sh --all)"
 	for name in "${names[@]}"; do
 		has_line "${output}" "${name}=true"
 	done
+	output="$(cd "${derived_fixture}" && bash scripts/ci/changed-surfaces.sh --all)"
+	has_line "${output}" 'db_integration=false'
+	has_line "${output}" 'migrations=false'
+	has_line "${output}" 'module_initializer=false'
 
-	if output="$(printf '%s\n' unknown/new-owner.xyz | classify 2>&1)"; then
+	if output="$(printf '%s\n' unknown/new-owner.xyz | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh) 2>&1)"; then
 		echo "unknown paths must fail closed" >&2
 		return 1
 	fi
@@ -408,7 +501,7 @@ self_test() {
 	has_line "${output}" 'unclassified_files=unknown/new-owner.xyz'
 
 	# Every tracked file has an owner.
-	output="$(git -C "${root}" ls-files | classify)"
+	output="$(git -C "${root}" ls-files | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
 	has_line "${output}" 'classified=true'
 
 	# The union keeps a surface either classifier selects. When HEAD predates
@@ -430,9 +523,7 @@ self_test() {
 
 case "${1:-}" in
 --all)
-	reset
-	mark "${names[@]}"
-	emit
+	all_surfaces
 	;;
 --self-test)
 	self_test

@@ -60,12 +60,13 @@ version. CI installs the same versions as prebuilt binaries.
 | Command | Does | Needs |
 | --- | --- | --- |
 | `make dockerfile-check` | BuildKit's built-in Dockerfile checks | Docker |
-| `ALLOW_HEAVY=1 make runtime-image-build RUNTIME_IMAGE=service:ci` | Build the production image; `VCS_REF`, `APP_VERSION`, `SOURCE_URL`, `SOURCE_DATE_EPOCH`, `RUNTIME_IMAGE_CACHE_FROM`, `RUNTIME_IMAGE_CACHE_TO` are honoured | Docker with BuildKit |
-| `ALLOW_HEAVY=1 make runtime-image-check RUNTIME_IMAGE=service:ci RUNTIME_EXPECTED_COMMIT=<sha>` | Start it `--read-only --cap-drop=ALL --security-opt=no-new-privileges`, await `/health/ready`, assert `app.commit`, require exit `0` from `docker stop --time 45` | Docker, curl |
-| `ALLOW_HEAVY=1 make container-security CONTAINER_IMAGE=service:ci` | Trivy: fixable HIGH and CRITICAL findings fail; Debian and `rustbinary` targets | Docker |
-| `ALLOW_HEAVY=1 make container-sbom CONTAINER_IMAGE=service:ci SBOM_OUTPUT=sbom.cdx.json` | CycloneDX SBOM of the image | Docker |
+| `ALLOW_HEAVY=1 make runtime-image-build` | Build the production image; `VCS_REF`, `APP_VERSION`, `SOURCE_URL`, `SOURCE_DATE_EPOCH`, `RUNTIME_IMAGE_CACHE_FROM`, `RUNTIME_IMAGE_CACHE_TO` are honoured | Docker with BuildKit |
+| `ALLOW_HEAVY=1 make runtime-image-check RUNTIME_EXPECTED_COMMIT=<sha>` | Start it `--read-only --cap-drop=ALL --security-opt=no-new-privileges`, await `/health/ready`, assert `app.commit`, require exit `0` from `docker stop --time 45` | Docker, curl |
+| `ALLOW_HEAVY=1 make container-security` | Trivy: fixable HIGH and CRITICAL findings fail; Debian and `rustbinary` targets | Docker |
+| `ALLOW_HEAVY=1 make container-sbom SBOM_OUTPUT=sbom.cdx.json` | CycloneDX SBOM of the image | Docker |
 | `make publish-image-metadata-check` | Self-test of the publication naming and tag promotion script | — |
 
+<!-- template:begin postgres:commands-postgres -->
 ## PostgreSQL
 
 | Command | Does | Needs |
@@ -74,7 +75,8 @@ version. CI installs the same versions as prebuilt binaries.
 | `ALLOW_HEAVY=1 make test-integration-db` | The database-backed proof: a throwaway compose PostgreSQL on an ephemeral port, `cargo test -p integration-tests --features integration` with `DATABASE_URL`, teardown; `REQUIRE_DOCKER=1` fails instead of refusing without Docker | Docker |
 | `make migration-check` | Static append-only history (`BASE_REF` for a range; the worktree with untracked files by default) and the `migrate` crate's source-rule tests over the embedded set | toolchain |
 | `make migration-history-self-test` | Self-test of `scripts/ci/migration-history-check.sh` | — |
-| `ALLOW_HEAVY=1 make migration-validate RUNTIME_IMAGE=service:ci RUNTIME_EXPECTED_COMMIT=<sha>` | Rehearse the image: `/migrate` against a fresh compose database, replay must be `no_change`, then `runtime-image-check` with the profile enabled; builds `service:migration` when no image is named | Docker, curl |
+| `ALLOW_HEAVY=1 make migration-validate RUNTIME_EXPECTED_COMMIT=<sha>` | Rehearse the image: `/migrate` against a fresh compose database, replay must be `no_change`, then `runtime-image-check` with the profile enabled; uses the local image default from `make/service.mk` | Docker, curl |
+<!-- template:end postgres:commands-postgres -->
 
 ## Routing and aggregates
 
@@ -83,22 +85,26 @@ version. CI installs the same versions as prebuilt binaries.
 | `make plan` | Classify the worktree's changes since `BASE_REF` and print the route: files, surfaces, commands with reasons and cost, surfaces with nothing to run |
 | `make verify` | Run that route under the validation lock; write an attempt record and, on a complete pass, a receipt under `<git-common-dir>/codex/verify` |
 | `make changed-surfaces-check`, `make affected-crates-check`, `make validation-lock-self-test`, `make verify-check` | The validation scripts' self-tests |
-| `ALLOW_FULL=1 make check` | The full repository gate under the lock: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-instructions`, `docs-check`, `migration-check`, and the five self-tests |
+| `ALLOW_FULL=1 make check` | The full repository gate under the lock: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-instructions`, `docs-check`, selected profile checks, and the five self-tests |
 
 ## Guards and variables
 
 | Variable | Meaning |
 | --- | --- |
 | `ALLOW_FULL=1` | Opt into `make check`; not a routine follow-up to every edit |
-| `ALLOW_HEAVY=1` | Opt into the image targets, the database-backed proof, the migration rehearsal, and the history-wide secret scan |
+| `ALLOW_HEAVY=1` | Opt into image targets, retained-profile database proof, and the history-wide secret scan |
+<!-- template:begin postgres:commands-require-docker -->
 | `REQUIRE_DOCKER=1` | Make a missing Docker daemon fail `test-integration-db` and `migration-validate` instead of refusing with exit 2; CI sets it |
+<!-- template:end postgres:commands-require-docker -->
 | `CI=true` | Set by CI; satisfies both guards, resolves the Cargo tools from `PATH`, and skips the worktree half of `secret-scan`. Do not set it locally |
-| `BASE_REF` | Comparison base for `plan`, `verify`, `secret-scan`, and `migration-check` (default `origin/main`) |
+| `BASE_REF` | Comparison base for `plan`, `verify`, and `secret-scan` (default `origin/main`) |
 | `PKG` / `PKGS` | One crate for `test-package`; a space-separated list for `lint-changed` and `test-changed` |
 | `VERIFY_FORCE=1` | Rerun `make verify` even when an identical receipt exists |
 | `TOOLS_ROOT` | Where the Cargo tools are built (default `<git-common-dir>/tools`) |
 | `RUNTIME_IMAGE`, `CONTAINER_IMAGE`, `RUNTIME_EXPECTED_COMMIT`, `SBOM_OUTPUT` | Image targets' tag, scan target, expected `app.commit`, SBOM path |
+<!-- template:begin postgres:commands-postgres-port -->
 | `POSTGRES_PORT` | Host port of `make compose-up` (default `5432`); the proof scripts use an ephemeral port |
+<!-- template:end postgres:commands-postgres-port -->
 
 `make help` prints the current catalog; when this document and `make help`
 disagree, `make/template.mk` is right and this document is stale.

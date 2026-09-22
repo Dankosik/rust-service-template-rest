@@ -13,8 +13,8 @@ read on 2026-12-01. IaC is evaluated by the Railway CLI against a linked
 project and applied explicitly; Railway does not read `.railway/` during a
 deploy. A template owns neither a `package.json` with the `railway`
 dependency nor a linked project, so it ships the policy as values and a
-copy-ready `service()` snippet instead. The initializer stage may generate
-`.railway/` once it knows the service identity.
+copy-ready `service()` snippet instead. Initialization does not create a
+Railway project, linked configuration or deployment input.
 
 ## Independent delivery paths
 

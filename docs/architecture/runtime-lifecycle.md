@@ -21,12 +21,8 @@ it against the built binary.
    log level, and the exporter state (`initialized`, `disabled`, `degraded`).
 4. Background tasks (metrics upkeep, Tokio runtime metrics, the readiness
    refresher) join a `TaskTracker` with child `CancellationToken`s.
-5. Dependency pools open when their profile is selected. With
-   `postgres.enabled`, the DSN is admitted, the pool's first connection is
-   established inside the acquire budget (`postgres_pool_opened`), the
-   probe joins the readiness set, and the pool gauge task joins the tracker;
-   an unreachable database is a startup failure, not a readiness that never
-   passes ([Persistence](persistence.md)).
+5. Admit the dependencies retained by the local profile before accepting
+   traffic; bootstrap owns their readiness registration and cleanup.
 6. Readiness admission: the refresher evaluates every registered probe once
    under `health.probe_budget`; a failure is a startup failure (exit
    `1`). Without a selected profile the set is empty and admission proves
@@ -37,6 +33,14 @@ it against the built binary.
    `observability.metrics.addr` is set. `service_ready` is logged only after
    both binds; the platform's first `/health/ready` poll answers from the
    admission evaluation.
+
+<!-- template:begin postgres:docs-lifecycle-postgres-startup -->
+With the PostgreSQL profile retained and `postgres.enabled`, bootstrap admits
+the DSN and opens the first connection inside the acquire budget
+(`postgres_pool_opened`). The probe joins readiness, the pool gauge task joins
+the tracker, and an unreachable database is a startup failure
+([Persistence](persistence.md)).
+<!-- template:end postgres:docs-lifecycle-postgres-startup -->
 
 Configuration and dependency admission precede traffic acceptance.
 Bootstrap, not handlers or feature code, owns process lifecycle and the
@@ -67,8 +71,13 @@ instead of pushing the process into `SIGKILL`.
 | HTTP drain: stop accepting, finish in-flight requests | `http.drain_timeout` minus the delay (`10s`) | `drain_started`, then `drain_completed`, or `shutdown_forced` with `remaining` connections |
 | Diagnostics listener close | `2s` | `diagnostics_stopped` or `diagnostics_forced` |
 | Cancel and join background tasks | `5s` | `background_joined` |
-| Close pooled dependencies (the PostgreSQL pool when enabled) | `5s` | `postgres_pool_closed`; an overrun votes `degraded` |
+| Close selected dependencies | `5s` | An overrun votes `degraded`; unused capacity retains the same grace-budget arithmetic |
 | Flush telemetry | `5s` | `telemetry_flushed`, then `shutdown_completed` |
+
+<!-- template:begin postgres:docs-lifecycle-postgres-close -->
+The retained PostgreSQL pool closes in the dependency-close stage and records
+`postgres_pool_closed`.
+<!-- template:end postgres:docs-lifecycle-postgres-close -->
 
 The `17s` tail after the drain is process structure, not configuration;
 `validate_grace_budget` refuses a configuration whose grace period cannot
@@ -116,7 +125,8 @@ destructors run.
   binary; `app.commit` is `vergen-gitcl` in `crates/config/build.rs` with
   `default_on_error()`, overridable through `VERGEN_GIT_SHA`, which the image
   build sets from `VCS_REF` (or Railway's `RAILWAY_GIT_COMMIT_SHA`).
-- **Process tests** use `CARGO_BIN_EXE_service`, an ephemeral port
+- **Process tests** use the Cargo executable environment key for the main
+  binary declared in `crates/service/Cargo.toml`, an ephemeral port
   (`APP__HTTP__ADDR=127.0.0.1:0`) read back from the JSON startup log, a
   readiness poll, `nix` `SIGTERM` (`Child::kill` is `SIGKILL`), and assert
   the exit code and drain timing. `SdkMeterProvider::shutdown_with_timeout`

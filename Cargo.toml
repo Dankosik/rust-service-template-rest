@@ -17,15 +17,20 @@ publish = false
 service-config = { path = "crates/config" }
 health = { path = "crates/health" }
 infra-http = { path = "crates/infra-http" }
+# template:begin postgres:workspace-postgres-crates
 infra-postgres = { path = "crates/infra-postgres" }
+# template:end postgres:workspace-postgres-crates
 infra-telemetry = { path = "crates/infra-telemetry" }
+# template:begin postgres:workspace-migrate-crate
 migrate = { path = "crates/migrate" }
+# template:end postgres:workspace-migrate-crate
 
+# template:begin postgres:workspace-postgres-dependencies
 # Persistence (docs/architecture/persistence.md). `macros` only where
 # `sqlx::migrate!` or `#[sqlx::test]` is used.
 sqlx = { version = "0.9.0", default-features = false }
-url = { version = "2.5", default-features = false }
 log = { version = "0.4", default-features = false }
+# template:end postgres:workspace-postgres-dependencies
 
 # Runtime and transport
 futures-util = { version = "0.3", default-features = false }
@@ -76,6 +81,7 @@ strum = { version = "0.28.0", default-features = false }
 
 # Utility toolkit (docs/backend-utility-recipes.md).
 # Declarations are not runtime dependencies; each owner opts in below.
+url = { version = "2.5", default-features = false }
 async-trait = { version = "0.1.92", default-features = false }
 serde_with = { version = "3.23.0", default-features = false }
 derive_more = { version = "2.1.1", default-features = false }

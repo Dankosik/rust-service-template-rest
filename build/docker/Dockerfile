@@ -34,7 +34,12 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 ENV CARGO_INCREMENTAL=0
 COPY --from=planner /src/recipe.json recipe.json
-RUN cargo chef cook --release --locked --recipe-path recipe.json -p service -p migrate
+ARG SERVICE_PACKAGE=service
+ARG SERVICE_BIN=service
+RUN cargo chef cook --release --locked --recipe-path recipe.json -p "${SERVICE_PACKAGE}"
+# template:begin postgres:docker-migrator-build
+RUN cargo chef cook --release --locked --recipe-path recipe.json -p migrate
+# template:end postgres:docker-migrator-build
 ARG VCS_REF=unknown
 ARG RAILWAY_GIT_COMMIT_SHA
 ARG SOURCE_DATE_EPOCH=0
@@ -42,9 +47,14 @@ ARG SOURCE_DATE_EPOCH=0
 # crates/config/build.rs); this is what the binary logs as app.commit.
 ENV VERGEN_GIT_SHA=${RAILWAY_GIT_COMMIT_SHA:-${VCS_REF}}
 COPY . .
-RUN cargo auditable build --release --locked -p service --bin service -p migrate --bin migrate \
- && mkdir -p /out && cp target/release/service target/release/migrate /out/ \
- && touch -d "@${SOURCE_DATE_EPOCH}" /out/service /out/migrate
+RUN cargo auditable build --release --locked -p "${SERVICE_PACKAGE}" --bin "${SERVICE_BIN}" \
+ && mkdir -p /out && cp "target/release/${SERVICE_BIN}" "/out/${SERVICE_BIN}" \
+ && touch -d "@${SOURCE_DATE_EPOCH}" "/out/${SERVICE_BIN}"
+# template:begin postgres:docker-migrator-output
+RUN cargo auditable build --release --locked -p migrate --bin migrate \
+ && cp target/release/migrate /out/migrate \
+ && touch -d "@${SOURCE_DATE_EPOCH}" /out/migrate
+# template:end postgres:docker-migrator-output
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97
 # The version is the Cargo package version; scripts/ci/runtime-image-build.sh
@@ -56,10 +66,13 @@ ARG SOURCE_URL=""
 LABEL org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.revision="${RAILWAY_GIT_COMMIT_SHA:-$VCS_REF}" \
       org.opencontainers.image.source="${SOURCE_URL}"
-COPY --from=builder /out/service /service
+ARG SERVICE_BIN=service
+COPY --from=builder "/out/${SERVICE_BIN}" /service
 # The migration job runs the same image with `--entrypoint /migrate`
 # (docs/architecture/persistence.md); it needs no migration directory.
+# template:begin postgres:docker-migrator-runtime
 COPY --from=builder /out/migrate /migrate
+# template:end postgres:docker-migrator-runtime
 EXPOSE 8080
 STOPSIGNAL SIGTERM
 USER nonroot:nonroot

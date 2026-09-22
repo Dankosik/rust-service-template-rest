@@ -1,10 +1,9 @@
 # Security Validation
 
 Select these commands for an explicit verification requirement or a bounded
-diagnostic. The domain label alone adds no local gate. CI's `security` and
-`secrets` jobs and the `image` job's scan keep their own admission scope
-([ci.yml](../../.github/workflows/ci.yml)); the workflow owns range versus
-full-history secret scanning, including the missing-base branch.
+diagnostic. The domain label alone adds no local gate. The service's CI policy
+owns security and image-scan admission scope, including range versus
+full-history secret scanning and missing-base handling.
 
 | Claim | Command | Observes |
 | --- | --- | --- |
