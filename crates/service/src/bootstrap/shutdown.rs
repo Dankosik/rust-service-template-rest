@@ -61,14 +61,14 @@ pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudget
 
 /// Cancel and join background work. Used on partial startup so the same
 /// owner story as [`run`] applies.
-pub(crate) async fn close_opened_dependencies(cancel: &CancellationToken, tracker: &TaskTracker) {
-    let _ = join_background_then_close(cancel, tracker, BACKGROUND_JOIN).await;
+pub(crate) async fn cleanup_startup_background(cancel: &CancellationToken, tracker: &TaskTracker) {
+    let _ = cancel_and_join_background(cancel, tracker, BACKGROUND_JOIN).await;
 }
 
 /// Cancel tracked work and wait for it.
 ///
 /// Returns whether the join finished in time.
-async fn join_background_then_close(
+async fn cancel_and_join_background(
     cancel: &CancellationToken,
     tracker: &TaskTracker,
     join_budget: Duration,
@@ -257,7 +257,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         }
     }
 
-    let joined = join_background_then_close(
+    let joined = cancel_and_join_background(
         &plan.cancel,
         &plan.tracker,
         budget.remaining(BACKGROUND_JOIN),

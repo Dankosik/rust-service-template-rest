@@ -122,7 +122,7 @@ impl Dsn {
     /// # Errors
     ///
     /// The first violated rule, without the offending value.
-    pub fn admit_with_environment<F>(raw: &str, occupied: F) -> Result<Self, DsnError>
+    pub(crate) fn admit_with_environment<F>(raw: &str, occupied: F) -> Result<Self, DsnError>
     where
         F: Fn(&str) -> bool,
     {
