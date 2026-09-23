@@ -39,6 +39,13 @@ use utoipa::ToSchema;
 pub enum Code {
     BadRequest,
     Unauthorized,
+    // template:begin authn:http-authentication-codes
+    AuthenticationRequired,
+    AuthenticationMalformed,
+    AuthenticationOversize,
+    AuthenticationInvalid,
+    AuthenticationUnavailable,
+    // template:end authn:http-authentication-codes
     Forbidden,
     NotFound,
     MethodNotAllowed,
@@ -92,6 +99,10 @@ impl Code {
         self.meta().type_uri
     }
 
+    // The exhaustive closed catalog keeps every wire identity, status, title,
+    // and type URI under one reviewable authority. Splitting it would add a
+    // second policy table solely to satisfy a line-count heuristic.
+    #[allow(clippy::too_many_lines)]
     const fn meta(self) -> CodeMeta {
         match self {
             Code::BadRequest => CodeMeta {
@@ -106,6 +117,38 @@ impl Code {
                 title: "unauthorized",
                 type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.2"),
             },
+            // template:begin authn:http-authentication-code-meta
+            Code::AuthenticationRequired => CodeMeta {
+                wire: "authentication_required",
+                status: StatusCode::UNAUTHORIZED,
+                title: "authentication required",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.2"),
+            },
+            Code::AuthenticationMalformed => CodeMeta {
+                wire: "authentication_malformed",
+                status: StatusCode::BAD_REQUEST,
+                title: "authentication malformed",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.1"),
+            },
+            Code::AuthenticationOversize => CodeMeta {
+                wire: "authentication_oversize",
+                status: StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                title: "authentication oversize",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc6585", "#section-5"),
+            },
+            Code::AuthenticationInvalid => CodeMeta {
+                wire: "authentication_invalid",
+                status: StatusCode::UNAUTHORIZED,
+                title: "authentication invalid",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.2"),
+            },
+            Code::AuthenticationUnavailable => CodeMeta {
+                wire: "authentication_unavailable",
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                title: "authentication unavailable",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4"),
+            },
+            // template:end authn:http-authentication-code-meta
             Code::Forbidden => CodeMeta {
                 wire: "forbidden",
                 status: StatusCode::FORBIDDEN,
@@ -370,6 +413,57 @@ pub mod responses {
     #[response(content_type = "application/problem+json")]
     pub struct InternalServerError(pub Problem);
 
+    // template:begin authn:http-authentication-problem-responses
+    /// bearer authentication is malformed
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json")]
+    pub struct AuthenticationMalformed(pub Problem);
+
+    /// bearer authentication is required or invalid
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json")]
+    pub struct AuthenticationUnauthorized(pub Problem);
+
+    /// downstream authorization denied the verified principal
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json")]
+    pub struct AuthenticationForbidden(pub Problem);
+
+    /// bearer authentication exceeds the admitted header value size
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json")]
+    pub struct AuthenticationOversize(pub Problem);
+
+    /// bearer authentication trust or provider is unavailable
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json")]
+    pub struct AuthenticationUnavailable(pub Problem);
+
+    /// the enclosing request budget expired before a response committed
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json")]
+    pub struct AuthenticationTimeout(pub Problem);
+
+    /// Responses every protected operation declares in addition to its own
+    /// success shape. Authentication never returns 403 itself; that status is
+    /// reserved for authorization that follows a verified principal.
+    #[derive(Debug, IntoResponses)]
+    pub enum ProtectedOperationProblemResponses {
+        #[response(status = 400)]
+        Malformed(#[ref_response] AuthenticationMalformed),
+        #[response(status = 401)]
+        Unauthorized(#[ref_response] AuthenticationUnauthorized),
+        #[response(status = 403)]
+        Forbidden(#[ref_response] AuthenticationForbidden),
+        #[response(status = 431)]
+        Oversize(#[ref_response] AuthenticationOversize),
+        #[response(status = 503)]
+        Unavailable(#[ref_response] AuthenticationUnavailable),
+        #[response(status = 504)]
+        Timeout(#[ref_response] AuthenticationTimeout),
+    }
+    // template:end authn:http-authentication-problem-responses
+
     /// The problem responses the OpenAPI document declares on every
     /// operation as shared transport answers. This is the Problem set every
     /// operation can name without colliding with probe-owned 503 `text/plain`.
@@ -396,7 +490,12 @@ pub mod responses {
     #[derive(OpenApi)]
     #[openapi(components(
         schemas(Problem, InvalidParam),
-        responses(BadRequest, RequestEntityTooLarge, InternalServerError)
+        responses(BadRequest, RequestEntityTooLarge, InternalServerError
+            // template:begin authn:http-authentication-problem-components
+            , AuthenticationMalformed, AuthenticationUnauthorized, AuthenticationForbidden,
+            AuthenticationOversize, AuthenticationUnavailable, AuthenticationTimeout
+            // template:end authn:http-authentication-problem-components
+        )
     ))]
     pub(crate) struct ProblemComponents;
 }

@@ -26,6 +26,20 @@ format = "text"
 otlp_endpoint = ""
 otlp_headers = ""
 
+# template:begin authn:local-config-section
+[authn]
+# Authentication remains inert until a derived service selects an authn profile.
+# Set shared trust values with APP__AUTHN__*.
+mode = "none"
+issuer = ""
+audience = ""
+# template:end authn:local-config-section
+# template:begin oidc-introspection:local-config-introspection-inputs
+# The client secret is environment-only and intentionally omitted here.
+introspection_endpoint = ""
+introspection_client_id = ""
+# template:end oidc-introspection:local-config-introspection-inputs
+
 # template:begin postgres:local-config
 [postgres]
 # The profile is inert until enabled. With `make compose-up`:

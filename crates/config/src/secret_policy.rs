@@ -23,10 +23,15 @@ where
 /// Whether a dotted key names a credential.
 ///
 /// Segments are split on `.`, `_`, and `-`, so `otlp_headers`, `api_key`,
-/// and `private-key` all match; `token_profile` and `token_url` do not.
+/// and `private-key` all match; `token_url` remains a non-credential URL name.
 #[must_use]
 pub fn is_secret_like_key(key: &str) -> bool {
     let lowered = key.trim().to_ascii_lowercase();
+    // template:begin oidc-jwt:secret-policy-token-profile-exception
+    if lowered == "authn.token_profile" {
+        return false;
+    }
+    // template:end oidc-jwt:secret-policy-token-profile-exception
     let segments: Vec<&str> = lowered
         .split(['.', '_', '-'])
         .filter(|segment| !segment.is_empty())
@@ -36,7 +41,7 @@ pub fn is_secret_like_key(key: &str) -> bool {
         .enumerate()
         .any(|(i, segment)| match *segment {
             "password" | "secret" | "secrets" | "authorization" | "dsn" => true,
-            "token" => !matches!(segments.get(i + 1), Some(&"profile" | &"url")),
+            "token" => !matches!(segments.get(i + 1), Some(&"url")),
             "key" => matches!(segments.get(i.wrapping_sub(1)), Some(&"api" | &"private")),
             "headers" => matches!(segments.get(i.wrapping_sub(1)), Some(&"otlp")),
             _ => false,
@@ -87,7 +92,10 @@ mod tests {
             // template:begin postgres:secret-key-vector
             "postgres.dsn",
             // template:end postgres:secret-key-vector
+            // template:begin oidc-introspection:secret-key-introspection-vector
             "authn.introspection_client_secret",
+            // template:end oidc-introspection:secret-key-introspection-vector
+            "cache.token_profile",
             "observability.otel.exporter.otlp_headers",
             "webhooks.static_secrets",
             "outbound.api_key",
@@ -98,7 +106,9 @@ mod tests {
             assert!(is_secret_like_key(key), "{key} should be secret-like");
         }
         for key in [
+            // template:begin oidc-jwt:secret-policy-token-profile-vector
             "authn.token_profile",
+            // template:end oidc-jwt:secret-policy-token-profile-vector
             "authn.token_url",
             "http.addr",
             "observability.otel.exporter.otlp_endpoint",
@@ -108,6 +118,26 @@ mod tests {
             assert!(!is_secret_like_key(key), "{key} should not be secret-like");
         }
     }
+
+    // template:begin oidc-introspection:secret-policy-introspection-fixture
+    #[test]
+    fn identifies_introspection_secret() {
+        let secret: toml::Table =
+            toml::from_str("[authn]\nintrospection_client_secret = \"secret\"\n").unwrap();
+        assert_eq!(
+            first_secret_like_key(&secret).as_deref(),
+            Some("authn.introspection_client_secret")
+        );
+    }
+    // template:end oidc-introspection:secret-policy-introspection-fixture
+
+    // template:begin oidc-jwt:secret-policy-token-profile-fixture
+    #[test]
+    fn identifies_the_public_jwt_token_profile() {
+        let public: toml::Table = toml::from_str("[authn]\ntoken_profile = \"rfc9068\"\n").unwrap();
+        assert_eq!(first_secret_like_key(&public), None);
+    }
+    // template:end oidc-jwt:secret-policy-token-profile-fixture
 
     // template:begin postgres:secret-policy-postgres-fixture
     #[test]

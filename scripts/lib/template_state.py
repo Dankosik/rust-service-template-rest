@@ -29,6 +29,7 @@ LOCK_NAME = "template.lock"
 LOCK_SCHEMA_VERSION = 1
 TEMPLATE_REPOSITORY = "https://github.com/Dankosik/rust-service-template-rest"
 DATABASE_CHOICES = ("none", "postgres")
+AUTHN_CHOICES = ("none", "oidc-jwt", "oidc-introspection")
 HARNESS_CHOICES = ("core", "codex", "claude", "qwen", "cursor", "grok", "opencode", "all")
 
 
@@ -101,12 +102,20 @@ _CODEOWNER_RE = re.compile(r"^@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:/[A-Za
 _GITHUB_OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
 _GITHUB_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+# Profile names are part of the source-owned inventory rather than a fixed
+# parser constant. Keep matching limited to executable whole-line markers.
 _PROFILE_MARKER_LINE_RE = re.compile(
-    rb"^(?:[ \t]*(?:#|//)[ \t]*template:(?:begin|end)[ \t]+postgres:"
-    rb"[a-z0-9]+(?:-[a-z0-9]+)*[ \t]*|[ \t]*<!--[ \t]*template:(?:begin|end)[ \t]+"
-    rb"postgres:[a-z0-9]+(?:-[a-z0-9]+)*[ \t]*-->[ \t]*)\r?$",
+    rb"^(?:[ \t]*(?:#|//)[ \t]*template:(?:begin|end)[ \t]+"
+    rb"[a-z0-9]+(?:-[a-z0-9]+)*:[a-z0-9]+(?:-[a-z0-9]+)*[ \t]*|"
+    rb"[ \t]*<!--[ \t]*template:(?:begin|end)[ \t]+"
+    rb"[a-z0-9]+(?:-[a-z0-9]+)*:[a-z0-9]+(?:-[a-z0-9]+)*[ \t]*-->[ \t]*)\r?$",
     re.MULTILINE,
 )
+_PROFILE_MARKER_PREFIX_RE = re.compile(
+    rb"^(?:[ \t]*(?:(?:#|//)[ \t]*template:(?:begin|end)(?:[ \t]|$)|<!--[ \t]*template:(?:begin|end)(?:[ \t]|$)))",
+    re.MULTILINE,
+)
+
 _RESERVED_CRATE_NAMES = {
     "as", "async", "await", "break", "const", "continue", "crate", "dyn",
     "else", "enum", "extern", "false", "fn", "for", "gen", "if", "impl",
@@ -225,15 +234,24 @@ def validate_identity(value: object) -> dict[str, str]:
 
 
 def validate_profiles(value: object) -> dict[str, str]:
-    if not isinstance(value, dict) or set(value) != {"database", "agent_harness"}:
+    if not isinstance(value, dict) or set(value) not in (
+        {"database", "agent_harness"},
+        {"database", "authn", "agent_harness"},
+    ):
         raise Refusal("profiles has an unsupported shape")
     database = value["database"]
+    authn = value.get("authn", "none")
     harness = value["agent_harness"]
     if not isinstance(database, str) or database not in DATABASE_CHOICES:
         raise Refusal("profiles.database is unsupported")
+    if not isinstance(authn, str) or authn not in AUTHN_CHOICES:
+        raise Refusal("profiles.authn is unsupported")
     if not isinstance(harness, str) or harness not in HARNESS_CHOICES:
         raise Refusal("profiles.agent_harness is unsupported")
-    return {"database": database, "agent_harness": harness}
+    # Schema-1 locks issued before authentication existed select the historical
+    # provider-independent profile. Normalization is read-only, so matching
+    # replay preserves their bytes exactly.
+    return {"database": database, "authn": authn, "agent_harness": harness}
 
 
 def validate_lock(value: object) -> dict[str, Any]:
@@ -290,6 +308,23 @@ def load_lock(root: Path, required: bool = False) -> dict[str, Any] | None:
     return validate_lock(parse_json_bytes(path.read_bytes(), LOCK_NAME))
 
 
+def lock_has_explicit_authn(root: Path, required: bool = False) -> bool:
+    """Tell a normalized lock from a historical lock without changing its bytes."""
+
+    path = Path(root) / LOCK_NAME
+    if not path.exists() and not path.is_symlink():
+        if required:
+            raise Refusal("template.lock is required")
+        return False
+    _regular_file(path, LOCK_NAME)
+    raw = parse_json_bytes(path.read_bytes(), LOCK_NAME)
+    validate_lock(raw)
+    assert isinstance(raw, dict)
+    profiles = raw["profiles"]
+    assert isinstance(profiles, dict)
+    return "authn" in profiles
+
+
 def selected_profiles(root: Path) -> tuple[str, str]:
     """Return database and harness; the uninitialized source is postgres/all."""
 
@@ -300,6 +335,19 @@ def selected_profiles(root: Path) -> tuple[str, str]:
         raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
     profiles = lock["profiles"]
     return (profiles["database"], profiles["agent_harness"])
+
+
+def selected_authn(root: Path) -> str:
+    """Return the normalized authentication profile without changing the lock."""
+
+    lock = load_lock(root)
+    if lock is None:
+        # The source contains all optional implementations, but has not made a
+        # derived-service profile selection.
+        return "none"
+    if lock["state"] != "complete":
+        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
+    return lock["profiles"]["authn"]
 
 
 def selected_adapters(harness: str) -> tuple[str, ...]:
@@ -355,6 +403,7 @@ _PROTECTED_MANIFEST_FILES = frozenset(
         "docs/railway-deployment-profile.md",
         "docs/production-contract.md",
         "docs/first-production-feature.md",
+        "docs/authentication.md",
         "docs/validation/postgres.md",
         "docs/validation/containers.md",
         "docs/validation/delivery.md",
@@ -451,7 +500,10 @@ def _manifest_files(root: Path, entry: str) -> tuple[Path, ...]:
 def _contains_profile_marker(contents: bytes) -> bool:
     """Only whole-line host-comment markers are executable profile syntax."""
 
-    return _PROFILE_MARKER_LINE_RE.search(contents) is not None
+    return (
+        _PROFILE_MARKER_LINE_RE.search(contents) is not None
+        or _PROFILE_MARKER_PREFIX_RE.search(contents) is not None
+    )
 
 
 def parse_manifest(
@@ -862,7 +914,11 @@ def _profile_command(arguments: argparse.Namespace) -> int:
             raise Refusal("repository directory is unsafe")
         root = root.resolve(strict=True)
         database, harness = selected_profiles(root)
-        value = database if arguments.field == "database" else harness
+        value = {
+            "database": database,
+            "authn": selected_authn(root),
+            "agent_harness": harness,
+        }[arguments.field]
         print(value)
         return 0
     except (Refusal, ToolFailure) as error:
@@ -875,7 +931,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     profile = commands.add_parser("profile", help="print selected profile data")
     profile.add_argument("--repo", required=True, type=Path)
-    profile.add_argument("--field", required=True, choices=("database", "agent_harness"))
+    profile.add_argument("--field", required=True, choices=("database", "authn", "agent_harness"))
     profile.set_defaults(handler=_profile_command)
     return parser
 

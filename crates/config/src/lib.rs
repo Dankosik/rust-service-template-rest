@@ -18,6 +18,9 @@ pub mod health;
 pub mod http;
 pub mod log;
 pub mod observability;
+// template:begin authn:config-module
+pub mod authn;
+// template:end authn:config-module
 // template:begin postgres:config-module
 pub mod postgres;
 // template:end postgres:config-module
@@ -38,6 +41,12 @@ pub use log::{LogConfig, LogFormat};
 pub use observability::{
     MetricsConfig, ObservabilityConfig, OtelConfig, OtelExporterConfig, TracesSampler,
 };
+// template:begin authn:config-export
+pub use authn::{AuthnConfig, AuthnMode};
+// template:end authn:config-export
+// template:begin oidc-jwt:config-token-profile-export
+pub use authn::TokenProfile;
+// template:end oidc-jwt:config-token-profile-export
 // template:begin postgres:config-export
 pub use postgres::PostgresConfig;
 // template:end postgres:config-export
@@ -53,6 +62,9 @@ pub struct Config {
     pub health: HealthConfig,
     pub log: LogConfig,
     pub observability: ObservabilityConfig,
+    // template:begin authn:config-field
+    pub authn: AuthnConfig,
+    // template:end authn:config-field
     // template:begin postgres:config-field
     pub postgres: PostgresConfig,
     // template:end postgres:config-field
@@ -71,6 +83,9 @@ impl Config {
         self.health.validate()?;
         self.log.validate()?;
         self.observability.validate()?;
+        // template:begin authn:config-validate
+        self.authn.validate()?;
+        // template:end authn:config-validate
         // template:begin postgres:config-validate
         self.postgres.validate()?;
         // template:end postgres:config-validate

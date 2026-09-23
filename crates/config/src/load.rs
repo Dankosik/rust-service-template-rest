@@ -159,6 +159,12 @@ mod tests {
 
     use super::*;
     use crate::LogFormat;
+    // template:begin oidc-jwt:load-token-profile-import
+    use crate::TokenProfile;
+    // template:end oidc-jwt:load-token-profile-import
+    // template:begin oidc-introspection:load-authn-mode-import
+    use crate::AuthnMode;
+    // template:end oidc-introspection:load-authn-mode-import
 
     const BUILD: BuildInfo = BuildInfo {
         version: "1.2.3",
@@ -226,6 +232,95 @@ mod tests {
         assert!(!cfg.observability.otel.exporter.has_headers());
         assert_eq!(cfg.observability.otel.exporter.otlp_endpoint, None);
     }
+
+    // template:begin oidc-introspection:load-introspection-environment
+    #[test]
+    fn introspection_environment_decodes_and_redacts_the_secret() {
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__AUTHN__MODE", "oidc-introspection"),
+                ("APP__AUTHN__ISSUER", "https://issuer.example/tenant"),
+                ("APP__AUTHN__AUDIENCE", "service"),
+                (
+                    "APP__AUTHN__INTROSPECTION_ENDPOINT",
+                    "https://issuer.example/introspect",
+                ),
+                ("APP__AUTHN__INTROSPECTION_CLIENT_ID", "service-client"),
+                ("APP__AUTHN__INTROSPECTION_CLIENT_SECRET", "loader-secret"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(cfg.authn.mode, AuthnMode::OidcIntrospection);
+        assert!(!format!("{cfg:?}").contains("loader-secret"));
+    }
+    // template:end oidc-introspection:load-introspection-environment
+
+    // template:begin oidc-jwt:load-jwt-token-profile-environment
+    #[test]
+    fn jwt_environment_preserves_a_supplied_token_profile() {
+        let jwt = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__AUTHN__MODE", "oidc-jwt"),
+                ("APP__AUTHN__ISSUER", "https://issuer.example/tenant"),
+                ("APP__AUTHN__AUDIENCE", "service"),
+                ("APP__AUTHN__TOKEN_PROFILE", "rfc9068"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(jwt.authn.token_profile, Some(TokenProfile::Rfc9068));
+    }
+    // template:end oidc-jwt:load-jwt-token-profile-environment
+
+    // template:begin oidc-introspection:load-introspection-secret-file
+    #[test]
+    fn introspection_secret_in_a_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let leaked = write(
+            &dir,
+            "leaked.toml",
+            "[authn]\nintrospection_client_secret = \"file-secret\"\n",
+        );
+        let err = load_from(
+            &LoadOptions {
+                config: Some(leaked),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::SecretInFile { key, .. } if key == "authn.introspection_client_secret"),
+            "{err}"
+        );
+    }
+    // template:end oidc-introspection:load-introspection-secret-file
+
+    // template:begin oidc-jwt:load-jwt-token-profile-file
+    #[test]
+    fn jwt_token_profile_in_a_file_is_public() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = write(
+            &dir,
+            "profile.toml",
+            "[authn]\ntoken_profile = \"rfc9068\"\n",
+        );
+        let cfg = load_from(
+            &LoadOptions {
+                config: Some(profile),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        )
+        .unwrap();
+        assert_eq!(cfg.authn.token_profile, Some(TokenProfile::Rfc9068));
+    }
+    // template:end oidc-jwt:load-jwt-token-profile-file
 
     #[test]
     fn precedence_is_defaults_then_files_in_order_then_env() {

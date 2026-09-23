@@ -58,6 +58,15 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   are refused at startup, and the diagnostic never carries the value
   ([Persistence](architecture/persistence.md#connection-admission)).
 <!-- template:end postgres:docs-config-postgres-source -->
+<!-- template:begin authn:docs-config-authn-source -->
+- `authn.mode` defaults to `none`. A retained initialized profile admits only `none` plus its selected engine; an active engine needs exact, nonblank `authn.issuer` and `authn.audience`. Issuer, audience, and identity values are not trimmed or case-folded. Disabled mode has no provider I/O, but any supplied nonblank trust values must still be syntactically valid.
+<!-- template:end authn:docs-config-authn-source -->
+<!-- template:begin oidc-jwt:docs-config-jwt-source -->
+- JWT mode accepts only `authn.token_profile = "resource-server"` or `"rfc9068"`; `resource-server` is the omitted-value default. This public enum is an exact exception to the token-key secret heuristic. JWT provider configuration does not accept introspection fields.
+<!-- template:end oidc-jwt:docs-config-jwt-source -->
+<!-- template:begin oidc-introspection:docs-config-introspection-source -->
+- Introspection mode requires `authn.introspection_endpoint`, `authn.introspection_client_id`, and a nonempty `APP__AUTHN__INTROSPECTION_CLIENT_SECRET`. Its client secret is `SecretString`, environment-only, and must never appear in TOML; the mode rejects JWT-only inputs.
+<!-- template:end oidc-introspection:docs-config-introspection-source -->
 
 ## OpenTelemetry Environment Policy
 
@@ -172,6 +181,9 @@ every record inside a request) or `text` (local development).
   draws `health.probe_budget`, and the pool closes inside the `5s`
   dependency-close stage.
 <!-- template:end postgres:docs-config-postgres-budget -->
+<!-- template:begin authn:docs-config-authn-budgets -->
+- Authentication provider calls have a fixed three-second cap. Request-driven work receives at most the lesser of that cap and the remaining request budget less 100ms; exhausted request budget remains the existing `504` path. Introspection admits at most 32 simultaneous exchanges and rejects excess work as unavailable without queueing.
+<!-- template:end authn:docs-config-authn-budgets -->
 
 ## Adding A Config Key
 

@@ -20,6 +20,7 @@ from typing import Any, Sequence
 
 from template_state import (
     ADAPTERS,
+    AUTHN_CHOICES,
     DATABASE_CHOICES,
     HARNESS_CHOICES,
     LOCK_NAME,
@@ -35,6 +36,7 @@ from template_state import (
     git,
     git_head,
     git_root,
+    lock_has_explicit_authn,
     load_lock,
     parse_manifest,
     parse_json_bytes,
@@ -49,12 +51,18 @@ from template_state import (
 )
 
 
+_PROFILE_FILE = "scripts/lib/template_profiles.json"
+_MARKER_PREFIX_RE = re.compile(
+    r"^[ \t]*(?:(?:#|//)[ \t]*template:(?:begin|end)(?:[ \t]|$)|<!--[ \t]*template:(?:begin|end)(?:[ \t]|$))"
+)
+
+# The inventory, not this parser, declares the supported marker kinds. This
+# recognizes only complete host-comment marker lines so ordinary prose is inert.
 _MARKER_RE = re.compile(
     r"^(?P<indent>[ \t]*)(?:(?P<hash>#)|(?P<slash>//)|(?P<html><!--))"
-    r"[ \t]*template:(?P<kind>begin|end)[ \t]+postgres:(?P<id>[a-z0-9]+(?:-[a-z0-9]+)*)"
+    r"[ \t]*template:(?P<kind>begin|end)[ \t]+(?P<profile>[a-z0-9]+(?:-[a-z0-9]+)*):(?P<id>[a-z0-9]+(?:-[a-z0-9]+)*)"
     r"(?:(?(html)[ \t]*-->|))[ \t]*$"
 )
-_PROFILE_FILE = "scripts/lib/template_profiles.json"
 
 
 @dataclass(frozen=True)
@@ -64,6 +72,7 @@ class InitInputs:
     description: str
     codeowner: str
     database: str
+    authn: str
     agent_harness: str
 
     def identity(self) -> dict[str, str]:
@@ -75,14 +84,14 @@ class InitInputs:
         }
 
     def profiles(self) -> dict[str, str]:
-        return {"database": self.database, "agent_harness": self.agent_harness}
+        return {"database": self.database, "authn": self.authn, "agent_harness": self.agent_harness}
 
 
 @dataclass(frozen=True)
 class ProfileData:
     source_only: tuple[str, ...]
-    remove_when_none: tuple[str, ...]
-    markers: tuple[tuple[str, str], ...]
+    removals: dict[str, tuple[str, ...]]
+    markers: tuple[tuple[str, str, str], ...]
     identity: tuple[dict[str, Any], ...]
     cargo_lock: dict[str, Any]
 
@@ -108,30 +117,63 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         description=validate_description(_argument_value(arguments, "description")),
         codeowner=validate_codeowner(_argument_value(arguments, "codeowner")),
         database=_argument_value(arguments, "database", default="none"),
+        authn=_argument_value(arguments, "authn", default="none"),
         agent_harness=_argument_value(arguments, "agent_harness", default="all"),
     )
     if inputs.database not in DATABASE_CHOICES:
         raise Refusal("DATABASE is unsupported")
+    if inputs.authn not in AUTHN_CHOICES:
+        raise Refusal("AUTHN is unsupported")
     if inputs.agent_harness not in HARNESS_CHOICES:
         raise Refusal("AGENT_HARNESS is unsupported")
     return inputs
 
 
-def _profile_data(snapshot: Path) -> ProfileData:
+_LEGACY_PROFILE_INVENTORY_KEYS = frozenset(
+    {"schema_version", "source_only", "postgres", "identity", "cargo_lock"}
+)
+_CURRENT_PROFILE_INVENTORY_KEYS = frozenset(
+    {
+        "schema_version",
+        "source_only",
+        "postgres",
+        "authn",
+        "oidc-jwt",
+        "oidc-introspection",
+        "identity",
+        "cargo_lock",
+    }
+)
+
+
+def _profile_data(snapshot: Path, *, historical_none: bool = False) -> ProfileData:
     profile_path = snapshot / _PROFILE_FILE
     try:
         raw = parse_json_bytes(profile_path.read_bytes(), _PROFILE_FILE)
     except FileNotFoundError:
         raise Refusal("template profile inventory is missing") from None
-    expected = {"schema_version", "source_only", "postgres", "identity", "cargo_lock"}
-    if not isinstance(raw, dict) or set(raw) != expected or raw.get("schema_version") != 1:
+    if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+        raise Refusal("template profile inventory has an unsupported schema")
+    keys = frozenset(raw)
+    if keys == _CURRENT_PROFILE_INVENTORY_KEYS:
+        include_authn = True
+    elif historical_none and keys == _LEGACY_PROFILE_INVENTORY_KEYS:
+        include_authn = False
+    else:
         raise Refusal("template profile inventory has an unsupported schema")
     source_only = _path_list(raw["source_only"], "source_only")
     postgres = raw["postgres"]
     if not isinstance(postgres, dict) or set(postgres) != {"remove_when_none", "markers"}:
         raise Refusal("template PostgreSQL inventory has an unsupported shape")
-    removals = _path_list(postgres["remove_when_none"], "remove_when_none")
-    markers = _markers(postgres["markers"])
+    removals = {"postgres": tuple(_path_list(postgres["remove_when_none"], "remove_when_none"))}
+    markers = _markers("postgres", postgres["markers"])
+    if include_authn:
+        for profile in ("authn", "oidc-jwt", "oidc-introspection"):
+            section = raw[profile]
+            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+                raise Refusal(f"template {profile} inventory has an unsupported shape")
+            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
+            markers.extend(_markers(profile, section["markers"]))
     identity = raw["identity"]
     if not isinstance(identity, list):
         raise Refusal("template identity inventory has an unsupported shape")
@@ -139,7 +181,9 @@ def _profile_data(snapshot: Path) -> ProfileData:
     cargo_lock = raw["cargo_lock"]
     if cargo_lock != {"schema_version": 1}:
         raise Refusal("template Cargo.lock inventory has an unsupported shape")
-    return ProfileData(tuple(source_only), tuple(removals), tuple(markers), tuple(identity), cargo_lock)
+    if len(markers) != len(set(markers)):
+        raise Refusal("template marker inventory has duplicate profile entries")
+    return ProfileData(tuple(source_only), removals, tuple(markers), tuple(identity), cargo_lock)
 
 
 def _path_list(value: object, label: str) -> list[str]:
@@ -151,20 +195,23 @@ def _path_list(value: object, label: str) -> list[str]:
     return paths
 
 
-def _markers(value: object) -> list[tuple[str, str]]:
+def _markers(profile: str, value: object) -> list[tuple[str, str, str]]:
     if not isinstance(value, list):
         raise Refusal("template marker inventory is invalid")
-    markers: list[tuple[str, str]] = []
+    markers: list[tuple[str, str, str]] = []
     for item in value:
-        if not isinstance(item, dict) or set(item) != {"path", "id"}:
+        if not isinstance(item, dict) or set(item) not in ({"path", "id"}, {"path", "ids"}):
             raise Refusal("template marker inventory has an unsupported entry")
         path = safe_relative(item["path"])
-        marker_id = item["id"]
-        if not isinstance(marker_id, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", marker_id):
-            raise Refusal("template marker inventory has an invalid id")
-        markers.append((path, marker_id))
-    if len(markers) != len(set(markers)) or len({marker_id for _, marker_id in markers}) != len(markers):
-        raise Refusal("template marker inventory has duplicate paths or ids")
+        marker_ids = [item["id"]] if "id" in item else item["ids"]
+        if not isinstance(marker_ids, list) or not marker_ids:
+            raise Refusal("template marker inventory has an invalid ids list")
+        for marker_id in marker_ids:
+            if not isinstance(marker_id, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", marker_id):
+                raise Refusal("template marker inventory has an invalid id")
+            markers.append((profile, path, marker_id))
+    if len(markers) != len(set(markers)):
+        raise Refusal("template marker inventory has duplicate entries")
     return markers
 
 
@@ -261,39 +308,54 @@ def _replace_service_manifest_names(path: Path, contents: str, service_name: str
     path.write_text("".join(output), encoding="utf-8")
 
 
-def _marker(line: str) -> tuple[str, str] | None:
+def _marker(line: str) -> tuple[str, str, str] | None:
     matched = _MARKER_RE.fullmatch(line)
     if matched is None:
         return None
-    return (matched.group("kind"), matched.group("id"))
+    return (matched.group("kind"), matched.group("profile"), matched.group("id"))
 
 
-def _apply_markers(snapshot: Path, profiles: ProfileData, database: str) -> None:
-    expected = set(profiles.markers)
-    seen: set[tuple[str, str]] = set()
-    for relative in sorted({path for path, _marker_id in profiles.markers}):
-        path = snapshot / relative
-        if not path.exists() or path.is_symlink() or not path.is_file():
-            raise Refusal(f"registered profile marker surface is missing: {relative}")
-        if not path.is_file() or path.is_symlink():
+def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
+    selected = {"postgres"} if inputs.database == "postgres" else set()
+    if inputs.authn != "none":
+        selected.update(("authn", inputs.authn))
+    return selected
+
+
+def _marker_files(root: Path) -> tuple[tuple[str, Path], ...]:
+    files: list[tuple[str, Path]] = []
+    for path in root.rglob("*"):
+        relative = path.relative_to(root)
+        if ".git" in relative.parts or path.is_symlink() or not path.is_file():
             continue
+        files.append((relative.as_posix(), path))
+    return tuple(sorted(files))
+
+
+def _apply_markers(snapshot: Path, profiles: ProfileData, inputs: InitInputs) -> None:
+    expected = set(profiles.markers)
+    selected = _selected_marker_profiles(inputs)
+    seen: set[tuple[str, str, str]] = set()
+    for relative, path in _marker_files(snapshot):
         try:
             lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         except UnicodeDecodeError:
             continue
-        stack: list[str] = []
+        stack: list[tuple[str, str]] = []
         transformed: list[str] = []
         found = False
         for line in lines:
             parsed = _marker(line.rstrip("\r\n"))
             if parsed is None:
-                if stack and database == "none":
+                if _MARKER_PREFIX_RE.match(line):
+                    raise Refusal(f"malformed profile marker in {relative}")
+                if stack and stack[-1][0] not in selected:
                     continue
                 transformed.append(line)
                 continue
             found = True
-            kind, marker_id = parsed
-            key = (relative, marker_id)
+            kind, profile, marker_id = parsed
+            key = (profile, relative, marker_id)
             if key not in expected:
                 raise Refusal(f"unknown profile marker in {relative}")
             if kind == "begin":
@@ -301,10 +363,10 @@ def _apply_markers(snapshot: Path, profiles: ProfileData, database: str) -> None
                     raise Refusal(f"nested profile marker in {relative}")
                 if key in seen:
                     raise Refusal(f"duplicate profile marker in {relative}")
-                stack.append(marker_id)
+                stack.append((profile, marker_id))
                 seen.add(key)
             else:
-                if stack != [marker_id]:
+                if stack != [(profile, marker_id)]:
                     raise Refusal(f"mismatched profile marker in {relative}")
                 stack.pop()
         if stack:
@@ -316,7 +378,13 @@ def _apply_markers(snapshot: Path, profiles: ProfileData, database: str) -> None
 
 
 def _remove_paths(snapshot: Path, paths: Sequence[str]) -> None:
-    for relative in paths:
+    independent: list[str] = []
+    for relative in sorted(set(paths), key=lambda item: (len(Path(item.rstrip("/")).parts), item)):
+        plain = relative.rstrip("/")
+        if any(plain.startswith(f"{ancestor.rstrip('/')}/") for ancestor in independent):
+            continue
+        independent.append(relative)
+    for relative in independent:
         path = snapshot / relative.rstrip("/")
         if not path.exists() and not path.is_symlink():
             raise Refusal(f"planned source removal is missing: {relative}")
@@ -406,7 +474,7 @@ def _postconditions(root: Path, inputs: InitInputs, profiles: ProfileData, *, in
         for relative in profiles.source_only:
             if (root / relative.rstrip("/")).exists():
                 raise Refusal(f"source-only output remains: {relative}")
-    _validate_database_pack(root, profiles, inputs.database)
+    _validate_profile_packs(root, profiles, _selected_marker_profiles(inputs))
     selected = set(selected_adapters(inputs.agent_harness))
     for adapter, pack in ADAPTERS.items():
         paths = (*pack.canonical, *pack.generated, *pack.settings)
@@ -420,36 +488,37 @@ def _postconditions(root: Path, inputs: InitInputs, profiles: ProfileData, *, in
         initializing=initial,
     )
     _validate_generated_ownership(root, inputs.agent_harness)
-    for relative in {path for path, _marker_id in profiles.markers}:
+    for relative in sorted({path for _profile, path, _marker_id in profiles.markers}):
         path = root / relative
         if not path.exists() or path.is_symlink() or not path.is_file():
             continue
         try:
             for line in path.read_text(encoding="utf-8").splitlines():
-                if _marker(line) is not None:
+                if _marker(line) is not None or _MARKER_PREFIX_RE.match(line):
                     raise Refusal("initialized output retains an executable profile marker")
         except UnicodeDecodeError as error:
                 raise Refusal(f"profile marker surface is not UTF-8: {relative}") from error
 
 
-def _validate_database_pack(root: Path, profiles: ProfileData, database: str) -> None:
-    """Replay proves selected pack shape without reading ordinary service bytes."""
+def _validate_profile_packs(root: Path, profiles: ProfileData, selected: set[str]) -> None:
+    """Replay proves retained physical profile packs without reading their bytes."""
 
-    for relative in profiles.remove_when_none:
-        candidate = root / relative.rstrip("/")
-        exists = candidate.exists() or candidate.is_symlink()
-        if database == "none":
-            if exists:
-                raise Refusal(f"unselected PostgreSQL output remains: {relative}")
-            continue
-        if not exists or candidate.is_symlink():
-            raise Refusal(f"selected PostgreSQL output is missing: {relative}")
-        mode = candidate.lstat().st_mode
-        if relative.endswith("/"):
-            if not stat.S_ISDIR(mode):
-                raise Refusal(f"selected PostgreSQL directory has an invalid type: {relative}")
-        elif not stat.S_ISREG(mode):
-            raise Refusal(f"selected PostgreSQL file has an invalid type: {relative}")
+    for profile, paths in profiles.removals.items():
+        for relative in paths:
+            candidate = root / relative.rstrip("/")
+            exists = candidate.exists() or candidate.is_symlink()
+            if profile not in selected:
+                if exists:
+                    raise Refusal(f"unselected {profile} output remains: {relative}")
+                continue
+            if not exists or candidate.is_symlink():
+                raise Refusal(f"selected {profile} output is missing: {relative}")
+            mode = candidate.lstat().st_mode
+            if relative.endswith("/"):
+                if not stat.S_ISDIR(mode):
+                    raise Refusal(f"selected {profile} directory has an invalid type: {relative}")
+            elif not stat.S_ISREG(mode):
+                raise Refusal(f"selected {profile} file has an invalid type: {relative}")
 
 
 def _validate_generated_ownership(root: Path, harness: str) -> None:
@@ -491,7 +560,7 @@ def _replay(root: Path, inputs: InitInputs) -> int:
         raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
     if lock["identity"] != inputs.identity() or lock["profiles"] != inputs.profiles():
         raise Refusal("template initialization choices differ from the complete template.lock")
-    profiles = _profile_data(root)
+    profiles = _profile_data(root, historical_none=not lock_has_explicit_authn(root, required=True))
     _postconditions(root, inputs, profiles)
     print("template init: matching complete lock; no changes")
     return 0
@@ -515,18 +584,35 @@ def _run_staged_command(snapshot: Path, command: Sequence[str], operation: str) 
 
 
 def _preflight_staged(snapshot: Path, inputs: InitInputs, profiles: ProfileData) -> None:
+    _project_staged(snapshot, inputs, profiles)
+    _validate_staged_runtime(snapshot, inputs)
+
+
+def _project_staged(snapshot: Path, inputs: InitInputs, profiles: ProfileData) -> None:
+    """Apply the canonical profile projection without invoking Cargo or rustfmt."""
+
     _check_harness_projection(snapshot, "all")
-    _apply_markers(snapshot, profiles, inputs.database)
+    _apply_markers(snapshot, profiles, inputs)
     _apply_identity(snapshot, profiles, inputs)
     _remove_paths(snapshot, profiles.source_only)
-    if inputs.database == "none":
-        _remove_paths(snapshot, profiles.remove_when_none)
+    unselected_removals = [
+        relative
+        for profile, removals in profiles.removals.items()
+        if profile not in _selected_marker_profiles(inputs)
+        for relative in removals
+    ]
+    _remove_paths(snapshot, unselected_removals)
     _remove_unselected_adapters(snapshot, inputs.agent_harness)
     _generate_harness_projection(snapshot, inputs.agent_harness)
     _check_harness_projection(snapshot, inputs.agent_harness)
     # Cargo.lock has its own strict source-shape projection.  The accepted map
     # is intentionally required rather than asking Cargo to resolve/update it.
     _project_cargo_lock(snapshot, profiles.cargo_lock, inputs)
+
+
+def _validate_staged_runtime(snapshot: Path, inputs: InitInputs) -> None:
+    """Validate the projected runtime tree with the existing locked commands."""
+
     metadata_bytes = _run_staged_command(
         snapshot,
         ["cargo", "metadata", "--locked", "--offline", "--format-version", "1"],
@@ -695,6 +781,114 @@ def _dependency_key(dependency: str, records: list[_LockRecord]) -> tuple[str, s
     return candidates[0]
 
 
+def _declared_dependencies(manifest: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+
+    def collect(section: object) -> None:
+        if not isinstance(section, dict):
+            raise Refusal("Cargo manifest dependency section is invalid")
+        for alias, definition in section.items():
+            if not isinstance(alias, str):
+                raise Refusal("Cargo manifest dependency name is invalid")
+            if isinstance(definition, str):
+                names.add(alias)
+                continue
+            if not isinstance(definition, dict):
+                raise Refusal("Cargo manifest dependency declaration is invalid")
+            package = definition.get("package", alias)
+            if not isinstance(package, str):
+                raise Refusal("Cargo manifest dependency package is invalid")
+            names.add(package)
+
+    for section_name in ("dependencies", "dev-dependencies", "build-dependencies"):
+        if section_name in manifest:
+            collect(manifest[section_name])
+    target = manifest.get("target", {})
+    if not isinstance(target, dict):
+        raise Refusal("Cargo manifest target dependency section is invalid")
+    for conditions in target.values():
+        if not isinstance(conditions, dict):
+            raise Refusal("Cargo manifest target dependency condition is invalid")
+        for section_name in ("dependencies", "dev-dependencies", "build-dependencies"):
+            if section_name in conditions:
+                collect(conditions[section_name])
+    return names
+
+
+def _local_direct_dependencies(snapshot: Path, inputs: InitInputs) -> dict[str, set[str]]:
+    manifests = [*sorted(snapshot.glob("crates/*/Cargo.toml")), snapshot / "test/Cargo.toml"]
+    result: dict[str, set[str]] = {}
+    for path in manifests:
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            manifest = tomllib.loads(path.read_text(encoding="utf-8"))
+            package_name = manifest["package"]["name"]
+        except (KeyError, TypeError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+            raise Refusal("local Cargo package manifest is invalid") from error
+        if not isinstance(package_name, str):
+            raise Refusal("local Cargo package name is invalid")
+        # Cargo.lock still contains the source package spelling until this
+        # function has projected its direct edges and renamed the service record.
+        lock_name = "service" if path.parent == snapshot / "crates/service" else package_name
+        if lock_name in result:
+            raise Refusal("local Cargo package name is ambiguous")
+        result[lock_name] = _declared_dependencies(manifest)
+    if not result:
+        raise Refusal("no local Cargo package manifests remain")
+    return result
+
+
+def _project_local_direct_edges(
+    records: list[_LockRecord], snapshot: Path, inputs: InitInputs
+) -> set[str]:
+    """Project every retained package's normal, dev, and build direct edges."""
+
+    direct = _local_direct_dependencies(snapshot, inputs)
+    for local_name, expected_names in direct.items():
+        record = _lock_record(records, local_name, "0.1.0")
+        current = list(record.data.get("dependencies", []))
+        resolved_names = {
+            _lock_record(records, *_dependency_key(dependency, records)).data["name"]
+            for dependency in current
+        }
+        if not expected_names.issubset(resolved_names):
+            raise Refusal("Cargo.lock omits a transformed local direct dependency")
+        retained = [
+            dependency
+            for dependency in current
+            if _lock_record(records, *_dependency_key(dependency, records)).data["name"] in expected_names
+        ]
+        _replace_lock_dependencies(record, current, retained)
+    return set(direct)
+
+
+def _project_feature_edge(
+    records: list[_LockRecord], name: str, version: str, expected: list[str], retained: list[str]
+) -> None:
+    registry = "registry+https://github.com/rust-lang/crates.io-index"
+    _replace_lock_dependencies(_lock_record(records, name, version, registry), expected, retained)
+
+
+def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInputs) -> None:
+    """Remove only source-anchored feature edges made unreachable by a profile."""
+
+    if inputs.database == "none":
+        for name, version, expected, retained in (
+            ("bitflags", "2.13.2", ["serde_core"], []),
+            ("either", "1.18.0", ["serde"], []),
+            ("hashbrown", "0.16.1", ["allocator-api2", "equivalent", "foldhash"], ["foldhash"]),
+            ("smallvec", "1.16.1", ["serde"], []),
+        ):
+            _project_feature_edge(records, name, version, expected, retained)
+    if inputs.authn != "oidc-jwt":
+        _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
+        _project_feature_edge(records, "zeroize", "1.9.0", ["zeroize_derive"], [])
+    if inputs.authn == "none":
+        _project_feature_edge(records, "ipnet", "2.12.2", ["serde"], [])
+        _project_feature_edge(records, "once_cell", "1.21.4", ["critical-section", "portable-atomic"], [])
+
+
 def _project_cargo_lock(snapshot: Path, inventory: dict[str, Any], inputs: InitInputs) -> None:
     """Project the current lock with guarded local edges, then exact reachability."""
 
@@ -702,51 +896,11 @@ def _project_cargo_lock(snapshot: Path, inventory: dict[str, Any], inputs: InitI
         raise Refusal("template Cargo.lock projection inventory is unsupported")
     lock = snapshot / "Cargo.lock"
     header, records = _lock_records(lock.read_text(encoding="utf-8"))
-    registry = "registry+https://github.com/rust-lang/crates.io-index"
-    local_names = {
-        "service",
-        "service-config",
-        "health",
-        "infra-http",
-        "infra-postgres",
-        "infra-telemetry",
-        "migrate",
-        "integration-tests",
-    }
-    for name in local_names:
-        _lock_record(records, name, "0.1.0")
+    local_names = _project_local_direct_edges(records, snapshot, inputs)
     service = _lock_record(records, "service", "0.1.0")
-    if inputs.database == "none":
-        service_dependencies = list(service.data.get("dependencies", []))
-        if not {"infra-postgres", "secrecy"}.issubset(service_dependencies):
-            raise Refusal("Cargo.lock service PostgreSQL edges are missing")
-        _replace_lock_dependencies(
-            service,
-            service_dependencies,
-            [item for item in service_dependencies if item not in {"infra-postgres", "secrecy"}],
-        )
-        if "infra-postgres" in service.data["dependencies"] or "secrecy" in service.data["dependencies"]:
-            raise Refusal("Cargo.lock PostgreSQL service edges were not removed")
-        integration = _lock_record(records, "integration-tests", "0.1.0")
-        integration_dependencies = list(integration.data.get("dependencies", []))
-        if not {"infra-postgres", "migrate"}.issubset(integration_dependencies):
-            raise Refusal("Cargo.lock integration PostgreSQL edges are missing")
-        _replace_lock_dependencies(
-            integration,
-            integration_dependencies,
-            [item for item in integration_dependencies if item not in {"health", "infra-postgres", "migrate", "sqlx"}],
-        )
-        for name, version, expected, replacement in (
-            ("bitflags", "2.13.2", ["serde_core"], []),
-            ("either", "1.18.0", ["serde"], []),
-            ("hashbrown", "0.16.1", ["allocator-api2", "equivalent", "foldhash"], ["foldhash"]),
-            ("smallvec", "1.16.1", ["serde"], []),
-        ):
-            record = _lock_record(records, name, version, registry)
-            _replace_lock_dependencies(record, expected, replacement)
+    _project_optional_feature_edges(records, inputs)
     _replace_lock_name(service, inputs.service_name)
-    retained_locals = local_names - ({"infra-postgres", "migrate"} if inputs.database == "none" else set())
-    retained_locals.remove("service")
+    retained_locals = local_names - {"service"}
     roots = {(inputs.service_name, "0.1.0", ""), *{(name, "0.1.0", "") for name in retained_locals}}
     by_key = {record.key: record for record in records}
     reachable: set[tuple[str, str, str]] = set()
@@ -846,8 +1000,9 @@ def initialize(arguments: argparse.Namespace) -> int:
         _preflight_staged(staged, inputs, profiles)
         _postconditions(staged, inputs, profiles, initial=True)
         owned_removals = list(profiles.source_only)
-        if inputs.database == "none":
-            owned_removals.extend(profiles.remove_when_none)
+        for profile, removals in profiles.removals.items():
+            if profile not in _selected_marker_profiles(inputs):
+                owned_removals.extend(removals)
         for adapter, pack in ADAPTERS.items():
             if adapter not in selected_adapters(inputs.agent_harness):
                 owned_removals.extend((*pack.canonical, *pack.generated, *pack.settings))
@@ -885,6 +1040,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--description", action=SingleValue)
     parser.add_argument("--codeowner", action=SingleValue)
     parser.add_argument("--database", action=SingleValue)
+    parser.add_argument("--authn", action=SingleValue)
     parser.add_argument("--agent-harness", action=SingleValue)
     return parser
 

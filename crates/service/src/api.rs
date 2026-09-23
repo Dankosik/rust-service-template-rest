@@ -14,6 +14,11 @@
 use std::error::Error;
 
 use health::ReadinessReader;
+// template:begin authn:service-api-authn-imports
+use infra_bearerauthn::Verifier;
+use utoipa::Modify;
+use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+// template:end authn:service-api-authn-imports
 use utoipa::OpenApi;
 use utoipa::openapi::OpenApi as Document;
 use utoipa_axum::router::OpenApiRouter;
@@ -31,9 +36,29 @@ const GENERATED_HEADER: &str =
         description = "HTTP contract served by the `service` binary: platform probes and feature operations, with RFC 9457 problem responses from one closed catalog."
     ),
     servers((url = "/", description = "current service origin")),
-    tags((name = "system", description = "Operational endpoints for liveness and readiness."))
+    tags((name = "system", description = "Operational endpoints for liveness and readiness.")),
+    // template:begin authn:service-api-authn-document-security
+    modifiers(&BearerAuth),
+    security(("bearerAuth" = []))
+    // template:end authn:service-api-authn-document-security
 )]
 struct ApiDoc;
+
+// template:begin authn:service-api-authn-security-scheme
+struct BearerAuth;
+
+impl Modify for BearerAuth {
+    fn modify(&self, document: &mut Document) {
+        document
+            .components
+            .get_or_insert_with(utoipa::openapi::Components::new)
+            .add_security_scheme(
+                "bearerAuth",
+                SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()),
+            );
+    }
+}
+// template:end authn:service-api-authn-security-scheme
 
 /// Every operation the service serves, with its contract, as one
 /// [`OpenApiRouter`] whose [`ReadinessReader`] state is still unapplied.
@@ -41,6 +66,28 @@ struct ApiDoc;
 /// [`document`] takes the other half.
 #[must_use]
 pub fn contract() -> OpenApiRouter<ReadinessReader> {
+    assemble()
+}
+
+// template:begin authn:service-api-contract-with-auth
+/// The served contract assembled with the verifier bootstrap prepared.
+///
+/// Current platform operations are intentionally public. Future protected
+/// operations enter this assembly only through `infra_http::protect`; carrying
+/// the verifier here keeps the runtime and document assembly on one seam.
+///
+/// # Errors
+///
+/// Returns a sanitized protection-composition error when a protected route
+/// supplied by this assembly declares a contract that does not match it.
+pub fn contract_with_auth(
+    _verifier: Verifier,
+) -> Result<OpenApiRouter<ReadinessReader>, infra_http::ProtectError> {
+    Ok(assemble())
+}
+// template:end authn:service-api-contract-with-auth
+
+fn assemble() -> OpenApiRouter<ReadinessReader> {
     OpenApiRouter::with_openapi(ApiDoc::openapi()).merge(infra_http::router())
 }
 
@@ -61,3 +108,82 @@ pub fn render() -> Result<String, Box<dyn Error + Send + Sync>> {
     let yaml = document().to_yaml()?;
     Ok(format!("{GENERATED_HEADER}\n{}\n", yaml.trim_end()))
 }
+
+// template:begin authn:service-api-protected-test-route
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use axum::http::header::AUTHORIZATION;
+    use axum::response::IntoResponse;
+    use utoipa_axum::routes;
+
+    use super::*;
+
+    #[utoipa::path(
+        get,
+        path = "/_test/protected",
+        tag = "system",
+        operation_id = "testProtected",
+        summary = "Test-only protected composition seam",
+        security(("bearerAuth" = [])),
+        extensions(("x-security-decision" = json!({
+            "exposure": "protected",
+            "rationale": "test-only route proving the production bearer composition seam"
+        }))),
+        responses(
+            (status = 200, description = "verified", content_type = "text/plain", body = String),
+            infra_http::problem::responses::ProtectedOperationProblemResponses,
+        )
+    )]
+    async fn protected(
+        principal: infra_http::VerifiedPrincipal,
+        headers: axum::http::HeaderMap,
+    ) -> impl IntoResponse {
+        let authorization_was_removed = !headers.contains_key(AUTHORIZATION);
+        let identity_was_verified = !principal.issuer().is_empty()
+            && (principal.subject().is_some() || principal.client_id().is_some());
+        if authorization_was_removed && identity_was_verified {
+            (StatusCode::OK, "verified").into_response()
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+
+    fn protected_test_contract(
+        verifier: Verifier,
+    ) -> Result<OpenApiRouter<ReadinessReader>, infra_http::ProtectError> {
+        Ok(assemble().routes(infra_http::protect(routes!(protected), verifier)?))
+    }
+
+    #[test]
+    fn test_only_protected_route_uses_the_production_contract_validator() {
+        let document = protected_test_contract(Verifier::disabled())
+            .expect("test route has the required protected metadata")
+            .into_openapi();
+        let operation = document.paths.paths["/_test/protected"]
+            .get
+            .as_ref()
+            .expect("GET operation");
+        assert_eq!(
+            serde_json::to_value(operation.security.as_ref()).expect("security serializes"),
+            serde_json::json!([{"bearerAuth": []}])
+        );
+    }
+
+    #[test]
+    fn public_probe_contract_does_not_depend_on_a_verifier() {
+        let document = contract_with_auth(Verifier::disabled())
+            .expect("public-only assembly does not protect a route")
+            .into_openapi();
+        assert!(
+            document.paths.paths["/health/live"]
+                .get
+                .as_ref()
+                .expect("liveness GET operation")
+                .security
+                .as_ref()
+                .is_some_and(Vec::is_empty)
+        );
+    }
+}
+// template:end authn:service-api-protected-test-route

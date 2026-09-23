@@ -184,9 +184,14 @@ self_test() (
 	: >make/source.mk
 	output=$(bash "${script}" --plan --files scripts/init-module.sh)
 	grep -q '^  make template-init-check$' <<<"${output}"
-	grep -q 'requires_heavy=true' <<<"${output}"
-	if CI='' ALLOW_FULL='' ALLOW_HEAVY=1 bash "${script}" --files scripts/init-module.sh >/dev/null 2>"${TMPDIR:-/tmp}/verify-full-required.$$"; then
-		echo "verify self-test accepted the initializer matrix without ALLOW_FULL=1" >&2
+	if grep -q 'requires_heavy=true' <<<"${output}"; then return 1; fi
+	output=$(bash "${script}" --plan --files scripts/tests/template-profile-projections.py)
+	grep -q '^  make template-init-check$' <<<"${output}"
+	grep -q 'cost_class=cpu requires_heavy=false requires_docker=false' <<<"${output}"
+	output=$(bash "${script}" --plan --files crates/infra-bearerauthn/src/claims.rs)
+	grep -q '^  make template-init-check$' <<<"${output}"
+	if CI='' ALLOW_FULL='' ALLOW_HEAVY='' bash "${script}" --files scripts/init-module.sh >/dev/null 2>"${TMPDIR:-/tmp}/verify-full-required.$$"; then
+		echo "verify self-test accepted complete initializer validation without ALLOW_FULL=1" >&2
 		return 1
 	fi
 	grep -q 'set ALLOW_FULL=1' "${TMPDIR:-/tmp}/verify-full-required.$$"
@@ -548,7 +553,7 @@ if is_true validation_system; then
 	add_command make verify-check "validation routing changed" "make verify-check" cpu false false
 fi
 if is_true module_initializer; then
-	add_command make template-init-check "initializer, profile, ownership, or source-only proof changed" "make template-init-check" docker true true
+	add_command make template-init-check "canonical projections and six runtime representatives" "make template-init-check" cpu false false
 fi
 
 workspace_rust=false

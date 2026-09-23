@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -44,6 +45,31 @@ def check(root: Path) -> None:
     state = load_state(root)
     entries = state.parse_manifest(root)
     owned = set(entries)
+    profile = json.loads((root / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
+    expected_profiles = {
+        "postgres": "remove_when_none",
+        "authn": "remove_when_unselected",
+        "oidc-jwt": "remove_when_unselected",
+        "oidc-introspection": "remove_when_unselected",
+    }
+    for name, removal_key in expected_profiles.items():
+        section = profile.get(name)
+        if not isinstance(section, dict) or set(section) != {removal_key, "markers"}:
+            raise AssertionError(f"profile inventory has no exact {name} section")
+        removals = section[removal_key]
+        markers = section["markers"]
+        if not isinstance(removals, list) or not removals or not isinstance(markers, list) or not markers:
+            raise AssertionError(f"profile inventory has an incomplete {name} projection")
+        for relative in removals:
+            plain = relative.rstrip("/")
+            if any(plain == entry.rstrip("/") or plain.startswith(f"{entry.rstrip('/')}/") for entry in entries):
+                raise AssertionError(f"manifest leaks profile-specific {name} output: {relative}")
+        for marker in markers:
+            if not isinstance(marker, dict) or set(marker) not in ({"path", "id"}, {"path", "ids"}):
+                raise AssertionError(f"profile inventory has malformed {name} marker")
+            marker_ids = [marker["id"]] if "id" in marker else marker["ids"]
+            if not isinstance(marker_ids, list) or not marker_ids or len(marker_ids) != len(set(marker_ids)):
+                raise AssertionError(f"profile inventory has duplicate {name} marker ids")
     for broad_owner in ("make/", "docs/", "scripts/", "crates/", "scripts/tests/template-sync-canary.py"):
         if not state._protected_manifest_owner(broad_owner):
             raise AssertionError(f"broad protected owner was admitted: {broad_owner}")

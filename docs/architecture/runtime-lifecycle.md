@@ -34,6 +34,15 @@ it against the built binary.
    both binds; the platform's first `/health/ready` poll answers from the
    admission evaluation.
 
+<!-- template:begin authn:docs-lifecycle-authn -->
+With authentication retained, bootstrap prepares the selected verifier before
+binding the server. Disabled runtime mode is inert. Introspection construction
+does no provider I/O; JWT startup discovers metadata and installs a usable JWKS
+inside its bounded startup budget. A JWT refresh future joins the existing
+`TaskTracker` with a child cancellation token. Authentication neither adds a
+readiness probe nor changes public health behavior.
+<!-- template:end authn:docs-lifecycle-authn -->
+
 <!-- template:begin postgres:docs-lifecycle-postgres-startup -->
 With the PostgreSQL profile retained and `postgres.enabled`, bootstrap admits
 the DSN and opens the first connection inside the acquire budget
@@ -78,6 +87,13 @@ instead of pushing the process into `SIGKILL`.
 The retained PostgreSQL pool closes in the dependency-close stage and records
 `postgres_pool_closed`.
 <!-- template:end postgres:docs-lifecycle-postgres-close -->
+
+<!-- template:begin oidc-jwt:docs-lifecycle-jwt-refresh -->
+JWT refresh is periodic and may be triggered by an unknown key; one shared
+fetch is coalesced and canceled/joined with background work during shutdown.
+Failed refresh keeps the last usable keys. There is no maximum cached-key age
+and this is not an immediate-revocation mechanism.
+<!-- template:end oidc-jwt:docs-lifecycle-jwt-refresh -->
 
 The `17s` tail after the drain is process structure, not configuration;
 `validate_grace_budget` refuses a configuration whose grace period cannot

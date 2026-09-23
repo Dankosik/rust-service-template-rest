@@ -140,6 +140,42 @@ components:
           example: https://www.rfc-editor.org/rfc/rfc9110#section-15.5.1
       additionalProperties: false
   responses:
+    AuthenticationForbidden:
+      description: downstream authorization denied the verified principal
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    AuthenticationMalformed:
+      description: bearer authentication is malformed
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    AuthenticationOversize:
+      description: bearer authentication exceeds the admitted header value size
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    AuthenticationTimeout:
+      description: the enclosing request budget expired before a response committed
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    AuthenticationUnauthorized:
+      description: bearer authentication is required or invalid
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    AuthenticationUnavailable:
+      description: bearer authentication trust or provider is unavailable
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
     BadRequest:
       description: request is malformed or invalid
       content:
@@ -158,6 +194,12 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+security:
+- bearerAuth: []
 tags:
 - name: system
   description: Operational endpoints for liveness and readiness.

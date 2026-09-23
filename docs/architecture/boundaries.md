@@ -11,6 +11,9 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | `health` (`crates/health`) | The readiness refresher over `tokio::sync::watch`: probe trait, failure threshold, staleness guard, drain flag, O(1) snapshot reads. | Probe implementations, HTTP handlers, the schedule (bootstrap owns the policy values). |
 | `infra-http` (`crates/infra-http`) | The hardened middleware chain, the bounded accept loop (`Server`), the probe handlers with their `#[utoipa::path]` contract, the RFC 9457 `Problem` type and closed code catalog, request-id admission, the route-template access log. | Business rules, configuration loading, feature routes (they merge in `service::api`). |
 | `infra-telemetry` (`crates/infra-telemetry`) | Subscriber installation (`json`/`text`), the tracer provider with the OTLP endpoint resolution and ambient-credential refusal, the Prometheus recorder with process and Tokio runtime metrics, the diagnostics router. | Feature semantics, startup logging content, request routing, which fields a handler emits. |
+<!-- template:begin authn:docs-boundaries-authn-owner -->
+| `infra-bearerauthn` (`crates/infra-bearerauthn`) | Bearer-envelope parsing, sealed verified identity, fixed verification failures, strict claims, and the selected OIDC JWT or introspection verifier with its provider transport. | Authorization policy, configuration loading, route assembly, readiness, or an application-visible raw token/claims API. |
+<!-- template:end authn:docs-boundaries-authn-owner -->
 | `integration-tests` (`test/`) | Executable utility recipes and any selected profile proof. | Anything a binary runs; the service's process tests stay in `crates/service/tests/`. |
 | `crates/<feature>` (none yet) | Use cases, business types, invariants, domain errors, and the feature's `OpenApiRouter` with its handlers. | Transport policy, provider drivers, runtime configuration, process lifecycle. |
 | `crates/infra-<provider>` (further adapters) | One transport or provider adapter: admission, budgets, mapping to feature-owned types. | Business rules, config precedence, other adapters' policy. |
@@ -42,6 +45,11 @@ main binary (crates/service, composition root)
   -> infra-telemetry -> opentelemetry*, tracing*, metrics*
   -> crates/<feature> (future; depends on no infra-* crate)
 
+<!-- template:begin authn:docs-boundaries-authn-edges -->
+  -> infra-bearerauthn
+infra-http -> infra-bearerauthn
+<!-- template:end authn:docs-boundaries-authn-edges -->
+
 integration-tests (test/)
   -> utility and transport recipes, health
 ```
@@ -59,6 +67,13 @@ beside their real consumer and move only for observed reuse. `health` is the
 one leaf two crates share (`infra-http` reads the verdict, `service` drives
 the refresher), which is why it is its own crate rather than a module of
 either.
+
+<!-- template:begin authn:docs-boundaries-authn-composition -->
+Authentication is a shared inbound transport contract, not a feature adapter:
+`service` owns verifier preparation and lifecycle; `infra-http` owns protected
+method composition and Problem mapping. Feature handlers consume only
+`VerifiedPrincipal` through the supported protected route tuple.
+<!-- template:end authn:docs-boundaries-authn-composition -->
 
 ## Decisions Recorded Here
 

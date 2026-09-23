@@ -5,10 +5,17 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import subprocess
 import tempfile
 from pathlib import Path
+
+
+_LEGACY_B206_PROFILE_SHA256 = "75e68f9c7defd4031f5d7a0bc2866f337a6c79f69a69f56c79a268d48d8d6530"
+_LEGACY_B206_REVISION = "b2060279370713f05be81b1ad44a31e3e960bccc"
+_LEGACY_PROFILE_KEYS = ("schema_version", "source_only", "postgres", "identity", "cargo_lock")
+_NEW_PROJECTION_CHECKER = "scripts/tests/template-profile-projections.py"
 
 
 def run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -66,17 +73,85 @@ def clone(source: Path, destination: Path) -> None:
         raise AssertionError(cloned.stderr)
 
 
+def install_historical_none(source: Path, target: Path) -> None:
+    profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
+    legacy = {key: profile[key] for key in _LEGACY_PROFILE_KEYS}
+    source_only = legacy["source_only"]
+    if not isinstance(source_only, list) or source_only.count(_NEW_PROJECTION_CHECKER) != 1:
+        raise AssertionError("current profile inventory lacks exactly one projection checker entry")
+    legacy["source_only"] = [item for item in source_only if item != _NEW_PROJECTION_CHECKER]
+    rendered = (json.dumps(legacy, indent=2) + "\n").encode("utf-8")
+    if hashlib.sha256(rendered).hexdigest() != _LEGACY_B206_PROFILE_SHA256:
+        raise AssertionError("legacy b206 profile inventory bytes changed")
+    (target / "scripts/lib/template_profiles.json").write_bytes(rendered)
+    lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
+    lock["profiles"].pop("authn")
+    lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
+    (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+
+
+def assert_profile_pack(source: Path, target: Path, profile_name: str, selected: bool) -> None:
+    profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
+    key = "remove_when_none" if profile_name == "postgres" else "remove_when_unselected"
+    for relative in profile[profile_name][key]:
+        path = target / relative.rstrip("/")
+        if not selected:
+            if path.exists() or path.is_symlink():
+                raise AssertionError(f"unselected {profile_name} output remains {relative}")
+            continue
+        if relative.endswith("/"):
+            if path.is_symlink() or not path.is_dir():
+                raise AssertionError(f"selected {profile_name} directory is missing {relative}")
+        elif path.is_symlink() or not path.is_file():
+            raise AssertionError(f"selected {profile_name} file is missing {relative}")
+
+
+def assert_authn_output(source: Path, target: Path, authn: str) -> None:
+    for profile, selected in (("authn", authn != "none"), ("oidc-jwt", authn == "oidc-jwt"), ("oidc-introspection", authn == "oidc-introspection")):
+        assert_profile_pack(source, target, profile, selected)
+    lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
+    if lock["profiles"].get("authn") != authn:
+        raise AssertionError(f"sync canary lock did not record authn={authn}")
+
+
+def initialize(source: Path, target: Path, authn: str | None) -> subprocess.CompletedProcess[str]:
+    command = [
+        "bash", os.fspath(source / "scripts/init-module.sh"), "--repo", os.fspath(target),
+        "--service-name", "canary-api", "--repository", "https://github.com/example/canary-api",
+        "--description", "Canary API", "--codeowner", "@example/platform", "--database", "none",
+        "--agent-harness", "claude",
+    ]
+    if authn is not None:
+        command.extend(("--authn", authn))
+    return run(command, cwd=source)
+
+
 def check(source: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="template-sync-canary-") as temp:
         work = Path(temp)
         target = work / "target"
         clone(source, target)
-        initialized = run(
-            ["bash", os.fspath(source / "scripts/init-module.sh"), "--repo", os.fspath(target), "--service-name", "canary-api", "--repository", "https://github.com/example/canary-api", "--description", "Canary API", "--codeowner", "@example/platform", "--database", "none", "--agent-harness", "claude"],
-            cwd=source,
-        )
+        initialized = initialize(source, target, "oidc-jwt")
         if initialized.returncode:
             raise AssertionError(initialized.stderr)
+        assert_authn_output(source, target, "oidc-jwt")
+        for authn in ("oidc-introspection", None):
+            profile_target = work / f"profile-{authn or 'historical-none'}"
+            clone(source, profile_target)
+            profile_initialized = initialize(source, profile_target, authn)
+            if profile_initialized.returncode:
+                raise AssertionError(profile_initialized.stderr)
+            expected = authn or "none"
+            assert_authn_output(source, profile_target, expected)
+            if authn is None:
+                install_historical_none(source, profile_target)
+                before = tree_state(profile_target)
+                replay = initialize(source, profile_target, "none")
+                if replay.returncode or tree_state(profile_target) != before:
+                    raise AssertionError("actual historical none lock replay changed the sync canary target")
+                mismatch = initialize(source, profile_target, "oidc-jwt")
+                if mismatch.returncode == 0 or tree_state(profile_target) != before:
+                    raise AssertionError("historical none sync canary accepted an authn profile migration")
         skill = target / ".agents/skills/local-service-skill"
         skill.mkdir(parents=True)
         (skill / ".service-owned").write_text("", encoding="utf-8")
