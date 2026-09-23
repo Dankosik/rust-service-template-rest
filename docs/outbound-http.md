@@ -154,3 +154,19 @@ boundary; the transport creates no inbound Problem response.
 The auth-private transport keeps its own JSON/200-only policy, three-second
 cap, 100 ms reserve, 32-exchange admission and count-only header limit. It
 shares only admitted DNS and tracked cancellation with this profile.
+
+## Mechanism and reopen conditions
+
+The selected mechanism uses the resolved `reqwest` 0.13.5 client and
+`hickory-resolver` 0.26.3. A small shared DNS crate is needed because auth and
+outbound can be selected independently while both require the same admitted
+answer set and tracked lookup cancellation. The outbound client retains its
+own authority, byte, header and operation policy; the auth client retains its
+provider-specific HTTP policy. The Definition and design comparison are
+preserved in the local stage-10.2 implementation commit.
+
+Reassess connection admission and error-source handling when changing reqwest
+or Hickory versions, and reassess address rules when the IANA special-purpose
+registries change. Private destinations, a proxy, connection pooling, HTTP/2,
+streaming or automatic decompression require a new contract and proof; this
+profile does not silently enable them.
