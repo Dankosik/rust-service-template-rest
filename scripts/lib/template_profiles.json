@@ -573,12 +573,6 @@
     ],
     "markers": [
       {
-        "path": "Cargo.toml",
-        "ids": [
-          "workspace-outbound-http-crate"
-        ]
-      },
-      {
         "path": "docs/architecture/boundaries.md",
         "ids": [
           "docs-boundaries-outbound-owner",
