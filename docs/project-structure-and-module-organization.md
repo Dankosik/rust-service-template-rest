@@ -21,6 +21,16 @@ Do not create a crate, module, or directory before its first real artifact.
 | Inbound bearer verification, provider transport, and sealed principal | `crates/infra-bearerauthn`; shared grammar/claims stay in the crate and JWT/refresh or introspection remain engine modules selected by the initializer |
 | Protected HTTP method composition and principal extraction | `crates/infra-http/src/authn.rs`; callers use `infra_http::authn::protect` with the route tuple |
 <!-- template:end authn:docs-structure-authn-placement -->
+<!-- template:begin outbound-http:docs-structure-outbound-placement -->
+| Fixed-authority bounded HTTP exchanges | `crates/infra-outbound-http`; provider policy uses its closed API ([guide](outbound-http.md)) |
+<!-- template:end outbound-http:docs-structure-outbound-placement -->
+<!-- template:begin egress-dns:docs-structure-egress-placement -->
+| Public-address admission and tracked DNS | `crates/infra-egress-dns`; consumers own their HTTP policies and error mapping |
+<!-- template:end egress-dns:docs-structure-egress-placement -->
+<!-- template:begin request-budget:docs-structure-request-budget -->
+| Readonly inbound request deadline | `crates/infra-http/src/harden.rs`; exported as `infra_http::RequestDeadline` |
+<!-- template:end request-budget:docs-structure-request-budget -->
+
 | Ordinary behavior and boundary tests | `#[cfg(test)] mod tests` beside the owner |
 | Black-box tests of one crate's public surface, including the built binary | `crates/<crate>/tests/<owner>.rs` (`crates/service/tests/lifecycle.rs` drives the binary; `openapi.rs` holds the contract tests) |
 | Delivery scripts | `scripts/ci/<owner>.sh` with a `--self-test` |

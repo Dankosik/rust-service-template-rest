@@ -20,6 +20,9 @@ sys.dont_write_bytecode = True
 _LEGACY_B206_PROFILE_SHA256 = "75e68f9c7defd4031f5d7a0bc2866f337a6c79f69a69f56c79a268d48d8d6530"
 _LEGACY_B206_REVISION = "b2060279370713f05be81b1ad44a31e3e960bccc"
 _LEGACY_PROFILE_KEYS = ("schema_version", "source_only", "postgres", "identity", "cargo_lock")
+_AUTH_ONLY_PROFILE_KEYS = (
+    "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection", "identity", "cargo_lock",
+)
 _NEW_PROJECTION_CHECKER = "scripts/tests/template-profile-projections.py"
 
 
@@ -86,7 +89,19 @@ def install_historical_none(source: Path, target: Path) -> None:
     (target / "scripts/lib/template_profiles.json").write_bytes(legacy_profile_inventory_bytes(source))
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     lock["profiles"].pop("authn")
+    lock["profiles"].pop("outbound_http", None)
     lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
+    (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+
+
+def install_derived_auth_only_none(source: Path, target: Path) -> None:
+    profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
+    auth_only = {key: profile[key] for key in _AUTH_ONLY_PROFILE_KEYS}
+    (target / "scripts/lib/template_profiles.json").write_text(
+        json.dumps(auth_only, indent=2) + "\n", encoding="utf-8"
+    )
+    lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
+    lock["profiles"].pop("outbound_http", None)
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -137,6 +152,7 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
         codeowner="@example/platform",
         database="none",
         authn="none",
+        outbound_http="none",
         agent_harness="core",
     )
     for label, contents in (
@@ -178,6 +194,7 @@ def assert_preflight_extraction(source: Path, work: Path) -> None:
             codeowner="@example/platform",
             database="none",
             authn="none",
+            outbound_http="none",
             agent_harness="core",
         )
 
@@ -226,7 +243,7 @@ def must_refuse(source: Path, work: Path, label: str, *extra: str) -> None:
     result = init(source, target, *extra)
     if result.returncode == 0:
         raise AssertionError(f"{label}: initializer unexpectedly succeeded")
-    if label not in {"duplicate-db", "duplicate-authn"} and "may be supplied once" in result.stderr:
+    if label not in {"duplicate-db", "duplicate-authn", "duplicate-outbound-http"} and "may be supplied once" in result.stderr:
         raise AssertionError(f"{label}: fixture accidentally exercised duplicate-option refusal")
     if state(target) != before:
         raise AssertionError(f"{label}: refusal changed target bytes or Git state")
@@ -264,17 +281,48 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
             raise AssertionError(f"selected {profile_name} output lacks retained file {relative}")
 
 
-def assert_profile_packs(source: Path, target: Path, *, database: str, authn: str) -> None:
+def assert_profile_packs(source: Path, target: Path, *, database: str, authn: str, outbound_http: str) -> None:
     assert_profile_pack(source, target, "postgres", database == "postgres")
     assert_profile_pack(source, target, "authn", authn != "none")
     assert_profile_pack(source, target, "oidc-jwt", authn == "oidc-jwt")
     assert_profile_pack(source, target, "oidc-introspection", authn == "oidc-introspection")
+    assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
+    shared_selected = authn != "none" or outbound_http == "bounded"
+    assert_profile_pack(source, target, "egress-dns", shared_selected)
+    assert_profile_pack(source, target, "request-budget", shared_selected)
 
 
 def assert_lock_authn(target: Path, expected: str) -> None:
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     if lock["profiles"].get("authn") != expected:
         raise AssertionError(f"template.lock did not record authn={expected}")
+
+
+def assert_lock_outbound_http(target: Path, expected: str) -> None:
+    lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
+    if lock["profiles"].get("outbound_http") != expected:
+        raise AssertionError(f"template.lock did not record outbound_http={expected}")
+
+
+def assert_outbound_lock_refusals(source: Path, target: Path) -> None:
+    lock_path = target / "template.lock"
+    original = lock_path.read_bytes()
+    cases = (
+        ("missing-authn", lambda profiles: profiles.pop("authn")),
+        ("missing-database", lambda profiles: profiles.pop("database")),
+        ("unknown-profile-field", lambda profiles: profiles.update(unexpected="value")),
+        ("unknown-outbound-value", lambda profiles: profiles.update(outbound_http="unbounded")),
+    )
+    for label, mutate in cases:
+        lock = json.loads(original)
+        profiles = lock["profiles"]
+        mutate(profiles)
+        lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+        before = state(target)
+        result = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
+        if result.returncode == 0 or state(target) != before:
+            raise AssertionError(f"{label} outbound lock shape was not a preserving refusal")
+        lock_path.write_bytes(original)
 
 
 def check(source: Path) -> None:
@@ -289,6 +337,8 @@ def check(source: Path) -> None:
         must_refuse(source, work, "duplicate-db", "--database", "none", "--database", "postgres")
         must_refuse(source, work, "unknown-authn", "--authn", "mtls")
         must_refuse(source, work, "duplicate-authn", "--authn", "none", "--authn", "oidc-jwt")
+        must_refuse(source, work, "unknown-outbound-http", "--outbound-http", "unbounded")
+        must_refuse(source, work, "duplicate-outbound-http", "--outbound-http", "none", "--outbound-http", "bounded")
         must_refuse(source, work, "codeowner-depth", "--codeowner", "@a/b/c")
         must_refuse(source, work, "reserved-abstract", "--service-name", "abstract")
         must_refuse(source, work, "reserved-gen", "--service-name", "gen")
@@ -304,8 +354,9 @@ def check(source: Path) -> None:
         result = init(source, target, "--database", "none", "--agent-harness", "claude")
         if result.returncode:
             raise AssertionError(f"successful initialization failed: {result.stderr}")
-        assert_profile_packs(source, target, database="none", authn="none")
+        assert_profile_packs(source, target, database="none", authn="none", outbound_http="none")
         assert_lock_authn(target, "none")
+        assert_lock_outbound_http(target, "none")
         for removed in [
             "make/source.mk", "scripts/ci/template-init-check.sh", "scripts/tests/template-init-safety.py",
             "crates/infra-postgres", "crates/migrate", "migrations", "env/docker-compose.yml",
@@ -351,6 +402,17 @@ def check(source: Path) -> None:
         repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
         if repeat.returncode or state(target) != after:
             raise AssertionError("matching complete-lock initialization was not a byte-preserving no-op")
+        assert_outbound_lock_refusals(source, target)
+        install_derived_auth_only_none(source, target)
+        auth_only_before = state(target)
+        auth_only_repeat = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
+        if auth_only_repeat.returncode or state(target) != auth_only_before:
+            raise AssertionError("derived auth-only none lock replay was not byte-preserving")
+        auth_only_mismatch = init(
+            source, target, "--database", "none", "--authn", "none", "--outbound-http", "bounded", "--agent-harness", "claude"
+        )
+        if auth_only_mismatch.returncode == 0 or state(target) != auth_only_before:
+            raise AssertionError("auth-only none lock accepted an outbound profile migration")
         install_historical_none(source, target)
         historical_before = state(target)
         historical_repeat = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
@@ -369,7 +431,7 @@ def check(source: Path) -> None:
         postgres = init(source, postgres_target, "--database", "postgres", "--agent-harness", "core")
         if postgres.returncode:
             raise AssertionError(f"postgres initialization failed: {postgres.stderr}")
-        assert_profile_packs(source, postgres_target, database="postgres", authn="none")
+        assert_profile_packs(source, postgres_target, database="postgres", authn="none", outbound_http="none")
         (postgres_target / "specs/service-feature").mkdir(parents=True)
         (postgres_target / "specs/service-feature/decision.md").write_text(
             "Service-owned PostgreSQL decision.\n", encoding="utf-8"
@@ -390,12 +452,23 @@ def check(source: Path) -> None:
             initialized = init(source, authn_target, "--database", "none", "--authn", authn, "--agent-harness", "core")
             if initialized.returncode:
                 raise AssertionError(f"{authn} initialization failed: {initialized.stderr}")
-            assert_profile_packs(source, authn_target, database="none", authn=authn)
+            assert_profile_packs(source, authn_target, database="none", authn=authn, outbound_http="none")
             assert_lock_authn(authn_target, authn)
             authn_before = state(authn_target)
             replay = init(source, authn_target, "--database", "none", "--authn", authn, "--agent-harness", "core")
             if replay.returncode or state(authn_target) != authn_before:
                 raise AssertionError(f"complete {authn} lock replay changed target bytes")
+        outbound_target = work / "outbound-replay"
+        clone(source, outbound_target)
+        outbound = init(source, outbound_target, "--database", "none", "--outbound-http", "bounded", "--agent-harness", "core")
+        if outbound.returncode:
+            raise AssertionError(f"bounded outbound initialization failed: {outbound.stderr}")
+        assert_profile_packs(source, outbound_target, database="none", authn="none", outbound_http="bounded")
+        assert_lock_outbound_http(outbound_target, "bounded")
+        outbound_before = state(outbound_target)
+        outbound_replay = init(source, outbound_target, "--database", "none", "--outbound-http", "bounded", "--agent-harness", "core")
+        if outbound_replay.returncode or state(outbound_target) != outbound_before:
+            raise AssertionError("complete bounded outbound lock replay changed target bytes")
         for permitted in ("union", "raw"):
             allowed = work / f"permitted-{permitted}"
             clone(source, allowed)

@@ -319,11 +319,10 @@
       "docs/authentication.md"
     ],
     "markers": [
-      {"path": "Cargo.toml", "ids": ["workspace-authn-crate", "workspace-authn-dns", "workspace-authn-tls-fixtures"]},
+      {"path": "Cargo.toml", "ids": ["workspace-authn-crate"]},
       {"path": "crates/config/Cargo.toml", "ids": ["config-authn-url"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-authn-dependency"]},
-      {"path": "crates/infra-http/src/harden.rs", "ids": ["http-request-deadline", "http-request-deadline-mapper-state", "http-request-deadline-mapper"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-authn-module", "infra-http-authn-exports"]},
       {"path": "crates/infra-http/src/problem.rs", "ids": ["http-authentication-codes", "http-authentication-code-meta", "http-authentication-problem-responses", "http-authentication-problem-components"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-authn-dependency", "service-authn-test-dependencies"]},
@@ -566,5 +565,123 @@
   ],
   "cargo_lock": {
     "schema_version": 1
+  },
+  "outbound-http": {
+    "remove_when_unselected": [
+      "crates/infra-outbound-http/",
+      "docs/outbound-http.md"
+    ],
+    "markers": [
+      {
+        "path": "docs/architecture/boundaries.md",
+        "ids": [
+          "docs-boundaries-outbound-owner",
+          "docs-boundaries-outbound-edges"
+        ]
+      },
+      {
+        "path": "docs/architecture/integration.md",
+        "ids": [
+          "docs-integration-outbound"
+        ]
+      },
+      {
+        "path": "docs/architecture/runtime-lifecycle.md",
+        "ids": [
+          "docs-lifecycle-outbound"
+        ]
+      },
+      {
+        "path": "docs/project-structure-and-module-organization.md",
+        "ids": [
+          "docs-structure-outbound-placement"
+        ]
+      },
+      {
+        "path": "docs/first-production-feature.md",
+        "ids": [
+          "docs-first-feature-outbound"
+        ]
+      },
+      {
+        "path": "docs/build-test-and-development-commands.md",
+        "ids": [
+          "docs-commands-outbound"
+        ]
+      },
+      {
+        "path": "docs/template-sync.md",
+        "ids": [
+          "docs-template-init-outbound",
+          "docs-template-init-outbound-sync"
+        ]
+      }
+    ]
+  },
+  "egress-dns": {
+    "remove_when_unselected": [
+      "crates/infra-egress-dns/"
+    ],
+    "markers": [
+      {
+        "path": "Cargo.toml",
+        "ids": [
+          "workspace-egress-dns-crate",
+          "workspace-egress-dns",
+          "workspace-egress-tls-fixtures"
+        ]
+      },
+      {
+        "path": "docs/architecture/boundaries.md",
+        "ids": [
+          "docs-boundaries-egress-owner",
+          "docs-boundaries-egress-edges"
+        ]
+      },
+      {
+        "path": "docs/project-structure-and-module-organization.md",
+        "ids": [
+          "docs-structure-egress-placement"
+        ]
+      },
+      {
+        "path": "docs/build-test-and-development-commands.md",
+        "ids": [
+          "docs-commands-egress"
+        ]
+      }
+    ]
+  },
+  "request-budget": {
+    "remove_when_unselected": [],
+    "markers": [
+      {
+        "path": "crates/infra-http/src/harden.rs",
+        "ids": [
+          "http-request-deadline",
+          "http-request-deadline-mapper-state",
+          "http-request-deadline-mapper",
+          "http-request-deadline-test"
+        ]
+      },
+      {
+        "path": "crates/infra-http/src/lib.rs",
+        "ids": [
+          "infra-http-request-deadline-export"
+        ]
+      },
+      {
+        "path": "docs/architecture/http.md",
+        "ids": [
+          "docs-http-request-budget"
+        ]
+      },
+      {
+        "path": "docs/project-structure-and-module-organization.md",
+        "ids": [
+          "docs-structure-request-budget"
+        ]
+      }
+    ]
   }
 }

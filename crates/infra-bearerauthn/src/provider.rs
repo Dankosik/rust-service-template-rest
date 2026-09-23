@@ -57,7 +57,8 @@ pub(crate) struct ProviderClient {
 
 impl ProviderClient {
     pub(crate) fn new(tracker: TaskTracker, cancel: CancellationToken) -> Result<Self, Failure> {
-        let resolver = dns::Resolver::new(tracker, cancel)?;
+        let resolver =
+            dns::PublicAddressResolver::new(tracker, cancel).map_err(|_| Failure::Unavailable)?;
         let client = build_client(resolver, None)?;
 
         Ok(Self { client })
@@ -173,7 +174,9 @@ where
         .timeout(PROVIDER_TIMEOUT)
         .dns_resolver(Arc::new(resolver));
     let builder = match root {
-        Some(root) => builder.add_root_certificate(root),
+        // Only the fixture constructor supplies a root. Keep fixture trust local
+        // instead of asking the host platform to supplement this test CA.
+        Some(root) => builder.tls_certs_only([root]),
         None => builder,
     };
     builder.build().map_err(|_| Failure::Unavailable)
@@ -297,6 +300,66 @@ mod tests {
         include_bytes!("../tests/fixtures/authn-fixture-untrusted-root.der");
     // template:end oidc-jwt:authn-provider-untrusted-root-fixture
 
+    async fn read_fixture_request(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> Vec<u8> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let header_end = loop {
+                if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    break end + 4;
+                }
+                let read = stream.read(&mut chunk).await.unwrap_or_default();
+                if read == 0 {
+                    return Vec::new();
+                }
+                request.extend_from_slice(&chunk[..read]);
+                assert!(request.len() <= 128 * 1024, "fixture request is bounded");
+            };
+            let headers =
+                std::str::from_utf8(&request[..header_end]).expect("fixture HTTP headers");
+            let body_length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .map_or(0, |(_, value)| {
+                    value
+                        .trim()
+                        .parse::<usize>()
+                        .expect("fixture content length")
+                });
+            let total = header_end
+                .checked_add(body_length)
+                .filter(|length| *length <= 128 * 1024)
+                .expect("fixture frame is bounded");
+            while request.len() < total {
+                let read = stream.read(&mut chunk).await.unwrap_or_default();
+                if read == 0 {
+                    return Vec::new();
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            request.truncate(total);
+            request
+        })
+        .await
+        .expect("fixture request completes within its budget")
+    }
+
+    #[tokio::test]
+    async fn fixture_capture_waits_for_fragmented_headers_and_complete_body() {
+        let expected = b"POST /introspect HTTP/1.1\r\nContent-Length: 3\r\n\r\na=b";
+        let (mut sender, mut receiver) = tokio::io::duplex(8);
+        let writer = tokio::spawn(async move {
+            sender
+                .write_all(expected)
+                .await
+                .expect("fragmented fixture write");
+            sender.shutdown().await.expect("fixture writer shutdown");
+        });
+        assert_eq!(read_fixture_request(&mut receiver).await, expected);
+        writer.await.expect("fixture writer joins");
+    }
+
     async fn tls_server(response: Vec<u8>) -> (std::net::SocketAddr, JoinHandle<Vec<u8>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -313,19 +376,21 @@ mod tests {
         .unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(config));
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut stream = acceptor
-                .accept(stream)
-                .await
-                .expect("trusted fixture TLS handshake must succeed");
-            let mut request = vec![0; 4096];
-            let read = stream.read(&mut request).await.unwrap_or_default();
-            request.truncate(read);
-            if !response.is_empty() {
-                stream.write_all(&response).await.unwrap();
-                stream.flush().await.unwrap();
-            }
-            request
+            tokio::time::timeout(Duration::from_secs(5), async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = acceptor
+                    .accept(stream)
+                    .await
+                    .expect("trusted fixture TLS handshake must succeed");
+                let request = read_fixture_request(&mut stream).await;
+                if !response.is_empty() && !request.is_empty() {
+                    stream.write_all(&response).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                request
+            })
+            .await
+            .expect("fixture connection completes within its budget")
         });
         (address, server)
     }
@@ -347,24 +412,26 @@ mod tests {
         .unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(config));
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let Ok(mut stream) = acceptor.accept(stream).await else {
-                return (Vec::new(), false);
-            };
-            let mut request = vec![0; 4096];
-            let read = stream.read(&mut request).await.unwrap_or_default();
-            request.truncate(read);
-            stream
-                .write_all(
-                    b"HTTP/1.1 302 Found\r\nlocation: /introspect\r\ncontent-length: 0\r\n\r\n",
-                )
-                .await
-                .unwrap();
-            stream.flush().await.unwrap();
-            let repeated = tokio::time::timeout(Duration::from_millis(25), listener.accept())
-                .await
-                .is_ok();
-            (request, repeated)
+            tokio::time::timeout(Duration::from_secs(5), async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let Ok(mut stream) = acceptor.accept(stream).await else {
+                    return (Vec::new(), false);
+                };
+                let request = read_fixture_request(&mut stream).await;
+                stream
+                    .write_all(
+                        b"HTTP/1.1 302 Found\r\nlocation: /introspect\r\ncontent-length: 0\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                stream.flush().await.unwrap();
+                let repeated = tokio::time::timeout(Duration::from_millis(25), listener.accept())
+                    .await
+                    .is_ok();
+                (request, repeated)
+            })
+            .await
+            .expect("fixture connection completes within its budget")
         });
         (address, server)
     }
@@ -387,18 +454,20 @@ mod tests {
         .unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(config));
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let Ok(mut stream) = acceptor.accept(stream).await else {
-                return (Vec::new(), false);
-            };
-            let mut request = vec![0; 4096];
-            let read = stream.read(&mut request).await.unwrap_or_default();
-            request.truncate(read);
-            drop(stream);
-            let repeated = tokio::time::timeout(Duration::from_millis(25), listener.accept())
-                .await
-                .is_ok();
-            (request, repeated)
+            tokio::time::timeout(Duration::from_secs(5), async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let Ok(mut stream) = acceptor.accept(stream).await else {
+                    return (Vec::new(), false);
+                };
+                let request = read_fixture_request(&mut stream).await;
+                drop(stream);
+                let repeated = tokio::time::timeout(Duration::from_millis(25), listener.accept())
+                    .await
+                    .is_ok();
+                (request, repeated)
+            })
+            .await
+            .expect("fixture connection completes within its budget")
         });
         (address, server)
     }
@@ -426,21 +495,25 @@ mod tests {
         let acceptor = TlsAcceptor::from(Arc::new(config));
         let (received, observed_request) = oneshot::channel();
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let Ok(mut stream) = acceptor.accept(stream).await else {
-                return false;
-            };
-            let mut request = vec![0; 4096];
-            let read = stream.read(&mut request).await.unwrap_or_default();
-            if read == 0 {
-                return false;
-            }
-            let _ = received.send(());
-            let mut after_request = [0_u8; 1];
-            matches!(
-                tokio::time::timeout(Duration::from_secs(1), stream.read(&mut after_request)).await,
-                Ok(Ok(0))
-            )
+            tokio::time::timeout(Duration::from_secs(5), async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let Ok(mut stream) = acceptor.accept(stream).await else {
+                    return false;
+                };
+                let request = read_fixture_request(&mut stream).await;
+                if request.is_empty() {
+                    return false;
+                }
+                let _ = received.send(());
+                let mut after_request = [0_u8; 1];
+                matches!(
+                    tokio::time::timeout(Duration::from_secs(1), stream.read(&mut after_request))
+                        .await,
+                    Ok(Ok(0))
+                )
+            })
+            .await
+            .expect("fixture connection completes within its budget")
         });
         (address, observed_request, server)
     }

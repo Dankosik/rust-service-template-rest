@@ -109,6 +109,9 @@ endif
 help: ## List available commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
+OUTBOUND_HTTP ?= none
+export OUTBOUND_HTTP
+
 template-init: ## Initialize the service identity and selected profiles once
 	@bash scripts/init-module.sh --repo .
 

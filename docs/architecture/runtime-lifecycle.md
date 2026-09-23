@@ -42,6 +42,15 @@ inside its bounded startup budget. A JWT refresh future joins the existing
 `TaskTracker` with a child cancellation token. Authentication neither adds a
 readiness probe nor changes public health behavior.
 <!-- template:end authn:docs-lifecycle-authn -->
+<!-- template:begin outbound-http:docs-lifecycle-outbound -->
+A retained [outbound client](../outbound-http.md) is inert until a concrete
+provider is wired. Bootstrap passes its existing tracker and a child root token
+to the client. Operations are caller-owned futures; each lookup has a child
+cancellation scope and every DNS task stays visible to the tracker. The
+existing cancel/close/wait shutdown stage joins them; the client never closes
+the shared tracker or adds a teardown stage.
+<!-- template:end outbound-http:docs-lifecycle-outbound -->
+
 
 <!-- template:begin postgres:docs-lifecycle-postgres-startup -->
 With the PostgreSQL profile retained and `postgres.enabled`, bootstrap admits

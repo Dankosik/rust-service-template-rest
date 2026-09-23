@@ -1826,7 +1826,7 @@ name = "infra-bearerauthn"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
- "hickory-resolver",
+ "infra-egress-dns",
  "jsonwebtoken",
  "metrics",
  "reqwest",
@@ -1838,6 +1838,16 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "url",
+]
+
+[[package]]
+name = "infra-egress-dns"
+version = "0.1.0"
+dependencies = [
+ "hickory-resolver",
+ "reqwest",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1871,6 +1881,19 @@ dependencies = [
  "utoipa",
  "utoipa-axum",
  "uuid",
+]
+
+[[package]]
+name = "infra-outbound-http"
+version = "0.1.0"
+dependencies = [
+ "infra-egress-dns",
+ "reqwest",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "url",
 ]
 
 [[package]]

@@ -20,6 +20,14 @@ If the feature calls another service or persists data, also decide who owns
 the source of truth, the timeout and retry eligibility inside
 `http.request_timeout`, the transaction boundary, readiness participation,
 and cleanup on partial startup ([Integration Boundaries](architecture/integration.md)).
+<!-- template:begin outbound-http:docs-first-feature-outbound -->
+For a fixed public HTTPS dependency, the retained [outbound profile](outbound-http.md)
+provides bounded transport. Put the concrete adapter under `crates/infra-<provider>`;
+keep its endpoint, credentials, response reserve, parsing and business errors
+there. Read the inbound deadline and pass cancellation rather than starting a
+fresh request budget. Bootstrap supplies the existing tracker/root token.
+<!-- template:end outbound-http:docs-first-feature-outbound -->
+
 
 ## 2. Create the feature crate
 

@@ -21,6 +21,7 @@ sys.dont_write_bytecode = True
 
 DATABASES = ("none", "postgres")
 AUTHN = ("none", "oidc-jwt", "oidc-introspection")
+OUTBOUND_HTTP = ("none", "bounded")
 HARNESSES = ("core", "codex", "claude", "qwen", "cursor", "grok", "opencode", "all")
 _RUNTIME_FILES = frozenset({"Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "template.lock", "Makefile", "build.rs"})
 _RUNTIME_PREFIXES = (
@@ -325,15 +326,16 @@ def _compare_lock(reference: bytes, actual: bytes, harness: str, initializer) ->
         raise initializer.Refusal("projection lock serialization differs beyond agent_harness")
 
 
-def _inputs(initializer, database: str, authn: str, harness: str):
-    service_name = f"matrix-{database}-{authn}-core"
+def _inputs(initializer, database: str, authn: str, outbound_http: str, harness: str):
+    service_name = f"matrix-{database}-{authn}-{outbound_http}-core"
     return initializer.InitInputs(
         service_name=service_name,
         repository=f"https://github.com/example/{service_name}",
-        description=f"Matrix {database} {authn} core",
+        description=f"Matrix {database} {authn} {outbound_http} core",
         codeowner="@example/platform",
         database=database,
         authn=authn,
+        outbound_http=outbound_http,
         agent_harness=harness,
     )
 
@@ -357,71 +359,75 @@ def check(source: Path) -> None:
         candidate=candidate,
         checker_sha256=_checker_identity(),
         exclusions=exclusions,
-        selections=len(DATABASES) * len(AUTHN) * len(HARNESSES),
+        selections=len(DATABASES) * len(AUTHN) * len(OUTBOUND_HTTP) * len(HARNESSES),
     )
     with tempfile.TemporaryDirectory(prefix="template-profile-projections-") as temporary:
         work = Path(temporary)
         for database in DATABASES:
             for authn in AUTHN:
-                reference: dict[str, Node] | None = None
-                reference_lock: bytes | None = None
-                identity = _inputs(initializer, database, authn, "core").identity()
-                all_inputs = _inputs(initializer, database, authn, "all")
-                with tempfile.TemporaryDirectory(
-                    prefix=f"{database}-{authn}-all-", dir=work
-                ) as selection:
-                    all_nodes = _project(source, candidate, initializer, all_inputs, Path(selection) / "tree")
-                admitted = _admitted_adapter_nodes(source, all_nodes, exclusions, initializer)
-                projected = {"all": all_nodes}
-                for harness in HARNESSES:
-                    inputs = _inputs(initializer, database, authn, harness)
-                    if inputs.identity() != identity:
-                        raise initializer.Refusal("harness changed a runtime profile identity")
-                    if harness in projected:
-                        nodes = projected[harness]
-                    else:
-                        with tempfile.TemporaryDirectory(
-                            prefix=f"{database}-{authn}-{harness}-", dir=work
-                        ) as selection:
-                            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
-                    digest = _tree_digest(nodes)
-                    lock = initializer._lock_bytes(inputs, candidate, "complete")
-                    lock_sha256 = hashlib.sha256(lock).hexdigest()
-                    _emit(
-                        "selection",
-                        database=database,
-                        authn=authn,
-                        harness=harness,
-                        identity=inputs.identity(),
-                        profiles=inputs.profiles(),
-                        tree_sha256=digest,
-                        lock_sha256=lock_sha256,
-                    )
-                    if harness == "core":
-                        reference = nodes
-                        reference_lock = lock
+                for outbound_http in OUTBOUND_HTTP:
+                    reference: dict[str, Node] | None = None
+                    reference_lock: bytes | None = None
+                    identity = _inputs(initializer, database, authn, outbound_http, "core").identity()
+                    all_inputs = _inputs(initializer, database, authn, outbound_http, "all")
+                    with tempfile.TemporaryDirectory(
+                        prefix=f"{database}-{authn}-{outbound_http}-all-", dir=work
+                    ) as selection:
+                        all_nodes = _project(source, candidate, initializer, all_inputs, Path(selection) / "tree")
+                    admitted = _admitted_adapter_nodes(source, all_nodes, exclusions, initializer)
+                    projected = {"all": all_nodes}
+                    for harness in HARNESSES:
+                        inputs = _inputs(initializer, database, authn, outbound_http, harness)
+                        if inputs.identity() != identity:
+                            raise initializer.Refusal("harness changed a runtime profile identity")
+                        if harness in projected:
+                            nodes = projected[harness]
+                        else:
+                            with tempfile.TemporaryDirectory(
+                                prefix=f"{database}-{authn}-{outbound_http}-{harness}-", dir=work
+                            ) as selection:
+                                nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+                        digest = _tree_digest(nodes)
+                        lock = initializer._lock_bytes(inputs, candidate, "complete")
+                        lock_sha256 = hashlib.sha256(lock).hexdigest()
+                        _emit(
+                            "selection",
+                            database=database,
+                            authn=authn,
+                            outbound_http=outbound_http,
+                            harness=harness,
+                            identity=inputs.identity(),
+                            profiles=inputs.profiles(),
+                            tree_sha256=digest,
+                            lock_sha256=lock_sha256,
+                        )
+                        if harness == "core":
+                            reference = nodes
+                            reference_lock = lock
+                            _emit(
+                                "equality",
+                                database=database,
+                                authn=authn,
+                                outbound_http=outbound_http,
+                                harness=harness,
+                                reference="core",
+                                tree_result="reference",
+                                lock_result="reference",
+                            )
+                            continue
+                        assert reference is not None and reference_lock is not None
+                        _compare(reference, nodes, exclusions, admitted, initializer)
+                        _compare_lock(reference_lock, lock, harness, initializer)
                         _emit(
                             "equality",
                             database=database,
                             authn=authn,
+                            outbound_http=outbound_http,
                             harness=harness,
                             reference="core",
-                            tree_result="reference",
-                            lock_result="reference",
+                            tree_result="equal",
+                            lock_result="agent_harness_only",
                         )
-                        continue
-                    assert reference is not None and reference_lock is not None
-                    _compare(reference, nodes, exclusions, admitted, initializer)
-                    _compare_lock(reference_lock, lock, harness, initializer)
-                    _emit(
-                        "equality",
-                        database=database,
-                        authn=authn,
-                        harness=harness,
-                        reference="core",
-                        tree_result="equal",
-                        lock_result="agent_harness_only",
-                    )
 
 
 def _expect_refusal(initializer, action, label: str) -> None:
@@ -499,8 +505,8 @@ def self_test(source: Path) -> None:
     finally:
         initializer.ADAPTERS.pop("malicious-runtime-owner", None)
     candidate = "0" * 40
-    core_inputs = _inputs(initializer, "none", "none", "core")
-    codex_inputs = _inputs(initializer, "none", "none", "codex")
+    core_inputs = _inputs(initializer, "none", "none", "none", "core")
+    codex_inputs = _inputs(initializer, "none", "none", "none", "codex")
     core_lock = initializer._lock_bytes(core_inputs, candidate, "complete")
     codex_lock = initializer._lock_bytes(codex_inputs, candidate, "complete")
     _compare_lock(core_lock, codex_lock, "codex", initializer)
@@ -508,6 +514,23 @@ def self_test(source: Path) -> None:
     lock_drift["identity"]["service_name"] = "different"
     lock_drift_bytes = (json.dumps(lock_drift, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     _expect_refusal(initializer, lambda: _compare_lock(core_lock, lock_drift_bytes, "codex", initializer), "lock drift")
+    outbound_lock_drift = json.loads(core_lock)
+    outbound_lock_drift["profiles"]["outbound_http"] = "bounded"
+    outbound_lock_drift_bytes = (json.dumps(outbound_lock_drift, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    _expect_refusal(
+        initializer,
+        lambda: _compare_lock(core_lock, outbound_lock_drift_bytes, "core", initializer),
+        "outbound profile lock drift",
+    )
+    outbound_tree_drift = dict(base)
+    outbound_tree_drift["crates/infra-outbound-http/src/lib.rs"] = Node(
+        "file", 0o644, b"outbound profile runtime"
+    )
+    _expect_refusal(
+        initializer,
+        lambda: _compare(base, outbound_tree_drift, carrier_scopes, admitted, initializer),
+        "outbound profile runtime drift",
+    )
     safety = _load_safety(source)
     with tempfile.TemporaryDirectory(prefix="template-profile-projections-self-test-") as temporary:
         safety.assert_preflight_extraction(source, Path(temporary))

@@ -27,6 +27,16 @@ Crate names are package names: `service`, `service-config` (the
 <!-- template:begin authn:docs-commands-authn -->
 With an authentication profile retained, `infra-bearerauthn` is also a package name for `make test-package`. Its default-off `test-support` feature exists only for consuming dev-dependencies that mount the real verifier in tests; it is not part of the ordinary release build or a production configuration knob.
 <!-- template:end authn:docs-commands-authn -->
+<!-- template:begin outbound-http:docs-commands-outbound -->
+With `OUTBOUND_HTTP=bounded`, `infra-outbound-http` is available to
+`make test-package PKG=infra-outbound-http`; the [guide](outbound-http.md)
+owns construction and operation policy.
+<!-- template:end outbound-http:docs-commands-outbound -->
+<!-- template:begin egress-dns:docs-commands-egress -->
+`make test-package PKG=infra-egress-dns` exercises the shared public-address
+and tracked resolver owner.
+<!-- template:end egress-dns:docs-commands-egress -->
+
 
 ## Contract
 
@@ -91,8 +101,8 @@ version. CI installs the same versions as prebuilt binaries.
 | `make changed-surfaces-check`, `make affected-crates-check`, `make validation-lock-self-test`, `make verify-check` | The validation scripts' self-tests |
 | `ALLOW_FULL=1 make check` | The full repository gate under the lock: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-instructions`, `docs-check`, selected profile checks, and the five self-tests |
 
-In the source template, `ALLOW_FULL=1 make template-init-check` checks 48
-canonical projections and initializes/builds/tests six distinct runtime
+In the source template, `ALLOW_FULL=1 make template-init-check` checks 96
+canonical projections and initializes/builds/tests twelve distinct runtime
 representatives. It does not need `ALLOW_HEAVY` or Docker. The source runner's
 `--projections-only` mode performs the focused projection/equality check without
 Cargo; it is not a complete public-initialization or runtime receipt. The

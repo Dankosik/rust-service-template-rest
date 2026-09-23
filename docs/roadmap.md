@@ -24,7 +24,7 @@ is not a supported template state.
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | done |
 | 9 | Template initializer, profiles, and template sync | done on merge after required CI |
-| 10 | Optional capability profiles | 10.1 locally accepted; remaining profiles planned |
+| 10 | Optional capability profiles | 10.1 merged; 10.2 locally accepted; remaining profiles planned |
 | 11 | Benchmarking and performance evidence | planned |
 | 12 | First release and derived-repository verification | planned |
 
@@ -601,11 +601,13 @@ markers, tests, and initializer support. Order by expected demand:
 
 1. Authentication: `AUTHN=oidc-jwt` (JWKS discovery and refresh, token
    profiles) and `AUTHN=oidc-introspection`; bearer grammar and sanitized
-   failure taxonomy in `crates/infra-bearerauthn`. **Locally accepted 2026-09-23**;
+   failure taxonomy in `crates/infra-bearerauthn`. **Merged via PR #41 at
+   `098b4ab18dd5b2d158a94e126798d8cc429ad735`**;
    [adoption and durable decisions](authentication.md).
 2. Bounded outbound HTTP: fixed-authority `reqwest` client with post-DNS
    public-address admission, header and body ceilings, correlation stripping,
-   no proxy.
+   no proxy. **Locally accepted 2026-09-23**;
+   [adoption guide](outbound-http.md).
 3. HTTP idempotency on PostgreSQL: `x-idempotent: true` operations, replay
    evidence and business effect in one transaction.
 4. Durable background jobs on PostgreSQL and the `jobs-worker` binary.
@@ -630,13 +632,32 @@ The current strict 48-projection run completed in 31 seconds on this workspace
 local execution, not a portable benchmark. The earlier run stopped after 18
 completed cells and is not a 48-cell aggregate PASS.
 
-The [initializer proof owner](template-sync.md#validation-boundary) now separates
-48 canonical projections from six future public-CLI/build/test representatives;
-it does not repeat the full aggregate per harness. Immutable local custody is
+The stage-10.1 [initializer proof owner](template-sync.md#validation-boundary) separated
+48 canonical projections from six public-CLI/build/test representatives;
+it did not repeat the full aggregate per harness. Immutable local custody is
 under `.git/codex/authn-delivery/`, including source `c24c3b3ccfaf0af06f3bd40427930221b7be286f`
 and the final closeout bundle. No main-checkout commit, CI success, publication
-or deployment is claimed by this local acceptance. Other stage-10 capabilities
-remain outside the delivered scope.
+or deployment is claimed by that local acceptance.
+
+Stage 10.2 adds `infra-outbound-http` and a shared `infra-egress-dns` admission
+owner. The auth client keeps its own JWT/introspection HTTP policy, deadlines,
+body rules and count-only header limit. The shared public-address predicate
+also refuses ambiguous 6to4, reserved IPv6 and private IPv4 embedded in the
+well-known NAT64 prefix. The selected pack is inert until a provider constructs
+it; the default initializer removes it and shared code is retained when auth
+still needs it. The [guide](outbound-http.md) owns the usable API and limits.
+
+Stage-10.2 local acceptance covered a workspace build, 261 unique source tests,
+formatting, documentation, scoped shell checks, dependency and secret gates,
+and independent final review. All 96 canonical profile/harness projections
+passed. Twelve unique runtime graphs have public-initializer/build/test
+evidence: eight fresh runs after a test-fixture repair plus four earlier runs
+reused only after exact equality of their 32 corresponding projected trees.
+The first full attempt remains recorded as failed at graph 11; the scoped
+recovery does not turn it into an aggregate PASS. Local custody is under
+`.git/codex/outbound-http/delivery/`. No remote CI, PR, publication, deployment,
+live-provider or PostgreSQL-runtime result is claimed. Other stage-10
+capabilities remain planned.
 
 ### Stage 11: Benchmarking and performance evidence
 

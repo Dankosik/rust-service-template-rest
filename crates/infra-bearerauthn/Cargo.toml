@@ -17,7 +17,7 @@ test-support = []
 
 [dependencies]
 base64 = { workspace = true, features = ["alloc"] }
-hickory-resolver = { workspace = true, features = ["tokio", "system-config"] }
+infra-egress-dns = { workspace = true }
 # template:begin oidc-jwt:authn-jwt-dependency
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 metrics = { workspace = true }

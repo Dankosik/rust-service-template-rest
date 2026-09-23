@@ -27,6 +27,9 @@ pub use harden::{
 // template:begin authn:infra-http-authn-exports
 pub use authn::{AUTHN_VERIFICATIONS_METRIC, ProtectError, VerifiedPrincipal, protect};
 // template:end authn:infra-http-authn-exports
+// template:begin request-budget:infra-http-request-deadline-export
+pub use harden::RequestDeadline;
+// template:end request-budget:infra-http-request-deadline-export
 pub use problem::{Code, InvalidParam, Problem};
 pub use request_id::{REQUEST_ID_HEADER, request_id};
 pub use router::router;
