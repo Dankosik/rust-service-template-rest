@@ -98,7 +98,7 @@ fn fixture_client_with_limits(address: SocketAddr, root: &[u8], limits: Limits) 
     let base = Url::parse(&format!("https://{FIXTURE_HOST}/")).expect("fixture URL");
     let authority = authority(&base).expect("fixture authority");
     let certificate = reqwest::Certificate::from_der(root).expect("fixture root certificate");
-    let client = build_fixture_client(
+    let transport = build_fixture_client(
         FixtureResolver {
             host: FIXTURE_HOST.to_owned(),
             address,
@@ -110,8 +110,8 @@ fn fixture_client_with_limits(address: SocketAddr, root: &[u8], limits: Limits) 
     Client {
         base,
         authority,
-        limits: limits.clone(),
-        client,
+        limits,
+        transport,
         admission: Arc::new(tokio::sync::Semaphore::new(limits.max_active)),
         shutdown: CancellationToken::new(),
         response_head_observed: None,
@@ -123,7 +123,7 @@ fn denied_client(root: &[u8], address: SocketAddr) -> Client {
     let base = Url::parse(&format!("https://{FIXTURE_HOST}/")).expect("denied fixture URL");
     let authority = authority(&base).expect("denied fixture authority");
     let certificate = reqwest::Certificate::from_der(root).expect("denied fixture root");
-    let client = build_fixture_client(
+    let transport = build_fixture_client(
         RawAnswerResolver {
             answers: vec!["8.8.8.8".parse().expect("public answer"), address.ip()],
             admitted_fixture: address,
@@ -135,8 +135,8 @@ fn denied_client(root: &[u8], address: SocketAddr) -> Client {
     Client {
         base,
         authority,
-        limits: limits.clone(),
-        client,
+        limits,
+        transport,
         admission: Arc::new(tokio::sync::Semaphore::new(limits.max_active)),
         shutdown: CancellationToken::new(),
         response_head_observed: None,
@@ -317,7 +317,7 @@ async fn a_trusted_root_does_not_disable_tls_hostname_verification() {
     let mut client = fixture_client(address, ROOT_DER);
     client.base = Url::parse("https://different.fixture.test/").expect("different hostname");
     client.authority = authority(&client.base).expect("different authority");
-    client.client = build_fixture_client(
+    client.transport = build_fixture_client(
         FixtureResolver {
             host: "different.fixture.test".to_owned(),
             address,
@@ -339,7 +339,7 @@ async fn framed_body_obeys_the_exact_operation_limit() {
     limits.response_body_bytes = 2;
     let (exact_address, exact_server) =
         tls_server(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
-    let exact = fixture_client_with_limits(exact_address, ROOT_DER, limits.clone())
+    let exact = fixture_client_with_limits(exact_address, ROOT_DER, limits)
         .execute(request(), operation())
         .await
         .expect("exact framed body limit succeeds");
@@ -363,21 +363,22 @@ async fn framed_body_obeys_the_exact_operation_limit() {
 
 #[tokio::test]
 async fn framed_chunked_and_unknown_length_bodies_enforce_the_streaming_cap() {
-    let cases: &[(&[u8], Result<&[u8], Error>)] = &[
+    let cases = [
         (
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n",
-            Ok(b"ok"),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n".as_slice(),
+            Ok(b"ok".as_slice()),
         ),
         (
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nno!\r\n0\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nno!\r\n0\r\n\r\n"
+                .as_slice(),
             Err(Error::ResponseBodyTooLarge),
         ),
         (
-            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nno!",
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nno!".as_slice(),
             Err(Error::ResponseBodyTooLarge),
         ),
     ];
-    for &(response, expected) in cases {
+    for (response, expected) in cases {
         let (address, server) = tls_server(response).await;
         let mut ceiling = limits();
         ceiling.response_body_bytes = 2;

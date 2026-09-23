@@ -18,7 +18,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use url::{Host, Url};
 
 /// Fixed client ceilings. Every field is required and finite.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
     pub max_active: usize,
     pub operation_timeout: Duration,
@@ -105,7 +105,7 @@ pub struct Client {
     base: Url,
     authority: Authority,
     limits: Limits,
-    client: reqwest::Client,
+    transport: reqwest::Client,
     admission: Arc<Semaphore>,
     shutdown: CancellationToken,
     // Test-only phase evidence; absent from production layout and behavior.
@@ -149,12 +149,12 @@ impl Client {
 
         let resolver = PublicResolver::new(tracker, shutdown.clone())
             .map_err(|_| Error::InvalidConfiguration)?;
-        let client = build_client(resolver, &limits)?;
+        let transport = build_client(resolver, &limits)?;
         Ok(Self {
             base,
             authority,
-            limits: limits.clone(),
-            client,
+            limits,
+            transport,
             admission: Arc::new(Semaphore::new(limits.max_active)),
             shutdown,
             #[cfg(test)]
@@ -197,12 +197,12 @@ impl Client {
             }
 
             let send = self
-                .client
+                .transport
                 .request(request.method, target)
                 .headers(headers)
                 .body(request.body)
                 .send();
-            let response = send.await.map_err(map_transport_error)?;
+            let response = send.await.map_err(|error| map_transport_error(&error))?;
             policy::admit_response_headers(
                 response.headers(),
                 self.limits.response_header_count,
@@ -222,7 +222,11 @@ impl Client {
 
             let mut response = response;
             let mut body = Vec::new();
-            while let Some(chunk) = response.chunk().await.map_err(map_transport_error)? {
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|error| map_transport_error(&error))?
+            {
                 let remaining = body_limit.saturating_sub(body.len());
                 if chunk.len() > remaining {
                     return Err(Error::ResponseBodyTooLarge);
@@ -344,7 +348,7 @@ where
         .map_err(|_| Error::InvalidConfiguration)
 }
 
-fn map_transport_error(error: reqwest::Error) -> Error {
+fn map_transport_error(error: &reqwest::Error) -> Error {
     if error.is_timeout() {
         return Error::Timeout;
     }

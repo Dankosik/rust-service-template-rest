@@ -84,7 +84,7 @@ pub(crate) fn admit_target(base: &Url, configured: &Authority, raw: &str) -> Res
 }
 
 fn is_representable_limit(value: usize) -> bool {
-    value <= isize::MAX as usize
+    isize::try_from(value).is_ok()
 }
 
 fn reject_untrusted_url_text(raw: &str, error: Error) -> Result<(), Error> {
