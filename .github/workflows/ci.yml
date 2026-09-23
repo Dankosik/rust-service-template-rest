@@ -58,6 +58,7 @@ jobs:
       documentation: ${{ steps.surfaces.outputs.documentation }}
       validation_system: ${{ steps.surfaces.outputs.validation_system }}
       module_initializer: ${{ steps.surfaces.outputs.module_initializer }}
+      initializer_runtime: ${{ steps.surfaces.outputs.initializer_runtime }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -506,7 +507,7 @@ jobs:
 
   initializer:
     needs: changes
-    if: needs.changes.outputs.module_initializer == 'true'
+    if: needs.changes.outputs.initializer_runtime == 'true'
     name: initializer (${{ matrix.part }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -577,6 +578,26 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
+  initializer-projections:
+    # Only projected text changed (documentation, instructions, harness
+    # carriers, workflow and image metadata): the canonical projections prove
+    # it without Cargo, and the runtime matrix waits for a change that can
+    # alter an initialized service's build or the initializer itself.
+    needs: changes
+    if: >-
+      needs.changes.outputs.module_initializer == 'true' &&
+      needs.changes.outputs.initializer_runtime != 'true'
+    name: initializer (projections)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Canonical projections
+        run: bash ./scripts/ci/measure.sh template-initializer-projections -- make template-init-projections
+
   docs:
     needs: changes
     if: needs.changes.outputs.documentation == 'true'
@@ -603,6 +624,7 @@ jobs:
       - integration
       # template:end postgres:ci-required-integration-need
       - initializer
+      - initializer-projections
       - docs
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -611,7 +633,13 @@ jobs:
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
       - name: Require selected initializer matrix success
-        if: needs.changes.outputs.module_initializer == 'true' && needs.initializer.result != 'success'
+        if: needs.changes.outputs.initializer_runtime == 'true' && needs.initializer.result != 'success'
+        run: exit 1
+      - name: Require selected initializer projections success
+        if: >-
+          needs.changes.outputs.module_initializer == 'true' &&
+          needs.changes.outputs.initializer_runtime != 'true' &&
+          needs.initializer-projections.result != 'success'
         run: exit 1
       - name: Accept passed and intentionally skipped gates
         run: echo "all applicable CI gates passed"

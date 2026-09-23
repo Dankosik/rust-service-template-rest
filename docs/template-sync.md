@@ -203,7 +203,8 @@ initialization in one run shares one absolute Cargo target (an explicit
 `CARGO_TARGET_DIR`, or the run's private one), so the locked dependency graph
 compiles once. CI runs the check as three parallel parts, the source suites
 with the projections and the twelve graphs split by DATABASE, and
-`make verify` leaves it to CI unless `ALLOW_FULL=1`.
+`make verify` leaves it to CI unless `ALLOW_FULL=1`. A change to projected
+text alone runs only `make template-init-projections`, locally and in CI.
 
 `bash scripts/ci/template-init-check.sh --projections-only` records the focused
 96-projection proof without Cargo or full/heavy admission. It does not claim
