@@ -104,8 +104,9 @@ version. CI installs the same versions as prebuilt binaries.
 In the source template, `ALLOW_FULL=1 make template-init-check` checks 96
 canonical projections and initializes/builds/tests twelve distinct runtime
 representatives. It does not need `ALLOW_HEAVY` or Docker. The source runner's
-`--projections-only` mode performs the focused projection/equality check without
-Cargo; it is not a complete public-initialization or runtime receipt. The
+`--projections-only` mode, `make template-init-projections`, performs the
+focused projection/equality check without Cargo; it is not a complete
+public-initialization or runtime receipt. The
 [initializer guide](template-sync.md#validation-boundary) owns this distinction.
 
 ## Guards and variables

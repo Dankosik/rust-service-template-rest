@@ -204,6 +204,10 @@ self_test() (
 	if grep -q '^ci-owned:$' <<<"${output}"; then return 1; fi
 	output=$(bash "${script}" --files scripts/tests/template-profile-projections.py)
 	grep -q '^verification not applicable locally: CI owns make template-init-check$' <<<"${output}"
+	# Projected text alone selects the Cargo-free projections, run locally.
+	output=$(bash "${script}" --plan --files docs/outbound-http.md)
+	grep -q '^  make template-init-projections$' <<<"$(plan_section commands)"
+	if grep -q 'template-init-check' <<<"${output}"; then return 1; fi
 	rm make/source.mk
 	cat >template.lock <<EOF
 {"schema_version":1,"state":"complete","identity":{"service_name":"fixture-api","repository":"https://github.com/example/fixture-api","description":"Fixture API","codeowner":"@example/platform"},"profiles":{"database":"none","agent_harness":"core"},"source":{"repository":"https://github.com/Dankosik/rust-service-template-rest","checkout_revision":"$(git rev-parse HEAD)","provenance":"local-checkout"}}
@@ -601,8 +605,10 @@ if is_true validation_system; then
 	add_command make validation-lock-self-test "validation routing changed" "make validation-lock-self-test" cheap false false
 	add_command make verify-check "validation routing changed" "make verify-check" cpu false false
 fi
-if is_true module_initializer; then
+if is_true initializer_runtime; then
 	add_command make template-init-check "canonical projections and twelve runtime representatives" "make template-init-check" cpu false false
+elif is_true module_initializer; then
+	add_command make template-init-projections "projected text changed and no runtime input did" "make template-init-projections" cpu false false
 fi
 
 workspace_rust=false

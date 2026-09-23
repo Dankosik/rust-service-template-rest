@@ -22,7 +22,7 @@ names=(
 	rust_source cargo_dependencies dependency_policy lint_config openapi tool_manifest
 	github_workflows dependency_automation shell runtime_image publication_metadata secret_scanning
 	db_integration migrations
-	agent_instructions documentation validation_system module_initializer no_validation_required
+	agent_instructions documentation validation_system module_initializer initializer_runtime no_validation_required
 )
 
 profile_database() {
@@ -50,7 +50,7 @@ all_surfaces() {
 	if [[ ${database} == none ]]; then
 		clear_surface db_integration migrations
 	fi
-	[[ ${source_only} == true ]] || clear_surface module_initializer
+	[[ ${source_only} == true ]] || clear_surface module_initializer initializer_runtime
 	emit
 }
 
@@ -176,21 +176,28 @@ classify() {
 			mark validation_system
 			;;
 		esac
-		# This surface exists only in the source template. A derived service
+		# These surfaces exist only in the source template. A derived service
 		# cannot select the source-only matrix because make/source.mk was removed.
+		# The runtime matrix proves what can change an initialized service's build
+		# and tests or the initializer itself; the canonical projections alone
+		# prove projected text.
 		if [[ ${source_only} == true ]]; then case "${file}" in
-		Cargo.toml | Cargo.lock | rust-toolchain.toml | template.lock | Makefile | make/*.mk | build/docker/Dockerfile | \
-		api/openapi/* | env/config/* | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | \
-		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | .github/workflows/ci.yml | \
-		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | \
+		Cargo.toml | Cargo.lock | rust-toolchain.toml | template.lock | Makefile | make/*.mk | \
+		api/openapi/* | env/config/* | .github/workflows/ci.yml | \
 		scripts/init-module.sh | scripts/template-sync.sh | scripts/lib/template_*.py | scripts/lib/template_profiles.json | \
 		template-owned.paths | \
 		scripts/ci/template-init-check.sh | scripts/tests/template-* | \
-		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/runtime-image-build.sh | \
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
 		crates/infra-bearerauthn/* | crates/infra-egress-dns/* | crates/infra-outbound-http/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | \
 		crates/infra-postgres/* | crates/migrate/* | \
-		test/* | migrations/* | .agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \
+		test/* | migrations/*)
+			mark module_initializer initializer_runtime
+			;;
+		build/docker/Dockerfile | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | \
+		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
+		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | \
+		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/runtime-image-build.sh | \
+		.agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \
 		.claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | \
 		docs/repo-architecture.md | docs/architecture/* | docs/configuration-source-policy.md | docs/production-contract.md | \
 		docs/first-production-feature.md | docs/project-structure-and-module-organization.md | \
@@ -291,36 +298,36 @@ EOF
 	classifier_root=${source_fixture}
 
 	assert_case template.lock \
-		"agent_instructions validation_system module_initializer" \
+		"agent_instructions validation_system module_initializer initializer_runtime" \
 		"cargo_dependencies shell documentation"
 
 	assert_case crates/service/src/main.rs \
-		"rust_source" \
+		"rust_source module_initializer initializer_runtime" \
 		"cargo_dependencies lint_config openapi shell documentation validation_system"
 	assert_case crates/config/build.rs \
 		"rust_source" \
 		"cargo_dependencies validation_system"
 	for file in crates/infra-bearerauthn/src/claims.rs crates/infra-http/src/authn.rs; do
 		assert_case "${file}" \
-			"rust_source module_initializer" \
+			"rust_source module_initializer initializer_runtime" \
 			"cargo_dependencies documentation"
 	done
 	for file in crates/infra-egress-dns/src/lib.rs crates/infra-outbound-http/src/lib.rs; do
 		assert_case "${file}" \
-			"rust_source module_initializer" \
+			"rust_source module_initializer initializer_runtime" \
 			"cargo_dependencies documentation"
 	done
 	for file in crates/config/Cargo.toml crates/service/Cargo.toml crates/infra-http/Cargo.toml crates/infra-egress-dns/Cargo.toml crates/infra-outbound-http/Cargo.toml; do
 		assert_case "${file}" \
-			"cargo_dependencies module_initializer" \
+			"cargo_dependencies module_initializer initializer_runtime" \
 			"rust_source documentation"
 	done
 	assert_case docs/authentication.md \
 		"documentation module_initializer" \
-		"rust_source cargo_dependencies"
+		"rust_source cargo_dependencies initializer_runtime"
 	assert_case docs/outbound-http.md \
 		"documentation module_initializer" \
-		"rust_source cargo_dependencies"
+		"rust_source cargo_dependencies initializer_runtime"
 	assert_case crates/service/tests/lifecycle.rs \
 		"rust_source" \
 		"cargo_dependencies documentation"
@@ -331,7 +338,7 @@ EOF
 		"rust_source" \
 		"cargo_dependencies lint_config documentation"
 	assert_case Cargo.toml \
-		"cargo_dependencies lint_config module_initializer" \
+		"cargo_dependencies lint_config module_initializer initializer_runtime" \
 		"rust_source dependency_policy documentation"
 	assert_case Cargo.lock \
 		"cargo_dependencies" \
@@ -364,8 +371,8 @@ EOF
 		"tool_manifest shell" \
 		"validation_system"
 	assert_case build/docker/Dockerfile \
-		"runtime_image tool_manifest" \
-		"rust_source cargo_dependencies shell validation_system"
+		"runtime_image tool_manifest module_initializer" \
+		"rust_source cargo_dependencies shell validation_system initializer_runtime"
 	assert_case .dockerignore \
 		"runtime_image" \
 		"tool_manifest no_validation_required"
@@ -376,7 +383,7 @@ EOF
 		"runtime_image shell" \
 		"tool_manifest validation_system"
 	assert_case .github/workflows/ci.yml \
-		"github_workflows module_initializer" \
+		"github_workflows module_initializer initializer_runtime" \
 		"dependency_automation documentation"
 	assert_case .github/actions/publish-image/action.yml \
 		"github_workflows publication_metadata" \
@@ -394,8 +401,8 @@ EOF
 		"secret_scanning" \
 		"documentation dependency_policy"
 	assert_case AGENTS.md \
-		"agent_instructions documentation" \
-		"rust_source validation_system"
+		"agent_instructions documentation module_initializer" \
+		"rust_source validation_system initializer_runtime"
 	assert_case CLAUDE.md \
 		"agent_instructions documentation" \
 		"rust_source"
@@ -485,20 +492,20 @@ EOF
 	done
 	for file in Makefile make/template.mk make/service.mk; do
 		assert_case "${file}" \
-			"validation_system module_initializer" \
+			"validation_system module_initializer initializer_runtime" \
 			"shell rust_source cargo_dependencies"
 	done
 	assert_case scripts/tests/template-profile-projections.py \
-		"module_initializer" \
+		"module_initializer initializer_runtime" \
 		"rust_source cargo_dependencies shell github_workflows db_integration"
 	for file in changed-surfaces git-changed-paths affected-crates verify validation-lock measure; do
 		assert_case "scripts/ci/${file}.sh" \
 			"validation_system shell" \
-			"tool_manifest rust_source"
+			"tool_manifest rust_source initializer_runtime"
 	done
 
 	output="$(printf '%s\n' Cargo.toml | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
-	has_line "${output}" 'surface_count=3'
+	has_line "${output}" 'surface_count=4'
 	output="$(printf '%s\n' LICENSE | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
 	has_line "${output}" 'surface_count=0'
 	has_line "${output}" 'classified=true'
@@ -507,6 +514,7 @@ EOF
 	# remains absent because the fixture has no make/source.mk.
 	output=$(printf '%s\n' Cargo.toml | (cd "${derived_fixture}" && bash scripts/ci/changed-surfaces.sh))
 	has_line "${output}" 'module_initializer=false'
+	has_line "${output}" 'initializer_runtime=false'
 	has_line "${output}" 'db_integration=false'
 	has_line "${output}" 'migrations=false'
 
@@ -518,6 +526,7 @@ EOF
 	has_line "${output}" 'db_integration=false'
 	has_line "${output}" 'migrations=false'
 	has_line "${output}" 'module_initializer=false'
+	has_line "${output}" 'initializer_runtime=false'
 
 	if output="$(printf '%s\n' unknown/new-owner.xyz | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh) 2>&1)"; then
 		echo "unknown paths must fail closed" >&2
