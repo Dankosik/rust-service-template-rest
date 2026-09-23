@@ -114,7 +114,9 @@ impl Dsn {
     }
 
     /// [`Dsn::admit`] with an explicit occupancy lookup, so the ambient
-    /// rule can be tested without mutating the process environment.
+    /// rule can be tested without mutating the process environment. It stays
+    /// crate-private: a public injectable lookup would let callers skip the
+    /// ambient rule that [`Dsn::admit`] enforces.
     /// `true` means the named variable is set to a **non-empty** value
     /// (empty `PG*` is ignored). This is the opposite of OpenTelemetry
     /// credential occupancy, where `var_os` presence including empty counts.
@@ -122,7 +124,7 @@ impl Dsn {
     /// # Errors
     ///
     /// The first violated rule, without the offending value.
-    pub fn admit_with_environment<F>(raw: &str, occupied: F) -> Result<Self, DsnError>
+    pub(crate) fn admit_with_environment<F>(raw: &str, occupied: F) -> Result<Self, DsnError>
     where
         F: Fn(&str) -> bool,
     {
