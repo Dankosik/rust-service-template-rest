@@ -317,3 +317,7 @@ The initializer does not create linked Railway inputs or deployment resources.
     every time without an error.
 17. A tool that sets its own `CARGO_TARGET_DIR` compiles cold on every call;
     the initializer reuses an explicit absolute caller cache instead.
+18. The first save claims a cache key, and later runs never replace it. Save
+    a target cache only after the step that fills it; otherwise a push to
+    `main` that ran only the OpenAPI, migration, or validation steps lets a
+    partial target own the key until `Cargo.lock` changes.
