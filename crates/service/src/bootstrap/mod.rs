@@ -206,7 +206,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // `TracerProviderHandle` is not last-ref: the global SDK clone remains
     // until process teardown.
     if outcome.is_err() {
-        shutdown::close_opened_dependencies(&cancel, &tracker).await;
+        shutdown::cancel_and_join_background_tasks(&cancel, &tracker).await;
         // template:begin postgres:bootstrap-startup-pool-close
         if let Some(pool) = postgres_pool.as_ref() {
             shutdown::close_opened_postgres(pool).await;
@@ -319,7 +319,7 @@ async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
 /// Runtime pieces built before listeners bind: admission, then serve.
 ///
 /// `cancel`, `tracker`, and `postgres_pool` are shared clones: `serve` still
-/// owns `close_opened_dependencies` on the error path. `tracer_provider` and
+/// owns `cancel_and_join_background_tasks` on the error path. `tracer_provider` and
 /// `metrics` are unique moves; Drop in this callee is enough on `Err`, and
 /// success transfers them into [`shutdown::Plan`].
 struct Prepared<'a> {

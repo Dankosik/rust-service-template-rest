@@ -154,6 +154,13 @@ boundary; the transport creates no inbound Problem response.
 The auth-private transport keeps its own JSON/200-only policy, three-second
 cap, 100 ms reserve, 32-exchange admission and count-only header limit. It
 shares only admitted DNS and tracked cancellation with this profile.
+The two clients deliberately repeat the baseline `reqwest` hardening settings
+(HTTPS, rustls, no redirect, retry, proxy, decompression or idle pooling) and
+bounded body reads. Keep those settings aligned when changing either client.
+Sharing a generic client builder would expose transport construction across
+the crate boundary while still leaving different authority, response, deadline
+and error policies with their current owners; the existing DNS crate carries
+the shared mechanism that has one contract.
 
 ## Mechanism and reopen conditions
 
