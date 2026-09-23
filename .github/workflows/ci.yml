@@ -29,6 +29,10 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   CARGO_NET_RETRY: "10"
+  # Line tables keep file:line in test backtraces; full debuginfo made each
+  # target cache about 4 GB. Cache keys carry the level, so a change never
+  # restores artifacts built at another one.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   RUST_BACKTRACE: short
 
 jobs:
@@ -131,8 +135,8 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
         uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2.87.14
@@ -287,16 +291,6 @@ jobs:
         run: |
           rustup toolchain install
           rustup show active-toolchain
-      - name: Restore cargo registry
-        if: needs.changes.outputs.cargo_dependencies == 'true' || needs.changes.outputs.dependency_policy == 'true'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
       - name: Install pinned Cargo tools
         uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2.87.14
         with:
@@ -484,8 +478,8 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-integration-${{ runner.os }}-${{ runner.arch }}-
+          key: cargo-integration-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-integration-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-
       - name: Database-backed proof
         # PostgreSQL from env/docker-compose.yml; the runner has Docker, so a
         # missing daemon is a failure here, never a refusal.
@@ -509,8 +503,24 @@ jobs:
   initializer:
     needs: changes
     if: needs.changes.outputs.module_initializer == 'true'
+    name: initializer (${{ matrix.part }})
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 30
+    strategy:
+      # Each part reports its own result; `required` reads the aggregate,
+      # which is success only when every part passed.
+      fail-fast: false
+      matrix:
+        # Together the parts are `make template-init-check`: the source
+        # suites with the canonical projections, and the twelve runtime
+        # graphs split by DATABASE (template-init-check.sh numbers none 1-6,
+        # postgres 7-12). Each part keeps its own warm target cache.
+        include:
+          - part: source
+          - part: database-none
+            graphs: 1,2,3,4,5,6
+          - part: database-postgres
+            graphs: 7,8,9,10,11,12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -529,14 +539,25 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-initializer-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-initializer-${{ runner.os }}-${{ runner.arch }}-
+          key: cargo-initializer-${{ matrix.part }}-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-initializer-${{ matrix.part }}-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-
       - name: Fetch locked Cargo packages
         run: cargo fetch --locked
-      - name: Validate projections and runtime representatives
+      - name: Source suites and canonical projections
+        if: matrix.part == 'source'
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: bash ./scripts/ci/measure.sh template-initializer -- env ALLOW_FULL=1 make template-init-check
+        run: |
+          set -euo pipefail
+          bash ./scripts/ci/measure.sh template-initializer-source -- bash ./scripts/ci/template-init-check.sh --source-checks
+          bash ./scripts/ci/measure.sh template-initializer-projections -- bash ./scripts/ci/template-init-check.sh --projections-only
+      - name: Runtime graphs
+        if: matrix.part != 'source'
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          PART: ${{ matrix.part }}
+          GRAPHS: ${{ matrix.graphs }}
+        run: bash ./scripts/ci/measure.sh "template-initializer-${PART}" -- bash ./scripts/ci/template-init-check.sh --runtime-graphs "${GRAPHS}"
       - name: Save cargo caches
         if: >-
           github.event_name == 'push' &&

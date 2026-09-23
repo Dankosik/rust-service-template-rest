@@ -40,7 +40,8 @@ service). A plain `cargo build` binary yields zero Rust packages; the empty
 target, not a clean scan, is the signal.
 
 `make verify` on a `runtime_image` change plans exactly this sequence on one
-shared verification tag (overridable with `VERIFY_RUNTIME_IMAGE`) and refuses to run without `ALLOW_HEAVY=1`.
+shared verification tag (overridable with `VERIFY_RUNTIME_IMAGE`) and leaves it
+to CI's `image` job unless `ALLOW_HEAVY=1` keeps it local.
 Preserve layer caches; do not use `--no-cache` or broad pruning as iteration.
 An unavailable optional container check is a disclosed gap, not a reason to
 provision an environment before local completion.

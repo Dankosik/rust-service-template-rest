@@ -45,12 +45,17 @@ that result; local completion alone does not complete it.
 
 `make plan` prints the route the changed surfaces select: the files, every
 surface's verdict, the commands with their reason, cost class, and whether
-they need `ALLOW_HEAVY=1` or Docker, and the surfaces with nothing to run. It
+they need Docker, the CI-owned steps, and the surfaces with nothing to run. It
 is a diagnosis, not a gate, and does not authorize the plan.
 
-`make verify` runs that route under the Git-common validation lock and records
-it. Before executing it checks the heavy authorization, the binaries the plan
-needs, and Docker when a step is container-backed. Each run writes an attempt
+Heavy steps (the image gates, the database-backed proof, the migration
+rehearsal) and the source initializer matrix are CI-owned: CI runs them on
+every surface that selects them, so `make verify` names them instead of
+occupying the workstation. `ALLOW_HEAVY=1` and `ALLOW_FULL=1` keep them local.
+
+`make verify` runs the route's local steps under the Git-common validation lock
+and records them. Before executing it checks the binaries the plan needs, and
+Docker when a local step is container-backed. Each run writes an attempt
 record under `<git-common-dir>/codex/verify` with the plan, candidate
 fingerprint, environment, and per-step state; only a complete passing run
 writes a receipt, keyed by the changed files' content and modes, HEAD, the
@@ -58,7 +63,9 @@ plan, and the environment. An identical rerun reuses that receipt
 (`VERIFY_FORCE=1` bypasses it). A step that changes the candidate invalidates
 the attempt; a failed or interrupted attempt keeps its evidence and grants
 nothing. The receipt names the commands, inputs, environment, duration, and
-the surfaces that had no executable check.
+the surfaces that had no executable check. While CI-owned steps remain it
+records `status: partially_verified`, lists them under `ci_owned`, and names
+CI as the next owner; a route with only CI-owned steps runs nothing locally.
 
 On pull requests the same classifier selects the affected crates through
 `scripts/ci/affected-crates.sh`: a changed crate plus every workspace crate

@@ -8,8 +8,9 @@ and the decisions behind each gate with the alternatives they beat
 
 Ordinary local completion is a matching build and relevant tests under
 [AGENTS.md](../AGENTS.md#validation-budget); [Validation Routing](validation-routing.md)
-selects anything beyond that. `make verify` runs the surface-aware route and
-records a receipt; `ALLOW_FULL=1 make check` is the explicit full gate. Local
+selects anything beyond that. `make verify` runs the surface-aware route's
+local steps and records a receipt, leaving the heavy steps and the initializer
+matrix to CI; `ALLOW_FULL=1 make check` is the explicit full gate. Local
 completion does not assert platform admission, runtime behavior, or a
 release; an explicit request for green CI or a release retains that outcome
 until the real result exists.
@@ -39,10 +40,15 @@ rehearsal in place of plain lifecycle: `/migrate` against a fresh database,
 `no_change` replay, then lifecycle with the pool open.
 <!-- template:end postgres:docs-ci-postgres-gates -->
 
-The source template additionally selects the initializer job on
-`module_initializer`: 48 canonical projection checks establish exact harness
-independence, and six DATABASE × AUTHN representatives run the public initializer,
-build and tests once each. It requires no Docker or per-harness full aggregate;
+The source template additionally selects the initializer matrix on
+`module_initializer`: three parallel parts that together are
+`make template-init-check`. One runs the source suites and the 96 canonical
+projection checks that establish exact harness independence; two run the
+twelve DATABASE × AUTHN × OUTBOUND_HTTP representatives, split by DATABASE,
+each through the public initializer, build and tests once. Every
+initialization in a part reuses that part's warm target cache, so the locked
+dependency graph compiles once per part, not once per initialization. It
+requires no Docker or per-harness full aggregate;
 other quality, security, image and database jobs retain their own gates. The
 runner and its source-only Make include are removed from derived services, so
 initializer proof cannot recur there. [Initialization validation](template-sync.md#validation-boundary)
@@ -170,6 +176,20 @@ surfaces let a schema change require image rehearsal without rebuilding for
 every adapter-only change.
 <!-- template:end postgres:docs-ci-postgres-routing -->
 
+### Pipeline time
+
+Reopened on 2026-09-23 with CI evidence: after stage 9, pull-request runs took
+22–36 minutes and pushes to `main` up to 43, almost all of it the initializer
+job, while every other job finished within 8 minutes.
+
+| Decision | Alternative rejected | Why |
+| --- | --- | --- |
+| The initializer's staged OpenAPI build reuses an explicit absolute `CARGO_TARGET_DIR`, and `template-init-check.sh` exports its one cache to every initialization | a private target per initialization | about 22 initializations per run each compiled the locked graph cold, about 50 s apiece on the 4-vCPU runner, while each representative's build took 3–5 s and its tests 7–14 s on the warm cache; staged files are written fresh, so Cargo still rebuilds every workspace crate |
+| The initializer as a three-part matrix: source suites with projections, graphs 1–6, graphs 7–12 | one sequential job | public-repository runners run the parts in parallel at no cost; `required` still reads one aggregate result; each part keeps its own warm cache |
+| CI builds with `CARGO_PROFILE_DEV_DEBUG=line-tables-only`, and every target cache key carries the level | full debuginfo | the `quality` and initializer caches were 4.2 and 4.1 GB, 8.7 of the repository's 10 GB, so the integration, Go-tool and buildx caches were evicted and one restore took 50–126 s; line tables keep file:line in test backtraces |
+| `make verify` leaves heavy steps and the initializer matrix to CI and records a partial receipt | refusing to run without `ALLOW_HEAVY=1` or `ALLOW_FULL=1` | the refusal led agents to run the full matrix on a workstation, 40 minutes and more with several GB of temporary targets, while CI runs the same gates in parallel |
+| No registry-only cache restore in `security` and CodeQL | the restores that were there | a cache version includes its path list, so restoring fewer paths than `quality` saves never hit (the CodeQL run of 2026-09-23 reported "Cache not found"); the crate downloads cost seconds |
+
 ### Runtime image
 
 Two candidates were built cold from the tracked tree (*verified*,
@@ -292,3 +312,8 @@ The initializer does not create linked Railway inputs or deployment resources.
     template's logs show the same). `crazy-max/ghaction-github-runtime`
     exposes them before `make runtime-image-build` in CI and in the
     publication action.
+16. An `actions/cache` entry is versioned by its path list as well as its
+    key: a restore must name exactly the paths that were saved, or it misses
+    every time without an error.
+17. A tool that sets its own `CARGO_TARGET_DIR` compiles cold on every call;
+    the initializer reuses an explicit absolute caller cache instead.

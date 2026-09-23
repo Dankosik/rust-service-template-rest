@@ -96,8 +96,8 @@ version. CI installs the same versions as prebuilt binaries.
 
 | Command | Does |
 | --- | --- |
-| `make plan` | Classify the worktree's changes since `BASE_REF` and print the route: files, surfaces, commands with reasons and cost, surfaces with nothing to run |
-| `make verify` | Run that route under the validation lock; write an attempt record and, on a complete pass, a receipt under `<git-common-dir>/codex/verify` |
+| `make plan` | Classify the worktree's changes since `BASE_REF` and print the route: files, surfaces, commands with reasons and cost, CI-owned steps, surfaces with nothing to run |
+| `make verify` | Run that route's local steps under the validation lock; write an attempt record and, on a complete pass, a receipt under `<git-common-dir>/codex/verify` that is partial while CI-owned steps remain |
 | `make changed-surfaces-check`, `make affected-crates-check`, `make validation-lock-self-test`, `make verify-check` | The validation scripts' self-tests |
 | `ALLOW_FULL=1 make check` | The full repository gate under the lock: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-instructions`, `docs-check`, selected profile checks, and the five self-tests |
 
@@ -112,8 +112,8 @@ Cargo; it is not a complete public-initialization or runtime receipt. The
 
 | Variable | Meaning |
 | --- | --- |
-| `ALLOW_FULL=1` | Opt into `make check`; not a routine follow-up to every edit |
-| `ALLOW_HEAVY=1` | Opt into image targets, retained-profile database proof, and the history-wide secret scan |
+| `ALLOW_FULL=1` | Opt into `make check`, and keep the source initializer matrix local in `make verify`; not a routine follow-up to every edit |
+| `ALLOW_HEAVY=1` | Opt into image targets, retained-profile database proof, and the history-wide secret scan, which `make verify` otherwise leaves to CI |
 <!-- template:begin postgres:commands-require-docker -->
 | `REQUIRE_DOCKER=1` | Make a missing Docker daemon fail `test-integration-db` and `migration-validate` instead of refusing with exit 2; CI sets it |
 <!-- template:end postgres:commands-require-docker -->

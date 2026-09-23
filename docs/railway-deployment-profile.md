@@ -118,8 +118,8 @@ and the user path the derived service owns.
 ## Change proof for this profile
 
 1. review the diff of this file and the Dockerfile for policy alignment;
-2. run `ALLOW_HEAVY=1 make runtime-image-build` and
-   `ALLOW_HEAVY=1 make runtime-image-check` (`make verify` selects both on an
-   image change) and confirm the clean stop inside 45 s;
+2. take `make runtime-image-build` and `make runtime-image-check` from CI's
+   `image` job (`make verify` leaves both to CI on an image change;
+   `ALLOW_HEAVY=1` runs them locally) and confirm the clean stop inside 45 s;
 3. leave project-specific settings and live deployment evidence to the
    derived service's operator.

@@ -122,9 +122,12 @@ skipped required tests are not passes. Do not create test environments or
 runners solely to establish local completion. Local completion does not
 establish a requested CI, release, deployment, or runtime result. Never run
 CPU-heavy validation concurrently or clear shared caches; `make check` and
-`make verify` take the shared validation lock. `ALLOW_FULL` and `ALLOW_HEAVY`
-are deliberate opt-ins for the aggregate and for container-backed or
-history-wide commands, not permissions to expand acceptance. Existing CI gates
+`make verify` take the shared validation lock. CI owns the steps `make verify`
+marks CI-owned: when pushing is authorized, push the working branch, open or
+update its pull request, and take their result from that run; otherwise report
+them as pending CI. `ALLOW_FULL` and `ALLOW_HEAVY` keep the aggregate or those
+steps local only when a local result is explicitly required, never to expand
+acceptance. Existing CI gates
 remain intact.
 
 ## Work Selection And Loading
