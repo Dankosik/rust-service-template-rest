@@ -5,17 +5,19 @@
 
 mod policy;
 
+use policy::Authority;
+
 #[cfg(test)]
 mod tests;
 
 use std::{error::Error as StdError, fmt, sync::Arc, time::Duration};
 
-use infra_egress_dns::{PublicResolver, ResolveError, admit_address};
+use infra_egress_dns::{PublicAddressResolver, ResolveError};
 use reqwest::redirect::Policy;
 pub use reqwest::{Method, StatusCode, header::HeaderMap};
 use tokio::{sync::Semaphore, time::Instant};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use url::{Host, Url};
+use url::Url;
 
 /// Fixed client ceilings. Every field is required and finite.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,7 +49,7 @@ impl fmt::Debug for Request {
 /// Request-specific custody supplied by the caller that owns the parent work.
 #[derive(Clone)]
 pub struct Operation {
-    pub parent_deadline: Instant,
+    pub deadline: Instant,
     pub cancel: CancellationToken,
     pub timeout: Option<Duration>,
     pub response_body_bytes: Option<usize>,
@@ -119,12 +121,6 @@ impl fmt::Debug for Client {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
-struct Authority {
-    host: Host<String>,
-    port: u16,
-}
-
 impl Client {
     /// Creates a fixed-authority client without performing DNS or network I/O.
     ///
@@ -139,15 +135,9 @@ impl Client {
         shutdown: CancellationToken,
     ) -> Result<Self, Error> {
         policy::validate_limits(&limits)?;
-        let base = policy::parse_base(base)?;
-        let authority = authority(&base).ok_or(Error::InvalidConfiguration)?;
-        match &authority.host {
-            Host::Ipv4(address) => admit_address((*address).into()).map_err(|_| Error::Denied)?,
-            Host::Ipv6(address) => admit_address((*address).into()).map_err(|_| Error::Denied)?,
-            Host::Domain(_) => {}
-        }
+        let (base, authority) = policy::admit_base(base)?;
 
-        let resolver = PublicResolver::new(tracker, shutdown.clone())
+        let resolver = PublicAddressResolver::new(tracker, shutdown.clone())
             .map_err(|_| Error::InvalidConfiguration)?;
         let transport = build_client(resolver, &limits)?;
         Ok(Self {
@@ -180,8 +170,8 @@ impl Client {
         if request.body.len() > self.limits.request_body_bytes {
             return Err(Error::RequestBodyTooLarge);
         }
-        if self.cancelled_or_expired(&operation, deadline) {
-            return self.cancellation_or_timeout(&operation, deadline);
+        if let Some(error) = self.interruption(&operation, deadline) {
+            return Err(error);
         }
 
         let request_cancel = operation.cancel.clone();
@@ -191,9 +181,9 @@ impl Client {
                 .clone()
                 .try_acquire_owned()
                 .map_err(|_| Error::AtCapacity)?;
-            if self.cancelled_or_expired(&operation, deadline) {
+            if let Some(error) = self.interruption(&operation, deadline) {
                 drop(permit);
-                return self.cancellation_or_timeout(&operation, deadline);
+                return Err(error);
             }
 
             let send = self
@@ -269,35 +259,18 @@ impl Client {
         let local_deadline = started
             .checked_add(timeout)
             .ok_or(Error::InvalidConfiguration)?;
-        Ok((operation.parent_deadline.min(local_deadline), body_limit))
+        Ok((operation.deadline.min(local_deadline), body_limit))
     }
 
-    fn cancelled_or_expired(&self, operation: &Operation, deadline: Instant) -> bool {
-        self.shutdown.is_cancelled()
-            || operation.cancel.is_cancelled()
-            || Instant::now() >= deadline
-    }
-
-    fn cancellation_or_timeout(
-        &self,
-        operation: &Operation,
-        deadline: Instant,
-    ) -> Result<Response, Error> {
+    fn interruption(&self, operation: &Operation, deadline: Instant) -> Option<Error> {
         if self.shutdown.is_cancelled() || operation.cancel.is_cancelled() {
-            Err(Error::Cancelled)
+            Some(Error::Cancelled)
         } else if Instant::now() >= deadline {
-            Err(Error::Timeout)
+            Some(Error::Timeout)
         } else {
-            Err(Error::Transport)
+            None
         }
     }
-}
-
-fn authority(url: &Url) -> Option<Authority> {
-    Some(Authority {
-        host: url.host()?.to_owned(),
-        port: url.port_or_known_default()?,
-    })
 }
 
 fn build_client<R>(resolver: R, limits: &Limits) -> Result<reqwest::Client, Error>

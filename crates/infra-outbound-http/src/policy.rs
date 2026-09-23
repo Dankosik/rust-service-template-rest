@@ -1,13 +1,16 @@
+use infra_egress_dns::admit_address;
 use reqwest::header::{self, HeaderMap};
 use tokio::{sync::Semaphore, time::Instant};
-use url::Url;
+use url::{Host, Url};
 
-use crate::{Authority, Error, Limits, authority};
+use crate::{Error, Limits};
 
 // http 1.5 HeaderMap supports at most 32,768 name/value entries. This also
 // keeps the HTTP/1 parser header allocation within its representable range.
 const MAX_HEADER_COUNT: usize = 32_768;
 
+// Correlation fields stay with the inbound request; callers cannot negotiate
+// response encoding here because decoding belongs to the provider adapter.
 const REMOVED_REQUEST_HEADERS: [header::HeaderName; 5] = [
     header::HeaderName::from_static("traceparent"),
     header::HeaderName::from_static("tracestate"),
@@ -43,7 +46,13 @@ pub(crate) fn validate_limits(limits: &Limits) -> Result<(), Error> {
     Ok(())
 }
 
-pub(crate) fn parse_base(raw: &str) -> Result<Url, Error> {
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct Authority {
+    host: Host<String>,
+    port: u16,
+}
+
+pub(crate) fn admit_base(raw: &str) -> Result<(Url, Authority), Error> {
     reject_untrusted_url_text(raw, Error::InvalidConfiguration)?;
     let base = Url::parse(raw).map_err(|_| Error::InvalidConfiguration)?;
     if base.scheme() != "https"
@@ -56,7 +65,13 @@ pub(crate) fn parse_base(raw: &str) -> Result<Url, Error> {
     {
         return Err(Error::InvalidConfiguration);
     }
-    Ok(base)
+    let authority = authority(&base).ok_or(Error::InvalidConfiguration)?;
+    match &authority.host {
+        Host::Ipv4(address) => admit_address((*address).into()).map_err(|_| Error::Denied)?,
+        Host::Ipv6(address) => admit_address((*address).into()).map_err(|_| Error::Denied)?,
+        Host::Domain(_) => {}
+    }
+    Ok((base, authority))
 }
 
 pub(crate) fn admit_target(base: &Url, configured: &Authority, raw: &str) -> Result<Url, Error> {
@@ -81,6 +96,13 @@ pub(crate) fn admit_target(base: &Url, configured: &Authority, raw: &str) -> Res
         return Err(Error::Denied);
     }
     Ok(target)
+}
+
+fn authority(url: &Url) -> Option<Authority> {
+    Some(Authority {
+        host: url.host()?.to_owned(),
+        port: url.port_or_known_default()?,
+    })
 }
 
 fn is_representable_limit(value: usize) -> bool {

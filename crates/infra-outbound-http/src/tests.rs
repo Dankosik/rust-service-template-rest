@@ -26,7 +26,7 @@ use tokio_rustls::{
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::{Client, Error, Limits, Operation, Request, authority, build_fixture_client, policy};
+use crate::{Client, Error, Limits, Operation, Request, build_fixture_client, policy};
 
 const FIXTURE_HOST: &str = "authn.fixture.test";
 const CERT_DER: &[u8] = include_bytes!("../tests/fixtures/outbound-fixture-cert.der");
@@ -95,8 +95,8 @@ fn fixture_client(address: SocketAddr, root: &[u8]) -> Client {
 }
 
 fn fixture_client_with_limits(address: SocketAddr, root: &[u8], limits: Limits) -> Client {
-    let base = Url::parse(&format!("https://{FIXTURE_HOST}/")).expect("fixture URL");
-    let authority = authority(&base).expect("fixture authority");
+    let (base, authority) =
+        policy::admit_base(&format!("https://{FIXTURE_HOST}/")).expect("fixture URL");
     let certificate = reqwest::Certificate::from_der(root).expect("fixture root certificate");
     let transport = build_fixture_client(
         FixtureResolver {
@@ -120,8 +120,8 @@ fn fixture_client_with_limits(address: SocketAddr, root: &[u8], limits: Limits) 
 
 fn denied_client(root: &[u8], address: SocketAddr) -> Client {
     let limits = limits();
-    let base = Url::parse(&format!("https://{FIXTURE_HOST}/")).expect("denied fixture URL");
-    let authority = authority(&base).expect("denied fixture authority");
+    let (base, authority) =
+        policy::admit_base(&format!("https://{FIXTURE_HOST}/")).expect("denied fixture URL");
     let certificate = reqwest::Certificate::from_der(root).expect("denied fixture root");
     let transport = build_fixture_client(
         RawAnswerResolver {
@@ -145,7 +145,7 @@ fn denied_client(root: &[u8], address: SocketAddr) -> Client {
 
 fn operation() -> Operation {
     Operation {
-        parent_deadline: Instant::now() + Duration::from_secs(1),
+        deadline: Instant::now() + Duration::from_secs(1),
         cancel: CancellationToken::new(),
         timeout: None,
         response_body_bytes: None,
@@ -316,7 +316,9 @@ async fn a_trusted_root_does_not_disable_tls_hostname_verification() {
     let (address, server) = tls_server(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
     let mut client = fixture_client(address, ROOT_DER);
     client.base = Url::parse("https://different.fixture.test/").expect("different hostname");
-    client.authority = authority(&client.base).expect("different authority");
+    client.authority = policy::admit_base(client.base.as_str())
+        .expect("different authority")
+        .1;
     client.transport = build_fixture_client(
         FixtureResolver {
             host: "different.fixture.test".to_owned(),
@@ -405,7 +407,7 @@ async fn cancelled_or_expired_operation_never_starts_a_connection() {
         .execute(
             request(),
             Operation {
-                parent_deadline: Instant::now() + Duration::from_secs(1),
+                deadline: Instant::now() + Duration::from_secs(1),
                 cancel,
                 timeout: None,
                 response_body_bytes: None,
@@ -418,7 +420,7 @@ async fn cancelled_or_expired_operation_never_starts_a_connection() {
         .execute(
             request(),
             Operation {
-                parent_deadline: Instant::now() - Duration::from_millis(1),
+                deadline: Instant::now() - Duration::from_millis(1),
                 cancel: CancellationToken::new(),
                 timeout: None,
                 response_body_bytes: None,
@@ -593,7 +595,7 @@ async fn admission_stays_held_through_body_and_releases_on_cancellation() {
             .execute(
                 request(),
                 Operation {
-                    parent_deadline: Instant::now() + Duration::from_secs(1),
+                    deadline: Instant::now() + Duration::from_secs(1),
                     cancel: first_cancel,
                     timeout: None,
                     response_body_bytes: None,
@@ -804,8 +806,8 @@ fn limits_reject_zero_overflow_and_unrepresentable_values() {
 
 #[test]
 fn target_admission_preserves_relative_and_canonical_authority_rules() {
-    let base = policy::parse_base("https://authn.fixture.test/base/").expect("base URL");
-    let configured = authority(&base).expect("base authority");
+    let (base, configured) =
+        policy::admit_base("https://authn.fixture.test/base/").expect("base URL");
     assert_eq!(
         policy::admit_target(&base, &configured, "child?query=yes")
             .expect("relative target")
@@ -840,7 +842,7 @@ fn target_admission_preserves_relative_and_canonical_authority_rules() {
             Err(Error::InvalidTarget)
         ));
     }
-    assert!(policy::parse_base("https://authn.fixture.test/\u{0085}").is_err());
+    assert!(policy::admit_base("https://authn.fixture.test/\u{0085}").is_err());
 }
 
 #[test]

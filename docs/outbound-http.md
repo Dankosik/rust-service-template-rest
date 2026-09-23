@@ -81,7 +81,7 @@ let response = client.execute(
         body: Vec::new(),
     },
     Operation {
-        parent_deadline: deadline,
+        deadline,
         cancel: request_cancel.child_token(),
         timeout: Some(Duration::from_secs(1)),
         response_body_bytes: Some(64 * 1024),

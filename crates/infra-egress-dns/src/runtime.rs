@@ -19,20 +19,20 @@ use crate::{ResolveError, admit_address};
 
 /// Reqwest DNS resolver with public-address admission and tracked work.
 #[derive(Clone)]
-pub struct PublicResolver {
+pub struct PublicAddressResolver {
     config: hickory_resolver::config::ResolverConfig,
     options: hickory_resolver::config::ResolverOpts,
     tracker: TaskTracker,
     cancel: CancellationToken,
 }
 
-impl fmt::Debug for PublicResolver {
+impl fmt::Debug for PublicAddressResolver {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PublicResolver([RUNTIME_OWNED])")
+        formatter.write_str("PublicAddressResolver([RUNTIME_OWNED])")
     }
 }
 
-impl PublicResolver {
+impl PublicAddressResolver {
     /// Snapshots system resolver configuration without performing a lookup.
     ///
     /// # Errors
@@ -96,7 +96,7 @@ impl PublicResolver {
     }
 }
 
-impl Resolve for PublicResolver {
+impl Resolve for PublicAddressResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let resolver = self.clone();
         let host = name.as_str().to_owned();

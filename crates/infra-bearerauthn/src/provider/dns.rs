@@ -2,7 +2,7 @@
 
 use std::net::IpAddr;
 
-pub(super) use infra_egress_dns::PublicResolver;
+pub(super) use infra_egress_dns::PublicAddressResolver;
 
 use crate::Failure;
 

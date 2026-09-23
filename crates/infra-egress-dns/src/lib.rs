@@ -9,7 +9,7 @@ mod runtime;
 use std::{error::Error, fmt};
 
 pub use address::admit_address;
-pub use runtime::PublicResolver;
+pub use runtime::PublicAddressResolver;
 
 /// Content-free DNS outcomes for consumers that need typed error mapping.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

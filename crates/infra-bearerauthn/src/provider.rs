@@ -58,7 +58,7 @@ pub(crate) struct ProviderClient {
 impl ProviderClient {
     pub(crate) fn new(tracker: TaskTracker, cancel: CancellationToken) -> Result<Self, Failure> {
         let resolver =
-            dns::PublicResolver::new(tracker, cancel).map_err(|_| Failure::Unavailable)?;
+            dns::PublicAddressResolver::new(tracker, cancel).map_err(|_| Failure::Unavailable)?;
         let client = build_client(resolver, None)?;
 
         Ok(Self { client })
