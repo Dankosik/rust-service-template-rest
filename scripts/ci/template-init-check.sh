@@ -1,23 +1,17 @@
 #!/usr/bin/env bash
-# Build one private, fixed source candidate, then prove every supported
-# initializer output. The shared checkout is never staged or committed.
+# Validate all canonical projections and six distinct runtime graphs from
+# one private, fixed source candidate. The shared checkout is never staged or committed.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 repo=${ROOT_DIR}
-self_test=false
-source_checks=false
+mode=full
 
 while (($#)); do
 	case "$1" in
-	--self-test)
-		[[ ${self_test} == false && ${source_checks} == false ]] || { echo "--self-test cannot combine with another mode" >&2; exit 2; }
-		self_test=true
-		shift
-		;;
-	--source-checks)
-		[[ ${source_checks} == false && ${self_test} == false ]] || { echo "--source-checks cannot combine with another mode" >&2; exit 2; }
-		source_checks=true
+	--self-test | --source-checks | --projections-only)
+		[[ ${mode} == full ]] || { echo "validation modes cannot be combined" >&2; exit 2; }
+		mode=${1#--}
 		shift
 		;;
 	--repo)
@@ -26,7 +20,7 @@ while (($#)); do
 		shift 2
 		;;
 	*)
-		echo "usage: $0 [--repo ROOT] [--source-checks|--self-test]" >&2
+		echo "usage: $0 [--repo ROOT] [--source-checks|--projections-only|--self-test]" >&2
 		exit 2
 		;;
 	esac
@@ -71,7 +65,7 @@ snapshot_candidate() {
 	while IFS= read -r relative || [[ -n ${relative} ]]; do
 		[[ -z ${relative} || ${relative} == \#* ]] && continue
 		if [[ ${relative} == */ ]]; then
-			[[ ${relative} == evals/template-initializer/ || ${relative} == specs/template-initializer/ ]] || {
+				[[ ${relative} == evals/template-initializer/ || ${relative} == specs/template-initializer/ || ${relative} == crates/infra-bearerauthn/ ]] || {
 				echo "candidate directory is not authorized: ${relative}" >&2; return 2
 			}
 			while IFS= read -r -d '' nested; do
@@ -95,19 +89,19 @@ snapshot_candidate() {
 }
 
 record_command() {
-	local receipt=$1 log=$2 label=$3
+	local receipt=$1 log=$2 label=$3 started=${SECONDS}
 	shift 3
 	printf 'command=%q ' "$@" >>"${receipt}"
 	printf '\nstatus=running label=%s\n' "${label}" >>"${receipt}"
 	if "$@" >"${log}" 2>&1; then
-		printf 'status=passed label=%s log_sha256=%s output=%s\n' "${label}" \
-			"$(shasum -a 256 "${log}" | awk '{print $1}')" "${log}" >>"${receipt}"
+		printf 'status=passed label=%s log_sha256=%s output=%s duration_seconds=%s\n' "${label}" \
+			"$(shasum -a 256 "${log}" | awk '{print $1}')" "${log}" "$((SECONDS - started))" >>"${receipt}"
 		cat "${log}"
 		return 0
 	else
 		local status=$?
-		printf 'status=failed label=%s exit_code=%s log_sha256=%s output=%s\n' "${label}" "${status}" \
-			"$(shasum -a 256 "${log}" | awk '{print $1}')" "${log}" >>"${receipt}"
+		printf 'status=failed label=%s exit_code=%s log_sha256=%s output=%s duration_seconds=%s\n' "${label}" "${status}" \
+			"$(shasum -a 256 "${log}" | awk '{print $1}')" "${log}" "$((SECONDS - started))" >>"${receipt}"
 		cat "${log}" >&2
 		return "${status}"
 	fi
@@ -146,29 +140,10 @@ record_source_suites() {
 		"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-sync-canary.py" --source "${source}"
 }
 
-run_source_checks() {
-	local work source candidate common receipt_dir receipt log_dir
-	local -a scrubbed_identity=(env -u SERVICE_NAME -u REPOSITORY -u DESCRIPTION -u CODEOWNER -u DATABASE -u AGENT_HARNESS)
-	work=$(mktemp -d)
-	trap 'rm -rf -- "${work}"' RETURN
-	common=$(git -C "${repo}" rev-parse --git-common-dir)
-	[[ ${common} == /* ]] || common=${repo}/${common}
-	receipt_dir=${common}/codex/template-init
-	mkdir -p "${receipt_dir}"
-	receipt=$(mktemp "${receipt_dir}/attempt.XXXXXX")
-	log_dir=$(mktemp -d "${receipt_dir}/attempt-logs.XXXXXX")
-	source=${work}/source
-	candidate=$(snapshot_candidate "${source}")
-	printf 'candidate=%s\nmode=source-checks\nstate=running\n' "${candidate}" >"${receipt}"
-	printf 'template initializer fixed candidate: %s\n' "${candidate}"
-	printf 'template initializer receipt: %s\n' "${receipt}"
-	record_source_suites
-	printf 'state=passed\n' >>"${receipt}"
-}
-
-run_matrix() {
-	local work source candidate database harness target cell=0 common receipt_dir receipt log_dir target_cache tools_root output_revision
-	local -a scrubbed_identity=(env -u SERVICE_NAME -u REPOSITORY -u DESCRIPTION -u CODEOWNER -u DATABASE -u AGENT_HARNESS)
+run_validation() {
+	local work source candidate database authn target graph=0 common receipt_dir receipt log_dir target_cache output_revision
+	local started=${SECONDS}
+	local -a scrubbed_identity=(env -u SERVICE_NAME -u REPOSITORY -u DESCRIPTION -u CODEOWNER -u DATABASE -u AUTHN -u AGENT_HARNESS)
 	work=$(mktemp -d)
 	trap 'rm -rf -- "${work}"' RETURN
 	common=$(git -C "${repo}" rev-parse --git-common-dir)
@@ -179,54 +154,58 @@ run_matrix() {
 	log_dir=$(mktemp -d "${receipt_dir}/attempt-logs.XXXXXX")
 	# Explicit caller caches survive this attempt; only private work is removed.
 	target_cache=${CARGO_TARGET_DIR:-${work}/cargo-target}
-	tools_root=${TOOLS_ROOT:-${work}/tools}
 	source=${work}/source
 	candidate=$(snapshot_candidate "${source}")
-	printf 'candidate=%s\nstate=running\n' "${candidate}" >"${receipt}"
+	printf 'candidate=%s\nmode=%s\nstate=running\n' "${candidate}" "${mode}" >"${receipt}"
 	printf 'template initializer fixed candidate: %s\n' "${candidate}"
 	printf 'template initializer receipt: %s\n' "${receipt}"
 
-	record_source_suites
-
-	for database in none postgres; do
-		for harness in core codex claude qwen cursor grok opencode all; do
-			((cell += 1))
-			target=${work}/cell-${cell}-${database}-${harness}
-			git clone --quiet --no-local "${source}" "${target}"
-			printf 'cell=%s database=%s harness=%s candidate=%s\n' "${cell}" "${database}" "${harness}" "${candidate}" >>"${receipt}"
-			record_command "${receipt}" "${log_dir}/cell-${cell}-init.log" "cell-${cell}-init" \
-				"${scrubbed_identity[@]}" bash "${source}/scripts/init-module.sh" --repo "${target}" \
-				--service-name "matrix-${database}-${harness}" \
-				--repository "https://github.com/example/matrix-${database}-${harness}" \
-				--description "Matrix ${database} ${harness}" \
-				--codeowner @example/platform --database "${database}" --agent-harness "${harness}"
-			git -C "${target}" config user.email template-init-check@example.invalid
-			git -C "${target}" config user.name template-init-check
-			git -C "${target}" add -A
-			git -C "${target}" commit -qm "initialized ${database}/${harness}"
-			output_revision=$(git -C "${target}" rev-parse HEAD)
-			printf 'status=passed label=cell-%s-initialized output_revision=%s\n' "${cell}" "${output_revision}" >>"${receipt}"
-			printf 'template initializer cell=%s database=%s harness=%s candidate=%s revision=%s\n' \
-				"${cell}" "${database}" "${harness}" "${candidate}" "${output_revision}"
-			record_command "${receipt}" "${log_dir}/cell-${cell}-build.log" "cell-${cell}-build" \
-				"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" TOOLS_ROOT="${tools_root}" make -C "${target}" build
-			record_command "${receipt}" "${log_dir}/cell-${cell}-check.log" "cell-${cell}-check" \
-				"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" TOOLS_ROOT="${tools_root}" ALLOW_FULL=1 ALLOW_HEAVY=1 make -C "${target}" check
+	if [[ ${mode} != projections-only ]]; then record_source_suites; fi
+	if [[ ${mode} != source-checks ]]; then
+		record_command "${receipt}" "${log_dir}/projection-self-test.log" "projection-self-test" \
+			"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-profile-projections.py" --source "${source}" --self-test
+		record_command "${receipt}" "${log_dir}/projections.log" "canonical-projections" \
+			"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-profile-projections.py" --source "${source}"
+	fi
+	if [[ ${mode} == full ]]; then
+		for database in none postgres; do
+			for authn in none oidc-jwt oidc-introspection; do
+				((graph += 1))
+				target=${work}/runtime-${graph}-${database}-${authn}
+				git clone --quiet --no-local "${source}" "${target}"
+				printf 'runtime_pair=%s database=%s authn=%s harness=core candidate=%s\n' "${graph}" "${database}" "${authn}" "${candidate}" >>"${receipt}"
+				record_command "${receipt}" "${log_dir}/runtime-${graph}-init.log" "runtime-${graph}-init" \
+					"${scrubbed_identity[@]}" bash "${source}/scripts/init-module.sh" --repo "${target}" \
+					--service-name "matrix-${database}-${authn}-core" \
+					--repository "https://github.com/example/matrix-${database}-${authn}-core" \
+					--description "Matrix ${database} ${authn} core" \
+					--codeowner @example/platform --database "${database}" --authn "${authn}" --agent-harness core
+				git -C "${target}" config user.email template-init-check@example.invalid
+				git -C "${target}" config user.name template-init-check
+				git -C "${target}" add -A
+				git -C "${target}" commit -qm "initialized ${database}/${authn}/core"
+				output_revision=$(git -C "${target}" rev-parse HEAD)
+				printf 'status=passed label=runtime-%s-initialized output_revision=%s\n' "${graph}" "${output_revision}" >>"${receipt}"
+				printf 'template initializer runtime_pair=%s database=%s authn=%s candidate=%s revision=%s\n' \
+					"${graph}" "${database}" "${authn}" "${candidate}" "${output_revision}"
+				record_command "${receipt}" "${log_dir}/runtime-${graph}-build.log" "runtime-${graph}-build" \
+					"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" make -C "${target}" build
+				record_command "${receipt}" "${log_dir}/runtime-${graph}-test.log" "runtime-${graph}-test" \
+					"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" make -C "${target}" test
+			done
 		done
-	done
-	printf 'state=passed\n' >>"${receipt}"
+	fi
+	printf 'state=passed\nduration_seconds=%s\n' "$((SECONDS - started))" >>"${receipt}"
 }
 
-# The outer call owns the validation lock once. Cells inherit it and execute
-# serially, so no Cargo-heavy or container-backed proofs overlap.
-if [[ ${self_test} == true ]]; then
+# The outer call owns the validation lock once. Representatives inherit it
+# and run sequentially; focused receipts retain their narrower mode.
+if [[ ${mode} == self-test ]]; then
 	recorder_self_test
-elif [[ ${source_checks} == true && ${VALIDATION_LOCK_HELD:-} == 1 ]]; then
-	run_source_checks
-elif [[ ${source_checks} == true ]]; then
-	bash "${repo}/scripts/ci/validation-lock.sh" -- bash "$0" --repo "${repo}" --source-checks
 elif [[ ${VALIDATION_LOCK_HELD:-} == 1 ]]; then
-	run_matrix
+	run_validation
 else
-	bash "${repo}/scripts/ci/validation-lock.sh" -- bash "$0" --repo "${repo}"
+	arguments=(--repo "${repo}")
+	if [[ ${mode} != full ]]; then arguments+=("--${mode}"); fi
+	bash "${repo}/scripts/ci/validation-lock.sh" -- bash "$0" "${arguments[@]}"
 fi

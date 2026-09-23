@@ -5,11 +5,22 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+
+sys.dont_write_bytecode = True
+
+
+_LEGACY_B206_PROFILE_SHA256 = "75e68f9c7defd4031f5d7a0bc2866f337a6c79f69a69f56c79a268d48d8d6530"
+_LEGACY_B206_REVISION = "b2060279370713f05be81b1ad44a31e3e960bccc"
+_LEGACY_PROFILE_KEYS = ("schema_version", "source_only", "postgres", "identity", "cargo_lock")
+_NEW_PROJECTION_CHECKER = "scripts/tests/template-profile-projections.py"
 
 
 def run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -58,6 +69,156 @@ def init(source: Path, target: Path, *extra: str) -> subprocess.CompletedProcess
     )
 
 
+def legacy_profile_inventory_bytes(source: Path) -> bytes:
+    profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
+    legacy = {key: profile[key] for key in _LEGACY_PROFILE_KEYS}
+    source_only = legacy["source_only"]
+    if not isinstance(source_only, list) or source_only.count(_NEW_PROJECTION_CHECKER) != 1:
+        raise AssertionError("current profile inventory lacks exactly one projection checker entry")
+    legacy["source_only"] = [item for item in source_only if item != _NEW_PROJECTION_CHECKER]
+    rendered = (json.dumps(legacy, indent=2) + "\n").encode("utf-8")
+    if hashlib.sha256(rendered).hexdigest() != _LEGACY_B206_PROFILE_SHA256:
+        raise AssertionError("legacy b206 profile inventory bytes changed")
+    return rendered
+
+
+def install_historical_none(source: Path, target: Path) -> None:
+    (target / "scripts/lib/template_profiles.json").write_bytes(legacy_profile_inventory_bytes(source))
+    lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
+    lock["profiles"].pop("authn")
+    lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
+    (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+
+
+def load_marker_modules(source: Path):
+    library = source / "scripts/lib"
+    sys.path.insert(0, os.fspath(library))
+    try:
+        module_path = library / "template_init.py"
+        spec = importlib.util.spec_from_file_location("template_init_safety_probe", module_path)
+        if spec is None or spec.loader is None:
+            raise AssertionError("template_init.py cannot be imported")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        state = sys.modules.get("template_state")
+        if state is None:
+            raise AssertionError("template_state.py was not imported")
+        return module, state
+    finally:
+        sys.path.remove(os.fspath(library))
+
+
+def assert_marker_syntax(source: Path, work: Path) -> None:
+    initializer, state_module = load_marker_modules(source)
+    table = (
+        ("\t#\ttemplate:begin authn:tabbed", ("begin", "authn", "tabbed"), True),
+        ("  //  template:end oidc-jwt:spaced", ("end", "oidc-jwt", "spaced"), True),
+        ("\t<!--\ttemplate:begin oidc-introspection:html\t-->\t", ("begin", "oidc-introspection", "html"), True),
+        ("t// template:begin authn:literal-prefix", None, False),
+    )
+    for line, expected, executable in table:
+        if initializer._marker(line) != expected:
+            raise AssertionError(f"marker parser mismatch for {line!r}")
+        if state_module._contains_profile_marker((line + "\n").encode("utf-8")) != executable:
+            raise AssertionError(f"marker state mismatch for {line!r}")
+
+    profile = initializer.ProfileData(
+        source_only=(),
+        removals={},
+        markers=(("authn", "marker.txt", "one"), ("authn", "marker.txt", "two")),
+        identity=(),
+        cargo_lock={"schema_version": 1},
+    )
+    inputs = initializer.InitInputs(
+        service_name="marker-api",
+        repository="https://github.com/example/marker-api",
+        description="Marker API",
+        codeowner="@example/platform",
+        database="none",
+        authn="none",
+        agent_harness="core",
+    )
+    for label, contents in (
+        ("duplicate", "# template:begin authn:one\n# template:end authn:one\n# template:begin authn:one\n# template:end authn:one\n"),
+        ("nested", "# template:begin authn:one\n# template:begin authn:two\n# template:end authn:two\n# template:end authn:one\n"),
+        ("missing", "# ordinary content\n"),
+    ):
+        marker_root = work / f"marker-{label}"
+        marker_root.mkdir()
+        (marker_root / "marker.txt").write_text(contents, encoding="utf-8")
+        try:
+            initializer._apply_markers(marker_root, profile, inputs)
+        except initializer.Refusal:
+            continue
+        raise AssertionError(f"{label} marker structure was accepted")
+
+
+def assert_preflight_extraction(source: Path, work: Path) -> None:
+    initializer, _state_module = load_marker_modules(source)
+    calls: list[str] = []
+    original_project = initializer._project_staged
+    original_runtime = initializer._validate_staged_runtime
+    try:
+        initializer._project_staged = lambda *_args: calls.append("project")
+        initializer._validate_staged_runtime = lambda *_args: calls.append("runtime")
+        initializer._preflight_staged(Path("unused"), object(), object())
+    finally:
+        initializer._project_staged = original_project
+        initializer._validate_staged_runtime = original_runtime
+    if calls != ["project", "runtime"]:
+        raise AssertionError(f"preflight phase order changed: {calls}")
+
+    def arguments(target: Path) -> argparse.Namespace:
+        return argparse.Namespace(
+            repo=target,
+            service_name="preflight-api",
+            repository="https://github.com/example/preflight-api",
+            description="Preflight API",
+            codeowner="@example/platform",
+            database="none",
+            authn="none",
+            agent_harness="core",
+        )
+
+    for phase in ("project", "runtime"):
+        target = work / f"preflight-{phase}"
+        clone(source, target)
+        before = state(target)
+        injected: list[str] = []
+        original_project = initializer._project_staged
+        original_runtime = initializer._validate_staged_runtime
+        try:
+            if phase == "project":
+                def fail_project(*_args):
+                    injected.append("project")
+                    raise initializer.Refusal("forced projection failure")
+
+                initializer._project_staged = fail_project
+            else:
+                def fail_runtime(*_args):
+                    injected.append("runtime")
+                    raise initializer.Refusal("forced runtime validation failure")
+
+                initializer._project_staged = lambda *_args: None
+                initializer._validate_staged_runtime = fail_runtime
+            try:
+                initializer.initialize(arguments(target))
+            except initializer.Refusal as error:
+                expected = f"forced {phase}{'ion' if phase == 'project' else ' validation'} failure"
+                if str(error) != expected:
+                    raise AssertionError(f"{phase} preflight raised the wrong refusal: {error}") from error
+            else:
+                raise AssertionError(f"{phase} preflight failure was accepted")
+        finally:
+            initializer._project_staged = original_project
+            initializer._validate_staged_runtime = original_runtime
+        if injected != [phase]:
+            raise AssertionError(f"{phase} preflight did not run the injected failure: {injected}")
+        if state(target) != before:
+            raise AssertionError(f"{phase} preflight failure mutated its target")
+
+
 def must_refuse(source: Path, work: Path, label: str, *extra: str) -> None:
     target = work / label
     clone(source, target)
@@ -65,7 +226,7 @@ def must_refuse(source: Path, work: Path, label: str, *extra: str) -> None:
     result = init(source, target, *extra)
     if result.returncode == 0:
         raise AssertionError(f"{label}: initializer unexpectedly succeeded")
-    if label != "duplicate-db" and "may be supplied once" in result.stderr:
+    if label not in {"duplicate-db", "duplicate-authn"} and "may be supplied once" in result.stderr:
         raise AssertionError(f"{label}: fixture accidentally exercised duplicate-option refusal")
     if state(target) != before:
         raise AssertionError(f"{label}: refusal changed target bytes or Git state")
@@ -87,25 +248,47 @@ def must_refuse_raw_description(source: Path, work: Path) -> None:
         raise AssertionError("non-UTF-8 description was not a preserving refusal")
 
 
-def assert_postgres_pack(source: Path, target: Path) -> None:
+def assert_profile_pack(source: Path, target: Path, profile_name: str, selected: bool) -> None:
     profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
-    for relative in profile["postgres"]["remove_when_none"]:
+    key = "remove_when_none" if profile_name == "postgres" else "remove_when_unselected"
+    for relative in profile[profile_name][key]:
         path = target / relative.rstrip("/")
+        if not selected:
+            if path.exists() or path.is_symlink():
+                raise AssertionError(f"unselected {profile_name} output remains {relative}")
+            continue
         if relative.endswith("/"):
             if path.is_symlink() or not path.is_dir():
-                raise AssertionError(f"postgres output lacks retained directory {relative}")
+                raise AssertionError(f"selected {profile_name} output lacks retained directory {relative}")
         elif path.is_symlink() or not path.is_file():
-            raise AssertionError(f"postgres output lacks retained file {relative}")
+            raise AssertionError(f"selected {profile_name} output lacks retained file {relative}")
+
+
+def assert_profile_packs(source: Path, target: Path, *, database: str, authn: str) -> None:
+    assert_profile_pack(source, target, "postgres", database == "postgres")
+    assert_profile_pack(source, target, "authn", authn != "none")
+    assert_profile_pack(source, target, "oidc-jwt", authn == "oidc-jwt")
+    assert_profile_pack(source, target, "oidc-introspection", authn == "oidc-introspection")
+
+
+def assert_lock_authn(target: Path, expected: str) -> None:
+    lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
+    if lock["profiles"].get("authn") != expected:
+        raise AssertionError(f"template.lock did not record authn={expected}")
 
 
 def check(source: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="template-init-safety-") as temp:
         work = Path(temp)
+        assert_marker_syntax(source, work)
+        assert_preflight_extraction(source, work)
         # Invalid identity inputs refuse before a plan is written. Cc and the
         # explicit Unicode separators are refused; permitted emoji/ZWJ text is
         # exercised by the successful initialization below.
         must_refuse(source, work, "unknown-db", "--database", "sqlite")
         must_refuse(source, work, "duplicate-db", "--database", "none", "--database", "postgres")
+        must_refuse(source, work, "unknown-authn", "--authn", "mtls")
+        must_refuse(source, work, "duplicate-authn", "--authn", "none", "--authn", "oidc-jwt")
         must_refuse(source, work, "codeowner-depth", "--codeowner", "@a/b/c")
         must_refuse(source, work, "reserved-abstract", "--service-name", "abstract")
         must_refuse(source, work, "reserved-gen", "--service-name", "gen")
@@ -121,6 +304,8 @@ def check(source: Path) -> None:
         result = init(source, target, "--database", "none", "--agent-harness", "claude")
         if result.returncode:
             raise AssertionError(f"successful initialization failed: {result.stderr}")
+        assert_profile_packs(source, target, database="none", authn="none")
+        assert_lock_authn(target, "none")
         for removed in [
             "make/source.mk", "scripts/ci/template-init-check.sh", "scripts/tests/template-init-safety.py",
             "crates/infra-postgres", "crates/migrate", "migrations", "env/docker-compose.yml",
@@ -166,6 +351,14 @@ def check(source: Path) -> None:
         repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
         if repeat.returncode or state(target) != after:
             raise AssertionError("matching complete-lock initialization was not a byte-preserving no-op")
+        install_historical_none(source, target)
+        historical_before = state(target)
+        historical_repeat = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
+        if historical_repeat.returncode or state(target) != historical_before:
+            raise AssertionError("actual historical none lock replay was not byte-preserving")
+        historical_mismatch = init(source, target, "--database", "none", "--authn", "oidc-jwt", "--agent-harness", "claude")
+        if historical_mismatch.returncode == 0 or state(target) != historical_before:
+            raise AssertionError("historical none lock accepted an authn profile migration")
         (target / "template.lock").write_text("{\"state\": []}\n", encoding="utf-8")
         malformed_before = state(target)
         malformed = init(source, target, "--database", "none", "--agent-harness", "claude")
@@ -176,7 +369,7 @@ def check(source: Path) -> None:
         postgres = init(source, postgres_target, "--database", "postgres", "--agent-harness", "core")
         if postgres.returncode:
             raise AssertionError(f"postgres initialization failed: {postgres.stderr}")
-        assert_postgres_pack(source, postgres_target)
+        assert_profile_packs(source, postgres_target, database="postgres", authn="none")
         (postgres_target / "specs/service-feature").mkdir(parents=True)
         (postgres_target / "specs/service-feature/decision.md").write_text(
             "Service-owned PostgreSQL decision.\n", encoding="utf-8"
@@ -191,6 +384,18 @@ def check(source: Path) -> None:
         missing_replay = init(source, postgres_target, "--database", "postgres", "--agent-harness", "core")
         if missing_replay.returncode == 0 or state(postgres_target) != missing_before:
             raise AssertionError("complete postgres lock accepted a missing retained pack")
+        for authn in ("oidc-jwt", "oidc-introspection"):
+            authn_target = work / f"{authn}-replay"
+            clone(source, authn_target)
+            initialized = init(source, authn_target, "--database", "none", "--authn", authn, "--agent-harness", "core")
+            if initialized.returncode:
+                raise AssertionError(f"{authn} initialization failed: {initialized.stderr}")
+            assert_profile_packs(source, authn_target, database="none", authn=authn)
+            assert_lock_authn(authn_target, authn)
+            authn_before = state(authn_target)
+            replay = init(source, authn_target, "--database", "none", "--authn", authn, "--agent-harness", "core")
+            if replay.returncode or state(authn_target) != authn_before:
+                raise AssertionError(f"complete {authn} lock replay changed target bytes")
         for permitted in ("union", "raw"):
             allowed = work / f"permitted-{permitted}"
             clone(source, allowed)

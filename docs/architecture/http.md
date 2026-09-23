@@ -94,6 +94,19 @@ bearer scheme arrives with the authentication profile), `401` and `403`
 problem responses, and the `400`, `431`, `503`, and `504` problem responses
 the contract test requires.
 
+<!-- template:begin authn:docs-http-protected-composition -->
+With a retained authentication profile, compose a protected operation through
+`infra_http::authn::protect(routes!(handler), verifier)`. The helper accepts
+the route tuple, verifies its protected security metadata and response family,
+and applies method-scoped authentication without changing unknown-path `404`
+or wrong-method `405` behavior. Its `VerifiedPrincipal` extractor contains
+only a sealed verified principal; handlers never receive a raw token or
+unverified claims. Health probes stay directly merged and explicitly public,
+so supplied Authorization does not cause provider work there.
+The [authentication guide](../authentication.md) owns retained-profile trust,
+failure, provider-budget and lifecycle decisions.
+<!-- template:end authn:docs-http-protected-composition -->
+
 ### Compatibility
 
 `operationId` is a stable identifier. oasdiff fails a pull request on a
@@ -138,6 +151,13 @@ one only with new evidence.
 | Drift check as a test embedding the committed file | hashing generated files around a generate step | runs everywhere `make test` runs; `make openapi-check` names it |
 | Redocly alone (`.redocly.yaml` ported unchanged) | kin-openapi validation in addition | Redocly's `struct` rule validates structure and the document is type-constructed; `vacuum` is the fallback if Node stops being available |
 | oasdiff through `go run` with `breaking-changes-approvals.txt` as `--err-ignore` | the Docker-based GitHub Action | one code path locally and in CI, pinned in `tools/versions.env` |
+
+<!-- template:begin authn:docs-http-bearer-default-exception -->
+When an authentication profile is retained, its real `bearerAuth` scheme and
+global bearer security default are intentionally present before a product route
+exists. This is the accepted exception to the no-unused-scheme convention;
+every public operation, including the probes, must retain `security: []`.
+<!-- template:end authn:docs-http-bearer-default-exception -->
 
 ### Deferred, with the change that reopens each
 

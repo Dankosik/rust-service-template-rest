@@ -39,9 +39,14 @@ rehearsal in place of plain lifecycle: `/migrate` against a fresh database,
 `no_change` replay, then lifecycle with the pool open.
 <!-- template:end postgres:docs-ci-postgres-gates -->
 
-The source template additionally selects the serial 16-output initializer job
-on `module_initializer`. The runner and its source-only Make include are removed
-from derived services; source matrix checks cannot recur there.
+The source template additionally selects the initializer job on
+`module_initializer`: 48 canonical projection checks establish exact harness
+independence, and six DATABASE × AUTHN representatives run the public initializer,
+build and tests once each. It requires no Docker or per-harness full aggregate;
+other quality, security, image and database jobs retain their own gates. The
+runner and its source-only Make include are removed from derived services, so
+initializer proof cannot recur there. [Initialization validation](template-sync.md#validation-boundary)
+defines the proof scopes and focused mode.
 
 A weekly schedule and manual dispatch select every surface, because advisory
 databases move without a commit. Tags select every surface too. A docs-only

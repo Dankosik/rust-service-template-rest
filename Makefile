@@ -3,6 +3,7 @@
 # conflict with the init CLI's duplicate-input refusal.
 ifneq (,$(filter template-init,$(MAKECMDGOALS)))
 DATABASE ?= none
+AUTHN ?= none
 AGENT_HARNESS ?= all
 override SERVICE_NAME := $(value SERVICE_NAME)
 export SERVICE_NAME
@@ -14,6 +15,8 @@ override CODEOWNER := $(value CODEOWNER)
 export CODEOWNER
 override DATABASE := $(value DATABASE)
 export DATABASE
+override AUTHN := $(value AUTHN)
+export AUTHN
 override AGENT_HARNESS := $(value AGENT_HARNESS)
 export AGENT_HARNESS
 endif

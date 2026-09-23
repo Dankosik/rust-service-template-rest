@@ -17,6 +17,10 @@ Do not create a crate, module, or directory before its first real artifact.
 | A binary with its own lifecycle | Its own crate, introduced with that lifecycle |
 | Client-visible REST contract | `#[utoipa::path]` and schema derives in the code; `api/openapi/service.yaml` is the generated, committed form |
 | Runtime configuration | the existing `crates/config/src/<section>.rs` owner |
+<!-- template:begin authn:docs-structure-authn-placement -->
+| Inbound bearer verification, provider transport, and sealed principal | `crates/infra-bearerauthn`; shared grammar/claims stay in the crate and JWT/refresh or introspection remain engine modules selected by the initializer |
+| Protected HTTP method composition and principal extraction | `crates/infra-http/src/authn.rs`; callers use `infra_http::authn::protect` with the route tuple |
+<!-- template:end authn:docs-structure-authn-placement -->
 | Ordinary behavior and boundary tests | `#[cfg(test)] mod tests` beside the owner |
 | Black-box tests of one crate's public surface, including the built binary | `crates/<crate>/tests/<owner>.rs` (`crates/service/tests/lifecycle.rs` drives the binary; `openapi.rs` holds the contract tests) |
 | Delivery scripts | `scripts/ci/<owner>.sh` with a `--self-test` |
@@ -89,6 +93,9 @@ cache, queue, store, or shared crate needs its accepted architecture force.
 - The probe handlers, the `Problem` type, and the shared problem responses
   live in `infra-http` because every derived service keeps them; a feature
   adds a `ToResponse` component there only when a new shared status appears.
+<!-- template:begin authn:docs-structure-authn-test-support -->
+- Authentication fixture transport is exposed only under the default-off `test-support` feature for consuming dev-dependencies. It may exercise the real verifier but never constructs a principal or bypasses verification.
+<!-- template:end authn:docs-structure-authn-test-support -->
 - Adapter-owned instruments stay with the adapter through the `metrics`
   facade; a caller-provided recorder alone does not justify a `metrics.rs`.
 - Every Cargo dependency is declared once in `[workspace.dependencies]` with

@@ -24,6 +24,10 @@ needs; [Validation Routing](validation-routing.md) selects beyond that.
 Crate names are package names: `service`, `service-config` (the
 `crates/config` directory), `health`, `infra-http`, `infra-telemetry`.
 
+<!-- template:begin authn:docs-commands-authn -->
+With an authentication profile retained, `infra-bearerauthn` is also a package name for `make test-package`. Its default-off `test-support` feature exists only for consuming dev-dependencies that mount the real verifier in tests; it is not part of the ordinary release build or a production configuration knob.
+<!-- template:end authn:docs-commands-authn -->
+
 ## Contract
 
 | Command | Does | Needs |
@@ -86,6 +90,13 @@ version. CI installs the same versions as prebuilt binaries.
 | `make verify` | Run that route under the validation lock; write an attempt record and, on a complete pass, a receipt under `<git-common-dir>/codex/verify` |
 | `make changed-surfaces-check`, `make affected-crates-check`, `make validation-lock-self-test`, `make verify-check` | The validation scripts' self-tests |
 | `ALLOW_FULL=1 make check` | The full repository gate under the lock: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-instructions`, `docs-check`, selected profile checks, and the five self-tests |
+
+In the source template, `ALLOW_FULL=1 make template-init-check` checks 48
+canonical projections and initializes/builds/tests six distinct runtime
+representatives. It does not need `ALLOW_HEAVY` or Docker. The source runner's
+`--projections-only` mode performs the focused projection/equality check without
+Cargo; it is not a complete public-initialization or runtime receipt. The
+[initializer guide](template-sync.md#validation-boundary) owns this distinction.
 
 ## Guards and variables
 

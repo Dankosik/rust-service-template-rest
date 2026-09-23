@@ -24,7 +24,7 @@ is not a supported template state.
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | done |
 | 9 | Template initializer, profiles, and template sync | done on merge after required CI |
-| 10 | Optional capability profiles | planned |
+| 10 | Optional capability profiles | 10.1 locally accepted; remaining profiles planned |
 | 11 | Benchmarking and performance evidence | planned |
 | 12 | First release and derived-repository verification | planned |
 
@@ -601,7 +601,8 @@ markers, tests, and initializer support. Order by expected demand:
 
 1. Authentication: `AUTHN=oidc-jwt` (JWKS discovery and refresh, token
    profiles) and `AUTHN=oidc-introspection`; bearer grammar and sanitized
-   failure taxonomy in `crates/infra-bearerauthn`.
+   failure taxonomy in `crates/infra-bearerauthn`. **Locally accepted 2026-09-23**;
+   [adoption and durable decisions](authentication.md).
 2. Bounded outbound HTTP: fixed-authority `reqwest` client with post-DNS
    public-address admission, header and body ceilings, correlation stripping,
    no proxy.
@@ -618,6 +619,24 @@ markers, tests, and initializer support. Order by expected demand:
 8. OAuth 2.0 client-credentials outbound authentication.
 9. S3-compatible object storage with one fixed endpoint.
 10. `examples/reference-service`: one isolated vertical slice.
+
+Stage 10.1 local evidence includes workspace build/tests, the generated
+contract, real local TLS/DNS and mounted HTTP authentication cases, dependency
+policy and existing initializer safety/sync proof. All six DATABASE × AUTHN
+runtime graphs passed initialized build/full checks; those scoped results were
+reused after exact input-equivalence checks during a validation-only refactor.
+The current strict 48-projection run completed in 31 seconds on this workspace
+(receipt `attempt.TIn1zM`), with a fresh validation review PASS. This is measured
+local execution, not a portable benchmark. The earlier run stopped after 18
+completed cells and is not a 48-cell aggregate PASS.
+
+The [initializer proof owner](template-sync.md#validation-boundary) now separates
+48 canonical projections from six future public-CLI/build/test representatives;
+it does not repeat the full aggregate per harness. Immutable local custody is
+under `.git/codex/authn-delivery/`, including source `c24c3b3ccfaf0af06f3bd40427930221b7be286f`
+and the final closeout bundle. No main-checkout commit, CI success, publication
+or deployment is claimed by this local acceptance. Other stage-10 capabilities
+remain outside the delivered scope.
 
 ### Stage 11: Benchmarking and performance evidence
 

@@ -1,0 +1,38 @@
+[package]
+name = "infra-bearerauthn"
+description = "Bounded inbound bearer authentication and verified identity."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+base64 = { workspace = true, features = ["alloc"] }
+hickory-resolver = { workspace = true, features = ["tokio", "system-config"] }
+# template:begin oidc-jwt:authn-jwt-dependency
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
+metrics = { workspace = true }
+# template:end oidc-jwt:authn-jwt-dependency
+reqwest = { workspace = true, features = ["rustls"] }
+# template:begin oidc-introspection:authn-secret-dependency
+secrecy = { workspace = true }
+# template:end oidc-introspection:authn-secret-dependency
+serde = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros", "io-util"] }
+tokio-util = { workspace = true, features = ["rt"] }
+url = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }

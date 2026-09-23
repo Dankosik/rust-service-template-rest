@@ -217,3 +217,26 @@ fn ambient_otlp_credentials_are_refused_under_a_typed_endpoint() {
         "credential must not be echoed: {stderr}"
     );
 }
+
+// template:begin authn:service-lifecycle-disabled-authn
+#[test]
+fn disabled_authentication_leaves_public_probes_unaffected() {
+    let service = Service::spawn(&[("APP__AUTHN__MODE", "none")]);
+    let api = service.await_record("http listener bound")["addr"]
+        .as_str()
+        .expect("addr field")
+        .to_owned();
+    service.await_record("service_ready");
+
+    let response = ureq::get(&format!("http://{api}/health/live"))
+        .header("Authorization", "not a bearer credential")
+        .call()
+        .expect("public liveness response");
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.into_body().read_to_string().unwrap(), "ok");
+
+    service.terminate();
+    let (code, stderr) = service.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+}
+// template:end authn:service-lifecycle-disabled-authn

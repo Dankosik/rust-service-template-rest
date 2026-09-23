@@ -516,8 +516,6 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
-      - name: Load tool manifest
-        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
       - name: Install pinned toolchain
         run: |
           rustup toolchain install
@@ -535,14 +533,10 @@ jobs:
           restore-keys: cargo-initializer-${{ runner.os }}-${{ runner.arch }}-
       - name: Fetch locked Cargo packages
         run: cargo fetch --locked
-      - name: Install pinned Cargo tools
-        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2.87.14
-        with:
-          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Initialize every supported output
-        run: bash ./scripts/ci/measure.sh template-initializer -- env ALLOW_FULL=1 ALLOW_HEAVY=1 REQUIRE_DOCKER=1 make template-init-check
+      - name: Validate projections and runtime representatives
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: bash ./scripts/ci/measure.sh template-initializer -- env ALLOW_FULL=1 make template-init-check
       - name: Save cargo caches
         if: >-
           github.event_name == 'push' &&

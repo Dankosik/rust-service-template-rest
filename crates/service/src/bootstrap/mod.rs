@@ -14,6 +14,9 @@ use std::time::Duration;
 
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
+// template:begin authn:bootstrap-authn-imports
+use infra_bearerauthn::Verifier;
+// template:end authn:bootstrap-authn-imports
 // template:begin postgres:bootstrap-imports
 use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe};
 // template:end postgres:bootstrap-imports
@@ -27,6 +30,9 @@ use secrecy::ExposeSecret;
 use service_config::{
     AppConfig, BuildInfo, Config, FromArgs, LogFormat, TracesSampler, process_failure,
 };
+// template:begin authn:bootstrap-authn-config-import
+use service_config::AuthnMode;
+// template:end authn:bootstrap-authn-config-import
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -61,6 +67,10 @@ pub(crate) enum BootstrapError {
     Admission(health::NotReady),
     #[error("configuration is invalid: {0}")]
     Config(#[from] service_config::ValidationError),
+    // template:begin authn:bootstrap-authn-errors
+    #[error("authentication startup failed")]
+    AuthenticationStartup,
+    // template:end authn:bootstrap-authn-errors
     // template:begin postgres:bootstrap-errors
     #[error("configuration is invalid: postgres.dsn: {0}")]
     PostgresDsn(#[from] infra_postgres::DsnError),
@@ -158,6 +168,9 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // template:end postgres:bootstrap-startup-pool
     let outcome = async {
         let probes: Vec<Box<dyn Probe>> = Vec::new();
+        // template:begin authn:bootstrap-authn-prepare
+        prepare_auth(&config, &tracker, &cancel).await?;
+        // template:end authn:bootstrap-authn-prepare
         // template:begin postgres:bootstrap-postgres-startup
         let (probes, pool) = prepare_postgres(probes, &config, &tracker, &cancel).await?;
         postgres_pool = pool;
@@ -202,6 +215,62 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     }
     outcome
 }
+
+// template:begin authn:bootstrap-prepare-auth-prefix
+#[allow(
+    clippy::unused_async,
+    reason = "JWT discovery awaits I/O; introspection-only output preserves the same bootstrap future without provider I/O"
+)]
+async fn prepare_auth(
+    config: &Config,
+    tracker: &TaskTracker,
+    cancel: &CancellationToken,
+) -> Result<Verifier, BootstrapError> {
+    match config.authn.mode {
+        AuthnMode::None => Ok(Verifier::disabled()),
+        // template:end authn:bootstrap-prepare-auth-prefix
+        // template:begin oidc-jwt:bootstrap-prepare-auth-jwt
+        AuthnMode::OidcJwt => {
+            let (verifier, refresh) = infra_bearerauthn::prepare_jwt(
+                infra_bearerauthn::JwtOptions {
+                    issuer: config.authn.issuer.clone(),
+                    audience: config.authn.audience.clone(),
+                    token_profile: match config.authn.token_profile() {
+                        service_config::TokenProfile::ResourceServer => {
+                            infra_bearerauthn::TokenProfile::ResourceServer
+                        }
+                        service_config::TokenProfile::Rfc9068 => {
+                            infra_bearerauthn::TokenProfile::Rfc9068
+                        }
+                    },
+                },
+                tracker.clone(),
+                cancel.child_token(),
+            )
+            .await
+            .map_err(|_| BootstrapError::AuthenticationStartup)?;
+            tracker.spawn(refresh);
+            Ok(verifier)
+        }
+        // template:end oidc-jwt:bootstrap-prepare-auth-jwt
+        // template:begin oidc-introspection:bootstrap-prepare-auth-introspection
+        AuthnMode::OidcIntrospection => infra_bearerauthn::prepare_introspection(
+            infra_bearerauthn::IntrospectionOptions {
+                issuer: config.authn.issuer.clone(),
+                audience: config.authn.audience.clone(),
+                endpoint: config.authn.introspection_endpoint.clone(),
+                client_id: config.authn.introspection_client_id.clone(),
+                client_secret: config.authn.introspection_client_secret.clone(),
+            },
+            tracker.clone(),
+            cancel.child_token(),
+        )
+        .map_err(|_| BootstrapError::AuthenticationStartup),
+        // template:end oidc-introspection:bootstrap-prepare-auth-introspection
+        // template:begin authn:bootstrap-prepare-auth-suffix
+    }
+}
+// template:end authn:bootstrap-prepare-auth-suffix
 
 // template:begin postgres:bootstrap-open-postgres
 async fn prepare_postgres(
@@ -300,7 +369,8 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
     };
     // The routes and the committed OpenAPI document are the two halves of
     // one contract; only the routes are needed here.
-    let (routes, _document) = service::api::contract().split_for_parts();
+    let contract = service::api::contract();
+    let (routes, _document) = contract.split_for_parts();
     let app = infra_http::harden(
         routes.with_state(readiness.reader()),
         &HardenOptions {

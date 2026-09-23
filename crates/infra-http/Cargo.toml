@@ -18,6 +18,9 @@ axum = { workspace = true, features = ["http1", "tokio", "matched-path", "origin
 axum-prometheus = { workspace = true, features = ["prometheus"] }
 axum-tracing-opentelemetry = { workspace = true, features = ["tracing_level_info"] }
 health = { workspace = true }
+# template:begin authn:http-authn-dependency
+infra-bearerauthn = { workspace = true }
+# template:end authn:http-authn-dependency
 http-body-util = { workspace = true }
 hyper-util = { workspace = true, features = ["server", "server-auto", "server-graceful", "service", "tokio", "http1", "http2"] }
 metrics = { workspace = true }
@@ -34,6 +37,14 @@ utoipa = { workspace = true, features = ["macros"] }
 utoipa-axum = { workspace = true }
 
 [dev-dependencies]
+# template:begin oidc-introspection:http-authn-test-dependencies
+infra-bearerauthn = { workspace = true, features = ["test-support"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
+tokio-util = { workspace = true, features = ["rt"] }
+# template:end oidc-introspection:http-authn-test-dependencies
+# template:begin oidc-introspection:http-introspection-test-secret
+secrecy = { workspace = true }
+# template:end oidc-introspection:http-introspection-test-secret
 uuid = { workspace = true, features = ["std"] }
 itertools = { workspace = true, features = ["use_std"] }
 axum-test = { workspace = true }

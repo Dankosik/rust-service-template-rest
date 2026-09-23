@@ -7,6 +7,10 @@ scripts/lib/template_init.py
 scripts/lib/template_sync.py
 scripts/lib/template_state.py
 scripts/lib/template_profiles.json
+crates/infra-bearerauthn/
+crates/config/src/authn.rs
+crates/infra-http/src/authn.rs
+docs/authentication.md
 template-owned.paths
 docs/template-sync.md
 make/service.mk
@@ -15,6 +19,7 @@ make/source.mk
 scripts/ci/template-init-check.sh
 scripts/tests/template-candidate-paths.txt
 scripts/tests/template-owned-purity.py
+scripts/tests/template-profile-projections.py
 scripts/tests/template-init-safety.py
 scripts/tests/template-sync-canary.py
 evals/template-initializer/

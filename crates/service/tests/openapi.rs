@@ -216,6 +216,32 @@ fn probe_operations_declare_the_shared_problem_responses() {
     }
 }
 
+// template:begin authn:service-openapi-authn-contract
+#[test]
+fn retained_authentication_document_declares_one_bearer_default_and_public_probes() {
+    let document = document();
+    assert_eq!(
+        document["components"]["securitySchemes"]["bearerAuth"]["type"],
+        "http"
+    );
+    assert_eq!(
+        document["components"]["securitySchemes"]["bearerAuth"]["scheme"],
+        "bearer"
+    );
+    assert_eq!(document["security"], json!([{"bearerAuth": []}]));
+
+    for operation_id in ["healthLive", "healthReady"] {
+        let operation = operations(&document)
+            .into_iter()
+            .find(|(_, _, operation)| operation["operationId"] == operation_id)
+            .expect("probe operation exists")
+            .2;
+        assert_eq!(operation["security"], json!([]));
+        assert!(is_public(&document, operation));
+    }
+}
+// template:end authn:service-openapi-authn-contract
+
 /// The classifier fails closed on every alternative that is not exactly the
 /// wired bearer scheme, so a protected operation cannot slip through with
 /// an anonymous or unsupported path.

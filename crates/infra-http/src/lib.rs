@@ -10,6 +10,9 @@
 //! contract decisions are recorded in `docs/architecture/http.md`.
 
 pub mod problem;
+// template:begin authn:infra-http-authn-module
+pub mod authn;
+// template:end authn:infra-http-authn-module
 
 mod access_log;
 mod harden;
@@ -21,6 +24,9 @@ mod server;
 pub use harden::{
     HTTP_METRICS_NAMES, HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, SHED_REQUESTS_METRIC, harden,
 };
+// template:begin authn:infra-http-authn-exports
+pub use authn::{AUTHN_VERIFICATIONS_METRIC, ProtectError, VerifiedPrincipal, protect};
+// template:end authn:infra-http-authn-exports
 pub use problem::{Code, InvalidParam, Problem};
 pub use request_id::{REQUEST_ID_HEADER, request_id};
 pub use router::router;
