@@ -106,6 +106,14 @@ so supplied Authorization does not cause provider work there.
 The [authentication guide](../authentication.md) owns retained-profile trust,
 failure, provider-budget and lifecycle decisions.
 <!-- template:end authn:docs-http-protected-composition -->
+<!-- template:begin request-budget:docs-http-request-budget -->
+The hardened chain stamps `infra_http::RequestDeadline` immediately before
+the existing request timer. Its `at()` accessor exposes the same absolute
+instant without allowing a reset. A request-owned provider must observe it,
+subtract its own response reserve, and refuse a missing stamp; the outer timer
+remains the final inbound timeout authority.
+<!-- template:end request-budget:docs-http-request-budget -->
+
 
 ### Compatibility
 

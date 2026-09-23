@@ -51,6 +51,9 @@ def check(root: Path) -> None:
         "authn": "remove_when_unselected",
         "oidc-jwt": "remove_when_unselected",
         "oidc-introspection": "remove_when_unselected",
+        "outbound-http": "remove_when_unselected",
+        "egress-dns": "remove_when_unselected",
+        "request-budget": "remove_when_unselected",
     }
     for name, removal_key in expected_profiles.items():
         section = profile.get(name)
@@ -58,8 +61,10 @@ def check(root: Path) -> None:
             raise AssertionError(f"profile inventory has no exact {name} section")
         removals = section[removal_key]
         markers = section["markers"]
-        if not isinstance(removals, list) or not removals or not isinstance(markers, list) or not markers:
+        if not isinstance(removals, list) or not isinstance(markers, list) or not markers:
             raise AssertionError(f"profile inventory has an incomplete {name} projection")
+        if name != "request-budget" and not removals:
+            raise AssertionError(f"profile inventory has no removable {name} output")
         for relative in removals:
             plain = relative.rstrip("/")
             if any(plain == entry.rstrip("/") or plain.startswith(f"{entry.rstrip('/')}/") for entry in entries):

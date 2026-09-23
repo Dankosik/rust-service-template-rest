@@ -8,9 +8,12 @@ scripts/lib/template_sync.py
 scripts/lib/template_state.py
 scripts/lib/template_profiles.json
 crates/infra-bearerauthn/
+crates/infra-egress-dns/
+crates/infra-outbound-http/
 crates/config/src/authn.rs
 crates/infra-http/src/authn.rs
 docs/authentication.md
+docs/outbound-http.md
 template-owned.paths
 docs/template-sync.md
 make/service.mk

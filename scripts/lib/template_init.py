@@ -37,7 +37,9 @@ from template_state import (
     git_head,
     git_root,
     lock_has_explicit_authn,
+    lock_has_explicit_outbound_http,
     load_lock,
+    OUTBOUND_HTTP_CHOICES,
     parse_manifest,
     parse_json_bytes,
     safe_relative,
@@ -73,6 +75,7 @@ class InitInputs:
     codeowner: str
     database: str
     authn: str
+    outbound_http: str
     agent_harness: str
 
     def identity(self) -> dict[str, str]:
@@ -84,7 +87,12 @@ class InitInputs:
         }
 
     def profiles(self) -> dict[str, str]:
-        return {"database": self.database, "authn": self.authn, "agent_harness": self.agent_harness}
+        return {
+            "database": self.database,
+            "authn": self.authn,
+            "outbound_http": self.outbound_http,
+            "agent_harness": self.agent_harness,
+        }
 
 
 @dataclass(frozen=True)
@@ -118,12 +126,15 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         codeowner=validate_codeowner(_argument_value(arguments, "codeowner")),
         database=_argument_value(arguments, "database", default="none"),
         authn=_argument_value(arguments, "authn", default="none"),
+        outbound_http=_argument_value(arguments, "outbound_http", default="none"),
         agent_harness=_argument_value(arguments, "agent_harness", default="all"),
     )
     if inputs.database not in DATABASE_CHOICES:
         raise Refusal("DATABASE is unsupported")
     if inputs.authn not in AUTHN_CHOICES:
         raise Refusal("AUTHN is unsupported")
+    if inputs.outbound_http not in OUTBOUND_HTTP_CHOICES:
+        raise Refusal("OUTBOUND_HTTP is unsupported")
     if inputs.agent_harness not in HARNESS_CHOICES:
         raise Refusal("AGENT_HARNESS is unsupported")
     return inputs
@@ -144,9 +155,17 @@ _CURRENT_PROFILE_INVENTORY_KEYS = frozenset(
         "cargo_lock",
     }
 )
+_OUTBOUND_PROFILE_INVENTORY_KEYS = frozenset(
+    {
+        *_CURRENT_PROFILE_INVENTORY_KEYS,
+        "outbound-http",
+        "egress-dns",
+        "request-budget",
+    }
+)
 
 
-def _profile_data(snapshot: Path, *, historical_none: bool = False) -> ProfileData:
+def _profile_data(snapshot: Path, *, historical_authn: bool = False, historical_outbound: bool = False) -> ProfileData:
     profile_path = snapshot / _PROFILE_FILE
     try:
         raw = parse_json_bytes(profile_path.read_bytes(), _PROFILE_FILE)
@@ -155,10 +174,15 @@ def _profile_data(snapshot: Path, *, historical_none: bool = False) -> ProfileDa
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
         raise Refusal("template profile inventory has an unsupported schema")
     keys = frozenset(raw)
-    if keys == _CURRENT_PROFILE_INVENTORY_KEYS:
+    if keys == _OUTBOUND_PROFILE_INVENTORY_KEYS:
         include_authn = True
-    elif historical_none and keys == _LEGACY_PROFILE_INVENTORY_KEYS:
+        include_outbound = True
+    elif historical_outbound and keys == _CURRENT_PROFILE_INVENTORY_KEYS:
+        include_authn = True
+        include_outbound = False
+    elif historical_authn and keys == _LEGACY_PROFILE_INVENTORY_KEYS:
         include_authn = False
+        include_outbound = False
     else:
         raise Refusal("template profile inventory has an unsupported schema")
     source_only = _path_list(raw["source_only"], "source_only")
@@ -169,6 +193,13 @@ def _profile_data(snapshot: Path, *, historical_none: bool = False) -> ProfileDa
     markers = _markers("postgres", postgres["markers"])
     if include_authn:
         for profile in ("authn", "oidc-jwt", "oidc-introspection"):
+            section = raw[profile]
+            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+                raise Refusal(f"template {profile} inventory has an unsupported shape")
+            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
+            markers.extend(_markers(profile, section["markers"]))
+    if include_outbound:
+        for profile in ("outbound-http", "egress-dns", "request-budget"):
             section = raw[profile]
             if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
@@ -319,6 +350,10 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
     selected = {"postgres"} if inputs.database == "postgres" else set()
     if inputs.authn != "none":
         selected.update(("authn", inputs.authn))
+    if inputs.outbound_http == "bounded":
+        selected.add("outbound-http")
+    if inputs.authn != "none" or inputs.outbound_http == "bounded":
+        selected.update(("egress-dns", "request-budget"))
     return selected
 
 
@@ -560,7 +595,12 @@ def _replay(root: Path, inputs: InitInputs) -> int:
         raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
     if lock["identity"] != inputs.identity() or lock["profiles"] != inputs.profiles():
         raise Refusal("template initialization choices differ from the complete template.lock")
-    profiles = _profile_data(root, historical_none=not lock_has_explicit_authn(root, required=True))
+    profiles = _profile_data(
+        root,
+        historical_authn=not lock_has_explicit_authn(root, required=True),
+        historical_outbound=lock_has_explicit_authn(root, required=True)
+        and not lock_has_explicit_outbound_http(root, required=True),
+    )
     _postconditions(root, inputs, profiles)
     print("template init: matching complete lock; no changes")
     return 0
@@ -884,7 +924,7 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
     if inputs.authn != "oidc-jwt":
         _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
         _project_feature_edge(records, "zeroize", "1.9.0", ["zeroize_derive"], [])
-    if inputs.authn == "none":
+    if inputs.authn == "none" and inputs.outbound_http == "none":
         _project_feature_edge(records, "ipnet", "2.12.2", ["serde"], [])
         _project_feature_edge(records, "once_cell", "1.21.4", ["critical-section", "portable-atomic"], [])
 
@@ -1041,6 +1081,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codeowner", action=SingleValue)
     parser.add_argument("--database", action=SingleValue)
     parser.add_argument("--authn", action=SingleValue)
+    parser.add_argument("--outbound-http", action=SingleValue)
     parser.add_argument("--agent-harness", action=SingleValue)
     return parser
 

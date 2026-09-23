@@ -15,6 +15,9 @@ from pathlib import Path
 _LEGACY_B206_PROFILE_SHA256 = "75e68f9c7defd4031f5d7a0bc2866f337a6c79f69a69f56c79a268d48d8d6530"
 _LEGACY_B206_REVISION = "b2060279370713f05be81b1ad44a31e3e960bccc"
 _LEGACY_PROFILE_KEYS = ("schema_version", "source_only", "postgres", "identity", "cargo_lock")
+_AUTH_ONLY_PROFILE_KEYS = (
+    "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection", "identity", "cargo_lock",
+)
 _NEW_PROJECTION_CHECKER = "scripts/tests/template-profile-projections.py"
 
 
@@ -86,7 +89,19 @@ def install_historical_none(source: Path, target: Path) -> None:
     (target / "scripts/lib/template_profiles.json").write_bytes(rendered)
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     lock["profiles"].pop("authn")
+    lock["profiles"].pop("outbound_http", None)
     lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
+    (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+
+
+def install_derived_auth_only_none(source: Path, target: Path) -> None:
+    profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
+    auth_only = {key: profile[key] for key in _AUTH_ONLY_PROFILE_KEYS}
+    (target / "scripts/lib/template_profiles.json").write_text(
+        json.dumps(auth_only, indent=2) + "\n", encoding="utf-8"
+    )
+    lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
+    lock["profiles"].pop("outbound_http", None)
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -106,15 +121,21 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
             raise AssertionError(f"selected {profile_name} file is missing {relative}")
 
 
-def assert_authn_output(source: Path, target: Path, authn: str) -> None:
+def assert_profile_output(source: Path, target: Path, authn: str, outbound_http: str) -> None:
     for profile, selected in (("authn", authn != "none"), ("oidc-jwt", authn == "oidc-jwt"), ("oidc-introspection", authn == "oidc-introspection")):
         assert_profile_pack(source, target, profile, selected)
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     if lock["profiles"].get("authn") != authn:
         raise AssertionError(f"sync canary lock did not record authn={authn}")
+    if lock["profiles"].get("outbound_http") != outbound_http:
+        raise AssertionError(f"sync canary lock did not record outbound_http={outbound_http}")
+    assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
+    shared_selected = authn != "none" or outbound_http == "bounded"
+    assert_profile_pack(source, target, "egress-dns", shared_selected)
+    assert_profile_pack(source, target, "request-budget", shared_selected)
 
 
-def initialize(source: Path, target: Path, authn: str | None) -> subprocess.CompletedProcess[str]:
+def initialize(source: Path, target: Path, authn: str | None, outbound_http: str | None = None) -> subprocess.CompletedProcess[str]:
     command = [
         "bash", os.fspath(source / "scripts/init-module.sh"), "--repo", os.fspath(target),
         "--service-name", "canary-api", "--repository", "https://github.com/example/canary-api",
@@ -123,6 +144,8 @@ def initialize(source: Path, target: Path, authn: str | None) -> subprocess.Comp
     ]
     if authn is not None:
         command.extend(("--authn", authn))
+    if outbound_http is not None:
+        command.extend(("--outbound-http", outbound_http))
     return run(command, cwd=source)
 
 
@@ -131,10 +154,10 @@ def check(source: Path) -> None:
         work = Path(temp)
         target = work / "target"
         clone(source, target)
-        initialized = initialize(source, target, "oidc-jwt")
+        initialized = initialize(source, target, "oidc-jwt", "bounded")
         if initialized.returncode:
             raise AssertionError(initialized.stderr)
-        assert_authn_output(source, target, "oidc-jwt")
+        assert_profile_output(source, target, "oidc-jwt", "bounded")
         for authn in ("oidc-introspection", None):
             profile_target = work / f"profile-{authn or 'historical-none'}"
             clone(source, profile_target)
@@ -142,8 +165,16 @@ def check(source: Path) -> None:
             if profile_initialized.returncode:
                 raise AssertionError(profile_initialized.stderr)
             expected = authn or "none"
-            assert_authn_output(source, profile_target, expected)
+            assert_profile_output(source, profile_target, expected, "none")
             if authn is None:
+                install_derived_auth_only_none(source, profile_target)
+                auth_only_before = tree_state(profile_target)
+                auth_only_replay = initialize(source, profile_target, "none", "none")
+                if auth_only_replay.returncode or tree_state(profile_target) != auth_only_before:
+                    raise AssertionError("derived auth-only none lock replay changed the sync canary target")
+                auth_only_mismatch = initialize(source, profile_target, "none", "bounded")
+                if auth_only_mismatch.returncode == 0 or tree_state(profile_target) != auth_only_before:
+                    raise AssertionError("auth-only none sync canary accepted an outbound profile migration")
                 install_historical_none(source, profile_target)
                 before = tree_state(profile_target)
                 replay = initialize(source, profile_target, "none")

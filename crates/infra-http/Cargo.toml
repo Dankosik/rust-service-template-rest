@@ -49,5 +49,5 @@ uuid = { workspace = true, features = ["std"] }
 itertools = { workspace = true, features = ["use_std"] }
 axum-test = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "test-util"] }
 tower = { workspace = true, features = ["util"] }

@@ -1,7 +1,7 @@
 # Initialization and portable updates
 
 Initialization gives a clean template checkout its service identity and selects
-the existing database, authentication, and agent-harness packs. Later synchronization adopts
+the existing database, authentication, outbound HTTP, and agent-harness packs. Later synchronization adopts
 portable tooling and instructions from a committed source checkout. The
 [ownership manifest](../template-owned.paths) is the full-sync copy authority;
 the service keeps its application, configuration and local policies.
@@ -22,6 +22,7 @@ make template-init \
   CODEOWNER=@example/platform \
   DATABASE=none \
   AUTHN=none \
+  OUTBOUND_HTTP=none \
   AGENT_HARNESS=claude
 ```
 
@@ -33,12 +34,12 @@ scripts/init-module.sh --repo . \
   --repository https://github.com/example/catalog-api \
   --description 'Catalog API' \
   --codeowner @example/platform \
-  --database none --authn none --agent-harness claude
+  --database none --authn none --outbound-http none --agent-harness claude
 ```
 
 The four identity values are required. `DATABASE` defaults to `none` and accepts
 `none` or `postgres`. `AGENT_HARNESS` defaults to `all` and accepts `core`,
-`codex`, `claude`, `qwen`, `cursor`, `grok`, `opencode`, or `all`. Every pair is
+`codex`, `claude`, `qwen`, `cursor`, `grok`, `opencode`, or `all`. Every combination is
 supported. `core` keeps canonical instructions without a product adapter;
 `all` keeps the six existing adapters. PostgreSQL remains disabled at runtime
 until configured when its pack is retained. The local
@@ -47,6 +48,14 @@ until configured when its pack is retained. The local
 <!-- template:begin authn:docs-template-init-authn -->
 `AUTHN` defaults to `none` and accepts `none`, `oidc-jwt`, or `oidc-introspection`; exactly one authentication engine may be retained. The direct entry takes the same choice as `--authn`. `none` removes all authentication configuration, code, tests, dependencies, and adopter guidance. An initialized authentication profile still defaults to runtime `authn.mode = "none"`, so enabling it requires a complete valid runtime trust tuple.
 <!-- template:end authn:docs-template-init-authn -->
+<!-- template:begin outbound-http:docs-template-init-outbound -->
+`OUTBOUND_HTTP` defaults to `none` and accepts `none` or `bounded`; the direct
+entry takes `--outbound-http`. `bounded` retains the [client guide](outbound-http.md),
+crate and tests independently of authentication. `none` removes that pack.
+The shared DNS and readonly request budget stay when auth or outbound needs
+them. Selection supplies no provider configuration or automatic request.
+<!-- template:end outbound-http:docs-template-init-outbound -->
+
 
 Service names are lowercase ASCII, start with a letter, use single hyphens
 between letters or digits, end in a letter or digit, and have at most 64
@@ -79,9 +88,17 @@ Repeating the exact initialization values checks identity and profile structure
 and succeeds without rewriting ordinary service edits. A different selection,
 incomplete record, malformed record, or inconsistent structure refuses. Profile
 migration of an established service is outside this command's scope.
+New schema-1 records contain exactly the `database`, `authn`, `outbound_http`
+and `agent_harness` profile fields. The only admitted historical profile shapes
+are `database` + `agent_harness` and `database` + `authn` + `agent_harness`;
+missing selections in those shapes mean `none`. Matching historical replay
+preserves the original lock bytes. Partial or unknown shapes refuse.
+
 
 <!-- template:begin authn:docs-template-init-authn-lock -->
-New schema-1 records write the chosen `authn` value. A historical schema-1 record without it means `none`; it does not imply JWT support. Changing the choice after initialization is a refused profile migration.
+The lock records the selected `authn` value. Historical records without it
+mean `none`; they do not imply JWT support. Changing the choice after
+initialization is a refused profile migration.
 <!-- template:end authn:docs-template-init-authn-lock -->
 
 ## Adopt a committed source
@@ -122,6 +139,11 @@ absent database pack.
 <!-- template:begin authn:docs-template-init-authn-sync -->
 Portable sync never restores a pruned authentication engine, runtime configuration, or profile-marked adopter documentation; the target lock and profile policy remain authoritative.
 <!-- template:end authn:docs-template-init-authn-sync -->
+<!-- template:begin outbound-http:docs-template-init-outbound-sync -->
+Portable sync cannot restore a pruned outbound pack, shared DNS runtime, or
+profile-marked guide. The target lock remains authoritative.
+<!-- template:end outbound-http:docs-template-init-outbound-sync -->
+
 
 Application/Cargo sources, configuration, secrets, OpenAPI, migrations, README,
 CODEOWNERS, initialization provenance, CI activation and local architecture,
@@ -171,16 +193,16 @@ no automatic rollback, reset, retry or destructive resume.
 Use the service's [command policy](build-test-and-development-commands.md) and
 [validation router](validation-routing.md) for ordinary development.
 The source template additionally owns `make template-owned-purity-check` and
-`ALLOW_FULL=1 make template-init-check`. It checks all 48 canonical profile and
-harness projections, then initializes, builds and tests six core representatives:
-one per DATABASE × AUTHN runtime graph. Exact non-harness tree equality proves
+`ALLOW_FULL=1 make template-init-check`. It checks all 96 canonical profile and
+harness projections, then initializes, builds and tests twelve core representatives:
+one per DATABASE × AUTHN × OUTBOUND_HTTP runtime graph. Exact non-harness tree equality proves
 that the other harness choices do not change runtime or contract-generation
 inputs. Quality, dependency, image and database gates retain their own scopes;
 the initializer command does not repeat the full aggregate per harness.
 
 `bash scripts/ci/template-init-check.sh --projections-only` records the focused
-48-projection proof without Cargo or full/heavy admission. It does not claim
-48 public-CLI initializations or builds. `--source-checks` keeps the source
+96-projection proof without Cargo or full/heavy admission. It does not claim
+96 public-CLI initializations or builds. `--source-checks` keeps the source
 safety/purity/sync route. The public initializer always performs its complete
 locked metadata, formatting and OpenAPI preflight before changing a target;
 neither focused proof mode changes that command. These source runners are

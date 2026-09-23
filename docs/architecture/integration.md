@@ -46,6 +46,15 @@ service's composition, otherwise their own crate with its own lifecycle.
 <!-- template:begin authn:docs-integration-authn-provider -->
 Inbound authentication's provider destination is fixed by validated configuration, never by the caller. The adapter permits only HTTPS, normal TLS hostname/certificate validation, public-unicast connection destinations, no redirects, proxy, retries, or connection reuse, and a 1 MiB response body. Provider work is bounded by three seconds and the enclosing request deadline; the HTTP transport's existing inbound header limit is separate from the provider-client header-count limit.
 <!-- template:end authn:docs-integration-authn-provider -->
+<!-- template:begin outbound-http:docs-integration-outbound -->
+A provider with a fixed public HTTPS dependency uses the retained
+[bounded outbound client](../outbound-http.md). The adapter supplies finite
+limits, credentials, a parent deadline with response reserve, and cancellation;
+it owns parsing and business errors. The client enforces same-authority targets,
+post-DNS public-address admission, bounded encoded bodies/headers and removal
+of correlation headers. Selection itself adds no neighbour or startup call.
+<!-- template:end outbound-http:docs-integration-outbound -->
+
 <!-- template:begin oidc-jwt:docs-integration-jwt -->
 JWT mode uses OIDC discovery and JWKS only from the exact configured issuer's discovery result. It accepts signed RS256 access tokens against eligible RSA keys; token headers never choose a trust destination. Refresh replaces a key set atomically, retains the last usable set after a failed fetch, and is not a revocation service.
 <!-- template:end oidc-jwt:docs-integration-jwt -->

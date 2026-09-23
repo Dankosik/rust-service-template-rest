@@ -14,6 +14,13 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 <!-- template:begin authn:docs-boundaries-authn-owner -->
 | `infra-bearerauthn` (`crates/infra-bearerauthn`) | Bearer-envelope parsing, sealed verified identity, fixed verification failures, strict claims, and the selected OIDC JWT or introspection verifier with its provider transport. | Authorization policy, configuration loading, route assembly, readiness, or an application-visible raw token/claims API. |
 <!-- template:end authn:docs-boundaries-authn-owner -->
+<!-- template:begin outbound-http:docs-boundaries-outbound-owner -->
+| `infra-outbound-http` (`crates/infra-outbound-http`) | Fixed-authority public HTTPS exchanges, finite request/response limits, shared admission and operation lifetime ([guide](../outbound-http.md)). | Provider credentials, parsing, retries, configuration, readiness or bootstrap. |
+<!-- template:end outbound-http:docs-boundaries-outbound-owner -->
+<!-- template:begin egress-dns:docs-boundaries-egress-owner -->
+| `infra-egress-dns` (`crates/infra-egress-dns`) | Public-address admission and tracked, cancellation-aware Hickory resolution. | Consumer HTTP policy, provider failures, credentials or readiness. |
+<!-- template:end egress-dns:docs-boundaries-egress-owner -->
+
 | `integration-tests` (`test/`) | Executable utility recipes and any selected profile proof. | Anything a binary runs; the service's process tests stay in `crates/service/tests/`. |
 | `crates/<feature>` (none yet) | Use cases, business types, invariants, domain errors, and the feature's `OpenApiRouter` with its handlers. | Transport policy, provider drivers, runtime configuration, process lifecycle. |
 | `crates/infra-<provider>` (further adapters) | One transport or provider adapter: admission, budgets, mapping to feature-owned types. | Business rules, config precedence, other adapters' policy. |
@@ -48,7 +55,15 @@ main binary (crates/service, composition root)
 <!-- template:begin authn:docs-boundaries-authn-edges -->
   -> infra-bearerauthn
 infra-http -> infra-bearerauthn
+infra-bearerauthn -> infra-egress-dns
 <!-- template:end authn:docs-boundaries-authn-edges -->
+<!-- template:begin outbound-http:docs-boundaries-outbound-edges -->
+infra-outbound-http -> infra-egress-dns, reqwest, url, tokio, tokio-util
+<!-- template:end outbound-http:docs-boundaries-outbound-edges -->
+<!-- template:begin egress-dns:docs-boundaries-egress-edges -->
+infra-egress-dns -> reqwest DNS types, hickory-resolver, tokio, tokio-util
+<!-- template:end egress-dns:docs-boundaries-egress-edges -->
+
 
 integration-tests (test/)
   -> utility and transport recipes, health
@@ -63,8 +78,8 @@ Its integration tests also depend on the provider and migrator.
 
 Feature crates never depend on a transport or provider crate; bootstrap may
 know every adapter because it is the composition root. Shared contracts start
-beside their real consumer and move only for observed reuse. `health` is the
-one leaf two crates share (`infra-http` reads the verdict, `service` drives
+beside their real consumer and move only for observed reuse. `health` is a
+leaf two crates share (`infra-http` reads the verdict, `service` drives
 the refresher), which is why it is its own crate rather than a module of
 either.
 

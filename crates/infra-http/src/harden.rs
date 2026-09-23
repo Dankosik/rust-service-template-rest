@@ -42,25 +42,27 @@ use crate::access_log::{self, AccessLogOptions, UNMATCHED_ROUTE};
 use crate::problem::{AT_CAPACITY_DETAIL, Code, Problem, SANITIZED_DETAIL};
 use crate::request_id;
 
-// template:begin authn:http-request-deadline
+// template:begin request-budget:http-request-deadline
 /// The conservative deadline shared with request-scoped dependencies.
 ///
 /// Only this module constructs it, immediately before the tower timeout that
 /// remains the final 504 authority. Consumers may observe the instant but
 /// cannot introduce a second request budget.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct RequestDeadline(tokio::time::Instant);
+pub struct RequestDeadline(tokio::time::Instant);
 
 impl RequestDeadline {
     fn from_timeout(timeout: Duration) -> Self {
         Self(tokio::time::Instant::now() + timeout)
     }
 
-    pub(crate) const fn at(&self) -> tokio::time::Instant {
+    /// The existing absolute request deadline; observing it never extends the budget.
+    #[must_use]
+    pub const fn at(&self) -> tokio::time::Instant {
         self.0
     }
 }
-// template:end authn:http-request-deadline
+// template:end request-budget:http-request-deadline
 
 /// Retry hint on a shed request. Short on purpose: shedding means the server
 /// is momentarily past capacity, not down.
@@ -118,9 +120,9 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
     let in_flight = options
         .max_in_flight
         .map(|limit| GlobalConcurrencyLimitLayer::new(limit.get() as usize));
-    // template:begin authn:http-request-deadline-mapper-state
+    // template:begin request-budget:http-request-deadline-mapper-state
     let request_timeout = options.request_timeout;
-    // template:end authn:http-request-deadline-mapper-state
+    // template:end request-budget:http-request-deadline-mapper-state
 
     // `load_shed` plus `GlobalConcurrencyLimitLayer` reject with 503
     // instead of queueing. They sit inside `ServiceBuilder` on
@@ -148,14 +150,14 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         .layer(HandleErrorLayer::new(middleware_error))
         .load_shed()
         .layer(option_layer(in_flight))
-        // template:begin authn:http-request-deadline-mapper
+        // template:begin request-budget:http-request-deadline-mapper
         .map_request(move |mut request: Request| {
             request
                 .extensions_mut()
                 .insert(RequestDeadline::from_timeout(request_timeout));
             request
         })
-        // template:end authn:http-request-deadline-mapper
+        // template:end request-budget:http-request-deadline-mapper
         .timeout(options.request_timeout)
         .layer(CatchPanicLayer::custom(panic_to_problem))
         .layer(middleware::from_fn_with_state(
@@ -332,6 +334,37 @@ mod tests {
             .body(Body::empty())
             .unwrap()
     }
+
+    // template:begin request-budget:http-request-deadline-test
+    #[tokio::test(start_paused = true)]
+    async fn request_deadline_is_observable_without_restarting_the_budget() {
+        let options = options();
+        let started = tokio::time::Instant::now();
+        let expected = started + options.request_timeout;
+        let routes = Router::new().route(
+            "/deadline",
+            get(move |axum::Extension(deadline): axum::Extension<crate::RequestDeadline>| async move {
+                assert_eq!(deadline.at(), expected);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                assert_eq!(deadline.at(), expected);
+                assert_eq!(
+                    deadline.at() - tokio::time::Instant::now(),
+                    Duration::from_millis(150)
+                );
+                "within budget"
+            }),
+        );
+        let response = harden(routes, &options)
+            .oneshot(request(Method::GET, "/deadline"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "within budget"
+        );
+    }
+    // template:end request-budget:http-request-deadline-test
 
     #[tokio::test]
     async fn success_carries_request_id_and_nosniff() {

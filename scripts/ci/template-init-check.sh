@@ -1,11 +1,28 @@
 #!/usr/bin/env bash
-# Validate all canonical projections and six distinct runtime graphs from
+# Validate all canonical projections and twelve distinct runtime graphs from
 # one private, fixed source candidate. The shared checkout is never staged or committed.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 repo=${ROOT_DIR}
 mode=full
+runtime_graphs=all
+
+
+validate_runtime_graphs() {
+	local selection=$1 number seen=,
+	[[ ${selection} =~ ^([1-9]|1[0-2])(,([1-9]|1[0-2]))*$ ]] || return 1
+	local -a numbers
+	IFS=, read -r -a numbers <<<"${selection}"
+	for number in "${numbers[@]}"; do
+		[[ ${seen} != *",${number},"* ]] || return 1
+		seen+="${number},"
+	done
+}
+
+runtime_graph_selected() {
+	[[ ${mode} != runtime-graphs || ,${runtime_graphs}, == *",${1},"* ]]
+}
 
 while (($#)); do
 	case "$1" in
@@ -14,17 +31,29 @@ while (($#)); do
 		mode=${1#--}
 		shift
 		;;
+	--runtime-graphs)
+		[[ ${mode} == full ]] || { echo "validation modes cannot be combined" >&2; exit 2; }
+		validate_runtime_graphs "${2:-}" || { echo "--runtime-graphs requires distinct comma-separated graph IDs 1..12" >&2; exit 2; }
+		mode=runtime-graphs
+		runtime_graphs=$2
+		shift 2
+		;;
 	--repo)
 		[[ -n ${2:-} ]] || { echo "--repo requires a path" >&2; exit 2; }
 		repo=$(cd "${2}" && pwd)
 		shift 2
 		;;
 	*)
-		echo "usage: $0 [--repo ROOT] [--source-checks|--projections-only|--self-test]" >&2
+		echo "usage: $0 [--repo ROOT] [--source-checks|--projections-only|--runtime-graphs IDS|--self-test]" >&2
 		exit 2
 		;;
 	esac
 done
+
+if [[ ${mode} == runtime-graphs && ${ALLOW_FULL:-} != 1 && ${CI:-} != true ]]; then
+	echo "--runtime-graphs requires ALLOW_FULL=1 (CI sets CI=true)" >&2
+	exit 2
+fi
 
 candidate_paths=${TEMPLATE_INIT_CANDIDATE_PATHS:-${repo}/scripts/tests/template-candidate-paths.txt}
 [[ -f ${candidate_paths} ]] || { echo "candidate path allowlist is missing: ${candidate_paths}" >&2; exit 2; }
@@ -65,7 +94,7 @@ snapshot_candidate() {
 	while IFS= read -r relative || [[ -n ${relative} ]]; do
 		[[ -z ${relative} || ${relative} == \#* ]] && continue
 		if [[ ${relative} == */ ]]; then
-				[[ ${relative} == evals/template-initializer/ || ${relative} == specs/template-initializer/ || ${relative} == crates/infra-bearerauthn/ ]] || {
+			[[ ${relative} == evals/template-initializer/ || ${relative} == specs/template-initializer/ || ${relative} == crates/infra-bearerauthn/ || ${relative} == crates/infra-egress-dns/ || ${relative} == crates/infra-outbound-http/ ]] || {
 				echo "candidate directory is not authorized: ${relative}" >&2; return 2
 			}
 			while IFS= read -r -d '' nested; do
@@ -128,6 +157,23 @@ recorder_self_test() {
 	[[ ${exit_code} == 7 ]] || { echo "recorder self-test changed exit ${exit_code}" >&2; return 1; }
 	grep -q 'status=failed label=forced-failure exit_code=7 ' "${receipt}"
 	[[ ! -e ${later} ]] || { echo "recorder self-test executed a later stage" >&2; return 1; }
+	local mode=full runtime_graphs=all number invalid
+	for number in {1..12}; do
+		runtime_graph_selected "${number}" || { echo "default full mode skipped graph ${number}" >&2; return 1; }
+	done
+	mode=runtime-graphs
+	runtime_graphs=3,4,5,6,9,10,11,12
+	validate_runtime_graphs "${runtime_graphs}"
+	for number in {1..12}; do
+		case "${number}" in
+		1 | 2 | 7 | 8) if runtime_graph_selected "${number}"; then echo "subset selected graph ${number}" >&2; return 1; fi ;;
+		*) runtime_graph_selected "${number}" || { echo "subset skipped graph ${number}" >&2; return 1; } ;;
+		esac
+	done
+	for invalid in '' 0 13 01 '1,1' '2,,3' '1,'; do
+		if validate_runtime_graphs "${invalid}"; then echo "invalid graph selection accepted" >&2; return 1; fi
+	done
+	printf 'template initializer graph selection self-test: pass\n'
 	printf 'template initializer recorder self-test: pass\n'
 }
 
@@ -141,9 +187,9 @@ record_source_suites() {
 }
 
 run_validation() {
-	local work source candidate database authn target graph=0 common receipt_dir receipt log_dir target_cache output_revision
+	local work source candidate database authn outbound_http target graph=0 common receipt_dir receipt log_dir target_cache output_revision
 	local started=${SECONDS}
-	local -a scrubbed_identity=(env -u SERVICE_NAME -u REPOSITORY -u DESCRIPTION -u CODEOWNER -u DATABASE -u AUTHN -u AGENT_HARNESS)
+	local -a scrubbed_identity=(env -u SERVICE_NAME -u REPOSITORY -u DESCRIPTION -u CODEOWNER -u DATABASE -u AUTHN -u OUTBOUND_HTTP -u AGENT_HARNESS)
 	work=$(mktemp -d)
 	trap 'rm -rf -- "${work}"' RETURN
 	common=$(git -C "${repo}" rev-parse --git-common-dir)
@@ -157,41 +203,46 @@ run_validation() {
 	source=${work}/source
 	candidate=$(snapshot_candidate "${source}")
 	printf 'candidate=%s\nmode=%s\nstate=running\n' "${candidate}" "${mode}" >"${receipt}"
+	if [[ ${mode} == runtime-graphs ]]; then printf 'requested_runtime_graphs=%s\n' "${runtime_graphs}" >>"${receipt}"; fi
 	printf 'template initializer fixed candidate: %s\n' "${candidate}"
 	printf 'template initializer receipt: %s\n' "${receipt}"
 
-	if [[ ${mode} != projections-only ]]; then record_source_suites; fi
-	if [[ ${mode} != source-checks ]]; then
+	if [[ ${mode} == full || ${mode} == source-checks ]]; then record_source_suites; fi
+	if [[ ${mode} == full || ${mode} == projections-only ]]; then
 		record_command "${receipt}" "${log_dir}/projection-self-test.log" "projection-self-test" \
 			"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-profile-projections.py" --source "${source}" --self-test
 		record_command "${receipt}" "${log_dir}/projections.log" "canonical-projections" \
 			"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-profile-projections.py" --source "${source}"
 	fi
-	if [[ ${mode} == full ]]; then
+	if [[ ${mode} == full || ${mode} == runtime-graphs ]]; then
 		for database in none postgres; do
 			for authn in none oidc-jwt oidc-introspection; do
-				((graph += 1))
-				target=${work}/runtime-${graph}-${database}-${authn}
-				git clone --quiet --no-local "${source}" "${target}"
-				printf 'runtime_pair=%s database=%s authn=%s harness=core candidate=%s\n' "${graph}" "${database}" "${authn}" "${candidate}" >>"${receipt}"
-				record_command "${receipt}" "${log_dir}/runtime-${graph}-init.log" "runtime-${graph}-init" \
-					"${scrubbed_identity[@]}" bash "${source}/scripts/init-module.sh" --repo "${target}" \
-					--service-name "matrix-${database}-${authn}-core" \
-					--repository "https://github.com/example/matrix-${database}-${authn}-core" \
-					--description "Matrix ${database} ${authn} core" \
-					--codeowner @example/platform --database "${database}" --authn "${authn}" --agent-harness core
-				git -C "${target}" config user.email template-init-check@example.invalid
-				git -C "${target}" config user.name template-init-check
-				git -C "${target}" add -A
-				git -C "${target}" commit -qm "initialized ${database}/${authn}/core"
-				output_revision=$(git -C "${target}" rev-parse HEAD)
-				printf 'status=passed label=runtime-%s-initialized output_revision=%s\n' "${graph}" "${output_revision}" >>"${receipt}"
-				printf 'template initializer runtime_pair=%s database=%s authn=%s candidate=%s revision=%s\n' \
-					"${graph}" "${database}" "${authn}" "${candidate}" "${output_revision}"
-				record_command "${receipt}" "${log_dir}/runtime-${graph}-build.log" "runtime-${graph}-build" \
-					"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" make -C "${target}" build
-				record_command "${receipt}" "${log_dir}/runtime-${graph}-test.log" "runtime-${graph}-test" \
-					"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" make -C "${target}" test
+				for outbound_http in none bounded; do
+					((graph += 1))
+					runtime_graph_selected "${graph}" || continue
+					target=${work}/runtime-${graph}-${database}-${authn}-${outbound_http}
+					git clone --quiet --no-local "${source}" "${target}"
+					printf 'runtime_graph=%s database=%s authn=%s outbound_http=%s harness=core candidate=%s\n' "${graph}" "${database}" "${authn}" "${outbound_http}" "${candidate}" >>"${receipt}"
+					record_command "${receipt}" "${log_dir}/runtime-${graph}-init.log" "runtime-${graph}-init" \
+						"${scrubbed_identity[@]}" bash "${source}/scripts/init-module.sh" --repo "${target}" \
+						--service-name "matrix-${database}-${authn}-${outbound_http}-core" \
+						--repository "https://github.com/example/matrix-${database}-${authn}-${outbound_http}-core" \
+						--description "Matrix ${database} ${authn} ${outbound_http} core" \
+						--codeowner @example/platform --database "${database}" --authn "${authn}" \
+						--outbound-http "${outbound_http}" --agent-harness core
+					git -C "${target}" config user.email template-init-check@example.invalid
+					git -C "${target}" config user.name template-init-check
+					git -C "${target}" add -A
+					git -C "${target}" commit -qm "initialized ${database}/${authn}/${outbound_http}/core"
+					output_revision=$(git -C "${target}" rev-parse HEAD)
+					printf 'status=passed label=runtime-%s-initialized output_revision=%s\n' "${graph}" "${output_revision}" >>"${receipt}"
+					printf 'template initializer runtime_graph=%s database=%s authn=%s outbound_http=%s candidate=%s revision=%s\n' \
+						"${graph}" "${database}" "${authn}" "${outbound_http}" "${candidate}" "${output_revision}"
+					record_command "${receipt}" "${log_dir}/runtime-${graph}-build.log" "runtime-${graph}-build" \
+						"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" make -C "${target}" build
+					record_command "${receipt}" "${log_dir}/runtime-${graph}-test.log" "runtime-${graph}-test" \
+						"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" make -C "${target}" test
+				done
 			done
 		done
 	fi
@@ -206,6 +257,10 @@ elif [[ ${VALIDATION_LOCK_HELD:-} == 1 ]]; then
 	run_validation
 else
 	arguments=(--repo "${repo}")
-	if [[ ${mode} != full ]]; then arguments+=("--${mode}"); fi
+	if [[ ${mode} == runtime-graphs ]]; then
+		arguments+=(--runtime-graphs "${runtime_graphs}")
+	elif [[ ${mode} != full ]]; then
+		arguments+=("--${mode}")
+	fi
 	bash "${repo}/scripts/ci/validation-lock.sh" -- bash "$0" "${arguments[@]}"
 fi
