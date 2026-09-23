@@ -119,7 +119,7 @@ impl AuthnConfig {
                 &self.introspection_client_id,
                 "oidc-jwt",
             )?;
-            if has_secret(&self.introspection_client_secret) {
+            if has_nonblank_secret(&self.introspection_client_secret) {
                 return Err(ValidationError::new(
                     "authn.introspection_client_secret",
                     "must be empty when authn.mode selects another authentication mode",
@@ -197,7 +197,7 @@ fn has_nonempty_secret(value: &SecretString) -> bool {
     !value.expose_secret().is_empty()
 }
 
-fn has_secret(value: &SecretString) -> bool {
+fn has_nonblank_secret(value: &SecretString) -> bool {
     !value.expose_secret().trim().is_empty()
 }
 // template:end oidc-introspection:authn-secret-presence-helper
@@ -231,6 +231,8 @@ fn validate_optional_provider_url(key: &str, value: &str) -> Result<(), Validati
 }
 
 fn validate_provider_url(key: &str, value: &str) -> Result<(), ValidationError> {
+    // Keep the URL grammar aligned with infra-bearerauthn's runtime parser.
+    // This side names the invalid config key; runtime also admits discovered URLs.
     if value.trim() != value || value.chars().any(|character| character.is_ascii_control()) {
         return Err(invalid_provider_url(key));
     }

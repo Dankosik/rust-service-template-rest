@@ -22,6 +22,8 @@ const PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
 const RESPONSE_RESERVE: Duration = Duration::from_millis(100);
 
 pub(crate) fn parse_provider_url(raw: &str) -> Result<Url, Failure> {
+    // Keep the syntax aligned with service-config's authn URL validation.
+    // Discovery and direct adapter callers still require runtime admission.
     if raw != raw.trim() || raw.bytes().any(|byte| byte.is_ascii_control()) {
         return Err(Failure::Unavailable);
     }

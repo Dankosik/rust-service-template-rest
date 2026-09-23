@@ -37,21 +37,16 @@ pub(crate) fn validate_jwt_claims(
     token_profile: TokenProfile,
     now_epoch_seconds: u64,
 ) -> Result<Principal, Failure> {
-    let raw = RawClaims::parse(bytes, ClaimShape::Jwt(token_profile), Failure::Invalid)?;
-    let common = validate_common(&raw, policy, now_epoch_seconds, Failure::Invalid, true)?;
+    let shape = ClaimShape::Jwt(token_profile);
+    let raw = RawClaims::parse(bytes, shape, Failure::Invalid)?;
+    let common = validate_common(&raw, policy, now_epoch_seconds, Failure::Invalid, shape)?;
 
     if token_profile == TokenProfile::Rfc9068 {
-        let subject = required_identity(raw.sub.as_deref(), raw.seen_sub, Failure::Invalid)?;
-        let client_id = required_identity(
-            raw.client_id.as_deref(),
-            raw.seen_client_id,
-            Failure::Invalid,
-        )?;
-        let jti = raw.jti.as_deref().filter(|value| !value.is_empty());
-        let Some(iat) = raw.iat else {
-            return Err(Failure::Invalid);
-        };
-        if !raw.seen_jti || jti.is_none() || !raw.seen_iat {
+        let subject = required_identity(&raw.sub, Failure::Invalid)?;
+        let client_id = required_identity(&raw.client_id, Failure::Invalid)?;
+        let jti = raw.jti.value().filter(|value| !value.is_empty());
+        let iat = required_number(&raw.iat, Failure::Invalid)?;
+        if jti.is_none() {
             return Err(Failure::Invalid);
         }
         if u128::from(iat) > u128::from(now_epoch_seconds) + LEEWAY_SECONDS {
@@ -85,11 +80,12 @@ pub(crate) fn validate_introspection_claims(
     if !parse_active(bytes)? {
         return Err(Failure::Invalid);
     }
-    let raw = RawClaims::parse(bytes, ClaimShape::Introspection, Failure::Unavailable)?;
-    if !raw.seen_active || raw.active != Some(true) {
+    let shape = ClaimShape::Introspection;
+    let raw = RawClaims::parse(bytes, shape, Failure::Unavailable)?;
+    if !matches!(&raw.active, ClaimMember::Value(true)) {
         return Err(Failure::Unavailable);
     }
-    let common = validate_common(&raw, policy, now_epoch_seconds, Failure::Unavailable, false)?;
+    let common = validate_common(&raw, policy, now_epoch_seconds, Failure::Unavailable, shape)?;
     Ok(Principal::new(
         policy.issuer.clone(),
         common.subject,
@@ -114,31 +110,23 @@ fn validate_common(
         unused_variables,
         reason = "JWT profile markers remove alias handling from introspection-only output"
     )]
-    allow_client_aliases: bool,
+    shape: ClaimShape,
 ) -> Result<CommonClaims, Failure> {
-    let issuer = required_nonempty_text(raw.iss.as_deref(), raw.seen_iss, malformed)?;
-    let audience = required_audience(raw.aud.as_ref(), raw.seen_aud, malformed)?;
-    let expiry = required_number(raw.exp, raw.seen_exp, malformed)?;
-    let not_before = optional_number(raw.nbf, raw.seen_nbf, malformed)?;
+    let issuer = required_nonempty_text(&raw.iss, malformed)?;
+    let audience = required_audience(&raw.aud, malformed)?;
+    let expiry = required_number(&raw.exp, malformed)?;
+    let not_before = optional_number(&raw.nbf, malformed)?;
 
-    let subject = optional_identity(raw.sub.as_deref(), raw.seen_sub, malformed)?;
+    let subject = optional_identity(&raw.sub, malformed)?;
     let mut client_values = Vec::new();
-    if raw.seen_client_id {
-        client_values.push(required_identity(
-            raw.client_id.as_deref(),
-            true,
-            malformed,
-        )?);
+    if raw.client_id.is_present() {
+        client_values.push(required_identity(&raw.client_id, malformed)?);
     }
     // template:begin oidc-jwt:authn-claims-client-aliases
-    if allow_client_aliases {
-        for (seen, value) in [
-            (raw.seen_azp, raw.azp.as_deref()),
-            (raw.seen_appid, raw.appid.as_deref()),
-            (raw.seen_cid, raw.cid.as_deref()),
-        ] {
-            if seen {
-                client_values.push(required_identity(value, true, malformed)?);
+    if shape.aliases() {
+        for value in [&raw.azp, &raw.appid, &raw.cid] {
+            if value.is_present() {
+                client_values.push(required_identity(value, malformed)?);
             }
         }
     }
@@ -169,67 +157,52 @@ fn validate_common(
     })
 }
 
-fn required_text(value: Option<&str>, seen: bool, malformed: Failure) -> Result<&str, Failure> {
-    if !seen {
-        return Err(malformed);
-    }
-    value.ok_or(malformed)
+fn required_text(value: &ClaimMember<String>, malformed: Failure) -> Result<&str, Failure> {
+    value.value().map(String::as_str).ok_or(malformed)
 }
 
 fn required_nonempty_text(
-    value: Option<&str>,
-    seen: bool,
+    value: &ClaimMember<String>,
     malformed: Failure,
 ) -> Result<&str, Failure> {
-    let value = required_text(value, seen, malformed)?;
+    let value = required_text(value, malformed)?;
     if value.is_empty() {
         return Err(malformed);
     }
     Ok(value)
 }
 
-fn required_number(value: Option<u64>, seen: bool, malformed: Failure) -> Result<u64, Failure> {
-    if !seen {
-        return Err(malformed);
-    }
-    value.ok_or(malformed)
+fn required_number(value: &ClaimMember<u64>, malformed: Failure) -> Result<u64, Failure> {
+    value.value().copied().ok_or(malformed)
 }
 
-fn optional_number(
-    value: Option<u64>,
-    seen: bool,
-    malformed: Failure,
-) -> Result<Option<u64>, Failure> {
-    if seen && value.is_none() {
-        return Err(malformed);
+fn optional_number(value: &ClaimMember<u64>, malformed: Failure) -> Result<Option<u64>, Failure> {
+    match value {
+        ClaimMember::Missing => Ok(None),
+        ClaimMember::Null => Err(malformed),
+        ClaimMember::Value(value) => Ok(Some(*value)),
     }
-    Ok(value)
 }
 
 fn required_audience(
-    value: Option<&Audience>,
-    seen: bool,
+    value: &ClaimMember<Audience>,
     malformed: Failure,
 ) -> Result<&[String], Failure> {
-    if !seen {
-        return Err(malformed);
-    }
-    value.map(Audience::values).ok_or(malformed)
+    value.value().map(Audience::values).ok_or(malformed)
 }
 
 fn optional_identity(
-    value: Option<&str>,
-    seen: bool,
+    value: &ClaimMember<String>,
     malformed: Failure,
 ) -> Result<Option<&str>, Failure> {
-    if !seen {
+    if !value.is_present() {
         return Ok(None);
     }
-    Ok(Some(required_identity(value, true, malformed)?))
+    Ok(Some(required_identity(value, malformed)?))
 }
 
-fn required_identity(value: Option<&str>, seen: bool, malformed: Failure) -> Result<&str, Failure> {
-    let value = required_text(value, seen, malformed)?;
+fn required_identity(value: &ClaimMember<String>, malformed: Failure) -> Result<&str, Failure> {
+    let value = required_text(value, malformed)?;
     if value.is_empty() || value.trim() != value {
         return Err(malformed);
     }
@@ -311,47 +284,53 @@ impl ClaimShape {
     // template:end oidc-jwt:authn-claim-shape-rfc9068
 
     // template:begin oidc-introspection:authn-claim-shape-active
-    fn active(self) -> bool {
+    fn is_introspection(self) -> bool {
         matches!(self, Self::Introspection)
     }
     // template:end oidc-introspection:authn-claim-shape-active
 }
 
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "each presence flag preserves strict duplicate, missing, and null JSON evidence"
-)]
+/// A consumed JSON member keeps absence distinct from an explicit null.
+#[derive(Default)]
+enum ClaimMember<T> {
+    #[default]
+    Missing,
+    Null,
+    Value(T),
+}
+
+impl<T> ClaimMember<T> {
+    fn is_present(&self) -> bool {
+        !matches!(self, Self::Missing)
+    }
+
+    fn value(&self) -> Option<&T> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Missing | Self::Null => None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct RawClaims {
-    iss: Option<String>,
-    seen_iss: bool,
-    aud: Option<Audience>,
-    seen_aud: bool,
-    exp: Option<u64>,
-    seen_exp: bool,
-    nbf: Option<u64>,
-    seen_nbf: bool,
-    sub: Option<String>,
-    seen_sub: bool,
-    client_id: Option<String>,
-    seen_client_id: bool,
+    iss: ClaimMember<String>,
+    aud: ClaimMember<Audience>,
+    exp: ClaimMember<u64>,
+    nbf: ClaimMember<u64>,
+    sub: ClaimMember<String>,
+    client_id: ClaimMember<String>,
     // template:begin oidc-jwt:authn-claims-alias-fields
-    azp: Option<String>,
-    seen_azp: bool,
-    appid: Option<String>,
-    seen_appid: bool,
-    cid: Option<String>,
-    seen_cid: bool,
+    azp: ClaimMember<String>,
+    appid: ClaimMember<String>,
+    cid: ClaimMember<String>,
     // template:end oidc-jwt:authn-claims-alias-fields
     // template:begin oidc-jwt:authn-claims-rfc9068-fields
-    iat: Option<u64>,
-    seen_iat: bool,
-    jti: Option<String>,
-    seen_jti: bool,
+    iat: ClaimMember<u64>,
+    jti: ClaimMember<String>,
     // template:end oidc-jwt:authn-claims-rfc9068-fields
     // template:begin oidc-introspection:authn-claims-active-fields
-    active: Option<bool>,
-    seen_active: bool,
+    active: ClaimMember<bool>,
     // template:end oidc-introspection:authn-claims-active-fields
 }
 
@@ -386,41 +365,39 @@ impl<'de> Visitor<'de> for RawClaimsVisitor {
         // template:end oidc-introspection:authn-claims-all-member-duplicates
         while let Some(name) = map.next_key::<String>()? {
             // template:begin oidc-introspection:authn-claims-all-member-duplicate-check
-            if self.shape.active() && !all_names.insert(name.clone()) {
+            if self.shape.is_introspection() && !all_names.insert(name.clone()) {
                 return Err(serde::de::Error::custom("duplicate introspection member"));
             }
             // template:end oidc-introspection:authn-claims-all-member-duplicate-check
             match name.as_str() {
-                "iss" => set_once(&mut claims.seen_iss, &mut claims.iss, &mut map)?,
-                "aud" => set_once(&mut claims.seen_aud, &mut claims.aud, &mut map)?,
-                "exp" => set_once(&mut claims.seen_exp, &mut claims.exp, &mut map)?,
-                "nbf" => set_once(&mut claims.seen_nbf, &mut claims.nbf, &mut map)?,
-                "sub" => set_once(&mut claims.seen_sub, &mut claims.sub, &mut map)?,
-                "client_id" => {
-                    set_once(&mut claims.seen_client_id, &mut claims.client_id, &mut map)?;
-                }
+                "iss" => set_once(&mut claims.iss, &mut map)?,
+                "aud" => set_once(&mut claims.aud, &mut map)?,
+                "exp" => set_once(&mut claims.exp, &mut map)?,
+                "nbf" => set_once(&mut claims.nbf, &mut map)?,
+                "sub" => set_once(&mut claims.sub, &mut map)?,
+                "client_id" => set_once(&mut claims.client_id, &mut map)?,
                 // template:begin oidc-jwt:authn-claims-alias-visitor
                 "azp" if self.shape.aliases() => {
-                    set_once(&mut claims.seen_azp, &mut claims.azp, &mut map)?;
+                    set_once(&mut claims.azp, &mut map)?;
                 }
                 "appid" if self.shape.aliases() => {
-                    set_once(&mut claims.seen_appid, &mut claims.appid, &mut map)?;
+                    set_once(&mut claims.appid, &mut map)?;
                 }
                 "cid" if self.shape.aliases() => {
-                    set_once(&mut claims.seen_cid, &mut claims.cid, &mut map)?;
+                    set_once(&mut claims.cid, &mut map)?;
                 }
                 // template:end oidc-jwt:authn-claims-alias-visitor
                 // template:begin oidc-jwt:authn-claims-rfc9068-visitor
                 "iat" if self.shape.rfc9068() => {
-                    set_once(&mut claims.seen_iat, &mut claims.iat, &mut map)?;
+                    set_once(&mut claims.iat, &mut map)?;
                 }
                 "jti" if self.shape.rfc9068() => {
-                    set_once(&mut claims.seen_jti, &mut claims.jti, &mut map)?;
+                    set_once(&mut claims.jti, &mut map)?;
                 }
                 // template:end oidc-jwt:authn-claims-rfc9068-visitor
                 // template:begin oidc-introspection:authn-claims-active-visitor
-                "active" if self.shape.active() => {
-                    set_once(&mut claims.seen_active, &mut claims.active, &mut map)?;
+                "active" if self.shape.is_introspection() => {
+                    set_once(&mut claims.active, &mut map)?;
                 }
                 // template:end oidc-introspection:authn-claims-active-visitor
                 _ => {
@@ -452,16 +429,11 @@ fn parse_active(bytes: &[u8]) -> Result<bool, Failure> {
         {
             let mut names = BTreeSet::new();
             let mut active = None;
-            let mut saw_active = false;
             while let Some(name) = map.next_key::<String>()? {
                 if !names.insert(name.clone()) {
                     return Err(serde::de::Error::custom("duplicate introspection member"));
                 }
                 if name == "active" {
-                    if saw_active {
-                        return Err(serde::de::Error::custom("duplicate active member"));
-                    }
-                    saw_active = true;
                     active = map.next_value::<Option<bool>>()?;
                 } else {
                     map.next_value::<IgnoredAny>()?;
@@ -480,19 +452,18 @@ fn parse_active(bytes: &[u8]) -> Result<bool, Failure> {
 }
 // template:end oidc-introspection:authn-parse-introspection-active
 
-fn set_once<'de, A, T>(
-    seen: &mut bool,
-    destination: &mut Option<T>,
-    map: &mut A,
-) -> Result<(), A::Error>
+fn set_once<'de, A, T>(destination: &mut ClaimMember<T>, map: &mut A) -> Result<(), A::Error>
 where
     A: MapAccess<'de>,
     T: Deserialize<'de>,
 {
-    if std::mem::replace(seen, true) {
+    if destination.is_present() {
         return Err(serde::de::Error::custom("duplicate consumed claim"));
     }
-    *destination = map.next_value()?;
+    *destination = match map.next_value::<Option<T>>()? {
+        Some(value) => ClaimMember::Value(value),
+        None => ClaimMember::Null,
+    };
     Ok(())
 }
 
@@ -531,6 +502,26 @@ mod tests {
         for payload in [
             br#"{"iss":"https://issuer.example","iss":"https://issuer.example","aud":"api","exp":130,"sub":"s"}"#.as_slice(),
             br#"{"iss":"https://issuer.example","aud":"api","exp":130,"sub":" subject"}"#.as_slice(),
+        ] {
+            assert_eq!(
+                validate_jwt_claims(payload, &policy(), TokenProfile::ResourceServer, 100),
+                Err(Failure::Invalid)
+            );
+        }
+    }
+
+    #[test]
+    fn jwt_distinguishes_missing_null_and_duplicate_claims() {
+        let absent_nbf = br#"{"iss":"https://issuer.example","aud":"api","exp":130,"sub":"s"}"#;
+        assert!(
+            validate_jwt_claims(absent_nbf, &policy(), TokenProfile::ResourceServer, 100).is_ok()
+        );
+
+        for payload in [
+            br#"{"iss":"https://issuer.example","aud":"api","exp":130,"nbf":null,"sub":"s"}"#
+                .as_slice(),
+            br#"{"iss":"https://issuer.example","aud":"api","exp":130,"sub":null,"sub":"s"}"#
+                .as_slice(),
         ] {
             assert_eq!(
                 validate_jwt_claims(payload, &policy(), TokenProfile::ResourceServer, 100),

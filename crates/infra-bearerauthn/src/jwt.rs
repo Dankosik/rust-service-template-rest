@@ -41,13 +41,33 @@ impl JwtVerifier {
         deadline: Instant,
     ) -> Result<Principal, Failure> {
         let compact = CompactToken::parse(token.as_bytes(), self.token_profile)?;
+        let key = self.select_key(compact.kid.as_deref(), deadline).await?;
+
+        verify_signature(token.as_bytes(), &key)?;
+        let now_epoch_seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| Failure::Unavailable)?
+            .as_secs();
+        validate_jwt_claims(
+            &compact.payload,
+            &self.claim_policy,
+            self.token_profile,
+            now_epoch_seconds,
+        )
+    }
+
+    async fn select_key(
+        &self,
+        kid: Option<&str>,
+        deadline: Instant,
+    ) -> Result<DecodingKey, Failure> {
         let initial = self.refresh.keys().await;
-        let key = match initial.select(compact.kid.as_deref()) {
+        let key = match initial.select(kid) {
             KeySelection::One(key) => key.clone(),
             KeySelection::UnknownKid => match self.refresh.refresh_unknown(deadline).await {
                 UnknownKeyResult::Refreshed => {
                     let refreshed = self.refresh.keys().await;
-                    match refreshed.select(compact.kid.as_deref()) {
+                    match refreshed.select(kid) {
                         KeySelection::One(key) => key.clone(),
                         KeySelection::UnknownKid | KeySelection::Ambiguous => {
                             return Err(Failure::Invalid);
@@ -61,18 +81,7 @@ impl JwtVerifier {
             },
             KeySelection::Ambiguous => return Err(Failure::Invalid),
         };
-
-        verify_signature(token.as_bytes(), &key)?;
-        let now_epoch_seconds = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| Failure::Unavailable)?
-            .as_secs();
-        validate_jwt_claims(
-            &compact.payload,
-            &self.claim_policy,
-            self.token_profile,
-            now_epoch_seconds,
-        )
+        Ok(key)
     }
 }
 
@@ -497,8 +506,8 @@ impl RawJwk {
         {
             return Ok(None);
         }
-        let modulus = required_field(self.n, self.seen_n)?;
-        let exponent = required_field(self.e, self.seen_e)?;
+        let modulus = self.n.ok_or(Failure::Unavailable)?;
+        let exponent = self.e.ok_or(Failure::Unavailable)?;
         let modulus_bytes = URL_SAFE_NO_PAD
             .decode(modulus)
             .map_err(|_| Failure::Unavailable)?;
@@ -527,14 +536,6 @@ fn modulus_bits(bytes: &[u8]) -> Option<usize> {
         return None;
     }
     Some((bytes.len() - 1) * 8 + (8 - first.leading_zeros() as usize))
-}
-
-fn required_field<T>(value: Option<T>, seen: bool) -> Result<T, Failure> {
-    if seen {
-        value.ok_or(Failure::Unavailable)
-    } else {
-        Err(Failure::Unavailable)
-    }
 }
 
 fn set_once<'de, A, T>(seen: &mut bool, destination: &mut T, map: &mut A) -> Result<(), A::Error>
