@@ -19,6 +19,35 @@ use crate::Failure;
 
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
+const RESPONSE_RESERVE: Duration = Duration::from_millis(100);
+
+pub(crate) fn parse_provider_url(raw: &str) -> Result<Url, Failure> {
+    if raw != raw.trim() || raw.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(Failure::Unavailable);
+    }
+    let url = Url::parse(raw).map_err(|_| Failure::Unavailable)?;
+    let authority = raw
+        .split_once("://")
+        .map(|(_, value)| value.split(['/', '?', '#']).next().unwrap_or_default())
+        .unwrap_or_default();
+    if url.scheme() != "https"
+        || url.host().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.query().is_some()
+        || authority.contains('@')
+    {
+        return Err(Failure::Unavailable);
+    }
+    Ok(url)
+}
+
+pub(crate) fn reserve_request_deadline(now: Instant, request_deadline: Instant) -> Option<Instant> {
+    let reserved_request_deadline = request_deadline.checked_sub(RESPONSE_RESERVE)?;
+    let provider_deadline = (now + PROVIDER_TIMEOUT).min(reserved_request_deadline);
+    (provider_deadline > now).then_some(provider_deadline)
+}
 
 /// The only outbound client authentication engines may use.
 #[derive(Clone)]

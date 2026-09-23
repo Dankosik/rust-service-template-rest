@@ -3,7 +3,7 @@
 use std::{
     fmt,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -15,12 +15,10 @@ use url::Url;
 use crate::{
     BearerToken, Failure, IntrospectionOptions, Principal, Verifier,
     claims::{ClaimPolicy, validate_introspection_claims},
-    provider::ProviderClient,
+    provider::{ProviderClient, parse_provider_url, reserve_request_deadline},
 };
 
 const MAX_IN_FLIGHT_EXCHANGES: usize = 32;
-const PROVIDER_ATTEMPT_BUDGET: Duration = Duration::from_secs(3);
-const RESPONSE_RESERVE: Duration = Duration::from_millis(100);
 
 /// Builds the opaque-token verifier without performing provider I/O.
 ///
@@ -57,7 +55,7 @@ fn prepare_with_provider(
     provider: ProviderClient,
 ) -> Result<Verifier, Failure> {
     let policy = ClaimPolicy::new(options.issuer, options.audience);
-    let endpoint = parse_endpoint(&options.endpoint)?;
+    let endpoint = parse_provider_url(&options.endpoint)?;
 
     Ok(Verifier::Introspection(IntrospectionVerifier {
         endpoint,
@@ -92,7 +90,7 @@ impl IntrospectionVerifier {
         token: &BearerToken<'_>,
         deadline: Instant,
     ) -> Result<Principal, Failure> {
-        let Some(provider_deadline) = reserve_provider_deadline(deadline) else {
+        let Some(provider_deadline) = reserve_request_deadline(Instant::now(), deadline) else {
             // The enclosing HTTP timeout is the authority for an exhausted
             // request budget. Do no provider work and leave it to produce 504.
             tokio::time::sleep_until(deadline).await;
@@ -117,35 +115,6 @@ impl IntrospectionVerifier {
             .await?;
         validate_introspection_claims(&response, &self.policy, now_epoch_seconds()?)
     }
-}
-
-fn parse_endpoint(raw: &str) -> Result<Url, Failure> {
-    if raw != raw.trim() || raw.bytes().any(|byte| byte.is_ascii_control()) {
-        return Err(Failure::Unavailable);
-    }
-    let endpoint = Url::parse(raw).map_err(|_| Failure::Unavailable)?;
-    let authority = raw
-        .split_once("://")
-        .map(|(_, value)| value.split(['/', '?', '#']).next().unwrap_or_default())
-        .unwrap_or_default();
-    if endpoint.scheme() != "https"
-        || endpoint.host().is_none()
-        || !endpoint.username().is_empty()
-        || endpoint.password().is_some()
-        || endpoint.fragment().is_some()
-        || endpoint.query().is_some()
-        || authority.contains('@')
-    {
-        return Err(Failure::Unavailable);
-    }
-    Ok(endpoint)
-}
-
-fn reserve_provider_deadline(request_deadline: Instant) -> Option<Instant> {
-    let now = Instant::now();
-    let reserved_request_deadline = request_deadline.checked_sub(RESPONSE_RESERVE)?;
-    let provider_deadline = (now + PROVIDER_ATTEMPT_BUDGET).min(reserved_request_deadline);
-    (provider_deadline > now).then_some(provider_deadline)
 }
 
 fn now_epoch_seconds() -> Result<u64, Failure> {
@@ -187,15 +156,16 @@ mod tests {
     use tokio::{sync::Semaphore, time::Instant};
     use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-    use super::{
-        ClaimPolicy, IntrospectionVerifier, basic_authorization, form_body, parse_endpoint,
+    use super::{ClaimPolicy, IntrospectionVerifier, basic_authorization, form_body};
+    use crate::{
+        Failure, parse_bearer,
+        provider::{ProviderClient, parse_provider_url, reserve_request_deadline},
     };
-    use crate::{Failure, parse_bearer, provider::ProviderClient};
 
     fn verifier_with_permits(permits: usize) -> (IntrospectionVerifier, Arc<Semaphore>) {
         let permits = Arc::new(Semaphore::new(permits));
         let verifier = IntrospectionVerifier {
-            endpoint: parse_endpoint("https://127.0.0.1/introspect").unwrap(),
+            endpoint: parse_provider_url("https://127.0.0.1/introspect").unwrap(),
             client_id: "fixture-client".to_owned(),
             client_secret: secrecy::SecretString::from("fixture-secret"),
             policy: Arc::new(ClaimPolicy::new(
@@ -225,7 +195,7 @@ mod tests {
 
     #[test]
     fn endpoint_requires_an_exact_https_destination_without_user_info() {
-        assert!(parse_endpoint("https://provider.example/oauth/introspect").is_ok());
+        assert!(parse_provider_url("https://provider.example/oauth/introspect").is_ok());
         for value in [
             "http://provider.example/introspect",
             "https://client:secret@provider.example/introspect",
@@ -235,7 +205,7 @@ mod tests {
             "https://@provider.example/introspect",
             "not a url",
         ] {
-            assert_eq!(parse_endpoint(value), Err(Failure::Unavailable));
+            assert_eq!(parse_provider_url(value), Err(Failure::Unavailable));
         }
     }
 
@@ -243,11 +213,11 @@ mod tests {
     async fn reserves_parent_response_time_before_provider_work() {
         let now = Instant::now();
         assert_eq!(
-            super::reserve_provider_deadline(now + std::time::Duration::from_millis(100)),
+            reserve_request_deadline(now, now + std::time::Duration::from_millis(100)),
             None
         );
         assert_eq!(
-            super::reserve_provider_deadline(now + std::time::Duration::from_secs(10)),
+            reserve_request_deadline(now, now + std::time::Duration::from_secs(10)),
             Some(now + std::time::Duration::from_secs(3))
         );
     }

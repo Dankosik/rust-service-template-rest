@@ -9,13 +9,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::Failure;
 use crate::jwt::{KeySet, parse_key_set};
-use crate::provider::ProviderClient;
+use crate::provider::{ProviderClient, reserve_request_deadline};
 use url::Url;
 
 const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
 const REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 const ATTEMPT_BUDGET: Duration = Duration::from_secs(3);
-const RESPONSE_RESERVE: Duration = Duration::from_millis(100);
 const REFRESH_METRIC: &str = "authn_jwks_refreshes_total";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,7 +97,7 @@ impl SharedRefresh {
                     FetchOutcome::Failure => UnknownKeyResult::CooldownFailure,
                 })
             } else {
-                match reserve_deadline(now, request_deadline) {
+                match reserve_request_deadline(now, request_deadline) {
                     Some(deadline) => {
                         let generation = state.next_generation;
                         state.next_generation = state.next_generation.saturating_add(1);
@@ -232,12 +231,6 @@ async fn fetch_set(
     parse_key_set(&result).map(Arc::new)
 }
 
-fn reserve_deadline(now: Instant, request_deadline: Instant) -> Option<Instant> {
-    let reserved_request_deadline = request_deadline.checked_sub(RESPONSE_RESERVE)?;
-    let deadline = (now + ATTEMPT_BUDGET).min(reserved_request_deadline);
-    (deadline > now).then_some(deadline)
-}
-
 async fn wait_for_parent_deadline(deadline: Instant) -> UnknownKeyResult {
     tokio::time::sleep_until(deadline).await;
     UnknownKeyResult::DeadlineElapsed
@@ -272,8 +265,8 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use tokio::time::Instant;
 
-    use super::{FetchOutcome, SharedRefresh, UnknownKeyResult, reserve_deadline};
-    use crate::{Failure, jwt::parse_key_set};
+    use super::{FetchOutcome, SharedRefresh, UnknownKeyResult};
+    use crate::{Failure, jwt::parse_key_set, provider::reserve_request_deadline};
 
     fn key_set(kid: &str) -> Arc<crate::jwt::KeySet> {
         let mut modulus = vec![0_u8; 256];
@@ -336,13 +329,13 @@ mod tests {
     #[test]
     fn reserved_deadline_never_exceeds_the_request_or_attempt_budget() {
         let now = Instant::now();
-        assert!(reserve_deadline(now, now + Duration::from_millis(100)).is_none());
+        assert!(reserve_request_deadline(now, now + Duration::from_millis(100)).is_none());
         assert_eq!(
-            reserve_deadline(now, now + Duration::from_secs(10)).unwrap(),
+            reserve_request_deadline(now, now + Duration::from_secs(10)).unwrap(),
             now + Duration::from_secs(3)
         );
         assert_eq!(
-            reserve_deadline(now, now + Duration::from_secs(1)).unwrap(),
+            reserve_request_deadline(now, now + Duration::from_secs(1)).unwrap(),
             now + Duration::from_millis(900)
         );
     }

@@ -70,8 +70,6 @@ pub(crate) enum BootstrapError {
     // template:begin authn:bootstrap-authn-errors
     #[error("authentication startup failed")]
     AuthenticationStartup,
-    #[error("authentication route composition failed")]
-    AuthenticationRoute,
     // template:end authn:bootstrap-authn-errors
     // template:begin postgres:bootstrap-errors
     #[error("configuration is invalid: postgres.dsn: {0}")]
@@ -171,7 +169,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     let outcome = async {
         let probes: Vec<Box<dyn Probe>> = Vec::new();
         // template:begin authn:bootstrap-authn-prepare
-        let verifier = prepare_auth(&config, &tracker, &cancel).await?;
+        prepare_auth(&config, &tracker, &cancel).await?;
         // template:end authn:bootstrap-authn-prepare
         // template:begin postgres:bootstrap-postgres-startup
         let (probes, pool) = prepare_postgres(probes, &config, &tracker, &cancel).await?;
@@ -196,9 +194,6 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             tracker: tracker.clone(),
             readiness,
             policy,
-            // template:begin authn:bootstrap-prepared-authn
-            verifier,
-            // template:end authn:bootstrap-prepared-authn
             // template:begin postgres:bootstrap-prepared-pool
             postgres_pool: postgres_pool.clone(),
             // template:end postgres:bootstrap-prepared-pool
@@ -336,9 +331,6 @@ struct Prepared<'a> {
     tracker: TaskTracker,
     readiness: Readiness,
     policy: RefreshPolicy,
-    // template:begin authn:bootstrap-prepared-authn-field
-    verifier: Verifier,
-    // template:end authn:bootstrap-prepared-authn-field
     // template:begin postgres:bootstrap-prepared-field
     postgres_pool: Option<PgPool>,
     // template:end postgres:bootstrap-prepared-field
@@ -354,9 +346,6 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         tracker,
         readiness,
         policy,
-        // template:begin authn:bootstrap-destructure-authn
-        verifier,
-        // template:end authn:bootstrap-destructure-authn
         // template:begin postgres:bootstrap-destructure-pool
         postgres_pool,
         // template:end postgres:bootstrap-destructure-pool
@@ -380,14 +369,7 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
     };
     // The routes and the committed OpenAPI document are the two halves of
     // one contract; only the routes are needed here.
-    #[allow(unused_variables)] // A retained profile shadows this uncalled factory.
-    let make_contract = || Ok::<_, BootstrapError>(service::api::contract());
-    // template:begin authn:bootstrap-authn-contract
-    let make_contract = || {
-        service::api::contract_with_auth(verifier).map_err(|_| BootstrapError::AuthenticationRoute)
-    };
-    // template:end authn:bootstrap-authn-contract
-    let contract = make_contract()?;
+    let contract = service::api::contract();
     let (routes, _document) = contract.split_for_parts();
     let app = infra_http::harden(
         routes.with_state(readiness.reader()),

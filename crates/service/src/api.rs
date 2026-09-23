@@ -15,7 +15,6 @@ use std::error::Error;
 
 use health::ReadinessReader;
 // template:begin authn:service-api-authn-imports
-use infra_bearerauthn::Verifier;
 use utoipa::Modify;
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 // template:end authn:service-api-authn-imports
@@ -69,24 +68,6 @@ pub fn contract() -> OpenApiRouter<ReadinessReader> {
     assemble()
 }
 
-// template:begin authn:service-api-contract-with-auth
-/// The served contract assembled with the verifier bootstrap prepared.
-///
-/// Current platform operations are intentionally public. Future protected
-/// operations enter this assembly only through `infra_http::protect`; carrying
-/// the verifier here keeps the runtime and document assembly on one seam.
-///
-/// # Errors
-///
-/// Returns a sanitized protection-composition error when a protected route
-/// supplied by this assembly declares a contract that does not match it.
-pub fn contract_with_auth(
-    _verifier: Verifier,
-) -> Result<OpenApiRouter<ReadinessReader>, infra_http::ProtectError> {
-    Ok(assemble())
-}
-// template:end authn:service-api-contract-with-auth
-
 fn assemble() -> OpenApiRouter<ReadinessReader> {
     OpenApiRouter::with_openapi(ApiDoc::openapi()).merge(infra_http::router())
 }
@@ -115,6 +96,7 @@ mod tests {
     use axum::http::StatusCode;
     use axum::http::header::AUTHORIZATION;
     use axum::response::IntoResponse;
+    use infra_bearerauthn::Verifier;
     use utoipa_axum::routes;
 
     use super::*;
@@ -172,9 +154,7 @@ mod tests {
 
     #[test]
     fn public_probe_contract_does_not_depend_on_a_verifier() {
-        let document = contract_with_auth(Verifier::disabled())
-            .expect("public-only assembly does not protect a route")
-            .into_openapi();
+        let document = contract().into_openapi();
         assert!(
             document.paths.paths["/health/live"]
                 .get

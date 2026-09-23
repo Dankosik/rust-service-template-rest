@@ -14,7 +14,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use url::Url;
 
 use crate::claims::{ClaimPolicy, validate_jwt_claims};
-use crate::provider::ProviderClient;
+use crate::provider::{ProviderClient, parse_provider_url};
 use crate::refresh::{SharedRefresh, UnknownKeyResult, run_refresh_worker};
 use crate::{BearerToken, Failure, JwtOptions, Principal, RefreshTask, TokenProfile, Verifier};
 
@@ -165,28 +165,6 @@ fn discovery_url(issuer: &str) -> Result<Url, Failure> {
 
 fn admitted_jwks_uri(value: &str) -> Result<Url, Failure> {
     parse_provider_url(value)
-}
-
-fn parse_provider_url(raw: &str) -> Result<Url, Failure> {
-    if raw != raw.trim() || raw.bytes().any(|byte| byte.is_ascii_control()) {
-        return Err(Failure::Unavailable);
-    }
-    let url = Url::parse(raw).map_err(|_| Failure::Unavailable)?;
-    let authority = raw
-        .split_once("://")
-        .map(|(_, value)| value.split(['/', '?', '#']).next().unwrap_or_default())
-        .unwrap_or_default();
-    if url.scheme() != "https"
-        || url.host().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-        || url.query().is_some()
-        || authority.contains('@')
-    {
-        return Err(Failure::Unavailable);
-    }
-    Ok(url)
 }
 
 struct CompactToken {
