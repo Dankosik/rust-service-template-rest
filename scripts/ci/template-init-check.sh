@@ -199,7 +199,11 @@ run_validation() {
 	receipt=$(mktemp "${receipt_dir}/attempt.XXXXXX")
 	log_dir=$(mktemp -d "${receipt_dir}/attempt-logs.XXXXXX")
 	# Explicit caller caches survive this attempt; only private work is removed.
+	# Every initialization and representative shares this one absolute cache,
+	# so the locked dependency graph compiles once per attempt, not per init.
 	target_cache=${CARGO_TARGET_DIR:-${work}/cargo-target}
+	[[ ${target_cache} == /* ]] || target_cache=${PWD}/${target_cache}
+	export CARGO_TARGET_DIR=${target_cache}
 	source=${work}/source
 	candidate=$(snapshot_candidate "${source}")
 	printf 'candidate=%s\nmode=%s\nstate=running\n' "${candidate}" "${mode}" >"${receipt}"

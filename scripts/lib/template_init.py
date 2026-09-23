@@ -711,7 +711,11 @@ def _format_staged_rust(snapshot: Path, metadata_bytes: bytes) -> None:
 def _staged_environment(snapshot: Path) -> dict[str, str]:
     environment = os.environ.copy()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    environment["CARGO_TARGET_DIR"] = os.fspath(snapshot.parent / "cargo-target")
+    # An explicit absolute caller cache is reused, so repeated initializations
+    # compile the locked dependency graph once; otherwise the build stays
+    # private to this attempt and outside the staged tree.
+    if not os.path.isabs(environment.get("CARGO_TARGET_DIR", "")):
+        environment["CARGO_TARGET_DIR"] = os.fspath(snapshot.parent / "cargo-target")
     return environment
 
 
