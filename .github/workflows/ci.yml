@@ -164,6 +164,7 @@ jobs:
           git fetch --no-tags --depth=1 origin "${BASE_SHA}"
           bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD | bash ./scripts/ci/affected-crates.sh | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
       - name: Lint, build, test
+        id: lint-build-test
         if: >-
           needs.changes.outputs.rust_source == 'true' ||
           needs.changes.outputs.cargo_dependencies == 'true' ||
@@ -238,12 +239,15 @@ jobs:
         run: bash ./scripts/ci/measure.sh quality-validation-system -- make changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
       - name: Save cargo caches
         # Only a push to main writes the cache, so a pull request or tag build
-        # cannot poison what later runs restore.
+        # cannot poison what later runs restore; and only after the workspace
+        # build, because the first save claims the key and a partial target
+        # would otherwise own it until Cargo.lock changes.
         if: >-
           github.event_name == 'push' &&
           github.ref == 'refs/heads/main' &&
           steps.cargo-cache.outcome == 'success' &&
-          steps.cargo-cache.outputs.cache-hit != 'true'
+          steps.cargo-cache.outputs.cache-hit != 'true' &&
+          steps.lint-build-test.outcome == 'success'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
