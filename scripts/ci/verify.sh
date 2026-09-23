@@ -14,6 +14,10 @@
 # VERIFY_FORCE=1. Every run writes an attempt record with per-step state, so a
 # failed or interrupted run leaves evidence without granting acceptance. A
 # step that changes the candidate invalidates the attempt.
+#
+# Heavy steps and the source initializer matrix are CI-owned: a local run
+# names them and records a partial result instead of running them.
+# ALLOW_HEAVY=1 and ALLOW_FULL=1 keep them local.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -101,6 +105,8 @@ prepare_command() {
 
 self_test() (
 	local output fixture scratch script attempt_path receipts_before crate
+	# plan_section NAME: one section of the plan in ${output}, header included.
+	plan_section() { sed -n "/^$1:\$/,/^[^ ]/p" <<<"${output}"; }
 	fixture=$(mktemp -d)
 	trap 'rm -rf -- "${fixture}"' EXIT
 	mkdir -p "${fixture}/scripts/ci" "${fixture}/scripts/lib" "${fixture}/make" "${fixture}/tools"
@@ -190,12 +196,14 @@ self_test() (
 	grep -q 'cost_class=cpu requires_heavy=false requires_docker=false' <<<"${output}"
 	output=$(bash "${script}" --plan --files crates/infra-bearerauthn/src/claims.rs)
 	grep -q '^  make template-init-check$' <<<"${output}"
-	if CI='' ALLOW_FULL='' ALLOW_HEAVY='' bash "${script}" --files scripts/init-module.sh >/dev/null 2>"${TMPDIR:-/tmp}/verify-full-required.$$"; then
-		echo "verify self-test accepted complete initializer validation without ALLOW_FULL=1" >&2
-		return 1
-	fi
-	grep -q 'set ALLOW_FULL=1' "${TMPDIR:-/tmp}/verify-full-required.$$"
-	rm -f "${TMPDIR:-/tmp}/verify-full-required.$$"
+	# The initializer matrix is CI-owned unless ALLOW_FULL=1 keeps it local; a
+	# route with nothing else to prove runs nothing and names CI.
+	grep -q '^  make template-init-check$' <<<"$(plan_section ci-owned)"
+	output=$(ALLOW_FULL=1 bash "${script}" --plan --files scripts/tests/template-profile-projections.py)
+	grep -q '^  make template-init-check$' <<<"$(plan_section commands)"
+	if grep -q '^ci-owned:$' <<<"${output}"; then return 1; fi
+	output=$(bash "${script}" --files scripts/tests/template-profile-projections.py)
+	grep -q '^verification not applicable locally: CI owns make template-init-check$' <<<"${output}"
 	rm make/source.mk
 	cat >template.lock <<EOF
 {"schema_version":1,"state":"complete","identity":{"service_name":"fixture-api","repository":"https://github.com/example/fixture-api","description":"Fixture API","codeowner":"@example/platform"},"profiles":{"database":"none","agent_harness":"core"},"source":{"repository":"https://github.com/Dankosik/rust-service-template-rest","checkout_revision":"$(git rev-parse HEAD)","provenance":"local-checkout"}}
@@ -312,12 +320,16 @@ EOF
 	grep -q '^  make test-integration-db$' <<<"${output}"
 	grep -q '^  make migration-validate RUNTIME_IMAGE=service:verify$' <<<"${output}"
 
-	if CI='' ALLOW_HEAVY='' bash "${script}" --files build/docker/Dockerfile >/dev/null 2>"${TMPDIR:-/tmp}/verify-heavy.$$"; then
-		echo "verify self-test accepted a heavy route without ALLOW_HEAVY=1" >&2
-		return 1
-	fi
-	grep -q 'set ALLOW_HEAVY=1' "${TMPDIR:-/tmp}/verify-heavy.$$"
-	rm -f "${TMPDIR:-/tmp}/verify-heavy.$$"
+	# Heavy steps are CI-owned unless ALLOW_HEAVY=1 keeps them local; the
+	# light steps of the same route stay local.
+	output=$(bash "${script}" --plan --files build/docker/Dockerfile)
+	grep -q '^  make dockerfile-check$' <<<"$(plan_section commands)"
+	if grep -q 'requires_heavy=true' <<<"$(plan_section commands)"; then return 1; fi
+	grep -q '^  make runtime-image-build RUNTIME_IMAGE=service:verify$' <<<"$(plan_section ci-owned)"
+	grep -q '^  make container-security CONTAINER_IMAGE=service:verify$' <<<"$(plan_section ci-owned)"
+	output=$(ALLOW_HEAVY=1 bash "${script}" --plan --files build/docker/Dockerfile)
+	grep -q '^  make runtime-image-build RUNTIME_IMAGE=service:verify$' <<<"$(plan_section commands)"
+	if grep -q '^ci-owned:$' <<<"${output}"; then return 1; fi
 
 	if VERIFY_DOCKER_COMMAND=missing-docker-for-verify-test bash "${script}" --files scripts/ci/fixture.sh >/dev/null 2>"${TMPDIR:-/tmp}/verify-docker.$$"; then
 		echo "verify self-test accepted a container-backed route without Docker" >&2
@@ -350,6 +362,20 @@ MAKE
 		echo "verification leaked temporary files" >&2
 		return 1
 	}
+
+	# Local steps pass while a CI-owned step remains: the receipt is partial
+	# and names CI, never a full verification.
+	cat >Makefile <<'MAKE'
+check-instructions:
+	@printf 'local step ran\n'
+MAKE
+	: >make/source.mk
+	output=$(VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py scripts/tests/template-profile-projections.py)
+	grep -q 'local step ran' <<<"${output}"
+	grep -q '^status: partially_verified$' <<<"${output}"
+	grep -q '^ci_owned: make template-init-check$' <<<"${output}"
+	grep -q '^gap_or_next_owner: CI$' <<<"${output}"
+	rm make/source.mk
 
 	# A failure retains passed and unstarted steps without granting aggregate
 	# acceptance; the owner finishes only the missing leaves.
@@ -466,7 +492,9 @@ SH
 )
 
 if [[ ${mode} == self-test ]]; then
-	self_test
+	# Which steps are CI-owned depends on these; CI and a workstation test the
+	# same routes.
+	CI='' ALLOW_FULL='' ALLOW_HEAVY='' self_test
 	exit
 fi
 
@@ -524,6 +552,21 @@ heavy_requirements=()
 docker_requirements=()
 keys=''
 not_applicable=()
+ci_owned_displays=()
+ci_owned_details=()
+
+# CI runs every heavy step and the source initializer matrix on the surfaces
+# that select them, so a local run leaves them there rather than occupying
+# the workstation.
+ci_owned() {
+	local requires_heavy=$1 display=$2
+	[[ ${CI:-} != true ]] || return 1
+	if [[ ${requires_heavy} == true ]]; then
+		[[ ${ALLOW_HEAVY:-} != 1 ]]
+		return
+	fi
+	[[ ${display} == 'make template-init-check' && ${ALLOW_FULL:-} != 1 ]]
+}
 
 # add_command KIND ARGUMENT REASON DISPLAY COST_CLASS REQUIRES_HEAVY REQUIRES_DOCKER
 add_command() {
@@ -531,6 +574,12 @@ add_command() {
 	key="${kind}|${argument}"
 	case $'\n'"${keys}" in *$'\n'"${key}"$'\n'*) return ;; esac
 	keys="${keys}${key}"$'\n'
+	if ci_owned "${requires_heavy}" "${display}"; then
+		ci_owned_displays[${#ci_owned_displays[@]}]=${display}
+		ci_owned_details[${#ci_owned_details[@]}]=$(printf '    because %s\n    cost_class=%s requires_heavy=%s requires_docker=%s' \
+			"${reason}" "${cost_class}" "${requires_heavy}" "${requires_docker}")
+		return
+	fi
 	kinds[${#kinds[@]}]=${kind}
 	arguments[${#arguments[@]}]=${argument}
 	reasons[${#reasons[@]}]=${reason}
@@ -553,7 +602,7 @@ if is_true validation_system; then
 	add_command make verify-check "validation routing changed" "make verify-check" cpu false false
 fi
 if is_true module_initializer; then
-	add_command make template-init-check "canonical projections and six runtime representatives" "make template-init-check" cpu false false
+	add_command make template-init-check "canonical projections and twelve runtime representatives" "make template-init-check" cpu false false
 fi
 
 workspace_rust=false
@@ -652,6 +701,12 @@ print_plan() {
 				"${displays[$i]}" "${reasons[$i]}" "${cost_classes[$i]}" "${heavy_requirements[$i]}" "${docker_requirements[$i]}"
 		done
 	fi
+	if ((${#ci_owned_displays[@]})); then
+		echo "ci-owned:"
+		for i in "${!ci_owned_displays[@]}"; do
+			printf '  %s\n%s\n' "${ci_owned_displays[$i]}" "${ci_owned_details[$i]}"
+		done
+	fi
 	if ((${#not_applicable[@]})); then
 		echo "not applicable:"
 		printf '  %s\n' "${not_applicable[@]}"
@@ -663,16 +718,24 @@ if [[ ${mode} == plan ]]; then
 	exit
 fi
 
+ci_owned_summary=''
+if ((${#ci_owned_displays[@]})); then ci_owned_summary=$(
+	IFS='; '
+	echo "${ci_owned_displays[*]}"
+); fi
+
 if ((${#kinds[@]} == 0)); then
 	print_plan
-	echo "verification not applicable: no executable checks for changed surfaces"
+	if [[ -n ${ci_owned_summary} ]]; then
+		echo "verification not applicable locally: CI owns ${ci_owned_summary}"
+	else
+		echo "verification not applicable: no executable checks for changed surfaces"
+	fi
 	exit 0
 fi
 
-requires_heavy=false
 requires_docker=false
 for i in "${!kinds[@]}"; do
-	[[ ${heavy_requirements[$i]} == true ]] && requires_heavy=true
 	[[ ${docker_requirements[$i]} == true ]] && requires_docker=true
 done
 
@@ -681,10 +744,6 @@ blocked() {
 	exit 2
 }
 
-if [[ ${requires_heavy} == true && ${ALLOW_HEAVY:-} != 1 && ${CI:-} != true ]]; then blocked "set ALLOW_HEAVY=1 before verification"; fi
-if is_true module_initializer && [[ ${ALLOW_FULL:-} != 1 && ${CI:-} != true ]]; then
-	blocked "set ALLOW_FULL=1 before verification"
-fi
 for binary in git make shasum; do command -v "${binary}" >/dev/null 2>&1 || blocked "required binary is unavailable: ${binary}"; done
 if is_true rust_source || is_true cargo_dependencies || is_true dependency_policy || is_true lint_config || is_true openapi || is_true validation_system || is_true module_initializer || is_true tool_manifest; then
 	command -v cargo >/dev/null 2>&1 || blocked "required binary is unavailable: cargo"
@@ -795,12 +854,16 @@ receipt_tmp=${receipt}.tmp.$$
 	printf 'inputs: %s\n' "$(tr '\n' ',' <"${files_path}")"
 	printf 'environment: %s\n' "${environment_detail}"
 	printf 'duration: %ss\n' "${duration}"
-	printf 'status: verified\n'
+	if [[ -n ${ci_owned_summary} ]]; then printf 'status: partially_verified\n'; else printf 'status: verified\n'; fi
 	if ((${#not_applicable[@]})); then printf 'not_applicable: %s\n' "$(
 		IFS='; '
 		echo "${not_applicable[*]}"
 	)"; fi
-	printf 'gap_or_next_owner: none\n'
+	if [[ -n ${ci_owned_summary} ]]; then
+		printf 'ci_owned: %s\ngap_or_next_owner: CI\n' "${ci_owned_summary}"
+	else
+		printf 'gap_or_next_owner: none\n'
+	fi
 } >"${receipt_tmp}"
 mv "${receipt_tmp}" "${receipt}"
 printf 'attempt_state: passed\nreceipt: %s\n' "${receipt}" >>"${attempt}"

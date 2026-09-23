@@ -198,7 +198,12 @@ harness projections, then initializes, builds and tests twelve core representati
 one per DATABASE × AUTHN × OUTBOUND_HTTP runtime graph. Exact non-harness tree equality proves
 that the other harness choices do not change runtime or contract-generation
 inputs. Quality, dependency, image and database gates retain their own scopes;
-the initializer command does not repeat the full aggregate per harness.
+the initializer command does not repeat the full aggregate per harness. Every
+initialization in one run shares one absolute Cargo target (an explicit
+`CARGO_TARGET_DIR`, or the run's private one), so the locked dependency graph
+compiles once. CI runs the check as three parallel parts, the source suites
+with the projections and the twelve graphs split by DATABASE, and
+`make verify` leaves it to CI unless `ALLOW_FULL=1`.
 
 `bash scripts/ci/template-init-check.sh --projections-only` records the focused
 96-projection proof without Cargo or full/heavy admission. It does not claim
