@@ -100,6 +100,20 @@ jobs:
         run: |
           rustup toolchain install
           rustup show active-toolchain
+      - name: Restore extractor caches
+        # The extractor's internal cargo builds the build scripts and
+        # proc-macros it needs into a fresh scratch directory on every run;
+        # its cargo_target_dir option points it at this persistent target.
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ${{ runner.temp }}/codeql-cargo-target
+          key: codeql-rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: codeql-rust-${{ runner.os }}-${{ runner.arch }}-
       - name: Initialize CodeQL
         uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
@@ -107,7 +121,27 @@ jobs:
           build-mode: none
           queries: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'security-extended' || 'security-and-quality' }}
       - name: Analyze
+        id: analyze
         uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        env:
+          CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET_DIR: ${{ runner.temp }}/codeql-cargo-target
+      - name: Save extractor caches
+        # Only a push to main writes the cache, and only after the analysis
+        # that filled it succeeded.
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.cargo-cache.outcome == 'success' &&
+          steps.cargo-cache.outputs.cache-hit != 'true' &&
+          steps.analyze.outcome == 'success'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ${{ runner.temp }}/codeql-cargo-target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   codeql-required:
     if: always()

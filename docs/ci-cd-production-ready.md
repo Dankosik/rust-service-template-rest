@@ -71,7 +71,10 @@ versions come from `tools/versions.env` through `GITHUB_ENV` and
 [codeql.yml](../.github/workflows/codeql.yml) runs CodeQL for Rust
 (`build-mode: none`) when Rust source or manifests change and for Actions
 when workflows change, with `security-events: write` scoped to the analyze
-jobs. `codeql-required` accepts skipped analyses and rejects failed ones.
+jobs. The Rust analysis points the extractor's `cargo_target_dir` at a
+persistent target restored with the crate registry; like the CI caches, only a
+push to `main` writes it, after a successful analysis. `codeql-required`
+accepts skipped analyses and rejects failed ones.
 
 GitHub Rulesets or organization policy own merge admission: require
 `required` and `codeql-required`. The repository does not rewrite its own
@@ -195,6 +198,7 @@ job, while every other job finished within 8 minutes.
 | CI builds with `CARGO_PROFILE_DEV_DEBUG=line-tables-only`, and every target cache key carries the level | full debuginfo | the `quality` and initializer caches were 4.2 and 4.1 GB, 8.7 of the repository's 10 GB, so the integration, Go-tool and buildx caches were evicted and one restore took 50–126 s; line tables keep file:line in test backtraces |
 | `make verify` leaves heavy steps and the initializer matrix to CI and records a partial receipt | refusing to run without `ALLOW_HEAVY=1` or `ALLOW_FULL=1` | the refusal led agents to run the full matrix on a workstation, 40 minutes and more with several GB of temporary targets, while CI runs the same gates in parallel |
 | No registry-only cache restore in `security` and CodeQL | the restores that were there | a cache version includes its path list, so restoring fewer paths than `quality` saves never hit (the CodeQL run of 2026-09-23 reported "Cache not found"); the crate downloads cost seconds |
+| CodeQL Rust points the extractor's `cargo_target_dir` at a persistent target, cached with the registry under its own key | the default scratch directory per run | loading the workspace (crate downloads, build scripts, proc-macros, all features on) took about 60 s of a 7-minute analysis; codeql-action 4.38.1 offers neither dependency caching nor overlay analysis for Rust, and the queries (about 3 minutes) and database finalization (about 40 s) are fixed cost on a 4-vCPU runner |
 
 ### Runtime image
 
