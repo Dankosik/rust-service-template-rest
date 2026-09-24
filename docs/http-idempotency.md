@@ -455,3 +455,44 @@ authentication engine exports a real verifier fixture — today,
 `AUTHN=oidc-introspection` — because it drives requests through the hardened
 chain with that verifier. It is absent from a JWT-only output, which still
 runs every engine-independent boundary test and the full store-level suite.
+
+## Mechanism and reopen conditions
+
+The boundary is template-owned because no maintained crate commits the
+replay record inside the caller's PostgreSQL transaction: `axum-idempotent`
+0.4.0 caches responses in a session store, lets concurrent duplicates reach
+the handler, and fails open, while `idempotent` 2.0.0 keeps leases in a
+separate store. Reassess when a maintained crate joins the caller's
+transaction.
+
+Each attempt is one explicit `READ COMMITTED` transaction on the writer. Its
+first statement refuses a recovering or read-only session and takes
+`pg_try_advisory_xact_lock` on the first eight bytes of the scope digest,
+which never waits; a live record decides before the lock result. A duplicate
+gets 409 instead of waiting, because with `sqlx` 0.9 a dropped waiting
+request keeps its pooled connection busy until the server statement ends.
+Stricter isolation is not offered: under `REPEATABLE READ` the committed
+record stays invisible to a duplicate. Reopen for a `sqlx` release that
+cancels server statements on drop, measured harmful 409 churn, a false 409
+that no lock holder explains, or an operation that needs stricter isolation.
+
+An unknown commit is read back on a fresh writer connection within the
+request deadline minus a 100 ms reserve; reopen if healthy-writer readback
+latency exceeds that reserve. Cleanup deletes 500-row batches every 60 s under
+a 1 s statement timeout; reopen for a backlog one tick cannot drain or for
+lock waits that cleanup causes. Canonical encoding 1, its digest domains, and
+stored success format 1 (1 MiB body, 8 KiB replayable headers) are fixed while
+records are live; changing one needs a contract change with a compatibility
+plan.
+
+The contract follows the expired IETF `Idempotency-Key` draft (revision 07)
+where it is sound and deviates deliberately: keys are unquoted tokens (the
+structured-field string form is refused), only 2xx successes are stored
+because a failure rolls the effect back, the scope is the verified caller and
+`operationId` with no resource or tenant refinement, an authentication engine
+is required, and retention has no template default. Reopen on the draft's
+publication as an RFC, a consumer that needs quoted keys or replayed business
+rejections, a real per-tenant key namespace, or a new verified-caller
+mechanism. Reassess the database-backed proof when `sqlx` or the proof image's
+PostgreSQL major version changes. The Definition, design, and plan comparison
+are preserved in the stage-10.3 implementation commit.
