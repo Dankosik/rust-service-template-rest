@@ -37,6 +37,7 @@ from template_state import (
     parse_manifest,
     safe_relative,
     selected_adapters,
+    selected_http_idempotency,
     selected_outbound_http,
     selected_profiles,
     snapshot_tree,
@@ -807,6 +808,7 @@ def _run(arguments: argparse.Namespace) -> int:
         assert target_lock is not None
         _database, harness = selected_profiles(target)
         selected_outbound_http(target)
+        selected_http_idempotency(target)
         selected = set(selected_adapters(harness))
         manifest = parse_manifest(
             snapshot,

@@ -101,13 +101,19 @@ version. CI installs the same versions as prebuilt binaries.
 | `make changed-surfaces-check`, `make affected-crates-check`, `make validation-lock-self-test`, `make verify-check` | The validation scripts' self-tests |
 | `ALLOW_FULL=1 make check` | The full repository gate under the lock: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-instructions`, `docs-check`, selected profile checks, and the five self-tests |
 
-In the source template, `ALLOW_FULL=1 make template-init-check` checks 96
-canonical projections and initializes/builds/tests twelve distinct runtime
-representatives. It does not need `ALLOW_HEAVY` or Docker. The source runner's
+In the source template, `ALLOW_FULL=1 make template-init-check` checks 128
+canonical projections and initializes/builds/tests sixteen distinct runtime
+representatives. It does not need `ALLOW_HEAVY`. The source runner's
 `--projections-only` mode, `make template-init-projections`, performs the
 focused projection/equality check without Cargo; it is not a complete
 public-initialization or runtime receipt. The
 [initializer guide](template-sync.md#validation-boundary) owns this distinction.
+<!-- template:begin http-idempotency:docs-commands-http-idempotency -->
+With the idempotency pack retained, four of those sixteen representatives
+(graphs 13-16) also run the retained idempotency database suite and need a
+usable Docker daemon; the runner refuses before any target write when one is
+missing.
+<!-- template:end http-idempotency:docs-commands-http-idempotency -->
 
 ## Guards and variables
 

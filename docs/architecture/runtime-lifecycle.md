@@ -23,13 +23,15 @@ it against the built binary.
    refresher) join a `TaskTracker` with child `CancellationToken`s.
 5. Admit the dependencies retained by the local profile before accepting
    traffic; bootstrap owns their readiness registration and cleanup.
-6. Readiness admission: the refresher evaluates every registered probe once
+6. The API contract comes from `service::api::contract()`: the route tree
+   and its OpenAPI document as one value. Assembly is pure, so it runs
+   before readiness admission.
+7. Readiness admission: the refresher evaluates every registered probe once
    under `health.probe_budget`; a failure is a startup failure (exit
    `1`). Without a selected profile the set is empty and admission proves
-   the mechanism.
-7. The route tree comes from `service::api::contract()`, is given the
-   readiness reader as state, wrapped by `infra_http::harden`, and bound by
-   the bounded `Server`; the diagnostics listener binds second when
+   the mechanism. The route tree is then given the readiness reader as
+   state, wrapped by `infra_http::harden`, and bound by the bounded
+   `Server`; the diagnostics listener binds second when
    `observability.metrics.addr` is set. `service_ready` is logged only after
    both binds; the platform's first `/health/ready` poll answers from the
    admission evaluation.
@@ -59,6 +61,19 @@ the DSN and opens the first connection inside the acquire budget
 the tracker, and an unreachable database is a startup failure
 ([Persistence](persistence.md)).
 <!-- template:end postgres:docs-lifecycle-postgres-startup -->
+<!-- template:begin http-idempotency:docs-lifecycle-http-idempotency -->
+With the HTTP idempotency profile retained, the composer built into
+`service::api::contract()` also proves declaration and agreement:
+`Composer::agree` runs against the assembled document before readiness
+admission, and any violation is a startup failure with a sanitized
+diagnostic. An `Active` result requires `postgres.enabled`, a set retention,
+the profile schema, and a writable session, then starts the boundary before
+admission continues; an `Inactive` result does nothing further. While
+active, a background cleanup task joins the existing `TaskTracker` with a
+child cancellation token and is cancelled and joined in the existing
+background-join shutdown stage, beside the other background tasks. It never
+adds a readiness probe or a shutdown stage of its own.
+<!-- template:end http-idempotency:docs-lifecycle-http-idempotency -->
 
 Configuration and dependency admission precede traffic acceptance.
 Bootstrap, not handlers or feature code, owns process lifecycle and the

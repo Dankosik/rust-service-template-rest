@@ -11,8 +11,9 @@ authority.
 1. Business behavior lives in `crates/<feature>`; transports and providers in
    `crates/infra-<provider>`; concrete wiring and process lifecycle in the
    composition root `crates/service`. The crate graph is the dependency rule:
-   a feature crate depends on no transport or provider crate, and the compiler
-   refuses the reverse edge.
+   features' HTTP modules may use `infra-http`'s inbound contract surfaces,
+   no feature depends on a provider crate, and no crate a feature depends on
+   may depend on that feature; the compiler refuses the reverse edge.
 2. Generated output is derived. `api/openapi/service.yaml` is generated from
    the handlers' `#[utoipa::path]` annotations and schema derives, committed,
    and byte-compared by a test; the annotations are where a change is made.

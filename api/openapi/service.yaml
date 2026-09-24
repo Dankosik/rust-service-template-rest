@@ -182,6 +182,53 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
+    IdempotencyBadRequest:
+      description: |-
+        bearer authentication is malformed, the Idempotency-Key header is missing
+        or invalid, or the request is otherwise malformed or invalid
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    IdempotencyKeyMismatch:
+      description: |-
+        the Idempotency-Key is bound to a different request, or the operation
+        cannot process the request content
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    IdempotencyRequestInProgress:
+      description: |-
+        a request with this Idempotency-Key is still in progress, so retry with
+        the same key later, or the operation reports its own conflict
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+          description: seconds to wait before retrying with the same Idempotency-Key
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    IdempotencyUnavailable:
+      description: |-
+        bearer authentication trust or provider is unavailable, idempotent request
+        processing is unavailable, or the outcome of this request is unknown;
+        retry with the same Idempotency-Key
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+          description: seconds to wait before retrying with the same Idempotency-Key
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
     InternalServerError:
       description: unexpected server failure
       content:

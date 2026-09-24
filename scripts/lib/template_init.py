@@ -23,6 +23,7 @@ from template_state import (
     AUTHN_CHOICES,
     DATABASE_CHOICES,
     HARNESS_CHOICES,
+    HTTP_IDEMPOTENCY_CHOICES,
     LOCK_NAME,
     LOCK_SCHEMA_VERSION,
     TEMPLATE_REPOSITORY,
@@ -36,7 +37,9 @@ from template_state import (
     git,
     git_head,
     git_root,
+    http_idempotency_requirement,
     lock_has_explicit_authn,
+    lock_has_explicit_http_idempotency,
     lock_has_explicit_outbound_http,
     load_lock,
     OUTBOUND_HTTP_CHOICES,
@@ -76,6 +79,7 @@ class InitInputs:
     database: str
     authn: str
     outbound_http: str
+    http_idempotency: str
     agent_harness: str
 
     def identity(self) -> dict[str, str]:
@@ -91,6 +95,7 @@ class InitInputs:
             "database": self.database,
             "authn": self.authn,
             "outbound_http": self.outbound_http,
+            "http_idempotency": self.http_idempotency,
             "agent_harness": self.agent_harness,
         }
 
@@ -127,6 +132,7 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         database=_argument_value(arguments, "database", default="none"),
         authn=_argument_value(arguments, "authn", default="none"),
         outbound_http=_argument_value(arguments, "outbound_http", default="none"),
+        http_idempotency=_argument_value(arguments, "http_idempotency", default="none"),
         agent_harness=_argument_value(arguments, "agent_harness", default="all"),
     )
     if inputs.database not in DATABASE_CHOICES:
@@ -135,8 +141,16 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         raise Refusal("AUTHN is unsupported")
     if inputs.outbound_http not in OUTBOUND_HTTP_CHOICES:
         raise Refusal("OUTBOUND_HTTP is unsupported")
+    if inputs.http_idempotency not in HTTP_IDEMPOTENCY_CHOICES:
+        raise Refusal("HTTP_IDEMPOTENCY is unsupported")
     if inputs.agent_harness not in HARNESS_CHOICES:
         raise Refusal("AGENT_HARNESS is unsupported")
+    if inputs.http_idempotency == "postgres":
+        requirement = http_idempotency_requirement(inputs.database, inputs.authn)
+        if requirement == "database":
+            raise Refusal("HTTP_IDEMPOTENCY=postgres requires DATABASE=postgres")
+        if requirement == "authn":
+            raise Refusal("HTTP_IDEMPOTENCY=postgres requires AUTHN=oidc-jwt or oidc-introspection")
     return inputs
 
 
@@ -163,9 +177,22 @@ _OUTBOUND_PROFILE_INVENTORY_KEYS = frozenset(
         "request-budget",
     }
 )
+_HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS = frozenset(
+    {
+        *_OUTBOUND_PROFILE_INVENTORY_KEYS,
+        "http-idempotency",
+        "http-idempotency-mounted",
+    }
+)
 
 
-def _profile_data(snapshot: Path, *, historical_authn: bool = False, historical_outbound: bool = False) -> ProfileData:
+def _profile_data(
+    snapshot: Path,
+    *,
+    historical_authn: bool = False,
+    historical_outbound: bool = False,
+    historical_http_idempotency: bool = False,
+) -> ProfileData:
     profile_path = snapshot / _PROFILE_FILE
     try:
         raw = parse_json_bytes(profile_path.read_bytes(), _PROFILE_FILE)
@@ -174,15 +201,22 @@ def _profile_data(snapshot: Path, *, historical_authn: bool = False, historical_
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
         raise Refusal("template profile inventory has an unsupported schema")
     keys = frozenset(raw)
-    if keys == _OUTBOUND_PROFILE_INVENTORY_KEYS:
+    if keys == _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
+        include_http_idempotency = True
+    elif historical_http_idempotency and keys == _OUTBOUND_PROFILE_INVENTORY_KEYS:
+        include_authn = True
+        include_outbound = True
+        include_http_idempotency = False
     elif historical_outbound and keys == _CURRENT_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = False
+        include_http_idempotency = False
     elif historical_authn and keys == _LEGACY_PROFILE_INVENTORY_KEYS:
         include_authn = False
         include_outbound = False
+        include_http_idempotency = False
     else:
         raise Refusal("template profile inventory has an unsupported schema")
     source_only = _path_list(raw["source_only"], "source_only")
@@ -200,6 +234,13 @@ def _profile_data(snapshot: Path, *, historical_authn: bool = False, historical_
             markers.extend(_markers(profile, section["markers"]))
     if include_outbound:
         for profile in ("outbound-http", "egress-dns", "request-budget"):
+            section = raw[profile]
+            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+                raise Refusal(f"template {profile} inventory has an unsupported shape")
+            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
+            markers.extend(_markers(profile, section["markers"]))
+    if include_http_idempotency:
+        for profile in ("http-idempotency", "http-idempotency-mounted"):
             section = raw[profile]
             if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
@@ -354,6 +395,10 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("outbound-http")
     if inputs.authn != "none" or inputs.outbound_http == "bounded":
         selected.update(("egress-dns", "request-budget"))
+    if inputs.http_idempotency == "postgres":
+        selected.add("http-idempotency")
+        if inputs.authn == "oidc-introspection":
+            selected.add("http-idempotency-mounted")
     return selected
 
 
@@ -600,6 +645,8 @@ def _replay(root: Path, inputs: InitInputs) -> int:
         historical_authn=not lock_has_explicit_authn(root, required=True),
         historical_outbound=lock_has_explicit_authn(root, required=True)
         and not lock_has_explicit_outbound_http(root, required=True),
+        historical_http_idempotency=lock_has_explicit_outbound_http(root, required=True)
+        and not lock_has_explicit_http_idempotency(root, required=True),
     )
     _postconditions(root, inputs, profiles)
     print("template init: matching complete lock; no changes")
@@ -1086,6 +1133,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--database", action=SingleValue)
     parser.add_argument("--authn", action=SingleValue)
     parser.add_argument("--outbound-http", action=SingleValue)
+    parser.add_argument("--http-idempotency", action=SingleValue)
     parser.add_argument("--agent-harness", action=SingleValue)
     return parser
 

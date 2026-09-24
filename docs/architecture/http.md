@@ -62,9 +62,10 @@ regenerated fails everywhere tests run.
    `x-security-decision`: `public` by design, `protected` by a real security
    scheme, or `blocked` pending a security specification. Do not add
    placeholder authentication.
-2. Put the behavior in its feature crate, which depends on no transport
-   crate. The handler that maps requests and responses for it lives with the
-   feature's router.
+2. Put the behavior in its feature crate. A feature depends on no provider
+   crate, and no crate a feature depends on may depend on it; its HTTP
+   module may use `infra-http`'s inbound contract surfaces. The handler that
+   maps requests and responses for it lives with the feature's router.
 3. Write the handler with `#[utoipa::path]`: `operation_id`, `summary`,
    `tag`, the extension, `security()` for a public operation, and every
    response. Name `infra_http::problem::responses::TransportProblemResponses`
@@ -73,7 +74,9 @@ regenerated fails everywhere tests run.
    is hyper-native `431`, not a Problem. Reference
    an operation-specific one as `(status = <code>, response = <Name>)`, and
    add a new component to `infra_http::problem::responses` only when a new
-   status appears. Request and response types derive `ToSchema`;
+   status appears. A response family owned by one optional pack instead
+   lives with that pack's seam and is registered through the pack's own
+   composer. Request and response types derive `ToSchema`;
    `#[serde(deny_unknown_fields)]` closes an object.
 4. Merge the feature's `OpenApiRouter` in `service::api::contract()`; the
    hardened chain is not edited for an operation.
@@ -113,6 +116,17 @@ instant without allowing a reset. A request-owned provider must observe it,
 subtract its own response reserve, and refuse a missing stamp; the outer timer
 remains the final inbound timeout authority.
 <!-- template:end request-budget:docs-http-request-budget -->
+<!-- template:begin http-idempotency:docs-http-idempotent-composition -->
+With a retained idempotency profile, compose an idempotent operation through
+`Composer::route(routes!(handler))`. Key handling runs inside
+authentication: `route` applies the key layer first at composition time but
+wraps it with `infra_http::authn::protect`, so at request time
+authentication decides before key validation, and both precede any handler
+extractor. `Composer::agree(document)` re-checks the declaration rules
+against the assembled contract and activates the boundary; a violation fails
+startup and the contract tests. The [HTTP idempotency guide](../http-idempotency.md)
+owns retained-profile activation, retry, and data-custody decisions.
+<!-- template:end http-idempotency:docs-http-idempotent-composition -->
 
 
 ### Compatibility

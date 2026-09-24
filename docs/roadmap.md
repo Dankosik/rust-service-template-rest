@@ -24,7 +24,7 @@ is not a supported template state.
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | done |
 | 9 | Template initializer, profiles, and template sync | done on merge after required CI |
-| 10 | Optional capability profiles | 10.1 merged; 10.2 locally accepted; remaining profiles planned |
+| 10 | Optional capability profiles | 10.1 and 10.2 merged; 10.3 locally accepted; remaining profiles planned |
 | 11 | Benchmarking and performance evidence | planned |
 | 12 | First release and derived-repository verification | planned |
 
@@ -32,7 +32,9 @@ Stages 2 and 3 are independent of each other; 4 and 5 depend on both. Stage 6
 depends on 5. Stage 7's core set was pulled forward after stage 2 so the
 remaining stages are implemented through skills; its capability skills and
 the Claude/Qwen discovery views follow their stages. Stage 9 depends on 4, 5, and 8. Stage 10 items are
-independent of each other and each depends on 9 for its profile marker.
+independent of each other and each depends on 9 for its profile marker,
+except that 10.3 also depends on 10.1 for an authentication engine and on 8
+for PostgreSQL.
 
 ## Decisions fixed in stage 1
 
@@ -606,10 +608,12 @@ markers, tests, and initializer support. Order by expected demand:
    [adoption and durable decisions](authentication.md).
 2. Bounded outbound HTTP: fixed-authority `reqwest` client with post-DNS
    public-address admission, header and body ceilings, correlation stripping,
-   no proxy. **Locally accepted 2026-09-23**;
+   no proxy. **Merged via PR #42 at
+   `43b7588edbdb1ebfbc478fb28e0e3d2e77417960`**;
    [adoption guide](outbound-http.md).
 3. HTTP idempotency on PostgreSQL: `x-idempotent: true` operations, replay
-   evidence and business effect in one transaction.
+   evidence and business effect in one transaction. **Locally accepted
+   2026-09-24**; [adoption guide](http-idempotency.md).
 4. Durable background jobs on PostgreSQL and the `jobs-worker` binary.
 5. Outbound webhooks (Standard Webhooks signing, retry, public-address
    predicate) and inbound webhooks (verification, receipt deduplication,
@@ -658,6 +662,34 @@ recovery does not turn it into an aggregate PASS. Local custody is under
 `.git/codex/outbound-http/delivery/`. No remote CI, PR, publication, deployment,
 live-provider or PostgreSQL-runtime result is claimed. Other stage-10
 capabilities remain planned.
+
+Stage 10.3 adds `HTTP_IDEMPOTENCY=none|postgres`, which requires
+`DATABASE=postgres` and an authentication engine. The selected pack holds the
+`infra-idempotency-store` record store, the `infra_http::idempotency` seam
+with four catalog codes, the `http_idempotency.retention` setting, bootstrap
+activation before readiness admission, one forward-only migration, and the
+[guide](http-idempotency.md). It stays inert until an operation declares
+`x-idempotent: true`; `none` removes it.
+
+Stage-10.3 local acceptance ran every local step of the `make plan` route:
+formatting, the workspace lint including the integration feature, build, 403
+workspace tests, the contract check, dependency and secret gates, workflow
+and shell checks, migration checks, and documentation. It also ran the
+real-PostgreSQL suite: the store-boundary claims P1-P8, the mounted-router
+claim P9 with the real introspection verifier, and the existing PostgreSQL
+proof, none skipped. All 128 canonical projections passed, and 16 runtime
+graphs were each initialized, built, and tested once. Graphs 13-16 also ran
+the idempotency database suite, with P9 in 15-16. A one-shot comparison found
+the generated contract and projected `Cargo.lock` of all twelve `none` graphs
+equal to the `d24d173` baseline (24 digests), and the independent final
+review passed. Repairs during validation (lint, one test composition, one
+initializer test fixture, one guide link) each reran only the evidence they
+invalidated. The first full matrix attempt remains recorded as failed in its
+source suites, and the documentation-only repair reran the projections alone,
+not the aggregate. Local custody is under
+`.git/claude/http-idempotency/delivery/`. The runtime image build, the
+migration rehearsal, container security, and every CI, PR, publication, or
+deployment result remain pending and are not claimed.
 
 ### Stage 11: Benchmarking and performance evidence
 

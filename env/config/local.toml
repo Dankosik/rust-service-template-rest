@@ -49,3 +49,11 @@ enabled = false
 dsn = ""
 max_connections = 4
 # template:end postgres:local-config
+
+# template:begin http-idempotency:local-config-http-idempotency
+# The pack is inert until an idempotent operation is served, and retention
+# has no usable default: set it once the pack is active, for example:
+#   APP__HTTP_IDEMPOTENCY__RETENTION=24h make run
+# [http_idempotency]
+# retention = "24h"
+# template:end http-idempotency:local-config-http-idempotency

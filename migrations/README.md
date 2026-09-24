@@ -2,9 +2,17 @@
 
 Forward-only SQL migrations for the PostgreSQL profile, embedded into the
 `migrate` binary by `crates/migrate` at compile time and applied by
-`sqlx::migrate::Migrator` under a session lock. The first migration arrives
-with the first durable feature; until then the runner proves the empty
-history path. Rationale: [Persistence Architecture](../docs/architecture/persistence.md).
+`sqlx::migrate::Migrator` under a session lock. A service's own migrations
+arrive with its first durable feature; with an empty set, the runner proves
+the empty-history path. Rationale: [Persistence Architecture](../docs/architecture/persistence.md).
+
+<!-- template:begin http-idempotency:migrations-readme-http-idempotency -->
+The HTTP idempotency pack ships one forward-only migration,
+`20260923000001_create_http_idempotency_records.sql`, which creates the
+`http_idempotency_records` table; the existing `migrate` binary applies it
+with the rest of the set. The service never creates or alters schema at
+runtime, and only `infra-idempotency-store` names the table.
+<!-- template:end http-idempotency:migrations-readme-http-idempotency -->
 
 Rules, proven by `cargo test -p migrate` over the embedded set:
 

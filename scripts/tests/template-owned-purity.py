@@ -54,6 +54,8 @@ def check(root: Path) -> None:
         "outbound-http": "remove_when_unselected",
         "egress-dns": "remove_when_unselected",
         "request-budget": "remove_when_unselected",
+        "http-idempotency": "remove_when_unselected",
+        "http-idempotency-mounted": "remove_when_unselected",
     }
     for name, removal_key in expected_profiles.items():
         section = profile.get(name)

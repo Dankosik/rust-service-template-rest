@@ -24,6 +24,9 @@ pub mod authn;
 // template:begin postgres:config-module
 pub mod postgres;
 // template:end postgres:config-module
+// template:begin http-idempotency:config-http-idempotency-module
+pub mod http_idempotency;
+// template:end http-idempotency:config-http-idempotency-module
 
 mod cli;
 mod load;
@@ -50,6 +53,9 @@ pub use authn::TokenProfile;
 // template:begin postgres:config-export
 pub use postgres::PostgresConfig;
 // template:end postgres:config-export
+// template:begin http-idempotency:config-http-idempotency-export
+pub use http_idempotency::HttpIdempotencyConfig;
+// template:end http-idempotency:config-http-idempotency-export
 pub use secret_policy::is_secret_like_key;
 pub use validate::ValidationError;
 
@@ -68,6 +74,9 @@ pub struct Config {
     // template:begin postgres:config-field
     pub postgres: PostgresConfig,
     // template:end postgres:config-field
+    // template:begin http-idempotency:config-http-idempotency-field
+    pub http_idempotency: HttpIdempotencyConfig,
+    // template:end http-idempotency:config-http-idempotency-field
 }
 
 impl Config {
@@ -89,6 +98,9 @@ impl Config {
         // template:begin postgres:config-validate
         self.postgres.validate()?;
         // template:end postgres:config-validate
+        // template:begin http-idempotency:config-http-idempotency-validate
+        self.http_idempotency.validate()?;
+        // template:end http-idempotency:config-http-idempotency-validate
         Ok(())
     }
 }

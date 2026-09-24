@@ -20,6 +20,9 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 <!-- template:begin egress-dns:docs-boundaries-egress-owner -->
 | `infra-egress-dns` (`crates/infra-egress-dns`) | Public-address admission and tracked, cancellation-aware Hickory resolution. | Consumer HTTP policy, provider failures, credentials or readiness. |
 <!-- template:end egress-dns:docs-boundaries-egress-owner -->
+<!-- template:begin http-idempotency:docs-boundaries-http-idempotency-owner -->
+| `infra-idempotency-store` (`crates/infra-idempotency-store`) | The PostgreSQL idempotency record store: arbitration, the execution transaction, readback, startup check, and cleanup ([guide](../http-idempotency.md)). | HTTP types, Problems, business rules, readiness registration, or request routing. |
+<!-- template:end http-idempotency:docs-boundaries-http-idempotency-owner -->
 
 | `integration-tests` (`test/`) | Executable utility recipes and any selected profile proof. | Anything a binary runs; the service's process tests stay in `crates/service/tests/`. |
 | `crates/<feature>` (none yet) | Use cases, business types, invariants, domain errors, and the feature's `OpenApiRouter` with its handlers. | Transport policy, provider drivers, runtime configuration, process lifecycle. |
@@ -50,7 +53,8 @@ main binary (crates/service, composition root)
   -> health
   -> infra-http      -> health, axum, tower, tower-http, hyper-util, utoipa, utoipa-axum
   -> infra-telemetry -> opentelemetry*, tracing*, metrics*
-  -> crates/<feature> (future; depends on no infra-* crate)
+  -> crates/<feature> (future; depends on infra-http's inbound contract
+     surfaces, never a provider crate)
 
 <!-- template:begin authn:docs-boundaries-authn-edges -->
   -> infra-bearerauthn
@@ -63,6 +67,11 @@ infra-outbound-http -> infra-egress-dns, reqwest, url, tokio, tokio-util
 <!-- template:begin egress-dns:docs-boundaries-egress-edges -->
 infra-egress-dns -> reqwest DNS types, hickory-resolver, tokio, tokio-util
 <!-- template:end egress-dns:docs-boundaries-egress-edges -->
+<!-- template:begin http-idempotency:docs-boundaries-http-idempotency-edges -->
+main binary -> infra-idempotency-store
+infra-http -> infra-idempotency-store, sha2
+infra-idempotency-store -> infra-postgres, sqlx, tokio, tokio-util, tracing, thiserror
+<!-- template:end http-idempotency:docs-boundaries-http-idempotency-edges -->
 
 
 integration-tests (test/)
@@ -76,8 +85,10 @@ depending on `infra-postgres`, `service-config`, `infra-telemetry` and `sqlx`.
 Its integration tests also depend on the provider and migrator.
 <!-- template:end postgres:docs-boundaries-postgres-edges -->
 
-Feature crates never depend on a transport or provider crate; bootstrap may
-know every adapter because it is the composition root. Shared contracts start
+A feature's HTTP module may use `infra-http`'s inbound contract surfaces; no
+feature depends on a provider crate, and no crate a feature depends on may
+depend on it, so the compiler refuses the reverse edge. Bootstrap may know
+every adapter because it is the composition root. Shared contracts start
 beside their real consumer and move only for observed reuse. `health` is a
 leaf two crates share (`infra-http` reads the verdict, `service` drives
 the refresher), which is why it is its own crate rather than a module of
@@ -89,6 +100,15 @@ Authentication is a shared inbound transport contract, not a feature adapter:
 method composition and Problem mapping. Feature handlers consume only
 `VerifiedPrincipal` through the supported protected route tuple.
 <!-- template:end authn:docs-boundaries-authn-composition -->
+<!-- template:begin http-idempotency:docs-boundaries-http-idempotency-composition -->
+HTTP idempotency is a shared inbound transport contract, not a feature
+adapter: `infra-http` composes it the way it composes authentication,
+through `Composer::route` and `Composer::agree`, and owns key handling,
+declaration and agreement, and Problem mapping. `infra-idempotency-store`
+owns the PostgreSQL mechanism behind the opaque `Tx` handle. Feature
+handlers consume only the `Idempotency` extractor and `Tx` through the
+supported composed route.
+<!-- template:end http-idempotency:docs-boundaries-http-idempotency-composition -->
 
 ## Decisions Recorded Here
 

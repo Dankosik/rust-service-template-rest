@@ -683,5 +683,50 @@
         ]
       }
     ]
+  },
+  "http-idempotency": {
+    "remove_when_unselected": [
+      "crates/infra-idempotency-store/",
+      "crates/infra-http/src/idempotency/",
+      "crates/config/src/http_idempotency.rs",
+      "migrations/20260923000001_create_http_idempotency_records.sql",
+      "test/tests/http_idempotency/",
+      "docs/http-idempotency.md"
+    ],
+    "markers": [
+      {"path": "Cargo.toml", "ids": ["workspace-http-idempotency-store", "workspace-http-idempotency-digest"]},
+      {"path": "crates/infra-http/Cargo.toml", "ids": ["http-idempotency-dependencies"]},
+      {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-idempotency-module"]},
+      {"path": "crates/infra-http/src/problem.rs", "ids": ["http-idempotency-codes", "http-idempotency-code-meta"]},
+      {"path": "crates/config/src/lib.rs", "ids": ["config-http-idempotency-module", "config-http-idempotency-export", "config-http-idempotency-field", "config-http-idempotency-validate"]},
+      {"path": "crates/config/src/load.rs", "ids": ["load-http-idempotency-environment"]},
+      {"path": "crates/service/Cargo.toml", "ids": ["service-http-idempotency-dependency"]},
+      {"path": "crates/service/src/api.rs", "ids": ["service-api-http-idempotency-import", "service-api-contract-composer", "service-api-idempotency-components", "service-api-document-composer", "service-api-idempotent-test-route"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-http-idempotency-imports", "bootstrap-http-idempotency-errors", "bootstrap-http-idempotency-verifier", "bootstrap-http-idempotency-composer", "bootstrap-http-idempotency-prepared-field", "bootstrap-http-idempotency-prepared-value", "bootstrap-http-idempotency-destructure", "bootstrap-http-idempotency-contract-composer", "bootstrap-http-idempotency-activation", "bootstrap-http-idempotency-functions", "bootstrap-http-idempotency-tests"]},
+      {"path": "crates/service/tests/openapi.rs", "ids": ["service-openapi-http-idempotency-contract"]},
+      {"path": "test/Cargo.toml", "ids": ["test-http-idempotency-dependencies"]},
+      {"path": "test/README.md", "ids": ["test-readme-http-idempotency"]},
+      {"path": "env/config/local.toml", "ids": ["local-config-http-idempotency"]},
+      {"path": "migrations/README.md", "ids": ["migrations-readme-http-idempotency"]},
+      {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-http-idempotency-owner", "docs-boundaries-http-idempotency-edges", "docs-boundaries-http-idempotency-composition"]},
+      {"path": "docs/architecture/http.md", "ids": ["docs-http-idempotent-composition"]},
+      {"path": "docs/first-production-feature.md", "ids": ["docs-first-feature-http-idempotency", "docs-first-feature-http-idempotency-contract"]},
+      {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-http-idempotency-placement"]},
+      {"path": "docs/architecture/persistence.md", "ids": ["docs-persistence-http-idempotency"]},
+      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-http-idempotency"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-http-idempotency"]},
+      {"path": "docs/template-sync.md", "ids": ["docs-template-init-http-idempotency", "docs-template-init-http-idempotency-sync"]},
+      {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-http-idempotency"]},
+      {"path": "docs/validation/postgres.md", "ids": ["docs-postgres-validation-http-idempotency"]}
+    ]
+  },
+  "http-idempotency-mounted": {
+    "remove_when_unselected": [
+      "test/tests/http_idempotency/mounted.rs"
+    ],
+    "markers": [
+      {"path": "test/Cargo.toml", "ids": ["test-http-idempotency-mounted-dependencies"]},
+      {"path": "test/tests/http_idempotency/main.rs", "ids": ["http-idempotency-mounted-module"]}
+    ]
   }
 }
