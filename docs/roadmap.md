@@ -24,7 +24,7 @@ is not a supported template state.
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | done |
 | 9 | Template initializer, profiles, and template sync | done on merge after required CI |
-| 10 | Optional capability profiles | 10.1 and 10.2 merged; 10.3 locally accepted; remaining profiles planned |
+| 10 | Optional capability profiles | 10.1, 10.2, and 10.3 merged; remaining profiles planned |
 | 11 | Benchmarking and performance evidence | planned |
 | 12 | First release and derived-repository verification | planned |
 
@@ -612,8 +612,9 @@ markers, tests, and initializer support. Order by expected demand:
    `43b7588edbdb1ebfbc478fb28e0e3d2e77417960`**;
    [adoption guide](outbound-http.md).
 3. HTTP idempotency on PostgreSQL: `x-idempotent: true` operations, replay
-   evidence and business effect in one transaction. **Locally accepted
-   2026-09-24**; [adoption guide](http-idempotency.md).
+   evidence and business effect in one transaction. **Merged via PR #49 at
+   `4819113b21c110e69f3f1d4d26f3bf9337c83b72`**;
+   [adoption guide](http-idempotency.md).
 4. Durable background jobs on PostgreSQL and the `jobs-worker` binary.
 5. Outbound webhooks (Standard Webhooks signing, retry, public-address
    predicate) and inbound webhooks (verification, receipt deduplication,
@@ -687,9 +688,13 @@ initializer test fixture, one guide link) each reran only the evidence they
 invalidated. The first full matrix attempt remains recorded as failed in its
 source suites, and the documentation-only repair reran the projections alone,
 not the aggregate. Local custody is under
-`.git/claude/http-idempotency/delivery/`. The runtime image build, the
-migration rehearsal, container security, and every CI, PR, publication, or
-deployment result remain pending and are not claimed.
+`.git/claude/http-idempotency/delivery/`. The exact-head
+[CI run](https://github.com/Dankosik/rust-service-template-rest/actions/runs/35986060000)
+of PR #49 then passed `required`, including the runtime image build, the
+migration rehearsal, the image vulnerability scan, the database suite, and
+all four initializer parts, and
+[CodeQL](https://github.com/Dankosik/rust-service-template-rest/actions/runs/35986059988)
+passed `codeql-required`. Publication and deployment are not claimed.
 
 ### Stage 11: Benchmarking and performance evidence
 
