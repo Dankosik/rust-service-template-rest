@@ -95,7 +95,10 @@ use [`query!` and related macros](https://docs.rs/sqlx/latest/sqlx/macro.query.h
 with committed offline `.sqlx` metadata and the existing planned prepare check.
 This is already a deferred decision in
 [Persistence Architecture](architecture/persistence.md#decisions-recorded-here),
-not a second migration framework or a query invented to justify tooling.
+not a second migration framework or a query invented to justify tooling. The
+trigger is the first *feature-owned* repository: an optional profile's own
+provider-owned statements over its own table do not by themselves adopt
+`query!`.
 
 Consider [`SeaORM`](https://www.sea-ql.org/SeaORM/) only for an actual
 CRUD-heavy derived service where entity/relation machinery removes enough

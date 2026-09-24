@@ -98,9 +98,10 @@ has_line() {
 }
 
 classify() {
-	local file matched database source_only=false
+	local file matched database source_only=false p9_retained=false
 	database=$(profile_database)
 	[[ -f make/source.mk ]] && source_only=true
+	[[ -f test/tests/http_idempotency/mounted.rs ]] && p9_retained=true
 	reset
 	while IFS= read -r file; do
 		[[ -n ${file} ]] || continue
@@ -117,10 +118,17 @@ classify() {
 		# Database-backed proof: the adapter, the runner, the test crate and
 		# its fixtures, the compose file, and the scripts that drive them.
 		if [[ ${database} == postgres ]]; then case "${file}" in
-		crates/infra-postgres/* | crates/migrate/* | test/* | env/docker-compose.yml | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh)
+		crates/infra-postgres/* | crates/infra-idempotency-store/* | crates/migrate/* | test/* | env/docker-compose.yml | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh)
 			mark db_integration
 			;;
 		esac
+		# P9 mounts the seam and the authentication engine against a real
+		# database; retained only while the introspection-only fixture exists.
+		if [[ ${p9_retained} == true ]]; then case "${file}" in
+		crates/infra-http/* | crates/infra-bearerauthn/*)
+			mark db_integration
+			;;
+		esac; fi
 		# The migration set and everything that rehearses it against the image.
 		case "${file}" in
 		migrations/*.sql | crates/migrate/* | env/docker-compose.yml | scripts/ci/migration-validate.sh | scripts/ci/migration-history-check.sh | scripts/lib/compose-postgres.sh)
@@ -188,7 +196,7 @@ classify() {
 		template-owned.paths | \
 		scripts/ci/template-init-check.sh | scripts/tests/template-* | \
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
-		crates/infra-bearerauthn/* | crates/infra-egress-dns/* | crates/infra-outbound-http/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | \
+		crates/infra-bearerauthn/* | crates/infra-egress-dns/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | \
 		crates/infra-postgres/* | crates/migrate/* | \
 		test/* | migrations/*)
 			mark module_initializer initializer_runtime
@@ -203,7 +211,7 @@ classify() {
 		docs/first-production-feature.md | docs/project-structure-and-module-organization.md | \
 		docs/backend-library-selection.md | docs/backend-utility-recipes.md | \
 		docs/build-test-and-development-commands.md | docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | \
-		docs/validation/* | docs/template-sync.md | docs/authentication.md | docs/outbound-http.md)
+		docs/validation/* | docs/template-sync.md | docs/authentication.md | docs/outbound-http.md | docs/http-idempotency.md)
 			mark module_initializer
 			;;
 		esac; fi
@@ -310,8 +318,25 @@ EOF
 	for file in crates/infra-bearerauthn/src/claims.rs crates/infra-http/src/authn.rs; do
 		assert_case "${file}" \
 			"rust_source module_initializer initializer_runtime" \
-			"cargo_dependencies documentation"
+			"cargo_dependencies documentation db_integration"
 	done
+	assert_case crates/infra-http/src/idempotency/mod.rs \
+		"rust_source module_initializer initializer_runtime" \
+		"cargo_dependencies documentation db_integration"
+	assert_case crates/infra-idempotency-store/src/lib.rs \
+		"rust_source db_integration module_initializer initializer_runtime" \
+		"cargo_dependencies migrations documentation"
+	# P9 only mounts infra-http and infra-bearerauthn against a real
+	# database while the introspection-only fixture is retained.
+	mkdir -p "${classifier_root}/test/tests/http_idempotency"
+	: >"${classifier_root}/test/tests/http_idempotency/mounted.rs"
+	assert_case crates/infra-http/src/authn.rs \
+		"rust_source module_initializer initializer_runtime db_integration" \
+		"cargo_dependencies documentation"
+	assert_case crates/infra-bearerauthn/src/claims.rs \
+		"rust_source module_initializer initializer_runtime db_integration" \
+		"cargo_dependencies documentation"
+	rm -rf "${classifier_root}/test/tests/http_idempotency"
 	for file in crates/infra-egress-dns/src/lib.rs crates/infra-outbound-http/src/lib.rs; do
 		assert_case "${file}" \
 			"rust_source module_initializer initializer_runtime" \
@@ -326,6 +351,9 @@ EOF
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
 	assert_case docs/outbound-http.md \
+		"documentation module_initializer" \
+		"rust_source cargo_dependencies initializer_runtime"
+	assert_case docs/http-idempotency.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
 	assert_case crates/service/tests/lifecycle.rs \

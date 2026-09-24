@@ -233,6 +233,22 @@ mod tests {
         assert_eq!(cfg.observability.otel.exporter.otlp_endpoint, None);
     }
 
+    // template:begin http-idempotency:load-http-idempotency-environment
+    #[test]
+    fn http_idempotency_environment_sets_the_retention() {
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__HTTP_IDEMPOTENCY__RETENTION", "2h")]),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.http_idempotency.retention,
+            Some(Duration::from_hours(2))
+        );
+    }
+    // template:end http-idempotency:load-http-idempotency-environment
+
     // template:begin oidc-introspection:load-introspection-environment
     #[test]
     fn introspection_environment_decodes_and_redacts_the_secret() {

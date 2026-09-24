@@ -27,15 +27,23 @@ keep its endpoint, credentials, response reserve, parsing and business errors
 there. Read the inbound deadline and pass cancellation rather than starting a
 fresh request budget. Bootstrap supplies the existing tracker/root token.
 <!-- template:end outbound-http:docs-first-feature-outbound -->
+<!-- template:begin http-idempotency:docs-first-feature-http-idempotency -->
+For an operation that must commit its business effect at most once per
+caller and key, the retained [HTTP idempotency profile](http-idempotency.md)
+composes replay and arbitration around it. Declare `x-idempotent: true`, one
+`Idempotency-Key` header parameter, and the closed response family the guide
+names; compose the route through the pack's seam rather than the plain
+`routes!` merge.
+<!-- template:end http-idempotency:docs-first-feature-http-idempotency -->
 
 
 ## 2. Create the feature crate
 
 A feature is one crate under `crates/<feature>`; the compiler enforces that
-nothing under `crates/infra-*` depends on it. The business rule lives in
+no crate the feature depends on can depend on it. The business rule lives in
 `src/lib.rs` with no transport types; the HTTP operations live in
-`src/http.rs`, which may use `axum`, `utoipa`, and `infra-http`'s problem
-catalog but never the chain or the server.
+`src/http.rs`, which may use `axum`, `utoipa`, and `infra-http`'s inbound
+contract surfaces but never the chain or the server.
 
 ```toml
 # crates/greeting/Cargo.toml
@@ -187,7 +195,9 @@ What each choice buys:
 - `TransportProblemResponses` declares the `400`, `413`, and `500` problems
   the hardened chain can answer on any route; the operation adds only its own
   statuses. A new status that several operations share becomes a
-  `ToResponse` component in `infra_http::problem::responses`.
+  `ToResponse` component in `infra_http::problem::responses`. A response
+  family owned by one optional pack instead lives with that pack's seam and
+  is registered through the pack's own composer.
 - `IntoResponses` documents the statuses; the hand-written `IntoResponse`
   serves them, and the contract tests assert both agree. `Json` gives the
   declared `application/json`; a `Problem` renders `application/problem+json`
@@ -238,6 +248,14 @@ pub fn contract() -> OpenApiRouter<ReadinessReader> {
         .merge(greeting::http::router())
 }
 ```
+
+<!-- template:begin http-idempotency:docs-first-feature-http-idempotency-contract -->
+With the idempotency pack retained, `contract` also takes the idempotency
+composer: `pub fn contract(idempotency: &mut infra_http::idempotency::Composer) -> OpenApiRouter<ReadinessReader>`,
+merging `idempotency.components()` and composing an idempotent operation's
+routes through `idempotency.route(routes!(handler))` instead of a plain
+`.merge`.
+<!-- template:end http-idempotency:docs-first-feature-http-idempotency-contract -->
 
 Nothing else in `service` changes: the hardened chain, the listeners, and
 the teardown are unaware of the feature. A forgotten merge is loud: the

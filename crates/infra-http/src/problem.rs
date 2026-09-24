@@ -46,6 +46,12 @@ pub enum Code {
     AuthenticationInvalid,
     AuthenticationUnavailable,
     // template:end authn:http-authentication-codes
+    // template:begin http-idempotency:http-idempotency-codes
+    IdempotencyRequestInProgress,
+    IdempotencyKeyMismatch,
+    IdempotencyUnavailable,
+    IdempotencyOutcomeUnknown,
+    // template:end http-idempotency:http-idempotency-codes
     Forbidden,
     NotFound,
     MethodNotAllowed,
@@ -149,6 +155,32 @@ impl Code {
                 type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4"),
             },
             // template:end authn:http-authentication-code-meta
+            // template:begin http-idempotency:http-idempotency-code-meta
+            Code::IdempotencyRequestInProgress => CodeMeta {
+                wire: "idempotency_request_in_progress",
+                status: StatusCode::CONFLICT,
+                title: "conflict",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.10"),
+            },
+            Code::IdempotencyKeyMismatch => CodeMeta {
+                wire: "idempotency_key_mismatch",
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                title: "unprocessable content",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.21"),
+            },
+            Code::IdempotencyUnavailable => CodeMeta {
+                wire: "idempotency_unavailable",
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                title: "service unavailable",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4"),
+            },
+            Code::IdempotencyOutcomeUnknown => CodeMeta {
+                wire: "idempotency_outcome_unknown",
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                title: "service unavailable",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4"),
+            },
+            // template:end http-idempotency:http-idempotency-code-meta
             Code::Forbidden => CodeMeta {
                 wire: "forbidden",
                 status: StatusCode::FORBIDDEN,
@@ -391,8 +423,9 @@ impl IntoResponse for Problem {
 /// [`Code`] on purpose: `Code::BadRequest` is what a handler returns,
 /// `responses::BadRequest` is what the contract declares. A new status joins
 /// this module with its first operation; the set every operation declares is
-/// [`TransportProblemResponses`]. Doc comments on the newtypes are the
-/// response descriptions in the contract.
+/// [`TransportProblemResponses`]. A response family owned by one optional
+/// pack may instead live with that pack's seam, which registers it. Doc
+/// comments on the newtypes are the response descriptions in the contract.
 pub mod responses {
     use utoipa::{IntoResponses, OpenApi, ToResponse};
 

@@ -148,6 +148,32 @@ replay is `no_change`, then the lifecycle check with the profile enabled.
 [PostgreSQL Validation](../validation/postgres.md) selects the commands.
 <!-- template:end postgres:docs-persistence-runtime -->
 
+<!-- template:begin http-idempotency:docs-persistence-http-idempotency -->
+## HTTP idempotency profile
+
+With the HTTP idempotency profile retained, `crates/infra-idempotency-store`
+owns one profile table, `http_idempotency_records`, and every statement
+against it; no other crate names the table. An idempotent operation's
+repository adapter joins the boundary's transaction through the opaque `Tx`
+handle the store passes to the operation's work. The store opens that one
+transaction with `in_tx_with` under `READ COMMITTED`, so the adapter's writes
+and the success record commit together under the commit-outcome policy this
+document already records (`CommitFailed`, `CommitUnknown`, `retryable`). The
+adapter reaches the connection only through the store's
+`connection(&mut Tx<'_>)` free function, never through a method or
+conversion on `Tx`; it never ends the transaction with transaction-control
+SQL and never names the profile table. The schema is the profile's one
+migration in `migrations/`, and the statements are constants in the store
+crate; the [guide](../http-idempotency.md) covers the rollout sequence.
+
+This retargets three persistence deferrals: `query!` with offline `.sqlx`
+metadata and `sqlx-cli`, and per-query tracing spans, move from "the first
+repository" to the first *feature-owned* repository, because the store's own
+statements are template-owned constants proven by the retained database
+suite. No migration-history exemption is adopted: the profile migration is
+ordinary forward-only history from the moment it merges.
+<!-- template:end http-idempotency:docs-persistence-http-idempotency -->
+
 ## Decisions Recorded Here
 
 These decisions apply when the local selection retains PostgreSQL.
@@ -196,9 +222,9 @@ scratch project against `postgres:18.4`):
   `build.rs` `rerun-if-changed=../../migrations` is required because the
   macro tracks the files it embedded, not the directory. Reversible pairs
   would ship `.down.sql` into production for a path the Go template also
-  refused to expose. The migration set is empty until the first durable
-  feature; `migrations/README.md` states the rules and the runner proves
-  the empty-history path.
+  refused to expose. The template ships no feature migration;
+  `migrations/README.md` states the rules and the runner proves the
+  empty-history path.
 - **The advisory lock is bounded by `lock_timeout`, not by a locker with its
   own timeouts** (Goose), and **the orchestration deadline drops the
   connection instead of sending a cancel request** (`pgx`): `sqlx` has
@@ -217,11 +243,12 @@ scratch project against `postgres:18.4`):
   observed.
 - **Renamed from Go**: `max_open_conns` is `max_connections` (the `sqlx`
   term).
-- **Deferred to the first repository (stage 10)**: `query!` macros with
+- **Deferred to the first feature-owned repository**: `query!` macros with
   offline `.sqlx` metadata (adds `sqlx-cli` to the tool manifest and
   `cargo sqlx prepare --check` to the quality job); per-query tracing spans
-  (`sqlx` emits `tracing` events, not spans; the Go template used `otelpgx`);
-  the template's own exemption from the static history check while it
-  authors profile migrations in place (arrives with the stage 9 profile
-  markers).
+  (`sqlx` emits `tracing` events, not spans; the Go template used `otelpgx`).
+- **No exemption from the static history check**: the check already treats a
+  migration added in the change range as an addition, including amendments
+  before merge, and a merged migration may already have been applied
+  elsewhere, so its correction is a new forward migration.
 <!-- template:end postgres:docs-persistence-decisions -->

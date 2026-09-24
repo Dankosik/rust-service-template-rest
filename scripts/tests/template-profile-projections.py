@@ -22,6 +22,7 @@ sys.dont_write_bytecode = True
 DATABASES = ("none", "postgres")
 AUTHN = ("none", "oidc-jwt", "oidc-introspection")
 OUTBOUND_HTTP = ("none", "bounded")
+HTTP_IDEMPOTENCY = ("none", "postgres")
 HARNESSES = ("core", "codex", "claude", "qwen", "cursor", "grok", "opencode", "all")
 _RUNTIME_FILES = frozenset({"Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "template.lock", "Makefile", "build.rs"})
 _RUNTIME_PREFIXES = (
@@ -326,18 +327,63 @@ def _compare_lock(reference: bytes, actual: bytes, harness: str, initializer) ->
         raise initializer.Refusal("projection lock serialization differs beyond agent_harness")
 
 
-def _inputs(initializer, database: str, authn: str, outbound_http: str, harness: str):
-    service_name = f"matrix-{database}-{authn}-{outbound_http}-core"
+def _inputs(initializer, database: str, authn: str, outbound_http: str, http_idempotency: str, harness: str):
+    # Matches the CI runner's `matrix-${database}-${authn}-${outbound_http}-${http_idempotency}-core`
+    # convention (ownership map), so runtime identity carries every selection
+    # dimension and two different selections never collide on one identity.
+    service_name = f"matrix-{database}-{authn}-{outbound_http}-{http_idempotency}-core"
     return initializer.InitInputs(
         service_name=service_name,
         repository=f"https://github.com/example/{service_name}",
-        description=f"Matrix {database} {authn} {outbound_http} core",
+        description=f"Matrix {database} {authn} {outbound_http} {http_idempotency} core",
         codeowner="@example/platform",
         database=database,
         authn=authn,
         outbound_http=outbound_http,
+        http_idempotency=http_idempotency,
         agent_harness=harness,
     )
+
+
+def _refused_http_idempotency_namespace(database: str, authn: str, outbound_http: str) -> argparse.Namespace:
+    return argparse.Namespace(
+        service_name="matrix-refused",
+        repository="https://github.com/example/matrix-refused",
+        description="Matrix refused selection",
+        codeowner="@example/platform",
+        database=database,
+        authn=authn,
+        outbound_http=outbound_http,
+        http_idempotency="postgres",
+        agent_harness="core",
+    )
+
+
+def _assert_http_idempotency_refused(initializer, database: str, authn: str, outbound_http: str) -> None:
+    """Prove `parse_inputs` refuses this non-harness selection before any write."""
+
+    try:
+        initializer.parse_inputs(_refused_http_idempotency_namespace(database, authn, outbound_http))
+    except initializer.Refusal:
+        return
+    raise initializer.Refusal(
+        f"admitted a refused http idempotency selection: {database}/{authn}/{outbound_http}"
+    )
+
+
+def _http_idempotency_output_paths(source: Path, initializer) -> frozenset[str]:
+    profiles = initializer._profile_data(source)
+    return frozenset(
+        relative.rstrip("/")
+        for profile in ("http-idempotency", "http-idempotency-mounted")
+        for relative in profiles.removals[profile]
+    )
+
+
+def _assert_no_http_idempotency_output(initializer, nodes: dict[str, Node], paths: Iterable[str]) -> None:
+    for relative in paths:
+        if relative in nodes or any(entry.startswith(f"{relative}/") for entry in nodes):
+            raise initializer.Refusal(f"http_idempotency=none selection retained profile output: {relative}")
 
 
 def _project(source: Path, candidate: str, initializer, inputs, destination: Path) -> dict[str, Node]:
@@ -354,80 +400,111 @@ def check(source: Path) -> None:
     initializer._tracked_checkout_is_clean(source)
     candidate = initializer.git_head(source)
     exclusions = _validated_exclusions(initializer)
+    idempotency_paths = _http_idempotency_output_paths(source, initializer)
+    raw_combinations = len(DATABASES) * len(AUTHN) * len(OUTBOUND_HTTP) * len(HTTP_IDEMPOTENCY)
+    admitted_combinations = sum(
+        1
+        for database in DATABASES
+        for authn in AUTHN
+        for outbound_http in OUTBOUND_HTTP
+        for http_idempotency in HTTP_IDEMPOTENCY
+        if http_idempotency == "none" or initializer.http_idempotency_requirement(database, authn) is None
+    )
+    refused_combinations = raw_combinations - admitted_combinations
     _emit(
         "header",
         candidate=candidate,
         checker_sha256=_checker_identity(),
         exclusions=exclusions,
-        selections=len(DATABASES) * len(AUTHN) * len(OUTBOUND_HTTP) * len(HARNESSES),
+        selections=admitted_combinations * len(HARNESSES),
+        refused_selections=refused_combinations,
     )
     with tempfile.TemporaryDirectory(prefix="template-profile-projections-") as temporary:
         work = Path(temporary)
         for database in DATABASES:
             for authn in AUTHN:
                 for outbound_http in OUTBOUND_HTTP:
-                    reference: dict[str, Node] | None = None
-                    reference_lock: bytes | None = None
-                    identity = _inputs(initializer, database, authn, outbound_http, "core").identity()
-                    all_inputs = _inputs(initializer, database, authn, outbound_http, "all")
-                    with tempfile.TemporaryDirectory(
-                        prefix=f"{database}-{authn}-{outbound_http}-all-", dir=work
-                    ) as selection:
-                        all_nodes = _project(source, candidate, initializer, all_inputs, Path(selection) / "tree")
-                    admitted = _admitted_adapter_nodes(source, all_nodes, exclusions, initializer)
-                    projected = {"all": all_nodes}
-                    for harness in HARNESSES:
-                        inputs = _inputs(initializer, database, authn, outbound_http, harness)
-                        if inputs.identity() != identity:
-                            raise initializer.Refusal("harness changed a runtime profile identity")
-                        if harness in projected:
-                            nodes = projected[harness]
-                        else:
-                            with tempfile.TemporaryDirectory(
-                                prefix=f"{database}-{authn}-{outbound_http}-{harness}-", dir=work
-                            ) as selection:
-                                nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
-                        digest = _tree_digest(nodes)
-                        lock = initializer._lock_bytes(inputs, candidate, "complete")
-                        lock_sha256 = hashlib.sha256(lock).hexdigest()
-                        _emit(
-                            "selection",
-                            database=database,
-                            authn=authn,
-                            outbound_http=outbound_http,
-                            harness=harness,
-                            identity=inputs.identity(),
-                            profiles=inputs.profiles(),
-                            tree_sha256=digest,
-                            lock_sha256=lock_sha256,
-                        )
-                        if harness == "core":
-                            reference = nodes
-                            reference_lock = lock
+                    for http_idempotency in HTTP_IDEMPOTENCY:
+                        if (
+                            http_idempotency == "postgres"
+                            and initializer.http_idempotency_requirement(database, authn) is not None
+                        ):
+                            _assert_http_idempotency_refused(initializer, database, authn, outbound_http)
+                            _emit(
+                                "refused",
+                                database=database,
+                                authn=authn,
+                                outbound_http=outbound_http,
+                                http_idempotency=http_idempotency,
+                            )
+                            continue
+                        reference: dict[str, Node] | None = None
+                        reference_lock: bytes | None = None
+                        identity = _inputs(initializer, database, authn, outbound_http, http_idempotency, "core").identity()
+                        all_inputs = _inputs(initializer, database, authn, outbound_http, http_idempotency, "all")
+                        with tempfile.TemporaryDirectory(
+                            prefix=f"{database}-{authn}-{outbound_http}-{http_idempotency}-all-", dir=work
+                        ) as selection:
+                            all_nodes = _project(source, candidate, initializer, all_inputs, Path(selection) / "tree")
+                        admitted = _admitted_adapter_nodes(source, all_nodes, exclusions, initializer)
+                        projected = {"all": all_nodes}
+                        for harness in HARNESSES:
+                            inputs = _inputs(initializer, database, authn, outbound_http, http_idempotency, harness)
+                            if inputs.identity() != identity:
+                                raise initializer.Refusal("harness changed a runtime profile identity")
+                            if harness in projected:
+                                nodes = projected[harness]
+                            else:
+                                with tempfile.TemporaryDirectory(
+                                    prefix=f"{database}-{authn}-{outbound_http}-{http_idempotency}-{harness}-", dir=work
+                                ) as selection:
+                                    nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+                            if http_idempotency == "none":
+                                _assert_no_http_idempotency_output(initializer, nodes, idempotency_paths)
+                            digest = _tree_digest(nodes)
+                            lock = initializer._lock_bytes(inputs, candidate, "complete")
+                            lock_sha256 = hashlib.sha256(lock).hexdigest()
+                            _emit(
+                                "selection",
+                                database=database,
+                                authn=authn,
+                                outbound_http=outbound_http,
+                                http_idempotency=http_idempotency,
+                                harness=harness,
+                                identity=inputs.identity(),
+                                profiles=inputs.profiles(),
+                                tree_sha256=digest,
+                                lock_sha256=lock_sha256,
+                            )
+                            if harness == "core":
+                                reference = nodes
+                                reference_lock = lock
+                                _emit(
+                                    "equality",
+                                    database=database,
+                                    authn=authn,
+                                    outbound_http=outbound_http,
+                                    http_idempotency=http_idempotency,
+                                    harness=harness,
+                                    reference="core",
+                                    tree_result="reference",
+                                    lock_result="reference",
+                                )
+                                continue
+                            assert reference is not None and reference_lock is not None
+                            _compare(reference, nodes, exclusions, admitted, initializer)
+                            _compare_lock(reference_lock, lock, harness, initializer)
                             _emit(
                                 "equality",
                                 database=database,
                                 authn=authn,
                                 outbound_http=outbound_http,
+                                http_idempotency=http_idempotency,
                                 harness=harness,
                                 reference="core",
-                                tree_result="reference",
-                                lock_result="reference",
+                                tree_result="equal",
+                                lock_result="agent_harness_only",
                             )
-                            continue
-                        assert reference is not None and reference_lock is not None
-                        _compare(reference, nodes, exclusions, admitted, initializer)
-                        _compare_lock(reference_lock, lock, harness, initializer)
-                        _emit(
-                            "equality",
-                            database=database,
-                            authn=authn,
-                            outbound_http=outbound_http,
-                            harness=harness,
-                            reference="core",
-                            tree_result="equal",
-                            lock_result="agent_harness_only",
-                        )
 
 
 def _expect_refusal(initializer, action, label: str) -> None:
@@ -505,8 +582,8 @@ def self_test(source: Path) -> None:
     finally:
         initializer.ADAPTERS.pop("malicious-runtime-owner", None)
     candidate = "0" * 40
-    core_inputs = _inputs(initializer, "none", "none", "none", "core")
-    codex_inputs = _inputs(initializer, "none", "none", "none", "codex")
+    core_inputs = _inputs(initializer, "none", "none", "none", "none", "core")
+    codex_inputs = _inputs(initializer, "none", "none", "none", "none", "codex")
     core_lock = initializer._lock_bytes(core_inputs, candidate, "complete")
     codex_lock = initializer._lock_bytes(codex_inputs, candidate, "complete")
     _compare_lock(core_lock, codex_lock, "codex", initializer)
@@ -530,6 +607,25 @@ def self_test(source: Path) -> None:
         initializer,
         lambda: _compare(base, outbound_tree_drift, carrier_scopes, admitted, initializer),
         "outbound profile runtime drift",
+    )
+    http_idempotency_lock_drift = json.loads(core_lock)
+    http_idempotency_lock_drift["profiles"]["http_idempotency"] = "postgres"
+    http_idempotency_lock_drift_bytes = (
+        json.dumps(http_idempotency_lock_drift, indent=2, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+    _expect_refusal(
+        initializer,
+        lambda: _compare_lock(core_lock, http_idempotency_lock_drift_bytes, "core", initializer),
+        "http idempotency profile lock drift",
+    )
+    http_idempotency_tree_drift = dict(base)
+    http_idempotency_tree_drift["crates/infra-idempotency-store/src/lib.rs"] = Node(
+        "file", 0o644, b"http idempotency profile runtime"
+    )
+    _expect_refusal(
+        initializer,
+        lambda: _compare(base, http_idempotency_tree_drift, carrier_scopes, admitted, initializer),
+        "http idempotency profile runtime drift",
     )
     safety = _load_safety(source)
     with tempfile.TemporaryDirectory(prefix="template-profile-projections-self-test-") as temporary:

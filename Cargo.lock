@@ -1864,12 +1864,14 @@ dependencies = [
  "http-body-util",
  "hyper-util",
  "infra-bearerauthn",
+ "infra-idempotency-store",
  "itertools 0.15.0",
  "metrics",
  "secrecy",
  "serde",
  "serde_json",
  "serde_with",
+ "sha2 0.11.0",
  "strum",
  "thiserror",
  "tokio",
@@ -1881,6 +1883,18 @@ dependencies = [
  "utoipa",
  "utoipa-axum",
  "uuid",
+]
+
+[[package]]
+name = "infra-idempotency-store"
+version = "0.1.0"
+dependencies = [
+ "infra-postgres",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -1953,6 +1967,7 @@ dependencies = [
 name = "integration-tests"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "axum-extra",
  "axum-test",
@@ -1969,18 +1984,23 @@ dependencies = [
  "health",
  "heck",
  "indexmap 2.14.2",
+ "infra-bearerauthn",
  "infra-http",
+ "infra-idempotency-store",
  "infra-postgres",
  "insta",
  "ipnet",
  "itertools 0.15.0",
  "json-patch",
+ "metrics",
+ "metrics-exporter-prometheus",
  "migrate",
  "moka",
  "proptest",
  "regex",
  "reqwest",
  "rust_decimal",
+ "secrecy",
  "semver",
  "serde",
  "serde_json",
@@ -1990,10 +2010,13 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "unicode-normalization",
  "unicode-segmentation",
  "url",
+ "utoipa",
+ "utoipa-axum",
  "uuid",
  "validator",
  "walkdir",
@@ -3704,6 +3727,7 @@ dependencies = [
  "health",
  "infra-bearerauthn",
  "infra-http",
+ "infra-idempotency-store",
  "infra-postgres",
  "infra-telemetry",
  "nix",

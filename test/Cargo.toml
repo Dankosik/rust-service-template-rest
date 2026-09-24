@@ -55,7 +55,7 @@ bstr = { workspace = true, features = ["std"] }
 heck = { workspace = true }
 bytes = { workspace = true, features = ["std"] }
 tokio-util = { workspace = true, features = ["io", "rt"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "test-util"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "net", "test-util"] }
 futures-util = { workspace = true, features = ["std", "async-await"] }
 infra-http = { workspace = true }
 axum-test = { workspace = true }
@@ -73,3 +73,16 @@ health = { workspace = true }
 # template:begin postgres:test-migrate-dependency
 migrate = { workspace = true }
 # template:end postgres:test-migrate-dependency
+# template:begin http-idempotency:test-http-idempotency-dependencies
+infra-idempotency-store = { workspace = true }
+# template:end http-idempotency:test-http-idempotency-dependencies
+# template:begin http-idempotency-mounted:test-http-idempotency-mounted-dependencies
+infra-bearerauthn = { workspace = true, features = ["test-support"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
+secrecy = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+utoipa = { workspace = true, features = ["macros"] }
+utoipa-axum = { workspace = true }
+async-trait = { workspace = true }
+# template:end http-idempotency-mounted:test-http-idempotency-mounted-dependencies

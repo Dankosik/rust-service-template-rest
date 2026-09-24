@@ -22,3 +22,14 @@ Selection and the claims each command supports:
 container proof for the built image stays in `crates/service/tests/` and
 `scripts/ci/runtime-image-check.sh`.
 <!-- template:end postgres:test-readme-postgres -->
+
+<!-- template:begin http-idempotency:test-readme-http-idempotency -->
+With the HTTP idempotency profile retained, the same command also runs
+`tests/http_idempotency/`. Its `main.rs` proves arbitration, replay, rollback,
+expiry and cleanup, writer refusal, unknown commits, abandonment, and the
+startup check at the record store, with two independent pools standing for
+two replicas (P1-P8). `commit_proxy.rs` is the one-shot wire proxy that lets a
+commit happen, or not, and loses its acknowledgement. The mounted HTTP proof
+(P9) runs only where the introspection engine is retained: in the source
+template and in `AUTHN=oidc-introspection` outputs.
+<!-- template:end http-idempotency:test-readme-http-idempotency -->

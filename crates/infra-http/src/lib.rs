@@ -13,6 +13,9 @@ pub mod problem;
 // template:begin authn:infra-http-authn-module
 pub mod authn;
 // template:end authn:infra-http-authn-module
+// template:begin http-idempotency:infra-http-idempotency-module
+pub mod idempotency;
+// template:end http-idempotency:infra-http-idempotency-module
 
 mod access_log;
 mod harden;

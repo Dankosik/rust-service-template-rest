@@ -67,6 +67,14 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
 <!-- template:begin oidc-introspection:docs-config-introspection-source -->
 - Introspection mode requires `authn.introspection_endpoint`, `authn.introspection_client_id`, and a nonempty `APP__AUTHN__INTROSPECTION_CLIENT_SECRET`. Its client secret is `SecretString`, environment-only, and must never appear in TOML; the mode rejects JWT-only inputs.
 <!-- template:end oidc-introspection:docs-config-introspection-source -->
+<!-- template:begin http-idempotency:docs-config-http-idempotency -->
+- `http_idempotency.retention` (environment `APP__HTTP_IDEMPOTENCY__RETENTION`)
+  is a non-secret human-readable duration, in a TOML file or the environment.
+  An empty or whitespace-only value is vacant, like `app.instance_id`. A set
+  value must fall within the inclusive range of 1 minute to 30 days. It is
+  required only when at least one idempotent operation is served; an
+  inactive boundary needs no value.
+<!-- template:end http-idempotency:docs-config-http-idempotency -->
 
 ## OpenTelemetry Environment Policy
 

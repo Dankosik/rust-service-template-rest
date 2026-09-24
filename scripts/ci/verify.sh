@@ -193,7 +193,7 @@ self_test() (
 	if grep -q 'requires_heavy=true' <<<"${output}"; then return 1; fi
 	output=$(bash "${script}" --plan --files scripts/tests/template-profile-projections.py)
 	grep -q '^  make template-init-check$' <<<"${output}"
-	grep -q 'cost_class=cpu requires_heavy=false requires_docker=false' <<<"${output}"
+	grep -q 'cost_class=cpu requires_heavy=false requires_docker=true' <<<"${output}"
 	output=$(bash "${script}" --plan --files crates/infra-bearerauthn/src/claims.rs)
 	grep -q '^  make template-init-check$' <<<"${output}"
 	# The initializer matrix is CI-owned unless ALLOW_FULL=1 keeps it local; a
@@ -606,7 +606,7 @@ if is_true validation_system; then
 	add_command make verify-check "validation routing changed" "make verify-check" cpu false false
 fi
 if is_true initializer_runtime; then
-	add_command make template-init-check "canonical projections and twelve runtime representatives" "make template-init-check" cpu false false
+	add_command make template-init-check "canonical projections and sixteen runtime representatives" "make template-init-check" cpu false true
 elif is_true module_initializer; then
 	add_command make template-init-projections "projected text changed and no runtime input did" "make template-init-projections" cpu false false
 fi

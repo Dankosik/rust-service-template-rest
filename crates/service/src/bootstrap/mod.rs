@@ -3,8 +3,9 @@
 //!
 //! Startup order: flags → config → signal handlers → tracer provider →
 //! subscriber → metrics recorder → background tasks → dependency pools →
-//! readiness admission → HTTP listeners → ready. Shutdown order lives in
-//! [`shutdown`]. Handlers and feature code never own this sequence.
+//! API contract → readiness admission → HTTP listeners → ready. Shutdown
+//! order lives in [`shutdown`]. Handlers and feature code never own this
+//! sequence.
 
 mod shutdown;
 
@@ -17,6 +18,10 @@ use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOp
 // template:begin authn:bootstrap-authn-imports
 use infra_bearerauthn::Verifier;
 // template:end authn:bootstrap-authn-imports
+// template:begin http-idempotency:bootstrap-http-idempotency-imports
+use infra_http::idempotency::{Activation, Composer};
+use infra_idempotency_store::Store;
+// template:end http-idempotency:bootstrap-http-idempotency-imports
 // template:begin postgres:bootstrap-imports
 use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe};
 // template:end postgres:bootstrap-imports
@@ -77,6 +82,12 @@ pub(crate) enum BootstrapError {
     #[error(transparent)]
     Postgres(#[from] infra_postgres::ConnectError),
     // template:end postgres:bootstrap-errors
+    // template:begin http-idempotency:bootstrap-http-idempotency-errors
+    #[error(transparent)]
+    HttpIdempotencyAgreement(#[from] infra_http::idempotency::AgreementError),
+    #[error("http idempotency startup: {0}")]
+    HttpIdempotencyStartup(#[from] infra_idempotency_store::StartupError),
+    // template:end http-idempotency:bootstrap-http-idempotency-errors
     #[error(transparent)]
     Server(#[from] infra_http::ServerError),
 }
@@ -168,6 +179,9 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // template:end postgres:bootstrap-startup-pool
     let outcome = async {
         let probes: Vec<Box<dyn Probe>> = Vec::new();
+        // template:begin http-idempotency:bootstrap-http-idempotency-verifier
+        let verifier =
+        // template:end http-idempotency:bootstrap-http-idempotency-verifier
         // template:begin authn:bootstrap-authn-prepare
         prepare_auth(&config, &tracker, &cancel).await?;
         // template:end authn:bootstrap-authn-prepare
@@ -175,6 +189,9 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
         let (probes, pool) = prepare_postgres(probes, &config, &tracker, &cancel).await?;
         postgres_pool = pool;
         // template:end postgres:bootstrap-postgres-startup
+        // template:begin http-idempotency:bootstrap-http-idempotency-composer
+        let composer = prepare_http_idempotency(&config, postgres_pool.as_ref(), verifier);
+        // template:end http-idempotency:bootstrap-http-idempotency-composer
 
         // Admission runs even without probes so the first probe after bind
         // answers from an evaluation.
@@ -197,6 +214,9 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             // template:begin postgres:bootstrap-prepared-pool
             postgres_pool: postgres_pool.clone(),
             // template:end postgres:bootstrap-prepared-pool
+            // template:begin http-idempotency:bootstrap-http-idempotency-prepared-value
+            composer,
+            // template:end http-idempotency:bootstrap-http-idempotency-prepared-value
         })
         .await
     }
@@ -316,6 +336,65 @@ async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
 }
 // template:end postgres:bootstrap-open-postgres
 
+// template:begin http-idempotency:bootstrap-http-idempotency-functions
+/// The composer through which idempotent operations join the contract. Its
+/// store uses the pool only when a retention is set as well; otherwise the
+/// store is inert, and activation refuses the missing value before any
+/// store call if an idempotent operation is served.
+fn prepare_http_idempotency(
+    config: &Config,
+    postgres_pool: Option<&PgPool>,
+    verifier: Verifier,
+) -> Composer {
+    let store = match (postgres_pool, config.http_idempotency.retention) {
+        (Some(pool), Some(retention)) => Store::new(pool.clone(), retention),
+        _ => Store::inert(),
+    };
+    Composer::new(store, verifier)
+}
+
+/// Agree the composed idempotent operations with the assembled document,
+/// then start the boundary when it serves at least one. An inactive
+/// boundary makes no query, starts no task, and requires no value.
+async fn activate_http_idempotency(
+    composer: Composer,
+    document: &utoipa::openapi::OpenApi,
+    config: &Config,
+    tracker: &TaskTracker,
+    cancel: &CancellationToken,
+) -> Result<(), BootstrapError> {
+    match composer.agree(document)? {
+        Activation::Inactive => Ok(()),
+        Activation::Active {
+            store, operations, ..
+        } => start_http_idempotency(store, operations, config, tracker, cancel).await,
+    }
+}
+
+/// Start an active boundary before readiness admission. It needs
+/// `postgres.enabled`, a set `http_idempotency.retention`, and the store's
+/// schema on a writable session; the cleanup task then joins the tracker.
+async fn start_http_idempotency(
+    store: Store,
+    operations: std::num::NonZeroUsize,
+    config: &Config,
+    tracker: &TaskTracker,
+    cancel: &CancellationToken,
+) -> Result<(), BootstrapError> {
+    let retention = config
+        .http_idempotency
+        .required_retention(&config.postgres)?;
+    store.check_startup().await?;
+    tracker.spawn(store.run_cleanup(cancel.child_token()));
+    tracing::info!(
+        http_idempotency.operations = operations.get(),
+        http_idempotency.retention = ?retention,
+        "http_idempotency_active"
+    );
+    Ok(())
+}
+// template:end http-idempotency:bootstrap-http-idempotency-functions
+
 /// Runtime pieces built before listeners bind: admission, then serve.
 ///
 /// `cancel`, `tracker`, and `postgres_pool` are shared clones: `serve` still
@@ -334,6 +413,10 @@ struct Prepared<'a> {
     // template:begin postgres:bootstrap-prepared-field
     postgres_pool: Option<PgPool>,
     // template:end postgres:bootstrap-prepared-field
+    // template:begin http-idempotency:bootstrap-http-idempotency-prepared-field
+    /// A unique move: agreement consumes it before admission.
+    composer: Composer,
+    // template:end http-idempotency:bootstrap-http-idempotency-prepared-field
 }
 
 async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapError> {
@@ -349,7 +432,20 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         // template:begin postgres:bootstrap-destructure-pool
         postgres_pool,
         // template:end postgres:bootstrap-destructure-pool
+        // template:begin http-idempotency:bootstrap-http-idempotency-destructure
+        mut composer,
+        // template:end http-idempotency:bootstrap-http-idempotency-destructure
     } = prepared;
+    // The routes and the committed OpenAPI document are the two halves of
+    // one contract. Assembly is pure, so it runs before readiness admission.
+    let contract = service::api::contract(
+        // template:begin http-idempotency:bootstrap-http-idempotency-contract-composer
+        &mut composer,
+        // template:end http-idempotency:bootstrap-http-idempotency-contract-composer
+    );
+    // template:begin http-idempotency:bootstrap-http-idempotency-activation
+    activate_http_idempotency(composer, contract.get_openapi(), config, &tracker, &cancel).await?;
+    // template:end http-idempotency:bootstrap-http-idempotency-activation
     readiness.refresh(policy).await;
     readiness
         .reader()
@@ -367,9 +463,6 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
             .unwrap_or(usize::MAX),
         max_connections: config.http.connection_cap(),
     };
-    // The routes and the committed OpenAPI document are the two halves of
-    // one contract; only the routes are needed here.
-    let contract = service::api::contract();
     let (routes, _document) = contract.split_for_parts();
     let app = infra_http::harden(
         routes.with_state(readiness.reader()),
@@ -498,4 +591,85 @@ mod tests {
             matches!(options.sampler, ResolvedSampler::TraceIdRatio(ratio) if (ratio - 0.5).abs() < f64::EPSILON)
         );
     }
+
+    // template:begin http-idempotency:bootstrap-http-idempotency-tests
+    /// Start an active boundary of one operation over `store`, on a fresh
+    /// tracker the caller can inspect for a spawned task.
+    async fn start_one_operation(
+        store: Store,
+        config: &Config,
+    ) -> (Result<(), BootstrapError>, TaskTracker) {
+        let tracker = TaskTracker::new();
+        let started = start_http_idempotency(
+            store,
+            std::num::NonZeroUsize::MIN,
+            config,
+            &tracker,
+            &CancellationToken::new(),
+        )
+        .await;
+        (started, tracker)
+    }
+
+    #[tokio::test]
+    async fn an_inactive_boundary_touches_no_store_and_spawns_no_task() {
+        // A contract without an idempotent operation: only the family's
+        // components, which every retained document carries.
+        let composer = Composer::inert();
+        let contract = composer.components::<()>();
+        let tracker = TaskTracker::new();
+        // An active boundary would refuse this configuration at its first
+        // check: `postgres.enabled` is false and no retention is set.
+        activate_http_idempotency(
+            composer,
+            contract.get_openapi(),
+            &Config::default(),
+            &tracker,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("an inactive boundary requires no value");
+        assert!(tracker.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_active_boundary_refuses_disabled_postgres_naming_the_key() {
+        let (started, tracker) = start_one_operation(Store::inert(), &Config::default()).await;
+        assert!(
+            matches!(&started, Err(BootstrapError::Config(invalid)) if invalid.key == "postgres.enabled"),
+            "{started:?}"
+        );
+        assert!(tracker.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_active_boundary_refuses_an_unset_retention_naming_the_key() {
+        let mut config = Config::default();
+        config.postgres.enabled = true;
+        let (started, tracker) = start_one_operation(Store::inert(), &config).await;
+        assert!(
+            matches!(&started, Err(BootstrapError::Config(invalid)) if invalid.key == "http_idempotency.retention"),
+            "{started:?}"
+        );
+        assert!(tracker.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_active_boundary_refuses_an_unavailable_store_at_the_startup_check() {
+        let mut config = Config::default();
+        config.postgres.enabled = true;
+        config.http_idempotency.retention = Some(Duration::from_secs(3600));
+        let (started, tracker) = start_one_operation(Store::inert(), &config).await;
+        assert!(
+            matches!(
+                &started,
+                Err(BootstrapError::HttpIdempotencyStartup(
+                    infra_idempotency_store::StartupError::Unavailable
+                ))
+            ),
+            "{started:?}"
+        );
+        assert!(tracker.is_empty());
+    }
+    // template:end http-idempotency:bootstrap-http-idempotency-tests
 }

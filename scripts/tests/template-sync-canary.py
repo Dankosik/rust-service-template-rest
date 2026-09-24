@@ -18,6 +18,10 @@ _LEGACY_PROFILE_KEYS = ("schema_version", "source_only", "postgres", "identity",
 _AUTH_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection", "identity", "cargo_lock",
 )
+_OUTBOUND_ONLY_PROFILE_KEYS = (
+    "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection",
+    "outbound-http", "egress-dns", "request-budget", "identity", "cargo_lock",
+)
 _NEW_PROJECTION_CHECKER = "scripts/tests/template-profile-projections.py"
 
 
@@ -90,6 +94,7 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     lock["profiles"].pop("authn")
     lock["profiles"].pop("outbound_http", None)
+    lock["profiles"].pop("http_idempotency", None)
     lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
@@ -102,6 +107,26 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     )
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     lock["profiles"].pop("outbound_http", None)
+    lock["profiles"].pop("http_idempotency", None)
+    (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+
+
+def install_derived_outbound_only_none(source: Path, target: Path) -> None:
+    profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
+    outbound_only = {key: profile[key] for key in _OUTBOUND_ONLY_PROFILE_KEYS}
+    (target / "scripts/lib/template_profiles.json").write_text(
+        json.dumps(outbound_only, indent=2) + "\n", encoding="utf-8"
+    )
+    lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
+    # The outbound generation's four-field shape, whatever an earlier
+    # fixture left in the lock: a missing selection there means `none`.
+    profiles = lock["profiles"]
+    lock["profiles"] = {
+        "database": profiles["database"],
+        "authn": profiles.get("authn", "none"),
+        "outbound_http": profiles.get("outbound_http", "none"),
+        "agent_harness": profiles["agent_harness"],
+    }
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -121,7 +146,9 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
             raise AssertionError(f"selected {profile_name} file is missing {relative}")
 
 
-def assert_profile_output(source: Path, target: Path, authn: str, outbound_http: str) -> None:
+def assert_profile_output(
+    source: Path, target: Path, authn: str, outbound_http: str, http_idempotency: str = "none"
+) -> None:
     for profile, selected in (("authn", authn != "none"), ("oidc-jwt", authn == "oidc-jwt"), ("oidc-introspection", authn == "oidc-introspection")):
         assert_profile_pack(source, target, profile, selected)
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
@@ -129,13 +156,22 @@ def assert_profile_output(source: Path, target: Path, authn: str, outbound_http:
         raise AssertionError(f"sync canary lock did not record authn={authn}")
     if lock["profiles"].get("outbound_http") != outbound_http:
         raise AssertionError(f"sync canary lock did not record outbound_http={outbound_http}")
+    if lock["profiles"].get("http_idempotency") != http_idempotency:
+        raise AssertionError(f"sync canary lock did not record http_idempotency={http_idempotency}")
     assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
     shared_selected = authn != "none" or outbound_http == "bounded"
     assert_profile_pack(source, target, "egress-dns", shared_selected)
     assert_profile_pack(source, target, "request-budget", shared_selected)
+    assert_profile_pack(source, target, "http-idempotency", http_idempotency == "postgres")
+    assert_profile_pack(
+        source, target, "http-idempotency-mounted", http_idempotency == "postgres" and authn == "oidc-introspection"
+    )
 
 
-def initialize(source: Path, target: Path, authn: str | None, outbound_http: str | None = None) -> subprocess.CompletedProcess[str]:
+def initialize(
+    source: Path, target: Path, authn: str | None, outbound_http: str | None = None,
+    http_idempotency: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     command = [
         "bash", os.fspath(source / "scripts/init-module.sh"), "--repo", os.fspath(target),
         "--service-name", "canary-api", "--repository", "https://github.com/example/canary-api",
@@ -146,6 +182,8 @@ def initialize(source: Path, target: Path, authn: str | None, outbound_http: str
         command.extend(("--authn", authn))
     if outbound_http is not None:
         command.extend(("--outbound-http", outbound_http))
+    if http_idempotency is not None:
+        command.extend(("--http-idempotency", http_idempotency))
     return run(command, cwd=source)
 
 
@@ -175,6 +213,14 @@ def check(source: Path) -> None:
                 auth_only_mismatch = initialize(source, profile_target, "none", "bounded")
                 if auth_only_mismatch.returncode == 0 or tree_state(profile_target) != auth_only_before:
                     raise AssertionError("auth-only none sync canary accepted an outbound profile migration")
+                install_derived_outbound_only_none(source, profile_target)
+                outbound_only_before = tree_state(profile_target)
+                outbound_only_replay = initialize(source, profile_target, "none", "none", "none")
+                if outbound_only_replay.returncode or tree_state(profile_target) != outbound_only_before:
+                    raise AssertionError("derived outbound-only none lock replay changed the sync canary target")
+                outbound_only_mismatch = initialize(source, profile_target, "none", "none", "postgres")
+                if outbound_only_mismatch.returncode == 0 or tree_state(profile_target) != outbound_only_before:
+                    raise AssertionError("outbound-only none sync canary accepted an http idempotency profile migration")
                 install_historical_none(source, profile_target)
                 before = tree_state(profile_target)
                 replay = initialize(source, profile_target, "none")
@@ -236,6 +282,10 @@ def check(source: Path) -> None:
             raise AssertionError(f"full sync apply failed: {full_apply.stderr}")
         if "Local canary architecture fact." not in service_doc.read_text(encoding="utf-8") or not (skill / ".service-owned").is_file():
             raise AssertionError("full sync changed local authority or marked service skill")
+        # `target` never selected HTTP_IDEMPOTENCY=postgres; a full sync from a
+        # source that retains the pack must not restore it.
+        assert_profile_pack(source, target, "http-idempotency", False)
+        assert_profile_pack(source, target, "http-idempotency-mounted", False)
         commit(target, "adopt full portable snapshot")
         full_parity = sync(source, target, "--check")
         if full_parity.returncode:

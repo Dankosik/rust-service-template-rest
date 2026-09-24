@@ -10,10 +10,15 @@ scripts/lib/template_profiles.json
 crates/infra-bearerauthn/
 crates/infra-egress-dns/
 crates/infra-outbound-http/
+crates/infra-idempotency-store/
 crates/config/src/authn.rs
+crates/config/src/http_idempotency.rs
 crates/infra-http/src/authn.rs
+crates/infra-http/src/idempotency/
+migrations/20260923000001_create_http_idempotency_records.sql
 docs/authentication.md
 docs/outbound-http.md
+docs/http-idempotency.md
 template-owned.paths
 docs/template-sync.md
 make/service.mk
@@ -25,5 +30,6 @@ scripts/tests/template-owned-purity.py
 scripts/tests/template-profile-projections.py
 scripts/tests/template-init-safety.py
 scripts/tests/template-sync-canary.py
+test/tests/http_idempotency/
 evals/template-initializer/
 specs/template-initializer/

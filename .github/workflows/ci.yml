@@ -517,15 +517,20 @@ jobs:
       fail-fast: false
       matrix:
         # Together the parts are `make template-init-check`: the source
-        # suites with the canonical projections, and the twelve runtime
-        # graphs split by DATABASE (template-init-check.sh numbers none 1-6,
-        # postgres 7-12). Each part keeps its own warm target cache.
+        # suites with the canonical projections, and the sixteen runtime
+        # graphs split by DATABASE and the idempotency pack
+        # (template-init-check.sh numbers none 1-6, postgres 7-12,
+        # http-idempotency 13-16). Each part keeps its own warm target cache;
+        # http-idempotency restores the database-postgres cache and saves
+        # none, so it needs no fourth initializer cache.
         include:
           - part: source
           - part: database-none
             graphs: 1,2,3,4,5,6
           - part: database-postgres
             graphs: 7,8,9,10,11,12
+          - part: http-idempotency
+            graphs: 13,14,15,16
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -544,8 +549,12 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-initializer-${{ matrix.part }}-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-initializer-${{ matrix.part }}-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-
+          # http-idempotency has no warm cache of its own: it restores the
+          # database-postgres part's cache (graphs 7-12 already need the
+          # postgres profile) and never saves, so it adds no fourth
+          # initializer cache to the repository's 10 GB budget.
+          key: cargo-initializer-${{ matrix.part == 'http-idempotency' && 'database-postgres' || matrix.part }}-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-initializer-${{ matrix.part == 'http-idempotency' && 'database-postgres' || matrix.part }}-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-
       - name: Fetch locked Cargo packages
         run: cargo fetch --locked
       - name: Source suites and canonical projections
@@ -562,11 +571,16 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           PART: ${{ matrix.part }}
           GRAPHS: ${{ matrix.graphs }}
+          # Only graphs 13-16 run the retained idempotency database suite.
+          REQUIRE_DOCKER: ${{ matrix.part == 'http-idempotency' && '1' || '' }}
         run: bash ./scripts/ci/measure.sh "template-initializer-${PART}" -- bash ./scripts/ci/template-init-check.sh --runtime-graphs "${GRAPHS}"
       - name: Save cargo caches
+        # http-idempotency reuses database-postgres's cache and never claims
+        # its own key.
         if: >-
           github.event_name == 'push' &&
           github.ref == 'refs/heads/main' &&
+          matrix.part != 'http-idempotency' &&
           steps.cargo-cache.outcome == 'success' &&
           steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

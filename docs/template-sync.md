@@ -55,6 +55,17 @@ crate and tests independently of authentication. `none` removes that pack.
 The shared DNS and readonly request budget stay when auth or outbound needs
 them. Selection supplies no provider configuration or automatic request.
 <!-- template:end outbound-http:docs-template-init-outbound -->
+<!-- template:begin http-idempotency:docs-template-init-http-idempotency -->
+`HTTP_IDEMPOTENCY` defaults to `none` and accepts `none` or `postgres`; the
+direct entry takes `--http-idempotency`. `postgres` retains the
+[idempotency guide](http-idempotency.md), the record-store crate, the
+profile migration, and tests, and requires `DATABASE=postgres` and an
+authentication engine (`AUTHN=oidc-jwt` or `oidc-introspection`); an
+unsupported combination or an unknown value is refused before any target
+write, naming the unmet requirement. `none` removes the pack. Selection
+supplies no retention value or automatic request; the boundary stays inert
+until an operation opts in and the runtime retention is configured.
+<!-- template:end http-idempotency:docs-template-init-http-idempotency -->
 
 
 Service names are lowercase ASCII, start with a letter, use single hyphens
@@ -88,11 +99,13 @@ Repeating the exact initialization values checks identity and profile structure
 and succeeds without rewriting ordinary service edits. A different selection,
 incomplete record, malformed record, or inconsistent structure refuses. Profile
 migration of an established service is outside this command's scope.
-New schema-1 records contain exactly the `database`, `authn`, `outbound_http`
-and `agent_harness` profile fields. The only admitted historical profile shapes
-are `database` + `agent_harness` and `database` + `authn` + `agent_harness`;
-missing selections in those shapes mean `none`. Matching historical replay
-preserves the original lock bytes. Partial or unknown shapes refuse.
+New schema-1 records contain exactly the `database`, `authn`, `outbound_http`,
+`http_idempotency`, and `agent_harness` profile fields. The admitted
+historical profile shapes are `database` + `agent_harness`, `database` +
+`authn` + `agent_harness`, and `database` + `authn` + `outbound_http` +
+`agent_harness`; missing selections in those shapes mean `none`. Matching
+historical replay preserves the original lock bytes. Partial or unknown
+shapes refuse.
 
 
 <!-- template:begin authn:docs-template-init-authn-lock -->
@@ -143,6 +156,11 @@ Portable sync never restores a pruned authentication engine, runtime configurati
 Portable sync cannot restore a pruned outbound pack, shared DNS runtime, or
 profile-marked guide. The target lock remains authoritative.
 <!-- template:end outbound-http:docs-template-init-outbound-sync -->
+<!-- template:begin http-idempotency:docs-template-init-http-idempotency-sync -->
+Portable sync cannot restore a pruned idempotency pack, its schema
+migration, configuration section, or profile-marked guide. The target lock
+remains authoritative.
+<!-- template:end http-idempotency:docs-template-init-http-idempotency-sync -->
 
 
 Application/Cargo sources, configuration, secrets, OpenAPI, migrations, README,
@@ -193,26 +211,30 @@ no automatic rollback, reset, retry or destructive resume.
 Use the service's [command policy](build-test-and-development-commands.md) and
 [validation router](validation-routing.md) for ordinary development.
 The source template additionally owns `make template-owned-purity-check` and
-`ALLOW_FULL=1 make template-init-check`. It checks all 96 canonical profile and
-harness projections, then initializes, builds and tests twelve core representatives:
-one per DATABASE × AUTHN × OUTBOUND_HTTP runtime graph. Exact non-harness tree equality proves
-that the other harness choices do not change runtime or contract-generation
-inputs. Quality, dependency, image and database gates retain their own scopes;
-the initializer command does not repeat the full aggregate per harness. Every
+`ALLOW_FULL=1 make template-init-check`. It checks all 128 canonical profile
+and harness projections, then initializes, builds and tests sixteen core
+representatives: one per DATABASE × AUTHN × OUTBOUND_HTTP × HTTP_IDEMPOTENCY
+runtime graph, of which graphs 13-16 also run their retained idempotency
+database suite. Exact non-harness tree equality proves that the other
+harness choices do not change runtime or contract-generation inputs.
+Quality, dependency, image and database gates retain their own scopes; the
+initializer command does not repeat the full aggregate per harness. Every
 initialization in one run shares one absolute Cargo target (an explicit
 `CARGO_TARGET_DIR`, or the run's private one), so the locked dependency graph
-compiles once. CI runs the check as three parallel parts, the source suites
-with the projections and the twelve graphs split by DATABASE, and
-`make verify` leaves it to CI unless `ALLOW_FULL=1`. A change to projected
-text alone runs only `make template-init-projections`, locally and in CI.
+compiles once. CI runs the check as four parallel parts: the source suites
+with the projections, graphs 1-6, graphs 7-12, and graphs 13-16, the last of
+which also needs Docker for its database suite. `make verify` leaves it to
+CI unless `ALLOW_FULL=1`. A change to projected text alone runs only
+`make template-init-projections`, locally and in CI.
 
-`bash scripts/ci/template-init-check.sh --projections-only` records the focused
-96-projection proof without Cargo or full/heavy admission. It does not claim
-96 public-CLI initializations or builds. `--source-checks` keeps the source
-safety/purity/sync route. The public initializer always performs its complete
-locked metadata, formatting and OpenAPI preflight before changing a target;
-neither focused proof mode changes that command. These source runners are
-removed from generated services, so standard checks cannot recurse into them.
+`bash scripts/ci/template-init-check.sh --projections-only` records the
+focused 128-projection proof without Cargo or full/heavy admission. It does
+not claim 128 public-CLI initializations or builds. `--source-checks` keeps
+the source safety/purity/sync route. The public initializer always performs
+its complete locked metadata, formatting and OpenAPI preflight before
+changing a target; neither focused proof mode changes that command. These
+source runners are removed from generated services, so standard checks
+cannot recurse into them.
 
 Local results describe their fixed candidate and commands. They do not claim a
 remote CI run, publication or deployment. The service's

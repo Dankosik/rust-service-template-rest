@@ -31,6 +31,7 @@ TEMPLATE_REPOSITORY = "https://github.com/Dankosik/rust-service-template-rest"
 DATABASE_CHOICES = ("none", "postgres")
 AUTHN_CHOICES = ("none", "oidc-jwt", "oidc-introspection")
 OUTBOUND_HTTP_CHOICES = ("none", "bounded")
+HTTP_IDEMPOTENCY_CHOICES = ("none", "postgres")
 HARNESS_CHOICES = ("core", "codex", "claude", "qwen", "cursor", "grok", "opencode", "all")
 
 
@@ -234,16 +235,33 @@ def validate_identity(value: object) -> dict[str, str]:
     }
 
 
+def http_idempotency_requirement(database: str, authn: str) -> str | None:
+    """Name the unmet HTTP_IDEMPOTENCY=postgres requirement, or none when met.
+
+    This is the one owner of the combination rule. Both `validate_profiles`
+    below and `template_init.py`'s `parse_inputs` call it and word their own
+    refusals from the field it names.
+    """
+
+    if database != "postgres":
+        return "database"
+    if authn not in ("oidc-jwt", "oidc-introspection"):
+        return "authn"
+    return None
+
+
 def validate_profiles(value: object) -> dict[str, str]:
     if not isinstance(value, dict) or set(value) not in (
         {"database", "agent_harness"},
         {"database", "authn", "agent_harness"},
         {"database", "authn", "outbound_http", "agent_harness"},
+        {"database", "authn", "outbound_http", "http_idempotency", "agent_harness"},
     ):
         raise Refusal("profiles has an unsupported shape")
     database = value["database"]
     authn = value.get("authn", "none")
     outbound_http = value.get("outbound_http", "none")
+    http_idempotency = value.get("http_idempotency", "none")
     harness = value["agent_harness"]
     if not isinstance(database, str) or database not in DATABASE_CHOICES:
         raise Refusal("profiles.database is unsupported")
@@ -251,6 +269,14 @@ def validate_profiles(value: object) -> dict[str, str]:
         raise Refusal("profiles.authn is unsupported")
     if not isinstance(outbound_http, str) or outbound_http not in OUTBOUND_HTTP_CHOICES:
         raise Refusal("profiles.outbound_http is unsupported")
+    if not isinstance(http_idempotency, str) or http_idempotency not in HTTP_IDEMPOTENCY_CHOICES:
+        raise Refusal("profiles.http_idempotency is unsupported")
+    if http_idempotency == "postgres":
+        requirement = http_idempotency_requirement(database, authn)
+        if requirement == "database":
+            raise Refusal("profiles.http_idempotency=postgres requires profiles.database=postgres")
+        if requirement == "authn":
+            raise Refusal("profiles.http_idempotency=postgres requires profiles.authn=oidc-jwt or oidc-introspection")
     if not isinstance(harness, str) or harness not in HARNESS_CHOICES:
         raise Refusal("profiles.agent_harness is unsupported")
     # Schema-1 locks issued before authentication existed select the historical
@@ -260,6 +286,7 @@ def validate_profiles(value: object) -> dict[str, str]:
         "database": database,
         "authn": authn,
         "outbound_http": outbound_http,
+        "http_idempotency": http_idempotency,
         "agent_harness": harness,
     }
 
@@ -352,6 +379,23 @@ def lock_has_explicit_outbound_http(root: Path, required: bool = False) -> bool:
     return "outbound_http" in profiles
 
 
+def lock_has_explicit_http_idempotency(root: Path, required: bool = False) -> bool:
+    """Tell a current lock from historical lock shapes without changing bytes."""
+
+    path = Path(root) / LOCK_NAME
+    if not path.exists() and not path.is_symlink():
+        if required:
+            raise Refusal("template.lock is required")
+        return False
+    _regular_file(path, LOCK_NAME)
+    raw = parse_json_bytes(path.read_bytes(), LOCK_NAME)
+    validate_lock(raw)
+    assert isinstance(raw, dict)
+    profiles = raw["profiles"]
+    assert isinstance(profiles, dict)
+    return "http_idempotency" in profiles
+
+
 def selected_profiles(root: Path) -> tuple[str, str]:
     """Return database and harness; the uninitialized source is postgres/all."""
 
@@ -387,6 +431,18 @@ def selected_outbound_http(root: Path) -> str:
     if lock["state"] != "complete":
         raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
     return lock["profiles"]["outbound_http"]
+
+
+def selected_http_idempotency(root: Path) -> str:
+    """Return the normalized idempotency choice, or the source capability."""
+
+    root = Path(root)
+    lock = load_lock(root)
+    if lock is None:
+        return "postgres" if (root / "crates/infra-idempotency-store").is_dir() else "none"
+    if lock["state"] != "complete":
+        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
+    return lock["profiles"]["http_idempotency"]
 
 
 def selected_adapters(harness: str) -> tuple[str, ...]:
@@ -957,6 +1013,7 @@ def _profile_command(arguments: argparse.Namespace) -> int:
             "database": database,
             "authn": selected_authn(root),
             "outbound_http": selected_outbound_http(root),
+            "http_idempotency": selected_http_idempotency(root),
             "agent_harness": harness,
         }[arguments.field]
         print(value)
@@ -971,7 +1028,9 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     profile = commands.add_parser("profile", help="print selected profile data")
     profile.add_argument("--repo", required=True, type=Path)
-    profile.add_argument("--field", required=True, choices=("database", "authn", "outbound_http", "agent_harness"))
+    profile.add_argument(
+        "--field", required=True, choices=("database", "authn", "outbound_http", "http_idempotency", "agent_harness")
+    )
     profile.set_defaults(handler=_profile_command)
     return parser
 

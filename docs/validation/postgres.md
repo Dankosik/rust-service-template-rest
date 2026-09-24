@@ -61,3 +61,20 @@ Missing Docker is not a pass for a required scenario. If the scenario is
 optional, disclose the gap and stop without building or repairing a test
 environment; it does not block local completion.
 <!-- template:end postgres:docs-postgres-validation -->
+
+<!-- template:begin http-idempotency:docs-postgres-validation-http-idempotency -->
+With the HTTP idempotency profile retained, `ALLOW_HEAVY=1 make test-integration-db`
+also runs the idempotency suite in `test/tests/http_idempotency/`:
+arbitration, replay, expiry, writer-refusal, unknown-commit, abandonment,
+and activation proof against the store boundary (P1-P8), plus the mounted
+router proof (P9) where the introspection engine is retained.
+`bash scripts/ci/test-integration-db.sh --test http_idempotency` runs that
+target alone (the script forwards its arguments to `cargo test`). The
+unknown-commit case (P6) uses a one-shot test proxy that acts on one
+`COMMIT`: it either forwards it and drops the acknowledgement, or closes
+both sockets before forwarding it, so the request sees a lost
+acknowledgement around a commit that did or did not happen; the readback's
+fresh connection passes through untouched. In the source template's
+initializer matrix, runtime graphs 13-16 run this suite once each, after
+their build and test, and need a usable Docker daemon.
+<!-- template:end http-idempotency:docs-postgres-validation-http-idempotency -->

@@ -112,6 +112,9 @@ help: ## List available commands
 OUTBOUND_HTTP ?= none
 export OUTBOUND_HTTP
 
+HTTP_IDEMPOTENCY ?= none
+export HTTP_IDEMPOTENCY
+
 template-init: ## Initialize the service identity and selected profiles once
 	@bash scripts/init-module.sh --repo .
 

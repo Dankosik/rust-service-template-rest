@@ -36,6 +36,9 @@ infra-bearerauthn = { workspace = true }
 infra-postgres = { workspace = true }
 secrecy = { workspace = true }
 # template:end postgres:service-postgres-dependency
+# template:begin http-idempotency:service-http-idempotency-dependency
+infra-idempotency-store = { workspace = true }
+# template:end http-idempotency:service-http-idempotency-dependency
 infra-telemetry = { workspace = true }
 service-config = { workspace = true }
 thiserror = { workspace = true }
