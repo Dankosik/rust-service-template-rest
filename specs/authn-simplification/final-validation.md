@@ -201,3 +201,45 @@ evidence. It found no additional behavioral defect; its FAIL was limited to the
 actual lint failure above. The same reader will check that bounded representation
 delta and receive the remaining runtime/projection/security evidence before a
 final review disposition.
+
+## Runtime results and bounded repair
+
+`make build` passed on clean `ac2bc09c6a7ce6023e041926f1f18e4e760cde2a`.
+The ordinary workspace run used `make test CARGO_FLAGS="--locked --no-fail-fast"`
+and completed all targets: 461 passed, two failed, none ignored. Its log is
+`/tmp/authn-workspace-tests-ac2bc09.log`; the build log is
+`/tmp/authn-build-ac2bc09.log`. This failed aggregate is not relabelled as passing.
+
+One failure was real environment integration: internally tagged serde buffering
+lost config-rs scalar conversion for cache controls. A private field-local
+adapter now accepts their typed TOML forms or exact scalar strings without
+coercing audience, client or credential strings. The complete config library
+rerun passed all 101 tests, including invalid values and numeric/boolean-looking
+string preservation (`/tmp/authn-failed-targets-diagnosis.log`).
+
+The diagnostic test's first failure was a fixture error: jsonwebtoken's Other
+key-family fallback accepts the old `kty: false` shape, so it correctly emitted
+100 unsupported-family rejections. A wrongly typed consumed `use` member now
+exercises the intended malformed-entry branch while retaining the private-data
+sentinel and all original assertions. Its subsequent isolated-pass/parallel-fail
+trace capture was independently diagnosed against tracing-core 0.1.36: the
+single-dispatch callsite optimization consults the registering sibling thread's
+default. The test now retains a second independent, non-default NoSubscriber
+dispatch, so merged interest performs the correct scoped lookup. No production
+observer, global subscriber or suite serialization was added. One normal
+parallel adapter rerun then passed all 33 tests
+(`/tmp/authn-adapter-anchor-repair.log`).
+
+The other 330 successful workspace tests are retained within their unchanged
+scope; the two failed library targets have their passing scoped results above.
+The cache-specific TLS, controlled-clock, capacity, payload, contention, expiry,
+context-isolation and unsuccessful-result cases actually executed and passed.
+The current-cache mounted TLS/no-Composer selector additionally passed one test
+with 21 intentionally filtered, checking actual authorization and distinct
+HTTP/engine recorder counts (`/tmp/authn-mounted-current-cache.log`). It started
+no database. Filtered tests are not counted as passes.
+
+After these bounded repairs, workspace lint again passed for all targets and the
+integration feature (`/tmp/authn-lint-final-repair.log`). Matching build-delta,
+current structural projections, exact-tree/range redacted secret scans, and the
+reviewer's final evidence disposition remain pending the next clean checkpoint.

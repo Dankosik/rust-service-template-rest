@@ -956,6 +956,12 @@ mod tests {
 
     #[test]
     fn diagnostics_report_closed_reasons_without_per_entry_log_amplification() {
+        let diagnostics = Diagnostics::default();
+        // Two independent registrations avoid tracing's single-dispatch shortcut
+        // caching a sibling thread's NoSubscriber interest for shared callsites.
+        let _registration_anchor =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let dispatch = tracing::Dispatch::new(diagnostics.clone());
         let verifier = JwtVerifier {
             claim_policy: ClaimPolicy::new(
                 "https://issuer.example".to_owned(),
@@ -971,20 +977,21 @@ mod tests {
         );
         let header = format!("Bearer {token}");
         let token = parse_bearer([header.as_bytes()], 32 * 1024).unwrap();
-        let diagnostics = Diagnostics::default();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
             .unwrap();
         metrics::with_local_recorder(&diagnostics, || {
-            tracing::subscriber::with_default(diagnostics.clone(), || {
+            tracing::dispatcher::with_default(&dispatch, || {
                 assert_eq!(
                     runtime.block_on(
                         verifier.verify(&token, Instant::now() + std::time::Duration::from_secs(1))
                     ),
                     Err(Failure::Invalid)
                 );
-                let entries = vec![serde_json::json!({"kid":"private-key-id","kty":false}); 100];
+                // Unknown key parameters fall back to the library's Other family.
+                // A wrongly typed consumed common field exercises malformed entries.
+                let entries = vec![serde_json::json!({"kid":"private-key-id","use":false}); 100];
                 assert!(matches!(
                     parse_key_set(
                         &serde_json::to_vec(&serde_json::json!({"keys":entries})).unwrap(),
@@ -1002,29 +1009,38 @@ mod tests {
                     .labels()
                     .any(|label| label.key() == "reason" && label.value() == "missing_claim")
         }));
-        assert!(counters.iter().any(|(key, value)| {
-            key.name() == "authn_jwks_key_rejections_total"
-                && *value == 100
-                && key
-                    .labels()
-                    .any(|label| label.key() == "reason" && label.value() == "malformed_entry")
-        }));
+        assert!(
+            counters.iter().any(|(key, value)| {
+                key.name() == "authn_jwks_key_rejections_total"
+                    && *value == 100
+                    && key
+                        .labels()
+                        .any(|label| label.key() == "reason" && label.value() == "malformed_entry")
+            }),
+            "recorded counters: {counters:?}"
+        );
         let events = diagnostics.events.lock().unwrap();
         assert_eq!(
             events
                 .iter()
                 .filter(|event| event.contains("authn_jwks_entries_rejected"))
                 .count(),
-            1
+            1,
+            "recorded events: {events:?}"
         );
         assert!(
             events
                 .iter()
                 .any(|event| event.contains("authn_verification_failed")
-                    && event.contains("missing_claim"))
+                    && event.contains("missing_claim")),
+            "recorded events: {events:?}"
         );
-        assert!(events.iter().all(
-            |event| !event.contains("private-claim-value") && !event.contains("private-key-id")
-        ));
+        assert!(
+            events
+                .iter()
+                .all(|event| !event.contains("private-claim-value")
+                    && !event.contains("private-key-id")),
+            "recorded events: {events:?}"
+        );
     }
 }

@@ -147,13 +147,19 @@ pub enum AuthnConfig {
         #[serde(default, deserialize_with = "occupied_secret")]
         introspection_client_secret: Option<SecretString>,
         /// Immediate provider-exchange capacity. Missing uses 32.
-        #[serde(default = "default_provider_concurrency")]
+        #[serde(
+            default = "default_provider_concurrency",
+            deserialize_with = "deserialize_scalar"
+        )]
         provider_concurrency: NonZeroU32,
         /// Reuse verified positive results until their fixed expiry. Default off.
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_scalar")]
         cache_enabled: bool,
         /// Maximum retained results, from 1 through 1024. Missing uses 256.
-        #[serde(default = "default_cache_capacity")]
+        #[serde(
+            default = "default_cache_capacity",
+            deserialize_with = "deserialize_scalar"
+        )]
         cache_capacity: usize,
         /// Maximum fixed retention, from 1s through 5m. Missing uses 30s.
         #[serde(default = "default_cache_ttl", with = "humantime_serde")]
@@ -187,6 +193,28 @@ const fn default_cache_capacity() -> usize {
 const fn default_cache_ttl() -> Duration {
     // Keep the opt-in delay in revocation detection short.
     Duration::from_secs(30)
+}
+
+// The tagged enum buffers values before decoding fields, so config-rs cannot
+// coerce environment strings here. Adapt only these scalar fields; trust and
+// credential strings must retain their exact bytes.
+fn deserialize_scalar<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Input<T> {
+        Typed(T),
+        Text(String),
+    }
+
+    match Input::<T>::deserialize(deserializer)? {
+        Input::Typed(value) => Ok(value),
+        Input::Text(value) => value.parse().map_err(serde::de::Error::custom),
+    }
 }
 // template:end oidc-introspection:authn-default-provider-concurrency
 

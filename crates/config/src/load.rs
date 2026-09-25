@@ -279,40 +279,92 @@ mod tests {
     // template:end jobs:load-jobs-environment
 
     // template:begin oidc-introspection:load-introspection-environment
+    fn introspection_environment(extra: &[(&str, &str)]) -> Vec<(String, String)> {
+        let mut values = env(&[
+            ("APP__AUTHN__MODE", "oidc-introspection"),
+            ("APP__AUTHN__ISSUER", "https://issuer.example/tenant"),
+            ("APP__AUTHN__AUDIENCE", "00123"),
+            (
+                "APP__AUTHN__INTROSPECTION_ENDPOINT",
+                "https://issuer.example/introspect",
+            ),
+            ("APP__AUTHN__INTROSPECTION_CLIENT_ID", "false"),
+            ("APP__AUTHN__INTROSPECTION_CLIENT_SECRET", "000042"),
+        ]);
+        values.extend(env(extra));
+        values
+    }
+
     #[test]
     fn introspection_environment_decodes_and_redacts_the_secret() {
-        let cfg = load_from(
-            &LoadOptions::default(),
-            BUILD,
-            env(&[
-                ("APP__AUTHN__MODE", "oidc-introspection"),
-                ("APP__AUTHN__ISSUER", "https://issuer.example/tenant"),
-                ("APP__AUTHN__AUDIENCE", "service"),
-                (
-                    "APP__AUTHN__INTROSPECTION_ENDPOINT",
-                    "https://issuer.example/introspect",
-                ),
-                ("APP__AUTHN__INTROSPECTION_CLIENT_ID", "service-client"),
-                ("APP__AUTHN__INTROSPECTION_CLIENT_SECRET", "loader-secret"),
-                ("APP__AUTHN__CACHE_ENABLED", "true"),
-                ("APP__AUTHN__CACHE_CAPACITY", "64"),
-                ("APP__AUTHN__CACHE_TTL", "1m 30s"),
-            ]),
-        )
-        .unwrap();
-        let AuthnConfig::OidcIntrospection {
-            cache_enabled,
-            cache_capacity,
-            cache_ttl,
-            ..
-        } = &cfg.authn
-        else {
-            panic!("expected OIDC introspection configuration");
-        };
-        assert!(*cache_enabled);
-        assert_eq!(*cache_capacity, 64);
-        assert_eq!(*cache_ttl, Duration::from_secs(90));
-        assert!(!format!("{cfg:?}").contains("loader-secret"));
+        use secrecy::ExposeSecret;
+
+        for (enabled, expected) in [("true", true), ("false", false)] {
+            let cfg = load_from(
+                &LoadOptions::default(),
+                BUILD,
+                introspection_environment(&[
+                    ("APP__AUTHN__PROVIDER_CONCURRENCY", "7"),
+                    ("APP__AUTHN__CACHE_ENABLED", enabled),
+                    ("APP__AUTHN__CACHE_CAPACITY", "64"),
+                    ("APP__AUTHN__CACHE_TTL", "1m 30s"),
+                ]),
+            )
+            .unwrap();
+            let AuthnConfig::OidcIntrospection {
+                audience,
+                introspection_client_id,
+                introspection_client_secret,
+                provider_concurrency,
+                cache_enabled,
+                cache_capacity,
+                cache_ttl,
+                ..
+            } = &cfg.authn
+            else {
+                panic!("expected OIDC introspection configuration");
+            };
+            assert_eq!(*cache_enabled, expected);
+            assert_eq!(*cache_capacity, 64);
+            assert_eq!(*cache_ttl, Duration::from_secs(90));
+            assert_eq!(provider_concurrency.get(), 7);
+            assert_eq!(audience.as_slice(), ["00123"]);
+            assert_eq!(introspection_client_id, "false");
+            assert_eq!(
+                introspection_client_secret
+                    .as_ref()
+                    .unwrap()
+                    .expose_secret(),
+                "000042"
+            );
+            assert!(!format!("{cfg:?}").contains("000042"));
+        }
+    }
+
+    #[test]
+    fn introspection_environment_rejects_invalid_scalar_overrides() {
+        for (key, value) in [
+            ("APP__AUTHN__CACHE_ENABLED", ""),
+            ("APP__AUTHN__CACHE_ENABLED", "not-a-boolean"),
+            ("APP__AUTHN__CACHE_CAPACITY", ""),
+            ("APP__AUTHN__CACHE_CAPACITY", "0"),
+            ("APP__AUTHN__CACHE_CAPACITY", "1025"),
+            ("APP__AUTHN__CACHE_CAPACITY", "-1"),
+            ("APP__AUTHN__CACHE_CAPACITY", "1.5"),
+            ("APP__AUTHN__PROVIDER_CONCURRENCY", ""),
+            ("APP__AUTHN__PROVIDER_CONCURRENCY", "0"),
+            ("APP__AUTHN__PROVIDER_CONCURRENCY", "4294967296"),
+        ] {
+            assert!(
+                load_from(
+                    &LoadOptions::default(),
+                    BUILD,
+                    introspection_environment(&[(key, value)]),
+                )
+                .is_err(),
+                "{key}={value}"
+            );
+        }
     }
     // template:end oidc-introspection:load-introspection-environment
 
