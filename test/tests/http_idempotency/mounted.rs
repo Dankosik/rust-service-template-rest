@@ -629,6 +629,104 @@ async fn until_free(request: impl Fn() -> TestRequest) -> (TestResponse, u64) {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/_test/authorization",
+    operation_id = "authorizationWithoutIdempotency",
+    responses(
+        (status = 200, description = "verified", content_type = "text/plain", body = String),
+        infra_http::problem::responses::ProtectedOperationProblemResponses,
+    )
+)]
+async fn authorized_without_idempotency(
+    principal: VerifiedPrincipal,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(response) = infra_http::require_scope(&principal, "widgets:write") {
+        return response;
+    }
+    assert!(!headers.contains_key(axum::http::header::AUTHORIZATION));
+    (
+        StatusCode::OK,
+        principal.subject().unwrap_or_default().to_owned(),
+    )
+        .into_response()
+}
+
+#[tokio::test]
+async fn repair_regression_authentication_and_scope_authorization_work_without_a_composer() {
+    let provider = Provider::start().await;
+    let root_policy = serde_json::from_value(json!({
+        "openapi": "3.1.0",
+        "info": {"title": "authorization fixture", "version": "1"},
+        "paths": {},
+        "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}},
+        "security": [{"bearerAuth": []}]
+    }))
+    .expect("the inherited bearer policy");
+    let contract = infra_http::ContractRouter::with_openapi(root_policy)
+        .merge(infra_http::router())
+        .routes(routes!(authorized_without_idempotency));
+    let router = infra_http::authn::finalize(contract, provider.verifier(), 32 * 1024)
+        .expect("the protected contract finalizes without an idempotency composer");
+    let server = TestServer::new(harden(
+        router.with_state(Readiness::new(Vec::new()).reader()),
+        &HardenOptions {
+            max_body_bytes: MAX_BODY_BYTES,
+            request_timeout: BUDGET,
+            max_in_flight: NonZeroU32::new(16),
+            log_health_probes: false,
+        },
+    ));
+    let mut responses = Vec::new();
+    for authorization in [
+        None,
+        Some("Bearer token token"),
+        Some(NO_SCOPE),
+        Some(ALICE),
+    ] {
+        let mut request = server.get("/_test/authorization");
+        if let Some(value) = authorization {
+            request = request.authorization(if value.starts_with("Bearer ") {
+                value.to_owned()
+            } else {
+                format!("Bearer {value}")
+            });
+        }
+        responses.push(request.await);
+    }
+    provider.stop().await;
+
+    for (response, status, code, challenge) in [
+        (
+            &responses[0],
+            StatusCode::UNAUTHORIZED,
+            "authentication_required",
+            "Bearer",
+        ),
+        (
+            &responses[1],
+            StatusCode::BAD_REQUEST,
+            "authentication_malformed",
+            "Bearer error=\"invalid_request\"",
+        ),
+        (
+            &responses[2],
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Bearer error=\"insufficient_scope\"",
+        ),
+    ] {
+        problem_body(response, status, code);
+        assert_eq!(
+            response.header(WWW_AUTHENTICATE),
+            HeaderValue::from_static(challenge)
+        );
+    }
+    assert_eq!(responses[3].status_code(), StatusCode::OK);
+    assert_eq!(responses[3].text(), "alice");
+}
+
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) {
     let recorder = PrometheusBuilder::new().build_recorder();
@@ -649,9 +747,15 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
         ),
         (
             Some("Basic Zm9vOmJhcg=="),
+            StatusCode::UNAUTHORIZED,
+            "authentication_required",
+            Some("Bearer"),
+        ),
+        (
+            Some("Bearer token token"),
             StatusCode::BAD_REQUEST,
             "authentication_malformed",
-            None,
+            Some("Bearer error=\"invalid_request\""),
         ),
         (
             Some(oversize.as_str()),

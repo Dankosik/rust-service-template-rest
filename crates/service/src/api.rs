@@ -147,29 +147,27 @@ mod tests {
     }
 
     #[test]
-    fn test_only_protected_route_uses_the_production_contract_validator() {
-        let document = protected_test_contract().into_document();
-        let operation = document.paths.paths["/_test/protected"]
-            .get
-            .as_ref()
-            .expect("GET operation");
-        assert_eq!(
-            serde_json::to_value(operation.security.as_ref()).expect("security serializes"),
-            serde_json::json!([{"bearerAuth": []}])
+    fn repair_regression_protected_contract_refuses_disabled_authentication_without_a_composer() {
+        assert!(
+            infra_http::authn::finalize(
+                protected_test_contract(),
+                infra_bearerauthn::Verifier::disabled(),
+                32 * 1024,
+            )
+            .is_err(),
+            "protected operations must refuse startup when authentication is disabled"
         );
     }
 
     #[test]
     fn public_probe_contract_does_not_depend_on_a_verifier() {
-        let document = document();
         assert!(
-            document.paths.paths["/health/live"]
-                .get
-                .as_ref()
-                .expect("liveness GET operation")
-                .security
-                .as_ref()
-                .is_some_and(Vec::is_empty)
+            infra_http::authn::finalize(
+                assemble(),
+                infra_bearerauthn::Verifier::disabled(),
+                32 * 1024,
+            )
+            .is_ok()
         );
     }
 }

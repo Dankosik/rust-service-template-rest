@@ -16,9 +16,11 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     BearerToken, Failure, JwtAlgorithm, JwtOptions, PreparationError, PreparationPhase,
-    PreparationReason, Principal, ProviderUrl, RefreshTask, TokenProfile, Verifier,
+    PreparationReason, Principal, ProviderUrl, RefreshTask, TokenProfile, VerificationError,
+    VerificationReason, Verifier,
     claims::{ClaimPolicy, JwtClaims, validate_jwt_claims},
     provider::{ProviderClient, ProviderDeadline},
+    record_verification,
     refresh::{SharedRefresh, UnknownKeyResult, run_refresh_worker},
 };
 
@@ -28,6 +30,7 @@ const STARTUP_BUDGET: Duration = Duration::from_secs(6);
 pub struct JwtVerifier {
     claim_policy: ClaimPolicy,
     token_profile: TokenProfile,
+    algorithms: Vec<JwtAlgorithm>,
     refresh: Arc<SharedRefresh>,
 }
 
@@ -43,26 +46,43 @@ impl JwtVerifier {
         token: &BearerToken<'_>,
         deadline: Instant,
     ) -> Result<Principal, Failure> {
-        let header = decode_header(token.as_bytes()).map_err(|_| Failure::Invalid)?;
+        record_verification("jwt", self.verify_evidence(token, deadline).await)
+    }
+
+    async fn verify_evidence(
+        &self,
+        token: &BearerToken<'_>,
+        deadline: Instant,
+    ) -> Result<Principal, VerificationError> {
+        let header = decode_header(token.as_bytes())
+            .map_err(|_| VerificationError::invalid(VerificationReason::Header))?;
         if header.crit.as_ref().is_some_and(|crit| !crit.is_empty()) {
-            return Err(Failure::Invalid);
+            return Err(VerificationError::invalid(VerificationReason::Header));
         }
-        let algorithm = JwtAlgorithm::from_jsonwebtoken(header.alg).ok_or(Failure::Invalid)?;
+        let algorithm = JwtAlgorithm::from_jsonwebtoken(header.alg)
+            .filter(|algorithm| self.algorithms.contains(algorithm))
+            .ok_or_else(|| VerificationError::invalid(VerificationReason::Algorithm))?;
         if self.token_profile == TokenProfile::Rfc9068
             && !header.typ.as_deref().is_some_and(is_access_token_type)
         {
-            return Err(Failure::Invalid);
+            return Err(VerificationError::invalid(VerificationReason::Profile));
         }
         let key = self
             .select_key(header.kid.as_deref(), algorithm, deadline)
             .await?;
-        let mut validation = validation_for(algorithm, &self.claim_policy);
-        validation.validate_nbf = true;
-        let claims = decode::<JwtClaims>(token.as_bytes(), &key.decoding_key, &validation)
-            .map_err(|_| Failure::Invalid)?
-            .claims;
-        let now = jsonwebtoken::get_current_timestamp();
-        validate_jwt_claims(claims, &self.claim_policy, self.token_profile, now)
+        let claims = decode::<JwtClaims>(
+            token.as_bytes(),
+            &key.decoding_key,
+            &validation_for(algorithm, &self.claim_policy),
+        )
+        .map_err(|error| jwt_validation_error(error.kind()))?
+        .claims;
+        validate_jwt_claims(
+            claims,
+            &self.claim_policy,
+            self.token_profile,
+            jsonwebtoken::get_current_timestamp(),
+        )
     }
 
     async fn select_key(
@@ -70,24 +90,55 @@ impl JwtVerifier {
         kid: Option<&str>,
         algorithm: JwtAlgorithm,
         deadline: Instant,
-    ) -> Result<JwtKey, Failure> {
+    ) -> Result<JwtKey, VerificationError> {
         let initial = self.refresh.keys();
         match initial.select(kid, algorithm) {
             KeySelection::One(key) => Ok(key.clone()),
-            KeySelection::Ambiguous => Err(Failure::Invalid),
+            KeySelection::Ambiguous => {
+                Err(VerificationError::invalid(VerificationReason::AmbiguousKey))
+            }
             KeySelection::Unknown => match self.refresh.refresh_unknown(deadline).await {
                 UnknownKeyResult::Refreshed => match self.refresh.keys().select(kid, algorithm) {
                     KeySelection::One(key) => Ok(key.clone()),
-                    KeySelection::Unknown | KeySelection::Ambiguous => Err(Failure::Invalid),
+                    KeySelection::Unknown => {
+                        Err(VerificationError::invalid(VerificationReason::UnknownKey))
+                    }
+                    KeySelection::Ambiguous => {
+                        Err(VerificationError::invalid(VerificationReason::AmbiguousKey))
+                    }
                 },
-                UnknownKeyResult::CooldownSuccess => Err(Failure::Invalid),
-                UnknownKeyResult::RefreshFailed | UnknownKeyResult::CooldownFailure => {
-                    Err(Failure::Unavailable)
+                UnknownKeyResult::CooldownSuccess => {
+                    Err(VerificationError::invalid(VerificationReason::UnknownKey))
                 }
-                UnknownKeyResult::DeadlineElapsed => Err(Failure::Timeout),
+                UnknownKeyResult::RefreshFailed | UnknownKeyResult::CooldownFailure => Err(
+                    VerificationError::new(Failure::Unavailable, VerificationReason::Refresh),
+                ),
+                UnknownKeyResult::DeadlineElapsed => Err(VerificationError::new(
+                    Failure::Timeout,
+                    VerificationReason::RequestTimeout,
+                )),
             },
         }
     }
+}
+
+fn jwt_validation_error(error: &jsonwebtoken::errors::ErrorKind) -> VerificationError {
+    use jsonwebtoken::errors::ErrorKind;
+    let reason = match error {
+        ErrorKind::MissingRequiredClaim(_) => VerificationReason::MissingClaim,
+        ErrorKind::ExpiredSignature => VerificationReason::Expired,
+        ErrorKind::ImmatureSignature => VerificationReason::NotYetValid,
+        ErrorKind::InvalidIssuer => VerificationReason::Issuer,
+        ErrorKind::InvalidAudience => VerificationReason::Audience,
+        ErrorKind::InvalidSubject => VerificationReason::Identity,
+        ErrorKind::InvalidAlgorithm
+        | ErrorKind::InvalidAlgorithmName
+        | ErrorKind::UnsupportedAlgorithm
+        | ErrorKind::MissingAlgorithm => VerificationReason::Algorithm,
+        ErrorKind::InvalidSignature => VerificationReason::Signature,
+        _ => VerificationReason::MalformedClaims,
+    };
+    VerificationError::invalid(reason)
 }
 
 /// Prepares initial trust before traffic admission and returns the one refresh
@@ -97,8 +148,10 @@ pub async fn prepare_jwt(
     _tracker: TaskTracker,
     cancel: CancellationToken,
 ) -> Result<(Verifier, RefreshTask), PreparationError> {
-    ensure_crypto_provider()?;
-    let provider = ProviderClient::new()?;
+    ensure_crypto_provider()
+        .map_err(|error| error.with_context(&options.issuer, &options.audiences, None))?;
+    let provider = ProviderClient::new()
+        .map_err(|error| error.with_context(&options.issuer, &options.audiences, None))?;
     prepare_with_provider(options, provider, cancel).await
 }
 
@@ -111,37 +164,73 @@ async fn prepare_with_provider(
         || options.audiences.iter().any(String::is_empty)
         || options.algorithms.is_empty()
     {
-        return Err(PreparationError::new(
-            PreparationPhase::Options,
-            PreparationReason::Parse,
-        ));
+        return Err(
+            PreparationError::new(PreparationPhase::Options, PreparationReason::Parse)
+                .with_context(&options.issuer, &options.audiences, None),
+        );
     }
     let startup_deadline = Instant::now() + STARTUP_BUDGET;
     let discovery_url = discovery_url(&options.issuer);
-    let discovery = fetch_discovery(&provider, &discovery_url, startup_deadline).await?;
+    let discovery = fetch_discovery(&provider, &discovery_url, startup_deadline)
+        .await
+        .map_err(|error| {
+            error.with_context(
+                &options.issuer,
+                &options.audiences,
+                Some(discovery_url.as_str()),
+            )
+        })?;
     if discovery.issuer != options.issuer.as_str() {
         return Err(PreparationError::new(
             PreparationPhase::Discovery,
             PreparationReason::IssuerMismatch,
-        ));
+        )
+        .with_context(
+            &options.issuer,
+            &options.audiences,
+            Some(discovery_url.as_str()),
+        )
+        .with_discovered_issuer(&discovery.issuer));
     }
     let jwks_uri = ProviderUrl::parse(&discovery.jwks_uri).map_err(|_| {
         PreparationError::new(PreparationPhase::Discovery, PreparationReason::InvalidUrl)
+            .with_context(
+                &options.issuer,
+                &options.audiences,
+                Some(&discovery.jwks_uri),
+            )
     })?;
     let bytes = provider
         .get_json(
             jwks_uri.url(),
-            startup_deadline_for(Instant::now(), startup_deadline, PreparationPhase::Jwks)?,
+            startup_deadline_for(Instant::now(), startup_deadline, PreparationPhase::Jwks)
+                .map_err(|error| {
+                    error.with_context(&options.issuer, &options.audiences, Some(jwks_uri.as_str()))
+                })?,
         )
         .await
-        .map_err(|_| PreparationError::new(PreparationPhase::Jwks, PreparationReason::Fetch))?;
-    let keys = parse_key_set(&bytes, &options.algorithms).map_err(|_| {
-        PreparationError::new(PreparationPhase::Jwks, PreparationReason::NoUsableKeys)
+        .map_err(|_| {
+            PreparationError::new(PreparationPhase::Jwks, PreparationReason::Fetch).with_context(
+                &options.issuer,
+                &options.audiences,
+                Some(jwks_uri.as_str()),
+            )
+        })?;
+    let keys = parse_key_set(&bytes, &options.algorithms).map_err(|error| {
+        PreparationError::new(
+            PreparationPhase::Jwks,
+            match error {
+                KeySetError::Parse => PreparationReason::Parse,
+                KeySetError::NoUsableKeys => PreparationReason::NoUsableKeys,
+            },
+        )
+        .with_context(&options.issuer, &options.audiences, Some(jwks_uri.as_str()))
     })?;
     let refresh = SharedRefresh::new(Arc::new(keys));
     let verifier = JwtVerifier {
         claim_policy: ClaimPolicy::new(options.issuer.as_str().to_owned(), options.audiences),
         token_profile: options.token_profile,
+        algorithms: options.algorithms.clone(),
         refresh: refresh.clone(),
     };
     let algorithms = options.algorithms;
@@ -255,17 +344,50 @@ struct RawJwks {
     keys: Vec<serde_json::Value>,
 }
 
-pub(crate) fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, Failure> {
-    let raw: RawJwks = serde_json::from_slice(bytes).map_err(|_| Failure::Unavailable)?;
-    let mut candidates = raw
-        .keys
-        .into_iter()
-        .filter_map(|value| {
-            serde_json::from_value::<Jwk>(value)
-                .ok()
-                .and_then(|jwk| Candidate::admit(jwk, configured))
-        })
-        .collect::<Vec<_>>();
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum KeySetError {
+    Parse,
+    NoUsableKeys,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum KeyRejection {
+    MalformedEntry,
+    IncompatibleUsage,
+    UnsupportedFamily,
+    AlgorithmBinding,
+    InvalidMaterial,
+    ConflictingAlgorithm,
+}
+impl KeyRejection {
+    fn label(self) -> &'static str {
+        match self {
+            Self::MalformedEntry => "malformed_entry",
+            Self::IncompatibleUsage => "incompatible_usage",
+            Self::UnsupportedFamily => "unsupported_family",
+            Self::AlgorithmBinding => "algorithm_binding",
+            Self::InvalidMaterial => "invalid_material",
+            Self::ConflictingAlgorithm => "conflicting_algorithm",
+        }
+    }
+}
+
+pub(crate) fn parse_key_set(
+    bytes: &[u8],
+    configured: &[JwtAlgorithm],
+) -> Result<KeySet, KeySetError> {
+    let raw: RawJwks = serde_json::from_slice(bytes).map_err(|_| KeySetError::Parse)?;
+    let mut rejected = std::collections::BTreeMap::<KeyRejection, u64>::new();
+    let mut candidates = Vec::new();
+    for value in raw.keys {
+        let candidate = serde_json::from_value::<Jwk>(value)
+            .map_err(|_| KeyRejection::MalformedEntry)
+            .and_then(|jwk| Candidate::admit(jwk, configured));
+        match candidate {
+            Ok(candidate) => candidates.push(candidate),
+            Err(reason) => *rejected.entry(reason).or_default() += 1,
+        }
+    }
     let conflicting = candidates
         .iter()
         .enumerate()
@@ -281,13 +403,31 @@ pub(crate) fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result
                 .then_some(index)
         })
         .collect::<std::collections::BTreeSet<_>>();
+    if !conflicting.is_empty() {
+        rejected.insert(KeyRejection::ConflictingAlgorithm, conflicting.len() as u64);
+    }
+    // Aggregate per-entry rejection evidence into one event per closed reason.
+    // Neither provider-controlled entry count nor key identifiers multiply logs.
+    metrics::describe_counter!(
+        "authn_jwks_key_rejections_total",
+        "Rejected JWKS entries by closed reason"
+    );
+    for (reason, count) in rejected {
+        tracing::debug!(
+            reason = reason.label(),
+            count,
+            "authn_jwks_entries_rejected"
+        );
+        metrics::counter!("authn_jwks_key_rejections_total", "reason" => reason.label())
+            .increment(count);
+    }
     candidates = candidates
         .into_iter()
         .enumerate()
         .filter_map(|(index, candidate)| (!conflicting.contains(&index)).then_some(candidate))
         .collect();
     if candidates.is_empty() {
-        return Err(Failure::Unavailable);
+        return Err(KeySetError::NoUsableKeys);
     }
     Ok(KeySet {
         keys: candidates
@@ -310,15 +450,23 @@ enum PublicMaterial {
 }
 
 impl Candidate {
-    fn admit(jwk: Jwk, configured: &[JwtAlgorithm]) -> Option<Self> {
+    fn admit(mut jwk: Jwk, configured: &[JwtAlgorithm]) -> Result<Self, KeyRejection> {
         if !signature_usage(&jwk) {
-            return None;
+            return Err(KeyRejection::IncompatibleUsage);
         }
-        let family = KeyFamily::from_jwk(&jwk)?;
-        let algorithm = bind_algorithm(jwk.common.key_algorithm, family, configured)?;
-        let material = admit_material(&jwk, algorithm)?;
-        let decoding_key = DecodingKey::from_jwk(&jwk).ok()?;
-        Some(Self {
+        let family = KeyFamily::from_jwk(&jwk).ok_or(KeyRejection::UnsupportedFamily)?;
+        let algorithm = bind_algorithm(jwk.common.key_algorithm, family, configured)
+            .ok_or(KeyRejection::AlgorithmBinding)?;
+        let material = admit_material(&jwk, algorithm).ok_or(KeyRejection::InvalidMaterial)?;
+        if let (PublicMaterial::Rsa(modulus, exponent), AlgorithmParameters::RSA(parameters)) =
+            (&material, &mut jwk.algorithm)
+        {
+            parameters.n = URL_SAFE_NO_PAD.encode(modulus);
+            parameters.e = URL_SAFE_NO_PAD.encode(exponent);
+        }
+        let decoding_key =
+            DecodingKey::from_jwk(&jwk).map_err(|_| KeyRejection::InvalidMaterial)?;
+        Ok(Self {
             key: JwtKey {
                 kid: jwk.common.key_id.clone(),
                 algorithm,
@@ -565,6 +713,7 @@ mod tests {
                 vec!["api".to_owned()],
             ),
             token_profile: TokenProfile::ResourceServer,
+            algorithms: vec![JwtAlgorithm::Rs256],
             refresh: SharedRefresh::new(key_set("fixture")),
         };
         let token = signed_token("fixture", serde_json::json!({"nbf": null}));
@@ -612,5 +761,265 @@ mod tests {
         .unwrap();
         assert!(keys.has_kid("usable"));
         assert!(!keys.has_kid("bad-point"));
+    }
+    #[tokio::test]
+    async fn repair_regression_alias_only_client_identity_is_verified() {
+        let verifier = JwtVerifier {
+            claim_policy: ClaimPolicy::new(
+                "https://issuer.example".to_owned(),
+                vec!["api".to_owned()],
+            ),
+            token_profile: TokenProfile::ResourceServer,
+            algorithms: vec![JwtAlgorithm::Rs256],
+            refresh: SharedRefresh::new(key_set("fixture")),
+        };
+        for alias in ["azp", "appid", "cid"] {
+            let token = signed_token("fixture", serde_json::json!({"sub":null, alias:"client"}));
+            let header = format!("Bearer {token}");
+            let token = parse_bearer([header.as_bytes()], 32 * 1024).unwrap();
+            let principal = verifier
+                .verify(&token, Instant::now() + std::time::Duration::from_secs(1))
+                .await
+                .unwrap();
+            assert_eq!(principal.subject(), None);
+            assert_eq!(principal.client_id(), Some("client"));
+        }
+        let token = signed_token(
+            "fixture",
+            serde_json::json!({"sub":null,"azp":"client","cid":"other"}),
+        );
+        let header = format!("Bearer {token}");
+        let token = parse_bearer([header.as_bytes()], 32 * 1024).unwrap();
+        assert_eq!(
+            verifier
+                .verify(&token, Instant::now() + std::time::Duration::from_secs(1))
+                .await,
+            Err(Failure::Invalid)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repair_regression_unconfigured_algorithm_does_not_wait_for_refresh() {
+        let refresh = SharedRefresh::new(key_set("fixture"));
+        refresh.permit_unknown_refresh_for_test().await;
+        let verifier = JwtVerifier {
+            claim_policy: ClaimPolicy::new(
+                "https://issuer.example".to_owned(),
+                vec!["api".to_owned()],
+            ),
+            token_profile: TokenProfile::ResourceServer,
+            algorithms: vec![JwtAlgorithm::Rs256],
+            refresh,
+        };
+        let token = encode(&Header::new(Algorithm::PS256), &serde_json::json!({"iss":"https://issuer.example","aud":"api","exp":jsonwebtoken::get_current_timestamp()+60,"sub":"subject"}), &EncodingKey::from_rsa_der(JWT_SIGNING_DER)).unwrap();
+        let header = format!("Bearer {token}");
+        let token = parse_bearer([header.as_bytes()], 32 * 1024).unwrap();
+        assert_eq!(
+            verifier
+                .verify(&token, Instant::now() + std::time::Duration::from_secs(10))
+                .await,
+            Err(Failure::Invalid)
+        );
+    }
+
+    #[test]
+    fn preparation_context_distinguishes_phases_and_sanitizes_discovery_evidence() {
+        use crate::{PreparationError, PreparationPhase, PreparationReason, ProviderUrl};
+        let issuer = ProviderUrl::parse("https://issuer.example").unwrap();
+        let error = PreparationError::new(
+            PreparationPhase::Discovery,
+            PreparationReason::IssuerMismatch,
+        )
+        .with_context(
+            &issuer,
+            &["api".to_owned()],
+            Some("https://issuer.example/.well-known/openid-configuration"),
+        )
+        .with_discovered_issuer("https://other.example");
+        assert_eq!(error.issuer(), Some("https://issuer.example"));
+        assert_eq!(error.discovered_issuer(), Some("https://other.example"));
+        assert!(error.to_string().contains("https://other.example"));
+        let unsafe_error =
+            error.with_discovered_issuer("https://user:secret@other.example/?token=private");
+        for rendered in [unsafe_error.to_string(), format!("{unsafe_error:?}")] {
+            assert!(rendered.contains("unsafe_or_overlong_url"));
+            assert!(!rendered.contains("secret"));
+            assert!(!rendered.contains("private"));
+        }
+        assert!(matches!(
+            parse_key_set(br#"{"keys":false}"#, &[JwtAlgorithm::Rs256]),
+            Err(super::KeySetError::Parse)
+        ));
+        assert!(matches!(
+            parse_key_set(br#"{"keys":[]}"#, &[JwtAlgorithm::Rs256]),
+            Err(super::KeySetError::NoUsableKeys)
+        ));
+    }
+
+    #[derive(Clone, Default)]
+    struct Diagnostics {
+        counters: Arc<std::sync::Mutex<Vec<(metrics::Key, u64)>>>,
+        events: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    struct RecordedCounter {
+        key: metrics::Key,
+        diagnostics: Diagnostics,
+    }
+    impl metrics::CounterFn for RecordedCounter {
+        fn increment(&self, value: u64) {
+            self.diagnostics
+                .counters
+                .lock()
+                .unwrap()
+                .push((self.key.clone(), value));
+        }
+        fn absolute(&self, value: u64) {
+            self.increment(value);
+        }
+    }
+    impl metrics::Recorder for Diagnostics {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            metrics::Counter::from_arc(Arc::new(RecordedCounter {
+                key: key.clone(),
+                diagnostics: self.clone(),
+            }))
+        }
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+    impl tracing::Subscriber for Diagnostics {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields(String);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    use std::fmt::Write;
+                    write!(self.0, "{}={value:?};", field.name()).unwrap();
+                }
+            }
+            let mut fields = Fields(String::new());
+            event.record(&mut fields);
+            self.events.lock().unwrap().push(fields.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn diagnostics_report_closed_reasons_without_per_entry_log_amplification() {
+        let verifier = JwtVerifier {
+            claim_policy: ClaimPolicy::new(
+                "https://issuer.example".to_owned(),
+                vec!["api".to_owned()],
+            ),
+            token_profile: TokenProfile::ResourceServer,
+            algorithms: vec![JwtAlgorithm::Rs256],
+            refresh: SharedRefresh::new(key_set("fixture")),
+        };
+        let token = signed_token(
+            "fixture",
+            serde_json::json!({"sub":null,"jti":"private-claim-value"}),
+        );
+        let header = format!("Bearer {token}");
+        let token = parse_bearer([header.as_bytes()], 32 * 1024).unwrap();
+        let diagnostics = Diagnostics::default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        metrics::with_local_recorder(&diagnostics, || {
+            tracing::subscriber::with_default(diagnostics.clone(), || {
+                assert_eq!(
+                    runtime.block_on(
+                        verifier.verify(&token, Instant::now() + std::time::Duration::from_secs(1))
+                    ),
+                    Err(Failure::Invalid)
+                );
+                let entries = vec![serde_json::json!({"kid":"private-key-id","kty":false}); 100];
+                assert!(matches!(
+                    parse_key_set(
+                        &serde_json::to_vec(&serde_json::json!({"keys":entries})).unwrap(),
+                        &[JwtAlgorithm::Rs256]
+                    ),
+                    Err(super::KeySetError::NoUsableKeys)
+                ));
+            })
+        });
+        let counters = diagnostics.counters.lock().unwrap();
+        assert!(counters.iter().any(|(key, value)| {
+            key.name() == "authn_verifications_total"
+                && *value == 1
+                && key
+                    .labels()
+                    .any(|label| label.key() == "reason" && label.value() == "missing_claim")
+        }));
+        assert!(counters.iter().any(|(key, value)| {
+            key.name() == "authn_jwks_key_rejections_total"
+                && *value == 100
+                && key
+                    .labels()
+                    .any(|label| label.key() == "reason" && label.value() == "malformed_entry")
+        }));
+        let events = diagnostics.events.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.contains("authn_jwks_entries_rejected"))
+                .count(),
+            1
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.contains("authn_verification_failed")
+                    && event.contains("missing_claim"))
+        );
+        assert!(events.iter().all(
+            |event| !event.contains("private-claim-value") && !event.contains("private-key-id")
+        ));
     }
 }

@@ -45,35 +45,100 @@ pub fn parse_bearer<'a>(
         return Err(Failure::Malformed);
     }
 
-    let Some((scheme, token)) = split_scheme(header) else {
-        return Err(Failure::Malformed);
-    };
-    if !scheme.eq_ignore_ascii_case(b"Bearer") || !valid_token(token) {
-        return Err(Failure::Malformed);
-    }
-    if token.len() > effective_token_bound.min(32 * 1024) {
-        return Err(Failure::Oversize);
-    }
-
-    Ok(BearerToken { bytes: token })
-}
-
-fn split_scheme(header: &[u8]) -> Option<(&[u8], &[u8])> {
-    let separator = header.iter().position(|byte| *byte == b' ')?;
-    if separator == 0 {
-        return None;
-    }
-    let token_start = header[separator..].iter().position(|byte| *byte != b' ')? + separator;
-    let scheme = &header[..separator];
-    let token = &header[token_start..];
-    if token.is_empty()
+    if header.is_empty()
         || header
             .iter()
             .any(|byte| !byte.is_ascii() || byte.is_ascii_control())
     {
-        return None;
+        return Err(Failure::Malformed);
     }
-    Some((scheme, token))
+    let separator = header
+        .iter()
+        .position(|byte| *byte == b' ')
+        .unwrap_or(header.len());
+    let scheme = &header[..separator];
+    if scheme.is_empty() || !scheme.iter().all(|byte| is_tchar(*byte)) {
+        return Err(Failure::Malformed);
+    }
+    let credentials = header[separator..].trim_ascii_start();
+    if !scheme.eq_ignore_ascii_case(b"Bearer") {
+        return if separator == header.len()
+            || valid_token(credentials)
+            || valid_auth_parameters(credentials)
+        {
+            Err(Failure::Missing)
+        } else {
+            Err(Failure::Malformed)
+        };
+    }
+    if credentials.len() > effective_token_bound.min(32 * 1024) {
+        return Err(Failure::Oversize);
+    }
+    if !valid_token(credentials) {
+        return Err(Failure::Malformed);
+    }
+    Ok(BearerToken { bytes: credentials })
+}
+
+fn is_tchar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+// Unsupported schemes may use token68 or the HTTP authentication parameter
+// grammar; applying Bearer's token grammar to Digest would misclassify it.
+fn valid_auth_parameters(mut bytes: &[u8]) -> bool {
+    if bytes.is_empty() || bytes.last() == Some(&b' ') {
+        return false;
+    }
+    loop {
+        let name_end = bytes
+            .iter()
+            .position(|byte| !is_tchar(*byte))
+            .unwrap_or(bytes.len());
+        if name_end == 0 {
+            return false;
+        }
+        bytes = bytes[name_end..].trim_ascii_start();
+        let Some(rest) = bytes.strip_prefix(b"=") else {
+            return false;
+        };
+        bytes = rest.trim_ascii_start();
+        if let Some(rest) = bytes.strip_prefix(b"\"") {
+            let mut escaped = false;
+            let mut end = None;
+            for (index, byte) in rest.iter().copied().enumerate() {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    end = Some(index + 1);
+                    break;
+                }
+            }
+            let Some(end) = end else {
+                return false;
+            };
+            bytes = &rest[end..];
+        } else {
+            let end = bytes
+                .iter()
+                .position(|byte| !is_tchar(*byte))
+                .unwrap_or(bytes.len());
+            if end == 0 {
+                return false;
+            }
+            bytes = &bytes[end..];
+        }
+        bytes = bytes.trim_ascii_start();
+        if bytes.is_empty() {
+            return true;
+        }
+        let Some(rest) = bytes.strip_prefix(b",") else {
+            return false;
+        };
+        bytes = rest.trim_ascii_start();
+    }
 }
 
 fn valid_token(token: &[u8]) -> bool {
@@ -114,7 +179,6 @@ mod tests {
             Err(Failure::Missing)
         );
         for value in [
-            b"Basic abc".as_slice(),
             b" Bearer abc".as_slice(),
             b"Bearer abc ".as_slice(),
             b"Bearer\tabc".as_slice(),
@@ -138,6 +202,32 @@ mod tests {
             ),
             Err(Failure::Malformed)
         );
+    }
+
+    #[test]
+    fn repair_regression_unsupported_authentication_scheme_is_missing_bearer() {
+        for value in [
+            b"Basic abc".as_slice(),
+            b"Digest realm=\"api\", nonce=\"xyz\"",
+            b"Negotiate",
+        ] {
+            assert_eq!(
+                parse_bearer([value], 32 * 1024),
+                Err(Failure::Missing),
+                "{value:?}"
+            );
+        }
+        for value in [
+            b"B@d abc".as_slice(),
+            b"Basic abc\n",
+            b"Digest realm=\"unterminated",
+        ] {
+            assert_eq!(
+                parse_bearer([value], 32 * 1024),
+                Err(Failure::Malformed),
+                "{value:?}"
+            );
+        }
     }
 
     #[test]

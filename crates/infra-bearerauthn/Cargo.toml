@@ -20,8 +20,8 @@ base64 = { workspace = true, features = ["alloc"] }
 # template:begin oidc-jwt:authn-jwt-dependency
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 aws-lc-rs = { workspace = true, features = ["alloc", "aws-lc-sys", "prebuilt-nasm"] }
-metrics = { workspace = true }
 # template:end oidc-jwt:authn-jwt-dependency
+metrics = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
 # template:begin oidc-introspection:authn-secret-dependency
 secrecy = { workspace = true }

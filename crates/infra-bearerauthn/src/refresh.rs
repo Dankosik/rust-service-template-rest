@@ -8,8 +8,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    Failure, ProviderUrl,
-    jwt::{KeySet, parse_key_set},
+    ProviderUrl,
+    jwt::{KeySet, KeySetError, parse_key_set},
     provider::{ProviderClient, ProviderDeadline, reserve_request_deadline},
 };
 
@@ -83,12 +83,16 @@ impl SharedRefresh {
         }
         let action = {
             let now = Instant::now();
-            let Some(wait_deadline) =
-                reserve_request_deadline(now, request_deadline).map(|deadline| deadline.instant())
+            let Some(wait_deadline) = reserve_request_deadline(now, request_deadline) else {
+                return UnknownKeyResult::DeadlineElapsed;
+            };
+            let Ok(mut state) = tokio::time::timeout_at(wait_deadline, self.state.lock()).await
             else {
                 return UnknownKeyResult::DeadlineElapsed;
             };
-            let mut state = self.state.lock().await;
+            if Instant::now() >= wait_deadline {
+                return UnknownKeyResult::DeadlineElapsed;
+            }
             let receiver = self.completed.subscribe();
             if let Some(reservation) = state.in_flight {
                 Action::Wait(reservation.generation, receiver, wait_deadline)
@@ -134,21 +138,25 @@ impl SharedRefresh {
         Some(reservation)
     }
 
-    async fn complete(&self, reservation: Reservation, replacement: Result<Arc<KeySet>, Failure>) {
+    async fn complete(
+        &self,
+        reservation: Reservation,
+        replacement: Result<Arc<KeySet>, RefreshFailure>,
+    ) {
         let mut state = self.state.lock().await;
         if state.in_flight.map(|current| current.generation) != Some(reservation.generation) {
             return;
         }
+        let reason = replacement
+            .as_ref()
+            .map_or_else(|failure| failure.label(), |_| "success");
         let outcome = match replacement {
             Ok(keys) => {
                 self.snapshot.send_replace(keys);
                 FetchOutcome::Success
             }
             Err(failure) => {
-                warn!(
-                    reason = refresh_reason(failure),
-                    "authentication JWKS refresh failed; retaining the last usable key snapshot"
-                );
+                warn!(reason = failure.label(), "authn_jwks_refresh_failed");
                 FetchOutcome::Failure
             }
         };
@@ -157,13 +165,15 @@ impl SharedRefresh {
         drop(state);
         self.completed
             .send_replace((reservation.generation, outcome));
-        metrics::counter!(REFRESH_METRIC, "result" => match outcome { FetchOutcome::Success => "success", FetchOutcome::Failure => "failure" }).increment(1);
+        metrics::describe_counter!(REFRESH_METRIC, "JWKS refresh outcomes by closed reason");
+        metrics::counter!(REFRESH_METRIC, "result" => match outcome { FetchOutcome::Success => "success", FetchOutcome::Failure => "failure" }, "reason" => reason).increment(1);
     }
 
     async fn cancel_in_flight(&self) {
         let reservation = self.state.lock().await.in_flight;
         if let Some(reservation) = reservation {
-            self.complete(reservation, Err(Failure::Unavailable)).await;
+            self.complete(reservation, Err(RefreshFailure::Cancelled))
+                .await;
         }
     }
 
@@ -206,24 +216,37 @@ async fn fetch_set(
     jwks_uri: &ProviderUrl,
     algorithms: &[crate::JwtAlgorithm],
     cancel: &CancellationToken,
-) -> Result<Arc<KeySet>, Failure> {
+) -> Result<Arc<KeySet>, RefreshFailure> {
     let deadline = ProviderDeadline::independent(Instant::now());
     let result = tokio::select! {
         biased;
-        () = cancel.cancelled() => return Err(Failure::Unavailable),
+        () = cancel.cancelled() => return Err(RefreshFailure::Cancelled),
         result = provider.get_json(jwks_uri.url(), deadline) => result,
-    }?;
-    parse_key_set(&result, algorithms).map(Arc::new)
+    }
+    .map_err(|_| RefreshFailure::Fetch)?;
+    parse_key_set(&result, algorithms)
+        .map(Arc::new)
+        .map_err(|error| match error {
+            KeySetError::Parse => RefreshFailure::Parse,
+            KeySetError::NoUsableKeys => RefreshFailure::NoUsableKeys,
+        })
 }
 
-fn refresh_reason(failure: Failure) -> &'static str {
-    match failure {
-        Failure::Missing => "missing",
-        Failure::Malformed => "malformed",
-        Failure::Oversize => "oversize",
-        Failure::Invalid => "invalid",
-        Failure::Unavailable => "unavailable",
-        Failure::Timeout => "timeout",
+#[derive(Clone, Copy)]
+enum RefreshFailure {
+    Fetch,
+    Parse,
+    NoUsableKeys,
+    Cancelled,
+}
+impl RefreshFailure {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Fetch => "fetch",
+            Self::Parse => "parse",
+            Self::NoUsableKeys => "no_usable_keys",
+            Self::Cancelled => "cancelled",
+        }
     }
 }
 
@@ -233,6 +256,9 @@ async fn wait_for_generation(
     deadline: Instant,
 ) -> UnknownKeyResult {
     loop {
+        if Instant::now() >= deadline {
+            return UnknownKeyResult::DeadlineElapsed;
+        }
         let (completed, outcome) = *receiver.borrow_and_update();
         if completed >= generation {
             return match outcome {
@@ -321,5 +347,33 @@ mod tests {
         assert_eq!(second.await.unwrap(), UnknownKeyResult::DeadlineElapsed);
         refresh.complete(reservation, Ok(key_set("new"))).await;
         assert_eq!(first.await.unwrap(), UnknownKeyResult::Refreshed);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn repair_regression_waiter_uses_own_budget_beyond_provider_cap() {
+        let refresh = SharedRefresh::new(key_set("old"));
+        refresh.permit_unknown_refresh_for_test().await;
+        let call = {
+            let refresh = refresh.clone();
+            tokio::spawn(async move {
+                refresh
+                    .refresh_unknown(Instant::now() + std::time::Duration::from_secs(10))
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        let reservation = refresh.state.lock().await.in_flight.unwrap();
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        tokio::task::yield_now().await;
+        refresh.complete(reservation, Ok(key_set("new"))).await;
+        assert_eq!(call.await.unwrap(), UnknownKeyResult::Refreshed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repair_regression_expired_waiter_rejects_already_completed_generation() {
+        let (_sender, receiver) = tokio::sync::watch::channel((1, super::FetchOutcome::Success));
+        assert_eq!(
+            super::wait_for_generation(receiver, 1, Instant::now()).await,
+            UnknownKeyResult::DeadlineElapsed
+        );
     }
 }

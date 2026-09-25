@@ -11,14 +11,22 @@ use secrecy::ExposeSecret;
 use tokio::{sync::Semaphore, time::Instant};
 
 use crate::{
-    BearerToken, Failure, IntrospectionOptions, PreparationError, Principal, Verifier,
+    BearerToken, Failure, IntrospectionOptions, PreparationError, Principal, VerificationError,
+    VerificationReason, Verifier,
     claims::{ClaimPolicy, validate_introspection_claims},
-    provider::{ProviderClient, reserve_request_deadline},
+    provider::{ProviderClient, ProviderDeadline},
+    record_verification,
 };
 
 /// Builds the opaque-token verifier without performing provider I/O.
 pub fn prepare_introspection(options: IntrospectionOptions) -> Result<Verifier, PreparationError> {
-    let provider = ProviderClient::new()?;
+    let provider = ProviderClient::new().map_err(|error| {
+        error.with_context(
+            &options.issuer,
+            &options.audiences,
+            Some(options.endpoint.as_str()),
+        )
+    })?;
     prepare_with_provider(options, provider)
 }
 
@@ -39,6 +47,11 @@ fn prepare_with_provider(
         return Err(PreparationError::new(
             crate::PreparationPhase::Options,
             crate::PreparationReason::Parse,
+        )
+        .with_context(
+            &options.issuer,
+            &options.audiences,
+            Some(options.endpoint.as_str()),
         ));
     }
     Ok(Verifier::Introspection(IntrospectionVerifier {
@@ -77,15 +90,24 @@ impl IntrospectionVerifier {
         token: &BearerToken<'_>,
         deadline: Instant,
     ) -> Result<Principal, Failure> {
-        let Some(provider_deadline) = reserve_request_deadline(Instant::now(), deadline) else {
-            return Err(Failure::Timeout);
+        record_verification("introspection", self.verify_evidence(token, deadline).await)
+    }
+
+    async fn verify_evidence(
+        &self,
+        token: &BearerToken<'_>,
+        deadline: Instant,
+    ) -> Result<Principal, VerificationError> {
+        let Some(provider_deadline) = ProviderDeadline::request(Instant::now(), deadline) else {
+            return Err(VerificationError::new(
+                Failure::Timeout,
+                VerificationReason::RequestTimeout,
+            ));
         };
-        let _permit = self
-            .permits
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| Failure::Unavailable)?;
-        let body = form_body(token)?;
+        let _permit = self.permits.clone().try_acquire_owned().map_err(|_| {
+            VerificationError::new(Failure::Unavailable, VerificationReason::Capacity)
+        })?;
+        let body = form_body(token).map_err(provider_error)?;
         let authorization =
             basic_authorization(&self.client_id, self.client_secret.expose_secret());
         let response = self
@@ -96,9 +118,25 @@ impl IntrospectionVerifier {
                 body.as_bytes(),
                 provider_deadline,
             )
-            .await?;
-        validate_introspection_claims(&response, &self.policy, now_epoch_seconds()?)
+            .await
+            .map_err(provider_error)?;
+        validate_introspection_claims(
+            &response,
+            &self.policy,
+            now_epoch_seconds().map_err(provider_error)?,
+        )
     }
+}
+
+fn provider_error(failure: Failure) -> VerificationError {
+    VerificationError::new(
+        failure,
+        if failure == Failure::Timeout {
+            VerificationReason::RequestTimeout
+        } else {
+            VerificationReason::Provider
+        },
+    )
 }
 
 fn now_epoch_seconds() -> Result<u64, Failure> {

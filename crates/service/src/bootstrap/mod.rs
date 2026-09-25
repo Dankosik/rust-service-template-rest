@@ -252,8 +252,9 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
 
 // template:begin authn:bootstrap-prepare-auth-prefix
 #[allow(
+    unused_variables,
     clippy::unused_async,
-    reason = "JWT discovery awaits I/O; introspection-only output preserves the same bootstrap future without provider I/O"
+    reason = "JWT discovery and refresh use the future and task ownership; introspection-only output preserves this preparation signature without provider I/O"
 )]
 async fn prepare_auth(
     config: &Config,
@@ -261,7 +262,6 @@ async fn prepare_auth(
     cancel: &CancellationToken,
 ) -> Result<PreparedAuth, BootstrapError> {
     match &config.authn {
-        AuthnConfig::None {} => Ok(PreparedAuth::None),
         // template:end authn:bootstrap-prepare-auth-prefix
         // template:begin oidc-jwt:bootstrap-prepare-auth-jwt
         AuthnConfig::OidcJwt {
@@ -336,8 +336,10 @@ async fn prepare_auth(
                 key: "authn.introspection_endpoint",
                 source,
             })
-        } // template:end oidc-introspection:bootstrap-prepare-auth-introspection
-          // template:begin authn:bootstrap-prepare-auth-suffix
+        }
+        // template:end oidc-introspection:bootstrap-prepare-auth-introspection
+        // template:begin authn:bootstrap-prepare-auth-suffix
+        AuthnConfig::None {} => Ok(PreparedAuth::None),
     }
 }
 // template:end authn:bootstrap-prepare-auth-suffix
@@ -513,11 +515,12 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         &mut composer,
         // template:end http-idempotency:bootstrap-http-idempotency-contract-composer
     );
-    // template:begin http-idempotency:bootstrap-http-idempotency-activation
+    // template:begin http-idempotency:bootstrap-http-idempotency-document
     let document = contract.document().clone();
+    // template:end http-idempotency:bootstrap-http-idempotency-document
     let routes = match auth {
         PreparedAuth::None => contract.finalize_public()?,
-        // template:begin authn:bootstrap-prepared-auth-enabled
+        // template:begin authn:bootstrap-authn-finalize-enabled
         PreparedAuth::Enabled(verifier) => infra_http::authn::finalize(
             contract,
             verifier,
@@ -525,8 +528,9 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
                 .unwrap_or(usize::MAX)
                 .min(32 * 1024),
         )?,
-        // template:end authn:bootstrap-prepared-auth-enabled
+        // template:end authn:bootstrap-authn-finalize-enabled
     };
+    // template:begin http-idempotency:bootstrap-http-idempotency-activation
     activate_http_idempotency(composer, &document, config, &tracker, &cancel).await?;
     // template:end http-idempotency:bootstrap-http-idempotency-activation
     readiness.refresh(policy).await;

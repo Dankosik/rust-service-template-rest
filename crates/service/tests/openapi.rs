@@ -1,8 +1,8 @@
 //! Contract proof over the assembled API document.
 //!
 //! The committed `api/openapi/service.yaml` must equal what the `openapi`
-//! binary renders, every operation must declare its security decision and
-//! the problem responses that decision requires, and the problem schemas
+//! binary renders, every operation must have supported effective security and
+//! the problem responses that policy requires, and the problem schemas
 //! must stay closed. The tests walk the document as JSON, so they hold for
 //! feature operations merged later without knowing their types.
 
@@ -148,45 +148,30 @@ fn document_has_the_probe_operations() {
 }
 
 #[test]
-fn every_operation_declares_its_security_decision() {
+fn every_operation_has_supported_security_and_matching_optional_context() {
     let document = document();
     for (method, path, operation) in operations(&document) {
-        let decision = &operation["x-security-decision"];
-        let exposure = decision["exposure"]
-            .as_str()
-            .map(str::trim)
-            .unwrap_or_default();
-        let rationale = decision["rationale"]
-            .as_str()
-            .map(str::trim)
-            .unwrap_or_default();
-        assert!(
-            !exposure.is_empty() && !rationale.is_empty(),
-            "{method} {path}: x-security-decision needs exposure and rationale"
-        );
-        match exposure {
-            "public" => assert!(
-                is_public(&document, operation),
-                "{method} {path} inherits or declares security while marked public"
-            ),
-            "protected" => {
+        let public = is_public(&document, operation);
+        if !public {
+            assert!(
+                uses_bearer_only(&document, operation),
+                "{method} {path} is protected but not every alternative is the bearer \
+                 scheme without scopes"
+            );
+            for status in PROTECTED_PROBLEM_STATUSES {
                 assert!(
-                    uses_bearer_only(&document, operation),
-                    "{method} {path} is protected but not every alternative is the bearer \
-                     scheme without scopes"
+                    has_problem_response(&document, operation, status),
+                    "{method} {path} is protected but lacks a {status} \
+                     application/problem+json response"
                 );
-                for status in PROTECTED_PROBLEM_STATUSES {
-                    assert!(
-                        has_problem_response(&document, operation, status),
-                        "{method} {path} is protected but lacks a {status} \
-                         application/problem+json response"
-                    );
-                }
             }
-            "blocked" => {}
-            other => {
-                panic!("{method} {path}: exposure {other:?} is not public, protected, or blocked")
-            }
+        }
+        if let Some(decision) = operation.get("x-security-decision") {
+            assert_eq!(
+                decision["exposure"].as_str(),
+                Some(if public { "public" } else { "protected" }),
+                "{method} {path}: x-security-decision contradicts effective security"
+            );
         }
     }
 }

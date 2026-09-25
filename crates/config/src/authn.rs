@@ -174,7 +174,6 @@ fn default_provider_concurrency() -> NonZeroU32 {
 impl AuthnConfig {
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
         match self {
-            Self::None {} => Ok(()),
             // template:begin oidc-jwt:authn-config-jwt-validation
             Self::OidcJwt {
                 issuer,
@@ -221,7 +220,9 @@ impl AuthnConfig {
                     ));
                 }
                 Ok(())
-            } // template:end oidc-introspection:authn-config-introspection-validation
+            }
+            // template:end oidc-introspection:authn-config-introspection-validation
+            Self::None {} => Ok(()),
         }
     }
 }

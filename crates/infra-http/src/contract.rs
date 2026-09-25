@@ -111,12 +111,12 @@ where
     }
 
     /// Finalize a public-only generated contract without an auth-provider
-    /// dependency. Any absent, protected, or non-public operation is refused.
+    /// dependency. Protected or contradictory operations are refused; a real
+    /// endpoint missing from the document answers a sanitized 500.
     ///
     /// # Errors
     ///
-    /// Returns a closed composition error when an actual endpoint lacks a
-    /// public OpenAPI operation.
+    /// Returns a closed composition error for a non-public security policy.
     pub fn finalize_public(self) -> Result<Router<S>, FinalizeError> {
         let policy = PublicPolicy::compile(self.router.get_openapi(), &self.registered)?;
         let (router, _) = self.router.split_for_parts();
@@ -127,9 +127,11 @@ where
         }
     }
 
+    // template:begin authn:contract-authn-parts
     pub(crate) fn into_parts(self) -> (OpenApiRouter<S>, RouteMethods) {
         (self.router, self.registered)
     }
+    // template:end authn:contract-authn-parts
 }
 
 /// A group of endpoints whose exact methods are tracked while it is composed.
@@ -175,8 +177,8 @@ where
 
     /// Register one real endpoint with no OpenAPI operation metadata.
     ///
-    /// This constructor is intentionally explicit: finalization will refuse
-    /// the route unless another carrier supplies its matching operation.
+    /// Unless another carrier supplies its matching operation, the finalized
+    /// router answers a sanitized 500 without invoking this handler.
     #[must_use]
     pub fn undocumented<T, H>(path: impl Into<String>, method: RouteMethod, handler: H) -> Self
     where
@@ -203,6 +205,7 @@ where
         self
     }
 
+    // template:begin http-idempotency:contract-idempotency-route-methods
     pub(crate) fn documented_paths(&self) -> Option<&Paths> {
         match self.registrations.as_slice() {
             [Registration::Documented((_, paths, _))] => Some(paths),
@@ -232,6 +235,7 @@ where
             methods: self.methods,
         }
     }
+    // template:end http-idempotency:contract-idempotency-route-methods
 }
 
 enum Registration<S> {
@@ -421,9 +425,9 @@ impl RouteMethods {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("HTTP contract finalization failed")]
 pub enum FinalizeError {
-    /// The no-auth finalizer encountered a non-public operation.
+    /// A protected operation requires enabled authentication.
     NonPublicOperation,
-    /// An operation's exposure metadata is missing or contradictory.
+    /// An operation's security policy is unsupported or contradictory.
     InvalidPolicy,
 }
 
@@ -446,7 +450,7 @@ impl PublicPolicy {
                 missing.insert((path.to_owned(), method));
                 continue;
             };
-            if !is_explicit_public(operation) {
+            if !is_public(document, operation)? {
                 return Err(FinalizeError::NonPublicOperation);
             }
         }
@@ -485,25 +489,35 @@ async fn enforce_public(
     }
 }
 
-pub(crate) fn is_explicit_public(operation: &Operation) -> bool {
-    let Some(extensions) = operation.extensions.as_ref() else {
-        return false;
-    };
-    let Some(decision) = extensions.get("x-security-decision") else {
-        return false;
-    };
-    let public = decision.as_object().is_some_and(|decision| {
-        decision.get("exposure").and_then(serde_json::Value::as_str) == Some("public")
-            && decision
-                .get("rationale")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|rationale| !rationale.trim().is_empty())
-    });
-    public
-        && serde_json::to_value(operation)
-            .ok()
-            .and_then(|operation| operation.get("security").cloned())
-            .is_some_and(|security| security.as_array().is_some_and(Vec::is_empty))
+pub(crate) fn is_public(document: &OpenApi, operation: &Operation) -> Result<bool, FinalizeError> {
+    let security = operation.security.as_ref().or(document.security.as_ref());
+    let public = security.is_none_or(Vec::is_empty);
+    if let Some(requirements) = security.filter(|_| !public) {
+        let value = serde_json::to_value(requirements).map_err(|_| FinalizeError::InvalidPolicy)?;
+        let bearer_only = value.as_array().is_some_and(|requirements| {
+            requirements.iter().all(|requirement| {
+                requirement.as_object().is_some_and(|requirement| {
+                    requirement.len() == 1
+                        && requirement.get("bearerAuth")
+                            == Some(&serde_json::Value::Array(Vec::new()))
+                })
+            })
+        });
+        if !bearer_only {
+            return Err(FinalizeError::InvalidPolicy);
+        }
+    }
+    if let Some(decision) = operation
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.get("x-security-decision"))
+    {
+        let expected = if public { "public" } else { "protected" };
+        if decision.get("exposure").and_then(serde_json::Value::as_str) != Some(expected) {
+            return Err(FinalizeError::InvalidPolicy);
+        }
+    }
+    Ok(public)
 }
 
 fn normalize_path(path: &str) -> String {
@@ -559,6 +573,73 @@ mod tests {
                 log_health_probes: false,
             },
         )
+    }
+
+    #[test]
+    fn repair_regression_public_policy_uses_effective_security_and_optional_context() {
+        for (root, security, exposure, public) in [
+            (None, None, None, true),
+            (None, Some(serde_json::json!([])), None, true),
+            (
+                Some(serde_json::json!([{"bearerAuth": []}])),
+                Some(serde_json::json!([])),
+                None,
+                true,
+            ),
+            (
+                Some(serde_json::json!([{"bearerAuth": []}])),
+                None,
+                None,
+                false,
+            ),
+            (None, Some(serde_json::json!([])), Some("protected"), false),
+            (None, Some(serde_json::json!([])), Some("public"), true),
+            (None, Some(serde_json::json!([{}])), None, false),
+            (
+                None,
+                Some(serde_json::json!([{"bearerAuth": ["write"]}])),
+                None,
+                false,
+            ),
+            (
+                None,
+                Some(serde_json::json!([{"unknown": []}])),
+                None,
+                false,
+            ),
+            (
+                None,
+                Some(serde_json::json!([{"bearerAuth": []}, {}])),
+                None,
+                false,
+            ),
+        ] {
+            let mut document = serde_json::json!({
+                "openapi": "3.1.0",
+                "info": {"title": "policy fixture", "version": "1"},
+                "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}},
+                "paths": {"/_test/policy": {"get": {"responses": {"200": {"description": "ok"}}}}}
+            });
+            if let Some(root) = root {
+                document["security"] = root;
+            }
+            if let Some(security) = security {
+                document["paths"]["/_test/policy"]["get"]["security"] = security;
+            }
+            if let Some(exposure) = exposure {
+                document["paths"]["/_test/policy"]["get"]["x-security-decision"] =
+                    serde_json::json!({"exposure": exposure});
+            }
+            let contract = ContractRouter::<()>::with_openapi(
+                serde_json::from_value(document.clone()).expect("valid OpenAPI fixture"),
+            )
+            .routes(RegisteredRoutes::undocumented(
+                "/_test/policy",
+                RouteMethod::Get,
+                || async { "ok" },
+            ));
+            assert_eq!(contract.finalize_public().is_ok(), public, "{document}");
+        }
     }
 
     #[tokio::test]

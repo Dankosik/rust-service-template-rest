@@ -78,6 +78,7 @@ pub(crate) struct ProviderDeadline {
 }
 
 impl ProviderDeadline {
+    // template:begin oidc-jwt:authn-provider-jwt-deadlines
     pub(crate) fn independent(now: Instant) -> Self {
         Self {
             deadline: now + PROVIDER_TIMEOUT,
@@ -93,8 +94,10 @@ impl ProviderDeadline {
         })
     }
 
-    fn request(now: Instant, request_deadline: Instant) -> Option<Self> {
-        let reserved = request_deadline.checked_sub(RESPONSE_RESERVE)?;
+    // template:end oidc-jwt:authn-provider-jwt-deadlines
+    // template:begin oidc-introspection:authn-provider-introspection-deadline
+    pub(crate) fn request(now: Instant, request_deadline: Instant) -> Option<Self> {
+        let reserved = reserve_request_deadline(now, request_deadline)?;
         let provider_cap = now + PROVIDER_TIMEOUT;
         let (deadline, exhausted) = if reserved <= provider_cap {
             (reserved, Failure::Timeout)
@@ -107,16 +110,13 @@ impl ProviderDeadline {
         })
     }
 
-    pub(crate) const fn instant(self) -> Instant {
-        self.deadline
-    }
+    // template:end oidc-introspection:authn-provider-introspection-deadline
 }
 
-pub(crate) fn reserve_request_deadline(
-    now: Instant,
-    request_deadline: Instant,
-) -> Option<ProviderDeadline> {
-    ProviderDeadline::request(now, request_deadline)
+pub(crate) fn reserve_request_deadline(now: Instant, request_deadline: Instant) -> Option<Instant> {
+    request_deadline
+        .checked_sub(RESPONSE_RESERVE)
+        .filter(|reserved| *reserved > now)
 }
 
 /// The only outbound client authentication engines may use.
@@ -452,7 +452,8 @@ mod tests {
                 &fixture_url(address),
                 b"Basic Zml4dHVyZQ==",
                 b"token=opaque",
-                ProviderDeadline::independent(Instant::now()),
+                ProviderDeadline::request(Instant::now(), Instant::now() + Duration::from_secs(4))
+                    .unwrap(),
             )
             .await
             .unwrap();

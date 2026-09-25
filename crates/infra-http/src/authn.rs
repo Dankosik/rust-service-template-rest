@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use infra_bearerauthn::{Failure, Principal, Verifier, parse_bearer};
 use utoipa::openapi::{OpenApi, path::Operation};
 
-use crate::contract::{ContractRouter, FinalizeError, RouteMethod, RouteMethods};
+use crate::contract::{ContractRouter, FinalizeError, RouteMethod, RouteMethods, is_public};
 use crate::harden::RequestDeadline;
 use crate::problem::{Code, Problem, SANITIZED_DETAIL};
 use crate::request_id;
@@ -131,6 +131,14 @@ where
 {
     let (contract, methods) = contract.into_parts();
     let policy = Policy::compile(contract.get_openapi(), &methods)?;
+    if !verifier.is_enabled()
+        && policy
+            .0
+            .values()
+            .any(|access| matches!(access, Access::Protected))
+    {
+        return Err(FinalizeError::NonPublicOperation);
+    }
     let (router, _) = contract.split_for_parts();
     if methods.is_empty() {
         return Ok(router);
@@ -263,66 +271,13 @@ async fn authenticate_protected(
 }
 
 fn classify(document: &OpenApi, operation: &Operation) -> Result<Access, FinalizeError> {
-    let Some(decision) = operation
-        .extensions
-        .as_ref()
-        .and_then(|extensions| extensions.get("x-security-decision"))
-        .and_then(serde_json::Value::as_object)
-    else {
-        return Err(FinalizeError::InvalidPolicy);
-    };
-    let valid_rationale = decision
-        .get("rationale")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|rationale| !rationale.trim().is_empty());
-    if !valid_rationale {
-        return Err(FinalizeError::InvalidPolicy);
+    if is_public(document, operation)? {
+        Ok(Access::Public)
+    } else if protected_problem_responses(operation) {
+        Ok(Access::Protected)
+    } else {
+        Err(FinalizeError::InvalidPolicy)
     }
-    match decision.get("exposure").and_then(serde_json::Value::as_str) {
-        Some("public") if explicit_security(operation).is_some_and(is_empty_security) => {
-            Ok(Access::Public)
-        }
-        Some("protected")
-            if effective_security(document, operation).is_some_and(is_bearer_only)
-                && protected_problem_responses(operation) =>
-        {
-            Ok(Access::Protected)
-        }
-        _ => Err(FinalizeError::InvalidPolicy),
-    }
-}
-
-fn explicit_security(operation: &Operation) -> Option<serde_json::Value> {
-    serde_json::to_value(operation)
-        .ok()?
-        .get("security")
-        .cloned()
-}
-
-fn effective_security(document: &OpenApi, operation: &Operation) -> Option<serde_json::Value> {
-    explicit_security(operation).or_else(|| {
-        serde_json::to_value(document)
-            .ok()?
-            .get("security")
-            .cloned()
-    })
-}
-
-fn is_empty_security(security: serde_json::Value) -> bool {
-    security.as_array().is_some_and(Vec::is_empty)
-}
-
-fn is_bearer_only(security: serde_json::Value) -> bool {
-    security.as_array().is_some_and(|requirements| {
-        !requirements.is_empty()
-            && requirements.iter().all(|requirement| {
-                requirement.as_object().is_some_and(|requirement| {
-                    requirement.len() == 1
-                        && requirement.get("bearerAuth")
-                            == Some(&serde_json::Value::Array(Vec::new()))
-                })
-            })
-    })
 }
 
 fn protected_problem_responses(operation: &Operation) -> bool {
@@ -352,7 +307,7 @@ fn failure_response(failure: Failure, request_id: Option<String>) -> Response {
         Failure::Malformed => (
             Code::AuthenticationMalformed,
             AUTHENTICATION_MALFORMED_DETAIL,
-            None,
+            Some("Bearer error=\"invalid_request\""),
         ),
         Failure::Oversize => (
             Code::AuthenticationOversize,
