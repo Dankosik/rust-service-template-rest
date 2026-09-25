@@ -1,6 +1,7 @@
 # T1 final delivery validation
 
-Status: in progress. This is the single delivery/review receipt; the root owns
+Status: Accepted locally for code candidate `0b4bfe0`; PR and exact-head CI remain root-owned.
+This is the single delivery/review receipt; the root owns
 the canonical ledger and publication. Local acceptance and requested PR/CI
 completion remain distinct.
 
@@ -243,3 +244,30 @@ After these bounded repairs, workspace lint again passed for all targets and the
 integration feature (`/tmp/authn-lint-final-repair.log`). Matching build-delta,
 current structural projections, exact-tree/range redacted secret scans, and the
 reviewer's final evidence disposition remain pending the next clean checkpoint.
+
+## Final local disposition
+
+Code candidate: `0b4bfe099381f140afb2d33886b09db958e02ba3`.
+The fresh cache/integration reviewer returned **PASS**, with no surviving
+findings, after consuming the repaired scoped test results and final receipts.
+All implementation, repair, diagnosis and review descendants are joined.
+
+Final `make build` passed (`/tmp/authn-build-0b4bfe0.log`). Current structural
+projections passed 208 selections/equalities and 22 expected refusals
+(`/tmp/authn-projections-0b4bfe0.log`). Gitleaks 8.30.1 with unchanged config
+SHA-256 `1b08e8ef509a65ca68a3967095e54553fb9ec097ec972399574bfc55620d3e04`
+reported zero leaks for both the exact tracked HEAD export (tree
+`4134b9c25d762df46a42a721f67e87d772347678`) and the seven-commit
+`4edd184..0b4bfe0` range (`/tmp/authn-secret-scans-0b4bfe0.log`). Both checks used
+redaction; the local CodeGraph cache and scanner policy were unchanged.
+
+Local acceptance uses the passing matching build, repaired config/adapter/mounted
+test receipts, unchanged workspace passes, selected static/security checks and
+independent review. The earlier failed workspace aggregate is not promoted to a
+passing aggregate receipt. The 26 generated runtime variants and database proof
+remain CI-owned, and no live IdP or deployment was certified. Root owns the
+remaining separate PR, exact-head CI and final publication closeout.
+
+Final receipt `make docs-check` passed 861 link checks with zero errors
+(`/tmp/authn-final-receipt-docs.log`). This status-only closeout adds no links or
+changes to the validated source, link targets, or profile inputs.
