@@ -27,11 +27,16 @@ _OUTBOUND_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection",
     "outbound-http", "egress-dns", "request-budget", "identity", "cargo_lock",
 )
+_HTTP_IDEMPOTENCY_ONLY_PROFILE_KEYS = (
+    "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection",
+    "outbound-http", "egress-dns", "request-budget", "http-idempotency", "http-idempotency-mounted",
+    "identity", "cargo_lock",
+)
 _NEW_PROJECTION_CHECKER = "scripts/tests/template-profile-projections.py"
 
 
-def run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+def run(args: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=env)
 
 
 def state(root: Path) -> str:
@@ -60,7 +65,9 @@ def clone(source: Path, destination: Path) -> None:
         raise AssertionError(result.stderr)
 
 
-def init(source: Path, target: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+def init(
+    source: Path, target: Path, *extra: str, environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     baseline = [
         ("--service-name", "safety-api"), ("--repository", "https://github.com/example/safety-api"),
         ("--description", "Safety API 👩‍💻"), ("--codeowner", "@example/platform"),
@@ -73,6 +80,7 @@ def init(source: Path, target: Path, *extra: str) -> subprocess.CompletedProcess
             *identity, *extra,
         ],
         cwd=source,
+        env=None if environment is None else {**os.environ, **environment},
     )
 
 
@@ -95,6 +103,7 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("authn")
     lock["profiles"].pop("outbound_http", None)
     lock["profiles"].pop("http_idempotency", None)
+    lock["profiles"].pop("jobs", None)
     lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
@@ -108,6 +117,7 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     lock["profiles"].pop("outbound_http", None)
     lock["profiles"].pop("http_idempotency", None)
+    lock["profiles"].pop("jobs", None)
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -125,6 +135,26 @@ def install_derived_outbound_only_none(source: Path, target: Path) -> None:
         "database": profiles["database"],
         "authn": profiles.get("authn", "none"),
         "outbound_http": profiles.get("outbound_http", "none"),
+        "agent_harness": profiles["agent_harness"],
+    }
+    (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+
+
+def install_derived_http_idempotency_only_none(source: Path, target: Path) -> None:
+    profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
+    http_idempotency_only = {key: profile[key] for key in _HTTP_IDEMPOTENCY_ONLY_PROFILE_KEYS}
+    (target / "scripts/lib/template_profiles.json").write_text(
+        json.dumps(http_idempotency_only, indent=2) + "\n", encoding="utf-8"
+    )
+    lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
+    # The http-idempotency generation's five-field shape, whatever an earlier
+    # fixture left in the lock: a missing selection there means `none`.
+    profiles = lock["profiles"]
+    lock["profiles"] = {
+        "database": profiles["database"],
+        "authn": profiles.get("authn", "none"),
+        "outbound_http": profiles.get("outbound_http", "none"),
+        "http_idempotency": profiles.get("http_idempotency", "none"),
         "agent_harness": profiles["agent_harness"],
     }
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
@@ -179,6 +209,7 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
         authn="none",
         outbound_http="none",
         http_idempotency="none",
+        jobs="none",
         agent_harness="core",
     )
     for label, contents in (
@@ -222,6 +253,7 @@ def assert_preflight_extraction(source: Path, work: Path) -> None:
             authn="none",
             outbound_http="none",
             http_idempotency="none",
+            jobs="none",
             agent_harness="core",
         )
 
@@ -263,18 +295,26 @@ def assert_preflight_extraction(source: Path, work: Path) -> None:
             raise AssertionError(f"{phase} preflight failure mutated its target")
 
 
-def must_refuse(source: Path, work: Path, label: str, *extra: str) -> None:
+def must_refuse(
+    source: Path, work: Path, label: str, *extra: str,
+    environment: dict[str, str] | None = None, expected: str | None = None,
+) -> None:
     target = work / label
     clone(source, target)
     before = state(target)
-    result = init(source, target, *extra)
+    result = init(source, target, *extra, environment=environment)
     if result.returncode == 0:
         raise AssertionError(f"{label}: initializer unexpectedly succeeded")
     if (
-        label not in {"duplicate-db", "duplicate-authn", "duplicate-outbound-http", "duplicate-http-idempotency"}
+        label not in {
+            "duplicate-db", "duplicate-authn", "duplicate-outbound-http", "duplicate-http-idempotency",
+            "duplicate-jobs", "jobs-flag-and-environment",
+        }
         and "may be supplied once" in result.stderr
     ):
         raise AssertionError(f"{label}: fixture accidentally exercised duplicate-option refusal")
+    if expected is not None and expected not in result.stderr:
+        raise AssertionError(f"{label}: refusal did not name {expected!r}: {result.stderr}")
     if state(target) != before:
         raise AssertionError(f"{label}: refusal changed target bytes or Git state")
 
@@ -312,7 +352,7 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
 
 
 def assert_profile_packs(
-    source: Path, target: Path, *, database: str, authn: str, outbound_http: str, http_idempotency: str
+    source: Path, target: Path, *, database: str, authn: str, outbound_http: str, http_idempotency: str, jobs: str
 ) -> None:
     assert_profile_pack(source, target, "postgres", database == "postgres")
     assert_profile_pack(source, target, "authn", authn != "none")
@@ -325,6 +365,10 @@ def assert_profile_packs(
     assert_profile_pack(source, target, "http-idempotency", http_idempotency == "postgres")
     assert_profile_pack(
         source, target, "http-idempotency-mounted", http_idempotency == "postgres" and authn == "oidc-introspection"
+    )
+    assert_profile_pack(source, target, "jobs", jobs == "postgres")
+    assert_profile_pack(
+        source, target, "jobs-http-idempotency", jobs == "postgres" and http_idempotency == "postgres"
     )
 
 
@@ -344,6 +388,12 @@ def assert_lock_http_idempotency(target: Path, expected: str) -> None:
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     if lock["profiles"].get("http_idempotency") != expected:
         raise AssertionError(f"template.lock did not record http_idempotency={expected}")
+
+
+def assert_lock_jobs(target: Path, expected: str) -> None:
+    lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
+    if lock["profiles"].get("jobs") != expected:
+        raise AssertionError(f"template.lock did not record jobs={expected}")
 
 
 def assert_outbound_lock_refusals(source: Path, target: Path) -> None:
@@ -391,6 +441,27 @@ def assert_http_idempotency_lock_refusals(source: Path, target: Path) -> None:
         lock_path.write_bytes(original)
 
 
+def assert_jobs_lock_refusals(source: Path, target: Path) -> None:
+    lock_path = target / "template.lock"
+    original = lock_path.read_bytes()
+    cases = (
+        ("jobs-without-database", lambda profiles: profiles.update(jobs="postgres")),
+        ("unknown-jobs-value", lambda profiles: profiles.update(jobs="redis")),
+        ("null-jobs-value", lambda profiles: profiles.update(jobs=None)),
+        ("missing-http-idempotency-with-jobs", lambda profiles: profiles.pop("http_idempotency")),
+    )
+    for label, mutate in cases:
+        lock = json.loads(original)
+        profiles = lock["profiles"]
+        mutate(profiles)
+        lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+        before = state(target)
+        result = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
+        if result.returncode == 0 or state(target) != before:
+            raise AssertionError(f"{label} jobs lock shape was not a preserving refusal")
+        lock_path.write_bytes(original)
+
+
 def check(source: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="template-init-safety-") as temp:
         work = Path(temp)
@@ -413,6 +484,19 @@ def check(source: Path) -> None:
         must_refuse(
             source, work, "http-idempotency-requires-authn", "--database", "postgres", "--http-idempotency", "postgres"
         )
+        must_refuse(source, work, "unknown-jobs", "--jobs", "redis", expected="JOBS is unsupported")
+        must_refuse(
+            source, work, "duplicate-jobs", "--jobs", "none", "--jobs", "postgres",
+            expected="--jobs may be supplied once",
+        )
+        must_refuse(
+            source, work, "jobs-flag-and-environment", "--jobs", "none",
+            environment={"JOBS": "none"}, expected="JOBS may be supplied once, by flag or environment",
+        )
+        must_refuse(
+            source, work, "jobs-requires-database", "--database", "none", "--jobs", "postgres",
+            expected="JOBS=postgres requires DATABASE=postgres",
+        )
         must_refuse(source, work, "codeowner-depth", "--codeowner", "@a/b/c")
         must_refuse(source, work, "reserved-abstract", "--service-name", "abstract")
         must_refuse(source, work, "reserved-gen", "--service-name", "gen")
@@ -428,10 +512,13 @@ def check(source: Path) -> None:
         result = init(source, target, "--database", "none", "--agent-harness", "claude")
         if result.returncode:
             raise AssertionError(f"successful initialization failed: {result.stderr}")
-        assert_profile_packs(source, target, database="none", authn="none", outbound_http="none", http_idempotency="none")
+        assert_profile_packs(
+            source, target, database="none", authn="none", outbound_http="none", http_idempotency="none", jobs="none"
+        )
         assert_lock_authn(target, "none")
         assert_lock_outbound_http(target, "none")
         assert_lock_http_idempotency(target, "none")
+        assert_lock_jobs(target, "none")
         for removed in [
             "make/source.mk", "scripts/ci/template-init-check.sh", "scripts/tests/template-init-safety.py",
             "crates/infra-postgres", "crates/migrate", "migrations", "env/docker-compose.yml",
@@ -479,6 +566,7 @@ def check(source: Path) -> None:
             raise AssertionError("matching complete-lock initialization was not a byte-preserving no-op")
         assert_outbound_lock_refusals(source, target)
         assert_http_idempotency_lock_refusals(source, target)
+        assert_jobs_lock_refusals(source, target)
         install_derived_auth_only_none(source, target)
         auth_only_before = state(target)
         auth_only_repeat = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
@@ -500,6 +588,43 @@ def check(source: Path) -> None:
         )
         if outbound_only_mismatch.returncode == 0 or state(target) != outbound_only_before:
             raise AssertionError("outbound-only none lock accepted an http idempotency profile migration")
+        (target / "scripts/lib/template_profiles.json").write_bytes(
+            (source / "scripts/lib/template_profiles.json").read_bytes()
+        )
+        lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
+        # A five-field lock against the current inventory: a missing selection
+        # means `none`, and the matching replay keeps its bytes.
+        profiles = lock["profiles"]
+        lock["profiles"] = {
+            "database": profiles["database"],
+            "authn": profiles.get("authn", "none"),
+            "outbound_http": profiles.get("outbound_http", "none"),
+            "http_idempotency": profiles.get("http_idempotency", "none"),
+            "agent_harness": profiles["agent_harness"],
+        }
+        (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+        five_field_before = state(target)
+        five_field_repeat = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
+        if five_field_repeat.returncode or state(target) != five_field_before:
+            raise AssertionError("five-field none lock replay was not byte-preserving")
+        install_derived_http_idempotency_only_none(source, target)
+        http_idempotency_only_before = state(target)
+        http_idempotency_only_repeat = init(
+            source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude"
+        )
+        if http_idempotency_only_repeat.returncode or state(target) != http_idempotency_only_before:
+            raise AssertionError("derived http-idempotency-only none lock replay was not byte-preserving")
+        jobs_migration = init(
+            source, target, "--database", "postgres", "--jobs", "postgres", "--agent-harness", "claude"
+        )
+        if jobs_migration.returncode == 0 or state(target) != http_idempotency_only_before:
+            raise AssertionError("http-idempotency-only none lock accepted a jobs profile migration")
+        if "template initialization choices differ from the complete template.lock" not in jobs_migration.stderr:
+            raise AssertionError(
+                "jobs profile migration refusal did not name "
+                "'template initialization choices differ from the complete template.lock': "
+                f"{jobs_migration.stderr}"
+            )
         install_historical_none(source, target)
         historical_before = state(target)
         historical_repeat = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
@@ -519,7 +644,8 @@ def check(source: Path) -> None:
         if postgres.returncode:
             raise AssertionError(f"postgres initialization failed: {postgres.stderr}")
         assert_profile_packs(
-            source, postgres_target, database="postgres", authn="none", outbound_http="none", http_idempotency="none"
+            source, postgres_target, database="postgres", authn="none", outbound_http="none", http_idempotency="none",
+            jobs="none",
         )
         (postgres_target / "specs/service-feature").mkdir(parents=True)
         (postgres_target / "specs/service-feature/decision.md").write_text(
@@ -529,6 +655,17 @@ def check(source: Path) -> None:
         postgres_repeat = init(source, postgres_target, "--database", "postgres", "--agent-harness", "core")
         if postgres_repeat.returncode or state(postgres_target) != postgres_before:
             raise AssertionError("complete postgres lock replay changed service-owned content")
+        postgres_jobs_mismatch = init(
+            source, postgres_target, "--database", "postgres", "--jobs", "postgres", "--agent-harness", "core"
+        )
+        if postgres_jobs_mismatch.returncode == 0 or state(postgres_target) != postgres_before:
+            raise AssertionError("complete postgres lock accepted a jobs profile migration")
+        if "template initialization choices differ from the complete template.lock" not in postgres_jobs_mismatch.stderr:
+            raise AssertionError(
+                "jobs profile migration refusal did not name "
+                "'template initialization choices differ from the complete template.lock': "
+                f"{postgres_jobs_mismatch.stderr}"
+            )
         missing_pack = postgres_target / "make/profile-postgres.mk"
         missing_pack.unlink()
         missing_before = state(postgres_target)
@@ -542,7 +679,8 @@ def check(source: Path) -> None:
             if initialized.returncode:
                 raise AssertionError(f"{authn} initialization failed: {initialized.stderr}")
             assert_profile_packs(
-                source, authn_target, database="none", authn=authn, outbound_http="none", http_idempotency="none"
+                source, authn_target, database="none", authn=authn, outbound_http="none", http_idempotency="none",
+                jobs="none",
             )
             assert_lock_authn(authn_target, authn)
             authn_before = state(authn_target)
@@ -555,7 +693,8 @@ def check(source: Path) -> None:
         if outbound.returncode:
             raise AssertionError(f"bounded outbound initialization failed: {outbound.stderr}")
         assert_profile_packs(
-            source, outbound_target, database="none", authn="none", outbound_http="bounded", http_idempotency="none"
+            source, outbound_target, database="none", authn="none", outbound_http="bounded", http_idempotency="none",
+            jobs="none",
         )
         assert_lock_outbound_http(outbound_target, "bounded")
         outbound_before = state(outbound_target)
@@ -572,7 +711,7 @@ def check(source: Path) -> None:
             raise AssertionError(f"postgres http idempotency initialization failed: {http_idempotency_result.stderr}")
         assert_profile_packs(
             source, http_idempotency_target, database="postgres", authn="oidc-introspection",
-            outbound_http="none", http_idempotency="postgres",
+            outbound_http="none", http_idempotency="postgres", jobs="none",
         )
         assert_lock_http_idempotency(http_idempotency_target, "postgres")
         http_idempotency_before = state(http_idempotency_target)
@@ -588,6 +727,35 @@ def check(source: Path) -> None:
         )
         if http_idempotency_revert_mismatch.returncode == 0 or state(http_idempotency_target) != http_idempotency_before:
             raise AssertionError("postgres http idempotency lock accepted a profile migration back to none")
+        jobs_target = work / "jobs-replay"
+        clone(source, jobs_target)
+        jobs_result = init(
+            source, jobs_target, "--database", "postgres", "--jobs", "postgres", "--agent-harness", "core"
+        )
+        if jobs_result.returncode:
+            raise AssertionError(f"postgres jobs initialization failed: {jobs_result.stderr}")
+        assert_profile_packs(
+            source, jobs_target, database="postgres", authn="none", outbound_http="none",
+            http_idempotency="none", jobs="postgres",
+        )
+        assert_lock_jobs(jobs_target, "postgres")
+        jobs_before = state(jobs_target)
+        jobs_replay = init(
+            source, jobs_target, "--database", "postgres", "--jobs", "postgres", "--agent-harness", "core"
+        )
+        if jobs_replay.returncode or state(jobs_target) != jobs_before:
+            raise AssertionError("complete postgres jobs lock replay changed target bytes")
+        jobs_revert_mismatch = init(
+            source, jobs_target, "--database", "postgres", "--jobs", "none", "--agent-harness", "core"
+        )
+        if jobs_revert_mismatch.returncode == 0 or state(jobs_target) != jobs_before:
+            raise AssertionError("postgres jobs lock accepted a profile migration back to none")
+        if "template initialization choices differ from the complete template.lock" not in jobs_revert_mismatch.stderr:
+            raise AssertionError(
+                "jobs profile migration refusal did not name "
+                "'template initialization choices differ from the complete template.lock': "
+                f"{jobs_revert_mismatch.stderr}"
+            )
         for permitted in ("union", "raw"):
             allowed = work / f"permitted-{permitted}"
             clone(source, allowed)

@@ -606,7 +606,7 @@ if is_true validation_system; then
 	add_command make verify-check "validation routing changed" "make verify-check" cpu false false
 fi
 if is_true initializer_runtime; then
-	add_command make template-init-check "canonical projections and sixteen runtime representatives" "make template-init-check" cpu false true
+	add_command make template-init-check "canonical projections and twenty-six runtime representatives" "make template-init-check" cpu false true
 elif is_true module_initializer; then
 	add_command make template-init-projections "projected text changed and no runtime input did" "make template-init-projections" cpu false false
 fi

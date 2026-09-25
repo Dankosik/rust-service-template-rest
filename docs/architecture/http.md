@@ -127,6 +127,15 @@ against the assembled contract and activates the boundary; a violation fails
 startup and the contract tests. The [HTTP idempotency guide](../http-idempotency.md)
 owns retained-profile activation, retry, and data-custody decisions.
 <!-- template:end http-idempotency:docs-http-idempotent-composition -->
+<!-- template:begin jobs:docs-http-jobs-worker-listener -->
+With the jobs pack retained, the `jobs-worker` process serves the same probe
+routes (`GET /health/live`, `GET /health/ready`) through the same hardened
+chain (`infra_http::harden` with the same options) and bounded server
+(`infra_http::Server`) on a health-only listener (`http.addr`), with no API
+route and no OpenAPI document; `/metrics` stays on the diagnostics listener.
+The [guide](../background-jobs.md#run-and-stop-the-worker) covers running and
+stopping the worker.
+<!-- template:end jobs:docs-http-jobs-worker-listener -->
 
 
 ### Compatibility

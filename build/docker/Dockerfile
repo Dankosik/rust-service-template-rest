@@ -40,6 +40,9 @@ RUN cargo chef cook --release --locked --recipe-path recipe.json -p "${SERVICE_P
 # template:begin postgres:docker-migrator-build
 RUN cargo chef cook --release --locked --recipe-path recipe.json -p migrate
 # template:end postgres:docker-migrator-build
+# template:begin jobs:docker-jobs-worker-build
+RUN cargo chef cook --release --locked --recipe-path recipe.json -p jobs-worker
+# template:end jobs:docker-jobs-worker-build
 ARG VCS_REF=unknown
 ARG RAILWAY_GIT_COMMIT_SHA
 ARG SOURCE_DATE_EPOCH=0
@@ -55,6 +58,11 @@ RUN cargo auditable build --release --locked -p migrate --bin migrate \
  && cp target/release/migrate /out/migrate \
  && touch -d "@${SOURCE_DATE_EPOCH}" /out/migrate
 # template:end postgres:docker-migrator-output
+# template:begin jobs:docker-jobs-worker-output
+RUN cargo auditable build --release --locked -p jobs-worker --bin jobs-worker \
+ && cp target/release/jobs-worker /out/jobs-worker \
+ && touch -d "@${SOURCE_DATE_EPOCH}" /out/jobs-worker
+# template:end jobs:docker-jobs-worker-output
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97
 # The version is the Cargo package version; scripts/ci/runtime-image-build.sh
@@ -73,6 +81,10 @@ COPY --from=builder "/out/${SERVICE_BIN}" /service
 # template:begin postgres:docker-migrator-runtime
 COPY --from=builder /out/migrate /migrate
 # template:end postgres:docker-migrator-runtime
+# template:begin jobs:docker-jobs-worker-runtime
+# The jobs worker runs the same image with --entrypoint /jobs-worker (docs/background-jobs.md).
+COPY --from=builder /out/jobs-worker /jobs-worker
+# template:end jobs:docker-jobs-worker-runtime
 EXPOSE 8080
 STOPSIGNAL SIGTERM
 USER nonroot:nonroot

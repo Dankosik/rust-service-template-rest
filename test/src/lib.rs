@@ -8,6 +8,10 @@
 // `Result` here would only move the same panic into every test body.
 #![allow(clippy::expect_used)]
 
+// template:begin jobs:test-lib-jobs-module
+pub mod jobs;
+// template:end jobs:test-lib-jobs-module
+
 use infra_postgres::Dsn;
 use sqlx::PgPool;
 use url::Url;

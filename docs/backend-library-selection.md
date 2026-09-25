@@ -118,6 +118,9 @@ rather than assuming any SeaORM release can share the current pool.
 | Tests of an outbound HTTP contract | [`wiremock`](https://docs.rs/wiremock/latest/wiremock/) | Local mock server, bounded waits and actual status/body/header behavior. Recheck maintenance at adoption; do not use it to replace inbound-router tests. |
 | A complex stable output warrants a reviewed snapshot | [`insta`](https://docs.rs/insta/latest/insta/) | Assert important semantics separately. Redact only irrelevant nondeterminism; never hide the ID or timestamp relationship being tested. Do not create a second snapshot authority for the already committed OpenAPI document. |
 | A parser/transformation has useful algebraic or grammar invariants | [`proptest`](https://docs.rs/proptest/latest/proptest/) | State the property independently of the implementation, retain useful explicit boundary cases, and bound generation. It is not mandatory for every helper. |
+<!-- template:begin jobs:docs-library-selection-jobs -->
+| Durable background jobs on PostgreSQL | The template-owned engine in `crates/infra-jobs` | Enqueue inside the caller's transaction; kinds and handlers in adapter crates; effects idempotent per [the guide](background-jobs.md); reassess the crates on [async.md's watch list](architecture/async.md#reopen-conditions-and-watch-list) before replacing the engine |
+<!-- template:end jobs:docs-library-selection-jobs -->
 
 The recipe suite exercises the selected utility mechanisms without installing
 a cache, HTTP provider, retry policy or new endpoint in the running service.

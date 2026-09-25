@@ -33,3 +33,13 @@ commit happen, or not, and loses its acknowledgement. The mounted HTTP proof
 (P9) runs only where the introspection engine is retained: in the source
 template and in `AUTHN=oidc-introspection` outputs.
 <!-- template:end http-idempotency:test-readme-http-idempotency -->
+<!-- template:begin jobs:test-readme-jobs -->
+
+With the jobs pack retained, the same command also runs `tests/jobs/`: the
+engine suite (enqueue, uniqueness, claiming, retries, recovery, fencing,
+retention; `main.rs` with `enqueue.rs` and `execution.rs`), the process suite
+on the test-only `jobs-worker-fixture` binary (`process.rs`, with the `Probe`
+kind in `src/jobs.rs` and the binary in `src/bin/`), and the joint HTTP
+idempotency proof (`http_idempotency.rs`) where both packs are retained. The
+shipped binary's refusal test is in `crates/jobs-worker/tests/`.
+<!-- template:end jobs:test-readme-jobs -->

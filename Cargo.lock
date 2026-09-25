@@ -1898,6 +1898,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "infra-jobs"
+version = "0.1.0"
+dependencies = [
+ "humantime",
+ "infra-postgres",
+ "metrics",
+ "opentelemetry",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-opentelemetry",
+ "uuid",
+]
+
+[[package]]
 name = "infra-outbound-http"
 version = "0.1.0"
 dependencies = [
@@ -1987,15 +2006,18 @@ dependencies = [
  "infra-bearerauthn",
  "infra-http",
  "infra-idempotency-store",
+ "infra-jobs",
  "infra-postgres",
  "insta",
  "ipnet",
  "itertools 0.15.0",
+ "jobs-worker",
  "json-patch",
  "metrics",
  "metrics-exporter-prometheus",
  "migrate",
  "moka",
+ "nix",
  "proptest",
  "regex",
  "reqwest",
@@ -2014,6 +2036,7 @@ dependencies = [
  "tokio-util",
  "unicode-normalization",
  "unicode-segmentation",
+ "ureq",
  "url",
  "utoipa",
  "utoipa-axum",
@@ -2188,6 +2211,24 @@ checksum = "38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264"
 dependencies = [
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "jobs-worker"
+version = "0.1.0"
+dependencies = [
+ "gethostname",
+ "health",
+ "infra-http",
+ "infra-jobs",
+ "infra-postgres",
+ "infra-telemetry",
+ "secrecy",
+ "service-config",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

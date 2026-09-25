@@ -1,0 +1,39 @@
+[package]
+name = "jobs-worker"
+description = "The jobs worker process: runs registered job kinds under the service's configuration, telemetry, health, and lifecycle rules."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The library holds the entry point and the registration contract a derived
+# service's `main.rs` uses. The binary is the shipped composition, which
+# registers no kind.
+[lib]
+name = "jobs_worker"
+
+[[bin]]
+name = "jobs-worker"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+gethostname = { workspace = true }
+health = { workspace = true }
+infra-http = { workspace = true }
+infra-jobs = { workspace = true }
+infra-postgres = { workspace = true }
+infra-telemetry = { workspace = true }
+secrecy = { workspace = true }
+service-config = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true, features = ["std", "attributes"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

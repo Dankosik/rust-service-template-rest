@@ -23,6 +23,7 @@ DATABASES = ("none", "postgres")
 AUTHN = ("none", "oidc-jwt", "oidc-introspection")
 OUTBOUND_HTTP = ("none", "bounded")
 HTTP_IDEMPOTENCY = ("none", "postgres")
+JOBS = ("none", "postgres")
 HARNESSES = ("core", "codex", "claude", "qwen", "cursor", "grok", "opencode", "all")
 _RUNTIME_FILES = frozenset({"Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "template.lock", "Makefile", "build.rs"})
 _RUNTIME_PREFIXES = (
@@ -327,25 +328,36 @@ def _compare_lock(reference: bytes, actual: bytes, harness: str, initializer) ->
         raise initializer.Refusal("projection lock serialization differs beyond agent_harness")
 
 
-def _inputs(initializer, database: str, authn: str, outbound_http: str, http_idempotency: str, harness: str):
-    # Matches the CI runner's `matrix-${database}-${authn}-${outbound_http}-${http_idempotency}-core`
-    # convention (ownership map), so runtime identity carries every selection
-    # dimension and two different selections never collide on one identity.
-    service_name = f"matrix-{database}-{authn}-{outbound_http}-{http_idempotency}-core"
+def _inputs(initializer, database: str, authn: str, outbound_http: str, http_idempotency: str, jobs: str, harness: str):
+    # Matches the CI runner's identity convention. The `JOBS=none` identity is
+    # unchanged from before the jobs pack.
+    if jobs == "none":
+        service_name = f"matrix-{database}-{authn}-{outbound_http}-{http_idempotency}-core"
+        description = f"Matrix {database} {authn} {outbound_http} {http_idempotency} core"
+    else:
+        service_name = f"matrix-{database}-{authn}-{outbound_http}-{http_idempotency}-jobs-core"
+        description = f"Matrix {database} {authn} {outbound_http} {http_idempotency} jobs core"
     return initializer.InitInputs(
         service_name=service_name,
         repository=f"https://github.com/example/{service_name}",
-        description=f"Matrix {database} {authn} {outbound_http} {http_idempotency} core",
+        description=description,
         codeowner="@example/platform",
         database=database,
         authn=authn,
         outbound_http=outbound_http,
         http_idempotency=http_idempotency,
+        jobs=jobs,
         agent_harness=harness,
     )
 
 
-def _refused_http_idempotency_namespace(database: str, authn: str, outbound_http: str) -> argparse.Namespace:
+def _admitted(initializer, database: str, authn: str, http_idempotency: str, jobs: str) -> bool:
+    return (http_idempotency == "none" or initializer.http_idempotency_requirement(database, authn) is None) and (
+        jobs == "none" or initializer.jobs_requirement(database) is None
+    )
+
+
+def _refused_namespace(database: str, authn: str, outbound_http: str, http_idempotency: str, jobs: str) -> argparse.Namespace:
     return argparse.Namespace(
         service_name="matrix-refused",
         repository="https://github.com/example/matrix-refused",
@@ -354,20 +366,21 @@ def _refused_http_idempotency_namespace(database: str, authn: str, outbound_http
         database=database,
         authn=authn,
         outbound_http=outbound_http,
-        http_idempotency="postgres",
+        http_idempotency=http_idempotency,
+        jobs=jobs,
         agent_harness="core",
     )
 
 
-def _assert_http_idempotency_refused(initializer, database: str, authn: str, outbound_http: str) -> None:
+def _assert_refused(initializer, database: str, authn: str, outbound_http: str, http_idempotency: str, jobs: str) -> None:
     """Prove `parse_inputs` refuses this non-harness selection before any write."""
 
     try:
-        initializer.parse_inputs(_refused_http_idempotency_namespace(database, authn, outbound_http))
+        initializer.parse_inputs(_refused_namespace(database, authn, outbound_http, http_idempotency, jobs))
     except initializer.Refusal:
         return
     raise initializer.Refusal(
-        f"admitted a refused http idempotency selection: {database}/{authn}/{outbound_http}"
+        f"admitted a refused selection: {database}/{authn}/{outbound_http}/{http_idempotency}/{jobs}"
     )
 
 
@@ -386,6 +399,21 @@ def _assert_no_http_idempotency_output(initializer, nodes: dict[str, Node], path
             raise initializer.Refusal(f"http_idempotency=none selection retained profile output: {relative}")
 
 
+def _jobs_output_paths(source: Path, initializer) -> frozenset[str]:
+    profiles = initializer._profile_data(source)
+    return frozenset(
+        relative.rstrip("/")
+        for profile in ("jobs", "jobs-http-idempotency")
+        for relative in profiles.removals[profile]
+    )
+
+
+def _assert_no_jobs_output(initializer, nodes: dict[str, Node], paths: Iterable[str]) -> None:
+    for relative in paths:
+        if relative in nodes or any(entry.startswith(f"{relative}/") for entry in nodes):
+            raise initializer.Refusal(f"jobs=none selection retained profile output: {relative}")
+
+
 def _project(source: Path, candidate: str, initializer, inputs, destination: Path) -> dict[str, Node]:
     initializer.snapshot_tree(source, destination, candidate)
     profiles = initializer._profile_data(destination)
@@ -401,14 +429,16 @@ def check(source: Path) -> None:
     candidate = initializer.git_head(source)
     exclusions = _validated_exclusions(initializer)
     idempotency_paths = _http_idempotency_output_paths(source, initializer)
-    raw_combinations = len(DATABASES) * len(AUTHN) * len(OUTBOUND_HTTP) * len(HTTP_IDEMPOTENCY)
+    jobs_paths = _jobs_output_paths(source, initializer)
+    raw_combinations = len(DATABASES) * len(AUTHN) * len(OUTBOUND_HTTP) * len(HTTP_IDEMPOTENCY) * len(JOBS)
     admitted_combinations = sum(
         1
         for database in DATABASES
         for authn in AUTHN
         for outbound_http in OUTBOUND_HTTP
         for http_idempotency in HTTP_IDEMPOTENCY
-        if http_idempotency == "none" or initializer.http_idempotency_requirement(database, authn) is None
+        for jobs in JOBS
+        if _admitted(initializer, database, authn, http_idempotency, jobs)
     )
     refused_combinations = raw_combinations - admitted_combinations
     _emit(
@@ -425,86 +455,90 @@ def check(source: Path) -> None:
             for authn in AUTHN:
                 for outbound_http in OUTBOUND_HTTP:
                     for http_idempotency in HTTP_IDEMPOTENCY:
-                        if (
-                            http_idempotency == "postgres"
-                            and initializer.http_idempotency_requirement(database, authn) is not None
-                        ):
-                            _assert_http_idempotency_refused(initializer, database, authn, outbound_http)
-                            _emit(
-                                "refused",
-                                database=database,
-                                authn=authn,
-                                outbound_http=outbound_http,
-                                http_idempotency=http_idempotency,
-                            )
-                            continue
-                        reference: dict[str, Node] | None = None
-                        reference_lock: bytes | None = None
-                        identity = _inputs(initializer, database, authn, outbound_http, http_idempotency, "core").identity()
-                        all_inputs = _inputs(initializer, database, authn, outbound_http, http_idempotency, "all")
-                        with tempfile.TemporaryDirectory(
-                            prefix=f"{database}-{authn}-{outbound_http}-{http_idempotency}-all-", dir=work
-                        ) as selection:
-                            all_nodes = _project(source, candidate, initializer, all_inputs, Path(selection) / "tree")
-                        admitted = _admitted_adapter_nodes(source, all_nodes, exclusions, initializer)
-                        projected = {"all": all_nodes}
-                        for harness in HARNESSES:
-                            inputs = _inputs(initializer, database, authn, outbound_http, http_idempotency, harness)
-                            if inputs.identity() != identity:
-                                raise initializer.Refusal("harness changed a runtime profile identity")
-                            if harness in projected:
-                                nodes = projected[harness]
-                            else:
-                                with tempfile.TemporaryDirectory(
-                                    prefix=f"{database}-{authn}-{outbound_http}-{http_idempotency}-{harness}-", dir=work
-                                ) as selection:
-                                    nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
-                            if http_idempotency == "none":
-                                _assert_no_http_idempotency_output(initializer, nodes, idempotency_paths)
-                            digest = _tree_digest(nodes)
-                            lock = initializer._lock_bytes(inputs, candidate, "complete")
-                            lock_sha256 = hashlib.sha256(lock).hexdigest()
-                            _emit(
-                                "selection",
-                                database=database,
-                                authn=authn,
-                                outbound_http=outbound_http,
-                                http_idempotency=http_idempotency,
-                                harness=harness,
-                                identity=inputs.identity(),
-                                profiles=inputs.profiles(),
-                                tree_sha256=digest,
-                                lock_sha256=lock_sha256,
-                            )
-                            if harness == "core":
-                                reference = nodes
-                                reference_lock = lock
+                        for jobs in JOBS:
+                            if not _admitted(initializer, database, authn, http_idempotency, jobs):
+                                _assert_refused(initializer, database, authn, outbound_http, http_idempotency, jobs)
+                                _emit(
+                                    "refused",
+                                    database=database,
+                                    authn=authn,
+                                    outbound_http=outbound_http,
+                                    http_idempotency=http_idempotency,
+                                    jobs=jobs,
+                                )
+                                continue
+                            reference: dict[str, Node] | None = None
+                            reference_lock: bytes | None = None
+                            identity = _inputs(initializer, database, authn, outbound_http, http_idempotency, jobs, "core").identity()
+                            all_inputs = _inputs(initializer, database, authn, outbound_http, http_idempotency, jobs, "all")
+                            with tempfile.TemporaryDirectory(
+                                prefix=f"{database}-{authn}-{outbound_http}-{http_idempotency}-{jobs}-all-", dir=work
+                            ) as selection:
+                                all_nodes = _project(source, candidate, initializer, all_inputs, Path(selection) / "tree")
+                            admitted = _admitted_adapter_nodes(source, all_nodes, exclusions, initializer)
+                            projected = {"all": all_nodes}
+                            for harness in HARNESSES:
+                                inputs = _inputs(initializer, database, authn, outbound_http, http_idempotency, jobs, harness)
+                                if inputs.identity() != identity:
+                                    raise initializer.Refusal("harness changed a runtime profile identity")
+                                if harness in projected:
+                                    nodes = projected[harness]
+                                else:
+                                    with tempfile.TemporaryDirectory(
+                                        prefix=f"{database}-{authn}-{outbound_http}-{http_idempotency}-{jobs}-{harness}-", dir=work
+                                    ) as selection:
+                                        nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+                                if http_idempotency == "none":
+                                    _assert_no_http_idempotency_output(initializer, nodes, idempotency_paths)
+                                if jobs == "none":
+                                    _assert_no_jobs_output(initializer, nodes, jobs_paths)
+                                digest = _tree_digest(nodes)
+                                lock = initializer._lock_bytes(inputs, candidate, "complete")
+                                lock_sha256 = hashlib.sha256(lock).hexdigest()
+                                _emit(
+                                    "selection",
+                                    database=database,
+                                    authn=authn,
+                                    outbound_http=outbound_http,
+                                    http_idempotency=http_idempotency,
+                                    jobs=jobs,
+                                    harness=harness,
+                                    identity=inputs.identity(),
+                                    profiles=inputs.profiles(),
+                                    tree_sha256=digest,
+                                    lock_sha256=lock_sha256,
+                                )
+                                if harness == "core":
+                                    reference = nodes
+                                    reference_lock = lock
+                                    _emit(
+                                        "equality",
+                                        database=database,
+                                        authn=authn,
+                                        outbound_http=outbound_http,
+                                        http_idempotency=http_idempotency,
+                                        jobs=jobs,
+                                        harness=harness,
+                                        reference="core",
+                                        tree_result="reference",
+                                        lock_result="reference",
+                                    )
+                                    continue
+                                assert reference is not None and reference_lock is not None
+                                _compare(reference, nodes, exclusions, admitted, initializer)
+                                _compare_lock(reference_lock, lock, harness, initializer)
                                 _emit(
                                     "equality",
                                     database=database,
                                     authn=authn,
                                     outbound_http=outbound_http,
                                     http_idempotency=http_idempotency,
+                                    jobs=jobs,
                                     harness=harness,
                                     reference="core",
-                                    tree_result="reference",
-                                    lock_result="reference",
+                                    tree_result="equal",
+                                    lock_result="agent_harness_only",
                                 )
-                                continue
-                            assert reference is not None and reference_lock is not None
-                            _compare(reference, nodes, exclusions, admitted, initializer)
-                            _compare_lock(reference_lock, lock, harness, initializer)
-                            _emit(
-                                "equality",
-                                database=database,
-                                authn=authn,
-                                outbound_http=outbound_http,
-                                http_idempotency=http_idempotency,
-                                harness=harness,
-                                reference="core",
-                                tree_result="equal",
-                                lock_result="agent_harness_only",
-                            )
 
 
 def _expect_refusal(initializer, action, label: str) -> None:
@@ -582,8 +616,8 @@ def self_test(source: Path) -> None:
     finally:
         initializer.ADAPTERS.pop("malicious-runtime-owner", None)
     candidate = "0" * 40
-    core_inputs = _inputs(initializer, "none", "none", "none", "none", "core")
-    codex_inputs = _inputs(initializer, "none", "none", "none", "none", "codex")
+    core_inputs = _inputs(initializer, "none", "none", "none", "none", "none", "core")
+    codex_inputs = _inputs(initializer, "none", "none", "none", "none", "none", "codex")
     core_lock = initializer._lock_bytes(core_inputs, candidate, "complete")
     codex_lock = initializer._lock_bytes(codex_inputs, candidate, "complete")
     _compare_lock(core_lock, codex_lock, "codex", initializer)
@@ -627,6 +661,71 @@ def self_test(source: Path) -> None:
         lambda: _compare(base, http_idempotency_tree_drift, carrier_scopes, admitted, initializer),
         "http idempotency profile runtime drift",
     )
+    jobs_lock_drift = json.loads(core_lock)
+    jobs_lock_drift["profiles"]["jobs"] = "postgres"
+    jobs_lock_drift_bytes = (
+        json.dumps(jobs_lock_drift, indent=2, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+    _expect_refusal(
+        initializer,
+        lambda: _compare_lock(core_lock, jobs_lock_drift_bytes, "core", initializer),
+        "jobs profile lock drift",
+    )
+    jobs_tree_drift = dict(base)
+    jobs_tree_drift["crates/infra-jobs/src/lib.rs"] = Node(
+        "file", 0o644, b"jobs profile runtime"
+    )
+    _expect_refusal(
+        initializer,
+        lambda: _compare(base, jobs_tree_drift, carrier_scopes, admitted, initializer),
+        "jobs profile runtime drift",
+    )
+    jobs_profiles = initializer.ProfileData(
+        source_only=(),
+        removals={},
+        markers=(("jobs", "fixture.rs", "registered-marker"),),
+        identity=(),
+        cargo_lock={"schema_version": 1},
+    )
+    jobs_inputs = _inputs(initializer, "postgres", "none", "none", "none", "postgres", "core")
+    with tempfile.TemporaryDirectory(prefix="template-profile-projections-jobs-marker-") as temporary:
+        marker_root = Path(temporary)
+        (marker_root / "fixture.rs").write_text(
+            "// template:begin jobs:registered-marker\nkept\n// template:end jobs:registered-marker\n",
+            encoding="utf-8",
+        )
+        initializer._apply_markers(marker_root, jobs_profiles, jobs_inputs)
+    with tempfile.TemporaryDirectory(prefix="template-profile-projections-jobs-marker-drift-") as temporary:
+        marker_root = Path(temporary)
+        (marker_root / "fixture.rs").write_text(
+            "// template:begin jobs:registered-marker\n"
+            "kept\n"
+            "// template:end jobs:registered-marker\n"
+            "// template:begin jobs:unregistered-marker\n"
+            "// template:end jobs:unregistered-marker\n",
+            encoding="utf-8",
+        )
+        _expect_refusal(
+            initializer,
+            lambda: initializer._apply_markers(marker_root, jobs_profiles, jobs_inputs),
+            "unregistered jobs marker",
+        )
+    jobs_removals = initializer._profile_data(source).removals["jobs"]
+    if "crates/infra-jobs/" not in jobs_removals:
+        raise AssertionError("jobs removals omit crates/infra-jobs/")
+    with tempfile.TemporaryDirectory(prefix="template-profile-projections-jobs-removal-") as temporary:
+        removal_root = Path(temporary)
+        jobs_crate = removal_root / "crates" / "infra-jobs"
+        jobs_crate.mkdir(parents=True)
+        (jobs_crate / "lib.rs").write_text("jobs\n", encoding="utf-8")
+        initializer._remove_paths(removal_root, ("crates/infra-jobs/",))
+        if jobs_crate.exists():
+            raise AssertionError("jobs removal path was retained")
+        _expect_refusal(
+            initializer,
+            lambda: initializer._remove_paths(removal_root, ("crates/infra-jobs/",)),
+            "missing jobs removal path",
+        )
     safety = _load_safety(source)
     with tempfile.TemporaryDirectory(prefix="template-profile-projections-self-test-") as temporary:
         safety.assert_preflight_extraction(source, Path(temporary))

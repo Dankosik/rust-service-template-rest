@@ -728,5 +728,56 @@
       {"path": "test/Cargo.toml", "ids": ["test-http-idempotency-mounted-dependencies"]},
       {"path": "test/tests/http_idempotency/main.rs", "ids": ["http-idempotency-mounted-module"]}
     ]
+  },
+  "jobs": {
+    "remove_when_unselected": [
+      "crates/infra-jobs/",
+      "crates/jobs-worker/",
+      "crates/config/src/jobs.rs",
+      "migrations/20260924000001_create_background_jobs.sql",
+      "test/src/jobs.rs",
+      "test/src/bin/",
+      "test/tests/jobs/",
+      "docs/background-jobs.md",
+      "docs/architecture/async.md"
+    ],
+    "markers": [
+      {"path": "Cargo.toml", "ids": ["workspace-jobs-crates"]},
+      {"path": "crates/config/src/lib.rs", "ids": ["config-jobs-module", "config-jobs-export", "config-jobs-field", "config-jobs-validate"]},
+      {"path": "crates/config/src/load.rs", "ids": ["load-jobs-environment"]},
+      {"path": "crates/config/src/observability.rs", "ids": ["otel-jobs-worker-identity-doc"]},
+      {"path": "crates/infra-telemetry/src/metrics.rs", "ids": ["telemetry-jobs-histograms"]},
+      {"path": "build/docker/Dockerfile", "ids": ["docker-jobs-worker-build", "docker-jobs-worker-output", "docker-jobs-worker-runtime"]},
+      {"path": "test/Cargo.toml", "ids": ["test-jobs-dependencies", "test-jobs-dev-dependencies", "test-jobs-worker-fixture"]},
+      {"path": "test/src/lib.rs", "ids": ["test-lib-jobs-module"]},
+      {"path": "test/README.md", "ids": ["test-readme-jobs"]},
+      {"path": "env/config/local.toml", "ids": ["local-config-jobs"]},
+      {"path": "migrations/README.md", "ids": ["migrations-readme-jobs"]},
+      {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-jobs-owners", "docs-boundaries-jobs-tests", "docs-boundaries-jobs-edges", "docs-boundaries-jobs-composition", "docs-boundaries-jobs-decision"]},
+      {"path": "docs/architecture/http.md", "ids": ["docs-http-jobs-worker-listener"]},
+      {"path": "docs/architecture/persistence.md", "ids": ["docs-persistence-jobs"]},
+      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-jobs-worker"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-jobs"]},
+      {"path": "docs/first-production-feature.md", "ids": ["docs-first-feature-jobs"]},
+      {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-jobs-placement"]},
+      {"path": "docs/repo-architecture.md", "ids": ["docs-architecture-jobs-leaf"]},
+      {"path": "docs/template-sync.md", "ids": ["docs-template-init-jobs", "docs-template-init-jobs-sync"]},
+      {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-jobs"]},
+      {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-jobs-worker-image"]},
+      {"path": "docs/validation/postgres.md", "ids": ["docs-postgres-validation-jobs"]},
+      {"path": "docs/validation/containers.md", "ids": ["docs-containers-jobs-worker-check"]},
+      {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-jobs"]},
+      {"path": "docs/http-idempotency.md", "ids": ["docs-http-idempotency-jobs-enqueue"]}
+    ]
+  },
+  "jobs-http-idempotency": {
+    "remove_when_unselected": [
+      "test/tests/jobs/http_idempotency.rs"
+    ],
+    "markers": [
+      {"path": "test/tests/jobs/main.rs", "ids": ["jobs-http-idempotency-module"]},
+      {"path": "docs/background-jobs.md", "ids": ["docs-background-jobs-idempotency"]},
+      {"path": "docs/architecture/async.md", "ids": ["docs-async-idempotency"]}
+    ]
   }
 }

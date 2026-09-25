@@ -64,6 +64,9 @@ pub struct OtelConfig {
     // template:begin postgres:otel-postgres-application-name-doc
     /// It also supplies PostgreSQL `application_name` for pooled and migrator sessions.
     // template:end postgres:otel-postgres-application-name-doc
+    // template:begin jobs:otel-jobs-worker-identity-doc
+    /// The jobs worker derives its own identity from it: `{name}-jobs-worker`.
+    // template:end jobs:otel-jobs-worker-identity-doc
     /// The initializer
     /// rewrites this default for a derived service. A distinct database
     /// session label is not a configuration axis.

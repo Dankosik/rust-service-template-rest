@@ -118,7 +118,7 @@ classify() {
 		# Database-backed proof: the adapter, the runner, the test crate and
 		# its fixtures, the compose file, and the scripts that drive them.
 		if [[ ${database} == postgres ]]; then case "${file}" in
-		crates/infra-postgres/* | crates/infra-idempotency-store/* | crates/migrate/* | test/* | env/docker-compose.yml | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh)
+		crates/infra-postgres/* | crates/infra-idempotency-store/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/migrate/* | test/* | env/docker-compose.yml | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh)
 			mark db_integration
 			;;
 		esac
@@ -197,7 +197,7 @@ classify() {
 		scripts/ci/template-init-check.sh | scripts/tests/template-* | \
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
 		crates/infra-bearerauthn/* | crates/infra-egress-dns/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | \
-		crates/infra-postgres/* | crates/migrate/* | \
+		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | \
 		test/* | migrations/*)
 			mark module_initializer initializer_runtime
 			;;
@@ -211,7 +211,7 @@ classify() {
 		docs/first-production-feature.md | docs/project-structure-and-module-organization.md | \
 		docs/backend-library-selection.md | docs/backend-utility-recipes.md | \
 		docs/build-test-and-development-commands.md | docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | \
-		docs/validation/* | docs/template-sync.md | docs/authentication.md | docs/outbound-http.md | docs/http-idempotency.md)
+		docs/validation/* | docs/template-sync.md | docs/authentication.md | docs/outbound-http.md | docs/http-idempotency.md | docs/background-jobs.md)
 			mark module_initializer
 			;;
 		esac; fi
@@ -326,6 +326,15 @@ EOF
 	assert_case crates/infra-idempotency-store/src/lib.rs \
 		"rust_source db_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations documentation"
+	assert_case crates/infra-jobs/src/lib.rs \
+		"rust_source db_integration module_initializer initializer_runtime" \
+		"cargo_dependencies migrations documentation"
+	assert_case crates/jobs-worker/src/main.rs \
+		"rust_source db_integration module_initializer initializer_runtime" \
+		"cargo_dependencies migrations documentation"
+	assert_case crates/jobs-worker/Cargo.toml \
+		"cargo_dependencies db_integration module_initializer initializer_runtime" \
+		"rust_source documentation"
 	# P9 only mounts infra-http and infra-bearerauthn against a real
 	# database while the introspection-only fixture is retained.
 	mkdir -p "${classifier_root}/test/tests/http_idempotency"
@@ -354,6 +363,12 @@ EOF
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
 	assert_case docs/http-idempotency.md \
+		"documentation module_initializer" \
+		"rust_source cargo_dependencies initializer_runtime"
+	assert_case docs/background-jobs.md \
+		"documentation module_initializer" \
+		"rust_source cargo_dependencies initializer_runtime"
+	assert_case docs/architecture/async.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
 	assert_case crates/service/tests/lifecycle.rs \

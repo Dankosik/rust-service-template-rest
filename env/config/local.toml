@@ -57,3 +57,9 @@ max_connections = 4
 # [http_idempotency]
 # retention = "24h"
 # template:end http-idempotency:local-config-http-idempotency
+
+# template:begin jobs:local-config-jobs
+# The jobs worker reads this section; a worker beside `make run` needs its own APP__HTTP__ADDR and APP__OBSERVABILITY__METRICS__ADDR.
+# [jobs]
+# max_workers = 1
+# template:end jobs:local-config-jobs

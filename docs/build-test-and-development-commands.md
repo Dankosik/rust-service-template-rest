@@ -101,19 +101,37 @@ version. CI installs the same versions as prebuilt binaries.
 | `make changed-surfaces-check`, `make affected-crates-check`, `make validation-lock-self-test`, `make verify-check` | The validation scripts' self-tests |
 | `ALLOW_FULL=1 make check` | The full repository gate under the lock: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-instructions`, `docs-check`, selected profile checks, and the five self-tests |
 
-In the source template, `ALLOW_FULL=1 make template-init-check` checks 128
-canonical projections and initializes/builds/tests sixteen distinct runtime
+In the source template, `ALLOW_FULL=1 make template-init-check` checks 208
+canonical projections and initializes/builds/tests twenty-six distinct runtime
 representatives. It does not need `ALLOW_HEAVY`. The source runner's
 `--projections-only` mode, `make template-init-projections`, performs the
 focused projection/equality check without Cargo; it is not a complete
 public-initialization or runtime receipt. The
 [initializer guide](template-sync.md#validation-boundary) owns this distinction.
 <!-- template:begin http-idempotency:docs-commands-http-idempotency -->
-With the idempotency pack retained, four of those sixteen representatives
-(graphs 13-16) also run the retained idempotency database suite and need a
-usable Docker daemon; the runner refuses before any target write when one is
-missing.
+With the idempotency pack retained, eight of those twenty-six representatives
+(graphs 13-16 and 23-26) also run the retained idempotency database suite and
+need a usable Docker daemon; the runner refuses before any target write when
+one is missing.
 <!-- template:end http-idempotency:docs-commands-http-idempotency -->
+<!-- template:begin jobs:docs-commands-jobs -->
+With the jobs pack retained, graphs 17-26 also run the jobs database suite
+(graphs 23-26 with its joint HTTP idempotency module) and need a usable
+Docker daemon. `infra-jobs` and `jobs-worker` are package names for
+`make test-package` (`PKG=infra-jobs`, `PKG=jobs-worker`). A local worker
+beside `make run` needs its own listeners and the PostgreSQL variables
+`make run` uses (`APP__POSTGRES__ENABLED=true` and `APP__POSTGRES__DSN`; see
+`env/config/local.toml`).
+Once the schema is migrated, run:
+
+```sh
+APP__HTTP__ADDR=127.0.0.1:8081 APP__OBSERVABILITY__METRICS__ADDR=127.0.0.1:9091 cargo run --locked -p jobs-worker -- --config env/config/local.toml
+```
+
+It runs only once a service registers its kinds; the template's worker
+refuses with `no job kind is registered`. See the
+[guide](background-jobs.md#configure-and-size-the-worker).
+<!-- template:end jobs:docs-commands-jobs -->
 
 ## Guards and variables
 
