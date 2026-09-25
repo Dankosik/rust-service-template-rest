@@ -91,6 +91,9 @@ def legacy_profile_inventory_bytes(source: Path) -> bytes:
     if not isinstance(source_only, list) or source_only.count(_NEW_PROJECTION_CHECKER) != 1:
         raise AssertionError("current profile inventory lacks exactly one projection checker entry")
     legacy["source_only"] = [item for item in source_only if item != _NEW_PROJECTION_CHECKER]
+    postgres_markers = legacy["postgres"]["markers"]
+    postgres_markers.remove({"path": "crates/infra-http/Cargo.toml", "id": "http-postgres-dependency"})
+    postgres_markers.remove({"path": "crates/infra-http/src/lib.rs", "id": "infra-http-postgres-tx"})
     rendered = (json.dumps(legacy, indent=2) + "\n").encode("utf-8")
     if hashlib.sha256(rendered).hexdigest() != _LEGACY_B206_PROFILE_SHA256:
         raise AssertionError("legacy b206 profile inventory bytes changed")

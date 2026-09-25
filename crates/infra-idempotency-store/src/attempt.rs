@@ -504,8 +504,16 @@ mod tests {
 
     #[test]
     fn transaction_failures_emit_only_bounded_diagnostics() {
+        // Register both contexts: tracing's single-dispatch fast path otherwise
+        // caches no interest when a sibling test first logs without a subscriber.
+        let unscoped = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let captured = Diagnostics::default();
         tracing::subscriber::with_default(captured.clone(), || {
+            tracing::dispatcher::with_default(&unscoped, || {
+                let _ = classify_tx::<()>(TxError::CommitUnknown(sqlx::Error::Protocol(
+                    "unscoped first use".to_owned(),
+                )));
+            });
             let _ = classify_tx::<()>(TxError::CommitUnknown(database("40003")));
             let _ = classify_tx::<()>(TxError::CommitUnknown(sqlx::Error::Protocol(
                 "sensitive SQL statement and bound value".to_owned(),

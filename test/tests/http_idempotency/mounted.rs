@@ -82,7 +82,8 @@ const STORED_BODY_BOUND: usize = 1_048_576;
 /// A name the operation's own validation refuses inside the work.
 const RESERVED_NAME: &str = "reserved";
 const KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
-const KEY_REASON: &str = "must be one Idempotency-Key field of 1 to 255 RFC 9110 token characters";
+const KEY_REASON: &str =
+    "must be one Idempotency-Key field of 1 to 255 decoded visible-ASCII bytes";
 
 // The fixture provider and the callers it knows.
 const FIXTURE_HOST: &str = "authn.fixture.test";
@@ -738,8 +739,9 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
     let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
 
-    // Authentication answers first: a bad key behind a failed authentication
-    // is never looked at.
+    // Authentication answers first: a malformed quoted key behind a failed
+    // authentication is never looked at.
+    let malformed_key = "\"k-1";
     let oversize = format!("Bearer {}", "a".repeat(32 * 1024 + 1));
     let inactive = format!("Bearer {INACTIVE}");
     for (authorization, status, code, challenge) in [
@@ -771,7 +773,7 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
         let mut request = mounted
             .server
             .post(PRIMARY_WIDGETS)
-            .add_header(KEY, "\"k-1\"")
+            .add_header(KEY, malformed_key)
             .add_header(REQUEST_ID_HEADER, "req-authn")
             .json(&input);
         if let Some(authorization) = authorization {
@@ -787,7 +789,9 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
     assert_eq!(outcomes(&recorder), counts(&[]));
 
     // Once authentication passes, the same key is refused.
-    let refused = mounted.create(ALICE, "\"k-1\"", &input, "req-key").await;
+    let refused = mounted
+        .create(ALICE, malformed_key, &input, "req-key")
+        .await;
     problem(&refused, StatusCode::BAD_REQUEST, "bad_request", "req-key");
     assert_eq!(outcomes(&recorder), counts(&[("invalid_key", 1)]));
     assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
