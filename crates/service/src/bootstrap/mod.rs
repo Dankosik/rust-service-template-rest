@@ -297,7 +297,7 @@ async fn prepare_auth(
                 source,
             })?;
             tracker.spawn(refresh);
-            Ok(PreparedAuth::Enabled(verifier))
+            Ok(PreparedAuth::Enabled(Box::new(verifier)))
         }
         // template:end oidc-jwt:bootstrap-prepare-auth-jwt
         // template:begin oidc-introspection:bootstrap-prepare-auth-introspection
@@ -344,7 +344,7 @@ async fn prepare_auth(
                     ttl: *cache_ttl,
                 }),
             })
-            .map(PreparedAuth::Enabled)
+            .map(|verifier| PreparedAuth::Enabled(Box::new(verifier)))
             .map_err(|source| BootstrapError::AuthenticationPreparation {
                 mode: "oidc-introspection",
                 key: "authn.introspection_endpoint",
@@ -537,7 +537,7 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         // template:begin authn:bootstrap-authn-finalize-enabled
         PreparedAuth::Enabled(verifier) => infra_http::authn::finalize(
             contract,
-            verifier,
+            *verifier,
             usize::try_from(config.http.max_header_bytes.as_u64())
                 .unwrap_or(usize::MAX)
                 .min(32 * 1024),
@@ -611,7 +611,7 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
 enum PreparedAuth {
     None,
     // template:begin authn:bootstrap-prepared-auth-enabled
-    Enabled(Verifier),
+    Enabled(Box<Verifier>),
     // template:end authn:bootstrap-prepared-auth-enabled
 }
 

@@ -181,3 +181,23 @@ projection assertions. These are static results, not cache behavior evidence.
 `make fmt` completed and canonical `make openapi-generate` completed without a
 YAML delta. No cache runtime tests, lint or final integrated review ran during
 coding. The root's next clean commit will own the assembled validation inputs.
+
+## Complete-candidate mechanical review
+
+The complete candidate was committed as
+`73e08a1c3af75de87ecf08603a8861e0dd0703fc`. Its formatting, instruction/carrier,
+documentation, unused-dependency and dependency-policy checks passed. The only
+lint failure was the startup-only `PreparedAuth` enum's enlarged inline verifier.
+After the fresh reviewer joined, that private variant was boxed once during
+preparation and consumed into the unchanged HTTP finalizer; profile markers and
+runtime policy did not change. The focused workspace lint rerun passed, including
+all targets and the integration feature. Logs are
+`/tmp/authn-complete-mechanical-73e08a1.log` and
+`/tmp/authn-lint-box-repair.log`.
+
+A fresh Astra/xhigh cache/integration reviewer independently inspected the full
+new cache boundary and its affected integration, consuming prior core closure
+evidence. It found no additional behavioral defect; its FAIL was limited to the
+actual lint failure above. The same reader will check that bounded representation
+delta and receive the remaining runtime/projection/security evidence before a
+final review disposition.
