@@ -21,6 +21,8 @@ impl JobKind for Probe {
     const NAME: &'static str = "test.probe";
 }
 
+const _: () = infra_jobs::assert_valid_kind_name(Probe::NAME);
+
 /// What one probe attempt does after it records itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,6 +33,16 @@ pub enum ProbeAction {
     FailRetryable,
     /// Fail with a permanent error.
     FailPermanent,
+    /// Request a caller-selected retry delay.
+    RetryAfter {
+        /// The requested delay in milliseconds.
+        millis: u64,
+    },
+    /// Defer once, then complete on the next delivery.
+    SnoozeOnce {
+        /// The requested delay in milliseconds.
+        millis: u64,
+    },
     /// Sleep, ignoring cancellation, so a timeout must abort the attempt.
     Sleep {
         /// How long to sleep.
@@ -72,6 +84,23 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
         ProbeAction::Succeed => Ok(()),
         ProbeAction::FailRetryable => Err(JobError::retryable("probe failed retryably")),
         ProbeAction::FailPermanent => Err(JobError::permanent("probe failed permanently")),
+        ProbeAction::RetryAfter { millis } => Err(JobError::retry_after(
+            "probe requested retry delay",
+            Duration::from_millis(millis),
+        )
+        .expect("probe delay is valid")),
+        ProbeAction::SnoozeOnce { millis } => {
+            let deliveries: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM probe_attempts WHERE job_id = $1::uuid")
+                    .bind(job.id().to_string())
+                    .fetch_one(job.pool())
+                    .await?;
+            if deliveries == 1 {
+                Err(JobError::snooze(Duration::from_millis(millis)).expect("probe delay is valid"))
+            } else {
+                Ok(())
+            }
+        }
         ProbeAction::Sleep { millis } => {
             tokio::time::sleep(Duration::from_millis(millis)).await;
             Ok(())

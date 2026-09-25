@@ -1,34 +1,27 @@
-//! The job engine: shared state, the attempt registry, and the drain-end protocol.
+//! The job engine: shared state and bounded supervisor cleanup.
 
-use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use infra_postgres::{Isolation, TxError, TxOptions};
 use sqlx::postgres::PgPool;
-use tokio::sync::{Semaphore, watch};
-use tokio::task::AbortHandle;
+use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::Registry;
-use crate::attempt::{self, Attribution, Facts, Intended, LostReason, Outcome};
-use crate::claim::{self, Claimed};
-use crate::kind::JobId;
-use crate::lease::{self, RowState};
+use crate::claim;
 use crate::maintenance;
 
 /// How often an idle worker claims.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// Claim and extension expiry on the database clock.
-pub const CLAIM_TTL: Duration = Duration::from_secs(30);
-/// How often one worker extends its claims.
-pub const UPKEEP_INTERVAL: Duration = Duration::from_secs(10);
+/// Recovery reserve added to each kind's attempt timeout.
+pub const LEASE_RESERVE: Duration = Duration::from_secs(60);
 /// How far the worker's own cancellation leads the database expiry.
 pub const CANCEL_MARGIN: Duration = Duration::from_secs(2);
 /// How long an outcome write waits before it is sent again.
@@ -44,7 +37,7 @@ pub(crate) const READ_COMMITTED: TxOptions = TxOptions {
     read_only: false,
 };
 
-/// A worker's job engine. Cloning shares the pool, registry, and attempt registry.
+/// A worker's job engine. Cloning shares the pool, registry, and supervisor tracker.
 #[derive(Clone)]
 pub struct Engine {
     shared: Arc<Shared>,
@@ -57,20 +50,19 @@ pub struct Started {
     failure: CancellationToken,
 }
 
-/// How a drain-end release finished.
+/// Cumulative local observations when forced cleanup ended.
+/// These counters do not attribute zero-row queue writes to this worker.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DrainEnd {
-    /// Entries taken by [`Started::cancel_and_release`].
+    /// Handlers whose result (including panic/timeout) became known.
+    pub known_results: usize,
+    /// Handlers joined with cancellation, eligible for a fenced release.
     pub cancelled: usize,
-    /// Recorded `released`.
+    /// Acknowledged one-row release writes.
     pub released: usize,
-    /// Recorded as the attempt's intended outcome.
-    pub written: usize,
-    /// Recorded `superseded`.
-    pub superseded: usize,
-    /// Recorded `lost` with reason `release`.
-    pub lost: usize,
-    /// The deadline passed before every attempt was attributed.
+    /// Attempts whose cleanup or transaction outcome stayed uncertain.
+    pub uncertain: usize,
+    /// The deadline passed before every supervisor finished.
     pub timed_out: bool,
 }
 
@@ -80,6 +72,9 @@ pub enum StartupError {
     /// The table or one of its columns is missing.
     #[error("the jobs schema is missing")]
     SchemaMissing,
+    /// PostgreSQL does not use UTF8 server encoding.
+    #[error("the jobs store requires UTF8 server encoding")]
+    UnsupportedEncoding,
     /// The session is read-only or recovering.
     #[error("the PostgreSQL session is not writable")]
     NotWritable,
@@ -138,7 +133,9 @@ impl Engine {
                 max_workers,
                 slots: Arc::new(Semaphore::new(slots)),
                 permit: Semaphore::new(1),
-                attempts: Attempts::new(),
+                force: CancellationToken::new(),
+                cleanup_deadline: Mutex::new(None),
+                counters: Counters::default(),
                 attempt_tracker: TaskTracker::new(),
                 failing: Failing::new(),
             }),
@@ -165,7 +162,7 @@ impl Engine {
         maintenance::remove_expired(&self.shared).await
     }
 
-    /// Spawn the claim loop, claim upkeep, retention, and gauge sampling on `tracker`.
+    /// Spawn the claim loop, retention, and gauge sampling on `tracker`.
     ///
     /// Each task runs under a child of `cancel`. Does no I/O before it returns.
     #[must_use]
@@ -178,14 +175,6 @@ impl Engine {
             stop.clone(),
             failure.clone(),
             claim::run_claim_loop,
-        );
-        let upkeep_cancel = cancel.child_token();
-        spawn_guarded(
-            tracker,
-            Arc::clone(&self.shared),
-            upkeep_cancel,
-            failure.clone(),
-            lease::run_upkeep,
         );
         let retention_cancel = cancel.child_token();
         tracker.spawn(maintenance::run_retention(
@@ -216,7 +205,7 @@ impl fmt::Debug for Engine {
 }
 
 impl Started {
-    /// Stop claiming. Idempotent. A claim already sent still completes.
+    /// Stop sends and admissions, including a claim awaiting acknowledgement.
     pub fn stop_claiming(&self) {
         self.stop.cancel();
     }
@@ -224,7 +213,7 @@ impl Started {
     /// Attempts admitted and not yet recorded.
     #[must_use]
     pub fn in_flight(&self) -> usize {
-        self.shared.attempts.len()
+        self.shared.attempt_tracker.len()
     }
 
     /// Resolves once the claim loop has exited and every supervisor has ended.
@@ -232,22 +221,33 @@ impl Started {
         self.shared.attempt_tracker.wait().await;
     }
 
-    /// Cancel in-flight attempts and release their jobs, inside `budget`.
+    /// Cancel unfinished handlers and finish known outcomes inside `budget`.
+    /// Supervisors retain ownership; this method never writes queue rows.
     #[must_use]
-    pub async fn cancel_and_release(&self, budget: Duration) -> DrainEnd {
-        let deadline = Instant::now()
+    pub async fn cancel_and_finish(&self, budget: Duration) -> DrainEnd {
+        let requested = Instant::now()
             .checked_add(budget)
             .unwrap_or_else(Instant::now);
         self.stop_claiming();
-        let entries = self.shared.attempts.close();
-        let cancelled = entries.len();
-        let collected = entries.into_iter().map(collect_entry).collect();
-        let mut end = release_collected(&self.shared, collected, deadline).await;
-        end.cancelled = cancelled;
-        end
+        let deadline = {
+            let mut stored = lock(&self.shared.cleanup_deadline);
+            *stored.get_or_insert(requested)
+        };
+        self.shared.force.cancel();
+        let timed_out = tokio::time::timeout_at(deadline, self.drained())
+            .await
+            .is_err();
+        let counters = &self.shared.counters;
+        DrainEnd {
+            known_results: counters.known_results.load(Ordering::Relaxed),
+            cancelled: counters.cancelled.load(Ordering::Relaxed),
+            released: counters.released.load(Ordering::Relaxed),
+            uncertain: counters.uncertain.load(Ordering::Relaxed),
+            timed_out,
+        }
     }
 
-    /// Resolves if the claim loop or claim upkeep ends on its own.
+    /// Resolves if the claim loop ends on its own.
     pub async fn failed(&self) {
         self.failure.cancelled().await;
     }
@@ -301,7 +301,9 @@ pub(crate) struct Shared {
     pub(crate) max_workers: NonZeroU32,
     pub(crate) slots: Arc<Semaphore>,
     pub(crate) permit: Semaphore,
-    pub(crate) attempts: Attempts,
+    pub(crate) force: CancellationToken,
+    cleanup_deadline: Mutex<Option<Instant>>,
+    pub(crate) counters: Counters,
     pub(crate) attempt_tracker: TaskTracker,
     pub(crate) failing: Failing,
 }
@@ -311,8 +313,22 @@ impl fmt::Debug for Shared {
         formatter
             .debug_struct("Shared")
             .field("max_workers", &self.max_workers)
-            .field("in_flight", &self.attempts.len())
+            .field("in_flight", &self.attempt_tracker.len())
             .finish_non_exhaustive()
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct Counters {
+    pub(crate) known_results: AtomicUsize,
+    pub(crate) cancelled: AtomicUsize,
+    pub(crate) released: AtomicUsize,
+    pub(crate) uncertain: AtomicUsize,
+}
+
+impl Shared {
+    pub(crate) fn deadline(&self, local: Instant) -> Instant {
+        lock(&self.cleanup_deadline).map_or(local, |cleanup| local.min(cleanup))
     }
 }
 
@@ -320,10 +336,8 @@ impl fmt::Debug for Shared {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Operation {
     Claim,
-    Extend,
     Record,
     Release,
-    Reconcile,
     Retention,
     Sample,
 }
@@ -333,10 +347,8 @@ impl Operation {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Claim => "claim",
-            Self::Extend => "extend",
             Self::Record => "record",
             Self::Release => "release",
-            Self::Reconcile => "reconcile",
             Self::Retention => "retention",
             Self::Sample => "sample",
         }
@@ -346,10 +358,8 @@ impl Operation {
 /// One flag per [`Operation`]: set after the first failure, clear after recovery.
 pub(crate) struct Failing {
     claim: AtomicBool,
-    extend: AtomicBool,
     record: AtomicBool,
     release: AtomicBool,
-    reconcile: AtomicBool,
     retention: AtomicBool,
     sample: AtomicBool,
 }
@@ -358,10 +368,8 @@ impl Failing {
     const fn new() -> Self {
         Self {
             claim: AtomicBool::new(false),
-            extend: AtomicBool::new(false),
             record: AtomicBool::new(false),
             release: AtomicBool::new(false),
-            reconcile: AtomicBool::new(false),
             retention: AtomicBool::new(false),
             sample: AtomicBool::new(false),
         }
@@ -370,10 +378,8 @@ impl Failing {
     fn flag(&self, operation: Operation) -> &AtomicBool {
         match operation {
             Operation::Claim => &self.claim,
-            Operation::Extend => &self.extend,
             Operation::Record => &self.record,
             Operation::Release => &self.release,
-            Operation::Reconcile => &self.reconcile,
             Operation::Retention => &self.retention,
             Operation::Sample => &self.sample,
         }
@@ -387,6 +393,10 @@ impl fmt::Debug for Failing {
 }
 
 pub(crate) fn observe_failure(shared: &Shared, operation: Operation, error: OperationError) {
+    metrics::describe_counter!(
+        OPERATION_FAILURES_METRIC,
+        "Failed worker database operations"
+    );
     metrics::counter!(OPERATION_FAILURES_METRIC, "operation" => operation.as_str()).increment(1);
     if !shared.failing.flag(operation).swap(true, Ordering::SeqCst) {
         tracing::warn!(
@@ -400,234 +410,6 @@ pub(crate) fn observe_failure(shared: &Shared, operation: Operation, error: Oper
 pub(crate) fn observe_recovery(shared: &Shared, operation: Operation) {
     if shared.failing.flag(operation).swap(false, Ordering::SeqCst) {
         tracing::info!(operation = operation.as_str(), "jobs_operation_recovered");
-    }
-}
-
-/// The `closed` flag and the admitted attempts, keyed by claim.
-type Table = (bool, HashMap<(JobId, i64), Entry>);
-
-pub(crate) struct Attempts {
-    inner: Mutex<Table>,
-}
-
-pub(crate) struct Entry {
-    pub(crate) id: JobId,
-    pub(crate) generation: i64,
-    pub(crate) kind: &'static str,
-    pub(crate) attempt: u16,
-    pub(crate) deadline: watch::Sender<Instant>,
-    pub(crate) superseded: CancellationToken,
-    pub(crate) handler_cancel: CancellationToken,
-    pub(crate) supervisor: AbortHandle,
-    pub(crate) handler: Option<(AbortHandle, Instant)>,
-    pub(crate) extending: bool,
-    pub(crate) intended: Option<Intended>,
-}
-
-pub(crate) struct Handles {
-    pub(crate) deadline: watch::Receiver<Instant>,
-    pub(crate) superseded: CancellationToken,
-    pub(crate) handler_cancel: CancellationToken,
-}
-
-impl fmt::Debug for Attempts {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Attempts")
-            .field("len", &self.len())
-            .finish_non_exhaustive()
-    }
-}
-
-impl fmt::Debug for Entry {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Entry")
-            .field("id", &self.id)
-            .field("generation", &self.generation)
-            .field("kind", &self.kind)
-            .field("attempt", &self.attempt)
-            .field("extending", &self.extending)
-            .finish_non_exhaustive()
-    }
-}
-
-impl fmt::Debug for Handles {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("Handles").finish_non_exhaustive()
-    }
-}
-
-impl Attempts {
-    fn new() -> Self {
-        Self {
-            inner: Mutex::new((false, HashMap::new())),
-        }
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Table> {
-        match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-
-    pub(crate) fn admit(
-        &self,
-        claimed: Claimed,
-        deadline: Instant,
-        spawn: impl FnOnce(Claimed, Handles) -> AbortHandle,
-    ) -> Result<(), Claimed> {
-        let mut guard = self.lock();
-        if guard.0 {
-            return Err(claimed);
-        }
-        let (sender, receiver) = watch::channel(deadline);
-        let superseded = CancellationToken::new();
-        let handler_cancel = CancellationToken::new();
-        let handles = Handles {
-            deadline: receiver,
-            superseded: superseded.clone(),
-            handler_cancel: handler_cancel.clone(),
-        };
-        let id = claimed.id;
-        let generation = claimed.generation;
-        let kind = claimed.kind;
-        let attempt = claimed.attempt;
-        let supervisor = spawn(claimed, handles);
-        guard.1.insert(
-            (id, generation),
-            Entry {
-                id,
-                generation,
-                kind,
-                attempt,
-                deadline: sender,
-                superseded,
-                handler_cancel,
-                supervisor,
-                handler: None,
-                extending: true,
-                intended: None,
-            },
-        );
-        Ok(())
-    }
-
-    #[must_use]
-    pub(crate) fn start_handler(
-        &self,
-        id: JobId,
-        generation: i64,
-        spawn: impl FnOnce() -> AbortHandle,
-    ) -> bool {
-        let mut guard = self.lock();
-        let Some(entry) = guard.1.get_mut(&(id, generation)) else {
-            return false;
-        };
-        let handle = spawn();
-        entry.handler = Some((handle, Instant::now()));
-        true
-    }
-
-    #[must_use]
-    pub(crate) fn settle(&self, id: JobId, generation: i64, intended: Intended) -> bool {
-        let mut guard = self.lock();
-        let Some(entry) = guard.1.get_mut(&(id, generation)) else {
-            return false;
-        };
-        entry.intended = Some(intended);
-        entry.extending = false;
-        true
-    }
-
-    #[must_use]
-    pub(crate) fn extending(&self) -> Vec<(JobId, i64)> {
-        self.lock()
-            .1
-            .iter()
-            .filter(|(_, entry)| entry.extending)
-            .map(|(key, _)| *key)
-            .collect()
-    }
-
-    pub(crate) fn acknowledge(&self, id: JobId, generation: i64, sent: Instant) {
-        let guard = self.lock();
-        let Some(entry) = guard.1.get(&(id, generation)) else {
-            return;
-        };
-        if entry.extending {
-            let _previous = entry.deadline.send_replace(lease::local_deadline(sent));
-        }
-    }
-
-    pub(crate) fn supersede(&self, id: JobId, generation: i64) {
-        let guard = self.lock();
-        let Some(entry) = guard.1.get(&(id, generation)) else {
-            return;
-        };
-        if entry.extending {
-            entry.superseded.cancel();
-        }
-    }
-
-    pub(crate) fn take(&self, id: JobId, generation: i64) -> Option<Entry> {
-        self.lock().1.remove(&(id, generation))
-    }
-
-    #[must_use]
-    pub(crate) fn close(&self) -> Vec<Entry> {
-        let mut guard = self.lock();
-        guard.0 = true;
-        guard.1.drain().map(|(_, entry)| entry).collect()
-    }
-
-    #[must_use]
-    pub(crate) fn len(&self) -> usize {
-        self.lock().1.len()
-    }
-}
-
-pub(crate) struct Collected {
-    pub(crate) id: JobId,
-    pub(crate) kind: &'static str,
-    pub(crate) generation: i64,
-    pub(crate) attempt: u16,
-    pub(crate) intended: Option<Intended>,
-    pub(crate) ran: Option<Duration>,
-    pub(crate) deadline: Instant,
-}
-
-impl fmt::Debug for Collected {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Collected")
-            .field("id", &self.id)
-            .field("generation", &self.generation)
-            .field("kind", &self.kind)
-            .field("attempt", &self.attempt)
-            .finish_non_exhaustive()
-    }
-}
-
-fn collect_entry(entry: Entry) -> Collected {
-    entry.handler_cancel.cancel();
-    if let Some((handle, _)) = &entry.handler {
-        handle.abort();
-    }
-    entry.supervisor.abort();
-    let ran = entry.intended.as_ref().map_or_else(
-        || entry.handler.as_ref().map(|(_, started)| started.elapsed()),
-        |intended| intended.ran,
-    );
-    Collected {
-        id: entry.id,
-        kind: entry.kind,
-        generation: entry.generation,
-        attempt: entry.attempt,
-        intended: entry.intended,
-        ran,
-        deadline: *entry.deadline.borrow(),
     }
 }
 
@@ -677,217 +459,6 @@ pub(crate) async fn backstop<T>(
     }
 }
 
-type ReleaseResult = Result<Vec<(JobId, i64)>, OperationError>;
-type ReconcileResult = Result<(Instant, Vec<RowState>), OperationError>;
-
-struct DrainProgress {
-    release: Mutex<Option<ReleaseResult>>,
-    reconcile: Mutex<Option<ReconcileResult>>,
-}
-
-pub(crate) async fn release_collected(
-    shared: &Shared,
-    collected: Vec<Collected>,
-    deadline: Instant,
-) -> DrainEnd {
-    if collected.is_empty() {
-        return DrainEnd::default();
-    }
-    let progress = DrainProgress {
-        release: Mutex::new(None),
-        reconcile: Mutex::new(None),
-    };
-    let timed_out = drive_release(shared, &collected, deadline, &progress).await;
-    record_drain(shared, &collected, &progress, timed_out)
-}
-
-async fn drive_release(
-    shared: &Shared,
-    collected: &[Collected],
-    deadline: Instant,
-    progress: &DrainProgress,
-) -> bool {
-    if Instant::now() >= deadline {
-        return true;
-    }
-    let aborted = AtomicBool::new(false);
-    let timed_out = tokio::time::timeout_at(
-        deadline,
-        release_and_reconcile(shared, collected, deadline, progress, &aborted),
-    )
-    .await
-    .is_err();
-    timed_out || aborted.load(Ordering::SeqCst)
-}
-
-async fn release_and_reconcile(
-    shared: &Shared,
-    collected: &[Collected],
-    deadline: Instant,
-    progress: &DrainProgress,
-    aborted: &AtomicBool,
-) {
-    if Instant::now() >= deadline {
-        aborted.store(true, Ordering::SeqCst);
-        return;
-    }
-    let Ok(_permit) = shared.permit.acquire().await else {
-        return;
-    };
-    let pairs: Vec<(JobId, i64)> = collected
-        .iter()
-        .map(|claim| (claim.id, claim.generation))
-        .collect();
-    let release_result = lease::release(shared, &pairs).await;
-    *lock(&progress.release) = Some(release_result);
-    if Instant::now() >= deadline {
-        aborted.store(true, Ordering::SeqCst);
-        return;
-    }
-    let id_list = ids_to_reconcile(collected, lock(&progress.release).as_ref());
-    if id_list.is_empty() {
-        return;
-    }
-    let reconcile_result = lease::reconcile(shared, &id_list).await;
-    *lock(&progress.reconcile) = Some(match reconcile_result {
-        Ok(rows) => Ok((Instant::now(), rows)),
-        Err(error) => Err(error),
-    });
-}
-
-fn ids_to_reconcile(collected: &[Collected], release: Option<&ReleaseResult>) -> Vec<JobId> {
-    let returned = match release {
-        Some(Ok(returned)) => returned.as_slice(),
-        _ => &[],
-    };
-    collected
-        .iter()
-        .filter(|claim| !returned.iter().any(|pair| pair_is(pair, claim)))
-        .map(|claim| claim.id)
-        .collect()
-}
-
-fn pair_is(pair: &(JobId, i64), claim: &Collected) -> bool {
-    pair.0 == claim.id && pair.1 == claim.generation
-}
-
-fn record_drain(
-    shared: &Shared,
-    collected: &[Collected],
-    progress: &DrainProgress,
-    timed_out: bool,
-) -> DrainEnd {
-    let (released, release_unknown) = take_release(shared, progress);
-    let rows = take_reconcile(shared, progress);
-    let mut end = DrainEnd {
-        timed_out,
-        ..DrainEnd::default()
-    };
-    for claim in collected {
-        let outcome = if released.contains(&(claim.id, claim.generation)) {
-            Outcome::Released
-        } else {
-            let (attribution, newer) = attribution_of(claim, rows.as_ref());
-            attempt::drain_outcome(
-                attribution,
-                newer,
-                release_unknown,
-                claim.intended.as_ref().map(|intended| intended.outcome),
-            )
-        };
-        attempt::record(outcome, &facts_of(claim, outcome));
-        tally(&mut end, outcome);
-    }
-    end
-}
-
-fn take_release(shared: &Shared, progress: &DrainProgress) -> (HashSet<(JobId, i64)>, bool) {
-    match lock(&progress.release).as_ref() {
-        Some(Ok(returned)) => {
-            observe_recovery(shared, Operation::Release);
-            (returned.iter().copied().collect(), false)
-        }
-        Some(Err(error)) => {
-            observe_failure(shared, Operation::Release, *error);
-            (HashSet::new(), *error == OperationError::CommitUnknown)
-        }
-        None => (HashSet::new(), false),
-    }
-}
-
-fn take_reconcile(shared: &Shared, progress: &DrainProgress) -> Option<(Instant, Vec<RowState>)> {
-    match lock(&progress.reconcile).take() {
-        Some(Ok(rows)) => {
-            observe_recovery(shared, Operation::Reconcile);
-            Some(rows)
-        }
-        Some(Err(error)) => {
-            observe_failure(shared, Operation::Reconcile, error);
-            None
-        }
-        None => None,
-    }
-}
-
-fn attribution_of(
-    claim: &Collected,
-    rows: Option<&(Instant, Vec<RowState>)>,
-) -> (Option<Attribution>, bool) {
-    let Some((arrived, rows)) = rows else {
-        return (None, false);
-    };
-    let row = rows.iter().find(|row| row.id == claim.id);
-    let newer = row.is_some_and(|row| row.generation != claim.generation);
-    let attribution = attempt::attribute(
-        claim.generation,
-        claim.attempt,
-        row,
-        *arrived < claim.deadline,
-    );
-    (Some(attribution), newer)
-}
-
-fn facts_of(claim: &Collected, outcome: Outcome) -> Facts<'_> {
-    let intended = claim.intended.as_ref();
-    let (summary, failure, retry_in, lost) = match outcome {
-        Outcome::Completed
-        | Outcome::Retry
-        | Outcome::Timeout
-        | Outcome::Exhausted
-        | Outcome::Permanent => (
-            intended.and_then(|item| item.summary.as_deref()),
-            intended.and_then(|item| item.failure),
-            intended.and_then(|item| item.retry_in),
-            None,
-        ),
-        Outcome::Lost => (None, None, None, Some(LostReason::Release)),
-        Outcome::Superseded | Outcome::Released => (None, None, None, None),
-    };
-    Facts {
-        id: claim.id,
-        kind: claim.kind,
-        attempt: claim.attempt,
-        summary,
-        failure,
-        retry_in,
-        lost,
-        ran: claim.ran,
-    }
-}
-
-fn tally(end: &mut DrainEnd, outcome: Outcome) {
-    match outcome {
-        Outcome::Released => end.released = end.released.saturating_add(1),
-        Outcome::Superseded => end.superseded = end.superseded.saturating_add(1),
-        Outcome::Lost => end.lost = end.lost.saturating_add(1),
-        Outcome::Completed
-        | Outcome::Retry
-        | Outcome::Timeout
-        | Outcome::Exhausted
-        | Outcome::Permanent => end.written = end.written.saturating_add(1),
-    }
-}
-
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
@@ -897,236 +468,35 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use super::*;
 
-    use tokio::sync::{Semaphore, watch};
-    use tokio::time::Instant;
-    use tokio_util::sync::CancellationToken;
-
-    use infra_postgres::TxError;
-
-    use super::{Attempts, OpFailed, Operation, OperationError, backstop};
-    use crate::attempt::{Intended, Outcome};
-    use crate::claim::Claimed;
-    use crate::kind::JobId;
-    use crate::lease;
-
-    fn id() -> JobId {
-        JobId::parse("01234567-89ab-cdef-fedc-ba9876543210").unwrap()
-    }
-
-    fn claimed(generation: i64) -> Claimed {
-        let slots = Arc::new(Semaphore::new(4));
-        let slot = slots.try_acquire_many_owned(1).unwrap();
-        Claimed {
-            id: id(),
-            generation,
-            kind: "sample",
-            attempt: 1,
-            payload: Vec::new(),
-            trace_context: None,
-            slot,
+    #[tokio::test(start_paused = true)]
+    async fn backstop_distinguishes_statement_timeout_from_unknown_commit() {
+        for (has_returned, expected) in [
+            (false, OperationError::TimedOut),
+            (true, OperationError::CommitUnknown),
+        ] {
+            let returned = AtomicBool::new(has_returned);
+            assert_eq!(
+                backstop(&returned, std::future::pending::<Result<(), OpFailed>>()).await,
+                Err(expected)
+            );
         }
     }
 
-    fn abort() -> tokio::task::AbortHandle {
-        tokio::spawn(async {}).abort_handle()
-    }
-
-    fn intended() -> Intended {
-        Intended {
-            outcome: Outcome::Completed,
-            summary: None,
-            failure: None,
-            retry_in: None,
-            ran: None,
-        }
-    }
-
-    fn admit(
-        attempts: &Attempts,
-        generation: i64,
-        deadline: Instant,
-    ) -> (watch::Receiver<Instant>, CancellationToken) {
-        let saved = Arc::new(Mutex::new(None));
-        let slot = Arc::clone(&saved);
-        attempts
-            .admit(claimed(generation), deadline, move |_claimed, handles| {
-                *slot.lock().unwrap() = Some((handles.deadline, handles.superseded));
-                abort()
+    #[tokio::test]
+    async fn backstop_preserves_transaction_result() {
+        let returned = AtomicBool::new(false);
+        assert_eq!(
+            backstop(&returned, async { Ok::<_, OpFailed>(7) }).await,
+            Ok(7)
+        );
+        assert_eq!(
+            backstop(&returned, async {
+                Err::<(), _>(OpFailed(OperationError::Begin))
             })
-            .unwrap();
-        saved.lock().unwrap().take().unwrap()
-    }
-
-    #[tokio::test]
-    async fn admit_hands_the_claim_back_once_closed() {
-        let attempts = Attempts::new();
-        let _closed = attempts.close();
-        let err = attempts.admit(claimed(1), Instant::now(), |_, _| panic!("spawned"));
-        let returned = err.unwrap_err();
-        assert_eq!(returned.id, id());
-        assert_eq!(returned.generation, 1);
-    }
-
-    #[tokio::test]
-    async fn start_handler_refuses_after_close_without_spawning() {
-        let attempts = Attempts::new();
-        attempts
-            .admit(claimed(1), Instant::now(), |_, _| abort())
-            .unwrap();
-        let _closed = attempts.close();
-        let called = AtomicBool::new(false);
-        let handle = abort();
-        let started = attempts.start_handler(id(), 1, || {
-            called.store(true, Ordering::SeqCst);
-            handle
-        });
-        assert!(!started);
-        assert!(!called.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn two_generations_of_one_job_are_each_taken_once() {
-        let attempts = Attempts::new();
-        let now = Instant::now();
-        attempts.admit(claimed(1), now, |_, _| abort()).unwrap();
-        attempts.admit(claimed(2), now, |_, _| abort()).unwrap();
-        assert_eq!(attempts.len(), 2);
-        assert!(attempts.take(id(), 1).is_some());
-        assert!(attempts.take(id(), 2).is_some());
-        assert!(attempts.take(id(), 1).is_none());
-        assert!(attempts.take(id(), 2).is_none());
-    }
-
-    #[tokio::test]
-    async fn take_and_close_give_each_entry_to_one_taker() {
-        let attempts = Attempts::new();
-        let now = Instant::now();
-        attempts.admit(claimed(1), now, |_, _| abort()).unwrap();
-        attempts.admit(claimed(2), now, |_, _| abort()).unwrap();
-        assert!(attempts.take(id(), 1).is_some());
-        let closed = attempts.close();
-        assert_eq!(closed.len(), 1);
-        assert_eq!(closed[0].generation, 2);
-        assert!(attempts.take(id(), 2).is_none());
-
-        let attempts = Attempts::new();
-        attempts.admit(claimed(7), now, |_, _| abort()).unwrap();
-        let closed = attempts.close();
-        assert_eq!(closed.len(), 1);
-        assert!(attempts.take(id(), 7).is_none());
-        assert!(attempts.close().is_empty());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn acknowledge_and_supersede_ignore_stale_and_settled() {
-        let attempts = Attempts::new();
-        let sent = Instant::now();
-        let (deadline, superseded) = admit(&attempts, 1, sent);
-        attempts.acknowledge(id(), 2, sent + Duration::from_secs(10));
-        attempts.supersede(id(), 2);
-        assert_eq!(*deadline.borrow(), sent);
-        assert!(!superseded.is_cancelled());
-
-        let later = sent + Duration::from_secs(10);
-        attempts.acknowledge(id(), 1, later);
-        assert_eq!(*deadline.borrow(), lease::local_deadline(later));
-        assert_eq!(*deadline.borrow(), later + Duration::from_secs(28));
-
-        attempts.supersede(id(), 1);
-        assert!(superseded.is_cancelled());
-
-        let attempts = Attempts::new();
-        let (deadline, superseded) = admit(&attempts, 1, sent);
-        assert!(attempts.settle(id(), 1, intended()));
-        attempts.acknowledge(id(), 1, later);
-        attempts.supersede(id(), 1);
-        assert_eq!(*deadline.borrow(), sent);
-        assert!(!superseded.is_cancelled());
-    }
-
-    #[tokio::test]
-    async fn settle_returns_false_after_close() {
-        let attempts = Attempts::new();
-        attempts
-            .admit(claimed(1), Instant::now(), |_, _| abort())
-            .unwrap();
-        let _closed = attempts.close();
-        assert!(!attempts.settle(id(), 1, intended()));
-    }
-
-    #[test]
-    fn op_failed_from_every_tx_error_and_sqlx() {
-        let io = || sqlx::Error::Io(std::io::Error::other("reset"));
-        assert_eq!(
-            OpFailed::from(TxError::Acquire(sqlx::Error::PoolTimedOut)).0,
-            OperationError::Acquire
+            .await,
+            Err(OperationError::Begin)
         );
-        assert_eq!(
-            OpFailed::from(TxError::Begin(sqlx::Error::PoolTimedOut)).0,
-            OperationError::Begin
-        );
-        assert_eq!(
-            OpFailed::from(TxError::CommitFailed(io())).0,
-            OperationError::Commit
-        );
-        assert_eq!(
-            OpFailed::from(TxError::CommitUnknown(io())).0,
-            OperationError::CommitUnknown
-        );
-        assert_eq!(
-            OpFailed::from(sqlx::Error::PoolTimedOut).0,
-            OperationError::Statement
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn backstop_expiry_before_returned_is_timed_out() {
-        let returned = AtomicBool::new(false);
-        let result = backstop(&returned, std::future::pending::<Result<(), OpFailed>>()).await;
-        assert_eq!(result, Err(OperationError::TimedOut));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn backstop_expiry_after_returned_is_commit_unknown() {
-        let returned = AtomicBool::new(false);
-        let result = backstop(&returned, async {
-            returned.store(true, Ordering::SeqCst);
-            std::future::pending::<Result<(), OpFailed>>().await
-        })
-        .await;
-        assert_eq!(result, Err(OperationError::CommitUnknown));
-    }
-
-    #[tokio::test]
-    async fn backstop_passes_ok_and_err_through() {
-        let returned = AtomicBool::new(false);
-        let ok = backstop(&returned, async { Ok::<u8, OpFailed>(7) }).await;
-        assert_eq!(ok, Ok(7));
-        let err = backstop(&returned, async {
-            Err::<(), OpFailed>(OpFailed(OperationError::Begin))
-        })
-        .await;
-        assert_eq!(err, Err(OperationError::Begin));
-    }
-
-    #[test]
-    fn operation_labels() {
-        assert_eq!(OperationError::Acquire.as_str(), "acquire");
-        assert_eq!(OperationError::Begin.as_str(), "begin");
-        assert_eq!(OperationError::Statement.as_str(), "statement");
-        assert_eq!(OperationError::Commit.as_str(), "commit");
-        assert_eq!(OperationError::CommitUnknown.as_str(), "commit_unknown");
-        assert_eq!(OperationError::TimedOut.as_str(), "timed_out");
-        assert_eq!(Operation::Claim.as_str(), "claim");
-        assert_eq!(Operation::Extend.as_str(), "extend");
-        assert_eq!(Operation::Record.as_str(), "record");
-        assert_eq!(Operation::Release.as_str(), "release");
-        assert_eq!(Operation::Reconcile.as_str(), "reconcile");
-        assert_eq!(Operation::Retention.as_str(), "retention");
-        assert_eq!(Operation::Sample.as_str(), "sample");
     }
 }

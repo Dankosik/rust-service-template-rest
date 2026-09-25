@@ -735,6 +735,7 @@
       "crates/jobs-worker/",
       "crates/config/src/jobs.rs",
       "migrations/20260924000001_create_background_jobs.sql",
+      "migrations/20260925000001_simplify_background_jobs.sql",
       "test/src/jobs.rs",
       "test/src/bin/",
       "test/tests/jobs/",

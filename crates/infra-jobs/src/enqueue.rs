@@ -7,7 +7,7 @@ use sqlx::Row;
 use sqlx::postgres::PgConnection;
 
 use crate::kind::{self, JobId, JobKind};
-use crate::traceparent;
+use crate::trace_context;
 
 /// The longest JSON payload enqueue accepts: 256 KiB.
 pub const MAX_PAYLOAD_BYTES: usize = 262_144;
@@ -18,11 +18,14 @@ pub const MAX_DELAY: Duration = Duration::from_hours(36_500 * 24);
 
 /// One insert on the caller's connection. A conflict with a live unique key
 /// returns no row.
-const ENQUEUE: &str = "INSERT INTO background_jobs (kind, payload, unique_key, not_before, trace_context) \
-     VALUES ($1, $2, $3, statement_timestamp() + $4, $5) \
+const ENQUEUE: &str = "INSERT INTO background_jobs (kind, payload, unique_key, not_before, trace_context, trace_state) \
+     VALUES ($1, $2::jsonb, $3::text COLLATE \"C\", \
+             statement_timestamp() + ($4 * interval '1 microsecond'), $5, $6) \
      ON CONFLICT (kind, unique_key) WHERE unique_key IS NOT NULL AND state IN ('pending', 'running') \
      DO NOTHING \
      RETURNING id::text AS id";
+
+const SERVER_ENCODING: &str = "SELECT current_setting('server_encoding')";
 
 /// Delay and uniqueness for one enqueue.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -44,6 +47,11 @@ pub enum Enqueued {
     Duplicate,
 }
 
+/// A delay outside the queue's supported range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("delay exceeds the maximum of 36500 days")]
+pub struct InvalidDelay;
+
 /// Why an enqueue did not insert a job.
 #[derive(Debug, thiserror::Error)]
 pub enum EnqueueError {
@@ -56,6 +64,9 @@ pub enum EnqueueError {
     /// The delay is longer than [`MAX_DELAY`].
     #[error("delay exceeds the maximum of 36500 days")]
     InvalidDelay,
+    /// The JSON payload decodes a NUL in a string or object key.
+    #[error("payload contains a decoded NUL character")]
+    PayloadContainsNul,
     /// The payload did not serialize as JSON.
     #[error("payload could not be serialized as JSON")]
     Serialize(#[source] serde_json::Error),
@@ -65,6 +76,9 @@ pub enum EnqueueError {
         /// The serialized size that was refused.
         bytes: usize,
     },
+    /// The connected database does not use UTF8 encoding.
+    #[error("jobs require a UTF8 database encoding")]
+    UnsupportedEncoding,
     /// The statement failed; the caller's transaction is aborted.
     ///
     /// Classify with [`infra_postgres::retryable`].
@@ -93,13 +107,21 @@ pub async fn enqueue<K: JobKind>(
     options: EnqueueOptions<'_>,
 ) -> Result<Enqueued, EnqueueError> {
     let prepared = prepare(payload, options)?;
-    let traceparent = traceparent::current();
+    let encoding: String = sqlx::query_scalar(SERVER_ENCODING)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(EnqueueError::Database)?;
+    if encoding != "UTF8" {
+        return Err(EnqueueError::UnsupportedEncoding);
+    }
+    let (traceparent, tracestate) = trace_context::capture();
     let row = sqlx::query(ENQUEUE)
         .bind(K::NAME)
-        .bind(prepared.payload.as_slice())
+        .bind(prepared.payload)
         .bind(prepared.unique_key)
-        .bind(prepared.delay)
+        .bind(prepared.delay_micros)
         .bind(traceparent.as_deref())
+        .bind(tracestate.as_deref())
         .fetch_optional(&mut *conn)
         .await
         .map_err(EnqueueError::Database)?;
@@ -117,9 +139,9 @@ pub async fn enqueue<K: JobKind>(
 
 #[derive(Debug)]
 struct Prepared<'a> {
-    payload: Vec<u8>,
-    unique_key: Option<&'a [u8]>,
-    delay: Duration,
+    payload: String,
+    unique_key: Option<&'a str>,
+    delay_micros: i64,
 }
 
 /// Validate and bind. A failure has sent nothing.
@@ -131,24 +153,25 @@ fn prepare<'a, K: JobKind>(
         return Err(EnqueueError::InvalidKind(K::NAME));
     }
     let unique_key = match options.unique_key {
-        Some(key) if valid_unique_key(key) => Some(key.as_bytes()),
+        Some(key) if valid_unique_key(key) => Some(key),
         Some(_) => return Err(EnqueueError::InvalidUniqueKey),
         None => None,
     };
-    if options.delay > MAX_DELAY {
-        return Err(EnqueueError::InvalidDelay);
-    }
-    let delay = whole_micros(options.delay);
-    let payload = serde_json::to_vec(payload).map_err(EnqueueError::Serialize)?;
+    let delay_micros =
+        checked_delay_micros(options.delay).map_err(|_| EnqueueError::InvalidDelay)?;
+    let payload = serde_json::to_string(payload).map_err(EnqueueError::Serialize)?;
     if payload.len() > MAX_PAYLOAD_BYTES {
         return Err(EnqueueError::PayloadTooLarge {
             bytes: payload.len(),
         });
     }
+    if contains_decoded_nul(payload.as_bytes()) {
+        return Err(EnqueueError::PayloadContainsNul);
+    }
     Ok(Prepared {
         payload,
         unique_key,
-        delay,
+        delay_micros,
     })
 }
 
@@ -156,24 +179,47 @@ fn valid_unique_key(key: &str) -> bool {
     !key.is_empty() && key.len() <= MAX_UNIQUE_KEY_BYTES && !key.chars().any(char::is_control)
 }
 
-/// `duration` without its sub-microsecond part. `sqlx` refuses to bind a
-/// `Duration` with one as an `interval`.
-fn whole_micros(duration: Duration) -> Duration {
-    Duration::new(duration.as_secs(), duration.subsec_micros() * 1_000)
+/// Returns the exact PostgreSQL microsecond delay, dropping sub-microseconds.
+///
+/// The queue accepts zero through [`MAX_DELAY`] inclusive.
+pub(crate) fn checked_delay_micros(duration: Duration) -> Result<i64, InvalidDelay> {
+    if duration > MAX_DELAY {
+        return Err(InvalidDelay);
+    }
+    i64::try_from(duration.as_micros()).map_err(|_| InvalidDelay)
+}
+
+/// Whether serializer-produced JSON contains an escape that decodes to NUL.
+///
+/// A backslash always consumes its following escape byte. Thus the second
+/// backslash in `\\\\u0000` is consumed and its following `u0000` remains literal.
+fn contains_decoded_nul(payload: &[u8]) -> bool {
+    let mut index = 0;
+    while index < payload.len() {
+        if payload[index] == b'\\' {
+            if payload.get(index + 1..index + 6) == Some(b"u0000") {
+                return true;
+            }
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::time::Duration;
 
-    use serde::ser::Error as _;
-    use serde::{Deserialize, Serialize};
-    use sqlx::postgres::types::PgInterval;
-
     use super::{
-        EnqueueError, EnqueueOptions, MAX_DELAY, MAX_PAYLOAD_BYTES, MAX_UNIQUE_KEY_BYTES, prepare,
+        EnqueueError, EnqueueOptions, InvalidDelay, MAX_DELAY, MAX_PAYLOAD_BYTES,
+        MAX_UNIQUE_KEY_BYTES, checked_delay_micros, prepare,
     };
     use crate::JobKind;
+    use serde::ser::Error as _;
+    use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
     struct Widget {
@@ -192,10 +238,34 @@ mod tests {
     }
 
     #[derive(Serialize, Deserialize)]
+    struct Keyed(BTreeMap<String, String>);
+
+    impl JobKind for Keyed {
+        const NAME: &'static str = "keyed";
+    }
+
+    #[derive(Serialize, Deserialize)]
     struct BadKind;
 
     impl JobKind for BadKind {
         const NAME: &'static str = "Bad Name";
+    }
+
+    #[derive(Deserialize)]
+    struct Duplicate;
+
+    impl Serialize for Duplicate {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap as _;
+            let mut map = serializer.serialize_map(Some(2))?;
+            map.serialize_entry("key", "\0")?;
+            map.serialize_entry("key", "later value")?;
+            map.end()
+        }
+    }
+
+    impl JobKind for Duplicate {
+        const NAME: &'static str = "duplicate";
     }
 
     #[derive(Deserialize)]
@@ -242,7 +312,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(prepared.unique_key, Some(accepted.as_bytes()));
+        assert_eq!(prepared.unique_key, Some(accepted.as_str()));
 
         assert!(matches!(
             prepare(
@@ -322,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn delay_drops_sub_microsecond_and_binds() {
+    fn checked_delay_drops_sub_microseconds() {
         let prepared = prepare(
             &widget(),
             EnqueueOptions {
@@ -331,8 +401,13 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(prepared.delay, Duration::new(1, 999_999_000));
-        assert!(PgInterval::try_from(prepared.delay).is_ok());
+        assert_eq!(prepared.delay_micros, 1_999_999);
+        assert_eq!(checked_delay_micros(Duration::ZERO), Ok(0));
+        assert_eq!(checked_delay_micros(MAX_DELAY), Ok(3_153_600_000_000_000));
+        assert_eq!(
+            checked_delay_micros(MAX_DELAY + Duration::from_nanos(1)),
+            Err(InvalidDelay)
+        );
     }
 
     #[test]
@@ -347,6 +422,26 @@ mod tests {
             err,
             EnqueueError::PayloadTooLarge { bytes } if bytes == MAX_PAYLOAD_BYTES + 1
         ));
+    }
+
+    #[test]
+    fn payload_rejects_decoded_nul_but_keeps_literal_backslash_u0000() {
+        assert!(matches!(
+            prepare(&Duplicate, EnqueueOptions::default()),
+            Err(EnqueueError::PayloadContainsNul)
+        ));
+        assert!(matches!(
+            prepare(&Raw("\0".to_owned()), EnqueueOptions::default()),
+            Err(EnqueueError::PayloadContainsNul)
+        ));
+        assert!(matches!(
+            prepare(
+                &Keyed(BTreeMap::from([("\0".to_owned(), "value".to_owned())])),
+                EnqueueOptions::default(),
+            ),
+            Err(EnqueueError::PayloadContainsNul)
+        ));
+        assert!(prepare(&Raw(r"\u0000".to_owned()), EnqueueOptions::default()).is_ok());
     }
 
     #[test]

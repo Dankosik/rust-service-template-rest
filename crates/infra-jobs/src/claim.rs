@@ -1,7 +1,7 @@
 //! CLAIM and the claim loop.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use infra_postgres::in_tx_with;
@@ -11,20 +11,20 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::attempt::{self, Facts, LostReason, Outcome};
+use crate::attempt;
 use crate::engine::{
-    self, CLAIM_TTL, OPERATION_BACKSTOP, OpFailed, Operation, OperationError, POLL_INTERVAL,
-    READ_COMMITTED, Shared, backstop, observe_failure, observe_recovery, release_collected,
+    CANCEL_MARGIN, LEASE_RESERVE, OpFailed, Operation, OperationError, POLL_INTERVAL,
+    READ_COMMITTED, Shared, backstop, observe_failure, observe_recovery,
 };
 use crate::kind::JobId;
-use crate::lease::{self, RowState};
 
 /// Claim due pending jobs and expired running jobs, up to the free slots.
 const CLAIM: &str = "WITH policy AS ( \
-         SELECT policy.kind, policy.max_attempts \
-         FROM unnest($1::text[], $2::smallint[]) AS policy (kind, max_attempts) \
+         SELECT policy.kind, policy.max_attempts, policy.timeout_micros \
+         FROM unnest($1::text[], $2::smallint[], $3::bigint[]) \
+             AS policy (kind, max_attempts, timeout_micros) \
      ), \
-     available AS ( \
+     candidates AS ( \
          SELECT candidate.id, candidate.not_before \
          FROM policy \
          CROSS JOIN LATERAL ( \
@@ -34,48 +34,60 @@ const CLAIM: &str = "WITH policy AS ( \
                AND job.kind = policy.kind \
                AND job.not_before <= statement_timestamp() \
              ORDER BY job.not_before, job.id \
-             LIMIT $3 \
-             FOR UPDATE SKIP LOCKED \
+             LIMIT $4 \
+         ) AS candidate \
+         UNION ALL \
+         SELECT candidate.id, candidate.not_before \
+         FROM policy \
+         CROSS JOIN LATERAL ( \
+             SELECT job.id, job.not_before \
+             FROM background_jobs AS job \
+             WHERE job.state = 'running' \
+               AND job.kind = policy.kind \
+               AND job.claim_expires_at <= statement_timestamp() \
+             ORDER BY job.not_before, job.id \
+             LIMIT $4 \
          ) AS candidate \
      ), \
-     expired AS ( \
-         SELECT job.id, job.not_before \
-         FROM background_jobs AS job \
-         WHERE job.state = 'running' \
-           AND job.claim_expires_at <= statement_timestamp() \
-           AND job.kind = ANY ($1::text[]) \
-         ORDER BY job.not_before, job.id \
-         LIMIT $3 \
-         FOR UPDATE SKIP LOCKED \
+     selected AS MATERIALIZED ( \
+         SELECT id \
+         FROM candidates \
+         ORDER BY not_before, id \
+         LIMIT $4 \
      ), \
-     picked AS ( \
-         SELECT candidates.id \
-         FROM ( \
-             SELECT available.id, available.not_before FROM available \
-             UNION ALL \
-             SELECT expired.id, expired.not_before FROM expired \
-         ) AS candidates \
-         ORDER BY candidates.not_before, candidates.id \
-         LIMIT $3 \
+     locked AS ( \
+         SELECT job.id, job.claim_generation, policy.max_attempts, policy.timeout_micros \
+         FROM selected \
+         JOIN background_jobs AS job ON job.id = selected.id \
+         JOIN policy ON policy.kind = job.kind \
+         WHERE (job.state = 'pending' AND job.not_before <= statement_timestamp()) \
+            OR (job.state = 'running' AND job.claim_expires_at <= statement_timestamp()) \
+         FOR UPDATE OF job SKIP LOCKED \
      ) \
      UPDATE background_jobs AS job \
-     SET state = CASE WHEN job.attempts >= policy.max_attempts THEN 'failed' ELSE 'running' END, \
-         failure_reason = CASE WHEN job.attempts >= policy.max_attempts THEN 'exhausted' END, \
-         finished_at = CASE WHEN job.attempts >= policy.max_attempts THEN statement_timestamp() END, \
-         claim_expires_at = CASE WHEN job.attempts >= policy.max_attempts THEN NULL \
-                                 ELSE statement_timestamp() + $4 END, \
-         attempts = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempts \
+     SET state = CASE WHEN job.attempts >= locked.max_attempts THEN 'failed' ELSE 'running' END, \
+         failure_reason = CASE WHEN job.attempts >= locked.max_attempts THEN 'exhausted' END, \
+         finished_at = CASE WHEN job.attempts >= locked.max_attempts THEN statement_timestamp() END, \
+         claim_expires_at = CASE WHEN job.attempts >= locked.max_attempts THEN NULL \
+                                 ELSE statement_timestamp() \
+                                      + locked.timeout_micros * interval '1 microsecond' \
+                                      + interval '60 seconds' END, \
+         attempts = CASE WHEN job.attempts >= locked.max_attempts THEN job.attempts \
                          ELSE job.attempts + 1 END, \
-         error_summary = CASE WHEN job.attempts >= policy.max_attempts \
+         error_summary = CASE WHEN job.attempts >= locked.max_attempts \
                               THEN COALESCE(job.error_summary, 'attempt budget spent') \
                               ELSE job.error_summary END, \
          claim_generation = nextval('background_jobs_claim_generation') \
-     FROM policy \
-     WHERE job.id = ANY (ARRAY(SELECT picked.id FROM picked)) \
-       AND policy.kind = job.kind \
+     FROM locked \
+     WHERE job.id = locked.id \
+       AND job.claim_generation = locked.claim_generation \
+       AND ((job.state = 'pending' AND job.not_before <= statement_timestamp()) \
+            OR (job.state = 'running' AND job.claim_expires_at <= statement_timestamp())) \
      RETURNING job.id::text AS id, job.kind, job.state, job.attempts, job.claim_generation, \
-               CASE WHEN job.state = 'running' THEN job.payload END AS payload, \
-               job.trace_context, job.error_summary";
+               locked.timeout_micros, \
+               CASE WHEN job.state = 'running' THEN job.payload::text END AS payload, \
+               job.trace_context, job.trace_state, job.error_summary, \
+               CASE WHEN job.state = 'running' THEN random() END AS jitter";
 
 /// A row CLAIM set `running`.
 #[derive(Debug)]
@@ -86,6 +98,8 @@ pub(crate) struct Claimed {
     pub(crate) attempt: u16,
     pub(crate) payload: Vec<u8>,
     pub(crate) trace_context: Option<String>,
+    pub(crate) trace_state: Option<String>,
+    pub(crate) jitter: f64,
     pub(crate) slot: OwnedSemaphorePermit,
 }
 
@@ -106,9 +120,13 @@ pub(crate) async fn run_claim_loop(shared: Arc<Shared>, stop: CancellationToken)
         let Some(permit) = engine_permit(&shared, &stop).await else {
             return;
         };
-        let round = send_claim(&shared, as_i64(requested)).await;
+        let round = tokio::select! {
+            biased;
+            () = stop.cancelled() => return,
+            round = send_claim(&shared, as_i64(requested)) => round,
+        };
         drop(permit);
-        wait_for_tick = finish_round(&shared, &mut slots, requested, round).await;
+        wait_for_tick = finish_round(&shared, &stop, &mut slots, requested, round);
     }
 }
 
@@ -159,70 +177,64 @@ async fn engine_permit<'a>(
 
 enum ClaimRound {
     Known { sent: Instant, rows: Vec<Drawn> },
-    Unknown { sent: Instant, rows: Vec<Drawn> },
+    Unknown,
     Failed(OperationError),
 }
 
 async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
-    let (names, max_attempts) = policy_binds(&shared.registry);
-    let kept = Mutex::new(None);
+    let (names, max_attempts, timeouts) = policy_binds(&shared.registry);
     let returned = AtomicBool::new(false);
     let result = backstop(
         &returned,
         in_tx_with(
             &shared.pool,
             READ_COMMITTED,
-            async |conn| -> Result<(), OpFailed> {
+            async |conn| -> Result<(Instant, Vec<Drawn>), OpFailed> {
                 let sent = Instant::now();
                 let rows = sqlx::query(CLAIM)
                     .bind(&names)
                     .bind(&max_attempts)
+                    .bind(&timeouts)
                     .bind(requested)
-                    .bind(CLAIM_TTL)
                     .fetch_all(&mut *conn)
                     .await?;
                 let decoded = decode_claims(&rows, &shared.registry)?;
-                *lock(&kept) = Some((sent, decoded));
                 returned.store(true, Ordering::SeqCst);
-                Ok(())
+                Ok((sent, decoded))
             },
         ),
     )
     .await;
-    let stored = lock(&kept).take();
     match result {
-        Ok(()) => stored_round(stored, true),
-        Err(OperationError::CommitUnknown) => stored_round(stored, false),
+        Ok((sent, rows)) => ClaimRound::Known { sent, rows },
+        Err(OperationError::CommitUnknown) => ClaimRound::Unknown,
         Err(error) => ClaimRound::Failed(error),
     }
 }
 
-fn stored_round(stored: Option<(Instant, Vec<Drawn>)>, known: bool) -> ClaimRound {
-    let (sent, rows) = stored.unwrap_or_else(|| (Instant::now(), Vec::new()));
-    if known {
-        ClaimRound::Known { sent, rows }
-    } else {
-        ClaimRound::Unknown { sent, rows }
-    }
-}
-
-fn policy_binds(registry: &crate::Registry) -> (Vec<&str>, Vec<i16>) {
+fn policy_binds(registry: &crate::Registry) -> (Vec<&str>, Vec<i16>, Vec<i64>) {
     let mut names = Vec::new();
     let mut max_attempts = Vec::new();
+    let mut timeouts = Vec::new();
     for registered in registry.iter() {
         names.push(registered.name);
-        let attempts = i16::try_from(registered.policy.max_attempts).unwrap_or(i16::MAX);
-        max_attempts.push(attempts);
+        max_attempts.push(i16::try_from(registered.policy.max_attempts).unwrap_or(i16::MAX));
+        timeouts.push(timeout_micros(registered.policy.timeout));
     }
-    (names, max_attempts)
+    (names, max_attempts, timeouts)
+}
+
+fn timeout_micros(timeout: Duration) -> i64 {
+    i64::try_from(timeout.as_micros()).unwrap_or(i64::MAX)
 }
 
 fn as_i64(count: usize) -> i64 {
     i64::try_from(count).unwrap_or(1)
 }
 
-async fn finish_round(
+fn finish_round(
     shared: &Arc<Shared>,
+    stop: &CancellationToken,
     slots: &mut OwnedSemaphorePermit,
     requested: usize,
     round: ClaimRound,
@@ -231,15 +243,11 @@ async fn finish_round(
         ClaimRound::Known { sent, rows } => {
             observe_recovery(shared, Operation::Claim);
             let filled = rows.len() == requested;
-            let deadline = lease::local_deadline(sent);
-            release_handed(shared, process_rows(shared, slots, rows, deadline)).await;
+            dispatch_known(shared, stop, slots, rows, sent);
             !filled
         }
-        ClaimRound::Unknown { sent, rows } => {
+        ClaimRound::Unknown => {
             observe_failure(shared, Operation::Claim, OperationError::CommitUnknown);
-            let deadline = lease::local_deadline(sent);
-            let claimed = attribute_unknown(shared, rows, deadline).await;
-            release_handed(shared, process_rows(shared, slots, claimed, deadline)).await;
             true
         }
         ClaimRound::Failed(error) => {
@@ -249,179 +257,57 @@ async fn finish_round(
     }
 }
 
-async fn release_handed(shared: &Shared, handed: Vec<engine::Collected>) {
-    if handed.is_empty() {
-        return;
-    }
-    let deadline = Instant::now()
-        .checked_add(OPERATION_BACKSTOP)
-        .unwrap_or_else(Instant::now);
-    release_collected(shared, handed, deadline).await;
-}
-
-async fn attribute_unknown(shared: &Shared, rows: Vec<Drawn>, deadline: Instant) -> Vec<Drawn> {
-    if rows.is_empty() || Instant::now() >= deadline {
-        return Vec::new();
-    }
-    let pending = rows;
-    loop {
-        if Instant::now() >= deadline {
-            return Vec::new();
-        }
-        match reconcile_kept(shared, &pending, deadline).await {
-            KeptTry::Ready(found) => {
-                return pending
-                    .into_iter()
-                    .filter(|row| was_claimed(row, &found))
-                    .collect();
-            }
-            KeptTry::Retry => sleep_capped(deadline, Duration::from_secs(1)).await,
-            KeptTry::Stop => return Vec::new(),
-        }
-    }
-}
-
-enum KeptTry {
-    Ready(Vec<RowState>),
-    Retry,
-    Stop,
-}
-
-enum Step {
-    Closed,
-    Done(Result<Vec<RowState>, OperationError>),
-}
-
-async fn reconcile_kept(shared: &Shared, pending: &[Drawn], deadline: Instant) -> KeptTry {
-    let id_list: Vec<JobId> = pending.iter().map(|row| row.id).collect();
-    let attempt = tokio::time::timeout_at(deadline, async {
-        let Ok(_permit) = shared.permit.acquire().await else {
-            return Step::Closed;
-        };
-        Step::Done(lease::reconcile(shared, &id_list).await)
-    })
-    .await;
-    match attempt {
-        Err(_) | Ok(Step::Closed) => KeptTry::Stop,
-        Ok(Step::Done(Ok(rows))) => {
-            observe_recovery(shared, Operation::Reconcile);
-            KeptTry::Ready(rows)
-        }
-        Ok(Step::Done(Err(error))) => {
-            observe_failure(shared, Operation::Reconcile, error);
-            KeptTry::Retry
-        }
-    }
-}
-
-fn was_claimed(row: &Drawn, found: &[RowState]) -> bool {
-    found
-        .iter()
-        .any(|state| state.id == row.id && state.generation == row.generation)
-}
-
-fn process_rows(
+fn dispatch_known(
     shared: &Arc<Shared>,
+    stop: &CancellationToken,
     slots: &mut OwnedSemaphorePermit,
     rows: Vec<Drawn>,
-    deadline: Instant,
-) -> Vec<engine::Collected> {
-    let mut handed = Vec::new();
+    sent: Instant,
+) {
     for row in rows {
         if row.state == DrawnState::Failed {
-            record_exhausted(&row);
+            attempt::record_exhausted(row.id, row.kind, row.attempt, row.error_summary.as_deref());
             continue;
         }
-        if Instant::now() >= deadline || row.payload.is_none() {
-            record_lost(&row);
-            continue;
+        let deadline = local_deadline(sent, row.timeout_micros);
+        if stop.is_cancelled() || Instant::now() >= deadline {
+            return;
         }
         let Some(slot) = slots.split(1) else {
-            handed.push(handed_back(&row, deadline));
-            continue;
+            return;
         };
         let Some(payload) = row.payload else {
-            record_lost(&row);
-            continue;
+            return;
+        };
+        let Some(jitter) = row.jitter else {
+            return;
         };
         let claimed = Claimed {
             id: row.id,
             generation: row.generation,
             kind: row.kind,
-            attempt: row.attempts,
-            payload,
+            attempt: row.attempt,
+            payload: payload.into_bytes(),
             trace_context: row.trace_context,
+            trace_state: row.trace_state,
+            jitter,
             slot,
         };
-        if let Err(returned) = shared
-            .attempts
-            .admit(claimed, deadline, |claimed, handles| {
-                shared
-                    .attempt_tracker
-                    .spawn(attempt::supervise(Arc::clone(shared), claimed, handles))
-                    .abort_handle()
-            })
-        {
-            handed.push(handed_back_claimed(&returned, deadline));
+        if stop.is_cancelled() {
+            return;
         }
-    }
-    handed
-}
-
-fn record_exhausted(row: &Drawn) {
-    attempt::record(
-        Outcome::Exhausted,
-        &Facts {
-            id: row.id,
-            kind: row.kind,
-            attempt: row.attempts,
-            summary: row.error_summary.as_deref(),
-            failure: None,
-            retry_in: None,
-            lost: None,
-            ran: None,
-        },
-    );
-}
-
-fn record_lost(row: &Drawn) {
-    attempt::record(
-        Outcome::Lost,
-        &Facts {
-            id: row.id,
-            kind: row.kind,
-            attempt: row.attempts,
-            summary: None,
-            failure: None,
-            retry_in: None,
-            lost: Some(LostReason::Extension),
-            ran: None,
-        },
-    );
-}
-
-fn handed_back(row: &Drawn, deadline: Instant) -> engine::Collected {
-    engine::Collected {
-        id: row.id,
-        kind: row.kind,
-        generation: row.generation,
-        attempt: row.attempts,
-        intended: None,
-        ran: None,
-        deadline,
+        shared
+            .attempt_tracker
+            .spawn(attempt::supervise(Arc::clone(shared), claimed, deadline));
     }
 }
 
-fn handed_back_claimed(claimed: &Claimed, deadline: Instant) -> engine::Collected {
-    engine::Collected {
-        id: claimed.id,
-        kind: claimed.kind,
-        generation: claimed.generation,
-        attempt: claimed.attempt,
-        intended: None,
-        ran: None,
-        deadline,
-    }
+fn local_deadline(sent: Instant, timeout_micros: i64) -> Instant {
+    let timeout = Duration::from_micros(u64::try_from(timeout_micros).unwrap_or_default());
+    sent.checked_add(timeout)
+        .and_then(|deadline| deadline.checked_add(LEASE_RESERVE))
+        .and_then(|deadline| deadline.checked_sub(CANCEL_MARGIN))
+        .unwrap_or(sent)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -435,10 +321,13 @@ struct Drawn {
     generation: i64,
     kind: &'static str,
     state: DrawnState,
-    attempts: u16,
-    payload: Option<Vec<u8>>,
+    attempt: u16,
+    timeout_micros: i64,
+    payload: Option<String>,
     trace_context: Option<String>,
+    trace_state: Option<String>,
     error_summary: Option<String>,
+    jitter: Option<f64>,
 }
 
 fn decode_claims(
@@ -470,35 +359,27 @@ fn decode_claim(
         _ => return Err(OpFailed(OperationError::Statement)),
     };
     let attempts_i16: i16 = row.try_get("attempts")?;
-    let attempts = u16::try_from(attempts_i16).map_err(|_| OpFailed(OperationError::Statement))?;
-    let generation: i64 = row.try_get("claim_generation")?;
-    let payload: Option<Vec<u8>> = row.try_get("payload")?;
-    if state == DrawnState::Running && payload.is_none() {
+    let attempt = u16::try_from(attempts_i16).map_err(|_| OpFailed(OperationError::Statement))?;
+    let timeout_micros: i64 = row.try_get("timeout_micros")?;
+    if timeout_micros < 0 {
+        return Err(OpFailed(OperationError::Statement));
+    }
+    let payload: Option<String> = row.try_get("payload")?;
+    let jitter: Option<f64> = row.try_get("jitter")?;
+    if state == DrawnState::Running && (payload.is_none() || jitter.is_none()) {
         return Err(OpFailed(OperationError::Statement));
     }
     Ok(Drawn {
         id,
-        generation,
+        generation: row.try_get("claim_generation")?,
         kind,
         state,
-        attempts,
+        attempt,
+        timeout_micros,
         payload,
         trace_context: row.try_get("trace_context")?,
+        trace_state: row.try_get("trace_state")?,
         error_summary: row.try_get("error_summary")?,
+        jitter,
     })
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-async fn sleep_capped(deadline: Instant, delay: Duration) {
-    let until = match Instant::now().checked_add(delay) {
-        Some(at) if at < deadline => at,
-        _ => deadline,
-    };
-    tokio::time::sleep_until(until).await;
 }

@@ -98,7 +98,7 @@ fn explain(err: &AttemptError) -> String {
 struct StoredJob {
     id_text: String,
     kind: String,
-    payload: String,
+    payload: serde_json::Value,
     unique_key_is_null: bool,
     state: String,
     attempts: i16,
@@ -169,7 +169,7 @@ async fn open(pool: &PgPool, max_connections: u32) -> PgPool {
 
 async fn stored_job(pool: &PgPool, id: &str) -> StoredJob {
     let row = sqlx::query(
-        "SELECT id::text AS id_text, kind, convert_from(payload, 'UTF8') AS payload, \
+        "SELECT id::text AS id_text, kind, payload::text AS payload, \
          unique_key IS NULL AS unique_key_is_null, state, attempts, claim_generation, \
          claim_expires_at IS NULL AS claim_expires_at_is_null, \
          finished_at IS NULL AS finished_at_is_null, \
@@ -182,10 +182,11 @@ async fn stored_job(pool: &PgPool, id: &str) -> StoredJob {
     .fetch_one(pool)
     .await
     .expect("the committed job");
+    let payload: String = row.try_get("payload").expect("payload");
     StoredJob {
         id_text: row.try_get("id_text").expect("id_text"),
         kind: row.try_get("kind").expect("kind"),
-        payload: row.try_get("payload").expect("payload"),
+        payload: serde_json::from_str(&payload).expect("JSONB payload"),
         unique_key_is_null: row
             .try_get("unique_key_is_null")
             .expect("unique_key_is_null"),
@@ -213,7 +214,7 @@ async fn stored_job(pool: &PgPool, id: &str) -> StoredJob {
 async fn rows_for_key(pool: &PgPool, kind: &str, key: &str) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM background_jobs WHERE kind = $1 AND unique_key = $2")
         .bind(kind)
-        .bind(key.as_bytes())
+        .bind(key)
         .fetch_one(pool)
         .await
         .expect("a key count")
@@ -224,7 +225,7 @@ async fn states_for_key(pool: &PgPool, key: &str) -> Vec<String> {
         "SELECT state FROM background_jobs WHERE kind = $1 AND unique_key = $2 ORDER BY state",
     )
     .bind(Note::NAME)
-    .bind(key.as_bytes())
+    .bind(key)
     .fetch_all(pool)
     .await
     .expect("states")
@@ -288,16 +289,18 @@ async fn insert_terminal(pool: &PgPool, key: &str, failed: bool) {
     let sql = if failed {
         "INSERT INTO background_jobs \
          (kind, payload, unique_key, state, failure_reason, finished_at, not_before) \
-         VALUES ($1, $2, $3, 'failed', 'exhausted', statement_timestamp(), statement_timestamp())"
+         VALUES ($1, $2::jsonb, $3::text COLLATE \"C\", 'failed', 'exhausted', \
+                 statement_timestamp(), statement_timestamp())"
     } else {
         "INSERT INTO background_jobs \
          (kind, payload, unique_key, state, finished_at, not_before) \
-         VALUES ($1, $2, $3, 'completed', statement_timestamp(), statement_timestamp())"
+         VALUES ($1, $2::jsonb, $3::text COLLATE \"C\", 'completed', \
+                 statement_timestamp(), statement_timestamp())"
     };
     let inserted = sqlx::query(sql)
         .bind(Note::NAME)
-        .bind(b"{}".as_slice())
-        .bind(key.as_bytes())
+        .bind("{}")
+        .bind(key)
         .execute(pool)
         .await
         .expect("the terminal holder");
@@ -308,12 +311,13 @@ async fn insert_running(pool: &PgPool, key: &str) {
     let inserted = sqlx::query(
         "INSERT INTO background_jobs \
          (kind, payload, unique_key, state, attempts, claim_generation, not_before, claim_expires_at) \
-         VALUES ($1, $2, $3, 'running', 1, nextval('background_jobs_claim_generation'), \
+         VALUES ($1, $2::jsonb, $3::text COLLATE \"C\", 'running', 1, \
+                 nextval('background_jobs_claim_generation'), \
                  statement_timestamp(), statement_timestamp() + interval '30 seconds')",
     )
-    .bind(Note::NAME)
-    .bind(b"{}".as_slice())
-    .bind(key.as_bytes())
+        .bind(Note::NAME)
+        .bind("{}")
+        .bind(key)
     .execute(pool)
     .await
     .expect("the running holder");
@@ -323,7 +327,7 @@ async fn insert_running(pool: &PgPool, key: &str) {
 async fn claim_like(conn: &mut PgConnection, key: &str) {
     let updated = sqlx::query(CLAIM_LIKE)
         .bind(Note::NAME)
-        .bind(key.as_bytes())
+        .bind(key)
         .execute(&mut *conn)
         .await
         .expect("the claim-like write");
@@ -337,7 +341,7 @@ async fn complete_holder(pool: &PgPool, key: &str) {
          WHERE kind = $1 AND unique_key = $2 AND state = 'pending'",
     )
     .bind(Note::NAME)
-    .bind(key.as_bytes())
+    .bind(key)
     .execute(pool)
     .await
     .expect("the holder becomes terminal");
@@ -443,7 +447,7 @@ fn spawn_snapshot_caller(
                 "SELECT count(*) FROM background_jobs WHERE kind = $1 AND unique_key = $2",
             )
             .bind(Note::NAME)
-            .bind(key.as_bytes())
+            .bind(&key)
             .fetch_one(&mut *conn)
             .await?;
             assert_eq!(seen, seen_rows, "rows visible to the caller's snapshot");
@@ -461,7 +465,7 @@ async fn e1_e2_e8_a_committed_enqueue_returns_created_and_one_row(pool: PgPool) 
     let note = Note {
         text: "kept".to_owned(),
     };
-    let expected = serde_json::to_string(&note).expect("payload text");
+    let expected = serde_json::to_value(&note).expect("payload JSON");
     let id = in_tx(&jobs, async |conn| -> Result<JobId, AttemptError> {
         let id = created(enqueue(conn, &note, EnqueueOptions::default()).await?);
         let on_time: bool = sqlx::query_scalar(
@@ -639,6 +643,12 @@ async fn e4_validation_failures_leave_the_transaction_usable(pool: PgPool) {
             |err| {
                 matches!(err, EnqueueError::PayloadTooLarge { bytes } if *bytes > MAX_PAYLOAD_BYTES)
             },
+        );
+        still_usable(conn).await;
+        refused(
+            enqueue(conn, &Raw("\0".to_owned()), EnqueueOptions::default()).await,
+            "PayloadContainsNul",
+            |err| matches!(err, EnqueueError::PayloadContainsNul),
         );
         still_usable(conn).await;
         refused(
@@ -937,7 +947,7 @@ async fn e6_read_committed_duplicate_against_a_live_holder_keeps_the_transaction
                      WHERE kind = $1 AND unique_key = $2 AND state IN ('pending', 'running')",
                 )
                 .bind(Note::NAME)
-                .bind(key.as_bytes())
+                .bind(key)
                 .fetch_one(&mut *conn)
                 .await?;
                 assert_eq!(seen, 1, "a live holder is visible");
@@ -962,105 +972,67 @@ async fn e6_read_committed_duplicate_against_a_live_holder_keeps_the_transaction
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn e6_read_committed_waits_then_duplicate_when_the_uncommitted_holder_commits(pool: PgPool) {
+async fn e6_read_committed_inflight_insert_keeps_commit_and_rollback_oracles(pool: PgPool) {
     let jobs = open(&pool, 3).await;
-    let key = "race-commit";
-    let mut holder = jobs.begin().await.expect("the holder transaction");
-    let held_id = created(
-        enqueue(
-            &mut holder,
-            &Note {
-                text: "holder".to_owned(),
+    for (label, commits) in [("commit", true), ("rollback", false)] {
+        let key = format!("race-{label}");
+        let mut holder = jobs.begin().await.expect("the holder transaction");
+        let held_id = created(
+            enqueue(
+                &mut holder,
+                &Note {
+                    text: "holder".to_owned(),
+                },
+                keyed(&key),
+            )
+            .await
+            .expect("the holder enqueues"),
+        );
+        let jobs_caller = jobs.clone();
+        let caller_key = key.clone();
+        let caller = tokio::spawn(async move {
+            in_tx_with(
+                &jobs_caller,
+                writable(Isolation::ReadCommitted),
+                async move |conn| -> Result<Enqueued, AttemptError> {
+                    let enqueued = enqueue(
+                        conn,
+                        &Note {
+                            text: "racer".to_owned(),
+                        },
+                        keyed(&caller_key),
+                    )
+                    .await?;
+                    still_usable(conn).await;
+                    Ok(enqueued)
+                },
+            )
+            .await
+        });
+        let enqueued = super::join_after_lock_wait(
+            &pool,
+            async {
+                if commits {
+                    holder.commit().await.expect("the holder commits");
+                } else {
+                    holder.rollback().await.expect("the holder rolls back");
+                }
             },
-            keyed(key),
+            caller,
         )
         .await
-        .expect("the holder enqueues"),
-    );
-    let jobs_caller = jobs.clone();
-    let caller = tokio::spawn(async move {
-        in_tx_with(
-            &jobs_caller,
-            writable(Isolation::ReadCommitted),
-            async |conn| -> Result<Enqueued, AttemptError> {
-                let enqueued = enqueue(
-                    conn,
-                    &Note {
-                        text: "racer".to_owned(),
-                    },
-                    keyed(key),
-                )
-                .await?;
-                still_usable(conn).await;
-                Ok(enqueued)
-            },
-        )
-        .await
-    });
-    let enqueued = super::join_after_lock_wait(
-        &pool,
-        async {
-            holder.commit().await.expect("the holder commits");
-        },
-        caller,
-    )
-    .await
-    .expect("the caller commits");
-    assert_eq!(enqueued, Enqueued::Duplicate);
-    assert_eq!(rows_for_key(&jobs, Note::NAME, key).await, 1);
-    assert!(visible(&jobs, &held_id.to_string()).await);
-    super::close(&[&jobs]).await;
-}
-
-#[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn e6_read_committed_waits_then_created_when_the_uncommitted_holder_rolls_back(pool: PgPool) {
-    let jobs = open(&pool, 3).await;
-    let key = "race-rollback";
-    let mut holder = jobs.begin().await.expect("the holder transaction");
-    let held_id = created(
-        enqueue(
-            &mut holder,
-            &Note {
-                text: "holder".to_owned(),
-            },
-            keyed(key),
-        )
-        .await
-        .expect("the holder enqueues"),
-    );
-    let jobs_caller = jobs.clone();
-    let caller = tokio::spawn(async move {
-        in_tx_with(
-            &jobs_caller,
-            writable(Isolation::ReadCommitted),
-            async |conn| -> Result<Enqueued, AttemptError> {
-                enqueue(
-                    conn,
-                    &Note {
-                        text: "racer".to_owned(),
-                    },
-                    keyed(key),
-                )
-                .await
-                .map_err(AttemptError::from)
-            },
-        )
-        .await
-    });
-    let enqueued = super::join_after_lock_wait(
-        &pool,
-        async {
-            holder.rollback().await.expect("the holder rolls back");
-        },
-        caller,
-    )
-    .await
-    .expect("the caller commits");
-    let id = created(enqueued);
-    assert_ne!(id.to_string(), held_id.to_string());
-    assert_eq!(rows_for_key(&jobs, Note::NAME, key).await, 1);
-    assert!(!visible(&jobs, &held_id.to_string()).await);
-    assert!(visible(&jobs, &id.to_string()).await);
+        .expect("the caller commits");
+        assert_eq!(rows_for_key(&jobs, Note::NAME, &key).await, 1, "{label}");
+        if commits {
+            assert_eq!(enqueued, Enqueued::Duplicate, "{label}");
+            assert!(visible(&jobs, &held_id.to_string()).await, "{label}");
+        } else {
+            let id = created(enqueued);
+            assert_ne!(id.to_string(), held_id.to_string(), "{label}");
+            assert!(!visible(&jobs, &held_id.to_string()).await, "{label}");
+            assert!(visible(&jobs, &id.to_string()).await, "{label}");
+        }
+    }
     super::close(&[&jobs]).await;
 }
 
@@ -1079,7 +1051,7 @@ async fn e6_snapshot_isolation_duplicate_when_the_snapshot_sees_the_live_holder(
                      WHERE kind = $1 AND unique_key = $2 AND state = 'pending'",
                 )
                 .bind(Note::NAME)
-                .bind(key.as_bytes())
+                .bind(&key)
                 .fetch_one(&mut *conn)
                 .await?;
                 assert_eq!(seen, 1, "the snapshot sees the live holder");
@@ -1177,74 +1149,65 @@ async fn e6_repeatable_read_40001_when_a_claim_write_commits_after_the_snapshot(
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn e6_repeatable_read_waits_then_40001_when_the_claim_write_commits(pool: PgPool) {
+async fn e6_repeatable_read_inflight_claim_keeps_commit_and_rollback_oracles(pool: PgPool) {
     let jobs = open(&pool, 3).await;
-    let key = "claim-waits-commit";
-    let _holder = commit_note(&jobs, key).await;
-    let snapshot = Arc::new(Notify::new());
-    let go = Arc::new(Notify::new());
-    let _unblock = Unblock(Arc::clone(&go));
-    let caller = spawn_snapshot_caller(
-        jobs.clone(),
-        Isolation::RepeatableRead,
-        key.to_owned(),
-        1,
-        Arc::clone(&snapshot),
-        Arc::clone(&go),
-        AfterSnapshot::Serialization,
-    );
-    super::bounded("the snapshot", snapshot.notified()).await;
-    let mut claim = jobs.begin().await.expect("the claim transaction");
-    claim_like(&mut claim, key).await;
-    go.notify_one();
-    let result = super::join_after_lock_wait(
-        &pool,
-        async {
-            claim.commit().await.expect("the claim commits");
-        },
-        caller,
-    )
-    .await;
-    assert!(
-        matches!(&result, Err(AttemptError::Rejected)),
-        "{}",
-        result.as_ref().err().map(explain).unwrap_or_default()
-    );
-    assert_eq!(states_for_key(&jobs, key).await, vec!["running".to_owned()]);
-    super::close(&[&jobs]).await;
-}
-
-#[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn e6_repeatable_read_waits_then_duplicate_when_the_claim_write_rolls_back(pool: PgPool) {
-    let jobs = open(&pool, 3).await;
-    let key = "claim-waits-rollback";
-    let _holder = commit_note(&jobs, key).await;
-    let snapshot = Arc::new(Notify::new());
-    let go = Arc::new(Notify::new());
-    let _unblock = Unblock(Arc::clone(&go));
-    let caller = spawn_snapshot_caller(
-        jobs.clone(),
-        Isolation::RepeatableRead,
-        key.to_owned(),
-        1,
-        Arc::clone(&snapshot),
-        Arc::clone(&go),
-        AfterSnapshot::Duplicate,
-    );
-    super::bounded("the snapshot", snapshot.notified()).await;
-    let mut claim = jobs.begin().await.expect("the claim transaction");
-    claim_like(&mut claim, key).await;
-    go.notify_one();
-    let enqueued = super::join_after_lock_wait(
-        &pool,
-        async {
-            claim.rollback().await.expect("the claim rolls back");
-        },
-        caller,
-    )
-    .await
-    .expect("the caller commits");
-    assert_eq!(enqueued, Enqueued::Duplicate);
-    assert_eq!(states_for_key(&jobs, key).await, vec!["pending".to_owned()]);
+    for (label, commits) in [("commit", true), ("rollback", false)] {
+        let key = format!("claim-waits-{label}");
+        let _holder = commit_note(&jobs, &key).await;
+        let snapshot = Arc::new(Notify::new());
+        let go = Arc::new(Notify::new());
+        let _unblock = Unblock(Arc::clone(&go));
+        let action = if commits {
+            AfterSnapshot::Serialization
+        } else {
+            AfterSnapshot::Duplicate
+        };
+        let caller = spawn_snapshot_caller(
+            jobs.clone(),
+            Isolation::RepeatableRead,
+            key.clone(),
+            1,
+            Arc::clone(&snapshot),
+            Arc::clone(&go),
+            action,
+        );
+        super::bounded("the snapshot", snapshot.notified()).await;
+        let mut claim = jobs.begin().await.expect("the claim transaction");
+        claim_like(&mut claim, &key).await;
+        go.notify_one();
+        let result = super::join_after_lock_wait(
+            &pool,
+            async {
+                if commits {
+                    claim.commit().await.expect("the claim commits");
+                } else {
+                    claim.rollback().await.expect("the claim rolls back");
+                }
+            },
+            caller,
+        )
+        .await;
+        if commits {
+            assert!(
+                matches!(&result, Err(AttemptError::Rejected)),
+                "{label}: {}",
+                result.as_ref().err().map(explain).unwrap_or_default()
+            );
+            assert_eq!(
+                states_for_key(&jobs, &key).await,
+                vec!["running".to_owned()]
+            );
+        } else {
+            assert_eq!(
+                result.expect("the caller commits"),
+                Enqueued::Duplicate,
+                "{label}"
+            );
+            assert_eq!(
+                states_for_key(&jobs, &key).await,
+                vec!["pending".to_owned()]
+            );
+        }
+    }
     super::close(&[&jobs]).await;
 }
