@@ -1,10 +1,10 @@
 //! Inbound HTTP idempotency: the composition and handler seam.
 //!
 //! An operation opts in by declaring `x-idempotent: true` in its OpenAPI
-//! metadata and by passing its `routes!` tuple to [`Composer::route`]. The
-//! composer checks the declaration, layers key handling inside the existing
-//! bearer authentication, and [`Composer::agree`] refuses a document whose
-//! idempotent operations and composed routes differ. The handler takes the
+//! metadata and by passing its tracked carrier to [`Composer::route`]. The
+//! composer checks the declaration and layers key handling; final contract
+//! authentication wraps that carrier. [`Composer::agree`] refuses a document
+//! whose idempotent operations and composed routes differ. The handler takes the
 //! [`Idempotency`] extractor, authorizes the attempt, and runs its work
 //! through [`Idempotency::execute`] with a [`Fingerprint`] of its semantic
 //! input; the work's PostgreSQL writes go through the opaque [`Tx`], so

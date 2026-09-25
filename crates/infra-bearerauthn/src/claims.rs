@@ -1,582 +1,394 @@
-//! Strict, duplicate-aware parsing for the claims consumed by authentication.
+//! Typed claim decoding and application identity normalization.
 
-// template:begin oidc-introspection:authn-claims-btree-set-import
 use std::collections::BTreeSet;
-// template:end oidc-introspection:authn-claims-btree-set-import
 
-use serde::{
-    Deserialize, Deserializer,
-    de::{IgnoredAny, MapAccess, Visitor},
-};
+use serde::{Deserialize, Deserializer};
 
-use crate::{Failure, Principal};
-// template:begin oidc-jwt:authn-claims-token-profile-import
-use crate::TokenProfile;
-// template:end oidc-jwt:authn-claims-token-profile-import
+use crate::{Failure, Principal, TokenProfile};
 
-const LEEWAY_SECONDS: u128 = 30;
+const LEEWAY_SECONDS: u64 = 30;
 
 #[derive(Clone)]
 pub(crate) struct ClaimPolicy {
     issuer: String,
-    audience: String,
+    audiences: Vec<String>,
 }
 
 impl ClaimPolicy {
-    pub(crate) fn new(issuer: String, audience: String) -> Self {
-        Self { issuer, audience }
+    pub(crate) fn new(issuer: String, audiences: Vec<String>) -> Self {
+        Self { issuer, audiences }
+    }
+
+    pub(crate) fn issuer(&self) -> &str {
+        &self.issuer
+    }
+
+    pub(crate) fn audiences(&self) -> &[String] {
+        &self.audiences
     }
 }
 
-// template:begin oidc-jwt:authn-validate-jwt-claims
-/// Validates a verified JWT payload. Any malformed or failing evidence is a
-/// token failure because the token itself supplied it.
-pub(crate) fn validate_jwt_claims(
-    bytes: &[u8],
-    policy: &ClaimPolicy,
-    token_profile: TokenProfile,
-    now_epoch_seconds: u64,
-) -> Result<Principal, Failure> {
-    let shape = ClaimShape::Jwt(token_profile);
-    let raw = RawClaims::parse(bytes, shape, Failure::Invalid)?;
-    let common = validate_common(&raw, policy, now_epoch_seconds, Failure::Invalid, shape)?;
-
-    if token_profile == TokenProfile::Rfc9068 {
-        let subject = required_identity(&raw.sub, Failure::Invalid)?;
-        let client_id = required_identity(&raw.client_id, Failure::Invalid)?;
-        let jti = raw.jti.value().filter(|value| !value.is_empty());
-        let iat = required_number(&raw.iat, Failure::Invalid)?;
-        if jti.is_none() {
-            return Err(Failure::Invalid);
-        }
-        if u128::from(iat) > u128::from(now_epoch_seconds) + LEEWAY_SECONDS {
-            return Err(Failure::Invalid);
-        }
-        return Ok(Principal::new(
-            policy.issuer.clone(),
-            Some(subject.to_owned()),
-            Some(client_id.to_owned()),
-            common.expiry_epoch_seconds,
-        ));
-    }
-
-    Ok(Principal::new(
-        policy.issuer.clone(),
-        common.subject,
-        common.client_id,
-        common.expiry_epoch_seconds,
-    ))
+/// A typed JWT payload. Serde's struct decoder rejects duplicate consumed fields
+/// while leaving unconsumed extension claims alone.
+#[derive(Deserialize)]
+pub(crate) struct JwtClaims {
+    pub(crate) iss: String,
+    pub(crate) aud: Audience,
+    pub(crate) exp: u64,
+    #[serde(default)]
+    pub(crate) nbf: Nullable<u64>,
+    #[serde(default)]
+    pub(crate) sub: Option<String>,
+    #[serde(default)]
+    pub(crate) client_id: Option<String>,
+    #[serde(default)]
+    pub(crate) azp: Option<String>,
+    #[serde(default)]
+    pub(crate) appid: Option<String>,
+    #[serde(default)]
+    pub(crate) cid: Option<String>,
+    #[serde(default)]
+    pub(crate) scope: Nullable<String>,
+    #[serde(default)]
+    pub(crate) scp: Nullable<Vec<String>>,
+    #[serde(default)]
+    pub(crate) jti: Option<String>,
+    #[serde(default)]
+    pub(crate) iat: Option<u64>,
 }
-// template:end oidc-jwt:authn-validate-jwt-claims
 
-// template:begin oidc-introspection:authn-validate-introspection-claims
-/// Validates an RFC 7662 response. Malformed required provider evidence is an
-/// unavailable provider, while a well-formed but nonmatching token is invalid.
-pub(crate) fn validate_introspection_claims(
-    bytes: &[u8],
-    policy: &ClaimPolicy,
-    now_epoch_seconds: u64,
-) -> Result<Principal, Failure> {
-    if !parse_active(bytes)? {
-        return Err(Failure::Invalid);
-    }
-    let shape = ClaimShape::Introspection;
-    let raw = RawClaims::parse(bytes, shape, Failure::Unavailable)?;
-    if !matches!(&raw.active, ClaimMember::Value(true)) {
-        return Err(Failure::Unavailable);
-    }
-    let common = validate_common(&raw, policy, now_epoch_seconds, Failure::Unavailable, shape)?;
-    Ok(Principal::new(
-        policy.issuer.clone(),
-        common.subject,
-        common.client_id,
-        common.expiry_epoch_seconds,
-    ))
+#[derive(Deserialize)]
+struct ActiveEnvelope {
+    active: bool,
 }
-// template:end oidc-introspection:authn-validate-introspection-claims
 
-struct CommonClaims {
-    subject: Option<String>,
+#[derive(Deserialize)]
+struct IntrospectionClaims {
+    active: bool,
+    iss: String,
+    aud: Audience,
+    exp: u64,
+    #[serde(default)]
+    nbf: Nullable<u64>,
+    #[serde(default)]
+    sub: Option<String>,
+    #[serde(default)]
     client_id: Option<String>,
-    expiry_epoch_seconds: u64,
+    #[serde(default)]
+    scope: Nullable<String>,
+    #[serde(default)]
+    scp: Nullable<Vec<String>>,
 }
 
-fn validate_common(
-    raw: &RawClaims,
-    policy: &ClaimPolicy,
-    now_epoch_seconds: u64,
-    malformed: Failure,
-    #[allow(
-        unused_variables,
-        reason = "JWT profile markers remove alias handling from introspection-only output"
-    )]
-    shape: ClaimShape,
-) -> Result<CommonClaims, Failure> {
-    let issuer = required_nonempty_text(&raw.iss, malformed)?;
-    let audience = required_audience(&raw.aud, malformed)?;
-    let expiry = required_number(&raw.exp, malformed)?;
-    let not_before = optional_number(&raw.nbf, malformed)?;
-
-    let subject = optional_identity(&raw.sub, malformed)?;
-    let mut client_values = Vec::new();
-    if raw.client_id.is_present() {
-        client_values.push(required_identity(&raw.client_id, malformed)?);
-    }
-    // template:begin oidc-jwt:authn-claims-client-aliases
-    if shape.aliases() {
-        for value in [&raw.azp, &raw.appid, &raw.cid] {
-            if value.is_present() {
-                client_values.push(required_identity(value, malformed)?);
-            }
-        }
-    }
-    // template:end oidc-jwt:authn-claims-client-aliases
-    let client_id = client_values.first().map(|value| (*value).to_owned());
-    if let Some(first) = client_values.first()
-        && client_values.iter().any(|value| *value != *first)
-    {
-        return Err(malformed);
-    }
-    if subject.is_none() && client_id.is_none() {
-        return Err(malformed);
-    }
-    if issuer != policy.issuer || !audience.iter().any(|value| value == &policy.audience) {
-        return Err(Failure::Invalid);
-    }
-    if u128::from(now_epoch_seconds) > u128::from(expiry) + LEEWAY_SECONDS
-        || not_before
-            .is_some_and(|value| u128::from(value) > u128::from(now_epoch_seconds) + LEEWAY_SECONDS)
-    {
-        return Err(Failure::Invalid);
-    }
-
-    Ok(CommonClaims {
-        subject: subject.map(ToOwned::to_owned),
-        client_id,
-        expiry_epoch_seconds: expiry,
-    })
-}
-
-fn required_text(value: &ClaimMember<String>, malformed: Failure) -> Result<&str, Failure> {
-    value.value().map(String::as_str).ok_or(malformed)
-}
-
-fn required_nonempty_text(
-    value: &ClaimMember<String>,
-    malformed: Failure,
-) -> Result<&str, Failure> {
-    let value = required_text(value, malformed)?;
-    if value.is_empty() {
-        return Err(malformed);
-    }
-    Ok(value)
-}
-
-fn required_number(value: &ClaimMember<u64>, malformed: Failure) -> Result<u64, Failure> {
-    value.value().copied().ok_or(malformed)
-}
-
-fn optional_number(value: &ClaimMember<u64>, malformed: Failure) -> Result<Option<u64>, Failure> {
-    match value {
-        ClaimMember::Missing => Ok(None),
-        ClaimMember::Null => Err(malformed),
-        ClaimMember::Value(value) => Ok(Some(*value)),
-    }
-}
-
-fn required_audience(
-    value: &ClaimMember<Audience>,
-    malformed: Failure,
-) -> Result<&[String], Failure> {
-    value.value().map(Audience::values).ok_or(malformed)
-}
-
-fn optional_identity(
-    value: &ClaimMember<String>,
-    malformed: Failure,
-) -> Result<Option<&str>, Failure> {
-    if !value.is_present() {
-        return Ok(None);
-    }
-    Ok(Some(required_identity(value, malformed)?))
-}
-
-fn required_identity(value: &ClaimMember<String>, malformed: Failure) -> Result<&str, Failure> {
-    let value = required_text(value, malformed)?;
-    if value.is_empty() || value.trim() != value {
-        return Err(malformed);
-    }
-    Ok(value)
-}
-
-struct Audience(Vec<String>);
-
-impl Audience {
-    fn values(&self) -> &[String] {
-        &self.0
-    }
-}
-
-impl<'de> Deserialize<'de> for Audience {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct AudienceVisitor;
-
-        impl<'de> Visitor<'de> for AudienceVisitor {
-            type Value = Audience;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a string or a nonempty array of strings")
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                if value.is_empty() {
-                    return Err(serde::de::Error::custom("audience must not be empty"));
-                }
-                Ok(Audience(vec![value.to_owned()]))
-            }
-
-            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                let mut values = Vec::new();
-                while let Some(value) = sequence.next_element::<String>()? {
-                    values.push(value);
-                }
-                if values.is_empty() || values.iter().any(String::is_empty) {
-                    return Err(serde::de::Error::custom("audience array must not be empty"));
-                }
-                Ok(Audience(values))
-            }
-        }
-
-        deserializer.deserialize_any(AudienceVisitor)
-    }
-}
-
-#[derive(Clone, Copy)]
-enum ClaimShape {
-    // template:begin oidc-jwt:authn-claim-shape-jwt
-    Jwt(TokenProfile),
-    // template:end oidc-jwt:authn-claim-shape-jwt
-    // template:begin oidc-introspection:authn-claim-shape-introspection
-    Introspection,
-    // template:end oidc-introspection:authn-claim-shape-introspection
-}
-
-impl ClaimShape {
-    // template:begin oidc-jwt:authn-claim-shape-aliases-jwt
-    fn aliases(self) -> bool {
-        matches!(self, Self::Jwt(_))
-    }
-    // template:end oidc-jwt:authn-claim-shape-aliases-jwt
-
-    // template:begin oidc-jwt:authn-claim-shape-rfc9068
-    fn rfc9068(self) -> bool {
-        matches!(self, Self::Jwt(TokenProfile::Rfc9068))
-    }
-    // template:end oidc-jwt:authn-claim-shape-rfc9068
-
-    // template:begin oidc-introspection:authn-claim-shape-active
-    fn is_introspection(self) -> bool {
-        matches!(self, Self::Introspection)
-    }
-    // template:end oidc-introspection:authn-claim-shape-active
-}
-
-/// A consumed JSON member keeps absence distinct from an explicit null.
-#[derive(Default)]
-enum ClaimMember<T> {
-    #[default]
+/// Preserves the distinction between an absent claim and a supplied JSON null.
+pub(crate) enum Nullable<T> {
     Missing,
     Null,
     Value(T),
 }
 
-impl<T> ClaimMember<T> {
-    fn is_present(&self) -> bool {
-        !matches!(self, Self::Missing)
+impl<T> Default for Nullable<T> {
+    fn default() -> Self {
+        Self::Missing
     }
+}
 
-    fn value(&self) -> Option<&T> {
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Nullable<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match Option::<T>::deserialize(deserializer)? {
+            Some(value) => Self::Value(value),
+            None => Self::Null,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(crate) enum Audience {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Audience {
+    fn values(&self) -> &[String] {
         match self {
-            Self::Value(value) => Some(value),
-            Self::Missing | Self::Null => None,
+            Self::One(value) => std::slice::from_ref(value),
+            Self::Many(values) => values,
         }
     }
 }
 
-#[derive(Default)]
-struct RawClaims {
-    iss: ClaimMember<String>,
-    aud: ClaimMember<Audience>,
-    exp: ClaimMember<u64>,
-    nbf: ClaimMember<u64>,
-    sub: ClaimMember<String>,
-    client_id: ClaimMember<String>,
-    // template:begin oidc-jwt:authn-claims-alias-fields
-    azp: ClaimMember<String>,
-    appid: ClaimMember<String>,
-    cid: ClaimMember<String>,
-    // template:end oidc-jwt:authn-claims-alias-fields
-    // template:begin oidc-jwt:authn-claims-rfc9068-fields
-    iat: ClaimMember<u64>,
-    jti: ClaimMember<String>,
-    // template:end oidc-jwt:authn-claims-rfc9068-fields
-    // template:begin oidc-introspection:authn-claims-active-fields
-    active: ClaimMember<bool>,
-    // template:end oidc-introspection:authn-claims-active-fields
-}
-
-impl RawClaims {
-    fn parse(bytes: &[u8], shape: ClaimShape, failure: Failure) -> Result<Self, Failure> {
-        let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-        let result = deserializer.deserialize_map(RawClaimsVisitor { shape });
-        result
-            .and_then(|claims| deserializer.end().map(|()| claims))
-            .map_err(|_| failure)
+/// Validates post-signature JWT identity/profile evidence.
+pub(crate) fn validate_jwt_claims(
+    claims: JwtClaims,
+    policy: &ClaimPolicy,
+    token_profile: TokenProfile,
+    now_epoch_seconds: u64,
+) -> Result<Principal, Failure> {
+    let common = validate_common(
+        &claims.iss,
+        &claims.aud,
+        claims.exp,
+        &claims.nbf,
+        claims.sub.as_deref(),
+        claims.client_id.as_deref(),
+        &claims.scope,
+        &claims.scp,
+        policy,
+        now_epoch_seconds,
+        Failure::Invalid,
+        true,
+    )?;
+    let aliases = [
+        claims.client_id.as_deref(),
+        claims.azp.as_deref(),
+        claims.appid.as_deref(),
+        claims.cid.as_deref(),
+    ];
+    let client_id = coherent_identity(aliases, Failure::Invalid)?;
+    if common.subject.is_none() && client_id.is_none() {
+        return Err(Failure::Invalid);
     }
-}
-
-struct RawClaimsVisitor {
-    shape: ClaimShape,
-}
-
-impl<'de> Visitor<'de> for RawClaimsVisitor {
-    type Value = RawClaims;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a JSON object")
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut claims = RawClaims::default();
-        // template:begin oidc-introspection:authn-claims-all-member-duplicates
-        let mut all_names = BTreeSet::new();
-        // template:end oidc-introspection:authn-claims-all-member-duplicates
-        while let Some(name) = map.next_key::<String>()? {
-            // template:begin oidc-introspection:authn-claims-all-member-duplicate-check
-            if self.shape.is_introspection() && !all_names.insert(name.clone()) {
-                return Err(serde::de::Error::custom("duplicate introspection member"));
-            }
-            // template:end oidc-introspection:authn-claims-all-member-duplicate-check
-            match name.as_str() {
-                "iss" => set_once(&mut claims.iss, &mut map)?,
-                "aud" => set_once(&mut claims.aud, &mut map)?,
-                "exp" => set_once(&mut claims.exp, &mut map)?,
-                "nbf" => set_once(&mut claims.nbf, &mut map)?,
-                "sub" => set_once(&mut claims.sub, &mut map)?,
-                "client_id" => set_once(&mut claims.client_id, &mut map)?,
-                // template:begin oidc-jwt:authn-claims-alias-visitor
-                "azp" if self.shape.aliases() => {
-                    set_once(&mut claims.azp, &mut map)?;
-                }
-                "appid" if self.shape.aliases() => {
-                    set_once(&mut claims.appid, &mut map)?;
-                }
-                "cid" if self.shape.aliases() => {
-                    set_once(&mut claims.cid, &mut map)?;
-                }
-                // template:end oidc-jwt:authn-claims-alias-visitor
-                // template:begin oidc-jwt:authn-claims-rfc9068-visitor
-                "iat" if self.shape.rfc9068() => {
-                    set_once(&mut claims.iat, &mut map)?;
-                }
-                "jti" if self.shape.rfc9068() => {
-                    set_once(&mut claims.jti, &mut map)?;
-                }
-                // template:end oidc-jwt:authn-claims-rfc9068-visitor
-                // template:begin oidc-introspection:authn-claims-active-visitor
-                "active" if self.shape.is_introspection() => {
-                    set_once(&mut claims.active, &mut map)?;
-                }
-                // template:end oidc-introspection:authn-claims-active-visitor
-                _ => {
-                    map.next_value::<IgnoredAny>()?;
-                }
-            }
-        }
-        Ok(claims)
-    }
-}
-
-// template:begin oidc-introspection:authn-parse-introspection-active
-/// Reads only the discriminator first so an inactive response can ignore the
-/// remaining claim meaning while still rejecting duplicate top-level names and
-/// trailing JSON. A second strict pass is performed only for an active token.
-fn parse_active(bytes: &[u8]) -> Result<bool, Failure> {
-    struct ActiveVisitor;
-
-    impl<'de> Visitor<'de> for ActiveVisitor {
-        type Value = Option<bool>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a JSON object with one boolean active member")
-        }
-
-        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-        where
-            A: MapAccess<'de>,
+    if token_profile == TokenProfile::Rfc9068 {
+        if common.subject.is_none()
+            || claims
+                .client_id
+                .as_deref()
+                .and_then(nonempty_identity)
+                .is_none()
+            || claims
+                .jti
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .is_none()
+            || claims
+                .iat
+                .is_none_or(|iat| iat > now_epoch_seconds.saturating_add(LEEWAY_SECONDS))
         {
-            let mut names = BTreeSet::new();
-            let mut active = None;
-            while let Some(name) = map.next_key::<String>()? {
-                if !names.insert(name.clone()) {
-                    return Err(serde::de::Error::custom("duplicate introspection member"));
-                }
-                if name == "active" {
-                    active = map.next_value::<Option<bool>>()?;
-                } else {
-                    map.next_value::<IgnoredAny>()?;
-                }
-            }
-            Ok(active)
+            return Err(Failure::Invalid);
         }
     }
-
-    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    let active = deserializer
-        .deserialize_map(ActiveVisitor)
-        .and_then(|active| deserializer.end().map(|()| active))
-        .map_err(|_| Failure::Unavailable)?;
-    active.ok_or(Failure::Unavailable)
+    Ok(Principal::new(
+        policy.issuer.clone(),
+        common.subject,
+        client_id,
+        common.scopes,
+        claims.exp,
+    ))
 }
-// template:end oidc-introspection:authn-parse-introspection-active
 
-fn set_once<'de, A, T>(destination: &mut ClaimMember<T>, map: &mut A) -> Result<(), A::Error>
-where
-    A: MapAccess<'de>,
-    T: Deserialize<'de>,
-{
-    if destination.is_present() {
-        return Err(serde::de::Error::custom("duplicate consumed claim"));
+/// Classifies a typed RFC 7662 response without exposing provider details.
+pub(crate) fn validate_introspection_claims(
+    bytes: &[u8],
+    policy: &ClaimPolicy,
+    now_epoch_seconds: u64,
+) -> Result<Principal, Failure> {
+    let envelope: ActiveEnvelope =
+        serde_json::from_slice(bytes).map_err(|_| Failure::Unavailable)?;
+    if !envelope.active {
+        return Err(Failure::Invalid);
     }
-    *destination = match map.next_value::<Option<T>>()? {
-        Some(value) => ClaimMember::Value(value),
-        None => ClaimMember::Null,
+    let claims: IntrospectionClaims =
+        serde_json::from_slice(bytes).map_err(|_| Failure::Unavailable)?;
+    if !claims.active {
+        return Err(Failure::Invalid);
+    }
+    let common = validate_common(
+        &claims.iss,
+        &claims.aud,
+        claims.exp,
+        &claims.nbf,
+        claims.sub.as_deref(),
+        claims.client_id.as_deref(),
+        &claims.scope,
+        &claims.scp,
+        policy,
+        now_epoch_seconds,
+        Failure::Unavailable,
+        true,
+    )?;
+    Ok(Principal::new(
+        policy.issuer.clone(),
+        common.subject,
+        common.client_id,
+        common.scopes,
+        claims.exp,
+    ))
+}
+
+struct CommonClaims {
+    subject: Option<String>,
+    client_id: Option<String>,
+    scopes: Vec<String>,
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the typed claim boundary keeps evidence classification explicit"
+)]
+fn validate_common(
+    issuer: &str,
+    audience: &Audience,
+    expiry: u64,
+    not_before: &Nullable<u64>,
+    subject: Option<&str>,
+    client_id: Option<&str>,
+    scope: &Nullable<String>,
+    scp: &Nullable<Vec<String>>,
+    policy: &ClaimPolicy,
+    now: u64,
+    malformed: Failure,
+    validate_time: bool,
+) -> Result<CommonClaims, Failure> {
+    if issuer.is_empty()
+        || issuer != policy.issuer
+        || audience.values().is_empty()
+        || audience.values().iter().any(String::is_empty)
+        || !audience
+            .values()
+            .iter()
+            .any(|value| policy.audiences.iter().any(|audience| audience == value))
+    {
+        return Err(Failure::Invalid);
+    }
+    let subject = subject
+        .map(|value| identity(value, malformed))
+        .transpose()?
+        .map(ToOwned::to_owned);
+    let client_id = client_id
+        .map(|value| identity(value, malformed))
+        .transpose()?
+        .map(ToOwned::to_owned);
+    if subject.is_none() && client_id.is_none() {
+        return Err(malformed);
+    }
+    let nbf = match not_before {
+        Nullable::Missing => None,
+        Nullable::Null => return Err(malformed),
+        Nullable::Value(value) => Some(*value),
     };
-    Ok(())
+    if validate_time
+        && (now > expiry.saturating_add(LEEWAY_SECONDS)
+            || nbf.is_some_and(|value| value > now.saturating_add(LEEWAY_SECONDS)))
+    {
+        return Err(Failure::Invalid);
+    }
+    Ok(CommonClaims {
+        subject,
+        client_id,
+        scopes: normalize_scopes(scope, scp, malformed)?,
+    })
+}
+
+fn coherent_identity(
+    values: [Option<&str>; 4],
+    malformed: Failure,
+) -> Result<Option<String>, Failure> {
+    let mut identities = values
+        .into_iter()
+        .flatten()
+        .map(|value| identity(value, malformed));
+    let Some(first) = identities.next().transpose()? else {
+        return Ok(None);
+    };
+    for value in identities {
+        if value? != first {
+            return Err(malformed);
+        }
+    }
+    Ok(Some(first.to_owned()))
+}
+
+fn identity(value: &str, malformed: Failure) -> Result<&str, Failure> {
+    if nonempty_identity(value).is_none() {
+        Err(malformed)
+    } else {
+        Ok(value)
+    }
+}
+
+fn nonempty_identity(value: &str) -> Option<&str> {
+    (!value.is_empty() && value.trim() == value).then_some(value)
+}
+
+fn normalize_scopes(
+    scope: &Nullable<String>,
+    scp: &Nullable<Vec<String>>,
+    malformed: Failure,
+) -> Result<Vec<String>, Failure> {
+    let from_scope = match scope {
+        Nullable::Missing | Nullable::Null => BTreeSet::new(),
+        Nullable::Value(value) => parse_scope_string(value, malformed)?,
+    };
+    let from_scp = match scp {
+        Nullable::Missing | Nullable::Null => BTreeSet::new(),
+        Nullable::Value(values) => values
+            .iter()
+            .map(|value| scope_token(value, malformed).map(ToOwned::to_owned))
+            .collect::<Result<BTreeSet<_>, _>>()?,
+    };
+    if !from_scope.is_empty() && !from_scp.is_empty() && from_scope != from_scp {
+        return Err(malformed);
+    }
+    Ok(if from_scope.is_empty() {
+        from_scp
+    } else {
+        from_scope
+    }
+    .into_iter()
+    .collect())
+}
+
+fn parse_scope_string(value: &str, malformed: Failure) -> Result<BTreeSet<String>, Failure> {
+    if value.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    value
+        .split(' ')
+        .map(|part| scope_token(part, malformed).map(ToOwned::to_owned))
+        .collect()
+}
+
+fn scope_token(value: &str, malformed: Failure) -> Result<&str, Failure> {
+    if value.is_empty()
+        || !value.bytes().all(|byte| {
+            byte == b'!' || (b'#'..=b'[').contains(&byte) || (b']'..=b'~').contains(&byte)
+        })
+    {
+        return Err(malformed);
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ClaimPolicy;
-    // template:begin oidc-introspection:authn-claims-introspection-test-import
-    use super::validate_introspection_claims;
-    // template:end oidc-introspection:authn-claims-introspection-test-import
-    // template:begin oidc-jwt:authn-claims-jwt-test-imports
-    use super::validate_jwt_claims;
-    use crate::TokenProfile;
-    // template:end oidc-jwt:authn-claims-jwt-test-imports
-    use crate::Failure;
+    use super::{ClaimPolicy, JwtClaims, validate_introspection_claims, validate_jwt_claims};
+    use crate::{Failure, TokenProfile};
 
     fn policy() -> ClaimPolicy {
-        ClaimPolicy::new("https://issuer.example".to_owned(), "api".to_owned())
+        ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()])
     }
 
-    // template:begin oidc-jwt:authn-claims-resource-server-test
     #[test]
-    fn resource_server_claims_require_identity_and_exact_audience() {
-        let payload = br#"{"iss":"https://issuer.example","aud":["other","api"],"exp":130,"sub":"subject","azp":"client"}"#;
+    fn typed_jwt_claims_normalize_matching_scope_forms() {
+        let claims: JwtClaims = serde_json::from_str(r#"{"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":"read write read","scp":["write","read"]}"#).unwrap();
         let principal =
-            validate_jwt_claims(payload, &policy(), TokenProfile::ResourceServer, 100).unwrap();
-
-        assert_eq!(principal.issuer(), "https://issuer.example");
-        assert_eq!(principal.subject(), Some("subject"));
-        assert_eq!(principal.client_id(), Some("client"));
-    }
-    // template:end oidc-jwt:authn-claims-resource-server-test
-
-    // template:begin oidc-jwt:authn-claims-jwt-rejection-test
-    #[test]
-    fn jwt_rejects_duplicate_consumed_members_and_whitespace_identity() {
-        for payload in [
-            br#"{"iss":"https://issuer.example","iss":"https://issuer.example","aud":"api","exp":130,"sub":"s"}"#.as_slice(),
-            br#"{"iss":"https://issuer.example","aud":"api","exp":130,"sub":" subject"}"#.as_slice(),
-        ] {
-            assert_eq!(
-                validate_jwt_claims(payload, &policy(), TokenProfile::ResourceServer, 100),
-                Err(Failure::Invalid)
-            );
-        }
+            validate_jwt_claims(claims, &policy(), TokenProfile::ResourceServer, 100).unwrap();
+        assert_eq!(principal.scopes(), ["read", "write"]);
+        assert_eq!(principal.expires_at(), 130);
     }
 
     #[test]
-    fn jwt_distinguishes_missing_null_and_duplicate_claims() {
-        let absent_nbf = br#"{"iss":"https://issuer.example","aud":"api","exp":130,"sub":"s"}"#;
-        assert!(
-            validate_jwt_claims(absent_nbf, &policy(), TokenProfile::ResourceServer, 100).is_ok()
-        );
-
-        for payload in [
-            br#"{"iss":"https://issuer.example","aud":"api","exp":130,"nbf":null,"sub":"s"}"#
-                .as_slice(),
-            br#"{"iss":"https://issuer.example","aud":"api","exp":130,"sub":null,"sub":"s"}"#
-                .as_slice(),
-        ] {
-            assert_eq!(
-                validate_jwt_claims(payload, &policy(), TokenProfile::ResourceServer, 100),
-                Err(Failure::Invalid)
-            );
-        }
-    }
-    // template:end oidc-jwt:authn-claims-jwt-rejection-test
-
-    // template:begin oidc-jwt:authn-claims-rfc9068-test
-    #[test]
-    fn rfc9068_requires_subject_client_jti_and_iat() {
-        let valid = br#"{"iss":"https://issuer.example","aud":"api","exp":130,"sub":"s","client_id":"c","jti":"j","iat":120}"#;
-        assert!(validate_jwt_claims(valid, &policy(), TokenProfile::Rfc9068, 100).is_ok());
-
-        let missing_client = br#"{"iss":"https://issuer.example","aud":"api","exp":130,"sub":"s","azp":"c","jti":"j","iat":120}"#;
+    fn provider_claim_shape_and_scope_disagreement_remain_unavailable() {
+        let response = br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":"read","scp":["write"]}"#;
         assert_eq!(
-            validate_jwt_claims(missing_client, &policy(), TokenProfile::Rfc9068, 100),
-            Err(Failure::Invalid)
-        );
-    }
-    // template:end oidc-jwt:authn-claims-rfc9068-test
-
-    // template:begin oidc-introspection:authn-claims-introspection-classification-test
-    #[test]
-    fn introspection_separates_provider_contract_failure_from_invalid_token() {
-        let inactive = br#"{"active":false,"iss":false}"#;
-        assert_eq!(
-            validate_introspection_claims(inactive, &policy(), 100),
-            Err(Failure::Invalid)
-        );
-
-        let malformed =
-            br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":null}"#;
-        assert_eq!(
-            validate_introspection_claims(malformed, &policy(), 100),
+            validate_introspection_claims(response, &policy(), 100),
             Err(Failure::Unavailable)
         );
-
-        let wrong_audience =
-            br#"{"active":true,"iss":"https://issuer.example","aud":"other","exp":130,"sub":"s"}"#;
         assert_eq!(
-            validate_introspection_claims(wrong_audience, &policy(), 100),
+            validate_introspection_claims(br#"{"active":false,"iss":false}"#, &policy(), 100),
             Err(Failure::Invalid)
         );
-
-        for malformed_audience in [
-            br#"{"active":true,"iss":"https://issuer.example","aud":"","exp":130,"sub":"s"}"#.as_slice(),
-            br#"{"active":true,"iss":"https://issuer.example","aud":["api",""],"exp":130,"sub":"s"}"#.as_slice(),
-        ] {
-            assert_eq!(
-                validate_introspection_claims(malformed_audience, &policy(), 100),
-                Err(Failure::Unavailable)
-            );
-        }
+        assert_eq!(validate_introspection_claims(br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"nbf":null,"sub":"subject"}"#, &policy(), 100), Err(Failure::Unavailable));
     }
-    // template:end oidc-introspection:authn-claims-introspection-classification-test
 }

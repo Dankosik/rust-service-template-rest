@@ -44,15 +44,19 @@ use their own binary in `crates/service/src/bin` only when they share the
 service's composition, otherwise their own crate with its own lifecycle.
 
 <!-- template:begin authn:docs-integration-authn-provider -->
-Inbound authentication's provider destination is fixed by validated configuration, never by the caller. The adapter permits only HTTPS, normal TLS hostname/certificate validation, public-unicast connection destinations, no redirects, proxy, retries, or connection reuse, and a 1 MiB response body. Provider work is bounded by three seconds and the enclosing request deadline; the HTTP transport's existing inbound header limit is separate from the provider-client header-count limit.
+Inbound authentication's provider destination is fixed by configuration or an
+exact-issuer discovery response, never by the caller. The adapter's one
+`ProviderUrl` grammar admits HTTPS, host, and no userinfo, query, fragment,
+whitespace, or controls before I/O. It retains normal TLS hostname/certificate
+validation, permits configured private HTTPS providers, disables redirects,
+ambient proxy and retry, and caps a response at 1 MiB. Provider work has a
+three-second attempt cap inside the request's remaining budget.
 
-Provider URL syntax is checked both by `crates/config/src/authn.rs` and by
-`crates/infra-bearerauthn/src/provider.rs`. Keep their HTTPS, host, userinfo,
-query, fragment and whitespace rules aligned. The checks have separate owners:
-configuration reports the offending key, while runtime also admits discovered
-JWKS URLs and direct adapter inputs. Moving either check to the other crate
-would discard one of those boundaries; a shared crate for this single grammar
-would add more ownership than it removes.
+The adapter owns URL representation because discovery and direct adapter inputs
+must pass the same admission. Config owns field presence, type, and useful key
+context; bootstrap converts primitive configuration into adapter options. The
+independent outbound HTTP profile alone owns post-resolution public-address
+admission and its DNS dependency.
 <!-- template:end authn:docs-integration-authn-provider -->
 <!-- template:begin outbound-http:docs-integration-outbound -->
 A provider with a fixed public HTTPS dependency uses the retained

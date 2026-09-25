@@ -3,10 +3,10 @@
 //!
 //! [`check_route`] checks one tuple before it is composed; [`agree`]
 //! re-checks every idempotent operation on the assembled document, where
-//! response references resolve, and adds the document-wide rules. Rule 3,
-//! the protected-operation contract, is `protect`'s own acceptance of the
-//! tuple and is not repeated here. Operations are read in their generated
-//! JSON form, as the committed contract renders them.
+//! response references resolve, and adds the document-wide rules. Final
+//! contract authentication owns protected-operation policy acceptance.
+//! Operations are read in their generated JSON form, as the committed
+//! contract renders them.
 
 use std::collections::BTreeSet;
 
@@ -61,7 +61,6 @@ pub(super) enum Rule {
     Undeclared,
     NotTrue,
     Method,
-    Protected,
     KeyParameter,
     SuccessResponses,
     ProblemResponses,
@@ -80,7 +79,6 @@ impl Rule {
             Self::Undeclared => "a route composed as idempotent must declare x-idempotent: true",
             Self::NotTrue => "x-idempotent must be the boolean true",
             Self::Method => "the method must be POST, PUT, PATCH, or DELETE",
-            Self::Protected => "the operation must meet the protected-operation contract",
             Self::KeyParameter => {
                 "Idempotency-Key must be one required header parameter with the exact schema"
             }

@@ -475,7 +475,7 @@ fn assembled_contract_agrees_with_its_idempotent_declarations() {
         .count();
     let mut composer = Composer::inert();
     let contract = service::api::contract(&mut composer);
-    match composer.agree(contract.get_openapi()) {
+    match composer.agree(contract.document()) {
         Ok(Activation::Inactive) => assert_eq!(declared, 0),
         Ok(Activation::Active {
             operations: served, ..

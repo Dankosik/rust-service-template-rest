@@ -38,11 +38,12 @@ it against the built binary.
 
 <!-- template:begin authn:docs-lifecycle-authn -->
 With authentication retained, bootstrap prepares the selected verifier before
-binding the server. Disabled runtime mode is inert. Introspection construction
-does no provider I/O; JWT startup discovers metadata and installs a usable JWKS
-inside its bounded startup budget. A JWT refresh future joins the existing
-`TaskTracker` with a child cancellation token. Authentication neither adds a
-readiness probe nor changes public health behavior.
+finalizing the complete contract and binding the server. Disabled runtime mode
+is inert only for a public-only contract; protected policy refuses startup.
+Introspection construction does no provider I/O; JWT startup discovers metadata
+and installs a usable JWKS inside its bounded startup budget. A JWT refresh
+future joins the existing `TaskTracker` with a child cancellation token.
+Authentication neither adds a readiness probe nor changes public health behavior.
 <!-- template:end authn:docs-lifecycle-authn -->
 <!-- template:begin outbound-http:docs-lifecycle-outbound -->
 A retained [outbound client](../outbound-http.md) is inert until a concrete

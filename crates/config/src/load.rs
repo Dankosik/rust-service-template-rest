@@ -158,13 +158,10 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::LogFormat;
+    use crate::{AuthnConfig, LogFormat};
     // template:begin oidc-jwt:load-token-profile-import
     use crate::TokenProfile;
     // template:end oidc-jwt:load-token-profile-import
-    // template:begin oidc-introspection:load-authn-mode-import
-    use crate::AuthnMode;
-    // template:end oidc-introspection:load-authn-mode-import
 
     const BUILD: BuildInfo = BuildInfo {
         version: "1.2.3",
@@ -281,7 +278,7 @@ mod tests {
             ]),
         )
         .unwrap();
-        assert_eq!(cfg.authn.mode, AuthnMode::OidcIntrospection);
+        assert!(matches!(cfg.authn, AuthnConfig::OidcIntrospection { .. }));
         assert!(!format!("{cfg:?}").contains("loader-secret"));
     }
     // template:end oidc-introspection:load-introspection-environment
@@ -300,7 +297,10 @@ mod tests {
             ]),
         )
         .unwrap();
-        assert_eq!(jwt.authn.token_profile, Some(TokenProfile::Rfc9068));
+        let AuthnConfig::OidcJwt { token_profile, .. } = jwt.authn else {
+            panic!("expected OIDC JWT configuration");
+        };
+        assert_eq!(token_profile, TokenProfile::Rfc9068);
     }
     // template:end oidc-jwt:load-jwt-token-profile-environment
 
@@ -336,7 +336,7 @@ mod tests {
         let profile = write(
             &dir,
             "profile.toml",
-            "[authn]\ntoken_profile = \"rfc9068\"\n",
+            "[authn]\nmode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\ntoken_profile = \"rfc9068\"\n",
         );
         let cfg = load_from(
             &LoadOptions {
@@ -347,7 +347,10 @@ mod tests {
             env(&[]),
         )
         .unwrap();
-        assert_eq!(cfg.authn.token_profile, Some(TokenProfile::Rfc9068));
+        let AuthnConfig::OidcJwt { token_profile, .. } = cfg.authn else {
+            panic!("expected OIDC JWT configuration");
+        };
+        assert_eq!(token_profile, TokenProfile::Rfc9068);
     }
     // template:end oidc-jwt:load-jwt-token-profile-file
 

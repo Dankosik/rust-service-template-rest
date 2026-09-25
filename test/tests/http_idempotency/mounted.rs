@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,12 +30,14 @@ use axum::{Extension, Json};
 use axum_test::{TestRequest, TestResponse, TestServer};
 use health::Readiness;
 use infra_bearerauthn::test_support::{FixtureTransport, prepare_introspection_with_fixture};
-use infra_bearerauthn::{IntrospectionOptions, Verifier};
+use infra_bearerauthn::{IntrospectionOptions, ProviderUrl, Verifier};
 use infra_http::idempotency::{
     Activation, Composer, Fingerprint, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, Tx,
 };
 use infra_http::problem::SANITIZED_DETAIL;
-use infra_http::{Code, HardenOptions, Problem, REQUEST_ID_HEADER, VerifiedPrincipal, harden};
+use infra_http::{
+    Code, HardenOptions, Problem, REQUEST_ID_HEADER, VerifiedPrincipal, harden, routes,
+};
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;
 use integration_tests::dsn_for;
@@ -54,7 +56,6 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use utoipa::ToSchema;
-use utoipa_axum::routes;
 
 use crate::commit_proxy::Fault;
 use crate::{
@@ -96,6 +97,8 @@ const ALICE: &str = "alice-token";
 /// by the operation's authorization.
 const ALICE_REVOKED: &str = "alice-revoked-client-token";
 const BOB: &str = "bob-token";
+/// A verified caller with no scope required by this operation.
+const NO_SCOPE: &str = "no-scope-token";
 const INACTIVE: &str = "inactive-token";
 const REVOKED_CLIENT: &str = "revoked-client";
 /// Bound on one introspection request.
@@ -205,6 +208,9 @@ async fn create_widget(
     Json(input): Json<NewWidget>,
 ) -> Response {
     // Every attempt is authorized before the seam, so a replay never skips it.
+    if let Err(response) = infra_http::require_scope(&principal, "widgets:write") {
+        return response;
+    }
     if !may_create(&principal) {
         return forbidden();
     }
@@ -274,20 +280,21 @@ impl Provider {
     /// fixture transport.
     fn verifier(&self) -> Verifier {
         let transport = FixtureTransport::new(
-            self.tasks.clone(),
-            self.cancel.child_token(),
             FIXTURE_HOST,
             self.address,
             FIXTURE_ROOT_DER,
+            self.cancel.child_token(),
         )
         .expect("the fixture transport");
         prepare_introspection_with_fixture(
             IntrospectionOptions {
-                issuer: ISSUER.to_owned(),
-                audience: AUDIENCE.to_owned(),
-                endpoint: format!("https://{FIXTURE_HOST}/introspect"),
+                issuer: ProviderUrl::parse(ISSUER).expect("fixture issuer URL"),
+                audiences: vec![AUDIENCE.to_owned()],
+                endpoint: ProviderUrl::parse(&format!("https://{FIXTURE_HOST}/introspect"))
+                    .expect("fixture endpoint URL"),
                 client_id: "fixture-client".to_owned(),
                 client_secret: SecretString::from("fixture-secret"),
+                provider_concurrency: NonZeroUsize::new(16).expect("fixture capacity"),
             },
             transport,
         )
@@ -395,10 +402,11 @@ fn request_body(request: &[u8]) -> Option<&[u8]> {
 /// The provider's answer for `token`: two subjects, the first also through a
 /// revoked client, and inactive for anything else.
 fn introspection(token: &str) -> String {
-    let (subject, client) = match token {
-        ALICE => ("alice", "widgets-app"),
-        ALICE_REVOKED => ("alice", REVOKED_CLIENT),
-        BOB => ("bob", "widgets-app"),
+    let (subject, client, scope) = match token {
+        ALICE => ("alice", "widgets-app", "widgets:write"),
+        ALICE_REVOKED => ("alice", REVOKED_CLIENT, "widgets:write"),
+        BOB => ("bob", "widgets-app", "widgets:write"),
+        NO_SCOPE => ("scope-less", "widgets-app", ""),
         _ => return json!({"active": false}).to_string(),
     };
     json!({
@@ -408,6 +416,7 @@ fn introspection(token: &str) -> String {
         "exp": 2_147_483_647,
         "sub": subject,
         "client_id": client,
+        "scope": scope,
     })
     .to_string()
 }
@@ -438,17 +447,14 @@ impl Mounted {
         let widgets: Arc<dyn CreateWidgets> = Arc::new(SqlWidgets {
             hold: Arc::clone(&hold),
         });
-        let mut composer = Composer::new(
-            Store::new(store_pool.clone(), RETENTION),
-            provider.verifier(),
-        );
+        let mut composer = Composer::new(Store::new(store_pool.clone(), RETENTION));
         // As `service::api::contract` assembles it: the transport router
         // registers the shared problem responses the family references (the
         // 403 among them must resolve), and the composer adds its own.
-        let (routes, document) = infra_http::router()
+        let contract = infra_http::router()
             .routes(composer.route(routes!(create_widget)))
-            .merge(composer.components())
-            .split_for_parts();
+            .merge_document(composer.components());
+        let document = contract.document().clone();
         let activation = composer
             .agree(&document)
             .expect("the composed operation agrees with the document");
@@ -456,6 +462,8 @@ impl Mounted {
             matches!(activation, Activation::Active { .. }),
             "{activation:?}"
         );
+        let routes = infra_http::authn::finalize(contract, provider.verifier(), 32 * 1024)
+            .expect("the mounted auth contract finalizes");
         let app = harden(
             routes
                 .layer(Extension(widgets))
@@ -674,6 +682,18 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
             challenge.map(HeaderValue::from_static)
         );
     }
+    assert_eq!(outcomes(&recorder), counts(&[]));
+
+    let scope_denied = mounted
+        .create(NO_SCOPE, "scope-check", &input, "req-scope")
+        .await;
+    problem_body(&scope_denied, StatusCode::FORBIDDEN, "forbidden");
+    assert_eq!(
+        scope_denied.maybe_header(WWW_AUTHENTICATE),
+        Some(HeaderValue::from_static(
+            "Bearer error=\"insufficient_scope\""
+        ))
+    );
     assert_eq!(outcomes(&recorder), counts(&[]));
 
     // Once authentication passes, the same key is refused.

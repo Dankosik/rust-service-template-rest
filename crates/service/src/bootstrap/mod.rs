@@ -36,8 +36,11 @@ use service_config::{
     AppConfig, BuildInfo, Config, FromArgs, LogFormat, TracesSampler, process_failure,
 };
 // template:begin authn:bootstrap-authn-config-import
-use service_config::AuthnMode;
+use service_config::AuthnConfig;
 // template:end authn:bootstrap-authn-config-import
+// template:begin oidc-jwt:bootstrap-auth-jwt-algorithm-import
+use service_config::{JwtAlgorithm, TokenProfile};
+// template:end oidc-jwt:bootstrap-auth-jwt-algorithm-import
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -73,9 +76,21 @@ pub(crate) enum BootstrapError {
     #[error("configuration is invalid: {0}")]
     Config(#[from] service_config::ValidationError),
     // template:begin authn:bootstrap-authn-errors
-    #[error("authentication startup failed")]
-    AuthenticationStartup,
+    #[error("authentication preparation failed for {mode} {key}: {source}")]
+    AuthenticationPreparation {
+        mode: &'static str,
+        key: &'static str,
+        #[source]
+        source: infra_bearerauthn::PreparationError,
+    },
+    #[error("authentication preparation input is unavailable for {mode}: {key}")]
+    AuthenticationInput {
+        mode: &'static str,
+        key: &'static str,
+    },
     // template:end authn:bootstrap-authn-errors
+    #[error(transparent)]
+    HttpContract(#[from] infra_http::FinalizeError),
     // template:begin postgres:bootstrap-errors
     #[error("configuration is invalid: postgres.dsn: {0}")]
     PostgresDsn(#[from] infra_postgres::DsnError),
@@ -179,18 +194,16 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // template:end postgres:bootstrap-startup-pool
     let outcome = async {
         let probes: Vec<Box<dyn Probe>> = Vec::new();
-        // template:begin http-idempotency:bootstrap-http-idempotency-verifier
-        let verifier =
-        // template:end http-idempotency:bootstrap-http-idempotency-verifier
+        let _auth = PreparedAuth::None;
         // template:begin authn:bootstrap-authn-prepare
-        prepare_auth(&config, &tracker, &cancel).await?;
+        let _auth = prepare_auth(&config, &tracker, &cancel).await?;
         // template:end authn:bootstrap-authn-prepare
         // template:begin postgres:bootstrap-postgres-startup
         let (probes, pool) = prepare_postgres(probes, &config, &tracker, &cancel).await?;
         postgres_pool = pool;
         // template:end postgres:bootstrap-postgres-startup
         // template:begin http-idempotency:bootstrap-http-idempotency-composer
-        let composer = prepare_http_idempotency(&config, postgres_pool.as_ref(), verifier);
+        let composer = prepare_http_idempotency(&config, postgres_pool.as_ref());
         // template:end http-idempotency:bootstrap-http-idempotency-composer
 
         // Admission runs even without probes so the first probe after bind
@@ -211,6 +224,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             tracker: tracker.clone(),
             readiness,
             policy,
+            auth: _auth,
             // template:begin postgres:bootstrap-prepared-pool
             postgres_pool: postgres_pool.clone(),
             // template:end postgres:bootstrap-prepared-pool
@@ -245,52 +259,110 @@ async fn prepare_auth(
     config: &Config,
     tracker: &TaskTracker,
     cancel: &CancellationToken,
-) -> Result<Verifier, BootstrapError> {
-    match config.authn.mode {
-        AuthnMode::None => Ok(Verifier::disabled()),
+) -> Result<PreparedAuth, BootstrapError> {
+    match &config.authn {
+        AuthnConfig::None {} => Ok(PreparedAuth::None),
         // template:end authn:bootstrap-prepare-auth-prefix
         // template:begin oidc-jwt:bootstrap-prepare-auth-jwt
-        AuthnMode::OidcJwt => {
+        AuthnConfig::OidcJwt {
+            issuer,
+            audience,
+            token_profile,
+            algorithms,
+        } => {
+            let issuer = provider_url("oidc-jwt", "authn.issuer", issuer)?;
             let (verifier, refresh) = infra_bearerauthn::prepare_jwt(
                 infra_bearerauthn::JwtOptions {
-                    issuer: config.authn.issuer.clone(),
-                    audience: config.authn.audience.clone(),
-                    token_profile: match config.authn.token_profile() {
-                        service_config::TokenProfile::ResourceServer => {
+                    issuer,
+                    audiences: audience.as_slice().to_vec(),
+                    token_profile: match token_profile {
+                        TokenProfile::ResourceServer => {
                             infra_bearerauthn::TokenProfile::ResourceServer
                         }
-                        service_config::TokenProfile::Rfc9068 => {
-                            infra_bearerauthn::TokenProfile::Rfc9068
-                        }
+                        TokenProfile::Rfc9068 => infra_bearerauthn::TokenProfile::Rfc9068,
                     },
+                    algorithms: algorithms.iter().copied().map(jwt_algorithm).collect(),
                 },
                 tracker.clone(),
                 cancel.child_token(),
             )
             .await
-            .map_err(|_| BootstrapError::AuthenticationStartup)?;
+            .map_err(|source| BootstrapError::AuthenticationPreparation {
+                mode: "oidc-jwt",
+                key: "authn.issuer",
+                source,
+            })?;
             tracker.spawn(refresh);
-            Ok(verifier)
+            Ok(PreparedAuth::Enabled(verifier))
         }
         // template:end oidc-jwt:bootstrap-prepare-auth-jwt
         // template:begin oidc-introspection:bootstrap-prepare-auth-introspection
-        AuthnMode::OidcIntrospection => infra_bearerauthn::prepare_introspection(
-            infra_bearerauthn::IntrospectionOptions {
-                issuer: config.authn.issuer.clone(),
-                audience: config.authn.audience.clone(),
-                endpoint: config.authn.introspection_endpoint.clone(),
-                client_id: config.authn.introspection_client_id.clone(),
-                client_secret: config.authn.introspection_client_secret.clone(),
-            },
-            tracker.clone(),
-            cancel.child_token(),
-        )
-        .map_err(|_| BootstrapError::AuthenticationStartup),
-        // template:end oidc-introspection:bootstrap-prepare-auth-introspection
-        // template:begin authn:bootstrap-prepare-auth-suffix
+        AuthnConfig::OidcIntrospection {
+            issuer,
+            audience,
+            introspection_endpoint,
+            introspection_client_id,
+            introspection_client_secret,
+            provider_concurrency,
+        } => {
+            let issuer = provider_url("oidc-introspection", "authn.issuer", issuer)?;
+            let endpoint = provider_url(
+                "oidc-introspection",
+                "authn.introspection_endpoint",
+                introspection_endpoint,
+            )?;
+            let client_secret =
+                introspection_client_secret
+                    .clone()
+                    .ok_or(BootstrapError::AuthenticationInput {
+                        mode: "oidc-introspection",
+                        key: "authn.introspection_client_secret",
+                    })?;
+            let provider_concurrency = std::num::NonZeroUsize::new(
+                usize::try_from(provider_concurrency.get()).expect("u32 fits usize"),
+            )
+            .expect("configured provider concurrency is nonzero");
+            infra_bearerauthn::prepare_introspection(infra_bearerauthn::IntrospectionOptions {
+                issuer,
+                audiences: audience.as_slice().to_vec(),
+                endpoint,
+                client_id: introspection_client_id.clone(),
+                client_secret,
+                provider_concurrency,
+            })
+            .map(PreparedAuth::Enabled)
+            .map_err(|source| BootstrapError::AuthenticationPreparation {
+                mode: "oidc-introspection",
+                key: "authn.introspection_endpoint",
+                source,
+            })
+        } // template:end oidc-introspection:bootstrap-prepare-auth-introspection
+          // template:begin authn:bootstrap-prepare-auth-suffix
     }
 }
 // template:end authn:bootstrap-prepare-auth-suffix
+
+// template:begin authn:bootstrap-auth-provider-url
+fn provider_url(
+    mode: &'static str,
+    key: &'static str,
+    value: &str,
+) -> Result<infra_bearerauthn::ProviderUrl, BootstrapError> {
+    infra_bearerauthn::ProviderUrl::parse(value)
+        .map_err(|source| BootstrapError::AuthenticationPreparation { mode, key, source })
+}
+// template:end authn:bootstrap-auth-provider-url
+
+// template:begin oidc-jwt:bootstrap-auth-jwt-algorithm-converter
+const fn jwt_algorithm(algorithm: JwtAlgorithm) -> infra_bearerauthn::JwtAlgorithm {
+    match algorithm {
+        JwtAlgorithm::Rs256 => infra_bearerauthn::JwtAlgorithm::Rs256,
+        JwtAlgorithm::Es256 => infra_bearerauthn::JwtAlgorithm::Es256,
+        JwtAlgorithm::Ps256 => infra_bearerauthn::JwtAlgorithm::Ps256,
+        JwtAlgorithm::EdDsa => infra_bearerauthn::JwtAlgorithm::EdDsa,
+    }
+}
+// template:end oidc-jwt:bootstrap-auth-jwt-algorithm-converter
 
 // template:begin postgres:bootstrap-open-postgres
 async fn prepare_postgres(
@@ -341,16 +413,12 @@ async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
 /// store uses the pool only when a retention is set as well; otherwise the
 /// store is inert, and activation refuses the missing value before any
 /// store call if an idempotent operation is served.
-fn prepare_http_idempotency(
-    config: &Config,
-    postgres_pool: Option<&PgPool>,
-    verifier: Verifier,
-) -> Composer {
+fn prepare_http_idempotency(config: &Config, postgres_pool: Option<&PgPool>) -> Composer {
     let store = match (postgres_pool, config.http_idempotency.retention) {
         (Some(pool), Some(retention)) => Store::new(pool.clone(), retention),
         _ => Store::inert(),
     };
-    Composer::new(store, verifier)
+    Composer::new(store)
 }
 
 /// Agree the composed idempotent operations with the assembled document,
@@ -410,6 +478,7 @@ struct Prepared<'a> {
     tracker: TaskTracker,
     readiness: Readiness,
     policy: RefreshPolicy,
+    auth: PreparedAuth,
     // template:begin postgres:bootstrap-prepared-field
     postgres_pool: Option<PgPool>,
     // template:end postgres:bootstrap-prepared-field
@@ -429,6 +498,7 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         tracker,
         readiness,
         policy,
+        auth,
         // template:begin postgres:bootstrap-destructure-pool
         postgres_pool,
         // template:end postgres:bootstrap-destructure-pool
@@ -444,7 +514,20 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         // template:end http-idempotency:bootstrap-http-idempotency-contract-composer
     );
     // template:begin http-idempotency:bootstrap-http-idempotency-activation
-    activate_http_idempotency(composer, contract.get_openapi(), config, &tracker, &cancel).await?;
+    let document = contract.document().clone();
+    let routes = match auth {
+        PreparedAuth::None => contract.finalize_public()?,
+        // template:begin authn:bootstrap-prepared-auth-enabled
+        PreparedAuth::Enabled(verifier) => infra_http::authn::finalize(
+            contract,
+            verifier,
+            usize::try_from(config.http.max_header_bytes.as_u64())
+                .unwrap_or(usize::MAX)
+                .min(32 * 1024),
+        )?,
+        // template:end authn:bootstrap-prepared-auth-enabled
+    };
+    activate_http_idempotency(composer, &document, config, &tracker, &cancel).await?;
     // template:end http-idempotency:bootstrap-http-idempotency-activation
     readiness.refresh(policy).await;
     readiness
@@ -463,7 +546,6 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
             .unwrap_or(usize::MAX),
         max_connections: config.http.connection_cap(),
     };
-    let (routes, _document) = contract.split_for_parts();
     let app = infra_http::harden(
         routes.with_state(readiness.reader()),
         &HardenOptions {
@@ -506,6 +588,13 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         signals,
     })
     .await)
+}
+
+enum PreparedAuth {
+    None,
+    // template:begin authn:bootstrap-prepared-auth-enabled
+    Enabled(Verifier),
+    // template:end authn:bootstrap-prepared-auth-enabled
 }
 
 fn replica_instance_id(app: &AppConfig) -> String {
@@ -616,13 +705,13 @@ mod tests {
         // A contract without an idempotent operation: only the family's
         // components, which every retained document carries.
         let composer = Composer::inert();
-        let contract = composer.components::<()>();
+        let contract = composer.components();
         let tracker = TaskTracker::new();
         // An active boundary would refuse this configuration at its first
         // check: `postgres.enabled` is false and no retention is set.
         activate_http_idempotency(
             composer,
-            contract.get_openapi(),
+            &contract,
             &Config::default(),
             &tracker,
             &CancellationToken::new(),

@@ -30,10 +30,10 @@ would ignore. Every idempotent operation must:
 
 1. Set `x-idempotent` to the JSON boolean `true` — nothing else is valid.
 2. Use `POST`, `PUT`, `PATCH`, or `DELETE`.
-3. Already be a protected operation: `x-security-decision: protected`,
-   bearer-only security, no anonymous alternative — the ordinary rule
-   [HTTP Architecture](architecture/http.md#adding-an-operation) and
-   [Optional inbound authentication](authentication.md) already require.
+3. Be effectively protected by the assembled OpenAPI policy: normally it
+   inherits the retained profile's root bearer requirement. An optional
+   `x-security-decision` must agree with that policy; an anonymous alternative
+   or public override cannot scope a caller key.
 4. Declare the header parameter `Idempotency-Key` exactly once, `required:
    true`, a string schema with `minLength: 1`, `maxLength: 255`, and this
    exact `pattern`:
@@ -75,9 +75,7 @@ transaction" below:
 #[utoipa::path(post, path = "/widgets", operation_id = "createWidget", tag = "widgets",
     params(infra_http::idempotency::IdempotencyKey),
     request_body = NewWidget,
-    security(("bearerAuth" = [])),
-    extensions(("x-security-decision" = json!({"exposure": "protected", "rationale": "..."})),
-               ("x-idempotent" = json!(true))),
+    extensions(("x-idempotent" = json!(true))),
     responses((status = 201, description = "created", body = Widget),
               infra_http::idempotency::IdempotentOperationProblemResponses))]
 pub async fn create_widget(idempotency: Idempotency, principal: VerifiedPrincipal,
@@ -269,21 +267,21 @@ the same request identity, or a separate durable design of its own.
 
 ## Compose the route
 
-`idempotency.route(routes!(widgets::http::create_widget))`, added inside
+`idempotency.route(infra_http::routes!(widgets::http::create_widget))`, added inside
 `service::api::contract()`, is the one composition call an idempotent
 operation needs:
 
 ```rust,ignore
 // crates/service/src/api.rs, added by the adopter inside contract():
-//     .routes(idempotency.route(routes!(widgets::http::create_widget)))
+//     .routes(idempotency.route(infra_http::routes!(widgets::http::create_widget)))
 ```
 
-It already composes the operation through the same protected-operation
-contract `infra_http::authn::protect` enforces — applying the key layer,
-then `protect` — in one call, so do not also wrap the route in `protect`
-yourself. With the pack retained, `contract()` already takes the `Composer`
-as a parameter and already merges `idempotency.components()`, so this one
-line, plus the handler and its port, is the whole adopter-owned change.
+It retains the documented route carrier while it adds key handling. The final
+authentication layer wraps the fully assembled contract, so authentication
+precedes key validation without per-operation wrapping. With the pack retained,
+`contract()` already takes the `Composer` as a parameter and merges
+`idempotency.components()`, so this one line, plus the handler and its port, is
+the whole adopter-owned change.
 
 At startup, `Composer::agree` re-checks every declaration rule against the
 assembled document in both directions: a composed operation without

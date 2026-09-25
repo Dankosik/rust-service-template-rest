@@ -1825,8 +1825,8 @@ dependencies = [
 name = "infra-bearerauthn"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "base64 0.23.1",
- "infra-egress-dns",
  "jsonwebtoken",
  "metrics",
  "reqwest",
@@ -1837,6 +1837,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
+ "tracing",
  "url",
 ]
 
@@ -3800,7 +3801,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
- "url",
  "vergen-gitcl",
 ]
 

@@ -8,13 +8,13 @@ Global constraints: [Intent](intent.md), [Technical Design transition](technical
 
 ## Tasks
 
-- [ ] T1: Every served operation follows the assembled authentication contract, backed by the reviewed bounded provider engines and matching generated profiles/documentation.
+- [x] T1: Every served operation follows the assembled authentication contract, backed by the reviewed bounded provider engines and matching generated profiles/documentation.
   - Depends on: none; reviewed Specification and Technical Design close implementation inputs. Local acceptance gates root publication; applicable CI gates requested external completion, not coding or the start of local validation.
   - Provides: One coherent implemented authentication delivery candidate, including tests, cleanup and projections.
   - Packet: [tasks/T1-authentication-delivery.md](tasks/T1-authentication-delivery.md)
 
 ## Completion state
 
-Implementation: not started. Local final validation/review: pending. Root publication and exact-head CI: pending. No execution or acceptance receipt exists yet.
+Implementation: T1 Implemented by native `/root/authn_implementation`; all writers and descendants joined. Formatting and canonical OpenAPI generation completed; generated YAML is unchanged. The checkbox records implementation only, not accepted behavior. Reviewed phase artifacts are preserved in local commit `2935249`; production base remains `4edd184`. Root `/root` is sole LEDGER_ORCHESTRATOR and is freezing the assembled candidate for final delivery validation/review assigned to the same Lead. Root publication and exact-head CI: pending. No acceptance receipt exists yet.
 
 This is one unit because its config, trust engines, route provenance, final auth layer, bootstrap and generated consumers must agree before the changed public composition can be consumed. They are useful implementation lanes, not independently acceptable outcomes. The Implementation Lead chooses those lanes against the packet's disjoint owner/lock constraints. After Planning movement, the root binds as sole ledger writer; the Lead returns an Implemented result, and the assigned delivery owner returns local Completion evidence before root publication.

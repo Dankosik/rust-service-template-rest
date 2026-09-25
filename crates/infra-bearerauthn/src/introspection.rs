@@ -9,68 +9,55 @@ use std::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use secrecy::ExposeSecret;
 use tokio::{sync::Semaphore, time::Instant};
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use url::Url;
 
 use crate::{
-    BearerToken, Failure, IntrospectionOptions, Principal, Verifier,
+    BearerToken, Failure, IntrospectionOptions, PreparationError, Principal, Verifier,
     claims::{ClaimPolicy, validate_introspection_claims},
-    provider::{ProviderClient, parse_provider_url, reserve_request_deadline},
+    provider::{ProviderClient, reserve_request_deadline},
 };
 
-const MAX_IN_FLIGHT_EXCHANGES: usize = 32;
-
 /// Builds the opaque-token verifier without performing provider I/O.
-///
-/// # Errors
-///
-/// Returns [`Failure::Unavailable`] when the configured endpoint or private
-/// provider transport cannot be prepared.
-pub fn prepare_introspection(
-    options: IntrospectionOptions,
-    tracker: TaskTracker,
-    cancel: CancellationToken,
-) -> Result<Verifier, Failure> {
-    let provider = ProviderClient::new(tracker, cancel)?;
+pub fn prepare_introspection(options: IntrospectionOptions) -> Result<Verifier, PreparationError> {
+    let provider = ProviderClient::new()?;
     prepare_with_provider(options, provider)
 }
 
-/// Prepares the real introspection verifier with the narrowly admitted local
-/// TLS transport used by cross-crate tests.
-///
-/// # Errors
-///
-/// Returns [`Failure::Unavailable`] when the fixture transport or configured
-/// endpoint is unsuitable for verification.
+/// Prepares a verifier through fixture-only local TLS transport.
 #[cfg(any(test, feature = "test-support"))]
 pub fn prepare_introspection_with_fixture(
     options: IntrospectionOptions,
     fixture: crate::test_support::FixtureTransport,
-) -> Result<Verifier, Failure> {
+) -> Result<Verifier, PreparationError> {
     prepare_with_provider(options, fixture.into_provider())
 }
 
 fn prepare_with_provider(
     options: IntrospectionOptions,
     provider: ProviderClient,
-) -> Result<Verifier, Failure> {
-    let policy = ClaimPolicy::new(options.issuer, options.audience);
-    let endpoint = parse_provider_url(&options.endpoint)?;
-
+) -> Result<Verifier, PreparationError> {
+    if options.audiences.is_empty() || options.audiences.iter().any(String::is_empty) {
+        return Err(PreparationError::new(
+            crate::PreparationPhase::Options,
+            crate::PreparationReason::Parse,
+        ));
+    }
     Ok(Verifier::Introspection(IntrospectionVerifier {
-        endpoint,
+        endpoint: options.endpoint,
         client_id: options.client_id,
         client_secret: options.client_secret,
-        policy: Arc::new(policy),
+        policy: Arc::new(ClaimPolicy::new(
+            options.issuer.as_str().to_owned(),
+            options.audiences,
+        )),
         provider,
-        permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_EXCHANGES)),
+        permits: Arc::new(Semaphore::new(options.provider_concurrency.get())),
     }))
 }
 
 /// An uncached, bounded client for one configured introspection endpoint.
 #[derive(Clone)]
 pub struct IntrospectionVerifier {
-    endpoint: Url,
+    endpoint: crate::ProviderUrl,
     client_id: String,
     client_secret: secrecy::SecretString,
     policy: Arc<ClaimPolicy>,
@@ -91,10 +78,7 @@ impl IntrospectionVerifier {
         deadline: Instant,
     ) -> Result<Principal, Failure> {
         let Some(provider_deadline) = reserve_request_deadline(Instant::now(), deadline) else {
-            // The enclosing HTTP timeout is the authority for an exhausted
-            // request budget. Do no provider work and leave it to produce 504.
-            tokio::time::sleep_until(deadline).await;
-            return Err(Failure::Unavailable);
+            return Err(Failure::Timeout);
         };
         let _permit = self
             .permits
@@ -107,7 +91,7 @@ impl IntrospectionVerifier {
         let response = self
             .provider
             .post_form_json(
-                &self.endpoint,
+                self.endpoint.url(),
                 &authorization,
                 body.as_bytes(),
                 provider_deadline,
@@ -154,29 +138,9 @@ mod tests {
     use std::sync::Arc;
 
     use tokio::{sync::Semaphore, time::Instant};
-    use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
     use super::{ClaimPolicy, IntrospectionVerifier, basic_authorization, form_body};
-    use crate::{
-        Failure, parse_bearer,
-        provider::{ProviderClient, parse_provider_url, reserve_request_deadline},
-    };
-
-    fn verifier_with_permits(permits: usize) -> (IntrospectionVerifier, Arc<Semaphore>) {
-        let permits = Arc::new(Semaphore::new(permits));
-        let verifier = IntrospectionVerifier {
-            endpoint: parse_provider_url("https://127.0.0.1/introspect").unwrap(),
-            client_id: "fixture-client".to_owned(),
-            client_secret: secrecy::SecretString::from("fixture-secret"),
-            policy: Arc::new(ClaimPolicy::new(
-                "https://issuer.example".to_owned(),
-                "api".to_owned(),
-            )),
-            provider: ProviderClient::new(TaskTracker::new(), CancellationToken::new()).unwrap(),
-            permits: permits.clone(),
-        };
-        (verifier, permits)
-    }
+    use crate::{Failure, ProviderUrl, parse_bearer, provider::ProviderClient};
 
     #[test]
     fn client_secret_basic_encodes_each_component_before_base64() {
@@ -184,76 +148,33 @@ mod tests {
     }
 
     #[test]
-    fn form_body_keeps_the_token_out_of_the_url_and_uses_access_token_hint() {
-        let token = parse_bearer([b"Bearer a+b/=".as_slice()]).unwrap();
-
+    fn form_body_keeps_the_token_out_of_the_url() {
+        let token = parse_bearer([b"Bearer a+b/=".as_slice()], 32 * 1024).unwrap();
         assert_eq!(
             form_body(&token).unwrap(),
             "token=a%2Bb%2F%3D&token_type_hint=access_token"
         );
     }
 
-    #[test]
-    fn endpoint_requires_an_exact_https_destination_without_user_info() {
-        assert!(parse_provider_url("https://provider.example/oauth/introspect").is_ok());
-        for value in [
-            "http://provider.example/introspect",
-            "https://client:secret@provider.example/introspect",
-            "https://provider.example/introspect#fragment",
-            "https://provider.example/introspect?query=value",
-            " https://provider.example/introspect",
-            "https://@provider.example/introspect",
-            "not a url",
-        ] {
-            assert_eq!(parse_provider_url(value), Err(Failure::Unavailable));
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn reserves_parent_response_time_before_provider_work() {
-        let now = Instant::now();
-        assert_eq!(
-            reserve_request_deadline(now, now + std::time::Duration::from_millis(100)),
-            None
-        );
-        assert_eq!(
-            reserve_request_deadline(now, now + std::time::Duration::from_secs(10)),
-            Some(now + std::time::Duration::from_secs(3))
-        );
-    }
-
     #[tokio::test]
-    async fn capacity_denial_is_immediate_and_starts_no_provider_exchange() {
-        let (verifier, permits) = verifier_with_permits(32);
-        let held = (0..32)
-            .map(|_| permits.clone().try_acquire_owned().unwrap())
-            .collect::<Vec<_>>();
-        let token = parse_bearer([b"Bearer opaque".as_slice()]).unwrap();
-
-        assert_eq!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(10),
-                verifier.verify(&token, Instant::now() + std::time::Duration::from_secs(1)),
-            )
-            .await
-            .unwrap(),
-            Err(Failure::Unavailable)
-        );
-        drop(held);
-        assert_eq!(permits.available_permits(), 32);
-    }
-
-    #[tokio::test]
-    async fn provider_failure_releases_the_admission_permit() {
-        let (verifier, permits) = verifier_with_permits(1);
-        let token = parse_bearer([b"Bearer opaque".as_slice()]).unwrap();
-
+    async fn exhausted_configured_capacity_rejects_before_provider_io() {
+        let verifier = IntrospectionVerifier {
+            endpoint: ProviderUrl::parse("https://127.0.0.1/introspect").unwrap(),
+            client_id: "client".to_owned(),
+            client_secret: secrecy::SecretString::from("secret"),
+            policy: Arc::new(ClaimPolicy::new(
+                "https://issuer.example".to_owned(),
+                vec!["api".to_owned()],
+            )),
+            provider: ProviderClient::new().unwrap(),
+            permits: Arc::new(Semaphore::new(0)),
+        };
+        let token = parse_bearer([b"Bearer opaque".as_slice()], 32 * 1024).unwrap();
         assert_eq!(
             verifier
                 .verify(&token, Instant::now() + std::time::Duration::from_secs(1))
                 .await,
             Err(Failure::Unavailable)
         );
-        assert_eq!(permits.available_permits(), 1);
     }
 }

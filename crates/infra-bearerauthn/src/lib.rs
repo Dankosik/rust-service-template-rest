@@ -1,4 +1,4 @@
-//! Bearer-token authentication verification.
+//! Bounded bearer authentication verification.
 //!
 //! This crate owns the sealed transition from an inbound bearer envelope to a
 //! verified identity. HTTP routing, configuration loading, and authorization
@@ -17,10 +17,7 @@ mod provider;
 mod refresh;
 // template:end oidc-jwt:authn-refresh-module
 
-use std::fmt;
-// template:begin oidc-jwt:authn-jwt-refresh-task-imports
-use std::{future::Future, pin::Pin};
-// template:end oidc-jwt:authn-jwt-refresh-task-imports
+use std::{fmt, future::Future, num::NonZeroUsize, pin::Pin};
 
 use tokio::time::Instant;
 
@@ -31,11 +28,9 @@ pub use introspection::prepare_introspection;
 // template:begin oidc-jwt:authn-jwt-prepare-export
 pub use jwt::prepare_jwt;
 // template:end oidc-jwt:authn-jwt-prepare-export
+pub use provider::ProviderUrl;
 
-/// The only authentication outcomes exposed to the HTTP adapter.
-///
-/// The variants intentionally do not retain dependency, token, provider, or
-/// endpoint details: those values are not safe to put in a response or log.
+/// The fixed authentication outcomes exposed to the HTTP adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Failure {
     #[error("bearer authentication is required")]
@@ -48,6 +43,54 @@ pub enum Failure {
     Invalid,
     #[error("bearer authentication is unavailable")]
     Unavailable,
+    #[error("bearer authentication exceeded the request deadline")]
+    Timeout,
+}
+
+/// A safe preparation phase for operator diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparationPhase {
+    Options,
+    Client,
+    Discovery,
+    Jwks,
+}
+
+/// A closed preparation reason. These variants never retain dependency errors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparationReason {
+    InvalidUrl,
+    Client,
+    Fetch,
+    Parse,
+    IssuerMismatch,
+    NoUsableKeys,
+}
+
+/// A safe preparation error for bootstrap's startup diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("authentication preparation failed during {phase:?}: {reason:?}")]
+pub struct PreparationError {
+    phase: PreparationPhase,
+    reason: PreparationReason,
+}
+
+impl PreparationError {
+    pub(crate) const fn new(phase: PreparationPhase, reason: PreparationReason) -> Self {
+        Self { phase, reason }
+    }
+
+    /// The failed bounded preparation stage.
+    #[must_use]
+    pub const fn phase(self) -> PreparationPhase {
+        self.phase
+    }
+
+    /// The safe closed reason for the failed stage.
+    #[must_use]
+    pub const fn reason(self) -> PreparationReason {
+        self.reason
+    }
 }
 
 /// A verified identity. Construction remains crate-private so callers cannot
@@ -57,10 +100,7 @@ pub struct Principal {
     issuer: String,
     subject: Option<String>,
     client_id: Option<String>,
-    #[allow(
-        dead_code,
-        reason = "retains verified expiry as sealed evidence; no downstream expiry policy exists"
-    )]
+    scopes: Vec<String>,
     expiry_epoch_seconds: u64,
 }
 
@@ -69,12 +109,14 @@ impl Principal {
         issuer: String,
         subject: Option<String>,
         client_id: Option<String>,
+        scopes: Vec<String>,
         expiry_epoch_seconds: u64,
     ) -> Self {
         Self {
             issuer,
             subject,
             client_id,
+            scopes,
             expiry_epoch_seconds,
         }
     }
@@ -96,6 +138,18 @@ impl Principal {
     pub fn client_id(&self) -> Option<&str> {
         self.client_id.as_deref()
     }
+
+    /// The normalized, exact-case scopes from verified token evidence.
+    #[must_use]
+    pub fn scopes(&self) -> &[String] {
+        &self.scopes
+    }
+
+    /// The verified `exp` claim in unsigned epoch seconds.
+    #[must_use]
+    pub const fn expires_at(&self) -> u64 {
+        self.expiry_epoch_seconds
+    }
 }
 
 impl fmt::Debug for Principal {
@@ -112,21 +166,25 @@ pub enum TokenProfile {
     ResourceServer,
     Rfc9068,
 }
+
+/// The closed JWT algorithms accepted by authentication configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum JwtAlgorithm {
+    Rs256,
+    Es256,
+    Ps256,
+    EdDsa,
+}
 // template:end oidc-jwt:authn-token-profile
 
 // template:begin oidc-jwt:authn-jwt-options
 /// Bootstrap input for OIDC discovery and JWT verification.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JwtOptions {
-    pub issuer: String,
-    pub audience: String,
+    pub issuer: ProviderUrl,
+    pub audiences: Vec<String>,
     pub token_profile: TokenProfile,
-}
-
-impl fmt::Debug for JwtOptions {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("JwtOptions([REDACTED])")
-    }
+    pub algorithms: Vec<JwtAlgorithm>,
 }
 // template:end oidc-jwt:authn-jwt-options
 
@@ -134,11 +192,12 @@ impl fmt::Debug for JwtOptions {
 /// Bootstrap input for RFC 7662 token introspection.
 #[derive(Clone)]
 pub struct IntrospectionOptions {
-    pub issuer: String,
-    pub audience: String,
-    pub endpoint: String,
+    pub issuer: ProviderUrl,
+    pub audiences: Vec<String>,
+    pub endpoint: ProviderUrl,
     pub client_id: String,
     pub client_secret: secrecy::SecretString,
+    pub provider_concurrency: NonZeroUsize,
 }
 
 impl fmt::Debug for IntrospectionOptions {
@@ -154,11 +213,9 @@ pub type RefreshTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 // template:end oidc-jwt:authn-refresh-task
 
 /// Fixture-only transport custody for tests that exercise a real verifier.
-/// It is compiled only by this crate's tests or its default-off test-support
-/// feature, and cannot construct a principal or bypass verification.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
-    use tokio_util::{sync::CancellationToken, task::TaskTracker};
+    use tokio_util::sync::CancellationToken;
 
     use super::{Failure, fmt, provider};
 
@@ -166,34 +223,22 @@ pub mod test_support {
     pub use crate::introspection::prepare_introspection_with_fixture;
     // template:end oidc-introspection:authn-test-support-introspection-prepare
 
-    /// Fixture-only custody for a real verifier transport. It is unavailable
-    /// from ordinary builds and has no principal-construction or bypass API.
+    /// Fixture-only custody for a real verifier transport. It cannot construct
+    /// a principal or bypass verification.
     pub struct FixtureTransport {
         provider: provider::ProviderClient,
     }
 
     impl FixtureTransport {
         /// Creates the sole fixture mapping: one named TLS endpoint to loopback.
-        ///
-        /// # Errors
-        ///
-        /// Returns [`Failure::Unavailable`] for an invalid fixture root, host,
-        /// address, or fixture transport setup.
         pub fn new(
-            tracker: TaskTracker,
-            cancel: CancellationToken,
             fixture_host: &str,
             fixture_addr: std::net::SocketAddr,
             fixture_root_der: &[u8],
+            cancel: CancellationToken,
         ) -> Result<Self, Failure> {
-            provider::new_fixture_client(
-                tracker,
-                cancel,
-                fixture_host,
-                fixture_addr,
-                fixture_root_der,
-            )
-            .map(|provider| Self { provider })
+            provider::new_fixture_client(fixture_host, fixture_addr, fixture_root_der, cancel)
+                .map(|provider| Self { provider })
         }
 
         pub(crate) fn into_provider(self) -> provider::ProviderClient {
@@ -221,20 +266,12 @@ pub enum Verifier {
 }
 
 impl Verifier {
-    /// Returns the deliberately unavailable verifier used by disabled profiles
-    /// and pure OpenAPI document assembly.
     #[must_use]
     pub const fn disabled() -> Self {
         Self::Disabled
     }
 
-    /// Verifies a syntactically accepted bearer token before the enclosing
-    /// request deadline.
-    ///
-    /// # Errors
-    ///
-    /// Returns the fixed authentication failure class without retaining token,
-    /// claim, credential, key, or provider details.
+    /// Verifies a syntactically accepted bearer token before its absolute deadline.
     pub async fn verify(
         &self,
         token: &BearerToken<'_>,
@@ -256,12 +293,8 @@ impl fmt::Debug for Verifier {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Disabled => formatter.write_str("Verifier::Disabled"),
-            // template:begin oidc-jwt:authn-verifier-jwt-debug
             Self::Jwt(_) => formatter.write_str("Verifier::Jwt(..)"),
-            // template:end oidc-jwt:authn-verifier-jwt-debug
-            // template:begin oidc-introspection:authn-verifier-introspection-debug
             Self::Introspection(_) => formatter.write_str("Verifier::Introspection(..)"),
-            // template:end oidc-introspection:authn-verifier-introspection-debug
         }
     }
 }

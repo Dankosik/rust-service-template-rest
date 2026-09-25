@@ -47,14 +47,16 @@ until configured when its pack is retained. The local
 [persistence authority](architecture/persistence.md) describes availability.
 
 <!-- template:begin authn:docs-template-init-authn -->
-`AUTHN` defaults to `none` and accepts `none`, `oidc-jwt`, or `oidc-introspection`; exactly one authentication engine may be retained. The direct entry takes the same choice as `--authn`. `none` removes all authentication configuration, code, tests, dependencies, and adopter guidance. An initialized authentication profile still defaults to runtime `authn.mode = "none"`, so enabling it requires a complete valid runtime trust tuple.
+`AUTHN` defaults to `none` and accepts `none`, `oidc-jwt`, or `oidc-introspection`; exactly one whole-file engine may be retained. The direct entry takes the same choice as `--authn`. `none` removes all authentication configuration, code, tests, dependencies, and adopter guidance. An initialized authentication profile still defaults to runtime `authn.mode = "none"`; a protected route contract requires a complete valid trust tuple before startup.
 <!-- template:end authn:docs-template-init-authn -->
 <!-- template:begin outbound-http:docs-template-init-outbound -->
 `OUTBOUND_HTTP` defaults to `none` and accepts `none` or `bounded`; the direct
 entry takes `--outbound-http`. `bounded` retains the [client guide](outbound-http.md),
 crate and tests independently of authentication. `none` removes that pack.
-The shared DNS and readonly request budget stay when auth or outbound needs
-them. Selection supplies no provider configuration or automatic request.
+The readonly request budget stays when auth or outbound needs it. DNS and
+public-address admission stay only with outbound HTTP; authentication retains
+its independent TLS fixtures without retaining the DNS pack. Selection supplies
+no provider configuration or automatic request.
 <!-- template:end outbound-http:docs-template-init-outbound -->
 <!-- template:begin http-idempotency:docs-template-init-http-idempotency -->
 `HTTP_IDEMPOTENCY` defaults to `none` and accepts `none` or `postgres`; the

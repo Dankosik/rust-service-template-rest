@@ -35,6 +35,7 @@ impl<'a> BearerToken<'a> {
 /// bearer envelope.
 pub fn parse_bearer<'a>(
     headers: impl IntoIterator<Item = &'a [u8]>,
+    effective_token_bound: usize,
 ) -> Result<BearerToken<'a>, Failure> {
     let mut headers = headers.into_iter();
     let Some(header) = headers.next() else {
@@ -50,7 +51,7 @@ pub fn parse_bearer<'a>(
     if !scheme.eq_ignore_ascii_case(b"Bearer") || !valid_token(token) {
         return Err(Failure::Malformed);
     }
-    if token.len() > 32 * 1024 {
+    if token.len() > effective_token_bound.min(32 * 1024) {
         return Err(Failure::Oversize);
     }
 
@@ -100,7 +101,7 @@ mod tests {
 
     #[test]
     fn accepts_case_insensitive_scheme_and_space_run() {
-        let token = parse_bearer([b"bEaReR   abc.DEF_~+/=".as_slice()]).unwrap();
+        let token = parse_bearer([b"bEaReR   abc.DEF_~+/=".as_slice()], 32 * 1024).unwrap();
 
         assert_eq!(token.as_bytes(), b"abc.DEF_~+/=");
         assert_eq!(format!("{token:?}"), "BearerToken([REDACTED])");
@@ -108,7 +109,10 @@ mod tests {
 
     #[test]
     fn distinguishes_missing_from_malformed_envelopes() {
-        assert_eq!(parse_bearer(std::iter::empty()), Err(Failure::Missing));
+        assert_eq!(
+            parse_bearer(std::iter::empty(), 32 * 1024),
+            Err(Failure::Missing)
+        );
         for value in [
             b"Basic abc".as_slice(),
             b" Bearer abc".as_slice(),
@@ -121,10 +125,17 @@ mod tests {
             b"Bearer abc\x7f".as_slice(),
             b"Bearer \xff".as_slice(),
         ] {
-            assert_eq!(parse_bearer([value]), Err(Failure::Malformed), "{value:?}");
+            assert_eq!(
+                parse_bearer([value], 32 * 1024),
+                Err(Failure::Malformed),
+                "{value:?}"
+            );
         }
         assert_eq!(
-            parse_bearer([b"Bearer one".as_slice(), b"Bearer two".as_slice()]),
+            parse_bearer(
+                [b"Bearer one".as_slice(), b"Bearer two".as_slice()],
+                32 * 1024
+            ),
             Err(Failure::Malformed)
         );
     }
@@ -134,9 +145,9 @@ mod tests {
         let at_limit = format!("Bearer {}", "a".repeat(32 * 1024));
         let over_limit = format!("Bearer {}", "a".repeat(32 * 1024 + 1));
 
-        assert!(parse_bearer([at_limit.as_bytes()]).is_ok());
+        assert!(parse_bearer([at_limit.as_bytes()], 32 * 1024).is_ok());
         assert_eq!(
-            parse_bearer([over_limit.as_bytes()]),
+            parse_bearer([over_limit.as_bytes()], 32 * 1024),
             Err(Failure::Oversize)
         );
     }
