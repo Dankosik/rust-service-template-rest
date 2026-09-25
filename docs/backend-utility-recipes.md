@@ -72,7 +72,7 @@ checks remain, with additional pre-cancellation and first-error-order tests.
 | --- | --- | --- |
 | `serde_with` | Nested `DisplayFromStr`, millisecond durations, `double_option`, duplicate-key refusal | Preserve the external format and unknown-field policy. PATCH missing/null/value are three states. Do not replace trim-and-empty normalization with `NoneAsEmptyString` and lose trimming. |
 | `validator` | Derive ordinary request-field constraints | Recipe uses a DTO-specific safe mapper to `Problem`, never the library error params containing submitted values. Production integration must add request ID and schema agreement. |
-| `json-patch` | JSON Merge Patch and fallible JSON Patch | The operation authorizes fields. Apply fallible patches to a candidate and publish only on success; do not expose partial mutation. |
+| `json-patch` | JSON Merge Patch and fallible JSON Patch | The operation authorizes fields. `patch` rolls back a failed sequence; publish only a successful result. Use a separate candidate when the original must remain available. |
 | `insta` | Review a stable JSON result as an inline snapshot | Keep semantic assertions. Do not add a second snapshot authority for committed OpenAPI or redact the relationship under test. |
 
 `serde_with` also has `OneOrMany` and `StringWithSeparator` for external

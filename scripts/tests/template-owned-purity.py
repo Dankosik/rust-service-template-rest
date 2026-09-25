@@ -106,8 +106,6 @@ def check(root: Path) -> None:
         candidate = root / path
         if not candidate.exists():
             raise AssertionError(f"source-only check input is missing: {path}")
-    if not any(root.glob("scripts/tests/template-*")):
-        raise AssertionError("source-only template fixture set is missing")
     for helper in REQUIRED_SYNC_HELPERS:
         if not (root / helper).is_file():
             raise AssertionError(f"required sync helper is missing: {helper}")

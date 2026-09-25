@@ -290,9 +290,9 @@ mod tests {
     }
 
     #[test]
-    fn percent_encoded_credentials_are_decoded_by_the_driver() {
-        let dsn = parse("postgres://app:p%40ss%2Fword@h:5432/app?sslmode=disable").unwrap();
-        assert_eq!(dsn.connect_options().get_username(), "app");
+    fn percent_encoded_username_is_decoded_by_the_driver() {
+        let dsn = parse("postgres://a%40pp:p%40ss%2Fword@h:5432/app?sslmode=disable").unwrap();
+        assert_eq!(dsn.connect_options().get_username(), "a@pp");
     }
 
     #[test]
