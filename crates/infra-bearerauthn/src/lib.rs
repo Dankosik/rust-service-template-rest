@@ -412,6 +412,34 @@ pub struct IntrospectionOptions {
     pub client_id: String,
     pub client_secret: secrecy::SecretString,
     pub provider_concurrency: NonZeroUsize,
+    pub cache: Option<IntrospectionCacheOptions>,
+}
+
+/// Optional positive-result retention for one prepared introspection verifier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IntrospectionCacheOptions {
+    /// Maximum retained entries, from 1 through 1024.
+    pub capacity: usize,
+    /// Fixed maximum lifetime, from one second through five minutes.
+    pub ttl: std::time::Duration,
+}
+
+impl Principal {
+    fn retained_bytes(&self) -> Option<usize> {
+        let bytes = self
+            .issuer
+            .capacity()
+            .checked_add(self.subject.as_ref().map_or(0, String::capacity))?
+            .checked_add(self.client_id.as_ref().map_or(0, String::capacity))?
+            .checked_add(
+                self.scopes
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<String>())?,
+            )?;
+        self.scopes
+            .iter()
+            .try_fold(bytes, |bytes, scope| bytes.checked_add(scope.capacity()))
+    }
 }
 
 impl fmt::Debug for IntrospectionOptions {
@@ -445,6 +473,11 @@ pub mod test_support {
 
     impl FixtureTransport {
         /// Creates the sole fixture mapping: one named TLS endpoint to loopback.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Failure::Unavailable`] for an invalid mapping or certificate,
+        /// or when client preparation fails.
         pub fn new(
             fixture_host: &str,
             fixture_addr: std::net::SocketAddr,
@@ -492,6 +525,11 @@ impl Verifier {
     }
 
     /// Verifies a syntactically accepted bearer token before its absolute deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Failure`] for invalid token evidence, an unavailable or disabled
+    /// engine, or an exhausted request deadline.
     pub async fn verify(
         &self,
         token: &BearerToken<'_>,

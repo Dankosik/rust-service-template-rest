@@ -158,7 +158,10 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::{AuthnConfig, LogFormat};
+    use crate::LogFormat;
+    // template:begin authn:load-authn-config-import
+    use crate::AuthnConfig;
+    // template:end authn:load-authn-config-import
     // template:begin oidc-jwt:load-token-profile-import
     use crate::TokenProfile;
     // template:end oidc-jwt:load-token-profile-import
@@ -189,6 +192,22 @@ mod tests {
         assert_eq!(cfg.app.commit, "abc123");
         assert_eq!(cfg.log.format, LogFormat::Json);
         assert_eq!(cfg.app.instance_id, None);
+    }
+
+    #[test]
+    fn shipped_local_configuration_loads_without_environment_overrides() {
+        let cfg = load_from(
+            &LoadOptions {
+                config: Some(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../env/config/local.toml"),
+                ),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        )
+        .unwrap();
+        assert_eq!(cfg.log.format, LogFormat::Text);
     }
 
     #[test]
@@ -275,10 +294,24 @@ mod tests {
                 ),
                 ("APP__AUTHN__INTROSPECTION_CLIENT_ID", "service-client"),
                 ("APP__AUTHN__INTROSPECTION_CLIENT_SECRET", "loader-secret"),
+                ("APP__AUTHN__CACHE_ENABLED", "true"),
+                ("APP__AUTHN__CACHE_CAPACITY", "64"),
+                ("APP__AUTHN__CACHE_TTL", "1m 30s"),
             ]),
         )
         .unwrap();
-        assert!(matches!(cfg.authn, AuthnConfig::OidcIntrospection { .. }));
+        let AuthnConfig::OidcIntrospection {
+            cache_enabled,
+            cache_capacity,
+            cache_ttl,
+            ..
+        } = &cfg.authn
+        else {
+            panic!("expected OIDC introspection configuration");
+        };
+        assert!(*cache_enabled);
+        assert_eq!(*cache_capacity, 64);
+        assert_eq!(*cache_ttl, Duration::from_secs(90));
         assert!(!format!("{cfg:?}").contains("loader-secret"));
     }
     // template:end oidc-introspection:load-introspection-environment

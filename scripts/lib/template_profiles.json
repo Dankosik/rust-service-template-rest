@@ -321,6 +321,7 @@
     "markers": [
       {"path": "Cargo.toml", "ids": ["workspace-authn-crate"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
+      {"path": "crates/config/src/load.rs", "ids": ["load-authn-config-import"]},
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-authn-dependency"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-authn-module", "infra-http-authn-exports"]},
       {"path": "crates/infra-http/src/contract.rs", "ids": ["contract-authn-parts"]},
@@ -373,7 +374,6 @@
       {"path": "crates/config/src/authn.rs", "ids": ["authn-nonzero-import", "authn-secrecy-import", "authn-occupied-secret-import", "authn-config-introspection-variant", "authn-default-provider-concurrency", "authn-config-introspection-validation", "authn-config-introspection-tests"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-introspection-environment", "load-introspection-secret-file"]},
       {"path": "crates/config/src/secret_policy.rs", "ids": ["secret-key-introspection-vector", "secret-policy-introspection-fixture"]},
-      {"path": "crates/infra-http/Cargo.toml", "ids": ["http-authn-test-dependencies", "http-introspection-test-secret"]},
       {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-secret-dependency"]},
       {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-post-form-json", "authn-provider-post-form-tls-test", "authn-provider-introspection-deadline"]},
       {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-introspection-module", "authn-introspection-prepare-export", "authn-test-support-introspection-prepare", "authn-introspection-options", "authn-verifier-introspection-variant", "authn-verifier-introspection-dispatch", "authn-concurrency-import", "authn-introspection-reasons", "authn-introspection-reason-labels", "authn-verifier-introspection-debug"]},

@@ -30,8 +30,10 @@ and must remain correctly ordered behind authentication.
 
 Includes contract enforcement, JWT/JWKS/discovery/introspection, configuration,
 provider transport, refresh lifecycle, diagnostics, and affected template/docs
-projections. Account for every review recommendation. Optional additions may be
-dispositioned with reasons. Retain jsonwebtoken plus the small owned refresh
+projections. Deliver every review recommendation. Introspection response caching
+is included as a configuration-controlled feature, disabled by default, with
+bounded retention that never extends beyond the token's exp. Optional activation
+does not make delivery optional. Retain jsonwebtoken plus the small owned refresh
 cache; an all-in-one crate experiment is separate work. Independent Stage 10.2
 outbound HTTP policy is assessed but not silently changed. No product routes,
 new identity provider, provider credentials, merge, deployment, or live-provider

@@ -23,6 +23,10 @@ pub struct ProviderUrl {
 
 impl ProviderUrl {
     /// Parses the one accepted configured/discovered provider URL grammar.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PreparationError`] when the URL violates the provider grammar.
     pub fn parse(raw: &str) -> Result<Self, PreparationError> {
         if raw
             .bytes()
@@ -129,7 +133,9 @@ impl ProviderClient {
     pub(crate) fn new() -> Result<Self, PreparationError> {
         build_client(None, None)
             .map(|client| Self { client })
-            .map_err(|_| PreparationError::new(PreparationPhase::Client, PreparationReason::Client))
+            .map_err(|()| {
+                PreparationError::new(PreparationPhase::Client, PreparationReason::Client)
+            })
     }
 
     // template:begin oidc-jwt:authn-provider-get-json
@@ -253,7 +259,7 @@ pub(crate) fn new_fixture_client(
     });
     build_client(Some(root), Some(resolver))
         .map(|client| ProviderClient { client })
-        .map_err(|_| Failure::Unavailable)
+        .map_err(|()| Failure::Unavailable)
 }
 
 #[cfg(any(test, feature = "test-support"))]

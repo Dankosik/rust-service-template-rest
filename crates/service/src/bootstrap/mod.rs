@@ -194,9 +194,13 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // template:end postgres:bootstrap-startup-pool
     let outcome = async {
         let probes: Vec<Box<dyn Probe>> = Vec::new();
-        let _auth = PreparedAuth::None;
+        #[allow(
+            unused_variables,
+            reason = "the no-auth projection uses this fallback; retained authentication shadows it"
+        )]
+        let auth = PreparedAuth::None;
         // template:begin authn:bootstrap-authn-prepare
-        let _auth = prepare_auth(&config, &tracker, &cancel).await?;
+        let auth = prepare_auth(&config, &tracker, &cancel).await?;
         // template:end authn:bootstrap-authn-prepare
         // template:begin postgres:bootstrap-postgres-startup
         let (probes, pool) = prepare_postgres(probes, &config, &tracker, &cancel).await?;
@@ -224,7 +228,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             tracker: tracker.clone(),
             readiness,
             policy,
-            auth: _auth,
+            auth,
             // template:begin postgres:bootstrap-prepared-pool
             postgres_pool: postgres_pool.clone(),
             // template:end postgres:bootstrap-prepared-pool
@@ -304,6 +308,9 @@ async fn prepare_auth(
             introspection_client_id,
             introspection_client_secret,
             provider_concurrency,
+            cache_enabled,
+            cache_capacity,
+            cache_ttl,
         } => {
             let issuer = provider_url("oidc-introspection", "authn.issuer", issuer)?;
             let endpoint = provider_url(
@@ -318,10 +325,13 @@ async fn prepare_auth(
                         mode: "oidc-introspection",
                         key: "authn.introspection_client_secret",
                     })?;
-            let provider_concurrency = std::num::NonZeroUsize::new(
-                usize::try_from(provider_concurrency.get()).expect("u32 fits usize"),
-            )
-            .expect("configured provider concurrency is nonzero");
+            let provider_concurrency = usize::try_from(provider_concurrency.get())
+                .ok()
+                .and_then(std::num::NonZeroUsize::new)
+                .ok_or(BootstrapError::AuthenticationInput {
+                    mode: "oidc-introspection",
+                    key: "authn.provider_concurrency",
+                })?;
             infra_bearerauthn::prepare_introspection(infra_bearerauthn::IntrospectionOptions {
                 issuer,
                 audiences: audience.as_slice().to_vec(),
@@ -329,6 +339,10 @@ async fn prepare_auth(
                 client_id: introspection_client_id.clone(),
                 client_secret,
                 provider_concurrency,
+                cache: cache_enabled.then_some(infra_bearerauthn::IntrospectionCacheOptions {
+                    capacity: *cache_capacity,
+                    ttl: *cache_ttl,
+                }),
             })
             .map(PreparedAuth::Enabled)
             .map_err(|source| BootstrapError::AuthenticationPreparation {

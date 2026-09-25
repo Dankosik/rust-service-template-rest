@@ -99,6 +99,15 @@ where
 /// The named scope is application policy, never inbound request data. A
 /// verified principal missing it receives the standard insufficient-scope
 /// challenge and the closed 403 Problem.
+///
+/// # Errors
+///
+/// Returns the ready HTTP 403 response when the verified principal lacks the
+/// required scope.
+#[expect(
+    clippy::result_large_err,
+    reason = "the HTTP helper returns the ready denial response without an extra allocation or error conversion"
+)]
 pub fn require_scope(principal: &VerifiedPrincipal, required: &str) -> Result<(), Response> {
     if principal.scopes().iter().any(|scope| scope == required) {
         return Ok(());

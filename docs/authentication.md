@@ -109,13 +109,41 @@ audience = "catalog-api"
 introspection_endpoint = "https://issuer.example/introspect"
 introspection_client_id = "catalog-api"
 # provider_concurrency = 32
+# cache_enabled = false
+# cache_capacity = 256
+# cache_ttl = "30s"
 ```
 
 Set the credential only through
-`APP__AUTHN__INTROSPECTION_CLIENT_SECRET`; never put it in TOML. Each admitted
-opaque token makes one RFC 7662 POST with `token_type_hint=access_token` and
-client-secret Basic authentication. There is no result cache, retry, redirect,
-or remembered outage.
+`APP__AUTHN__INTROSPECTION_CLIENT_SECRET`; never put it in TOML. With the default
+`cache_enabled = false`, each admitted opaque token makes one RFC 7662 POST
+with `token_type_hint=access_token` and client-secret Basic authentication.
+There is no retry, redirect, or remembered outage.
+
+Set `cache_enabled = true` to reuse successfully verified active results.
+`cache_capacity` defaults to 256 and accepts 1–1024 entries; `cache_ttl` defaults
+to `"30s"` and accepts human durations from `"1s"` through `"5m"`. All three keys
+belong only to introspection mode, and bounds are validated even while disabled.
+The environment equivalents are `APP__AUTHN__CACHE_ENABLED`,
+`APP__AUTHN__CACHE_CAPACITY`, and `APP__AUTHN__CACHE_TTL`.
+
+A hit requires the exact token and the same prepared verifier's immutable trust
+context. Its lifetime is fixed at verification completion and ends at the
+earlier of the configured TTL and token `exp`, without expiry leeway; hits
+never extend it. Current token temporal rules and the request deadline still
+apply. A valid hit avoids the provider exchange and its capacity permit.
+Enabled caching deliberately delays detection of revocation and provider
+outages until the cached result expires. Disable it when every request must
+observe the provider, and recreate the verifier to discard retained state.
+
+Inactive or invalid tokens, malformed responses, provider failures, and timeouts
+are never cached. Expired entries use the normal provider path, including during
+an outage, with no stale fallback. Full or contended storage also uses that path.
+Each entry's retained variable data is capped at 64 KiB; larger verified results
+are returned normally without being cached. Together with capacity this bounds
+retained variable payload to 16 MiB by default or 64 MiB at maximum capacity,
+plus map, entry, and allocator overhead. The store adds no background task;
+dropping the last verifier releases it.
 
 `provider_concurrency` is a nonzero provider limit and defaults to 32. The adapter rejects
 excess work immediately rather than queueing it. An inactive token or active

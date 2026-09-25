@@ -66,6 +66,7 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
 <!-- template:end oidc-jwt:docs-config-jwt-source -->
 <!-- template:begin oidc-introspection:docs-config-introspection-source -->
 - Introspection mode requires `authn.introspection_endpoint`, `authn.introspection_client_id`, a nonzero `authn.provider_concurrency` (default 32), and a nonempty `APP__AUTHN__INTROSPECTION_CLIENT_SECRET`. Its client secret is `SecretString`, environment-only, and must never appear in TOML; the mode rejects JWT-only inputs.
+- Introspection alone accepts `authn.cache_enabled` (default `false`), `authn.cache_capacity` (default 256, inclusive 1–1024), and `authn.cache_ttl` (human duration, default `"30s"`, inclusive `"1s"`–`"5m"`). These non-secret values use normal file/environment precedence (`APP__AUTHN__CACHE_ENABLED`, `APP__AUTHN__CACHE_CAPACITY`, `APP__AUTHN__CACHE_TTL`). Invalid bounds fail startup even when caching is disabled. Enabled positive reuse ends at the earlier of the fixed TTL and token expiry, without expiry leeway; it can delay observing revocation or provider outages for that interval. See [Authentication](authentication.md#oidc-introspection) for storage bounds and miss behavior.
 <!-- template:end oidc-introspection:docs-config-introspection-source -->
 <!-- template:begin http-idempotency:docs-config-http-idempotency -->
 - `http_idempotency.retention` (environment `APP__HTTP_IDEMPOTENCY__RETENTION`)

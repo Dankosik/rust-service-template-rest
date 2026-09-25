@@ -334,7 +334,7 @@ impl RouteMethod {
         }
     }
 
-    pub(crate) fn operation<'a>(self, item: &'a PathItem) -> Option<&'a Operation> {
+    pub(crate) fn operation(self, item: &PathItem) -> Option<&Operation> {
         match self {
             Self::Get => item.get.as_ref(),
             Self::Put => item.put.as_ref(),
@@ -383,15 +383,21 @@ impl RouteMethods {
         T: 'static,
         S: Send + Sync + Clone + 'static,
     {
-        self.0
+        let mut methods = self
+            .0
             .values()
             .flatten()
             .copied()
             .collect::<BTreeSet<_>>()
-            .into_iter()
+            .into_iter();
+        let Some(last) = methods.next_back() else {
+            return MethodRouter::new();
+        };
+        methods
             .fold(MethodRouter::new(), |router, method| {
                 router.on(method.filter(), handler.clone())
             })
+            .on(last.filter(), handler)
     }
 
     pub(crate) fn effective(&self, path: &str, request_method: &Method) -> Option<RouteMethod> {

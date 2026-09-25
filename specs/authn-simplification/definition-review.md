@@ -26,6 +26,38 @@ mechanical status refresh does not change reviewed semantic scope.
 
 reopen_owner: none
 
+## Original-request introspection-cache correction review
+
+candidate: Bounded three-file diff against production HEAD
+`a896e21f27acffc03193e6d43613c6e5173603b0` in
+`rust-service-template-rest.codex-authn-contract-and-libraries`, reviewed by fresh
+native Astra/high `/root/authn_definition/cache_definition_review` with no
+inherited conversation:
+
+- intent.md SHA256 `a1cbbf92f55f1743f60e3c9db2bcd8e717a810394f5ba63baea67850df3d8c3c`
+- spec.md SHA256 `6087e12fce3f20b67882f656ef925d75b7bc8d31f20371d42cc76155874410f3`
+- research/synthesis.md SHA256 `a41f8c0d2dd49264d846d5e8629adcb7e2adf0ca52375d21ed6a0313233ce7c0`
+
+verdict: PASS
+
+findings: None surviving. The original request requires delivering a cache with
+optional activation, disabled by default. Earlier permission to omit that
+feature was an incorrect interpretation and is superseded by the current
+Intent/R7, while all unaffected prior review reasoning remains applicable.
+
+evidence_boundary: Read-only Specification Review of the cache delta and
+affected Intent/R9/proof/authority wording. Both pre- and post-review hashes
+matched. The reviewer attempted falsifiers for omitted delivery, cross-token or
+cross-context authorization, skipped bearer/deadline checks, negative/error
+caching, sliding retention, expiry extended by skew, stale fallback during an
+outage, changed disabled behavior, implied immediate revocation, unbounded
+capacity, premature mechanism selection and expanded proof infrastructure.
+Current wording closed each within this boundary. No builds, runtime tests or
+production claims. Owner changed only Intent/spec status from draft to ready
+after PASS; this mechanical refresh preserves the reviewed semantic scope.
+
+reopen_owner: none
+
 ## Technical Design carry
 
 Preserve the difference between implicit HEAD inheritance and an explicit

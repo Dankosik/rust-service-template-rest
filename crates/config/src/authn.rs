@@ -5,7 +5,7 @@
 //! adapter.
 
 // template:begin oidc-introspection:authn-nonzero-import
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, time::Duration};
 // template:end oidc-introspection:authn-nonzero-import
 
 // template:begin oidc-introspection:authn-secrecy-import
@@ -149,6 +149,15 @@ pub enum AuthnConfig {
         /// Immediate provider-exchange capacity. Missing uses 32.
         #[serde(default = "default_provider_concurrency")]
         provider_concurrency: NonZeroU32,
+        /// Reuse verified positive results until their fixed expiry. Default off.
+        #[serde(default)]
+        cache_enabled: bool,
+        /// Maximum retained results, from 1 through 1024. Missing uses 256.
+        #[serde(default = "default_cache_capacity")]
+        cache_capacity: usize,
+        /// Maximum fixed retention, from 1s through 5m. Missing uses 30s.
+        #[serde(default = "default_cache_ttl", with = "humantime_serde")]
+        cache_ttl: Duration,
     },
     // template:end oidc-introspection:authn-config-introspection-variant
 }
@@ -167,7 +176,17 @@ fn default_algorithms() -> Vec<JwtAlgorithm> {
 
 // template:begin oidc-introspection:authn-default-provider-concurrency
 fn default_provider_concurrency() -> NonZeroU32 {
-    NonZeroU32::new(32).expect("32 is nonzero")
+    const { NonZeroU32::new(32).expect("32 is nonzero") }
+}
+
+const fn default_cache_capacity() -> usize {
+    // Bound retained results without implying a throughput target.
+    256
+}
+
+const fn default_cache_ttl() -> Duration {
+    // Keep the opt-in delay in revocation detection short.
+    Duration::from_secs(30)
 }
 // template:end oidc-introspection:authn-default-provider-concurrency
 
@@ -199,6 +218,8 @@ impl AuthnConfig {
                 introspection_endpoint,
                 introspection_client_id,
                 introspection_client_secret,
+                cache_capacity,
+                cache_ttl,
                 ..
             } => {
                 require_nonblank("authn.issuer", issuer, "oidc-introspection")?;
@@ -217,6 +238,18 @@ impl AuthnConfig {
                     return Err(ValidationError::new(
                         "authn.introspection_client_secret",
                         "is required when authn.mode = oidc-introspection",
+                    ));
+                }
+                if !(1..=1024).contains(cache_capacity) {
+                    return Err(ValidationError::new(
+                        "authn.cache_capacity",
+                        "must be between 1 and 1024, even when caching is disabled",
+                    ));
+                }
+                if !(Duration::from_secs(1)..=Duration::from_secs(300)).contains(cache_ttl) {
+                    return Err(ValidationError::new(
+                        "authn.cache_ttl",
+                        "must be between 1s and 5m, even when caching is disabled",
                     ));
                 }
                 Ok(())
@@ -354,12 +387,18 @@ mod tests {
         .unwrap();
         let AuthnConfig::OidcIntrospection {
             provider_concurrency,
+            cache_enabled,
+            cache_capacity,
+            cache_ttl,
             ..
         } = &config
         else {
             panic!("expected OIDC introspection configuration");
         };
         assert_eq!(provider_concurrency.get(), 32);
+        assert!(!cache_enabled);
+        assert_eq!(*cache_capacity, 256);
+        assert_eq!(*cache_ttl, Duration::from_secs(30));
         config.validate().unwrap();
 
         let missing_secret = parse(
@@ -391,6 +430,39 @@ mod tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn introspection_validates_cache_bounds_even_when_disabled() {
+        let base = r#"
+            mode = "oidc-introspection"
+            issuer = "issuer"
+            audience = "service"
+            introspection_endpoint = "endpoint"
+            introspection_client_id = "client"
+            introspection_client_secret = "secret"
+        "#;
+        for enabled in [false, true] {
+            for (capacity, ttl) in [(1, "1s"), (1024, "5m")] {
+                let source = format!(
+                    "{base}\ncache_enabled = {enabled}\ncache_capacity = {capacity}\ncache_ttl = \"{ttl}\"\n"
+                );
+                parse(&source).unwrap().validate().unwrap();
+            }
+            for (field, value) in [
+                ("cache_capacity", "0"),
+                ("cache_capacity", "1025"),
+                ("cache_ttl", "\"999ms\""),
+                ("cache_ttl", "\"301s\""),
+            ] {
+                let source = format!("{base}\ncache_enabled = {enabled}\n{field} = {value}\n");
+                assert_eq!(
+                    parse(&source).unwrap().validate().unwrap_err().key,
+                    format!("authn.{field}"),
+                    "{source}"
+                );
+            }
+        }
+    }
     // template:end oidc-introspection:authn-config-introspection-tests
 
     #[test]
@@ -405,6 +477,21 @@ mod tests {
             "mode = \"oidc-introspection\"\nissuer = \"issuer\"\naudience = \"service\"\nintrospection_endpoint = \"endpoint\"\nintrospection_client_id = \"client\"\nintrospection_client_secret = \"secret\"\nalgorithms = [\"RS256\"]\n",
         ] {
             assert!(parse(source).is_err(), "{source}");
+        }
+        for mode in ["none", "oidc-jwt"] {
+            let base = if mode == "none" {
+                "mode = \"none\"\n"
+            } else {
+                "mode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\n"
+            };
+            for field in [
+                "cache_enabled = false",
+                "cache_capacity = 256",
+                "cache_ttl = \"30s\"",
+            ] {
+                let source = format!("{base}{field}\n");
+                assert!(parse(&source).is_err(), "{source}");
+            }
         }
     }
 }

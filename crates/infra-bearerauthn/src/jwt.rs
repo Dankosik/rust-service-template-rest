@@ -78,7 +78,7 @@ impl JwtVerifier {
         .map_err(|error| jwt_validation_error(error.kind()))?
         .claims;
         validate_jwt_claims(
-            claims,
+            &claims,
             &self.claim_policy,
             self.token_profile,
             jsonwebtoken::get_current_timestamp(),
@@ -143,6 +143,11 @@ fn jwt_validation_error(error: &jsonwebtoken::errors::ErrorKind) -> Verification
 
 /// Prepares initial trust before traffic admission and returns the one refresh
 /// future for bootstrap to spawn through its process tracker.
+///
+/// # Errors
+///
+/// Returns [`PreparationError`] when options, client preparation, discovery,
+/// issuer agreement, or initial key admission fail.
 pub async fn prepare_jwt(
     options: JwtOptions,
     _tracker: TaskTracker,
@@ -244,7 +249,7 @@ async fn prepare_with_provider(
 fn ensure_crypto_provider() -> Result<(), PreparationError> {
     match DEFAULT_PROVIDER.install_default() {
         Ok(()) => Ok(()),
-        Err(installed) if std::ptr::eq(installed, &DEFAULT_PROVIDER) => Ok(()),
+        Err(installed) if std::ptr::eq(installed, &raw const DEFAULT_PROVIDER) => Ok(()),
         Err(_) => Err(PreparationError::new(
             PreparationPhase::Client,
             PreparationReason::Client,
@@ -670,7 +675,7 @@ mod tests {
         )
     }
 
-    fn signed_token(kid: &str, extra: serde_json::Value) -> String {
+    fn signed_token(kid: &str, extra: &serde_json::Value) -> String {
         let mut claims = serde_json::json!({
             "iss": "https://issuer.example", "aud": "api",
             "exp": jsonwebtoken::get_current_timestamp() + 60, "sub": "subject",
@@ -716,7 +721,7 @@ mod tests {
             algorithms: vec![JwtAlgorithm::Rs256],
             refresh: SharedRefresh::new(key_set("fixture")),
         };
-        let token = signed_token("fixture", serde_json::json!({"nbf": null}));
+        let token = signed_token("fixture", &serde_json::json!({"nbf": null}));
         let header = format!("Bearer {token}");
         let token = parse_bearer([header.as_bytes()], 32 * 1024).unwrap();
         assert_eq!(
@@ -726,7 +731,7 @@ mod tests {
             Err(Failure::Invalid)
         );
 
-        let token = signed_token("fixture", serde_json::json!({}));
+        let token = signed_token("fixture", &serde_json::json!({}));
         let mut bytes = token.into_bytes();
         *bytes.last_mut().unwrap() = if *bytes.last().unwrap() == b'A' {
             b'B'
@@ -774,7 +779,7 @@ mod tests {
             refresh: SharedRefresh::new(key_set("fixture")),
         };
         for alias in ["azp", "appid", "cid"] {
-            let token = signed_token("fixture", serde_json::json!({"sub":null, alias:"client"}));
+            let token = signed_token("fixture", &serde_json::json!({"sub":null, alias:"client"}));
             let header = format!("Bearer {token}");
             let token = parse_bearer([header.as_bytes()], 32 * 1024).unwrap();
             let principal = verifier
@@ -786,7 +791,7 @@ mod tests {
         }
         let token = signed_token(
             "fixture",
-            serde_json::json!({"sub":null,"azp":"client","cid":"other"}),
+            &serde_json::json!({"sub":null,"azp":"client","cid":"other"}),
         );
         let header = format!("Bearer {token}");
         let token = parse_bearer([header.as_bytes()], 32 * 1024).unwrap();
@@ -962,7 +967,7 @@ mod tests {
         };
         let token = signed_token(
             "fixture",
-            serde_json::json!({"sub":null,"jti":"private-claim-value"}),
+            &serde_json::json!({"sub":null,"jti":"private-claim-value"}),
         );
         let header = format!("Bearer {token}");
         let token = parse_bearer([header.as_bytes()], 32 * 1024).unwrap();
@@ -987,7 +992,7 @@ mod tests {
                     ),
                     Err(super::KeySetError::NoUsableKeys)
                 ));
-            })
+            });
         });
         let counters = diagnostics.counters.lock().unwrap();
         assert!(counters.iter().any(|(key, value)| {

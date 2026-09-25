@@ -2,22 +2,24 @@
 
 status: ready
 
-owner: Planning
+owner: Planning, narrow reconciliation of the corrected introspection-cache obligation
 
-result: [tasks.md](tasks.md), [T1 authentication delivery packet](tasks/T1-authentication-delivery.md)
+result: [T1 authentication delivery packet](tasks/T1-authentication-delivery.md); the existing [ledger](tasks.md) retains the single T1, its dependencies and root custody.
 
-review: [planning-review.md](planning-review.md), PASS by fresh independent reviewer; no surviving finding or upstream reopen.
+review: [Current narrow Planning review](planning-review.md#current-narrow-cache-reopen), fresh Astra/high PASS with no surviving findings. Prior Planning readiness remains valid only for unaffected scope.
 
-movement_evidence: One executable T1 reconciles every accepted R1–R10 obligation to the reviewed system/ownership contracts. Its layers are disjoint implementation lanes where useful, not artificial acceptance units. Inputs and authorizations are closed; canonical/generated order, superseded paths, semantic mutable owners and shared locks are explicit. The next owner can implement without selecting product behavior, architecture or a test-design phase. Tests, fixtures, assertions and exact commands remain executor-owned. One assembled final validation and independent authorization/lifecycle review follow joined writers; root publication and exact-head CI remain distinct requested external obligations.
+movement_evidence: Required cache delivery and optional default-off activation are reconciled into existing T1. Reviewed Definition and Technical Design close finite config, storage/temporal semantics, bootstrap conversion and retained-profile behavior. C/I/V/B/P already own every affected surface; shared writes remain serialized. No new unit, dependency, test-design phase, environment or intermediate proof gate is introduced. The next owner can implement the remaining cache delta from canonical inputs. Cases, fixtures, assertions and commands remain executor-owned. Existing valid core evidence is retained; earlier no-cache receipts do not prove the new feature. One final assembled validation and independent authorization/concurrency/lifecycle review follow joined writers, with root publication and exact-head CI remaining distinct external obligations.
 
-reopen_owner: none for movement. Use the packet's smallest-owner reopen conditions for changed behavior, mechanism or ownership.
+reopen_owner: none for movement. The packet retains the smallest-owner conditions for changed behavior, mechanism, ownership or acceptance boundaries.
 
-next_owner: Root binds as sole `LEDGER_ORCHESTRATOR`, dispatches a fresh Acceptance-Unit Lead with Implementation as method and T1 as boundary, and assigns one delivery owner for assembled validation/review. This Planning actor stops before Implementation.
+next_owner: Root remains sole `LEDGER_ORCHESTRATOR` and returns remaining T1 work to existing Implementation Lead `/root/authn_implementation`. The existing delivery owner retains final assembled validation/review; root retains commit/push/separate-PR/CI custody. This Planning actor stops before Implementation.
 
 ## Current custody and boundary
 
-Use `/Users/daniil/Projects/Opensource/rust-service-template-rest.codex-authn-contract-and-libraries`, branch `codex/authn-contract-and-libraries`, base `4edd184ea3cc6b6fa2b225244700fce57150ae18`. The original neighboring checkout is not this task's workspace. Its accepted source/instruction identity and the relocated reviewed artifacts were verified by root before this phase. The current Specification SHA256 is `b36ae2db73d7551bb86101394066bd2d9d7f5150975f210b4acba3b131ac92d5`, ready system design `cfcb895fd72551c155503a713f79d5a2124a7e60cc5f1220c27668256b32c416`, and ready ownership map `d4a3f6568c4b6e6eb54d106acf0f4d2fd1d961fb3f06c68e1b1ba9e5afddf81d`. The Planning reviewer independently confirmed the design differences from prior reviewed hashes are only draft-to-ready status.
+Use `/Users/daniil/Projects/Opensource/rust-service-template-rest.codex-authn-contract-and-libraries`, branch `codex/authn-contract-and-libraries`, base `4edd184ea3cc6b6fa2b225244700fce57150ae18`. Core implementation is anchored at `a896e21f27acffc03193e6d43613c6e5173603b0` plus the existing Lead's same-owner mechanical cleanup. Exact packet and accepted-input hashes are in the current review receipt; the packet is fixed at SHA256 `fe16d7ab6b8a9f40e6a9c5a82f86c5d579a26176ef6c9885da6bbec848efb919`.
 
-Only Planning artifacts were added/changed by this actor. No production implementation, build, runtime proof, commit, push or PR occurred. The user-authorized request continues without technical reconfirmation. No Stage 10.2 behavior change, merge, deployment, live provider certification or new database environment is included. Root retains existing publication authority after local delivery acceptance.
+This actor changed only the T1 packet and Planning review/transition receipts. The canonical ledger remains root-owned and its already-reopened T1 checkbox is unchanged by this actor. No production code, dependency, production documentation, build/runtime proof, commit, push or PR was produced here. Prior unrelated readiness and valid core receipts remain in their existing custody. The user-authorized implementation/publication continues without technical reconfirmation; Stage 10.2 policy changes, merge, deployment and live-provider certification remain outside scope.
 
-Static documentation verification: final `make docs-check` passed after these receipt files were written (exit 0, 837 links checked, zero errors). This sentence then replaced the pending-result note without changing any link or reviewed plan. It does not claim implementation proof.
+Root's progress update should record that reviewed Definition, Technical Design and Planning now permit cache implementation by the existing Lead, followed by affected assembled proof. This changes only the stale progress locator; T1 outcome/dependencies/external gates remain as reviewed.
+
+Static documentation verification: final `make docs-check` passed after these receipts were written (exit 0, 859 links checked, zero errors), and the scoped packet/receipt `git diff --check` passed. This sentence then replaced the pending note without changing any link or reviewed packet. Neither establishes implementation or cache behavior.

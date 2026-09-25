@@ -7,25 +7,27 @@ owner: Definition (Intake, supporting Research, Specification)
 result: [intent.md](intent.md), [spec.md](spec.md),
 [research/synthesis.md](research/synthesis.md)
 
-review: [definition-review.md](definition-review.md), original PASS retained for
-unchanged scope plus fresh PASS for the R4/R7 numeric-null correction by native
-reviewer `/root/authn_definition/numeric_null_review`.
+review: [definition-review.md](definition-review.md), fresh PASS for the
+original-request introspection-cache correction from native reviewer
+`/root/authn_definition/cache_definition_review`; prior PASS evidence remains
+valid for unchanged scope.
 
-movement_evidence: All ten review groups retain their disposition. Technical
-Design's nbf:null issue is closed: JWT present null is 401 through library-native
-Validation, active introspection present null is 503 provider evidence, omission
-remains allowed. Fresh bounded review permits movement; no user-owned question
-survives. Documentation links passed with zero errors.
-Production files, builds, live providers and remote state were not changed by
-this phase. Base `4edd184`, branch `codex/authn-contract-and-libraries`.
+movement_evidence: Reviewed Intake/R7 now distinguish required cache delivery
+from optional activation. Positive verified results are bounded by token/trust
+context, capacity, fixed retention and exp, with no negative/error/stale cache.
+Disabled behavior is preserved. No user-owned question survives. Current
+production candidate `a896e21f27acffc03193e6d43613c6e5173603b0`; no production
+edit or build is part of this Definition repair. Independent prior R1–R10
+decisions remain unchanged; current no-cache downstream wording is superseded
+only for this delta and must be reconciled by its next owner before execution.
+`make docs-check` passed with zero link/fragment errors after the repair.
 
-reopen_owner: none. Reopen only a rule invalidated by new evidence, preserving
-reviewed independent decisions. Technical choices do not require user approval.
+reopen_owner: none. No user-owned question or new approval is required.
 
-next_owner: Technical Design, resume `/root/authn_design`. Close full-router composition,
-config/adapter owner boundaries, idempotency ordering, reusable trusted transport,
-single-algorithm key admission, refresh/watch lifecycle and template projection
-mechanisms. The root coordinator owns dispatch and later PR/CI delivery.
+next_owner: Technical Design, narrow reopen. Close only the cache's
+mechanism, finite configuration bounds, ownership and affected projections;
+preserve all independent accepted decisions. The root coordinator owns dispatch
+and later PR/CI delivery.
 
 ## Proof and authority boundary
 

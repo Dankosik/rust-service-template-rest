@@ -48,6 +48,7 @@ until configured when its pack is retained. The local
 
 <!-- template:begin authn:docs-template-init-authn -->
 `AUTHN` defaults to `none` and accepts `none`, `oidc-jwt`, or `oidc-introspection`; exactly one whole-file engine may be retained. The direct entry takes the same choice as `--authn`. `none` removes all authentication configuration, code, tests, dependencies, and adopter guidance. An initialized authentication profile still defaults to runtime `authn.mode = "none"`; a protected route contract requires a complete valid trust tuple before startup.
+The introspection profile retains its complete optional positive-cache configuration and implementation, disabled by default. JWT-only and no-auth outputs remove that cache path along with introspection; selecting the profile does not enable caching at runtime.
 <!-- template:end authn:docs-template-init-authn -->
 <!-- template:begin outbound-http:docs-template-init-outbound -->
 `OUTBOUND_HTTP` defaults to `none` and accepts `none` or `bounded`; the direct

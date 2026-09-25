@@ -1868,7 +1868,6 @@ dependencies = [
  "infra-idempotency-store",
  "itertools 0.15.0",
  "metrics",
- "secrecy",
  "serde",
  "serde_json",
  "serde_with",
@@ -1876,7 +1875,6 @@ dependencies = [
  "strum",
  "thiserror",
  "tokio",
- "tokio-rustls",
  "tokio-util",
  "tower",
  "tower-http 0.7.1",
@@ -2040,7 +2038,6 @@ dependencies = [
  "ureq",
  "url",
  "utoipa",
- "utoipa-axum",
  "uuid",
  "validator",
  "walkdir",
@@ -3783,7 +3780,6 @@ dependencies = [
  "tracing",
  "ureq",
  "utoipa",
- "utoipa-axum",
 ]
 
 [[package]]

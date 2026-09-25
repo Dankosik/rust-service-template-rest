@@ -139,9 +139,33 @@ scope policy or scope names to metric labels.
 
 ## R7. Introspection classification and capacity
 
-Retain one client-secret-basic RFC 7662 POST per admitted opaque token, proper
-credential component encoding, no retry and no result cache. Optional caching
-is deliberately not introduced: it adds revocation policy without a requirement.
+Provide an operator-enabled introspection result cache, disabled by default.
+With caching disabled, retain one client-secret-basic RFC 7662 POST per admitted
+opaque token, proper credential component encoding and no retry. Enabling the
+cache permits a valid hit to avoid that provider call; a miss or expired entry
+uses the same existing introspection path and failure/deadline rules.
+
+Cache only successfully verified active results, isolated by the exact opaque
+token and the issuer, accepted audiences and provider credential/endpoint trust
+context used to verify them. A result from another token or trust context must
+never authorize a request. Never cache inactive results, invalid tokens,
+incomplete/malformed responses, provider errors or timeouts. A hit supplies only
+the verified identity/scope evidence and must still satisfy the current token
+temporal rules; it neither extends token validity nor bypasses request deadline
+or bearer-envelope checks.
+
+Storage has finite capacity and entries have a finite configured maximum
+lifetime, fixed when successful verification completes. Cache hits do not renew
+that lifetime. An entry stops being usable at the earlier of that lifetime's
+end and token exp, without the 30-second token-validation leeway. A result
+already at or past exp may still be handled by the unchanged uncached temporal
+policy, but is not cacheable. At capacity, storage remains bounded without
+weakening verification; the particular admission/eviction mechanism belongs to
+Technical Design. Expired entries are misses, including during provider failure:
+there is no stale-result fallback. Documentation must state that enabled caching
+can delay detection of revocation until the valid entry expires. Token and
+cached identity confidentiality retain the existing secret/logging constraints.
+
 An active response missing iss/aud/exp or both subject and client identity
 rejects with 401 invalid_token and internal reason `missing_claim`. Wrong issuer,
 audience, expiry/not-before or inactive token is also 401. Active responses with
@@ -183,7 +207,8 @@ Auth config is a serde internally tagged enum with variant-specific fields and
 deny_unknown_fields. None is the omitted default and accepts no dormant provider
 fields. JWT requires issuer/audience and supports token_profile (default
 resource-server) and algorithms (default [RS256]); introspection requires
-issuer/audience/endpoint/client id and environment-only secret plus concurrency.
+issuer/audience/endpoint/client id and environment-only secret plus concurrency
+and the default-off cache's capacity/lifetime controls.
 Unknown/foreign fields fail with a useful key/mode diagnostic. Existing `audience`
 string input remains accepted; the same field also accepts a nonempty list of
 nonblank exact audiences. Duplicate list entries are harmless normalization;
@@ -239,7 +264,9 @@ selects cases/commands; this is not a test-plan gate. Cover bypass prevention,
 full bootstrap without idempotency, native 404/405/HEAD, mixed/ambiguous JWKS,
 actual library/crypto validation, response classification, two refresh waiters
 with different deadlines, private trusted HTTPS and provider bounds, scope
-authorization, config rejection and initializer projections. Existing TLS fixture
+authorization, config rejection, initializer projections and default-off versus
+enabled introspection caching with bounded capacity/retention, expiry and
+trust-context isolation. Existing TLS fixture
 authority suffices; no live IdP, new database environment or performance target
 is introduced. Preserve all applicable repository/CI gates and factor expensive
 runtime validation from harness/profile transformation checks. Final assembled

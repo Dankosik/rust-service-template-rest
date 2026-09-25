@@ -107,15 +107,12 @@ fn typed_claim<T: serde::de::DeserializeOwned>(
 // template:end oidc-introspection:authn-claims-introspection-envelope
 
 /// Preserve absence separately from a supplied numeric null.
+#[derive(Default)]
 pub(crate) enum Nullable<T> {
+    #[default]
     Missing,
     Null,
     Value(T),
-}
-impl<T> Default for Nullable<T> {
-    fn default() -> Self {
-        Self::Missing
-    }
 }
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Nullable<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -159,7 +156,7 @@ impl Audience {
 
 // template:begin oidc-jwt:authn-claims-jwt-validation
 pub(crate) fn validate_jwt_claims(
-    claims: JwtClaims,
+    claims: &JwtClaims,
     policy: &ClaimPolicy,
     token_profile: TokenProfile,
     now: u64,
@@ -181,16 +178,8 @@ pub(crate) fn validate_jwt_claims(
     }
     if token_profile == TokenProfile::Rfc9068 {
         if subject.is_none()
-            || claims
-                .client_id
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .is_none()
-            || claims
-                .jti
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .is_none()
+            || claims.client_id.as_deref().is_none_or(str::is_empty)
+            || claims.jti.as_deref().is_none_or(str::is_empty)
             || claims.iat.is_none()
         {
             return Err(VerificationError::invalid(VerificationReason::MissingClaim));
@@ -227,11 +216,51 @@ fn coherent_identity(values: [Option<&str>; 4]) -> Result<Option<String>, Verifi
 // template:end oidc-jwt:authn-claims-jwt-validation
 
 // template:begin oidc-introspection:authn-claims-introspection-validation
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct VerifiedIntrospection {
+    principal: Principal,
+    not_before: Option<u64>,
+}
+
+impl VerifiedIntrospection {
+    pub(crate) fn principal(&self) -> &Principal {
+        &self.principal
+    }
+
+    pub(crate) fn into_principal(self) -> Principal {
+        self.principal
+    }
+
+    pub(crate) fn validate_time(&self, now: u64) -> Result<(), VerificationError> {
+        validate_introspection_time(self.principal.expires_at(), self.not_before, now)
+    }
+}
+
+impl std::fmt::Debug for VerifiedIntrospection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedIntrospection([REDACTED])")
+    }
+}
+
+fn validate_introspection_time(
+    expiry: u64,
+    not_before: Option<u64>,
+    now: u64,
+) -> Result<(), VerificationError> {
+    if now > expiry.saturating_add(LEEWAY_SECONDS) {
+        return Err(VerificationError::invalid(VerificationReason::Expired));
+    }
+    if not_before.is_some_and(|value| value > now.saturating_add(LEEWAY_SECONDS)) {
+        return Err(VerificationError::invalid(VerificationReason::NotYetValid));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_introspection_claims(
     bytes: &[u8],
     policy: &ClaimPolicy,
     now: u64,
-) -> Result<Principal, VerificationError> {
+) -> Result<VerifiedIntrospection, VerificationError> {
     let malformed =
         || VerificationError::new(Failure::Unavailable, VerificationReason::MalformedClaims);
     let missing = || VerificationError::invalid(VerificationReason::MissingClaim);
@@ -281,12 +310,7 @@ pub(crate) fn validate_introspection_claims(
     {
         return Err(VerificationError::invalid(VerificationReason::Audience));
     }
-    if now > expiry.saturating_add(LEEWAY_SECONDS) {
-        return Err(VerificationError::invalid(VerificationReason::Expired));
-    }
-    if not_before.is_some_and(|value| value > now.saturating_add(LEEWAY_SECONDS)) {
-        return Err(VerificationError::invalid(VerificationReason::NotYetValid));
-    }
+    validate_introspection_time(expiry, not_before, now)?;
     let subject = subject
         .as_deref()
         .map(identity)
@@ -300,13 +324,10 @@ pub(crate) fn validate_introspection_claims(
     if subject.is_none() && client_id.is_none() {
         return Err(missing());
     }
-    Ok(Principal::new(
-        policy.issuer.clone(),
-        subject,
-        client_id,
-        scopes,
-        expiry,
-    ))
+    Ok(VerifiedIntrospection {
+        principal: Principal::new(policy.issuer.clone(), subject, client_id, scopes, expiry),
+        not_before,
+    })
 }
 // template:end oidc-introspection:authn-claims-introspection-validation
 
@@ -344,10 +365,10 @@ fn normalize_scopes(
                 .collect::<Result<BTreeSet<_>, _>>()?,
         ),
     };
-    if let (Some(left), Some(right)) = (&from_scope, &from_scp) {
-        if left != right {
-            return Err(error());
-        }
+    if let (Some(left), Some(right)) = (&from_scope, &from_scp)
+        && left != right
+    {
+        return Err(error());
     }
     Ok(from_scope
         .or(from_scp)
@@ -385,7 +406,7 @@ mod tests {
     fn typed_jwt_claims_normalize_matching_scope_forms() {
         let claims: JwtClaims = serde_json::from_str(r#"{"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":"read write read","scp":["write","read"]}"#).unwrap();
         let principal =
-            validate_jwt_claims(claims, &policy(), TokenProfile::ResourceServer, 100).unwrap();
+            validate_jwt_claims(&claims, &policy(), TokenProfile::ResourceServer, 100).unwrap();
         assert_eq!(principal.scopes(), ["read", "write"]);
         assert_eq!(principal.expires_at(), 130);
     }
@@ -516,7 +537,10 @@ mod tests {
                     100,
                 );
                 if let Some(expected) = &expected {
-                    assert_eq!(result.unwrap().scopes(), expected.as_slice());
+                    assert_eq!(
+                        result.unwrap().into_principal().scopes(),
+                        expected.as_slice()
+                    );
                 } else {
                     assert_eq!(result.unwrap_err().failure, Failure::Unavailable);
                 }
@@ -526,7 +550,7 @@ mod tests {
             let claims: JwtClaims = serde_json::from_value(response).unwrap();
             {
                 let result =
-                    validate_jwt_claims(claims, &policy(), TokenProfile::ResourceServer, 100);
+                    validate_jwt_claims(&claims, &policy(), TokenProfile::ResourceServer, 100);
                 if let Some(expected) = &expected {
                     assert_eq!(result.unwrap().scopes(), expected.as_slice());
                 } else {

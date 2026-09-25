@@ -295,6 +295,7 @@ impl Provider {
                 client_id: "fixture-client".to_owned(),
                 client_secret: SecretString::from("fixture-secret"),
                 provider_concurrency: NonZeroUsize::new(16).expect("fixture capacity"),
+                cache: None,
             },
             transport,
         )

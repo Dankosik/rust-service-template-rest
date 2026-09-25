@@ -116,3 +116,68 @@ The mounted count assertion and final review disposition remain pending.
 The selected remaining local plan also includes `make secret-scan
 BASE_REF=4edd184`: CONTRIBUTING's manifest/lock change rule requires this local
 changed-range scan. No full-history scan is selected.
+
+## Core repair execution and requester-scope hold
+
+The mechanical batch on `a896e21` passed formatting, documentation links
+(713 successful checks, zero errors) and dependency policy/advisories; reported
+duplicate-version warnings were non-failing. It found a four-word skill budget
+overrun, four unused dependency edges, and local Clippy issues. Those were
+repaired without changing the authentication behavior. The existing HTTP runtime
+dependency now explicitly owns its required Tokio-util `rt` feature after the
+obsolete authentication fixture dev edges were removed. Registry package
+versions/checksums did not change.
+
+Subsequent `make check-instructions` passed all 28 skills, five canonical roles,
+the Codex registry and selected Claude/Qwen views. `make unused-deps` passed.
+`make lint` passed over the workspace, all targets and the existing integration
+feature. Logs: `/tmp/authn-mechanical-repair.log` and
+`/tmp/authn-lint-after-bootstrap.log`.
+
+The same bounded `repair_regression` command then exited 0 with all ten selected
+tests passing: seven adapter cases, effective public policy, protected startup
+refusal with a disabled verifier, and mounted TLS authentication/scope handling
+without a Composer. The mounted test observed the separate HTTP/engine counter
+totals. No database or live IdP was used; filtered-out binaries are not counted.
+Log: `/tmp/authn-repaired-regressions.log`.
+
+These results cover `a896e21` plus the current mechanical code delta. Its SHA-256
+is `f2332751d33910f46d513189c95336e1b0b2200a3f89b9ebf6f76311b84cbf96`
+for `git diff --binary a896e21 -- .agents/skills/rust-api-contract/SKILL.md
+Cargo.lock crates scripts/lib/template_profiles.json test/Cargo.toml`.
+This is scoped evidence, not a whole-candidate aggregate receipt.
+
+The canonical local secret-scan wrapper reported a match only in ignored,
+generated `.codegraph/codegraph.db-wal`; no raw match is retained here. Gitleaks
+directory mode ignores Git exclusions and offers no direct path-exclusion flag.
+Root approved the same pinned/redacted/configured directory scan on an exact
+`git archive HEAD` export plus the unchanged `4edd184..HEAD` Git-range scan.
+Those scans remain pending the final clean candidate; no cache was deleted and
+no scanner rule or source pattern was suppressed.
+
+Overall acceptance remains held: requester-meaning reconciliation established
+that the original optional-cache instruction requires a delivered opt-in,
+default-off feature. Root reopened that narrow Intent/R7/Design/Planning scope.
+The corrected cache design and narrow Planning are reviewed. Remaining cache
+implementation is authorized by the fixed T1 packet SHA-256
+`fe16d7ab6b8a9f40e6a9c5a82f86c5d579a26176ef6c9885da6bbec848efb919`
+and was completed by two fresh Astra/xhigh owners for runtime/evidence and
+configuration/composition/projections, as recorded below.
+The successful core evidence above remains useful only within its unchanged
+scope. Full build/workspace runtime validation and final acceptance must cover
+the assembled cache-capable result.
+
+## Cache assembly checkpoint
+
+Both fresh cache writers returned Implemented and joined. Cache source, private
+verified temporal evidence/allocation accounting, introspection-only config and
+bootstrap conversion, operator guidance, existing caller migration and projection
+assertions are assembled. A shipped local-config loader regression accompanies
+the correction of dormant introspection fields under `mode = "none"`.
+
+The bounded compile-only command for all six affected production/test packages
+and the integration feature passed with no diagnostics; Python parsed the changed
+projection assertions. These are static results, not cache behavior evidence.
+`make fmt` completed and canonical `make openapi-generate` completed without a
+YAML delta. No cache runtime tests, lint or final integrated review ran during
+coding. The root's next clean commit will own the assembled validation inputs.

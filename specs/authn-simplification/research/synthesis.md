@@ -93,3 +93,20 @@ the existing refresh policy, or provider interoperability certification is
 claimed. Refresh this evidence if pinned versions, trust boundary, algorithm
 families, or the requested all-in-one experiment change. Technical Design owns
 placement and exact mechanisms consistent with the closed behavior below.
+
+## Original-request cache correction
+
+The original user recommendation said: "кеш ответов сделать опциональным и
+выключенным по умолчанию, как в Spring; время жизни записи не дольше exp токена".
+The user then asked to implement everything recommended. This is authority for
+a delivered feature whose activation is optional, not permission to omit the
+feature. The earlier no-cache disposition incorrectly narrowed that request.
+
+The root accepted this requester-meaning correction against production candidate
+`a896e21f27acffc03193e6d43613c6e5173603b0`. R7 now requires default-off positive
+result caching with bounded capacity and retention, exact token/trust-context
+isolation, no retention beyond exp, and no negative/error or stale-result cache.
+This records original scope; it is not a new optional capability proposal or a
+mechanism/dependency selection. All independent Definition decisions and their
+review evidence remain valid for unchanged scope. Technical Design owns the
+remaining implementation choices and precise finite configuration bounds.
