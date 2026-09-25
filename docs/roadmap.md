@@ -24,7 +24,7 @@ is not a supported template state.
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | done |
 | 9 | Template initializer, profiles, and template sync | done on merge after required CI |
-| 10 | Optional capability profiles | 10.1, 10.2, and 10.3 merged; 10.4 locally accepted; remaining profiles planned |
+| 10 | Optional capability profiles | 10.1, 10.2, 10.3, and 10.4 merged; remaining profiles planned |
 | 11 | Benchmarking and performance evidence | planned |
 | 12 | First release and derived-repository verification | planned |
 
@@ -620,7 +620,9 @@ markers, tests, and initializer support. Order by expected demand:
    `4819113b21c110e69f3f1d4d26f3bf9337c83b72`**;
    [adoption guide](http-idempotency.md).
 4. Durable background jobs on PostgreSQL and the `jobs-worker` binary.
-   **Locally accepted 2026-09-25**; [adoption guide](background-jobs.md).
+   **Merged via PR #51 at
+   `48e565af7c2875832996816b975a2e2b01457d4f`**;
+   [adoption guide](background-jobs.md).
 5. Outbound webhooks (Standard Webhooks signing, retry, public-address
    predicate) and inbound webhooks (verification, receipt deduplication,
    durable dispatch).
@@ -723,13 +725,21 @@ independent final review passed. Repairs during validation (the workspace
 lint over `infra-jobs`, its database tests, and one worker unit test; the
 guide's empty-kind refusal text; one reopen condition in the architecture
 leaf, corrected once) each reran only the evidence they invalidated. Local
-custody is under `.git/claude/background-jobs/delivery/`. The real-PostgreSQL
-suites (enqueue, execution with two racing engines, the worker process
-suite, the joint HTTP idempotency module, and the existing database proof),
-the 208 canonical projections and 26 runtime graphs, the runtime image build
-with its `/jobs-worker` step, the migration rehearsal, container security,
-the initializer parts' timing against the 373 s baseline, and every CI, PR,
-publication, or deployment result are CI-owned and pending; none is claimed.
+custody is under `.git/claude/background-jobs/delivery/`. The exact-head
+[CI run](https://github.com/Dankosik/rust-service-template-rest/actions/runs/36082103573)
+of PR #51 then passed `required`, including the real-PostgreSQL suites
+(enqueue, execution with two racing engines, the worker process suite, the
+joint HTTP idempotency module, and the existing database proof), the 208
+canonical projections and all eight initializer parts over the 26 runtime
+graphs, the runtime image build with its `/jobs-worker` step, the migration
+rehearsal, and the image vulnerability scan, and
+[CodeQL](https://github.com/Dankosik/rust-service-template-rest/actions/runs/36082103697)
+passed `codeql-required`. That run took 464 s from the first job's start to
+`required`, against the 373 s baseline. The image job set it at 452 s: its
+build step grew from 293 s to 406 s with the third release binary. The
+slowest initializer part took 278 s, inside the image job, so the
+initializer stayed off the critical path. Publication and deployment are not
+claimed.
 
 ### Stage 11: Benchmarking and performance evidence
 
