@@ -136,7 +136,7 @@ fn merge_patch_uses_null_to_remove_and_absence_to_preserve() {
 }
 
 #[test]
-fn fallible_json_patch_is_applied_to_a_candidate_before_publication() {
+fn fallible_json_patch_rolls_back_failed_operations() {
     let original = json!({"name": "old"});
     let patch: json_patch::Patch = serde_json::from_value(json!([
         {"op": "replace", "path": "/name", "value": "new"},
@@ -145,8 +145,7 @@ fn fallible_json_patch_is_applied_to_a_candidate_before_publication() {
     .unwrap();
     let mut candidate = original.clone();
     assert!(json_patch::patch(&mut candidate, &patch).is_err());
-    // Never publish a partially changed candidate after a failed patch.
-    assert_eq!(original, json!({"name": "old"}));
+    assert_eq!(candidate, original);
 }
 
 #[test]
