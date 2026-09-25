@@ -5,10 +5,6 @@
 
 mod dns;
 
-#[cfg(test)]
-#[path = "../../infra-egress-dns/tests/fixtures/tls.rs"]
-mod tls;
-
 use std::time::Duration;
 
 use infra_egress_dns::{PublicAddressResolver, https_client_builder};
@@ -239,6 +235,7 @@ fn is_json_media_type(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::tls::TlsMaterial;
     use std::{sync::Arc, time::Duration};
     // template:begin oidc-jwt:authn-provider-raw-dns-test-imports
     use std::net::{IpAddr, Ipv4Addr};
@@ -264,7 +261,6 @@ mod tests {
 
     use super::{
         Failure, PROVIDER_TIMEOUT, ProviderClient, is_json_media_type, new_fixture_client,
-        tls::TlsMaterial,
     };
 
     const FIXTURE_HOST: &str = "authn.fixture.test";

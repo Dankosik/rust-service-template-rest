@@ -13,7 +13,7 @@ use crate::ResolveError;
 const IPV4_METADATA: Ipv4Addr = Ipv4Addr::new(168, 63, 129, 16);
 const IPV4_EXCEPTIONS: [Ipv4Addr; 2] = [Ipv4Addr::new(192, 0, 0, 9), Ipv4Addr::new(192, 0, 0, 10)];
 const IPV4_DENIED: [Ipv4Net; 15] = [
-    Ipv4Net::new_assert(Ipv4Addr::new(0, 0, 0, 0), 8),
+    Ipv4Net::new_assert(Ipv4Addr::UNSPECIFIED, 8),
     Ipv4Net::new_assert(Ipv4Addr::new(10, 0, 0, 0), 8),
     Ipv4Net::new_assert(Ipv4Addr::new(100, 64, 0, 0), 10),
     Ipv4Net::new_assert(Ipv4Addr::new(127, 0, 0, 0), 8),

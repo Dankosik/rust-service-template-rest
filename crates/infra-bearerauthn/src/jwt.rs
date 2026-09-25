@@ -21,10 +21,6 @@ use crate::{BearerToken, Failure, JwtOptions, Principal, RefreshTask, TokenProfi
 const STARTUP_BUDGET: Duration = Duration::from_secs(6);
 const ATTEMPT_BUDGET: Duration = Duration::from_secs(3);
 
-#[cfg(test)]
-#[path = "../../infra-egress-dns/tests/fixtures/tls.rs"]
-mod tls;
-
 #[derive(Clone)]
 pub struct JwtVerifier {
     claim_policy: ClaimPolicy,
@@ -596,6 +592,7 @@ fn verify_signature(token: &[u8], key: &DecodingKey) -> Result<(), Failure> {
 
 #[cfg(test)]
 mod tests {
+    use crate::tls::TlsMaterial;
     use std::{
         sync::Arc,
         time::{Duration, SystemTime, UNIX_EPOCH},
@@ -620,7 +617,7 @@ mod tests {
 
     use super::{
         ClaimPolicy, CompactToken, JwtVerifier, KeySelection, SharedRefresh, TokenProfile,
-        parse_key_set, prepare_jwt_with_fixture, tls::TlsMaterial,
+        parse_key_set, prepare_jwt_with_fixture,
     };
     use crate::{Failure, JwtOptions, Verifier, claims::validate_jwt_claims, parse_bearer};
 

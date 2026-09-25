@@ -568,11 +568,10 @@ mod tests {
     }
 
     async fn finish_fixture(server: JoinHandle<Vec<u8>>) -> Vec<u8> {
-        let request = tokio::time::timeout(Duration::from_secs(1), server)
+        tokio::time::timeout(Duration::from_secs(1), server)
             .await
             .expect("fixture server finishes")
-            .expect("fixture server task");
-        request
+            .expect("fixture server task")
     }
 
     async fn abort_fixture(server: JoinHandle<Vec<u8>>) {

@@ -10,6 +10,7 @@ mod tls;
 
 use std::{
     error::Error as _,
+    fmt::Write as _,
     io,
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -803,7 +804,7 @@ async fn transport_source_redacts_request_and_response_content() {
     let mut diagnostics = format!("{error:?} {error}");
     let mut source = error.source();
     while let Some(current) = source {
-        diagnostics.push_str(&format!(" {current:?} {current}"));
+        write!(diagnostics, " {current:?} {current}").expect("format diagnostics");
         source = current.source();
     }
     for sentinel in [
