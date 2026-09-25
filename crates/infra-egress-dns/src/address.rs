@@ -121,103 +121,158 @@ mod tests {
 
     use super::{admit_address, admit_answers};
 
-    #[test]
-    fn denies_special_and_mapped_addresses() {
-        for address in [
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)),
-            IpAddr::V4(Ipv4Addr::new(169, 254, 170, 2)),
-            IpAddr::V4(Ipv4Addr::new(169, 254, 170, 23)),
-            IpAddr::V4(Ipv4Addr::new(168, 63, 129, 16)),
-            IpAddr::V4(Ipv4Addr::new(100, 100, 100, 200)),
-            IpAddr::V4(Ipv4Addr::new(224, 0, 0, 0)),
-            IpAddr::V4(Ipv4Addr::new(240, 0, 0, 0)),
-            IpAddr::V4(Ipv4Addr::new(192, 0, 0, 8)),
-            IpAddr::V6(Ipv6Addr::LOCALHOST),
-            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            IpAddr::V6("::2".parse().expect("reserved IPv6 address")),
-            IpAddr::V6("::ffff:127.0.0.1".parse().expect("mapped test address")),
-            IpAddr::V6(
-                "::ffff:168.63.129.16"
-                    .parse()
-                    .expect("mapped Azure WireServer"),
-            ),
-            IpAddr::V6("2001:db8::1".parse().expect("documentation test address")),
-            IpAddr::V6("2002::1".parse().expect("6to4 test address")),
-            IpAddr::V6(
-                "2002:808:808::1"
-                    .parse()
-                    .expect("public-embedded 6to4 address"),
-            ),
-            IpAddr::V6("fec0::1".parse().expect("reserved test address")),
-            IpAddr::V6("fd00:ec2::254".parse().expect("AWS IPv6 metadata address")),
-            IpAddr::V6("4000::1".parse().expect("reserved test address")),
-            IpAddr::V6(
-                "64:ff9b::c0a8:1"
-                    .parse()
-                    .expect("private NAT64 test address"),
-            ),
-            IpAddr::V6(
-                "64:ff9b::a83f:8110"
-                    .parse()
-                    .expect("Azure WireServer NAT64 address"),
-            ),
-        ] {
-            assert!(admit_address(address).is_err(), "{address} must be denied");
-        }
-    }
+    /// `(address, admitted)` pairs taken from the IANA special-purpose
+    /// registries and the metadata literals above, not from the policy tables.
+    /// Each table entry appears at both ends, with public neighbours where a
+    /// changed prefix length would otherwise go unnoticed.
+    const REVIEWED_CORPUS: &[(&str, bool)] = &[
+        ("0.0.0.0", false),
+        ("0.255.255.255", false),
+        ("1.1.1.1", true),
+        ("8.8.8.8", true),
+        ("9.255.255.255", true),
+        ("10.0.0.0", false),
+        ("10.255.255.255", false),
+        ("11.0.0.0", true),
+        ("100.63.255.255", true),
+        ("100.64.0.0", false),
+        ("100.100.100.200", false), // Alibaba Cloud metadata
+        ("100.127.255.255", false),
+        ("100.128.0.0", true),
+        ("126.255.255.255", true),
+        ("127.0.0.0", false),
+        ("127.0.0.1", false),
+        ("127.255.255.255", false),
+        ("128.0.0.0", true),
+        ("168.63.129.15", true),
+        ("168.63.129.16", false), // Azure WireServer
+        ("168.63.129.17", true),
+        ("169.253.255.255", true),
+        ("169.254.0.0", false),
+        ("169.254.169.254", false), // AWS, Azure, GCP and OCI metadata
+        ("169.254.170.2", false),   // AWS ECS task metadata
+        ("169.254.170.23", false),  // AWS EKS Pod Identity
+        ("169.254.255.255", false),
+        ("169.255.0.0", true),
+        ("172.15.255.255", true),
+        ("172.16.0.0", false),
+        ("172.31.255.255", false),
+        ("172.32.0.0", true),
+        ("192.0.0.0", false),
+        ("192.0.0.8", false),
+        ("192.0.0.9", true),
+        ("192.0.0.10", true),
+        ("192.0.0.11", false),
+        ("192.0.0.170", false),
+        ("192.0.0.255", false),
+        ("192.0.1.1", true),
+        ("192.0.2.0", false),
+        ("192.0.2.255", false),
+        ("192.0.3.0", true),
+        ("192.2.1.1", true),
+        ("192.31.196.1", true),
+        ("192.52.193.1", true),
+        ("192.88.98.255", true),
+        ("192.88.99.0", false),
+        ("192.88.99.255", false),
+        ("192.167.255.255", true),
+        ("192.168.0.0", false),
+        ("192.168.255.255", false),
+        ("192.169.0.0", true),
+        ("192.175.48.1", true),
+        ("198.17.255.255", true),
+        ("198.18.0.0", false),
+        ("198.19.255.255", false),
+        ("198.20.0.0", true),
+        ("198.51.100.0", false),
+        ("198.51.100.255", false),
+        ("198.51.101.0", true),
+        ("203.0.112.255", true),
+        ("203.0.113.0", false),
+        ("203.0.113.255", false),
+        ("223.255.255.255", true),
+        ("224.0.0.0", false),
+        ("239.255.255.255", false),
+        ("240.0.0.0", false),
+        ("255.255.255.255", false),
+        ("::ffff:8.8.8.8", true),
+        ("::ffff:127.0.0.1", false),
+        ("::ffff:168.63.129.16", false),
+        ("::ffff:169.254.169.254", false),
+        ("::ffff:172.16.0.1", false),
+        ("::a9fe:a9fe", false), // deprecated IPv4-compatible form
+        ("64:ff9b::808:808", true),
+        ("64:ff9b::c000:9", true),
+        ("64:ff9b::a83f:8110", false),
+        ("64:ff9b::a9fe:a9fe", false),
+        ("64:ff9b::ac10:1", false),
+        ("64:ff9b::c0a8:1", false),
+        ("64:ff9b::1:808:808", false),
+        ("64:ff9b:1::1", false),
+        ("::", false),
+        ("::1", false),
+        ("::2", false),
+        ("100::1", false),
+        ("100:0:0:1::1", false),
+        ("1fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", false),
+        ("2001::", false),
+        ("2001:1::", false),
+        ("2001:1::1", true),
+        ("2001:1::2", true),
+        ("2001:1::3", true),
+        ("2001:1::4", false),
+        ("2001:2::1", false),
+        ("2001:3::", true),
+        ("2001:3:ffff:ffff:ffff:ffff:ffff:ffff", true),
+        ("2001:4::", false),
+        ("2001:4:111::1", false),
+        ("2001:4:112::", true),
+        ("2001:4:112:ffff:ffff:ffff:ffff:ffff", true),
+        ("2001:4:113::", false),
+        ("2001:10::1", false),
+        ("2001:1f:ffff:ffff:ffff:ffff:ffff:ffff", false),
+        ("2001:20::", true),
+        ("2001:2f:ffff:ffff:ffff:ffff:ffff:ffff", true),
+        ("2001:30::", true),
+        ("2001:3f:ffff:ffff:ffff:ffff:ffff:ffff", true),
+        ("2001:40::", false),
+        ("2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff", false),
+        ("2001:200::", true),
+        ("2001:db7:ffff:ffff:ffff:ffff:ffff:ffff", true),
+        ("2001:db8::", false),
+        ("2001:db8:ffff:ffff:ffff:ffff:ffff:ffff", false),
+        ("2001:db9::", true),
+        ("2002::", false),
+        ("2002:808:808::1", false),
+        ("2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff", false),
+        ("2003::", true),
+        ("2606:4700:4700::1111", true),
+        ("2620:4f:8000::1", true),
+        ("3fff::", false),
+        ("3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff", false),
+        ("3fff:1000::", true),
+        ("4000::", false),
+        ("5f00::1", false),
+        ("fc00::", false),
+        ("fd00:ec2::254", false), // AWS IPv6 metadata
+        ("fe80::1", false),
+        ("fec0::1", false),
+        ("ff02::1", false),
+    ];
 
     #[test]
-    fn admits_public_global_addresses_and_registry_exceptions() {
-        for address in [
-            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
-            IpAddr::V4(Ipv4Addr::new(192, 0, 0, 9)),
-            IpAddr::V4(Ipv4Addr::new(192, 0, 0, 10)),
-            IpAddr::V4(Ipv4Addr::new(192, 0, 1, 1)),
-            IpAddr::V4(Ipv4Addr::new(192, 2, 1, 1)),
-            IpAddr::V6("::ffff:8.8.8.8".parse().expect("public mapped address")),
-            IpAddr::V6("2001:1::1".parse().expect("PCP exception")),
-            IpAddr::V6("2001:1::2".parse().expect("TURN exception")),
-            IpAddr::V6("2001:1::3".parse().expect("DNS-SD exception")),
-            IpAddr::V6("2001:3::1".parse().expect("AMT exception")),
-            IpAddr::V6("2001:4:112::1".parse().expect("AS112 exception")),
-            IpAddr::V6("2001:20::1".parse().expect("ORCHIDv2 exception")),
-            IpAddr::V6("2001:3f::1".parse().expect("DET exception")),
-            IpAddr::V6("2606:4700:4700::1111".parse().expect("public test address")),
-            IpAddr::V6(
-                "64:ff9b::808:808"
-                    .parse()
-                    .expect("public NAT64 test address"),
-            ),
-            IpAddr::V6(
-                "64:ff9b::c000:9"
-                    .parse()
-                    .expect("public exception NAT64 address"),
-            ),
-        ] {
-            assert!(admit_address(address).is_ok(), "{address} must be admitted");
-        }
-    }
-
-    #[test]
-    fn denies_current_iana_non_global_prefixes_at_their_exact_boundaries() {
-        for address in [
-            IpAddr::V4(Ipv4Addr::new(192, 0, 0, 8)),
-            IpAddr::V4(Ipv4Addr::new(192, 0, 0, 11)),
-            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 0)),
-            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 255)),
-            IpAddr::V6("100::1".parse().expect("discard-only prefix")),
-            IpAddr::V6("100:0:0:1::1".parse().expect("dummy prefix")),
-            IpAddr::V6("5f00::1".parse().expect("SRv6 prefix")),
-            IpAddr::V6("2001:1::4".parse().expect("non-exception host")),
-            IpAddr::V6("2001:2::1".parse().expect("benchmark prefix")),
-            IpAddr::V6("2001:4:111::1".parse().expect("AS112 adjacent prefix")),
-            IpAddr::V6("2001:10::1".parse().expect("deprecated ORCHID prefix")),
-            IpAddr::V6("2001:40::1".parse().expect("IETF assignment boundary")),
-        ] {
-            assert!(admit_address(address).is_err(), "{address} must be denied");
-        }
+    fn admission_matches_the_reviewed_registry_corpus() {
+        let mismatches: Vec<_> = REVIEWED_CORPUS
+            .iter()
+            .filter(|(address, admitted)| {
+                let address: IpAddr = address.parse().expect("corpus address");
+                admit_address(address).is_ok() != *admitted
+            })
+            .collect();
+        assert!(
+            mismatches.is_empty(),
+            "policy disagrees with the reviewed corpus: {mismatches:?}"
+        );
     }
 
     #[test]
