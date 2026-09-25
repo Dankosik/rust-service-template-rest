@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use infra_postgres::in_tx_with;
+use infra_postgres::{connection, in_tx_with};
 use sqlx::postgres::PgConnection;
 use tokio::task::{JoinError, JoinHandle};
 use tokio::time::Instant;
@@ -584,9 +584,16 @@ async fn send_outcome(
         in_tx_with(
             &shared.pool,
             READ_COMMITTED,
-            async |conn| -> Result<u64, OpFailed> {
-                let affected =
-                    execute(conn, &id_text, generation, outcome, delay, &summary).await?;
+            async |tx| -> Result<u64, OpFailed> {
+                let affected = execute(
+                    connection(tx),
+                    &id_text,
+                    generation,
+                    outcome,
+                    delay,
+                    &summary,
+                )
+                .await?;
                 returned.store(true, Ordering::SeqCst);
                 Ok(affected)
             },

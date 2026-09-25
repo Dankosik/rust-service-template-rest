@@ -65,18 +65,21 @@ environment; it does not block local completion.
 <!-- template:begin http-idempotency:docs-postgres-validation-http-idempotency -->
 With the HTTP idempotency profile retained, `ALLOW_HEAVY=1 make test-integration-db`
 also runs the idempotency suite in `test/tests/http_idempotency/`:
-arbitration, replay, expiry, writer-refusal, unknown-commit, abandonment,
-and activation proof against the store boundary (P1-P8), plus the mounted
-router proof (P9) where the introspection engine is retained.
+arbitration, equal replay and mismatch, expiry, writer refusal, rollback,
+same-key retry after uncertainty, 25P02 classification, byte-safe replay,
+caller-metadata maintenance, guarded legacy migration, and activation proof
+against the store boundary, plus the mounted router proof where the
+introspection engine is retained.
 `bash scripts/ci/test-integration-db.sh --test http_idempotency` runs that
-target alone (the script forwards its arguments to `cargo test`). The
-unknown-commit case (P6) uses a one-shot test proxy that acts on one
-`COMMIT`: it either forwards it and drops the acknowledgement, or closes
-both sockets before forwarding it, so the request sees a lost
-acknowledgement around a commit that did or did not happen; the readback's
-fresh connection passes through untouched. In the source template's
-initializer matrix, runtime graphs 13-16 and 23-26 run this suite once each,
-after their build and test, and need a usable Docker daemon.
+target alone (the script forwards its arguments to `cargo test`). The suite
+uses the existing transaction/store error seam for uncertain commits; it does
+not require a lost-COMMIT-ack proxy or post-commit readback. It establishes
+database observations only when a usable Docker daemon is available. The
+required cases include cancellation/outer-504 uncertainty returning to same-key
+arbitration, exact composite-array schema admission, the 15 s migration-lock
+and 5 min migration-deadline behavior, and the retained one-outcome metric
+semantics. This is proof of local database behavior only; it does not perform
+the operator maintenance sequence or authorize a deployment.
 <!-- template:end http-idempotency:docs-postgres-validation-http-idempotency -->
 <!-- template:begin jobs:docs-postgres-validation-jobs -->
 

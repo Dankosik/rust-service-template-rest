@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use infra_jobs::{EnqueueOptions, Enqueued, enqueue};
-use infra_postgres::PgPool;
+use infra_postgres::{PgPool, TxError, in_tx};
 use integration_tests::jobs::{CREATE_PROBE_ATTEMPTS, Probe, ProbeAction};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
@@ -207,14 +207,16 @@ async fn prepare(pool: &PgPool) {
 }
 
 async fn enqueue_committed(pool: &PgPool, action: ProbeAction) -> String {
-    let mut tx = pool.begin().await.expect("begin the enqueue transaction");
-    let enqueued = enqueue(&mut tx, &Probe { action }, EnqueueOptions::default())
-        .await
-        .expect("enqueue");
+    let enqueued = in_tx(pool, async |tx| -> Result<_, TxError> {
+        Ok(enqueue(tx, &Probe { action }, EnqueueOptions::default())
+            .await
+            .expect("enqueue"))
+    })
+    .await
+    .expect("enqueue");
     let Enqueued::Created(id) = enqueued else {
         panic!("duplicate enqueue");
     };
-    tx.commit().await.expect("commit the enqueue");
     id.to_string()
 }
 

@@ -1,6 +1,6 @@
 //! Claim upkeep, release, and reconciliation.
 
-use infra_postgres::in_tx_with;
+use infra_postgres::{connection, in_tx_with};
 use sqlx::Row;
 use tokio::sync::SemaphorePermit;
 use tokio::time::{Instant, MissedTickBehavior};
@@ -71,7 +71,8 @@ async fn extend_claims(shared: &Shared, claims: &[(JobId, i64)]) {
         in_tx_with(
             &shared.pool,
             READ_COMMITTED,
-            async |conn| -> Result<(Instant, Vec<(JobId, i64)>), OpFailed> {
+            async |tx| -> Result<(Instant, Vec<(JobId, i64)>), OpFailed> {
+                let conn = connection(tx);
                 let sent = Instant::now();
                 let rows = sqlx::query(EXTEND)
                     .bind(&id_list)
@@ -125,7 +126,8 @@ pub(crate) async fn release(
         in_tx_with(
             &shared.pool,
             READ_COMMITTED,
-            async |conn| -> Result<Vec<(JobId, i64)>, OpFailed> {
+            async |tx| -> Result<Vec<(JobId, i64)>, OpFailed> {
+                let conn = connection(tx);
                 let rows = sqlx::query(RELEASE)
                     .bind(&id_list)
                     .bind(&generations)
@@ -156,7 +158,8 @@ pub(crate) async fn reconcile(
         in_tx_with(
             &shared.pool,
             READ_COMMITTED,
-            async |conn| -> Result<Vec<RowState>, OpFailed> {
+            async |tx| -> Result<Vec<RowState>, OpFailed> {
+                let conn = connection(tx);
                 let rows = sqlx::query(RECONCILE)
                     .bind(&id_list)
                     .fetch_all(&mut *conn)

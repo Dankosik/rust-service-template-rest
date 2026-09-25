@@ -30,6 +30,9 @@ pub use harden::{
 // template:begin authn:infra-http-authn-exports
 pub use authn::{AUTHN_VERIFICATIONS_METRIC, ProtectError, VerifiedPrincipal, protect};
 // template:end authn:infra-http-authn-exports
+// template:begin postgres:infra-http-postgres-tx
+pub use infra_postgres::Tx;
+// template:end postgres:infra-http-postgres-tx
 // template:begin request-budget:infra-http-request-deadline-export
 pub use harden::RequestDeadline;
 // template:end request-budget:infra-http-request-deadline-export

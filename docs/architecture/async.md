@@ -91,12 +91,12 @@ changes nothing.
 
 ## Enqueue flows
 
-Enqueue runs on the caller's connection, inside the caller's `in_tx`
+Enqueue runs inside the caller's `in_tx`
 ([Transactions](persistence.md#transactions)). It is the only insert. It
-accepts `&mut PgConnection`, never a pool, and it issues no
-transaction-control SQL, no savepoint, and no second connection. A handler
-may call the same function on the connection its own `in_tx` closure
-receives, so a follow-up job commits with that handler's writes.
+accepts the shared opaque `&mut infra_postgres::Tx`, obtains its connection
+inside the jobs adapter, and issues no transaction-control SQL, savepoint,
+or second connection. A handler may pass the capability its own `in_tx`
+closure receives, so a follow-up job commits with that handler's writes.
 
 Validation runs before any statement. The kind name must match the grammar
 above. A unique key, when set, must be 1 to 255 bytes of UTF-8 without
@@ -152,16 +152,14 @@ handler's effect idempotent, and a terminal job frees the key.
 
 <!-- template:begin jobs-http-idempotency:docs-async-idempotency -->
 
-An idempotent operation uses the same statement, on the connection the store
-already holds. The operation's adapter calls
-`infra_jobs::enqueue(connection(tx), ..)`. The store's `READ COMMITTED`
-transaction commits the business write, the success record, and the job
-together, or none of them. A replay, a refusal, or an in-progress answer
-never runs the work, so it enqueues nothing. A live holder yields
-`Duplicate` after any wait for its writer. The store's arbitration,
-readback, and response rules are untouched. The only textual change in the
-idempotency guide is the jobs-marked admission in its adapter rule.
-[HTTP idempotency](../http-idempotency.md) states that rule.
+An idempotent operation uses the shared `infra-postgres::Tx` that
+`infra_http::idempotency` re-exports. Its provider adapter calls
+`infra_jobs::enqueue(tx, ..)`; the one READ COMMITTED transaction commits the
+business write, success record, and job together, or none. Replay, refusal,
+and an in-progress answer never run work and enqueue nothing. The jobs seam
+does not acquire, commit, or roll back that transaction. [HTTP
+idempotency](../http-idempotency.md) owns its request, retry, and response
+rules.
 
 <!-- template:end jobs-http-idempotency:docs-async-idempotency -->
 

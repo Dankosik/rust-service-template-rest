@@ -45,9 +45,10 @@ sqlx = { version = "0.9.0", default-features = false }
 log = { version = "0.4", default-features = false }
 # template:end postgres:workspace-postgres-dependencies
 # template:begin http-idempotency:workspace-http-idempotency-digest
-# Idempotency scope and fingerprint digests (docs/http-idempotency.md). The
-# same release `sqlx-postgres` already resolves, with the same features.
+# Idempotency request identity (docs/http-idempotency.md): SHA-256 uses
+# the release already resolved by sqlx-postgres; sfv owns structured strings.
 sha2 = { version = "0.11.0", default-features = false }
+sfv = { version = "0.15.0", default-features = false }
 # template:end http-idempotency:workspace-http-idempotency-digest
 
 # Runtime and transport

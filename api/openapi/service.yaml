@@ -200,8 +200,8 @@ components:
             $ref: '#/components/schemas/Problem'
     IdempotencyRequestInProgress:
       description: |-
-        a request with this Idempotency-Key is still in progress, so retry with
-        the same key later, or the operation reports its own conflict
+        a request with this Idempotency-Key is still in progress, or the operation
+        reports a conflict; retry with the same key after the Retry-After interval
       headers:
         Retry-After:
           schema:
@@ -215,9 +215,8 @@ components:
             $ref: '#/components/schemas/Problem'
     IdempotencyUnavailable:
       description: |-
-        bearer authentication trust or provider is unavailable, idempotent request
-        processing is unavailable, or the outcome of this request is unknown;
-        retry with the same Idempotency-Key
+        bearer authentication trust or idempotent request processing is unavailable,
+        or the committed outcome is uncertain; retry with the same Idempotency-Key
       headers:
         Retry-After:
           schema:

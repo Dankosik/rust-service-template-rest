@@ -6,9 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use infra_postgres::{TxError, in_tx_with};
+use infra_postgres::{TxError, connection, in_tx_with};
 use sqlx::Row;
-use sqlx::postgres::PgConnection;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -88,7 +87,8 @@ pub(crate) async fn check_startup(shared: &Shared) -> Result<(), StartupError> {
     let check = in_tx_with(
         &shared.pool,
         READ_COMMITTED,
-        async |conn: &mut PgConnection| -> Result<(), Refused> {
+        async |tx| -> Result<(), Refused> {
+            let conn = connection(tx);
             let row = sqlx::query(STARTUP_CHECK)
                 .fetch_one(&mut *conn)
                 .await
@@ -187,7 +187,8 @@ async fn delete_batch(
         in_tx_with(
             &shared.pool,
             READ_COMMITTED,
-            async |conn| -> Result<u64, OpFailed> {
+            async |tx| -> Result<u64, OpFailed> {
+                let conn = connection(tx);
                 sqlx::query(RETENTION_STATEMENT_TIMEOUT)
                     .execute(&mut *conn)
                     .await?;
@@ -215,7 +216,8 @@ async fn sample_once(shared: &Shared) -> Result<Vec<SampleRow>, OperationError> 
         in_tx_with(
             &shared.pool,
             READ_COMMITTED,
-            async |conn| -> Result<Vec<SampleRow>, OpFailed> {
+            async |tx| -> Result<Vec<SampleRow>, OpFailed> {
+                let conn = connection(tx);
                 sqlx::query(SAMPLE_STATEMENT_TIMEOUT)
                     .execute(&mut *conn)
                     .await?;

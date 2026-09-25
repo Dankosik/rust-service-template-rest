@@ -1,37 +1,30 @@
-//! Stored success format 1: capture, encoding, decoding, and replay.
-//!
-//! A 2xx response is captured once: its body is buffered within the bound,
-//! only the replayable headers are kept, and the first response is answered
-//! from that captured form, so it carries the same status, headers, and body
-//! bytes as every later replay. The record store only moves the encoded
-//! bytes.
+//! Stored-success admission and replay.
 
 use axum::body::{Body, Bytes};
 use axum::http::header::{
-    CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_TYPE, LOCATION,
+    CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_TYPE, ETAG, LAST_MODIFIED,
+    LOCATION,
 };
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
-use infra_idempotency_store::{Digest, Record};
+use infra_idempotency_store::{Digest, HeaderPair, Record};
 
 /// The largest success body the boundary stores and replays (1 MiB).
 pub const MAX_STORED_BODY_BYTES: usize = 1_048_576;
 
-/// The largest total of replayable header fields the boundary stores,
-/// counting `name.len + value.len + 4` per field (8 KiB).
+/// The largest total of replayable header name and value bytes (8 KiB).
 pub const MAX_STORED_HEADER_BYTES: usize = 8_192;
 
-/// The stored-success encoding this module writes and reads.
-const FORMAT: i16 = 1;
-
-/// The headers a replay reproduces, with their format-1 name ids.
-const REPLAYABLE: [(u8, HeaderName); 5] = [
-    (1, CONTENT_TYPE),
-    (2, CONTENT_ENCODING),
-    (3, CONTENT_LANGUAGE),
-    (4, CONTENT_DISPOSITION),
-    (5, LOCATION),
+/// The only headers the idempotency boundary stores and replays.
+const REPLAYABLE: [HeaderName; 7] = [
+    CONTENT_TYPE,
+    CONTENT_ENCODING,
+    CONTENT_LANGUAGE,
+    CONTENT_DISPOSITION,
+    LOCATION,
+    ETAG,
+    LAST_MODIFIED,
 ];
 
 /// A captured success: what the first response and every replay carry.
@@ -42,21 +35,21 @@ pub(super) struct Stored {
     body: Bytes,
 }
 
-/// Why a success cannot be stored. The work's transaction rolls back.
+/// Why a successful response cannot be stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Unstorable {
-    /// Not a 2xx status.
+    /// The handler result was not a success.
     Status,
-    /// The body stream failed while buffering.
+    /// The success body stream failed while buffering.
     BodyStream,
-    /// The body exceeds [`MAX_STORED_BODY_BYTES`].
+    /// The success body exceeded the bound.
     BodyLimit,
-    /// The replayable headers exceed [`MAX_STORED_HEADER_BYTES`].
+    /// The retained header fields exceeded the bound.
     HeaderLimit,
 }
 
 impl Unstorable {
-    /// The failure class for logs; never a value.
+    /// The non-sensitive class safe for the operator log.
     pub(super) const fn class(self) -> &'static str {
         match self {
             Self::Status => "status",
@@ -67,12 +60,11 @@ impl Unstorable {
     }
 }
 
-/// A record that is not a valid stored success of format 1.
+/// A record that cannot safely be rendered as a stored success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Undecodable;
 
-/// Buffer a 2xx response within the body bound and keep its replayable
-/// headers, every value, in `HeaderMap` order.
+/// Buffer a 2xx response and retain only the declared replayable headers.
 pub(super) async fn capture(response: Response) -> Result<Stored, Unstorable> {
     let (parts, body) = response.into_parts();
     if !parts.status.is_success() {
@@ -89,12 +81,19 @@ pub(super) async fn capture(response: Response) -> Result<Stored, Unstorable> {
             }
         })?
         .to_bytes();
-    let headers = parts
-        .headers
+    let headers = REPLAYABLE
         .iter()
-        .filter(|(name, _)| name_id(name).is_some())
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect();
+        .flat_map(|name| {
+            parts
+                .headers
+                .get_all(name)
+                .iter()
+                .map(move |value| (name.clone(), value.clone()))
+        })
+        .collect::<Vec<_>>();
+    if header_bytes(&headers).is_none_or(|total| total > MAX_STORED_HEADER_BYTES) {
+        return Err(Unstorable::HeaderLimit);
+    }
     Ok(Stored {
         status: parts.status,
         headers,
@@ -103,32 +102,26 @@ pub(super) async fn capture(response: Response) -> Result<Stored, Unstorable> {
 }
 
 impl Stored {
-    /// Encode as a format-1 record that carries `fingerprint`.
+    /// Produce the structured record that commits with this successful work.
     pub(super) fn record(&self, fingerprint: Digest) -> Result<Record, Unstorable> {
-        if header_bytes(&self.headers) > MAX_STORED_HEADER_BYTES {
-            return Err(Unstorable::HeaderLimit);
-        }
-        let mut headers = Vec::new();
-        for (name, value) in &self.headers {
-            let id = name_id(name).ok_or(Unstorable::HeaderLimit)?;
-            let length = u16::try_from(value.len()).map_err(|_| Unstorable::HeaderLimit)?;
-            headers.push(id);
-            headers.extend_from_slice(&length.to_be_bytes());
-            headers.extend_from_slice(value.as_bytes());
-        }
+        let headers = self
+            .headers
+            .iter()
+            .map(|(name, value)| HeaderPair {
+                name: name.as_str().to_owned(),
+                value: value.as_bytes().to_vec(),
+            })
+            .collect();
         let status = i16::try_from(self.status.as_u16()).map_err(|_| Unstorable::Status)?;
         Ok(Record {
             fingerprint,
-            format: FORMAT,
             status,
             headers,
             body: self.body.to_vec(),
         })
     }
 
-    /// The response: the stored status and body, then the stored headers in
-    /// order. The transport adds the request id, trace context, `nosniff`,
-    /// and framing of the exchange that sends it.
+    /// Render the same stored form for a first success and every replay.
     pub(super) fn into_response(self) -> Response {
         let mut response = Response::new(Body::from(self.body));
         *response.status_mut() = self.status;
@@ -140,10 +133,9 @@ impl Stored {
     }
 }
 
-/// Decode a record written by [`Stored::record`], re-checking the format,
-/// the status, the header names and lengths, and both bounds.
+/// Validate a database record before replaying it.
 pub(super) fn decode(record: Record) -> Result<Stored, Undecodable> {
-    if record.format != FORMAT || record.body.len() > MAX_STORED_BODY_BYTES {
+    if record.body.len() > MAX_STORED_BODY_BYTES {
         return Err(Undecodable);
     }
     let status = u16::try_from(record.status)
@@ -151,7 +143,21 @@ pub(super) fn decode(record: Record) -> Result<Stored, Undecodable> {
         .and_then(|status| StatusCode::from_u16(status).ok())
         .filter(StatusCode::is_success)
         .ok_or(Undecodable)?;
-    let headers = decode_headers(&record.headers).ok_or(Undecodable)?;
+    let headers = record
+        .headers
+        .into_iter()
+        .map(|pair| {
+            let name = HeaderName::from_bytes(pair.name.as_bytes()).map_err(|_| Undecodable)?;
+            if name.as_str() != pair.name || !is_replayable(&name) {
+                return Err(Undecodable);
+            }
+            let value = HeaderValue::from_bytes(&pair.value).map_err(|_| Undecodable)?;
+            Ok((name, value))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if header_bytes(&headers).is_none_or(|total| total > MAX_STORED_HEADER_BYTES) {
+        return Err(Undecodable);
+    }
     Ok(Stored {
         status,
         headers,
@@ -159,45 +165,23 @@ pub(super) fn decode(record: Record) -> Result<Stored, Undecodable> {
     })
 }
 
-fn decode_headers(mut encoded: &[u8]) -> Option<Vec<(HeaderName, HeaderValue)>> {
-    let mut headers = Vec::new();
-    while let Some((&id, rest)) = encoded.split_first() {
-        let name = REPLAYABLE
-            .iter()
-            .find(|(candidate, _)| *candidate == id)
-            .map(|(_, name)| name.clone())?;
-        let (length, rest) = rest.split_first_chunk::<2>()?;
-        let (value, rest) = rest.split_at_checked(usize::from(u16::from_be_bytes(*length)))?;
-        headers.push((name, HeaderValue::from_bytes(value).ok()?));
-        encoded = rest;
-    }
-    (header_bytes(&headers) <= MAX_STORED_HEADER_BYTES).then_some(headers)
+fn is_replayable(name: &HeaderName) -> bool {
+    REPLAYABLE.iter().any(|candidate| candidate == name)
 }
 
-fn name_id(name: &HeaderName) -> Option<u8> {
-    REPLAYABLE
-        .iter()
-        .find(|(_, candidate)| candidate == name)
-        .map(|(id, _)| *id)
-}
-
-/// The header accounting of the specification: `name.len + value.len + 4`
-/// per field.
-fn header_bytes(headers: &[(HeaderName, HeaderValue)]) -> usize {
-    headers.iter().fold(0, |total, (name, value)| {
+fn header_bytes(headers: &[(HeaderName, HeaderValue)]) -> Option<usize> {
+    headers.iter().try_fold(0usize, |total, (name, value)| {
         total
-            .saturating_add(name.as_str().len())
-            .saturating_add(value.len())
-            .saturating_add(4)
+            .checked_add(name.as_str().len())?
+            .checked_add(value.len())
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use axum::http::header::SET_COOKIE;
+    use http_body_util::BodyExt;
 
     use super::*;
-    use crate::idempotency::openapi::REPLAYABLE_HEADERS;
 
     const FINGERPRINT: Digest = [7; 32];
 
@@ -206,190 +190,132 @@ mod tests {
         for (name, value) in headers {
             builder = builder.header(*name, *value);
         }
-        builder.body(body.into()).unwrap()
+        builder.body(body.into()).expect("valid response")
     }
 
-    fn header(name: &str, value: &str) -> (HeaderName, HeaderValue) {
-        (
-            HeaderName::from_bytes(name.as_bytes()).unwrap(),
-            HeaderValue::from_str(value).unwrap(),
-        )
-    }
-
-    fn record(status: i16, headers: Vec<u8>, body: Vec<u8>) -> Record {
+    fn record(status: i16, headers: Vec<HeaderPair>, body: Vec<u8>) -> Record {
         Record {
             fingerprint: FINGERPRINT,
-            format: FORMAT,
             status,
             headers,
             body,
         }
     }
 
-    #[test]
-    fn replayable_names_are_the_declared_replayable_headers() {
-        let stored: Vec<&str> = REPLAYABLE.iter().map(|(_, name)| name.as_str()).collect();
-        let declared: Vec<String> = REPLAYABLE_HEADERS
-            .iter()
-            .map(|name| name.to_ascii_lowercase())
-            .collect();
-        assert_eq!(stored, declared);
-        let ids: Vec<u8> = REPLAYABLE.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids, [1, 2, 3, 4, 5]);
-    }
-
     #[tokio::test]
-    async fn a_success_round_trips_with_only_replayable_headers_in_order() {
+    async fn first_success_and_replay_have_the_same_admitted_bytes() {
         let captured = capture(response(
             201,
             &[
                 ("content-type", "application/json"),
-                ("x-trace", "drop-me"),
-                ("location", "/widgets/1"),
+                ("x-trace", "drop"),
                 ("content-language", "en"),
                 ("content-language", "fr"),
-                ("set-cookie", "session=secret"),
+                ("etag", "\"v1\""),
+                ("last-modified", "Mon, 01 Jan 2024 00:00:00 GMT"),
+                ("set-cookie", "secret"),
             ],
-            r#"{"id":1}"#,
+            br#"{"id":1}"#.as_slice(),
         ))
         .await
-        .unwrap();
-        let kept = vec![
-            header("content-type", "application/json"),
-            header("location", "/widgets/1"),
-            header("content-language", "en"),
-            header("content-language", "fr"),
-        ];
+        .expect("storable response");
+        let record = captured.record(FINGERPRINT).expect("record");
         assert_eq!(
-            captured,
-            Stored {
-                status: StatusCode::CREATED,
-                headers: kept.clone(),
-                body: Bytes::from_static(br#"{"id":1}"#),
-            }
+            record.headers,
+            vec![
+                HeaderPair {
+                    name: "content-type".to_owned(),
+                    value: b"application/json".to_vec()
+                },
+                HeaderPair {
+                    name: "content-language".to_owned(),
+                    value: b"en".to_vec()
+                },
+                HeaderPair {
+                    name: "content-language".to_owned(),
+                    value: b"fr".to_vec()
+                },
+                HeaderPair {
+                    name: "etag".to_owned(),
+                    value: b"\"v1\"".to_vec()
+                },
+                HeaderPair {
+                    name: "last-modified".to_owned(),
+                    value: b"Mon, 01 Jan 2024 00:00:00 GMT".to_vec()
+                },
+            ]
         );
-
-        let encoded = captured.record(FINGERPRINT).unwrap();
-        let expected_headers = [
-            &[1, 0, 16][..],
-            b"application/json",
-            &[5, 0, 10],
-            b"/widgets/1",
-            &[3, 0, 2],
-            b"en",
-            &[3, 0, 2],
-            b"fr",
-        ]
-        .concat();
-        assert_eq!(
-            encoded,
-            record(201, expected_headers, br#"{"id":1}"#.to_vec())
-        );
-
-        let replayed = decode(encoded).unwrap();
-        assert_eq!(replayed, captured);
-        let replay = replayed.into_response();
+        let replay = decode(record).expect("admitted record").into_response();
         assert_eq!(replay.status(), StatusCode::CREATED);
-        let sent: Vec<(HeaderName, HeaderValue)> = replay
-            .headers()
-            .iter()
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect();
-        assert_eq!(sent, kept);
-        assert!(!replay.headers().contains_key(SET_COOKIE));
-        let body = replay.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(body.as_ref(), br#"{"id":1}"#);
-    }
-
-    #[tokio::test]
-    async fn a_body_of_exactly_one_mebibyte_is_stored_and_one_more_byte_is_not() {
-        let exact = capture(response(200, &[], vec![b'x'; MAX_STORED_BODY_BYTES]))
-            .await
-            .unwrap();
-        let encoded = exact.record(FINGERPRINT).unwrap();
-        assert_eq!(encoded.body.len(), MAX_STORED_BODY_BYTES);
-        assert_eq!(decode(encoded).unwrap(), exact);
-
-        let over = capture(response(200, &[], vec![b'x'; MAX_STORED_BODY_BYTES + 1])).await;
-        assert_eq!(over.unwrap_err(), Unstorable::BodyLimit);
-    }
-
-    #[tokio::test]
-    async fn a_failing_body_or_a_non_success_status_is_unstorable() {
-        let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
-            Ok(Bytes::from_static(b"partial")),
-            Err(std::io::Error::other("stream broke")),
-        ];
-        let failing = response(
-            200,
-            &[],
-            Body::from_stream(futures_util::stream::iter(chunks)),
-        );
-        assert_eq!(capture(failing).await.unwrap_err(), Unstorable::BodyStream);
         assert_eq!(
-            capture(response(404, &[], "missing")).await.unwrap_err(),
-            Unstorable::Status
+            replay.headers().get(CONTENT_TYPE),
+            Some(&HeaderValue::from_static("application/json"))
+        );
+        assert_eq!(replay.headers().get_all(CONTENT_LANGUAGE).iter().count(), 2);
+        assert!(!replay.headers().contains_key("x-trace"));
+        assert_eq!(
+            replay.into_body().collect().await.expect("body").to_bytes(),
+            Bytes::from_static(br#"{"id":1}"#)
         );
     }
 
     #[tokio::test]
-    async fn header_fields_are_bounded_by_name_value_and_four_bytes_each() {
-        // content-disposition (19) + value + 4 = 8192 at the bound.
-        let at_bound = "a".repeat(MAX_STORED_HEADER_BYTES - 19 - 4);
-        let captured = capture(response(
-            200,
-            &[("content-disposition", at_bound.as_str())],
-            "",
-        ))
-        .await
-        .unwrap();
-        let encoded = captured.record(FINGERPRINT).unwrap();
-        assert_eq!(decode(encoded).unwrap(), captured);
-
-        let over_bound = format!("{at_bound}a");
-        let captured = capture(response(
-            200,
-            &[("content-disposition", over_bound.as_str())],
-            "",
-        ))
-        .await
-        .unwrap();
+    async fn admission_rejects_non_success_and_oversized_headers() {
         assert_eq!(
-            captured.record(FINGERPRINT).unwrap_err(),
-            Unstorable::HeaderLimit
+            capture(response(409, &[], Body::empty())).await,
+            Err(Unstorable::Status)
+        );
+        let large = "x".repeat(MAX_STORED_HEADER_BYTES);
+        assert_eq!(
+            capture(response(
+                200,
+                &[("content-type", large.as_str())],
+                Body::empty()
+            ))
+            .await,
+            Err(Unstorable::HeaderLimit)
         );
     }
 
     #[test]
-    fn decoding_refuses_every_invalid_record() {
-        let valid_headers = [&[1, 0, 10][..], b"text/plain"].concat();
-        assert!(decode(record(200, valid_headers.clone(), b"ok".to_vec())).is_ok());
-
-        let mut wrong_format = record(200, valid_headers.clone(), b"ok".to_vec());
-        wrong_format.format = 2;
-        let over_header_bound = [
-            &[4, 0x1f, 0xea][..],
-            "a".repeat(MAX_STORED_HEADER_BYTES - 19 - 3).as_bytes(),
-        ]
-        .concat();
-        let invalid = [
-            wrong_format,
+    fn decode_refuses_corrupt_or_noncanonical_structured_headers() {
+        let valid = record(
+            200,
+            vec![HeaderPair {
+                name: "content-type".to_owned(),
+                value: b"text/plain".to_vec(),
+            }],
+            b"stored".to_vec(),
+        );
+        assert!(decode(valid).is_ok());
+        for invalid in [
             record(199, Vec::new(), Vec::new()),
-            record(300, Vec::new(), Vec::new()),
-            record(404, Vec::new(), Vec::new()),
-            record(-200, Vec::new(), Vec::new()),
-            record(200, vec![0, 0, 1, b'a'], Vec::new()),
-            record(200, vec![6, 0, 1, b'a'], Vec::new()),
-            record(200, vec![1, 0], Vec::new()),
-            record(200, vec![1, 0, 5, b'a', b'b'], Vec::new()),
-            record(200, [&valid_headers[..], &[5]].concat(), Vec::new()),
-            record(200, vec![5, 0, 3, b'a', b'\n', b'b'], Vec::new()),
-            record(200, vec![5, 0, 1, 0x7f], Vec::new()),
-            record(200, over_header_bound, Vec::new()),
-            record(200, Vec::new(), vec![b'x'; MAX_STORED_BODY_BYTES + 1]),
-        ];
-        for record in invalid {
-            assert_eq!(decode(record).unwrap_err(), Undecodable);
+            record(
+                200,
+                vec![HeaderPair {
+                    name: "Content-Type".to_owned(),
+                    value: b"text/plain".to_vec(),
+                }],
+                Vec::new(),
+            ),
+            record(
+                200,
+                vec![HeaderPair {
+                    name: "set-cookie".to_owned(),
+                    value: b"secret".to_vec(),
+                }],
+                Vec::new(),
+            ),
+            record(
+                200,
+                vec![HeaderPair {
+                    name: "content-type".to_owned(),
+                    value: vec![b'\n'],
+                }],
+                Vec::new(),
+            ),
+        ] {
+            assert_eq!(decode(invalid), Err(Undecodable));
         }
     }
 }

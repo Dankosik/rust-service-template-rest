@@ -65,9 +65,10 @@ impl infra_jobs::JobKind for Welcome {
 
 ## Enqueue in the transaction
 
-`infra_jobs::enqueue(conn, &payload, options)` takes the caller's open
-transaction connection: the `&mut PgConnection` an `infra_postgres::in_tx`
-or `in_tx_with` closure receives, including a handler's own transaction. It
+`infra_jobs::enqueue(tx, &payload, options)` takes the shared opaque
+`&mut infra_postgres::Tx` that an `in_tx` or `in_tx_with` closure receives,
+including a handler's own transaction. The jobs adapter obtains the scoped
+connection internally. It
 never opens, commits, or rolls back a transaction, issues no
 transaction-control SQL (`COMMIT`, `ROLLBACK`, `SAVEPOINT`), and never
 acquires another connection. The caller does not name `background_jobs`;
@@ -143,16 +144,16 @@ a later enqueue once the holder is terminal
 
 ```rust,ignore
 // crates/infra-widgets/src/lib.rs
-infra_postgres::in_tx(pool, async |conn| {
+infra_postgres::in_tx(pool, async |tx| {
     let widget_id: i64 = sqlx::query_scalar(
         "INSERT INTO widgets (name) VALUES ($1) RETURNING id",
     )
     .bind(name)
-    .fetch_one(&mut *conn)
+    .fetch_one(infra_postgres::connection(tx))
     .await?;
     let key = widget_id.to_string();
     match infra_jobs::enqueue(
-        conn,
+        tx,
         &Welcome { widget_id },
         infra_jobs::EnqueueOptions {
             unique_key: Some(&key),
@@ -178,11 +179,12 @@ transaction usable, so the widget insert can still commit.
 ## Enqueue from an idempotent operation
 
 An HTTP-idempotent operation's persistence adapter enqueues through
-`infra_jobs::enqueue(connection(tx), &payload, options)`, where `connection`
-is `infra_idempotency_store::connection`. Such an adapter also depends on
-`infra-jobs`, besides the feature and `infra-idempotency-store`. The
-`POST /widgets` adapter inserts the widget and enqueues `widgets.welcome`
-with the widget id as the unique key on that connection.
+`infra_jobs::enqueue(tx, &payload, options)`, using the shared
+`infra_postgres::Tx` re-exported by `infra_http::idempotency`. Such an adapter
+depends on `infra-jobs` and the provider's own persistence boundary; it never
+obtains a connection through the idempotency store. The `POST /widgets` adapter
+inserts the widget and enqueues `widgets.welcome` with the widget id as its
+unique key in that same transaction.
 
 The job commits together with the business write and the success record, or
 not at all. A replayed, refused, in-progress, or rolled-back attempt
@@ -197,17 +199,15 @@ adapter returns an error and the work answers non-2xx, which rolls back. The
 adapter still issues no transaction-control SQL and names neither
 `http_idempotency_records` nor `background_jobs`: the enqueue seam owns its
 statement. The rest of the boundary's rules are in
-[HTTP idempotency](http-idempotency.md#do-the-work-inside-the-transaction).
+[HTTP idempotency](http-idempotency.md#transaction-outcomes-and-replay).
 
 ```rust,ignore
 // crates/infra-widgets/src/lib.rs
-use infra_idempotency_store::connection;
-
 let widget_id: i64 = sqlx::query_scalar(
     "INSERT INTO widgets (name) VALUES ($1) RETURNING id",
 )
 .bind(&input.name)
-.fetch_one(connection(tx))
+.fetch_one(infra_postgres::connection(tx))
 .await?;
 let key = widget_id.to_string();
 match infra_jobs::enqueue(
