@@ -18,7 +18,7 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | `infra-outbound-http` (`crates/infra-outbound-http`) | Fixed-authority public HTTPS exchanges over standard `http::Request<Bytes>`/`Response<Bytes>`, five limits, component target composition, and operation lifetime ([guide](../outbound-http.md)). | Provider credentials, parsing, retries, configuration, readiness, bootstrap, or task tracking. |
 <!-- template:end outbound-http:docs-boundaries-outbound-owner -->
 <!-- template:begin egress-dns:docs-boundaries-egress-owner -->
-| `infra-egress-dns` (`crates/infra-egress-dns`) | Public-address admission, shared Hickory resolution, and the common hardened HTTPS builder. | Consumer HTTP policy, provider failures, credentials, readiness, or service task tracking. |
+| `infra-egress-dns` (`crates/infra-egress-dns`) | Public-address admission, shared Hickory resolution, the common hardened HTTPS builder, and default-off generated TLS test material. | Consumer HTTP policy, provider failures, credentials, readiness, or service task tracking. |
 <!-- template:end egress-dns:docs-boundaries-egress-owner -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-owner -->
 | `infra-idempotency-store` (`crates/infra-idempotency-store`) | The PostgreSQL idempotency record store: arbitration, the execution transaction, readback, startup check, and cleanup ([guide](../http-idempotency.md)). | HTTP types, Problems, business rules, readiness registration, or request routing. |
@@ -77,7 +77,7 @@ infra-bearerauthn -> infra-egress-dns
 infra-outbound-http -> infra-egress-dns, reqwest, http, bytes, url, tokio
 <!-- template:end outbound-http:docs-boundaries-outbound-edges -->
 <!-- template:begin egress-dns:docs-boundaries-egress-edges -->
-infra-egress-dns -> reqwest DNS types, hickory-resolver, tokio
+infra-egress-dns -> reqwest, hickory-resolver, ipnet
 <!-- template:end egress-dns:docs-boundaries-egress-edges -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-edges -->
 main binary -> infra-idempotency-store

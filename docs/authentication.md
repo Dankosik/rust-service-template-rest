@@ -140,7 +140,8 @@ joined through the background tracker.
 These are authentication-specific controls, not a general outbound HTTP
 capability. Another provider class, private-network exception, revocation rule,
 authorization policy or transport lifetime mechanism reopens the corresponding
-contract. Generated test-only DER material is valid at test execution time and
-exercises normal TLS/name checks without a checked-in expiry deadline.
+contract. Generated test-only DER material from the default-off
+`infra-egress-dns/test-support` feature exercises normal TLS/name checks
+without a checked-in expiry deadline.
 [Initializer validation](template-sync.md#validation-boundary) separates
 all-choice projection proof from distinct runtime build/test evidence.

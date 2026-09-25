@@ -235,12 +235,12 @@ fn is_json_media_type(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::tls::TlsMaterial;
     use std::{sync::Arc, time::Duration};
     // template:begin oidc-jwt:authn-provider-raw-dns-test-imports
     use std::net::{IpAddr, Ipv4Addr};
     // template:end oidc-jwt:authn-provider-raw-dns-test-imports
 
+    use infra_egress_dns::test_support::TlsMaterial;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,

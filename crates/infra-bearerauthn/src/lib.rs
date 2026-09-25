@@ -13,10 +13,6 @@ mod introspection;
 mod jwt;
 // template:end oidc-jwt:authn-jwt-module
 mod provider;
-#[cfg(test)]
-#[path = "../../infra-egress-dns/tests/fixtures/tls.rs"]
-mod tls;
-
 // template:begin oidc-jwt:authn-refresh-module
 mod refresh;
 // template:end oidc-jwt:authn-refresh-module

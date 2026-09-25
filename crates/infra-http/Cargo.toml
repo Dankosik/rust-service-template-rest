@@ -42,11 +42,9 @@ utoipa-axum = { workspace = true }
 
 [dev-dependencies]
 # template:begin oidc-introspection:http-authn-test-dependencies
-rcgen = { workspace = true, features = ["aws_lc_rs"] }
-time = { workspace = true, features = ["std"] }
 infra-bearerauthn = { workspace = true, features = ["test-support"] }
+infra-egress-dns = { workspace = true, features = ["test-support"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
-tokio-util = { workspace = true, features = ["rt"] }
 # template:end oidc-introspection:http-authn-test-dependencies
 # template:begin oidc-introspection:http-introspection-test-secret
 secrecy = { workspace = true }
@@ -57,9 +55,3 @@ axum-test = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "test-util"] }
 tower = { workspace = true, features = ["util"] }
-
-# template:begin oidc-introspection:http-authn-fixture-analysis
-# Used by the path-included egress TLS fixture; cargo-shear does not follow it.
-[package.metadata.cargo-shear]
-ignored = ["time"]
-# template:end oidc-introspection:http-authn-fixture-analysis

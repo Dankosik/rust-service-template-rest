@@ -13,9 +13,13 @@ workspace = true
 
 [features]
 default = []
+# Generated TLS material for the consumers' real-TLS tests; never enable it in
+# a production dependency.
+test-support = ["dep:rcgen"]
 
 [dependencies]
 thiserror = { workspace = true }
 hickory-resolver = { workspace = true, features = ["tokio", "system-config"] }
 reqwest = { workspace = true, features = ["rustls"] }
 ipnet = { workspace = true, features = ["std"] }
+rcgen = { workspace = true, optional = true, features = ["aws_lc_rs"] }

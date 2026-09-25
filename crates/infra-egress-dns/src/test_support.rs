@@ -1,44 +1,49 @@
-//! Test-only TLS material shared by the egress consumers.
-
-// Cryptographic fixture setup must succeed before a test can exercise TLS.
-#![allow(clippy::expect_used)]
+//! Generated TLS material for the egress consumers' real-TLS tests.
 
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose,
 };
-use time::{Duration, OffsetDateTime};
 
-/// One generated CA, matching DNS-SAN leaf and unrelated CA for a TLS test.
+/// One generated CA, a matching DNS-SAN leaf and key, and an unrelated CA.
+///
+/// Every certificate keeps rcgen's default validity window, so nothing
+/// checked in or computed from the test clock can expire.
 #[derive(Debug)]
-// Each path-including consumer uses the material needed by its own TLS scenarios.
-#[allow(dead_code)]
-pub(super) struct TlsMaterial {
-    pub(super) cert: Vec<u8>,
-    pub(super) key: Vec<u8>,
-    pub(super) root: Vec<u8>,
-    pub(super) untrusted_root: Vec<u8>,
+pub struct TlsMaterial {
+    /// Leaf certificate DER for the fixture server.
+    pub cert: Vec<u8>,
+    /// PKCS #8 DER private key of the leaf.
+    pub key: Vec<u8>,
+    /// DER of the CA that signed the leaf.
+    pub root: Vec<u8>,
+    /// DER of a CA that did not sign the leaf.
+    pub untrusted_root: Vec<u8>,
 }
 
 impl TlsMaterial {
-    /// Generates material that is valid around the test's execution time.
-    pub(super) fn new(host: &str) -> Self {
+    /// Generates fresh material whose leaf names `host`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `host` is empty or key generation or signing fails; a TLS
+    /// test cannot run without its material.
+    #[must_use]
+    #[allow(
+        clippy::expect_used,
+        reason = "fixture setup failures are test failures"
+    )]
+    pub fn new(host: &str) -> Self {
         assert!(!host.is_empty(), "TLS fixture host must not be empty");
-        let now = OffsetDateTime::now_utc();
-        let not_before = now - Duration::days(1);
-        let not_after = now + Duration::days(1);
-
-        let issuer = new_issuer(not_before, not_after);
+        let issuer = new_issuer();
         let leaf_key = KeyPair::generate().expect("generate TLS fixture leaf key");
         let mut leaf =
             CertificateParams::new(vec![host.to_owned()]).expect("create TLS fixture DNS SAN");
-        leaf.not_before = not_before;
-        leaf.not_after = not_after;
         leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         let certificate = leaf
             .signed_by(&leaf_key, &issuer)
             .expect("sign TLS fixture leaf certificate");
-        let unrelated = new_issuer(not_before, not_after);
+        let unrelated = new_issuer();
 
         Self {
             cert: certificate.der().to_vec(),
@@ -49,13 +54,12 @@ impl TlsMaterial {
     }
 }
 
-fn new_issuer(
-    not_before: OffsetDateTime,
-    not_after: OffsetDateTime,
-) -> CertifiedIssuer<'static, KeyPair> {
+#[allow(
+    clippy::expect_used,
+    reason = "fixture setup failures are test failures"
+)]
+fn new_issuer() -> CertifiedIssuer<'static, KeyPair> {
     let mut params = CertificateParams::default();
-    params.not_before = not_before;
-    params.not_after = not_after;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     CertifiedIssuer::self_signed(

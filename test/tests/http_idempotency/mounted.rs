@@ -31,6 +31,7 @@ use axum_test::{TestRequest, TestResponse, TestServer};
 use health::Readiness;
 use infra_bearerauthn::test_support::{FixtureTransport, prepare_introspection_with_fixture};
 use infra_bearerauthn::{IntrospectionOptions, Verifier};
+use infra_egress_dns::test_support::TlsMaterial;
 use infra_http::idempotency::{
     Activation, Composer, Fingerprint, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, Tx,
 };
@@ -83,9 +84,6 @@ const KEY_REASON: &str = "must be one Idempotency-Key field of 1 to 255 RFC 9110
 
 // The fixture provider and the callers it knows.
 const FIXTURE_HOST: &str = "authn.fixture.test";
-#[path = "../../../crates/infra-egress-dns/tests/fixtures/tls.rs"]
-mod tls;
-use tls::TlsMaterial;
 const ISSUER: &str = "https://issuer.example";
 const AUDIENCE: &str = "service";
 const ALICE: &str = "alice-token";

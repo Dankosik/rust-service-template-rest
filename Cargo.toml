@@ -156,12 +156,6 @@ tokio-rustls = { version = "0.26.5", default-features = false }
 rcgen = { version = "0.14.10", default-features = false }
 # template:end egress-dns:workspace-egress-tls-fixtures
 
-# template:begin egress-dns:workspace-egress-fixture-analysis
-# rcgen is used by path-included test modules outside each consumer crate.
-[workspace.metadata.cargo-shear]
-ignored = ["rcgen"]
-# template:end egress-dns:workspace-egress-fixture-analysis
-
 # Lints apply to every crate that opts in with `[lints] workspace = true`.
 # `make lint` promotes warnings to errors; keep the levels here at `warn` so
 # local builds stay usable while a fix is in progress.

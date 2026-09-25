@@ -144,12 +144,12 @@ body. `Client` diagnostics remain redacted. The adapter maps errors to its
 existing boundary; authentication maps provider failures to its sanitized
 unavailable outcome.
 
-Tests use generated, test-only TLS material from
-`crates/infra-egress-dns/tests/fixtures/tls.rs`: an execution-time-valid isolated
-root, matching DNS-SAN leaf/key, and unrelated root. The module returns DER
-bytes only to test modules; it creates no production custom-root escape. The
-eight former auth/outbound TLS DER fixtures are removed, while the JWT signing
-key remains.
+Tests use generated TLS material from `infra_egress_dns::test_support`, which
+only the default-off `test-support` feature compiles and which consumers enable
+from their dev-dependencies: an isolated root, a matching DNS-SAN leaf and key,
+and an unrelated root. It returns DER bytes to tests only; it creates no
+production custom-root escape. The eight former auth/outbound TLS DER fixtures
+are removed, while the JWT signing key remains.
 
 ## Dependency decisions and evidence
 
@@ -177,9 +177,10 @@ CIDR mechanics; the template owns this public-only policy. IPv4-mapped IPv6 and
 well-known NAT64 reapply the IPv4 policy, including metadata. A generic global-IP
 predicate cannot replace those accepted exceptions and threat-policy overrides.
 
-Test-only rcgen 0.14.10 uses the existing aws-lc-rs backend, with default features
-off and execution-time validity from time 0.3.55. This avoids expiring checked-in
-certificates and an external OpenSSL process. The existing chunk loop remains
+Test-only rcgen 0.14.10 uses the existing aws-lc-rs backend with default
+features off, as an optional dependency of that one feature, and keeps rcgen's
+default 1975-4096 validity. This avoids expiring checked-in certificates, test
+clock arithmetic and an external OpenSSL process. The existing chunk loop remains
 because a Limited adapter would add conversion machinery to the buffered API.
 No crate upgrade, performance result or live-provider certification is implied.
 

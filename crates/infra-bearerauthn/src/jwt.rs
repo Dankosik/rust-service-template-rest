@@ -592,13 +592,13 @@ fn verify_signature(token: &[u8], key: &DecodingKey) -> Result<(), Failure> {
 
 #[cfg(test)]
 mod tests {
-    use crate::tls::TlsMaterial;
     use std::{
         sync::Arc,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use infra_egress_dns::test_support::TlsMaterial;
     use jsonwebtoken::{Algorithm, EncodingKey, Header};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},

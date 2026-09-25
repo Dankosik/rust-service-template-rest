@@ -373,7 +373,7 @@
       {"path": "crates/config/src/authn.rs", "ids": ["authn-secrecy-import", "authn-mode-oidc-introspection", "authn-introspection-fields", "authn-introspection-defaults", "authn-foreign-introspection-inputs", "authn-dormant-introspection-syntax", "authn-introspection-validation", "authn-foreign-input-helper", "authn-secret-presence-helper", "authn-required-provider-url-helper", "authn-introspection-test-config", "authn-introspection-tests", "authn-dormant-introspection-tests"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-authn-mode-import", "load-introspection-environment", "load-introspection-secret-file"]},
       {"path": "crates/config/src/secret_policy.rs", "ids": ["secret-key-introspection-vector", "secret-policy-introspection-fixture"]},
-      {"path": "crates/infra-http/Cargo.toml", "ids": ["http-authn-test-dependencies", "http-authn-fixture-analysis", "http-introspection-test-secret"]},
+      {"path": "crates/infra-http/Cargo.toml", "ids": ["http-authn-test-dependencies", "http-introspection-test-secret"]},
       {"path": "crates/infra-http/src/authn.rs", "ids": ["http-introspection-fixture-std-imports", "http-introspection-fixture-imports", "http-introspection-fixture-material", "http-introspection-fixture-server", "http-introspection-fixture-route-tests"]},
       {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-secret-dependency"]},
       {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-btree-set-import", "authn-validate-introspection-claims", "authn-claim-shape-introspection", "authn-claim-shape-active", "authn-claims-active-fields", "authn-claims-all-member-duplicates", "authn-claims-all-member-duplicate-check", "authn-claims-active-visitor", "authn-parse-introspection-active", "authn-claims-introspection-test-import", "authn-claims-introspection-classification-test"]},
@@ -629,8 +629,7 @@
         "ids": [
           "workspace-egress-dns-crate",
           "workspace-egress-dns",
-          "workspace-egress-tls-fixtures",
-          "workspace-egress-fixture-analysis"
+          "workspace-egress-tls-fixtures"
         ]
       },
       {

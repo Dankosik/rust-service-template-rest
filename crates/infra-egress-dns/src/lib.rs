@@ -5,6 +5,12 @@
 
 mod address;
 mod runtime;
+/// Generated TLS material for the consumers' real-TLS tests.
+///
+/// Only the default-off `test-support` feature compiles it; it adds no
+/// production trust configuration or custom-root option.
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 use std::{error::Error, time::Duration};
 

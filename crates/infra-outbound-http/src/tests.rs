@@ -5,9 +5,6 @@
     reason = "bounded local TLS fixtures make setup failures test failures"
 )]
 
-#[path = "../../infra-egress-dns/tests/fixtures/tls.rs"]
-mod tls;
-
 use std::{
     error::Error as _,
     fmt::Write as _,
@@ -19,7 +16,7 @@ use std::{
 
 use bytes::Bytes;
 use http::{Request, Version, header};
-use infra_egress_dns::admit_answers;
+use infra_egress_dns::{admit_answers, test_support::TlsMaterial};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -37,7 +34,6 @@ use tokio_rustls::{
 };
 
 use crate::{Client, Error, Limits, Operation, build_fixture_client, policy};
-use tls::TlsMaterial;
 
 const FIXTURE_HOST: &str = "authn.fixture.test";
 

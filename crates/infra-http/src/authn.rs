@@ -28,14 +28,6 @@ const AUTHENTICATION_OVERSIZE_DETAIL: &str = "bearer authentication is too large
 const AUTHENTICATION_INVALID_DETAIL: &str = "bearer authentication is invalid";
 const AUTHENTICATION_UNAVAILABLE_DETAIL: &str = "bearer authentication is unavailable";
 
-// template:begin oidc-introspection:http-introspection-fixture-material
-#[cfg(test)]
-const FIXTURE_HOST: &str = "authn.fixture.test";
-#[cfg(test)]
-#[path = "../../infra-egress-dns/tests/fixtures/tls.rs"]
-mod tls;
-// template:end oidc-introspection:http-introspection-fixture-material
-
 /// A principal verified by the method-scoped authentication middleware.
 ///
 /// The wrapped principal is private, so handlers can inspect only identity
@@ -375,6 +367,10 @@ mod tests {
     use super::*;
     use crate::{HardenOptions, harden};
 
+    // template:begin oidc-introspection:http-introspection-fixture-material
+    const FIXTURE_HOST: &str = "authn.fixture.test";
+    // template:end oidc-introspection:http-introspection-fixture-material
+
     #[utoipa::path(
         get,
         path = "/_test/protected",
@@ -472,7 +468,7 @@ mod tests {
     }
 
     // template:begin oidc-introspection:http-introspection-fixture-server
-    use super::tls::TlsMaterial;
+    use infra_egress_dns::test_support::TlsMaterial;
 
     #[derive(Clone, Copy)]
     enum FixtureReply {
