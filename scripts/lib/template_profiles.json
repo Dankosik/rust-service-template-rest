@@ -353,9 +353,9 @@
       {"path": "crates/config/src/lib.rs", "ids": ["config-token-profile-export"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-token-profile-import", "load-jwt-token-profile-environment", "load-jwt-token-profile-file"]},
       {"path": "crates/config/src/secret_policy.rs", "ids": ["secret-policy-token-profile-exception", "secret-policy-token-profile-vector", "secret-policy-token-profile-fixture"]},
-      {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-jwt-dependency"]},
+      {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-jwt-dependency", "authn-jwt-runtime-dependency"]},
       {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-token-profile-import", "authn-validate-jwt-claims", "authn-claims-client-aliases", "authn-claim-shape-jwt", "authn-claim-shape-aliases-jwt", "authn-claim-shape-rfc9068", "authn-claims-alias-fields", "authn-claims-rfc9068-fields", "authn-claims-alias-visitor", "authn-claims-rfc9068-visitor", "authn-claims-jwt-test-imports", "authn-claims-resource-server-test", "authn-claims-jwt-rejection-test", "authn-claims-rfc9068-test"]},
-      {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-get-json", "authn-provider-raw-dns-test-imports", "authn-provider-cancellation-server-import", "authn-provider-untrusted-root-fixture", "authn-provider-tls-name-root-test", "authn-provider-literal-redirect-test", "authn-provider-redirect-server", "authn-provider-streaming-bound-test", "authn-provider-cancellation-server", "authn-provider-drop-request-test", "authn-provider-raw-dns-test-constructor", "authn-provider-raw-dns-test", "authn-provider-length-deadline-test", "authn-provider-expired-deadline-test"]},
+      {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-get-json", "authn-provider-raw-dns-test-imports", "authn-provider-cancellation-server-import", "authn-provider-tls-name-root-test", "authn-provider-literal-redirect-test", "authn-provider-redirect-server", "authn-provider-streaming-bound-test", "authn-provider-cancellation-server", "authn-provider-drop-request-test", "authn-provider-raw-dns-test-constructor", "authn-provider-raw-dns-test", "authn-provider-length-deadline-test", "authn-provider-expired-deadline-test"]},
       {"path": "crates/infra-bearerauthn/src/provider/dns.rs", "ids": ["authn-dns-raw-answer-resolver"]},
       {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-jwt-module", "authn-refresh-module", "authn-jwt-prepare-export", "authn-jwt-refresh-task-imports", "authn-token-profile", "authn-jwt-options", "authn-refresh-task", "authn-verifier-jwt-variant", "authn-verifier-jwt-dispatch", "authn-verifier-jwt-debug"]},
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-prepare-auth-jwt"]},
@@ -373,7 +373,7 @@
       {"path": "crates/config/src/authn.rs", "ids": ["authn-secrecy-import", "authn-mode-oidc-introspection", "authn-introspection-fields", "authn-introspection-defaults", "authn-foreign-introspection-inputs", "authn-dormant-introspection-syntax", "authn-introspection-validation", "authn-foreign-input-helper", "authn-secret-presence-helper", "authn-required-provider-url-helper", "authn-introspection-test-config", "authn-introspection-tests", "authn-dormant-introspection-tests"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-authn-mode-import", "load-introspection-environment", "load-introspection-secret-file"]},
       {"path": "crates/config/src/secret_policy.rs", "ids": ["secret-key-introspection-vector", "secret-policy-introspection-fixture"]},
-      {"path": "crates/infra-http/Cargo.toml", "ids": ["http-authn-test-dependencies", "http-introspection-test-secret"]},
+      {"path": "crates/infra-http/Cargo.toml", "ids": ["http-authn-test-dependencies", "http-authn-fixture-analysis", "http-introspection-test-secret"]},
       {"path": "crates/infra-http/src/authn.rs", "ids": ["http-introspection-fixture-std-imports", "http-introspection-fixture-imports", "http-introspection-fixture-material", "http-introspection-fixture-server", "http-introspection-fixture-route-tests"]},
       {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-secret-dependency"]},
       {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-btree-set-import", "authn-validate-introspection-claims", "authn-claim-shape-introspection", "authn-claim-shape-active", "authn-claims-active-fields", "authn-claims-all-member-duplicates", "authn-claims-all-member-duplicate-check", "authn-claims-active-visitor", "authn-parse-introspection-active", "authn-claims-introspection-test-import", "authn-claims-introspection-classification-test"]},
@@ -572,6 +572,7 @@
       "docs/outbound-http.md"
     ],
     "markers": [
+      {"path": "Cargo.toml", "ids": ["workspace-outbound-http-types"]},
       {
         "path": "docs/architecture/boundaries.md",
         "ids": [
@@ -628,7 +629,8 @@
         "ids": [
           "workspace-egress-dns-crate",
           "workspace-egress-dns",
-          "workspace-egress-tls-fixtures"
+          "workspace-egress-tls-fixtures",
+          "workspace-egress-fixture-analysis"
         ]
       },
       {

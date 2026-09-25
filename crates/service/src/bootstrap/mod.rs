@@ -237,9 +237,12 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
 }
 
 // template:begin authn:bootstrap-prepare-auth-prefix
+// Preserve standalone initializer markers; rustfmt joins the final arm marker.
+#[rustfmt::skip]
 #[allow(
     clippy::unused_async,
-    reason = "JWT discovery awaits I/O; introspection-only output preserves the same bootstrap future without provider I/O"
+    unused_variables,
+    reason = "JWT uses async I/O and process custody; introspection-only output preserves the bootstrap interface without either"
 )]
 async fn prepare_auth(
     config: &Config,
@@ -264,7 +267,6 @@ async fn prepare_auth(
                         }
                     },
                 },
-                tracker.clone(),
                 cancel.child_token(),
             )
             .await
@@ -274,18 +276,18 @@ async fn prepare_auth(
         }
         // template:end oidc-jwt:bootstrap-prepare-auth-jwt
         // template:begin oidc-introspection:bootstrap-prepare-auth-introspection
-        AuthnMode::OidcIntrospection => infra_bearerauthn::prepare_introspection(
-            infra_bearerauthn::IntrospectionOptions {
-                issuer: config.authn.issuer.clone(),
-                audience: config.authn.audience.clone(),
-                endpoint: config.authn.introspection_endpoint.clone(),
-                client_id: config.authn.introspection_client_id.clone(),
-                client_secret: config.authn.introspection_client_secret.clone(),
-            },
-            tracker.clone(),
-            cancel.child_token(),
-        )
-        .map_err(|_| BootstrapError::AuthenticationStartup),
+        AuthnMode::OidcIntrospection => {
+            let verifier =
+                infra_bearerauthn::prepare_introspection(infra_bearerauthn::IntrospectionOptions {
+                    issuer: config.authn.issuer.clone(),
+                    audience: config.authn.audience.clone(),
+                    endpoint: config.authn.introspection_endpoint.clone(),
+                    client_id: config.authn.introspection_client_id.clone(),
+                    client_secret: config.authn.introspection_client_secret.clone(),
+                })
+                .map_err(|_| BootstrapError::AuthenticationStartup)?;
+            Ok(verifier)
+        }
         // template:end oidc-introspection:bootstrap-prepare-auth-introspection
         // template:begin authn:bootstrap-prepare-auth-suffix
     }

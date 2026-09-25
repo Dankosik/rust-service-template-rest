@@ -53,8 +53,8 @@ until configured when its pack is retained. The local
 `OUTBOUND_HTTP` defaults to `none` and accepts `none` or `bounded`; the direct
 entry takes `--outbound-http`. `bounded` retains the [client guide](outbound-http.md),
 crate and tests independently of authentication. `none` removes that pack.
-The shared DNS and readonly request budget stay when auth or outbound needs
-them. Selection supplies no provider configuration or automatic request.
+The shared DNS resolver and readonly request budget stay when auth or outbound
+needs them. Selection supplies no provider configuration or automatic request.
 <!-- template:end outbound-http:docs-template-init-outbound -->
 <!-- template:begin http-idempotency:docs-template-init-http-idempotency -->
 `HTTP_IDEMPOTENCY` defaults to `none` and accepts `none` or `postgres`; the
@@ -170,8 +170,8 @@ absent database pack.
 Portable sync never restores a pruned authentication engine, runtime configuration, or profile-marked adopter documentation; the target lock and profile policy remain authoritative.
 <!-- template:end authn:docs-template-init-authn-sync -->
 <!-- template:begin outbound-http:docs-template-init-outbound-sync -->
-Portable sync cannot restore a pruned outbound pack, shared DNS runtime, or
-profile-marked guide. The target lock remains authoritative.
+Portable sync cannot restore a pruned outbound pack, shared DNS resolver/test
+fixture material, or profile-marked guide. The target lock remains authoritative.
 <!-- template:end outbound-http:docs-template-init-outbound-sync -->
 <!-- template:begin http-idempotency:docs-template-init-http-idempotency-sync -->
 Portable sync cannot restore a pruned idempotency pack, its schema

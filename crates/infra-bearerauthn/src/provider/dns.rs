@@ -2,8 +2,6 @@
 
 use std::net::IpAddr;
 
-pub(super) use infra_egress_dns::PublicAddressResolver;
-
 use crate::Failure;
 
 pub(super) fn admit_address(address: IpAddr) -> Result<(), Failure> {
@@ -37,19 +35,12 @@ impl reqwest::dns::Resolve for RawAnswerResolver {
         let host = self.host.clone();
         let answers = self.answers.clone();
         Box::pin(async move {
-            if !name.as_str().eq_ignore_ascii_case(&host)
-                || answers.is_empty()
-                || answers
-                    .iter()
-                    .any(|address| admit_address(*address).is_err())
-            {
+            if !name.as_str().eq_ignore_ascii_case(&host) {
                 return Err(std::io::Error::other("provider DNS address denied").into());
             }
-            Ok(Box::new(
-                answers
-                    .into_iter()
-                    .map(|address| std::net::SocketAddr::new(address, 0)),
-            ) as reqwest::dns::Addrs)
+            let answers = infra_egress_dns::admit_answers(answers)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            Ok(Box::new(answers.into_iter()) as reqwest::dns::Addrs)
         })
     }
 }

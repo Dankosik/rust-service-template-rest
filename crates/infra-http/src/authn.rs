@@ -28,6 +28,14 @@ const AUTHENTICATION_OVERSIZE_DETAIL: &str = "bearer authentication is too large
 const AUTHENTICATION_INVALID_DETAIL: &str = "bearer authentication is invalid";
 const AUTHENTICATION_UNAVAILABLE_DETAIL: &str = "bearer authentication is unavailable";
 
+// template:begin oidc-introspection:http-introspection-fixture-material
+#[cfg(test)]
+const FIXTURE_HOST: &str = "authn.fixture.test";
+#[cfg(test)]
+#[path = "../../infra-egress-dns/tests/fixtures/tls.rs"]
+mod tls;
+// template:end oidc-introspection:http-introspection-fixture-material
+
 /// A principal verified by the method-scoped authentication middleware.
 ///
 /// The wrapped principal is private, so handlers can inspect only identity
@@ -360,23 +368,12 @@ mod tests {
     use tokio_rustls::rustls::ServerConfig;
     use tokio_rustls::rustls::crypto::aws_lc_rs;
     use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-    use tokio_util::{sync::CancellationToken, task::TaskTracker};
     // template:end oidc-introspection:http-introspection-fixture-imports
     use tower::ServiceExt;
     use utoipa_axum::{router::OpenApiRouter, routes};
 
     use super::*;
     use crate::{HardenOptions, harden};
-
-    // template:begin oidc-introspection:http-introspection-fixture-material
-    const FIXTURE_HOST: &str = "authn.fixture.test";
-    const FIXTURE_ROOT_DER: &[u8] =
-        include_bytes!("../../infra-bearerauthn/tests/fixtures/authn-fixture-root.der");
-    const FIXTURE_CERT_DER: &[u8] =
-        include_bytes!("../../infra-bearerauthn/tests/fixtures/authn-fixture-cert.der");
-    const FIXTURE_KEY_DER: &[u8] =
-        include_bytes!("../../infra-bearerauthn/tests/fixtures/authn-fixture-key.der");
-    // template:end oidc-introspection:http-introspection-fixture-material
 
     #[utoipa::path(
         get,
@@ -475,6 +472,8 @@ mod tests {
     }
 
     // template:begin oidc-introspection:http-introspection-fixture-server
+    use super::tls::TlsMaterial;
+
     #[derive(Clone, Copy)]
     enum FixtureReply {
         Active,
@@ -482,20 +481,21 @@ mod tests {
         Stall,
     }
 
-    fn fixture_tls_config() -> ServerConfig {
+    fn fixture_tls_config(material: &TlsMaterial) -> ServerConfig {
         ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
             .with_safe_default_protocol_versions()
             .expect("fixture TLS protocol versions")
             .with_no_client_auth()
             .with_single_cert(
-                vec![CertificateDer::from(FIXTURE_CERT_DER)],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(FIXTURE_KEY_DER)),
+                vec![CertificateDer::from(material.cert.clone())],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
             )
             .expect("fixture certificate and key")
     }
 
     async fn start_fixture_server(
         reply: FixtureReply,
+        material: &TlsMaterial,
     ) -> (
         std::net::SocketAddr,
         JoinHandle<Vec<u8>>,
@@ -505,7 +505,7 @@ mod tests {
             .await
             .expect("fixture listener");
         let address = listener.local_addr().expect("fixture address");
-        let acceptor = TlsAcceptor::from(Arc::new(fixture_tls_config()));
+        let acceptor = TlsAcceptor::from(Arc::new(fixture_tls_config(material)));
         let (accepted_send, accepted) = oneshot::channel();
         let task = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.expect("fixture accepts request");
@@ -544,22 +544,13 @@ mod tests {
 
     async fn fixture_verifier(
         reply: FixtureReply,
-    ) -> (
-        Verifier,
-        CancellationToken,
-        TaskTracker,
-        JoinHandle<Vec<u8>>,
-        oneshot::Receiver<()>,
-    ) {
-        let (address, server, accepted) = start_fixture_server(reply).await;
-        let tracker = TaskTracker::new();
-        let cancel = CancellationToken::new();
+    ) -> (Verifier, JoinHandle<Vec<u8>>, oneshot::Receiver<()>) {
+        let material = TlsMaterial::new(FIXTURE_HOST);
+        let (address, server, accepted) = start_fixture_server(reply, &material).await;
         let transport = infra_bearerauthn::test_support::FixtureTransport::new(
-            tracker.clone(),
-            cancel.child_token(),
             FIXTURE_HOST,
             address,
-            FIXTURE_ROOT_DER,
+            &material.root,
         )
         .expect("fixture transport");
         let verifier = infra_bearerauthn::test_support::prepare_introspection_with_fixture(
@@ -573,38 +564,20 @@ mod tests {
             transport,
         )
         .expect("fixture verifier");
-        (verifier, cancel, tracker, server, accepted)
+        (verifier, server, accepted)
     }
 
-    async fn finish_fixture(
-        cancel: CancellationToken,
-        tracker: TaskTracker,
-        server: JoinHandle<Vec<u8>>,
-    ) -> Vec<u8> {
+    async fn finish_fixture(server: JoinHandle<Vec<u8>>) -> Vec<u8> {
         let request = tokio::time::timeout(Duration::from_secs(1), server)
             .await
             .expect("fixture server finishes")
             .expect("fixture server task");
-        cancel.cancel();
-        tracker.close();
-        tokio::time::timeout(Duration::from_secs(1), tracker.wait())
-            .await
-            .expect("fixture DNS work joins");
         request
     }
 
-    async fn abort_fixture(
-        cancel: CancellationToken,
-        tracker: TaskTracker,
-        server: JoinHandle<Vec<u8>>,
-    ) {
+    async fn abort_fixture(server: JoinHandle<Vec<u8>>) {
         server.abort();
         let _ = server.await;
-        cancel.cancel();
-        tracker.close();
-        tokio::time::timeout(Duration::from_secs(1), tracker.wait())
-            .await
-            .expect("fixture DNS work joins");
     }
     // template:end oidc-introspection:http-introspection-fixture-server
 
@@ -739,8 +712,7 @@ mod tests {
     #[tokio::test]
     async fn mounted_real_introspection_verifies_identity_removes_authorization_and_redacts_denials()
      {
-        let (verifier, cancel, tracker, server, _accepted) =
-            fixture_verifier(FixtureReply::Active).await;
+        let (verifier, server, _accepted) = fixture_verifier(FixtureReply::Active).await;
         // This proves identity and wire semantics, not a one-second TLS SLO.
         // Keep the parent above the provider's real three-second bound so
         // platform certificate validation is not confused with this oracle.
@@ -756,7 +728,7 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(success.status(), StatusCode::OK);
-        let request = finish_fixture(cancel, tracker, server).await;
+        let request = finish_fixture(server).await;
         let request = String::from_utf8(request).expect("fixture request is HTTP text");
         assert!(
             request.starts_with("POST /introspect HTTP/1.1\r\n"),
@@ -765,8 +737,7 @@ mod tests {
         assert!(request.contains("authorization: Basic "), "{request}");
         assert!(!request.contains("Bearer opaque-token"), "{request}");
 
-        let (verifier, cancel, tracker, server, _accepted) =
-            fixture_verifier(FixtureReply::Inactive).await;
+        let (verifier, server, _accepted) = fixture_verifier(FixtureReply::Inactive).await;
         let denied = protected_router_with_timeout(verifier, Duration::from_secs(5))
             .oneshot(
                 Request::builder()
@@ -795,13 +766,12 @@ mod tests {
         assert!(denied_body.contains("authentication_invalid"));
         assert!(!denied_body.contains("opaque-token"));
         assert!(!denied_body.contains(FIXTURE_HOST));
-        let _ = finish_fixture(cancel, tracker, server).await;
+        let _ = finish_fixture(server).await;
     }
 
     #[tokio::test]
     async fn mounted_real_introspection_defers_to_the_enclosing_request_deadline() {
-        let (verifier, cancel, tracker, server, accepted) =
-            fixture_verifier(FixtureReply::Stall).await;
+        let (verifier, server, accepted) = fixture_verifier(FixtureReply::Stall).await;
         let response = protected_router_with_timeout(verifier, Duration::from_millis(40))
             .oneshot(
                 Request::builder()
@@ -821,7 +791,7 @@ mod tests {
                 .is_err(),
             "exhausted reserve must not contact the fixture"
         );
-        abort_fixture(cancel, tracker, server).await;
+        abort_fixture(server).await;
     }
     // template:end oidc-introspection:http-introspection-fixture-route-tests
 }

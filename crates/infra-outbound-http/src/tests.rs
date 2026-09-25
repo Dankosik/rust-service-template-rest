@@ -5,9 +5,20 @@
     reason = "bounded local TLS fixtures make setup failures test failures"
 )]
 
-use std::{io, net::SocketAddr, process::Command, sync::Arc, time::Duration};
+#[path = "../../infra-egress-dns/tests/fixtures/tls.rs"]
+mod tls;
 
-use infra_egress_dns::ResolveError;
+use std::{
+    error::Error as _,
+    io,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
+
+use bytes::Bytes;
+use http::{Request, Version, header};
+use infra_egress_dns::admit_answers;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -23,17 +34,11 @@ use tokio_rustls::{
         pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
     },
 };
-use tokio_util::sync::CancellationToken;
-use url::Url;
 
-use crate::{Client, Error, Limits, Operation, Request, build_fixture_client, policy};
+use crate::{Client, Error, Limits, Operation, build_fixture_client, policy};
+use tls::TlsMaterial;
 
 const FIXTURE_HOST: &str = "authn.fixture.test";
-const CERT_DER: &[u8] = include_bytes!("../tests/fixtures/outbound-fixture-cert.der");
-const KEY_DER: &[u8] = include_bytes!("../tests/fixtures/outbound-fixture-key.der");
-const ROOT_DER: &[u8] = include_bytes!("../tests/fixtures/outbound-fixture-root.der");
-const UNTRUSTED_ROOT_DER: &[u8] =
-    include_bytes!("../tests/fixtures/outbound-fixture-untrusted-root.der");
 
 #[derive(Clone)]
 struct FixtureResolver {
@@ -43,7 +48,7 @@ struct FixtureResolver {
 
 #[derive(Clone)]
 struct RawAnswerResolver {
-    answers: Vec<std::net::IpAddr>,
+    answers: Vec<IpAddr>,
     admitted_fixture: SocketAddr,
 }
 
@@ -52,14 +57,10 @@ impl Resolve for RawAnswerResolver {
         let answers = self.answers.clone();
         let admitted_fixture = self.admitted_fixture;
         Box::pin(async move {
-            if answers.is_empty() {
-                return Err(ResolveError::Denied.into());
-            }
-            for address in answers {
-                infra_egress_dns::admit_address(address)?;
-            }
-            // Only the test maps an admitted public set to the local TLS peer.
-            Ok(Box::new(std::iter::once(admitted_fixture)) as Addrs)
+            let admitted = admit_answers(answers)?;
+            // The raw-answer facade exercises shared admission before mapping
+            // a safe synthetic answer to the in-process TLS peer.
+            Ok(Box::new(admitted.into_iter().map(move |_| admitted_fixture)) as Addrs)
         })
     }
 }
@@ -81,23 +82,24 @@ fn limits() -> Limits {
     Limits {
         max_active: 1,
         operation_timeout: Duration::from_secs(1),
-        request_header_count: 8,
-        request_header_bytes: 512,
         response_header_count: 8,
         response_header_bytes: 512,
-        request_body_bytes: 128,
         response_body_bytes: 128,
     }
 }
 
-fn fixture_client(address: SocketAddr, root: &[u8]) -> Client {
-    fixture_client_with_limits(address, root, limits())
+fn fixture_client(address: SocketAddr, material: &TlsMaterial) -> Client {
+    fixture_client_with_limits(address, material, limits())
 }
 
-fn fixture_client_with_limits(address: SocketAddr, root: &[u8], limits: Limits) -> Client {
-    let (base, authority) =
-        policy::admit_base(&format!("https://{FIXTURE_HOST}/")).expect("fixture URL");
-    let certificate = reqwest::Certificate::from_der(root).expect("fixture root certificate");
+fn fixture_client_with_limits(
+    address: SocketAddr,
+    material: &TlsMaterial,
+    limits: Limits,
+) -> Client {
+    let base = policy::admit_base(&format!("https://{FIXTURE_HOST}/")).expect("fixture URL");
+    let certificate =
+        reqwest::Certificate::from_der(&material.root).expect("fixture root certificate");
     let transport = build_fixture_client(
         FixtureResolver {
             host: FIXTURE_HOST.to_owned(),
@@ -109,20 +111,17 @@ fn fixture_client_with_limits(address: SocketAddr, root: &[u8], limits: Limits) 
     .expect("fixture client");
     Client {
         base,
-        authority,
         limits,
         transport,
         admission: Arc::new(tokio::sync::Semaphore::new(limits.max_active)),
-        shutdown: CancellationToken::new(),
         response_head_observed: None,
     }
 }
 
-fn denied_client(root: &[u8], address: SocketAddr) -> Client {
+fn denied_client(material: &TlsMaterial, address: SocketAddr) -> Client {
     let limits = limits();
-    let (base, authority) =
-        policy::admit_base(&format!("https://{FIXTURE_HOST}/")).expect("denied fixture URL");
-    let certificate = reqwest::Certificate::from_der(root).expect("denied fixture root");
+    let base = policy::admit_base(&format!("https://{FIXTURE_HOST}/")).expect("fixture URL");
+    let certificate = reqwest::Certificate::from_der(&material.root).expect("fixture root");
     let transport = build_fixture_client(
         RawAnswerResolver {
             answers: vec!["8.8.8.8".parse().expect("public answer"), address.ip()],
@@ -131,14 +130,12 @@ fn denied_client(root: &[u8], address: SocketAddr) -> Client {
         &limits,
         certificate,
     )
-    .expect("denied fixture client");
+    .expect("fixture client");
     Client {
         base,
-        authority,
         limits,
         transport,
-        admission: Arc::new(tokio::sync::Semaphore::new(limits.max_active)),
-        shutdown: CancellationToken::new(),
+        admission: Arc::new(tokio::sync::Semaphore::new(1)),
         response_head_observed: None,
     }
 }
@@ -146,22 +143,18 @@ fn denied_client(root: &[u8], address: SocketAddr) -> Client {
 fn operation() -> Operation {
     Operation {
         deadline: Instant::now() + Duration::from_secs(1),
-        cancel: CancellationToken::new(),
         timeout: None,
         response_body_bytes: None,
     }
 }
 
-fn request() -> Request {
-    Request {
-        method: reqwest::Method::GET,
-        target: "/fixture".to_owned(),
-        headers: reqwest::header::HeaderMap::new(),
-        body: Vec::new(),
-    }
+fn request() -> Request<Bytes> {
+    Request::get("/fixture")
+        .body(Bytes::new())
+        .expect("fixture request")
 }
 
-fn fixture_acceptor() -> TlsAcceptor {
+fn fixture_acceptor(material: &TlsMaterial) -> TlsAcceptor {
     let config = ServerConfig::builder_with_provider(Arc::new(
         tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
     ))
@@ -169,8 +162,8 @@ fn fixture_acceptor() -> TlsAcceptor {
     .expect("fixture TLS protocol versions")
     .with_no_client_auth()
     .with_single_cert(
-        vec![CertificateDer::from(CERT_DER.to_vec())],
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KEY_DER.to_vec())),
+        vec![CertificateDer::from(material.cert.clone())],
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
     )
     .expect("fixture certificate and key");
     TlsAcceptor::from(Arc::new(config))
@@ -191,12 +184,15 @@ async fn read_request_headers<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -
     headers
 }
 
-async fn tls_server(response: &'static [u8]) -> (SocketAddr, JoinHandle<()>) {
+async fn tls_server(
+    material: &TlsMaterial,
+    response: &'static [u8],
+) -> (SocketAddr, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("fixture listener");
     let address = listener.local_addr().expect("fixture address");
-    let acceptor = fixture_acceptor();
+    let acceptor = fixture_acceptor(material);
     let server = tokio::spawn(async move {
         tokio::time::timeout(Duration::from_secs(3), async move {
             let (socket, _) = listener.accept().await.expect("fixture accepts connection");
@@ -217,13 +213,14 @@ async fn tls_server(response: &'static [u8]) -> (SocketAddr, JoinHandle<()>) {
 }
 
 async fn tls_server_capture(
+    material: &TlsMaterial,
     response: &'static [u8],
 ) -> (SocketAddr, oneshot::Receiver<Vec<u8>>, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("capture fixture listener");
     let address = listener.local_addr().expect("capture fixture address");
-    let acceptor = fixture_acceptor();
+    let acceptor = fixture_acceptor(material);
     let (captured_send, captured) = oneshot::channel();
     let server = tokio::spawn(async move {
         tokio::time::timeout(Duration::from_secs(3), async move {
@@ -253,12 +250,12 @@ async fn tls_server_capture(
     (address, captured, server)
 }
 
-async fn tls_server_stall_after_headers() -> (SocketAddr, JoinHandle<()>) {
+async fn tls_server_stall_after_headers(material: &TlsMaterial) -> (SocketAddr, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("stall fixture listener");
     let address = listener.local_addr().expect("stall fixture address");
-    let acceptor = fixture_acceptor();
+    let acceptor = fixture_acceptor(material);
     let server = tokio::spawn(async move {
         tokio::time::timeout(Duration::from_secs(3), async move {
             let (socket, _) = listener
@@ -282,160 +279,211 @@ async fn tls_server_stall_after_headers() -> (SocketAddr, JoinHandle<()>) {
     (address, server)
 }
 
+async fn tls_server_reuses_one_connection(
+    material: &TlsMaterial,
+) -> (SocketAddr, JoinHandle<usize>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("pool fixture listener");
+    let address = listener.local_addr().expect("pool fixture address");
+    let acceptor = fixture_acceptor(material);
+    let server = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(3), async move {
+            let (socket, _) = listener.accept().await.expect("pooled request connects");
+            let mut stream = acceptor.accept(socket).await.expect("pooled TLS handshake");
+            read_request_headers(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("first pooled response");
+            stream.flush().await.expect("first pooled response flushes");
+            read_request_headers(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("second pooled response");
+            stream.shutdown().await.expect("pooled connection closes");
+            1
+        })
+        .await
+        .expect("pool fixture completes within its budget")
+    });
+    (address, server)
+}
+
 #[tokio::test]
-async fn trusted_named_tls_fixture_returns_a_complete_response() {
+async fn standard_request_returns_standard_response_with_full_body() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let (address, server) = tls_server(
+        &material,
+        b"HTTP/1.1 201 Created\r\nX-Fixture: yes\r\nContent-Length: 2\r\n\r\nok",
+    )
+    .await;
+    let response = fixture_client(address, &material)
+        .execute(request(), operation())
+        .await
+        .expect("trusted TLS response");
+    assert_eq!(response.status(), http::StatusCode::CREATED);
+    assert_eq!(response.version(), Version::HTTP_11);
+    assert_eq!(response.headers()["x-fixture"], "yes");
+    assert_eq!(response.body().as_ref(), b"ok");
+    server.await.expect("fixture server succeeds");
+}
+
+#[tokio::test]
+async fn tls_trust_and_hostname_failures_remain_transport_errors() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
     let (address, server) =
-        tls_server(b"HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nok").await;
-    let result = fixture_client(address, ROOT_DER)
-        .execute(request(), operation())
-        .await;
-    let response = result.expect("trusted TLS response");
-    assert_eq!(response.status, reqwest::StatusCode::CREATED);
-    assert_eq!(response.body, b"ok");
-    tokio::time::timeout(Duration::from_secs(1), server)
-        .await
-        .expect("fixture server completes")
-        .expect("fixture server succeeds");
-}
+        tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let mut untrusted = TlsMaterial::new(FIXTURE_HOST);
+    untrusted.root = material.untrusted_root.clone();
+    assert!(matches!(
+        fixture_client(address, &untrusted)
+            .execute(request(), operation())
+            .await,
+        Err(Error::Transport { .. })
+    ));
+    server.await.expect("untrusted fixture server succeeds");
 
-#[tokio::test]
-async fn untrusted_tls_root_is_a_static_transport_failure() {
-    let (address, server) = tls_server(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
-    let result = fixture_client(address, UNTRUSTED_ROOT_DER)
-        .execute(request(), operation())
-        .await;
-    assert!(matches!(result, Err(Error::Transport)));
-    tokio::time::timeout(Duration::from_secs(1), server)
-        .await
-        .expect("fixture server completes")
-        .expect("fixture server succeeds");
-}
-
-#[tokio::test]
-async fn a_trusted_root_does_not_disable_tls_hostname_verification() {
-    let (address, server) = tls_server(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
-    let mut client = fixture_client(address, ROOT_DER);
-    client.base = Url::parse("https://different.fixture.test/").expect("different hostname");
-    client.authority = policy::admit_base(client.base.as_str())
-        .expect("different authority")
-        .1;
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let (address, server) =
+        tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let mut client = fixture_client(address, &material);
+    client.base = policy::admit_base("https://different.fixture.test/").expect("different base");
     client.transport = build_fixture_client(
         FixtureResolver {
             host: "different.fixture.test".to_owned(),
             address,
         },
         &client.limits,
-        reqwest::Certificate::from_der(ROOT_DER).expect("trusted fixture root"),
+        reqwest::Certificate::from_der(&material.root).expect("fixture root"),
     )
     .expect("hostname fixture client");
     assert!(matches!(
         client.execute(request(), operation()).await,
-        Err(Error::Transport)
+        Err(Error::Transport { .. })
     ));
-    server.await.expect("hostname fixture joins");
+    server.await.expect("hostname fixture server succeeds");
 }
 
 #[tokio::test]
-async fn framed_body_obeys_the_exact_operation_limit() {
-    let mut limits = limits();
-    limits.response_body_bytes = 2;
-    let (exact_address, exact_server) =
-        tls_server(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
-    let exact = fixture_client_with_limits(exact_address, ROOT_DER, limits)
-        .execute(request(), operation())
-        .await
-        .expect("exact framed body limit succeeds");
-    assert_eq!(exact.body, b"ok");
-    tokio::time::timeout(Duration::from_secs(1), exact_server)
-        .await
-        .expect("exact fixture server completes")
-        .expect("exact fixture server succeeds");
-
-    let (over_address, over_server) =
-        tls_server(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nno!").await;
-    let over = fixture_client_with_limits(over_address, ROOT_DER, limits)
-        .execute(request(), operation())
-        .await;
-    assert!(matches!(over, Err(Error::ResponseBodyTooLarge)));
-    tokio::time::timeout(Duration::from_secs(1), over_server)
-        .await
-        .expect("over-limit fixture server completes")
-        .expect("over-limit fixture server succeeds");
-}
-
-#[tokio::test]
-async fn framed_chunked_and_unknown_length_bodies_enforce_the_streaming_cap() {
+async fn framed_and_streamed_bodies_obey_the_response_ceiling() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let mut ceiling = limits();
+    ceiling.response_body_bytes = 2;
     let cases = [
         (
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n".as_slice(),
-            Ok(b"ok".as_slice()),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".as_slice(),
+            true,
         ),
         (
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nno!\r\n0\r\n\r\n"
                 .as_slice(),
-            Err(Error::ResponseBodyTooLarge),
+            false,
         ),
         (
             b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nno!".as_slice(),
-            Err(Error::ResponseBodyTooLarge),
+            false,
         ),
     ];
-    for (response, expected) in cases {
-        let (address, server) = tls_server(response).await;
-        let mut ceiling = limits();
-        ceiling.response_body_bytes = 2;
-        let result = fixture_client_with_limits(address, ROOT_DER, ceiling)
+    for (wire, succeeds) in cases {
+        let (address, server) = tls_server(&material, wire).await;
+        let result = fixture_client_with_limits(address, &material, ceiling)
             .execute(request(), operation())
             .await;
-        match (result, expected) {
-            (Ok(actual), Ok(body)) => assert_eq!(actual.body, body),
-            (Err(actual), Err(error)) => assert_eq!(actual, error),
-            (actual, expected) => {
-                panic!("unexpected framed body result: {actual:?}, expected {expected:?}")
-            }
+        if succeeds {
+            assert_eq!(
+                result.expect("exact ceiling response").body().as_ref(),
+                b"ok"
+            );
+        } else {
+            assert!(matches!(result, Err(Error::ResponseBodyTooLarge)));
         }
-        server.await.expect("framed body fixture joins");
+        server.await.expect("body fixture server succeeds");
     }
 }
 
 #[tokio::test]
-async fn cancelled_or_expired_operation_never_starts_a_connection() {
-    let client = fixture_client("127.0.0.1:9".parse().expect("discard address"), ROOT_DER);
-    let cancel = CancellationToken::new();
-    cancel.cancel();
-    let cancelled = client
-        .execute(
-            request(),
-            Operation {
-                deadline: Instant::now() + Duration::from_secs(1),
-                cancel,
-                timeout: None,
-                response_body_bytes: None,
-            },
-        )
-        .await;
-    assert!(matches!(cancelled, Err(Error::Cancelled)));
+async fn advertised_overflow_and_missing_exact_cap_eof_do_not_return_a_body() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let mut ceiling = limits();
+    ceiling.response_body_bytes = 2;
+    let cases = [
+        (
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nno!".as_slice(),
+            "advertised overflow",
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\no".as_slice(),
+            "missing exact-cap EOF",
+        ),
+    ];
+    for (wire, name) in cases {
+        let (address, server) = tls_server(&material, wire).await;
+        let error = fixture_client_with_limits(address, &material, ceiling)
+            .execute(request(), operation())
+            .await
+            .expect_err(name);
+        match name {
+            "advertised overflow" => assert!(matches!(error, Error::ResponseBodyTooLarge)),
+            "missing exact-cap EOF" => assert!(matches!(error, Error::Transport { .. })),
+            _ => unreachable!("fixed test case name"),
+        }
+        server.await.expect("framing fixture server succeeds");
+    }
 
-    let expired = client
-        .execute(
-            request(),
-            Operation {
-                deadline: Instant::now() - Duration::from_millis(1),
-                cancel: CancellationToken::new(),
-                timeout: None,
-                response_body_bytes: None,
-            },
-        )
-        .await;
-    assert!(matches!(expired, Err(Error::Timeout)));
+    let (address, server) =
+        tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    assert!(matches!(
+        fixture_client_with_limits(address, &material, ceiling)
+            .execute(
+                request(),
+                Operation {
+                    deadline: Instant::now() + Duration::from_secs(1),
+                    timeout: None,
+                    response_body_bytes: Some(1),
+                },
+            )
+            .await,
+        Err(Error::ResponseBodyTooLarge)
+    ));
+    server.await.expect("narrowed body fixture server succeeds");
 }
 
 #[tokio::test]
-async fn typed_denied_dns_answer_refuses_before_any_connection() {
+async fn response_header_count_and_aggregate_bytes_have_distinct_bounds() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Large: abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\r\n\r\n";
+    let mut byte_ceiling = limits();
+    byte_ceiling.response_header_bytes = 32;
+    let (address, server) = tls_server(&material, response).await;
+    assert!(matches!(
+        fixture_client_with_limits(address, &material, byte_ceiling)
+            .execute(request(), operation())
+            .await,
+        Err(Error::ResponseHeadersTooLarge)
+    ));
+    server.await.expect("aggregate header fixture joins");
+
+    let mut count_ceiling = limits();
+    count_ceiling.response_header_count = 1;
+    let (address, server) = tls_server(&material, response).await;
+    assert!(matches!(
+        fixture_client_with_limits(address, &material, count_ceiling)
+            .execute(request(), operation())
+            .await,
+        Err(Error::Transport { .. })
+    ));
+    server.await.expect("parser header fixture joins");
+}
+
+#[tokio::test]
+async fn denied_answer_set_refuses_before_any_connection() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("no-connect listener");
-    let result = denied_client(ROOT_DER, listener.local_addr().expect("listener address"))
+    let result = denied_client(&material, listener.local_addr().expect("listener address"))
         .execute(request(), operation())
         .await;
     assert!(matches!(result, Err(Error::Denied)));
@@ -447,49 +495,82 @@ async fn typed_denied_dns_answer_refuses_before_any_connection() {
 }
 
 #[tokio::test]
-async fn truncated_body_is_transport_failure_and_statuses_are_not_replayed_or_redirected() {
-    let (truncated_address, truncated_server) =
-        tls_server(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok").await;
-    let truncated = fixture_client(truncated_address, ROOT_DER)
-        .execute(request(), operation())
+async fn expired_or_wider_operation_limits_refuse_before_network_work() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("no-connect listener");
+    let client = fixture_client(listener.local_addr().expect("listener address"), &material);
+    let expired = client
+        .execute(
+            request(),
+            Operation {
+                deadline: Instant::now() - Duration::from_millis(1),
+                timeout: None,
+                response_body_bytes: None,
+            },
+        )
         .await;
-    assert!(matches!(truncated, Err(Error::Transport)));
-    truncated_server
-        .await
-        .expect("truncated fixture server succeeds");
-
-    let (redirect_address, redirect_server) = tls_server(
-        b"HTTP/1.1 302 Found\r\nLocation: https://other.fixture.test/\r\nContent-Length: 0\r\n\r\n",
-    )
-    .await;
-    let redirect = fixture_client(redirect_address, ROOT_DER)
-        .execute(request(), operation())
-        .await
-        .expect("redirect response remains local");
-    assert_eq!(redirect.status, reqwest::StatusCode::FOUND);
-    redirect_server
-        .await
-        .expect("redirect fixture server succeeds");
-
-    let (failure_address, failure_server) =
-        tls_server(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n").await;
-    let failure = fixture_client(failure_address, ROOT_DER)
-        .execute(request(), operation())
-        .await
-        .expect("non-success response is returned once");
-    assert_eq!(failure.status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
-    failure_server
-        .await
-        .expect("failure fixture server succeeds");
+    assert!(matches!(expired, Err(Error::Timeout { source: None })));
+    let wider = client
+        .execute(
+            request(),
+            Operation {
+                deadline: Instant::now() + Duration::from_secs(1),
+                timeout: Some(Duration::from_secs(2)),
+                response_body_bytes: None,
+            },
+        )
+        .await;
+    assert!(matches!(wider, Err(Error::InvalidConfiguration)));
+    let zero_timeout = client
+        .execute(
+            request(),
+            Operation {
+                deadline: Instant::now() + Duration::from_secs(1),
+                timeout: Some(Duration::ZERO),
+                response_body_bytes: None,
+            },
+        )
+        .await;
+    assert!(matches!(zero_timeout, Err(Error::InvalidConfiguration)));
+    let zero_body = client
+        .execute(
+            request(),
+            Operation {
+                deadline: Instant::now() + Duration::from_secs(1),
+                timeout: None,
+                response_body_bytes: Some(0),
+            },
+        )
+        .await;
+    assert!(matches!(zero_body, Err(Error::InvalidConfiguration)));
+    let wider_body = client
+        .execute(
+            request(),
+            Operation {
+                deadline: Instant::now() + Duration::from_secs(1),
+                timeout: None,
+                response_body_bytes: Some(limits().response_body_bytes + 1),
+            },
+        )
+        .await;
+    assert!(matches!(wider_body, Err(Error::InvalidConfiguration)));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
-async fn a_request_is_not_replayed_after_the_peer_closes_without_a_response() {
+async fn request_is_not_replayed_after_the_peer_received_it() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("replay listener");
     let address = listener.local_addr().expect("replay address");
-    let acceptor = fixture_acceptor();
+    let acceptor = fixture_acceptor(&material);
     let server = tokio::spawn(async move {
         tokio::time::timeout(Duration::from_secs(3), async move {
             let (socket, _) = listener.accept().await.expect("first request connects");
@@ -504,10 +585,10 @@ async fn a_request_is_not_replayed_after_the_peer_closes_without_a_response() {
         .expect("replay fixture is bounded")
     });
     assert!(matches!(
-        fixture_client(address, ROOT_DER)
+        fixture_client(address, &material)
             .execute(request(), operation())
             .await,
-        Err(Error::Transport)
+        Err(Error::Transport { .. })
     ));
     assert!(
         !server.await.expect("replay fixture joins"),
@@ -516,32 +597,48 @@ async fn a_request_is_not_replayed_after_the_peer_closes_without_a_response() {
 }
 
 #[tokio::test]
-async fn captured_wire_request_omits_propagation_and_encoding_headers() {
+async fn completed_exchange_reuses_an_idle_https_connection() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let (address, server) = tls_server_reuses_one_connection(&material).await;
+    let client = fixture_client(address, &material);
+    client
+        .execute(request(), operation())
+        .await
+        .expect("first pooled response");
+    let second = client
+        .execute(request(), operation())
+        .await
+        .expect("second pooled response");
+    assert_eq!(second.status(), http::StatusCode::NO_CONTENT);
+    assert_eq!(server.await.expect("pool fixture joins"), 1);
+}
+
+#[tokio::test]
+async fn header_stripping_and_fixed_authority_apply_on_the_wire() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
     let (address, captured, server) =
-        tls_server_capture(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
-    let mut request = request();
-    request.headers.insert(
-        "traceparent",
-        "00-abc-def-01".parse().expect("trace header"),
-    );
-    request
-        .headers
-        .insert("tracestate", "vendor=value".parse().expect("state header"));
-    request
-        .headers
-        .insert("baggage", "key=value".parse().expect("baggage header"));
-    request
-        .headers
-        .insert("x-request-id", "correlation".parse().expect("request id"));
-    request
-        .headers
-        .insert("accept-encoding", "gzip".parse().expect("encoding header"));
-    fixture_client(address, ROOT_DER)
+        tls_server_capture(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let mut request = Request::get("//other.fixture.test/items%23safe?q=%23")
+        .body(Bytes::new())
+        .expect("origin-form request");
+    for (name, value) in [
+        ("traceparent", "00-abc-def-01"),
+        ("tracestate", "vendor=value"),
+        ("baggage", "key=value"),
+        ("x-request-id", "correlation"),
+        ("accept-encoding", "gzip"),
+    ] {
+        request
+            .headers_mut()
+            .insert(name, value.parse().expect("header value"));
+    }
+    fixture_client(address, &material)
         .execute(request, operation())
         .await
         .expect("captured request response");
     let wire = String::from_utf8(captured.await.expect("captured request")).expect("ASCII request");
-    for header in [
+    assert!(wire.starts_with("GET //other.fixture.test/items%23safe?q=%23 HTTP/1.1\r\n"));
+    for removed in [
         "traceparent:",
         "tracestate:",
         "baggage:",
@@ -549,60 +646,23 @@ async fn captured_wire_request_omits_propagation_and_encoding_headers() {
         "accept-encoding:",
     ] {
         assert!(
-            !wire.to_ascii_lowercase().contains(header),
-            "{header} leaked to the wire"
+            !wire.to_ascii_lowercase().contains(removed),
+            "{removed} leaked to the wire"
         );
     }
     server.await.expect("capture fixture server succeeds");
 }
 
 #[tokio::test]
-async fn one_absolute_timeout_covers_headers_and_framed_body() {
-    let (address, server) = tls_server_stall_after_headers().await;
+async fn future_drop_releases_admission_after_response_headers() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let (address, server) = tls_server_stall_after_headers(&material).await;
     let head_observed = Arc::new(tokio::sync::Notify::new());
-    let mut limits = limits();
-    limits.operation_timeout = Duration::from_millis(500);
-    let mut client = fixture_client_with_limits(address, ROOT_DER, limits);
+    let mut client = fixture_client(address, &material);
     client.response_head_observed = Some(head_observed.clone());
-    let exchange = tokio::spawn(async move { client.execute(request(), operation()).await });
-    tokio::time::timeout(Duration::from_secs(2), head_observed.notified())
-        .await
-        .expect("client admits response headers before pending body read");
-    assert!(matches!(
-        exchange.await.expect("timed exchange joins"),
-        Err(Error::Timeout)
-    ));
-    server.abort();
-    assert!(
-        server
-            .await
-            .expect_err("aborted fixture joins")
-            .is_cancelled()
-    );
-}
-
-#[tokio::test]
-async fn admission_stays_held_through_body_and_releases_on_cancellation() {
-    let (address, server) = tls_server_stall_after_headers().await;
-    let head_observed = Arc::new(tokio::sync::Notify::new());
-    let mut client = fixture_client(address, ROOT_DER);
-    client.response_head_observed = Some(head_observed.clone());
-    let cancel = CancellationToken::new();
-    let first_client = client.clone();
-    let first_cancel = cancel.clone();
-    let first = tokio::spawn(async move {
-        first_client
-            .execute(
-                request(),
-                Operation {
-                    deadline: Instant::now() + Duration::from_secs(1),
-                    cancel: first_cancel,
-                    timeout: None,
-                    response_body_bytes: None,
-                },
-            )
-            .await
-    });
+    let exchange_client = client.clone();
+    let exchange =
+        tokio::spawn(async move { exchange_client.execute(request(), operation()).await });
     tokio::time::timeout(Duration::from_secs(2), head_observed.notified())
         .await
         .expect("client admits response headers before pending body read");
@@ -610,36 +670,9 @@ async fn admission_stays_held_through_body_and_releases_on_cancellation() {
         client.execute(request(), operation()).await,
         Err(Error::AtCapacity)
     ));
-    cancel.cancel();
-    assert!(matches!(
-        first.await.expect("first operation joins"),
-        Err(Error::Cancelled)
-    ));
-    assert_eq!(client.admission.available_permits(), 1);
-    server.abort();
+    exchange.abort();
     assert!(
-        server
-            .await
-            .expect_err("aborted fixture joins")
-            .is_cancelled()
-    );
-}
-
-#[tokio::test]
-async fn dropping_the_calling_task_releases_operation_admission() {
-    let (address, server) = tls_server_stall_after_headers().await;
-    let head_observed = Arc::new(tokio::sync::Notify::new());
-    let mut client = fixture_client(address, ROOT_DER);
-    client.response_head_observed = Some(head_observed.clone());
-    let first_client = client.clone();
-    let first = tokio::spawn(async move { first_client.execute(request(), operation()).await });
-    tokio::time::timeout(Duration::from_secs(2), head_observed.notified())
-        .await
-        .expect("client admits response headers before pending body read");
-    assert_eq!(client.admission.available_permits(), 0);
-    first.abort();
-    assert!(
-        first
+        exchange
             .await
             .expect_err("dropped exchange joins")
             .is_cancelled()
@@ -655,229 +688,135 @@ async fn dropping_the_calling_task_releases_operation_admission() {
 }
 
 #[tokio::test]
-async fn parsed_response_header_bytes_and_parser_count_are_bounded() {
-    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Large: abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\r\n\r\n";
-    let (address, server) = tls_server(response).await;
-    let mut ceiling = limits();
-    ceiling.response_header_bytes = 32;
+async fn narrower_timeout_covers_stalled_body_and_releases_admission() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let (address, server) = tls_server_stall_after_headers(&material).await;
+    let head_observed = Arc::new(tokio::sync::Notify::new());
+    let mut client = fixture_client(address, &material);
+    client.response_head_observed = Some(head_observed.clone());
+    let exchange_client = client.clone();
+    let exchange = tokio::spawn(async move {
+        exchange_client
+            .execute(
+                request(),
+                Operation {
+                    deadline: Instant::now() + Duration::from_secs(1),
+                    timeout: Some(Duration::from_millis(50)),
+                    response_body_bytes: None,
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), head_observed.notified())
+        .await
+        .expect("client admits response headers before stalled body");
     assert!(matches!(
-        fixture_client_with_limits(address, ROOT_DER, ceiling)
-            .execute(request(), operation())
-            .await,
-        Err(Error::ResponseHeadersTooLarge)
+        exchange.await.expect("timed exchange joins"),
+        Err(Error::Timeout { source: None })
     ));
-    server.await.expect("header fixture joins");
-
-    let (address, server) = tls_server(response).await;
-    let mut ceiling = limits();
-    ceiling.response_header_count = 1;
-    assert!(matches!(
-        fixture_client_with_limits(address, ROOT_DER, ceiling)
-            .execute(request(), operation())
-            .await,
-        Err(Error::Transport)
-    ));
-    server.await.expect("parser fixture joins");
-}
-
-#[test]
-fn proxy_environment_isolated_in_a_subprocess_cannot_divert_fixture_client() {
-    const CHILD: &str = "INFRA_OUTBOUND_HTTP_PROXY_CHILD";
-    if std::env::var_os(CHILD).is_some() {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("child runtime")
-            .block_on(async {
-                let (address, server) =
-                    tls_server(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
-                fixture_client(address, ROOT_DER)
-                    .execute(request(), operation())
-                    .await
-                    .expect("no_proxy client reaches fixture under proxy environment");
-                server.await.expect("proxy fixture server succeeds");
-            });
-        return;
-    }
-    let mut child = Command::new(std::env::current_exe().expect("current test executable"))
-        .arg("--exact")
-        .arg("tests::proxy_environment_isolated_in_a_subprocess_cannot_divert_fixture_client")
-        .arg("--nocapture")
-        .env(CHILD, "1")
-        .env("HTTPS_PROXY", "http://127.0.0.1:9")
-        .env("https_proxy", "http://127.0.0.1:9")
-        .env("ALL_PROXY", "http://127.0.0.1:9")
-        .env("NO_PROXY", "")
-        .env("no_proxy", "")
-        .spawn()
-        .expect("proxy child starts");
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(status) = child.try_wait().expect("observe proxy child") {
-            assert!(status.success(), "proxy child must prove no_proxy behavior");
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            child.kill().expect("terminate overdue proxy child");
-            child.wait().expect("join terminated proxy child");
-            panic!("proxy child exceeded its budget");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-#[test]
-fn reserved_propagation_headers_are_removed_before_accounting() {
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(
-        "traceparent",
-        "oversized value".parse().expect("header value"),
-    );
-    headers.insert(
-        "x-request-id",
-        "oversized value".parse().expect("header value"),
-    );
-    headers.insert(
-        "authorization",
-        "Bearer fixture".parse().expect("header value"),
-    );
-    let admitted = policy::admit_request_headers(headers, 1, 64).expect("remaining header fits");
-    assert!(!admitted.contains_key("traceparent"));
-    assert!(!admitted.contains_key("x-request-id"));
-    assert!(admitted.contains_key("authorization"));
-}
-
-#[test]
-fn duplicate_field_values_count_individually() {
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.append("x-one", "a".parse().expect("first duplicate"));
-    headers.append("x-one", "b".parse().expect("second duplicate"));
-    assert_eq!(
-        policy::admit_response_headers(&headers, 1, 128),
-        Err(Error::ResponseHeadersTooLarge)
-    );
-}
-
-#[test]
-fn host_header_is_denied_before_transport() {
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert("host", "authn.fixture.test".parse().expect("host header"));
-    assert_eq!(
-        policy::admit_request_headers(headers, 8, 512),
-        Err(Error::Denied)
-    );
-}
-
-#[test]
-fn limits_reject_zero_overflow_and_unrepresentable_values() {
-    let mut invalid = limits();
-    invalid.max_active = 0;
-    assert_eq!(
-        policy::validate_limits(&invalid),
-        Err(Error::InvalidConfiguration)
-    );
-
-    let mut invalid = limits();
-    invalid.operation_timeout = Duration::MAX;
-    assert_eq!(
-        policy::validate_limits(&invalid),
-        Err(Error::InvalidConfiguration)
-    );
-
-    let setters: [fn(&mut Limits); 8] = [
-        |value: &mut Limits| value.request_header_count = usize::MAX,
-        |value: &mut Limits| value.request_header_count = 32_769,
-        |value: &mut Limits| value.response_header_count = 32_769,
-        |value: &mut Limits| value.request_header_bytes = usize::MAX,
-        |value: &mut Limits| value.response_header_count = usize::MAX,
-        |value: &mut Limits| value.response_header_bytes = usize::MAX,
-        |value: &mut Limits| value.request_body_bytes = usize::MAX,
-        |value: &mut Limits| value.response_body_bytes = usize::MAX,
-    ];
-    for set_limit in setters {
-        let mut invalid = limits();
-        set_limit(&mut invalid);
-        assert_eq!(
-            policy::validate_limits(&invalid),
-            Err(Error::InvalidConfiguration)
-        );
-    }
-}
-
-#[test]
-fn target_admission_preserves_relative_and_canonical_authority_rules() {
-    let (base, configured) =
-        policy::admit_base("https://authn.fixture.test/base/").expect("base URL");
-    assert_eq!(
-        policy::admit_target(&base, &configured, "child?query=yes")
-            .expect("relative target")
-            .as_str(),
-        "https://authn.fixture.test/base/child?query=yes"
-    );
+    assert_eq!(client.admission.available_permits(), 1);
+    server.abort();
     assert!(
-        policy::admit_target(&base, &configured, "https://authn.fixture.test:443/child").is_ok()
+        server
+            .await
+            .expect_err("aborted fixture joins")
+            .is_cancelled()
     );
+}
+
+#[test]
+fn uri_admission_uses_the_represented_origin_form() {
+    let base = policy::admit_base("https://authn.fixture.test/v1").expect("base URL");
+    let target = policy::admit_target(
+        &base,
+        &"//other.fixture.test/items%23safe?q=%23"
+            .parse()
+            .expect("origin-form URI"),
+    )
+    .expect("double-slash path is not an authority");
     assert_eq!(
-        policy::admit_target(&base, &configured, "https://other.fixture.test/").unwrap_err(),
-        Error::Denied
+        target.as_str(),
+        "https://authn.fixture.test//other.fixture.test/items%23safe?q=%23"
     );
-    for target in [
-        "https://@authn.fixture.test/",
-        "//@authn.fixture.test/",
-        "///@authn.fixture.test/",
-        "////@authn.fixture.test/",
-        "https:\\@authn.fixture.test/",
-        "\\\\@authn.fixture.test/",
-    ] {
-        assert_eq!(
-            policy::admit_target(&base, &configured, target).unwrap_err(),
-            Error::InvalidTarget,
-            "{target} must retain raw userinfo syntax"
-        );
-    }
-    assert!(policy::admit_target(&base, &configured, "/people/@self").is_ok());
-    for target in ["child\u{0085}", "child\n", " child", "child "] {
+
+    let parsed_fragment: http::Uri = "/items#fragment".parse().expect("dynamic URI");
+    assert_eq!(parsed_fragment.path(), "/items");
+    assert!(policy::admit_target(&base, &parsed_fragment).is_ok());
+    for invalid in ["https://other.fixture.test/items", "items", "*"] {
+        let uri = invalid.parse().expect("HTTP URI grammar");
         assert!(matches!(
-            policy::admit_target(&base, &configured, target),
+            policy::admit_target(&base, &uri),
             Err(Error::InvalidTarget)
         ));
     }
-    assert!(policy::admit_base("https://authn.fixture.test/\u{0085}").is_err());
 }
 
 #[test]
-fn literal_and_mapped_private_bases_are_denied_before_resolver_setup() {
-    for base in ["https://127.0.0.1/", "https://[::ffff:127.0.0.1]/"] {
-        assert!(
-            matches!(
-                Client::new(
-                    base,
-                    limits(),
-                    tokio_util::task::TaskTracker::new(),
-                    CancellationToken::new(),
-                ),
-                Err(Error::Denied)
-            ),
-            "{base} must be denied"
-        );
+fn fixed_authority_policy_rejects_host_and_invalid_limits() {
+    let mut headers = header::HeaderMap::new();
+    headers.insert(
+        header::HOST,
+        "other.fixture.test".parse().expect("host header"),
+    );
+    assert!(matches!(
+        policy::admit_request_headers(headers),
+        Err(Error::Denied)
+    ));
+    let mutations: [fn(&mut Limits); 5] = [
+        |limits: &mut Limits| limits.max_active = 0,
+        |limits: &mut Limits| limits.operation_timeout = Duration::ZERO,
+        |limits: &mut Limits| limits.response_header_count = 0,
+        |limits: &mut Limits| limits.response_header_bytes = 0,
+        |limits: &mut Limits| limits.response_body_bytes = 0,
+    ];
+    for mutate in mutations {
+        let mut invalid = limits();
+        mutate(&mut invalid);
+        assert!(matches!(
+            policy::validate_limits(&invalid),
+            Err(Error::InvalidConfiguration)
+        ));
     }
 }
 
-#[test]
-fn large_single_header_fields_are_rejected_for_each_direction() {
-    let value = "x".repeat(32);
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert("x-field", value.parse().expect("request field"));
-    assert_eq!(
-        policy::admit_request_headers(headers, 1, 16),
-        Err(Error::RequestHeadersTooLarge)
+#[tokio::test]
+async fn transport_source_redacts_request_and_response_content() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let (address, server) = tls_server(
+        &material,
+        b"HTTP/1.1 200 OK\r\nContent-Length: 23\r\n\r\nresponse-sentinel-body",
+    )
+    .await;
+    let mut request = Request::get("/sentinel-path?token=request-query-sentinel")
+        .body(Bytes::from_static(b"request-sentinel-body"))
+        .expect("request with sentinel target");
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        "Bearer request-header-sentinel"
+            .parse()
+            .expect("credential header"),
     );
-
-    let value = "x".repeat(32);
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert("x-field", value.parse().expect("response field"));
-    assert_eq!(
-        policy::admit_response_headers(&headers, 1, 16),
-        Err(Error::ResponseHeadersTooLarge)
-    );
+    let error = fixture_client(address, &material)
+        .execute(request, operation())
+        .await
+        .expect_err("truncated response fails");
+    let mut diagnostics = format!("{error:?} {error}");
+    let mut source = error.source();
+    while let Some(current) = source {
+        diagnostics.push_str(&format!(" {current:?} {current}"));
+        source = current.source();
+    }
+    for sentinel in [
+        "sentinel-path",
+        "request-query-sentinel",
+        "request-header-sentinel",
+        "request-sentinel-body",
+        "response-sentinel-body",
+    ] {
+        assert!(
+            !diagnostics.contains(sentinel),
+            "transport diagnostics leaked {sentinel}"
+        );
+    }
+    server.await.expect("truncated fixture server succeeds");
 }

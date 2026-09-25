@@ -24,8 +24,10 @@ returns an authorization decision; 403 belongs to downstream policy.
 ## Configuration
 
 All values are strict and unknown fields fail startup. Provider URLs are absolute
-HTTPS with no userinfo, query, or fragment. Issuer, audience, and identities
-are exact strings: do not trim, normalize, or case-fold them.
+HTTPS with a host and no userinfo, query, fragment, whitespace, or controls.
+URL canonicalization owns host case, default port, and empty-userinfo handling.
+Issuer, audience, and identities are exact strings: do not trim, normalize, or
+case-fold them.
 
 <!-- template:begin oidc-jwt:authentication-jwt -->
 ## OIDC JWT
@@ -111,24 +113,34 @@ policy, so none is introduced for this two-field POST.
 
 ## Provider boundary and operations
 
-Provider calls use only exact configured or discovery-validated HTTPS destinations, normal certificate and hostname validation, and public-unicast resolution on each connection. Loopback, private, link-local, multicast, unspecified, and other reserved destinations are refused. Mapped IPv4 addresses undergo the same public-unicast predicate. Redirects, ambient proxies, retries, caller-selected destinations, and connection reuse are not supported. Responses are read with a 1 MiB ceiling. Provider work has a three-second absolute cap and, for requests, cannot exceed the remaining request deadline less a 100ms response reserve.
+Provider calls use only exact configured or discovery-validated HTTPS destinations,
+normal certificate and hostname validation, and public-unicast admission of every
+literal address and complete DNS answer set. Loopback, private, link-local,
+multicast, unspecified, and other reserved destinations are refused. Mapped IPv4
+addresses undergo the same public-unicast predicate. Redirects, ambient proxies,
+caller-selected destinations, and reqwest policy retry are disabled. Responses are
+read with a 1 MiB ceiling. Provider work has a three-second absolute cap and, for
+requests, cannot exceed the remaining request deadline less a 100ms response
+reserve.
 
 The provider client limits header count, but does not promise a separate application-selected aggregate outbound header-byte cap. The service's inbound header limit and native 431 behavior remain separate. The default-off `test-support` feature is for tests that mount the real verifier with fixture transport; it is not enabled in ordinary builds and exposes no verification bypass or principal constructor.
 
-`reqwest` 0.13 supplies the fixed private HTTPS client with system roots. HTTP/1
-and zero idle pooling avoid reused-connection replay beyond its retry policy;
-pooling or HTTP/2 needs a fresh no-replay assessment. Hickory 0.26.3 supplies
-asynchronous system-DNS resolution. Each lookup owns a cancellation scope and
-tracker token, uses the actual admitted answer set, and retains the original
-hostname for certificate verification. System DNS configuration is snapshotted
-at preparation and changes require restart; no fallback public resolver is
-invented. DNS wrapper futures join the existing background budget. Reqwest's
-internal HTTP dispatchers retain cancellation-on-drop and
-runtime-teardown ownership; a tracker receipt does not claim their direct join.
+`reqwest` 0.13 supplies the fixed private HTTPS client with system roots and
+HTTP/1. The shared `infra-egress-dns::https_client_builder` applies its 30-second
+idle pool, finite per-host cap, resolver, and common hardening. A stale reused
+connection may use only the library's pre-write retry; no provider policy retries
+or replay after a possibly delivered request are added. Hickory 0.26.3 supplies
+asynchronous system-DNS resolution. One resolver is created for each client and
+shared by its clones; system DNS configuration is snapshotted at preparation and
+changes require restart. There is no fallback public resolver. Resolver and HTTP
+library tasks are library-owned: they are not given tracker tokens or joined by
+the service. The existing JWT refresh future remains process-owned, cancelled and
+joined through the background tracker.
 
 These are authentication-specific controls, not a general outbound HTTP
 capability. Another provider class, private-network exception, revocation rule,
 authorization policy or transport lifetime mechanism reopens the corresponding
-contract. Synthetic DER fixtures exercise normal TLS/name checks; renew expired
-fixtures without weakening verification. [Initializer validation](template-sync.md#validation-boundary)
-separates all-choice projection proof from distinct runtime build/test evidence.
+contract. Generated test-only DER material is valid at test execution time and
+exercises normal TLS/name checks without a checked-in expiry deadline.
+[Initializer validation](template-sync.md#validation-boundary) separates
+all-choice projection proof from distinct runtime build/test evidence.

@@ -30,9 +30,17 @@ serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros", "io-util"] }
+# template:begin oidc-jwt:authn-jwt-runtime-dependency
 tokio-util = { workspace = true, features = ["rt"] }
+# template:end oidc-jwt:authn-jwt-runtime-dependency
 url = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+rcgen = { workspace = true, features = ["aws_lc_rs"] }
+time = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
+
+# Used by the path-included egress TLS fixture; cargo-shear does not follow it.
+[package.metadata.cargo-shear]
+ignored = ["time"]

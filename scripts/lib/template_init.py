@@ -1014,9 +1014,11 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
         ):
             _project_feature_edge(records, name, version, expected, retained)
     if inputs.authn != "oidc-jwt":
-        _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
         _project_feature_edge(records, "zeroize", "1.9.0", ["zeroize_derive"], [])
     if inputs.authn == "none" and inputs.outbound_http == "none":
+        # rcgen/aws_lc_rs retains the weak x509-parser/verify-aws lock edge,
+        # whose aws-lc-rs defaults also retain untrusted without JWT.
+        _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
         _project_feature_edge(records, "ipnet", "2.12.2", ["serde"], [])
         _project_feature_edge(records, "once_cell", "1.21.4", ["critical-section", "portable-atomic"], [])
 

@@ -5,14 +5,18 @@
 
 mod dns;
 
-use std::{sync::Arc, time::Duration};
+#[cfg(test)]
+#[path = "../../infra-egress-dns/tests/fixtures/tls.rs"]
+mod tls;
 
-use reqwest::{header, redirect::Policy};
+use std::time::Duration;
+
+use infra_egress_dns::{PublicAddressResolver, https_client_builder};
+use reqwest::header;
 // template:begin oidc-introspection:authn-provider-form-header-import
 use reqwest::header::HeaderValue;
 // template:end oidc-introspection:authn-provider-form-header-import
 use tokio::time::Instant;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use url::{Host, Url};
 
 use crate::Failure;
@@ -28,17 +32,12 @@ pub(crate) fn parse_provider_url(raw: &str) -> Result<Url, Failure> {
         return Err(Failure::Unavailable);
     }
     let url = Url::parse(raw).map_err(|_| Failure::Unavailable)?;
-    let authority = raw
-        .split_once("://")
-        .map(|(_, value)| value.split(['/', '?', '#']).next().unwrap_or_default())
-        .unwrap_or_default();
     if url.scheme() != "https"
         || url.host().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
         || url.query().is_some()
-        || authority.contains('@')
     {
         return Err(Failure::Unavailable);
     }
@@ -58,9 +57,8 @@ pub(crate) struct ProviderClient {
 }
 
 impl ProviderClient {
-    pub(crate) fn new(tracker: TaskTracker, cancel: CancellationToken) -> Result<Self, Failure> {
-        let resolver =
-            dns::PublicAddressResolver::new(tracker, cancel).map_err(|_| Failure::Unavailable)?;
+    pub(crate) fn new() -> Result<Self, Failure> {
+        let resolver = PublicAddressResolver::new().map_err(|_| Failure::Unavailable)?;
         let client = build_client(resolver, None)?;
 
         Ok(Self { client })
@@ -159,22 +157,7 @@ fn build_client<R>(
 where
     R: reqwest::dns::Resolve + 'static,
 {
-    let builder = reqwest::Client::builder()
-        .tls_backend_rustls()
-        .https_only(true)
-        .redirect(Policy::none())
-        .retry(reqwest::retry::never())
-        .no_proxy()
-        .referer(false)
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .no_zstd()
-        .http1_only()
-        .pool_max_idle_per_host(0)
-        .http1_max_headers(100)
-        .timeout(PROVIDER_TIMEOUT)
-        .dns_resolver(Arc::new(resolver));
+    let builder = https_client_builder(resolver, PROVIDER_TIMEOUT, 100, 32);
     let builder = match root {
         // Only the fixture constructor supplies a root. Keep fixture trust local
         // instead of asking the host platform to supplement this test CA.
@@ -188,8 +171,6 @@ where
 /// loopback mapping and retains the hostname for certificate/SNI verification.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn new_fixture_client(
-    tracker: TaskTracker,
-    cancel: CancellationToken,
     fixture_host: &str,
     fixture_addr: std::net::SocketAddr,
     fixture_root_der: &[u8],
@@ -200,8 +181,6 @@ pub(crate) fn new_fixture_client(
     let root =
         reqwest::Certificate::from_der(fixture_root_der).map_err(|_| Failure::Unavailable)?;
     let resolver = FixtureResolver {
-        tracker,
-        cancel,
         host: fixture_host.to_owned(),
         address: fixture_addr,
     };
@@ -213,8 +192,6 @@ pub(crate) fn new_fixture_client(
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
 struct FixtureResolver {
-    tracker: TaskTracker,
-    cancel: CancellationToken,
     host: String,
     address: std::net::SocketAddr,
 }
@@ -224,13 +201,10 @@ impl reqwest::dns::Resolve for FixtureResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let host = self.host.clone();
         let address = self.address;
-        let tracker = self.tracker.clone();
-        let cancel = self.cancel.clone();
         Box::pin(async move {
-            if cancel.is_cancelled() || !name.as_str().eq_ignore_ascii_case(&host) {
+            if !name.as_str().eq_ignore_ascii_case(&host) {
                 return Err(std::io::Error::other("fixture DNS denied").into());
             }
-            let _scope = tracker.token();
             Ok(Box::new(std::iter::once(address)) as reqwest::dns::Addrs)
         })
     }
@@ -290,17 +264,10 @@ mod tests {
 
     use super::{
         Failure, PROVIDER_TIMEOUT, ProviderClient, is_json_media_type, new_fixture_client,
+        tls::TlsMaterial,
     };
-    use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
     const FIXTURE_HOST: &str = "authn.fixture.test";
-    const CERT_DER: &[u8] = include_bytes!("../tests/fixtures/authn-fixture-cert.der");
-    const KEY_DER: &[u8] = include_bytes!("../tests/fixtures/authn-fixture-key.der");
-    const ROOT_DER: &[u8] = include_bytes!("../tests/fixtures/authn-fixture-root.der");
-    // template:begin oidc-jwt:authn-provider-untrusted-root-fixture
-    const UNTRUSTED_ROOT_DER: &[u8] =
-        include_bytes!("../tests/fixtures/authn-fixture-untrusted-root.der");
-    // template:end oidc-jwt:authn-provider-untrusted-root-fixture
 
     async fn read_fixture_request(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> Vec<u8> {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -362,7 +329,10 @@ mod tests {
         writer.await.expect("fixture writer joins");
     }
 
-    async fn tls_server(response: Vec<u8>) -> (std::net::SocketAddr, JoinHandle<Vec<u8>>) {
+    async fn tls_server(
+        material: &TlsMaterial,
+        response: Vec<u8>,
+    ) -> (std::net::SocketAddr, JoinHandle<Vec<u8>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let config = ServerConfig::builder_with_provider(Arc::new(
@@ -372,8 +342,8 @@ mod tests {
         .unwrap()
         .with_no_client_auth()
         .with_single_cert(
-            vec![CertificateDer::from(CERT_DER.to_vec())],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KEY_DER.to_vec())),
+            vec![CertificateDer::from(material.cert.clone())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
         )
         .unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -398,7 +368,9 @@ mod tests {
     }
 
     // template:begin oidc-jwt:authn-provider-redirect-server
-    async fn redirect_server() -> (std::net::SocketAddr, JoinHandle<(Vec<u8>, bool)>) {
+    async fn redirect_server(
+        material: &TlsMaterial,
+    ) -> (std::net::SocketAddr, JoinHandle<(Vec<u8>, bool)>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let config = ServerConfig::builder_with_provider(Arc::new(
@@ -408,8 +380,8 @@ mod tests {
         .unwrap()
         .with_no_client_auth()
         .with_single_cert(
-            vec![CertificateDer::from(CERT_DER.to_vec())],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KEY_DER.to_vec())),
+            vec![CertificateDer::from(material.cert.clone())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
         )
         .unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -440,7 +412,9 @@ mod tests {
     // template:end oidc-jwt:authn-provider-redirect-server
 
     // template:begin oidc-introspection:authn-provider-dropped-post-server
-    async fn dropped_post_server() -> (std::net::SocketAddr, JoinHandle<(Vec<u8>, bool)>) {
+    async fn dropped_post_server(
+        material: &TlsMaterial,
+    ) -> (std::net::SocketAddr, JoinHandle<(Vec<u8>, bool)>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let config = ServerConfig::builder_with_provider(Arc::new(
@@ -450,8 +424,8 @@ mod tests {
         .unwrap()
         .with_no_client_auth()
         .with_single_cert(
-            vec![CertificateDer::from(CERT_DER.to_vec())],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KEY_DER.to_vec())),
+            vec![CertificateDer::from(material.cert.clone())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
         )
         .unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -476,7 +450,9 @@ mod tests {
     // template:end oidc-introspection:authn-provider-dropped-post-server
 
     // template:begin oidc-jwt:authn-provider-cancellation-server
-    async fn cancellation_server() -> (
+    async fn cancellation_server(
+        material: &TlsMaterial,
+    ) -> (
         std::net::SocketAddr,
         oneshot::Receiver<()>,
         JoinHandle<bool>,
@@ -490,8 +466,8 @@ mod tests {
         .unwrap()
         .with_no_client_auth()
         .with_single_cert(
-            vec![CertificateDer::from(CERT_DER.to_vec())],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KEY_DER.to_vec())),
+            vec![CertificateDer::from(material.cert.clone())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
         )
         .unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -522,14 +498,7 @@ mod tests {
     // template:end oidc-jwt:authn-provider-cancellation-server
 
     fn fixture_client(address: std::net::SocketAddr, host: &str, root: &[u8]) -> ProviderClient {
-        new_fixture_client(
-            TaskTracker::new(),
-            CancellationToken::new(),
-            host,
-            address,
-            root,
-        )
-        .unwrap()
+        new_fixture_client(host, address, root).unwrap()
     }
 
     fn fixture_url(host: &str, address: std::net::SocketAddr) -> Url {
@@ -549,9 +518,10 @@ mod tests {
     // template:begin oidc-introspection:authn-provider-post-form-tls-test
     #[tokio::test]
     async fn fixture_client_preserves_tls_name_root_and_form_post_controls() {
+        let material = TlsMaterial::new(FIXTURE_HOST);
         let response = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 16\r\n\r\n{\"active\":false}".to_vec();
-        let (address, server) = tls_server(response).await;
-        let provider = fixture_client(address, FIXTURE_HOST, ROOT_DER);
+        let (address, server) = tls_server(&material, response).await;
+        let provider = fixture_client(address, FIXTURE_HOST, &material.root);
 
         let body = provider
             .post_form_json(
@@ -575,11 +545,12 @@ mod tests {
     // template:begin oidc-jwt:authn-provider-tls-name-root-test
     #[tokio::test]
     async fn fixture_client_rejects_wrong_name_and_untrusted_root() {
+        let material = TlsMaterial::new(FIXTURE_HOST);
         let response =
             b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}"
                 .to_vec();
-        let (wrong_name_address, wrong_name_server) = tls_server(response.clone()).await;
-        let wrong_name = fixture_client(wrong_name_address, "wrong.fixture.test", ROOT_DER);
+        let (wrong_name_address, wrong_name_server) = tls_server(&material, response.clone()).await;
+        let wrong_name = fixture_client(wrong_name_address, "wrong.fixture.test", &material.root);
         assert_eq!(
             wrong_name
                 .get_json(
@@ -591,8 +562,8 @@ mod tests {
         );
         let _ = wrong_name_server.await;
 
-        let (untrusted_address, untrusted_server) = tls_server(response).await;
-        let untrusted = fixture_client(untrusted_address, FIXTURE_HOST, UNTRUSTED_ROOT_DER);
+        let (untrusted_address, untrusted_server) = tls_server(&material, response).await;
+        let untrusted = fixture_client(untrusted_address, FIXTURE_HOST, &material.untrusted_root);
         assert_eq!(
             untrusted
                 .get_json(
@@ -609,11 +580,12 @@ mod tests {
     // template:begin oidc-jwt:authn-provider-length-deadline-test
     #[tokio::test]
     async fn fixture_client_denies_oversized_response_and_deadline() {
+        let material = TlsMaterial::new(FIXTURE_HOST);
         let oversized =
             b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1048577\r\n\r\n"
                 .to_vec();
-        let (oversized_address, oversized_server) = tls_server(oversized).await;
-        let provider = fixture_client(oversized_address, FIXTURE_HOST, ROOT_DER);
+        let (oversized_address, oversized_server) = tls_server(&material, oversized).await;
+        let provider = fixture_client(oversized_address, FIXTURE_HOST, &material.root);
         assert_eq!(
             provider
                 .get_json(
@@ -625,8 +597,8 @@ mod tests {
         );
         let _ = oversized_server.await;
 
-        let (slow_address, slow_server) = tls_server(Vec::new()).await;
-        let slow = fixture_client(slow_address, FIXTURE_HOST, ROOT_DER);
+        let (slow_address, slow_server) = tls_server(&material, Vec::new()).await;
+        let slow = fixture_client(slow_address, FIXTURE_HOST, &material.root);
         assert_eq!(
             slow.get_json(
                 &fixture_url(FIXTURE_HOST, slow_address),
@@ -642,11 +614,12 @@ mod tests {
     // template:begin oidc-jwt:authn-provider-streaming-bound-test
     #[tokio::test]
     async fn fixture_client_enforces_streaming_body_bound_without_content_length() {
+        let material = TlsMaterial::new(FIXTURE_HOST);
         let mut response = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n100000\r\n".to_vec();
         response.extend(std::iter::repeat_n(b'x', 1_048_576));
         response.extend_from_slice(b"\r\n1\r\ny\r\n0\r\n\r\n");
-        let (address, server) = tls_server(response).await;
-        let provider = fixture_client(address, FIXTURE_HOST, ROOT_DER);
+        let (address, server) = tls_server(&material, response).await;
+        let provider = fixture_client(address, FIXTURE_HOST, &material.root);
 
         assert_eq!(
             provider
@@ -664,8 +637,9 @@ mod tests {
     // template:begin oidc-introspection:authn-provider-dropped-post-test
     #[tokio::test]
     async fn dropped_post_does_not_repeat_the_exchange() {
-        let (address, server) = dropped_post_server().await;
-        let provider = fixture_client(address, FIXTURE_HOST, ROOT_DER);
+        let material = TlsMaterial::new(FIXTURE_HOST);
+        let (address, server) = dropped_post_server(&material).await;
+        let provider = fixture_client(address, FIXTURE_HOST, &material.root);
         assert_eq!(
             provider
                 .post_form_json(
@@ -686,8 +660,9 @@ mod tests {
     // template:begin oidc-jwt:authn-provider-drop-request-test
     #[tokio::test]
     async fn dropping_request_future_closes_the_actual_provider_connection() {
-        let (address, received, server) = cancellation_server().await;
-        let provider = fixture_client(address, FIXTURE_HOST, ROOT_DER);
+        let material = TlsMaterial::new(FIXTURE_HOST);
+        let (address, received, server) = cancellation_server(&material).await;
+        let provider = fixture_client(address, FIXTURE_HOST, &material.root);
         let request = tokio::spawn(async move {
             provider
                 .get_json(
@@ -731,7 +706,7 @@ mod tests {
     async fn production_literal_loopback_and_redirect_never_reach_or_repeat_a_listener() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let production = ProviderClient::new(TaskTracker::new(), CancellationToken::new()).unwrap();
+        let production = ProviderClient::new().unwrap();
         assert_eq!(
             production
                 .get_json(
@@ -747,8 +722,9 @@ mod tests {
                 .is_err()
         );
 
-        let (redirect_address, redirect_server) = redirect_server().await;
-        let fixture = fixture_client(redirect_address, FIXTURE_HOST, ROOT_DER);
+        let material = TlsMaterial::new(FIXTURE_HOST);
+        let (redirect_address, redirect_server) = redirect_server(&material).await;
+        let fixture = fixture_client(redirect_address, FIXTURE_HOST, &material.root);
         assert_eq!(
             fixture
                 .get_json(

@@ -44,7 +44,14 @@ use their own binary in `crates/service/src/bin` only when they share the
 service's composition, otherwise their own crate with its own lifecycle.
 
 <!-- template:begin authn:docs-integration-authn-provider -->
-Inbound authentication's provider destination is fixed by validated configuration, never by the caller. The adapter permits only HTTPS, normal TLS hostname/certificate validation, public-unicast connection destinations, no redirects, proxy, retries, or connection reuse, and a 1 MiB response body. Provider work is bounded by three seconds and the enclosing request deadline; the HTTP transport's existing inbound header limit is separate from the provider-client header-count limit.
+Inbound authentication's provider destination is fixed by validated configuration,
+never by the caller. The adapter permits only HTTPS, normal TLS hostname/certificate
+validation, public-unicast destinations, no redirects or proxy, and a 1 MiB
+response body. It shares the resolver and 30-second idle pool with the bounded
+outbound profile; a library stale-connection retry is limited to before request
+writing. Provider work is bounded by three seconds and the enclosing request
+deadline; the HTTP transport's existing inbound header limit is separate from the
+provider-client header-count limit.
 
 Provider URL syntax is checked both by `crates/config/src/authn.rs` and by
 `crates/infra-bearerauthn/src/provider.rs`. Keep their HTTPS, host, userinfo,
@@ -57,10 +64,11 @@ would add more ownership than it removes.
 <!-- template:begin outbound-http:docs-integration-outbound -->
 A provider with a fixed public HTTPS dependency uses the retained
 [bounded outbound client](../outbound-http.md). The adapter supplies finite
-limits, credentials, a parent deadline with response reserve, and cancellation;
-it owns parsing and business errors. The client enforces same-authority targets,
-post-DNS public-address admission, bounded encoded bodies/headers and removal
-of correlation headers. Selection itself adds no neighbour or startup call.
+limits, credentials, and a parent deadline with response reserve; it owns parsing
+and business errors. The client takes a standard `Request<Bytes>`, enforces
+origin-form component composition and same-authority targets, admits complete DNS
+answer sets, and returns bounded `Response<Bytes>` after removing correlation
+headers. Selection itself adds no neighbour or startup call.
 <!-- template:end outbound-http:docs-integration-outbound -->
 
 <!-- template:begin oidc-jwt:docs-integration-jwt -->

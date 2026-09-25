@@ -158,8 +158,6 @@ pub type RefreshTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 /// feature, and cannot construct a principal or bypass verification.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
-    use tokio_util::{sync::CancellationToken, task::TaskTracker};
-
     use super::{Failure, fmt, provider};
 
     // template:begin oidc-introspection:authn-test-support-introspection-prepare
@@ -180,20 +178,12 @@ pub mod test_support {
         /// Returns [`Failure::Unavailable`] for an invalid fixture root, host,
         /// address, or fixture transport setup.
         pub fn new(
-            tracker: TaskTracker,
-            cancel: CancellationToken,
             fixture_host: &str,
             fixture_addr: std::net::SocketAddr,
             fixture_root_der: &[u8],
         ) -> Result<Self, Failure> {
-            provider::new_fixture_client(
-                tracker,
-                cancel,
-                fixture_host,
-                fixture_addr,
-                fixture_root_der,
-            )
-            .map(|provider| Self { provider })
+            provider::new_fixture_client(fixture_host, fixture_addr, fixture_root_der)
+                .map(|provider| Self { provider })
         }
 
         pub(crate) fn into_provider(self) -> provider::ProviderClient {

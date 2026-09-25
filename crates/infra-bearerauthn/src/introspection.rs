@@ -9,7 +9,6 @@ use std::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use secrecy::ExposeSecret;
 use tokio::{sync::Semaphore, time::Instant};
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use url::Url;
 
 use crate::{
@@ -26,12 +25,8 @@ const MAX_IN_FLIGHT_EXCHANGES: usize = 32;
 ///
 /// Returns [`Failure::Unavailable`] when the configured endpoint or private
 /// provider transport cannot be prepared.
-pub fn prepare_introspection(
-    options: IntrospectionOptions,
-    tracker: TaskTracker,
-    cancel: CancellationToken,
-) -> Result<Verifier, Failure> {
-    let provider = ProviderClient::new(tracker, cancel)?;
+pub fn prepare_introspection(options: IntrospectionOptions) -> Result<Verifier, Failure> {
+    let provider = ProviderClient::new()?;
     prepare_with_provider(options, provider)
 }
 
@@ -153,14 +148,12 @@ fn form_component(value: &str) -> String {
 mod tests {
     use std::sync::Arc;
 
-    use tokio::{sync::Semaphore, time::Instant};
-    use tokio_util::{sync::CancellationToken, task::TaskTracker};
-
     use super::{ClaimPolicy, IntrospectionVerifier, basic_authorization, form_body};
     use crate::{
         Failure, parse_bearer,
         provider::{ProviderClient, parse_provider_url, reserve_request_deadline},
     };
+    use tokio::{sync::Semaphore, time::Instant};
 
     fn verifier_with_permits(permits: usize) -> (IntrospectionVerifier, Arc<Semaphore>) {
         let permits = Arc::new(Semaphore::new(permits));
@@ -172,7 +165,7 @@ mod tests {
                 "https://issuer.example".to_owned(),
                 "api".to_owned(),
             )),
-            provider: ProviderClient::new(TaskTracker::new(), CancellationToken::new()).unwrap(),
+            provider: ProviderClient::new().unwrap(),
             permits: permits.clone(),
         };
         (verifier, permits)
@@ -194,15 +187,15 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_requires_an_exact_https_destination_without_user_info() {
+    fn endpoint_requires_an_exact_https_destination_without_credentials() {
         assert!(parse_provider_url("https://provider.example/oauth/introspect").is_ok());
+        assert!(parse_provider_url("https://@provider.example/introspect").is_ok());
         for value in [
             "http://provider.example/introspect",
             "https://client:secret@provider.example/introspect",
             "https://provider.example/introspect#fragment",
             "https://provider.example/introspect?query=value",
             " https://provider.example/introspect",
-            "https://@provider.example/introspect",
             "not a url",
         ] {
             assert_eq!(parse_provider_url(value), Err(Failure::Unavailable));

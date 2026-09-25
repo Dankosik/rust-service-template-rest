@@ -10,7 +10,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use tokio::time::Instant;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::claims::{ClaimPolicy, validate_jwt_claims};
@@ -20,6 +20,10 @@ use crate::{BearerToken, Failure, JwtOptions, Principal, RefreshTask, TokenProfi
 
 const STARTUP_BUDGET: Duration = Duration::from_secs(6);
 const ATTEMPT_BUDGET: Duration = Duration::from_secs(3);
+
+#[cfg(test)]
+#[path = "../../infra-egress-dns/tests/fixtures/tls.rs"]
+mod tls;
 
 #[derive(Clone)]
 pub struct JwtVerifier {
@@ -94,10 +98,9 @@ impl JwtVerifier {
 /// provider transport cannot establish usable JWT verification.
 pub async fn prepare_jwt(
     options: JwtOptions,
-    tracker: TaskTracker,
     cancel: CancellationToken,
 ) -> Result<(Verifier, RefreshTask), Failure> {
-    let provider = ProviderClient::new(tracker, cancel.child_token())?;
+    let provider = ProviderClient::new()?;
     prepare_with_provider(options, provider, cancel).await
 }
 
@@ -613,19 +616,16 @@ mod tests {
             pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
         },
     };
-    use tokio_util::{sync::CancellationToken, task::TaskTracker};
+    use tokio_util::sync::CancellationToken;
 
     use super::{
         ClaimPolicy, CompactToken, JwtVerifier, KeySelection, SharedRefresh, TokenProfile,
-        parse_key_set, prepare_jwt_with_fixture,
+        parse_key_set, prepare_jwt_with_fixture, tls::TlsMaterial,
     };
     use crate::{Failure, JwtOptions, Verifier, claims::validate_jwt_claims, parse_bearer};
 
     const FIXTURE_HOST: &str = "authn.fixture.test";
-    const CERT_DER: &[u8] = include_bytes!("../tests/fixtures/authn-fixture-cert.der");
-    const KEY_DER: &[u8] = include_bytes!("../tests/fixtures/authn-fixture-key.der");
     const JWT_SIGNING_DER: &[u8] = include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
-    const ROOT_DER: &[u8] = include_bytes!("../tests/fixtures/authn-fixture-root.der");
     const FIXTURE_MODULUS: &str = "oqVsNW7NLfad_LLglPJsIEFPiNDxHC8VBEUrd0qat1etcgBHlY5rPq_Fxo6DUo6fe1_haaLbqf4HwPK7TAf_N9FuQ4TnLuG2fHkNFUlf_P2IM_c3MpiOo4-1DcTk1_-aN4P-7XKq_c4W6ssAdtE5T91TX8gQMtRmsy-G6G45mdroQBlM3V7ZQcn3T3d6j3BQRYdBijVaPMFYxBfOEi4-3OWpJIiqYiW-TZYFcM9RUkE8egaFh7Ck8Ah_B1f30lrrVaidmdFpvZrxIPg0FvmEOQJrRZuACZNKgK83sVUgRmI3jtSquFlbvoo-ayOIOMssBQuAt380L22tfKSjn3cE0Q";
 
     fn fixture_jwks(kid: &str) -> String {
@@ -665,6 +665,7 @@ mod tests {
     }
 
     async fn tls_sequence_server(
+        material: &TlsMaterial,
         build_responses: impl FnOnce(std::net::SocketAddr) -> Vec<Vec<u8>>,
     ) -> (std::net::SocketAddr, JoinHandle<Vec<Vec<u8>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -677,8 +678,8 @@ mod tests {
         .unwrap()
         .with_no_client_auth()
         .with_single_cert(
-            vec![CertificateDer::from(CERT_DER.to_vec())],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KEY_DER.to_vec())),
+            vec![CertificateDer::from(material.cert.clone())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
         )
         .unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -860,9 +861,10 @@ mod tests {
 
     #[tokio::test]
     async fn fixture_prepare_discovers_initial_keys_rotates_and_retains_last_good_after_failure() {
+        let material = TlsMaterial::new(FIXTURE_HOST);
         let initial = fixture_jwks("old");
         let rotated = fixture_jwks("new");
-        let (address, server) = tls_sequence_server(|address| {
+        let (address, server) = tls_sequence_server(&material, |address| {
             vec![
                 json_response(&format!(
                     r#"{{"issuer":"https://{FIXTURE_HOST}:{}","jwks_uri":"https://{FIXTURE_HOST}:{}/jwks"}}"#,
@@ -877,14 +879,9 @@ mod tests {
         .await;
         let issuer = format!("https://{FIXTURE_HOST}:{}", address.port());
         let cancel = CancellationToken::new();
-        let fixture = crate::test_support::FixtureTransport::new(
-            TaskTracker::new(),
-            cancel.child_token(),
-            FIXTURE_HOST,
-            address,
-            ROOT_DER,
-        )
-        .unwrap();
+        let fixture =
+            crate::test_support::FixtureTransport::new(FIXTURE_HOST, address, &material.root)
+                .unwrap();
         let (verifier, refresh) = prepare_jwt_with_fixture(
             JwtOptions {
                 issuer: issuer.clone(),

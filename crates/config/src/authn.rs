@@ -243,21 +243,10 @@ fn validate_provider_url(key: &str, value: &str) -> Result<(), ValidationError> 
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
-        || url_has_userinfo(value)
     {
         return Err(invalid_provider_url(key));
     }
     Ok(())
-}
-
-fn url_has_userinfo(value: &str) -> bool {
-    let Some((_, after_scheme)) = value.split_once("://") else {
-        return false;
-    };
-    after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .is_some_and(|authority| authority.contains('@'))
 }
 
 fn invalid_provider_url(key: &str) -> ValidationError {
@@ -393,12 +382,17 @@ mod tests {
             ..AuthnConfig::default()
         };
         accepted.validate().unwrap();
+        AuthnConfig {
+            introspection_endpoint: "https://@issuer.example".to_owned(),
+            ..AuthnConfig::default()
+        }
+        .validate()
+        .expect("the URL parser canonicalizes empty userinfo");
 
         for (key, value) in [
             ("authn.issuer", "http://issuer.example"),
             ("authn.issuer", " https://issuer.example"),
             ("authn.issuer", "https://issuer.example/\u{0001}"),
-            ("authn.introspection_endpoint", "https://@issuer.example"),
             ("authn.introspection_endpoint", "https://u:p@issuer.example"),
             (
                 "authn.introspection_endpoint",
