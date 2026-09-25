@@ -275,10 +275,10 @@ fn key_mismatch(request_id: Option<String>) -> Response {
 }
 
 fn in_progress(request_id: Option<String>, scope: &ScopeKey, operation: &str) -> Response {
-    tracing::warn!(
+    // An expected answer to a concurrent retry; the request span carries the request id.
+    tracing::info!(
         scope_digest = %ScopeDigest(scope.digest()),
         operation,
-        request_id = ?request_id,
         "http_idempotency_in_progress"
     );
     Problem::new(Code::IdempotencyRequestInProgress)

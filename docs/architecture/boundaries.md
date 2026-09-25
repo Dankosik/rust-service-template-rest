@@ -81,7 +81,7 @@ infra-egress-dns -> reqwest DNS types, hickory-resolver, tokio, tokio-util
 <!-- template:end egress-dns:docs-boundaries-egress-edges -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-edges -->
 main binary -> infra-idempotency-store
-infra-http -> infra-idempotency-store, infra-postgres (profile-scoped Tx re-export), sha2, sfv
+infra-http -> infra-idempotency-store, infra-postgres (the Tx re-export), sha2, sfv
 infra-idempotency-store -> infra-postgres, sqlx, tokio, tokio-util, tracing, thiserror
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-edges -->
 <!-- template:begin jobs:docs-boundaries-jobs-edges -->
@@ -125,10 +125,11 @@ HTTP idempotency is a shared inbound transport contract, not a feature
 adapter: `infra-http` composes it the way it composes authentication,
 through `Composer::route` and `Composer::agree`, and owns key handling,
 declaration and agreement, and Problem mapping. `infra-idempotency-store`
-owns PostgreSQL arbitration and records. `infra-postgres` owns the opaque Tx;
-`infra-http` and `infra_http::idempotency` re-export it only as an inbound
-contract. Feature handlers consume `Idempotency` and that Tx through the
-supported composed route, while provider adapters alone use the connection.
+owns PostgreSQL arbitration and records. `infra-postgres` owns the opaque
+`Tx`; `infra_http::idempotency` re-exports it only as an inbound contract, so
+`infra-http` depends on `infra-postgres` only while this profile is retained.
+Feature handlers consume `Idempotency` and that `Tx` through the supported
+composed route, while provider adapters alone use the connection.
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-composition -->
 <!-- template:begin jobs:docs-boundaries-jobs-composition -->
 Jobs are a provider seam, not a transport contract: an adapter enqueues on

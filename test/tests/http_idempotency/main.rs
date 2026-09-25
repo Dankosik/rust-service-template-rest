@@ -770,6 +770,14 @@ async fn p8_a_live_legacy_row_refuses_the_transition_and_is_preserved(pool: PgPo
         legacy_format,
         "the transition rolled its schema change back"
     );
+
+    // The new store refuses the legacy schema before readiness admission.
+    let (store_pool, store) = replica(&dsn_for(&pool).await).await;
+    assert_eq!(
+        store.check_startup().await,
+        Err(StartupError::SchemaMissing)
+    );
+    close(&[&store_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

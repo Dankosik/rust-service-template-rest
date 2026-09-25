@@ -43,6 +43,17 @@ async fn create_widget(
 }
 ```
 
+The handler keeps its ordinary protected-operation annotation (security,
+`x-security-decision`, its success response, and
+`ProtectedOperationProblemResponses`) with no idempotency metadata. Compose it
+inside `service::api::contract`, which receives the composer; `route` already
+applies `protect`, so do not wrap the route again:
+
+```rust,ignore
+// crates/service/src/api.rs, inside contract(idempotency: &mut Composer):
+.routes(idempotency.route(routes!(widgets::http::create_widget)))
+```
+
 Regenerate and review the OpenAPI document after composition changes. The
 generated key description covers both wire encodings and decoded length; it
 does not advertise the retired token-only pattern or a quoted wire-length limit.
@@ -115,6 +126,12 @@ business effect, and job commit together; replay, refusal, and rollback enqueue
 nothing. External effects are outside this guarantee.
 <!-- template:end jobs:docs-http-idempotency-jobs-enqueue -->
 
+Only statements issued through that `Tx` share the record's fate. An outbound
+HTTP call, a message, a file, or a write to another datastore is not covered:
+it can run on an attempt that later rolls back and run again on a retry, so
+such an effect needs its own idempotency key derived from the same request or
+its own durable design.
+
 Only a storable 2xx commits work and the record. A non-2xx work result rolls
 back and keeps its ordinary response. A concurrent undecided attempt receives
 409 `idempotency_request_in_progress` with `Retry-After: 1`; once a committed
@@ -131,8 +148,10 @@ cases an identical same-key retry returns to normal arbitration.
 
 The outcome metric keeps one outcome per attempt and its abandoned-attempt
 semantics. It folds the former `outcome_unknown` into `unavailable`, removes
-`reconciled`, uses `not_stored` for known internal faults, and retains
-`integrity` for corrupt stored records. It adds no high-cardinality labels.
+`reconciled`, uses `not_stored` for known internal faults and for a request
+body that cannot be read or exceeds the limit (400 or 413 before
+arbitration), and retains `integrity` for corrupt stored records. It adds no
+high-cardinality labels.
 
 The first stored success and replay have byte-exact status/body and preserve
 only these response headers, including repeated values and per-name order:
@@ -152,6 +171,20 @@ security, and framing headers are generated normally.
 30 days. It is required only when composition activates the boundary; active
 startup also requires PostgreSQL, the admitted schema, and a writable session.
 Publish this duration as the retry promise. Expired keys may execute again.
+
+Every request that reaches `execute` holds one pooled connection: four round
+trips when a record or the lock decides it, and the work's duration plus five
+round trips when it executes. A duplicate never waits for the holder, but
+distinct keys executing together compete for the pool; once it is exhausted,
+a request waits up to the 3 s acquire budget and then gets 503
+`idempotency_unavailable`. Size `postgres.max_connections` for concurrent
+work, replays, the readiness probe, and one cleanup connection, and keep the
+work inside `execute` short.
+
+While the boundary is active, a background task deletes expired records once
+a minute in batches of 500 rows, each under a 1 s statement timeout, skipping
+rows a live attempt holds. A failed run logs its failure class and retries on
+the next tick; it changes neither readiness nor serving.
 
 Each new record retains verified issuer, caller kind/value, non-secret scope
 digest, and expiry, never raw keys, credentials, or request bodies for
@@ -193,3 +226,55 @@ Do not run old and new implementations together. Before a successful migration,
 old binary/schema remain the rollback path; after it, roll forward or use a
 separately authorized database recovery, never restart old code. See
 [Migrations](../migrations/README.md) and [PostgreSQL validation](validation/postgres.md).
+
+## Roll it out
+
+Apply the migrations with the `migrate` job before the release that composes
+the first operation, set `APP__HTTP_IDEMPOTENCY__RETENTION`, publish that
+window to clients, then deploy.
+
+Composing an operation that already serves requests protects retries only
+once every replica runs the new release: a replica on the old release ignores
+`Idempotency-Key`, so a same-key retry that lands there executes again.
+Promise the key only after the rollout finishes (compare `app.version` in
+each replica's `service_starting` record). A rollback, or removing the route
+from `Composer::route`, withdraws the protection at once, even for keys still
+inside a published window.
+
+## Mechanism and reopen conditions
+
+The boundary is template-owned because no maintained crate commits the replay
+record inside the caller's PostgreSQL transaction: `axum-idempotent` 0.4.0
+caches responses in a session store and lets concurrent duplicates reach the
+handler, and `idempotent` 2.0.0 keeps leases in a separate store. Reassess
+when a maintained crate joins the caller's transaction.
+
+Each attempt is one explicit `READ COMMITTED` transaction on the writer. Its
+first statement refuses a recovering or read-only session and takes
+`pg_try_advisory_xact_lock` on the scope digest's first eight bytes without
+waiting; a second statement reads the record, so its snapshot follows the
+lock, and a live record decides before the lock result. The primary key and
+an upsert that replaces only an expired row are the backstop. A duplicate
+gets 409 instead of waiting because `sqlx` 0.9 keeps a dropped waiting
+request's connection busy until the server statement ends, and `REPEATABLE
+READ` would hide the committed record from it. Reopen for a `sqlx` release
+that cancels server statements on drop, measured harmful 409 churn, or an
+operation that needs stricter isolation.
+
+The fingerprint hashes the received request rather than a typed or canonical
+form, so it cannot omit a path, query, or body value; RFC 8785 serializes
+numbers as IEEE 754 doubles, so integers above 2^53 would collide. A client
+that re-serializes an equal body differently gets 422, a safe refusal.
+Reopen when a real consumer needs representation-tolerant retries. Keys
+accept the expired IETF draft's Structured Field string through `sfv` and
+Stripe-compatible unquoted visible ASCII. An uncertain commit answers 503 and
+is resolved by the client's same-key retry; a post-commit readback would only
+turn that rare 503 into a 2xx. Headers are `http_idempotency_header_pair[]`
+rather than `jsonb` because their values are bytes.
+
+Deliberate deviations from the draft: only 2xx successes are stored, because
+a failed attempt rolls its effect back; the key is scoped to the verified
+caller, so an authentication engine is required; retention has no template
+default. Cleanup deletes 500-row batches every 60 s under a 1 s statement
+timeout; reopen for a backlog one tick cannot drain or for lock waits cleanup
+causes.

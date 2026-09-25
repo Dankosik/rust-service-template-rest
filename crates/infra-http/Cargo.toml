@@ -21,11 +21,9 @@ health = { workspace = true }
 # template:begin authn:http-authn-dependency
 infra-bearerauthn = { workspace = true }
 # template:end authn:http-authn-dependency
-# template:begin postgres:http-postgres-dependency
-infra-postgres = { workspace = true }
-# template:end postgres:http-postgres-dependency
 # template:begin http-idempotency:http-idempotency-dependencies
 infra-idempotency-store = { workspace = true }
+infra-postgres = { workspace = true }
 sha2 = { workspace = true }
 sfv = { workspace = true, features = ["parsed-types"] }
 # template:end http-idempotency:http-idempotency-dependencies

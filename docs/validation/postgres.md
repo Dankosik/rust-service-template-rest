@@ -67,18 +67,19 @@ With the HTTP idempotency profile retained, `ALLOW_HEAVY=1 make test-integration
 also runs the idempotency suite in `test/tests/http_idempotency/`:
 arbitration, equal replay and mismatch, expiry, writer refusal, rollback,
 same-key retry after uncertainty, 25P02 classification, byte-safe replay,
-caller-metadata maintenance, guarded legacy migration, and activation proof
+caller metadata, guarded legacy migration, and activation proof
 against the store boundary, plus the mounted router proof where the
 introspection engine is retained.
 `bash scripts/ci/test-integration-db.sh --test http_idempotency` runs that
 target alone (the script forwards its arguments to `cargo test`). The suite
 uses the existing transaction/store error seam for uncertain commits; it does
 not require a lost-COMMIT-ack proxy or post-commit readback. It establishes
-database observations only when a usable Docker daemon is available. The
-required cases include cancellation/outer-504 uncertainty returning to same-key
-arbitration, exact composite-array schema admission, the 15 s migration-lock
-and 5 min migration-deadline behavior, and the retained one-outcome metric
-semantics. This is proof of local database behavior only; it does not perform
+database observations only when a usable Docker daemon is available. Its
+cases include cancellation and outer-504 uncertainty returning to same-key
+arbitration, startup admission of the migrated schema and refusal of the
+legacy one, and the one-outcome metric semantics; the migrator's 15 s lock
+and 5 min deadline are proven by `test/tests/postgres.rs`, not by this suite.
+This is proof of local database behavior only; it does not perform
 the operator maintenance sequence or authorize a deployment.
 <!-- template:end http-idempotency:docs-postgres-validation-http-idempotency -->
 <!-- template:begin jobs:docs-postgres-validation-jobs -->

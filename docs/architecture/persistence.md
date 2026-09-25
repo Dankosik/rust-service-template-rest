@@ -157,10 +157,11 @@ With the HTTP idempotency profile retained, `crates/infra-idempotency-store`
 owns one profile table, `http_idempotency_records`, and every statement
 against it; no other crate names the table. `infra-postgres` owns the opaque
 `Tx`, transaction lifecycle, and provider-only `connection(&mut Tx)` access.
-`infra-http` re-exports the same inbound type for HTTP idempotency, so feature
-handlers and their provider adapters join `execute(work)` without gaining a
-provider dependency. The store arbitrates and persists within that one explicit
-READ COMMITTED transaction; a storable 2xx effect and record commit together.
+`infra_http::idempotency` re-exports the same type, so a feature's port can
+name it without a provider dependency, and the feature's provider adapter
+reaches the connection through `infra_postgres::connection`. The store
+arbitrates and persists within that one explicit READ COMMITTED transaction;
+a storable 2xx effect and record commit together.
 Adapters never issue transaction-control SQL or name the profile table.
 
 New records use native `http_idempotency_header_pair[]` values (`name text`,

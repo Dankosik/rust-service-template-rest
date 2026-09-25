@@ -12,8 +12,8 @@ mod identity;
 mod openapi;
 mod stored;
 
-pub use crate::Tx;
 pub use compose::{Activation, Composer};
 pub use declaration::AgreementError;
 pub use execute::{HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency};
+pub use infra_postgres::Tx;
 pub use stored::{MAX_STORED_BODY_BYTES, MAX_STORED_HEADER_BYTES};

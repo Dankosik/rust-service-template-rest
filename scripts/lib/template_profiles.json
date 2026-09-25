@@ -29,8 +29,6 @@
       "make/profile-postgres.mk"
     ],
     "markers": [
-      {"path": "crates/infra-http/Cargo.toml", "id": "http-postgres-dependency"},
-      {"path": "crates/infra-http/src/lib.rs", "id": "infra-http-postgres-tx"},
       {
         "path": "Cargo.toml",
         "id": "workspace-postgres-crates"
