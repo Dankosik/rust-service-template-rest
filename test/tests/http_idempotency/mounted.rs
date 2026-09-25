@@ -653,8 +653,12 @@ async fn authorized_without_idempotency(
         .into_response()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn repair_regression_authentication_and_scope_authorization_work_without_a_composer() {
+    // Keep the router and provider tasks on the test thread so this recorder
+    // cannot observe counters from concurrently running tests.
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
     let provider = Provider::start().await;
     let root_policy = serde_json::from_value(json!({
         "openapi": "3.1.0",
@@ -679,6 +683,7 @@ async fn repair_regression_authentication_and_scope_authorization_work_without_a
         },
     ));
     let mut responses = Vec::new();
+    let mut verification_counts = Vec::new();
     for authorization in [
         None,
         Some("Bearer token token"),
@@ -694,6 +699,24 @@ async fn repair_regression_authentication_and_scope_authorization_work_without_a
             });
         }
         responses.push(request.await);
+        let scrape = recorder.handle().render();
+        let count = |name: &str| -> u64 {
+            scrape
+                .lines()
+                .filter_map(|line| {
+                    let series = line.strip_prefix(name)?;
+                    if !series.starts_with('{') && !series.starts_with(' ') {
+                        return None;
+                    }
+                    let (_, value) = series.rsplit_once(' ')?;
+                    Some(value.parse::<u64>().expect("a whole verification counter"))
+                })
+                .sum()
+        };
+        verification_counts.push((
+            count("authn_verifications_total"),
+            count("authn_token_verifications_total"),
+        ));
     }
     provider.stop().await;
 
@@ -725,6 +748,11 @@ async fn repair_regression_authentication_and_scope_authorization_work_without_a
     }
     assert_eq!(responses[3].status_code(), StatusCode::OK);
     assert_eq!(responses[3].text(), "alice");
+    assert_eq!(
+        verification_counts,
+        [(1, 0), (2, 0), (3, 1), (4, 2)],
+        "each request records one HTTP outcome; only a parsed token reaches engine verification"
+    );
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

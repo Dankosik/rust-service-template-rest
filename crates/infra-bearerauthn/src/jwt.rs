@@ -991,7 +991,7 @@ mod tests {
         });
         let counters = diagnostics.counters.lock().unwrap();
         assert!(counters.iter().any(|(key, value)| {
-            key.name() == "authn_verifications_total"
+            key.name() == "authn_token_verifications_total"
                 && *value == 1
                 && key
                     .labels()

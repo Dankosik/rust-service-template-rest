@@ -36,8 +36,9 @@ token over the effective bound produces `431 authentication_oversize` when the
 middleware sees it. Invalid token evidence is `401 authentication_invalid`.
 Unavailable trust or provider capacity is `503 authentication_unavailable`, and
 a request that exhausts its own remaining budget is `504 request_timeout`.
-Problems and observability never include a token, identity, endpoint, key ID, or
-provider body.
+Caller Problems never include a token, identity, endpoint, key ID, or provider
+body. Operator diagnostics use closed reasons and the bounded safe preparation
+context described below.
 
 ## Configuration
 
@@ -119,9 +120,10 @@ or remembered outage.
 `provider_concurrency` is a nonzero provider limit and defaults to 32. The adapter rejects
 excess work immediately rather than queueing it. An inactive token or active
 evidence with wrong issuer, audience, expiry, or not-before is an invalid-token
-response. An active response requires typed issuer, audience, expiry, and a
-subject or client identity; malformed or unusable provider evidence is
-unavailable trust. Omitted `nbf` is allowed, while present `nbf: null` is
+response. Missing required issuer, audience, expiry, or subject/client identity
+also produces an invalid-token response. Wrongly typed supplied claims and
+malformed provider evidence are unavailable trust. Omitted `nbf` is allowed,
+while present `nbf: null` is
 unusable provider evidence.
 
 Credential components are form-encoded before Basic authentication. The request
@@ -132,6 +134,15 @@ an OAuth client library would not own these response and identity rules.
 <!-- template:end oidc-introspection:authentication-introspection -->
 
 ## Provider boundary and operations
+
+`authn_verifications_total` records one HTTP authentication outcome per
+protected request, including envelope rejection. `authn_token_verifications_total`
+records decisions that reach a verifier engine, with closed `mode`, `outcome`,
+and `reason` labels. Keep these counts separate when querying outcomes.
+Preparation errors identify their phase and reason with bounded safe configured
+issuer, audience and endpoint context; issuer mismatch includes a sanitized
+discovered issuer when safe. Tokens, credentials, raw key material, response
+bodies and unfiltered provider errors are never diagnostic fields.
 
 Provider calls use only operator-configured or issuer-validated discovery HTTPS
 destinations. Normal certificate and hostname verification stay enabled; private

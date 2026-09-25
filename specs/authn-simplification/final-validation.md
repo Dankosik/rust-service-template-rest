@@ -91,3 +91,28 @@ The whole-project marker inventory count is not an auth complexity target.
 Formatting is authored. The root will create a clean repaired commit before
 the existing HEAD-based projection checker runs. Repaired execution and the
 original reviewer's bounded delta disposition remain pending.
+
+## Projection and diagnostic seam
+
+The clean repaired candidate `3b05fa754cd9add8a11741ae69ead2e0633ce861`
+passed `python3 scripts/tests/template-profile-projections.py --source <checkout>`
+under the common validation lock: 208 selection/equality records and 22 expected
+refusals. Output is retained at `/tmp/authn-projections-3b05fa7.log`. This proves
+structural projections and harness parity, not the CI-owned runtime matrix.
+
+The original reviewer closed the ten original source findings except for a
+diagnostic integration regression: the adapter and HTTP layer both incremented
+the established HTTP outcome counter. The bounded repair preserves
+`authn_verifications_total` for one HTTP authentication outcome and names the
+engine-reason counter `authn_token_verifications_total`. The existing mounted
+TLS test now observes both recorder-visible counts for envelope rejection and
+completed verification. Documentation states their distinct scopes.
+
+This metric/test/documentation delta changes no generator, profile selection,
+dependency edge, or source marker, so the structural projection evidence remains
+reusable for that scope; it is not relabelled as a fresh exact-candidate run.
+The mounted count assertion and final review disposition remain pending.
+
+The selected remaining local plan also includes `make secret-scan
+BASE_REF=4edd184`: CONTRIBUTING's manifest/lock change rule requires this local
+changed-range scan. No full-history scan is selected.

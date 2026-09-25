@@ -297,10 +297,10 @@ pub(crate) fn record_verification(
         .map_or_else(|error| error.reason.label(), |_| "verified");
     let outcome = if result.is_ok() { "success" } else { "failure" };
     metrics::describe_counter!(
-        "authn_verifications_total",
-        "Authentication decisions by engine and closed reason"
+        "authn_token_verifications_total",
+        "Token verification decisions by engine and closed reason"
     );
-    metrics::counter!("authn_verifications_total", "mode" => mode, "outcome" => outcome, "reason" => reason).increment(1);
+    metrics::counter!("authn_token_verifications_total", "mode" => mode, "outcome" => outcome, "reason" => reason).increment(1);
     if result.is_err() {
         tracing::debug!(mode, reason, "authn_verification_failed");
     }
