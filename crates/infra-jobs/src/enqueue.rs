@@ -25,8 +25,6 @@ const ENQUEUE: &str = "INSERT INTO background_jobs (kind, payload, unique_key, n
      DO NOTHING \
      RETURNING id::text AS id";
 
-const SERVER_ENCODING: &str = "SELECT current_setting('server_encoding')";
-
 /// Delay and uniqueness for one enqueue.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EnqueueOptions<'a> {
@@ -76,9 +74,6 @@ pub enum EnqueueError {
         /// The serialized size that was refused.
         bytes: usize,
     },
-    /// The connected database does not use UTF8 encoding.
-    #[error("jobs require a UTF8 database encoding")]
-    UnsupportedEncoding,
     /// The statement failed; the caller's transaction is aborted.
     ///
     /// Classify with [`infra_postgres::retryable`].
@@ -107,13 +102,6 @@ pub async fn enqueue<K: JobKind>(
     options: EnqueueOptions<'_>,
 ) -> Result<Enqueued, EnqueueError> {
     let prepared = prepare(payload, options)?;
-    let encoding: String = sqlx::query_scalar(SERVER_ENCODING)
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(EnqueueError::Database)?;
-    if encoding != "UTF8" {
-        return Err(EnqueueError::UnsupportedEncoding);
-    }
     let (traceparent, tracestate) = trace_context::capture();
     let row = sqlx::query(ENQUEUE)
         .bind(K::NAME)

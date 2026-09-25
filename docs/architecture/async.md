@@ -39,12 +39,13 @@ exact UTF-8 key equality independent of the database default.
 
 Before database access, enqueue validates kind, key, delay, serialized size,
 and decoded NUL. It serializes once with `serde_json`; the validation detects
-unescaped `\\u0000` without a lossy value round trip. It then checks
-`current_setting('server_encoding')`; non-UTF-8 returns typed
-`UnsupportedEncoding`. Valid JSON and keys bind as text with explicit casts.
-Worker startup verifies UTF-8, both converted column types, and `trace_state`.
-The migration repeats UTF-8 validation, so an incompatible row is refused,
-never silently sanitized.
+unescaped `\\u0000` without a lossy value round trip. Valid JSON and keys bind
+as text with explicit casts, and the insert is enqueue's only statement.
+UTF-8 is a schema precondition, not a per-call query: a database's
+`server_encoding` is fixed at creation, the simplification migration refuses
+a non-UTF-8 database, and worker startup verifies UTF-8, both converted column
+types, and `trace_state`. The migration repeats UTF-8 validation, so an
+incompatible row is refused, never silently sanitized.
 
 `enqueue` remains the only insert and uses the caller's open
 `&mut PgConnection` without transaction-control SQL or another connection.
@@ -71,15 +72,22 @@ extension, upkeep task, or claim readback. A failed or unknown claim commit
 dispatches no returned rows and leaves any committed claim to expire. A claim
 acknowledged past its local deadline is likewise not dispatched.
 
-Claims discover candidate pending and expired running IDs without locks, then
-materialize the globally earliest at most `batch` IDs before the sole
-`FOR UPDATE ... SKIP LOCKED` query. That query rechecks eligibility and the
-update also guards ID, generation, and live eligibility. At most `batch` IDs can
-reach any lock attempt, including candidates later rejected by recheck. This
-does not promise constant scan cost: an indexed expired range can sort.
-Contention can underfill a batch and a persistently locked early job can delay
-later work; normal polling retries it. There is deliberately no overfetch,
-cursor, quota, priority, fairness, or execution-order protocol.
+Claims lock while they scan, the canonical `SKIP LOCKED` queue form: each
+registered kind's due pending rows and expired running rows are read in
+`not_before, id` order by a lateral scan that takes `FOR UPDATE SKIP LOCKED`
+itself, at most `batch` per kind and branch. A row another session holds is
+skipped and the scan moves to the next one, so concurrent workers take
+disjoint jobs without underfilling their free slots, and a locked early job
+never blocks later work. The statement then updates the globally earliest at
+most `batch` of those rows; the update rechecks live eligibility. Candidates
+it locked but did not pick stay locked only until the short claim transaction
+commits. Choosing IDs before locking them was rejected: concurrent workers
+chose the same IDs, the losers claimed nothing until the next poll, and a
+one-slot worker stalled behind a locked earliest job. Measured on PostgreSQL
+18.6 with 20 ms jobs, eight one-slot workers claimed 42 jobs/s that way and
+271 jobs/s locking while scanning. This does not promise constant scan cost:
+an indexed expired range can sort. There is deliberately no cursor, quota,
+priority, fairness, or execution-order protocol.
 
 Each admitted supervisor owns one claim, slot, immutable deadline, handler
 join handle, and intended outcome until cleanup ends. It captures the outcome
@@ -111,7 +119,10 @@ retry, failure, or release transition. Do not blindly replay the closure.
 same checked delay domain and return `Result<_, InvalidDelay>`. Retry-after
 spends an attempt and has no jitter. Snooze wins over exhaustion, returns the
 row to pending at database time, clears its claim, and refunds exactly one
-attempt; its fenced SQL cannot refund again after the first transition.
+attempt; its fenced SQL cannot refund again after the first transition. A
+handler cancelled by a forced drain is released: the unit is refunded the same
+way, but `not_before` is unchanged, so the job is due at once and keeps its
+place in claim order rather than queueing behind the backlog.
 
 ## Observation and retention
 
@@ -162,7 +173,7 @@ design.
 
 ## Decisions recorded here
 
-The durable decisions are the static lease, supervisor-owned outcome, bounded
-selected lock footprint, JSONB/text conversion, capped fresh samples, and the
-deferred lifecycle extraction recorded above. They remain active after the
+The durable decisions are the static lease, supervisor-owned outcome,
+lock-while-scanning claims, JSONB/text conversion, capped fresh samples, and
+the deferred lifecycle extraction recorded above. They remain active after the
 planning bundle is removed.

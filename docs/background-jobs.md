@@ -43,12 +43,19 @@ UTF-8 string with no control characters. A live unique key returns
 `Enqueued::Duplicate` and leaves the transaction usable.
 
 Before sending SQL, enqueue validates kind, key, delay, JSON size (256 KiB),
-and decoded NUL. It serializes once with `serde_json`, rejects unescaped
-`\\u0000`, and requires `server_encoding = UTF8`; a non-UTF-8 session returns
-`EnqueueError::UnsupportedEncoding`. Valid payload and key bind as text with
-explicit JSONB/text casts. The typed validation failures include `InvalidKind`,
-`InvalidUniqueKey`, `InvalidDelay`, `PayloadContainsNul`, `Serialize`, and `PayloadTooLarge`.
-Database errors abort the caller transaction in the ordinary PostgreSQL way.
+and decoded NUL. It serializes once with `serde_json` and rejects a `\u0000`
+escape (a NUL character), which JSONB cannot store. Valid payload and key
+bind as text with explicit JSONB/text casts, and the insert is the only
+statement enqueue sends. UTF-8 is a schema precondition rather than a
+per-call check: the simplification migration refuses a non-UTF-8 database,
+and the worker's startup check verifies it. The typed validation failures
+include `InvalidKind`, `InvalidUniqueKey`, `InvalidDelay`,
+`PayloadContainsNul`, `Serialize`, and `PayloadTooLarge`. Database errors
+abort the caller transaction in the ordinary PostgreSQL way.
+
+A payload carries identifiers, not secrets or copies of business data. It is
+stored as queryable JSONB, kept with terminal history (24 hours, or seven
+days after a failure), and readable by anyone who can read the table.
 
 ```rust,ignore
 infra_postgres::in_tx(pool, async |conn| {
@@ -88,6 +95,22 @@ A `Handler<K>` returns `Result<(), JobError>`. `Ok(())` requests ordinary
 completion; `JobError::retryable(error)` and `JobError::permanent(error)` keep
 their existing meanings. A retryable error, panic, timeout, or decode failure
 uses the persisted retry policy; a permanent error becomes terminal.
+
+`job.cancellation()` fires at the kind's timeout and when a forced drain
+cancels the attempt. The handler task is also aborted, which takes effect at
+its next `.await`. Work started with `tokio::task::spawn_blocking` is not
+stopped, so check the token inside blocking loops and expect the job to run
+again while that work may still be running.
+
+Reach PostgreSQL through `job.pool()`, holding at most one pooled connection
+at a time: the pool has one connection per attempt slot plus two for the
+engine and readiness (`jobs.max_workers + 2`), so a handler that runs a pool
+query inside its own open transaction takes a connection another slot or the
+engine's outcome write needs. The service's session budgets apply:
+`statement_timeout` and `idle_in_transaction_session_timeout` are 8 s and a
+pool acquire waits 3 s. A handler that needs a longer statement raises the
+limit for its own transaction only, with `SET LOCAL statement_timeout = '...'`
+as that transaction's first statement.
 
 For an effect wholly inside a supplied PostgreSQL transaction, call
 `job.complete_in_tx(conn).await?` inside that same transaction closure. The
@@ -187,7 +210,9 @@ lease is fixed at `statement_timestamp() + timeout + 60 seconds`; the local
 deadline uses the same whole-microsecond timeout and is two seconds earlier.
 There are no renewal, heartbeat, upkeep, or claim-attribution reads. A failed
 or unknown claim acknowledgement never dispatches the returned row, and any
-committed row recovers when its original lease expires.
+committed row recovers when its original lease expires. Claims lock rows while
+they scan with `SKIP LOCKED`, so concurrent workers take disjoint jobs and a
+row another session holds is skipped rather than stalling the claim.
 
 One supervisor owns each admitted claim, slot, handler join, deadline, and
 intended queue transition through cleanup. It records a known handler result
@@ -201,7 +226,9 @@ expiry.
 
 On the first signal the worker disables readiness and stops claiming, then
 drains. A forced drain calls `Started::cancel_and_finish` for the same two
-second cleanup stage. `attempts_finished` reports known local results,
+second cleanup stage. A handler it cancels is released: the attempt is
+refunded and `not_before` is unchanged, so the job is due at once and keeps
+its place in claim order. `attempts_finished` reports known local results,
 cancelled handlers, acknowledged releases, and uncertainty without claiming
 that a zero-row write released a job. The tail remains listeners 2 s,
 background join 3 s, pool close 5 s, and telemetry flush 5 s. A successful
@@ -222,12 +249,37 @@ The worker extracts through the installed propagator and creates a span link,
 never a remote parent. Empty trace-state is absent; malformed, overbound, or
 control-bearing context produces an unlinked attempt. No baggage is stored.
 
+Each worker exposes these counters and the histogram on its `/metrics`
+listener:
+
+| Instrument | Labels | Meaning |
+| --- | --- | --- |
+| `jobs_attempts_total` | `kind`, `outcome` | Handler results as the worker observed them: `completed`, `retry`, `timeout`, `exhausted`, `permanent`, `snoozed`, `cancelled`, `transaction_unknown`. |
+| `jobs_persistence_total` | `kind`, `disposition` | Outcome writes: `applied`; `unchanged`, a zero-row write, which is normal after `complete_in_tx` and otherwise means a newer claim owns the row; `unknown`, left to lease expiry and logged at `warn`. |
+| `jobs_attempt_duration_seconds` | `kind` | Handler run time. |
+| `jobs_worker_operation_failures_total` | `operation` | Failed `claim`, `record`, `release`, `retention`, or `sample` statements. |
+
+Records never carry the payload: `job_failed` (`warn`), `job_attempt_failed`
+(`info`), `job_attempt_finished` (`info`, snooze and cancellation),
+`job_transaction_unknown` (`warn`), `job_attempt_completed` and
+`job_persistence_finished` (`debug`, or `warn` when unknown), and
+`jobs_operation_failed` / `jobs_operation_recovered` on the first failure
+and the first recovery of each operation.
+
 Every worker samples only registered kinds every ten seconds. For each kind and
 `available`, `scheduled`, or `running` state, it counts at most 1001 indexed
 rows, publishes a value capped at 1000 and a censoring gauge, and publishes the
 constant cap in `jobs_live_jobs_sample_cap`. Oldest available age uses an
 independent indexed due-row lookup. These samples are per-process and must not
-be summed across replicas; unknown kinds are not aggregated.
+be summed across replicas; unknown kinds are not aggregated. Live jobs of a
+kind no worker registers, for example after a rename, appear only in SQL:
+
+```sql
+SELECT kind, state, count(*) FROM background_jobs
+WHERE state IN ('pending', 'running')
+  AND kind <> ALL (ARRAY['widgets.welcome'])  -- the registered kinds
+GROUP BY kind, state;
+```
 
 Before a first successful sample, backlog, age, and censoring are NaN,
 timestamp is 0, and success is 0. A successful sample publishes its database

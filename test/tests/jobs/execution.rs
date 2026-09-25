@@ -477,8 +477,8 @@ async fn x1_unknown_committed_claim_never_dispatches_a_handler(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn x1_locked_earliest_candidate_does_not_duplicate_or_block_another_kind(pool: PgPool) {
-    let jobs = open(&pool, 2).await;
+async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) {
+    let jobs = open(&pool, 1).await;
     let locker = open(&pool, 1).await;
     prepare(&jobs).await;
     sqlx::query("CREATE TABLE stranded_attempts (job_id uuid NOT NULL)")
@@ -503,14 +503,20 @@ async fn x1_locked_earliest_candidate_does_not_duplicate_or_block_another_kind(p
         .execute(&mut *hold)
         .await
         .expect("the earliest candidate is locked");
-    let run = start(&jobs, locked_multi_kind_registry(), 2);
-    until("one unlocked kind is dispatched", super::WAIT, async || {
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM stranded_attempts")
-            .fetch_one(&jobs)
-            .await
-            .expect("second-kind attempt count");
-        (count == 1).then_some(())
-    })
+    // One slot: a claim that chose its ids before locking would pick only the
+    // locked earliest job and claim nothing while the lock is held.
+    let run = start(&jobs, locked_multi_kind_registry(), 1);
+    until(
+        "the next unlocked job is dispatched",
+        super::WAIT,
+        async || {
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM stranded_attempts")
+                .fetch_one(&jobs)
+                .await
+                .expect("second-kind attempt count");
+            (count == 1).then_some(())
+        },
+    )
     .await;
     let locked_view = load(&jobs, &locked).await;
     assert_eq!(locked_view.state, "pending");
@@ -520,7 +526,7 @@ async fn x1_locked_earliest_candidate_does_not_duplicate_or_block_another_kind(p
         .fetch_one(&jobs)
         .await
         .expect("second-kind attempt count");
-    assert_eq!(dispatched, 1, "one selected slot was excluded by the lock");
+    assert_eq!(dispatched, 1, "the only slot runs the next unlocked job");
 
     run.started.stop_claiming();
     hold.commit().await.expect("the candidate lock releases");
@@ -1741,15 +1747,13 @@ async fn w4_x7_cancel_and_finish_returns_the_budget_unit(pool: PgPool) {
     prepare(&jobs).await;
     let id = enqueue_one(&jobs, ProbeAction::WaitForCancellation).await;
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
-    until("the claim is in flight", super::WAIT, async || {
+    let claimed = until("the claim is in flight", super::WAIT, async || {
         let view = load(&jobs, &id).await;
         (view.state == "running" && run.started.in_flight() == 1).then_some(view)
     })
     .await;
     run.started.stop_claiming();
-    let before_release = db_now_us(&jobs).await;
     let end = run.started.cancel_and_finish(RELEASE_BUDGET).await;
-    let after_release = db_now_us(&jobs).await;
     assert_eq!(
         end,
         DrainEnd {
@@ -1764,7 +1768,10 @@ async fn w4_x7_cancel_and_finish_returns_the_budget_unit(pool: PgPool) {
     assert_eq!(released.state, "pending");
     assert_eq!(released.attempts, 0);
     assert!(released.claim_cleared);
-    assert!((before_release..=after_release).contains(&released.not_before_us));
+    assert_eq!(
+        released.not_before_us, claimed.not_before_us,
+        "a released job keeps its place in claim order"
+    );
     assert!(released.failure_reason.is_none());
     join(run, &[&jobs]).await;
 }

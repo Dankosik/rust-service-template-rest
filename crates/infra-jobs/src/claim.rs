@@ -19,6 +19,11 @@ use crate::engine::{
 use crate::kind::JobId;
 
 /// Claim due pending jobs and expired running jobs, up to the free slots.
+///
+/// Each per-kind scan locks rows while it reads them (`SKIP LOCKED` inside the
+/// lateral), so a row another session holds is skipped and the scan moves on.
+/// Choosing ids first and locking them afterwards hands concurrent workers the
+/// same few ids: the losers claim nothing until the next poll.
 const CLAIM: &str = "WITH policy AS ( \
          SELECT policy.kind, policy.max_attempts, policy.timeout_micros \
          FROM unnest($1::text[], $2::smallint[], $3::bigint[]) \
@@ -35,6 +40,7 @@ const CLAIM: &str = "WITH policy AS ( \
                AND job.not_before <= statement_timestamp() \
              ORDER BY job.not_before, job.id \
              LIMIT $4 \
+             FOR UPDATE SKIP LOCKED \
          ) AS candidate \
          UNION ALL \
          SELECT candidate.id, candidate.not_before \
@@ -47,44 +53,36 @@ const CLAIM: &str = "WITH policy AS ( \
                AND job.claim_expires_at <= statement_timestamp() \
              ORDER BY job.not_before, job.id \
              LIMIT $4 \
+             FOR UPDATE SKIP LOCKED \
          ) AS candidate \
      ), \
-     selected AS MATERIALIZED ( \
-         SELECT id \
+     picked AS ( \
+         SELECT candidates.id \
          FROM candidates \
-         ORDER BY not_before, id \
+         ORDER BY candidates.not_before, candidates.id \
          LIMIT $4 \
-     ), \
-     locked AS ( \
-         SELECT job.id, job.claim_generation, policy.max_attempts, policy.timeout_micros \
-         FROM selected \
-         JOIN background_jobs AS job ON job.id = selected.id \
-         JOIN policy ON policy.kind = job.kind \
-         WHERE (job.state = 'pending' AND job.not_before <= statement_timestamp()) \
-            OR (job.state = 'running' AND job.claim_expires_at <= statement_timestamp()) \
-         FOR UPDATE OF job SKIP LOCKED \
      ) \
      UPDATE background_jobs AS job \
-     SET state = CASE WHEN job.attempts >= locked.max_attempts THEN 'failed' ELSE 'running' END, \
-         failure_reason = CASE WHEN job.attempts >= locked.max_attempts THEN 'exhausted' END, \
-         finished_at = CASE WHEN job.attempts >= locked.max_attempts THEN statement_timestamp() END, \
-         claim_expires_at = CASE WHEN job.attempts >= locked.max_attempts THEN NULL \
+     SET state = CASE WHEN job.attempts >= policy.max_attempts THEN 'failed' ELSE 'running' END, \
+         failure_reason = CASE WHEN job.attempts >= policy.max_attempts THEN 'exhausted' END, \
+         finished_at = CASE WHEN job.attempts >= policy.max_attempts THEN statement_timestamp() END, \
+         claim_expires_at = CASE WHEN job.attempts >= policy.max_attempts THEN NULL \
                                  ELSE statement_timestamp() \
-                                      + locked.timeout_micros * interval '1 microsecond' \
+                                      + policy.timeout_micros * interval '1 microsecond' \
                                       + interval '60 seconds' END, \
-         attempts = CASE WHEN job.attempts >= locked.max_attempts THEN job.attempts \
+         attempts = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempts \
                          ELSE job.attempts + 1 END, \
-         error_summary = CASE WHEN job.attempts >= locked.max_attempts \
+         error_summary = CASE WHEN job.attempts >= policy.max_attempts \
                               THEN COALESCE(job.error_summary, 'attempt budget spent') \
                               ELSE job.error_summary END, \
          claim_generation = nextval('background_jobs_claim_generation') \
-     FROM locked \
-     WHERE job.id = locked.id \
-       AND job.claim_generation = locked.claim_generation \
+     FROM policy \
+     WHERE job.id = ANY (ARRAY(SELECT picked.id FROM picked)) \
+       AND policy.kind = job.kind \
        AND ((job.state = 'pending' AND job.not_before <= statement_timestamp()) \
             OR (job.state = 'running' AND job.claim_expires_at <= statement_timestamp())) \
      RETURNING job.id::text AS id, job.kind, job.state, job.attempts, job.claim_generation, \
-               locked.timeout_micros, \
+               policy.timeout_micros, \
                CASE WHEN job.state = 'running' THEN job.payload::text END AS payload, \
                job.trace_context, job.trace_state, job.error_summary, \
                CASE WHEN job.state = 'running' THEN random() END AS jitter";

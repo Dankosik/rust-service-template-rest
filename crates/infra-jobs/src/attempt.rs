@@ -43,9 +43,14 @@ const FAIL: &str = "UPDATE background_jobs \
      SET state = 'failed', failure_reason = $3, finished_at = statement_timestamp(), \
          claim_expires_at = NULL, error_summary = $4 \
      WHERE id = $1::uuid AND claim_generation = $2 AND state = 'running'";
-const REFUND: &str = "UPDATE background_jobs \
+const SNOOZE: &str = "UPDATE background_jobs \
      SET state = 'pending', not_before = statement_timestamp() + $3, claim_expires_at = NULL, \
          attempts = attempts - 1 \
+     WHERE id = $1::uuid AND claim_generation = $2 AND state = 'running'";
+/// A cancelled attempt gives its unit back and keeps `not_before`, so the job
+/// keeps its place in claim order instead of queueing behind the backlog.
+const RELEASE: &str = "UPDATE background_jobs \
+     SET state = 'pending', claim_expires_at = NULL, attempts = attempts - 1 \
      WHERE id = $1::uuid AND claim_generation = $2 AND state = 'running'";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -295,9 +300,12 @@ async fn persist(shared: &Shared, attempt: &AttemptId, intended: &Intended, loca
         match result {
             Some(Ok(rows)) => {
                 observe_recovery(shared, operation);
-                persistence(
-                    attempt.kind,
-                    if rows == 1 { "applied" } else { "unchanged" },
+                let disposition = if rows == 1 { "applied" } else { "unchanged" };
+                persistence(attempt.kind, disposition);
+                tracing::debug!(
+                    job.kind = attempt.kind,
+                    disposition,
+                    "job_persistence_finished"
                 );
                 if rows == 1 && intended.outcome == Outcome::Cancelled {
                     shared.counters.released.fetch_add(1, Ordering::Relaxed);
@@ -327,12 +335,18 @@ fn persistence(kind: &'static str, disposition: &'static str) {
     );
     metrics::counter!(PERSISTENCE_METRIC, "kind" => kind, "disposition" => disposition)
         .increment(1);
-    tracing::info!(job.kind = kind, disposition, "job_persistence_finished");
 }
 
+/// The attempt's queue transition is not known to have landed; lease expiry
+/// recovers the row.
 fn uncertain(shared: &Shared, attempt: &AttemptId) {
     shared.counters.uncertain.fetch_add(1, Ordering::Relaxed);
     persistence(attempt.kind, "unknown");
+    tracing::warn!(
+        job.kind = attempt.kind,
+        disposition = "unknown",
+        "job_persistence_finished"
+    );
 }
 
 async fn send_outcome(
@@ -375,9 +389,8 @@ async fn execute(
             .bind(generation)
             .bind(delay)
             .bind(intended.summary.as_deref().unwrap_or("")),
-        Outcome::Snoozed | Outcome::Cancelled => {
-            sqlx::query(REFUND).bind(id).bind(generation).bind(delay)
-        }
+        Outcome::Snoozed => sqlx::query(SNOOZE).bind(id).bind(generation).bind(delay),
+        Outcome::Cancelled => sqlx::query(RELEASE).bind(id).bind(generation),
         Outcome::Exhausted | Outcome::Permanent => sqlx::query(FAIL)
             .bind(id)
             .bind(generation)

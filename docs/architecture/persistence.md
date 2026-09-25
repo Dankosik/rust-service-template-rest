@@ -182,10 +182,11 @@ against it; no other crate names the table. Enqueue (`infra_jobs::enqueue`)
 runs on the caller's `&mut PgConnection` inside the caller's transaction,
 under the caller's isolation level, with no transaction-control SQL; the job
 commits or rolls back with the caller's write under the commit-outcome
-policy this document records. It rejects a non-UTF-8 session before sending
-JSONB/text data. Every worker statement runs in its own explicit `READ
-COMMITTED` transaction through `in_tx_with`, so a stricter server
-default cannot turn `SKIP LOCKED` claims into serialization failures.
+policy this document records. The insert is its only statement: UTF-8 is a
+schema precondition that the simplification migration enforces and the
+worker's startup check verifies. Every worker statement runs in its own
+explicit `READ COMMITTED` transaction through `in_tx_with`, so a stricter
+server default cannot turn `SKIP LOCKED` claims into serialization failures.
 
 The worker's sessions carry a derived `application_name` of the form
 `{service_name}-jobs-worker`, with the service name cut to at most 51 bytes
