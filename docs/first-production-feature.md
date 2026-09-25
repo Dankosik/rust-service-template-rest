@@ -329,3 +329,7 @@ operational question ([Runtime Lifecycle](architecture/runtime-lifecycle.md),
 - Persistence, an outbound dependency, or a background task: their stages
   add the adapter crate, the readiness probe, the shutdown stage, and the
   container-backed proof.
+<!-- template:begin jobs:docs-first-feature-jobs -->
+- Durable follow-up work that must outlive the request is a job kind enqueued
+  in the write's own transaction; see [Background jobs](background-jobs.md).
+<!-- template:end jobs:docs-first-feature-jobs -->

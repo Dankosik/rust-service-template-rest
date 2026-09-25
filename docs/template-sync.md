@@ -1,7 +1,8 @@
 # Initialization and portable updates
 
 Initialization gives a clean template checkout its service identity and selects
-the existing database, authentication, outbound HTTP, and agent-harness packs. Later synchronization adopts
+the existing database, authentication, outbound HTTP, HTTP idempotency,
+background jobs, and agent-harness packs. Later synchronization adopts
 portable tooling and instructions from a committed source checkout. The
 [ownership manifest](../template-owned.paths) is the full-sync copy authority;
 the service keeps its application, configuration and local policies.
@@ -66,6 +67,21 @@ write, naming the unmet requirement. `none` removes the pack. Selection
 supplies no retention value or automatic request; the boundary stays inert
 until an operation opts in and the runtime retention is configured.
 <!-- template:end http-idempotency:docs-template-init-http-idempotency -->
+<!-- template:begin jobs:docs-template-init-jobs -->
+`JOBS` defaults to `none` and accepts `none` or `postgres`; the direct entry
+takes `--jobs`. `postgres` retains the [jobs guide](background-jobs.md), the
+`infra-jobs` and `jobs-worker` crates, the `jobs` configuration section, the
+migration, the jobs tests and the test-only fixture binary, the `/jobs-worker`
+image entrypoint, and the architecture leaf. It requires `DATABASE=postgres`
+and combines with every `AUTHN`, `OUTBOUND_HTTP`, and `HTTP_IDEMPOTENCY`
+choice; `JOBS=postgres` without that database is refused before any target
+write with `JOBS=postgres requires DATABASE=postgres`, and an unknown value
+with `JOBS is unsupported`. `none` removes the pack. `JOBS` is a common
+environment variable name (for example a parallelism setting): an ambient
+value such as `JOBS=8` makes `make template-init` refuse with
+`JOBS is unsupported`, so it must be unset or a valid choice. Selection
+starts no worker; `/jobs-worker` runs only where it is deployed.
+<!-- template:end jobs:docs-template-init-jobs -->
 
 
 Service names are lowercase ASCII, start with a letter, use single hyphens
@@ -100,12 +116,13 @@ and succeeds without rewriting ordinary service edits. A different selection,
 incomplete record, malformed record, or inconsistent structure refuses. Profile
 migration of an established service is outside this command's scope.
 New schema-1 records contain exactly the `database`, `authn`, `outbound_http`,
-`http_idempotency`, and `agent_harness` profile fields. The admitted
+`http_idempotency`, `jobs`, and `agent_harness` profile fields. The admitted
 historical profile shapes are `database` + `agent_harness`, `database` +
-`authn` + `agent_harness`, and `database` + `authn` + `outbound_http` +
-`agent_harness`; missing selections in those shapes mean `none`. Matching
-historical replay preserves the original lock bytes. Partial or unknown
-shapes refuse.
+`authn` + `agent_harness`, `database` + `authn` + `outbound_http` +
+`agent_harness`, and `database` + `authn` + `outbound_http` +
+`http_idempotency` + `agent_harness`; missing selections in those shapes mean
+`none`. Matching historical replay preserves the original lock bytes. Partial
+or unknown shapes refuse.
 
 
 <!-- template:begin authn:docs-template-init-authn-lock -->
@@ -161,6 +178,10 @@ Portable sync cannot restore a pruned idempotency pack, its schema
 migration, configuration section, or profile-marked guide. The target lock
 remains authoritative.
 <!-- template:end http-idempotency:docs-template-init-http-idempotency-sync -->
+<!-- template:begin jobs:docs-template-init-jobs-sync -->
+Portable sync cannot restore a pruned jobs pack, its migration, its
+configuration section, or its guide. The target lock remains authoritative.
+<!-- template:end jobs:docs-template-init-jobs-sync -->
 
 
 Application/Cargo sources, configuration, secrets, OpenAPI, migrations, README,
@@ -211,25 +232,28 @@ no automatic rollback, reset, retry or destructive resume.
 Use the service's [command policy](build-test-and-development-commands.md) and
 [validation router](validation-routing.md) for ordinary development.
 The source template additionally owns `make template-owned-purity-check` and
-`ALLOW_FULL=1 make template-init-check`. It checks all 128 canonical profile
-and harness projections, then initializes, builds and tests sixteen core
+`ALLOW_FULL=1 make template-init-check`. It checks all 208 canonical profile
+and harness projections, then initializes, builds and tests twenty-six core
 representatives: one per DATABASE × AUTHN × OUTBOUND_HTTP × HTTP_IDEMPOTENCY
-runtime graph, of which graphs 13-16 also run their retained idempotency
-database suite. Exact non-harness tree equality proves that the other
-harness choices do not change runtime or contract-generation inputs.
+× JOBS runtime graph, of which graphs 13-16 and 23-26 also run their retained
+idempotency database suite and graphs 17-26 run the jobs suite (in 23-26 with
+its joint module), each in one `test-integration-db.sh` call. Exact
+non-harness tree equality proves that the other harness choices do not change
+runtime or contract-generation inputs.
 Quality, dependency, image and database gates retain their own scopes; the
 initializer command does not repeat the full aggregate per harness. Every
 initialization in one run shares one absolute Cargo target (an explicit
 `CARGO_TARGET_DIR`, or the run's private one), so the locked dependency graph
-compiles once. CI runs the check as four parallel parts: the source suites
-with the projections, graphs 1-6, graphs 7-12, and graphs 13-16, the last of
-which also needs Docker for its database suite. `make verify` leaves it to
+compiles once. CI runs the check as eight parallel parts: the source suites
+with the projections, graphs 1-6, graphs 7-12, graphs 13-16, graphs 17-19,
+graphs 20-22, graphs 23-24, and graphs 25-26, the last five of which also
+need Docker for their database suites. `make verify` leaves it to
 CI unless `ALLOW_FULL=1`. A change to projected text alone runs only
 `make template-init-projections`, locally and in CI.
 
 `bash scripts/ci/template-init-check.sh --projections-only` records the
-focused 128-projection proof without Cargo or full/heavy admission. It does
-not claim 128 public-CLI initializations or builds. `--source-checks` keeps
+focused 208-projection proof without Cargo or full/heavy admission. It does
+not claim 208 public-CLI initializations or builds. `--source-checks` keeps
 the source safety/purity/sync route. The public initializer always performs
 its complete locked metadata, formatting and OpenAPI preflight before
 changing a target; neither focused proof mode changes that command. These

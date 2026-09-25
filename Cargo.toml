@@ -33,6 +33,10 @@ migrate = { path = "crates/migrate" }
 # template:begin http-idempotency:workspace-http-idempotency-store
 infra-idempotency-store = { path = "crates/infra-idempotency-store" }
 # template:end http-idempotency:workspace-http-idempotency-store
+# template:begin jobs:workspace-jobs-crates
+infra-jobs = { path = "crates/infra-jobs" }
+jobs-worker = { path = "crates/jobs-worker" }
+# template:end jobs:workspace-jobs-crates
 
 # template:begin postgres:workspace-postgres-dependencies
 # Persistence (docs/architecture/persistence.md). `macros` only where

@@ -95,6 +95,7 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("authn")
     lock["profiles"].pop("outbound_http", None)
     lock["profiles"].pop("http_idempotency", None)
+    lock["profiles"].pop("jobs", None)
     lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
@@ -108,6 +109,7 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     lock["profiles"].pop("outbound_http", None)
     lock["profiles"].pop("http_idempotency", None)
+    lock["profiles"].pop("jobs", None)
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -147,7 +149,8 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
 
 
 def assert_profile_output(
-    source: Path, target: Path, authn: str, outbound_http: str, http_idempotency: str = "none"
+    source: Path, target: Path, authn: str, outbound_http: str, http_idempotency: str = "none",
+    jobs: str = "none",
 ) -> None:
     for profile, selected in (("authn", authn != "none"), ("oidc-jwt", authn == "oidc-jwt"), ("oidc-introspection", authn == "oidc-introspection")):
         assert_profile_pack(source, target, profile, selected)
@@ -158,6 +161,8 @@ def assert_profile_output(
         raise AssertionError(f"sync canary lock did not record outbound_http={outbound_http}")
     if lock["profiles"].get("http_idempotency") != http_idempotency:
         raise AssertionError(f"sync canary lock did not record http_idempotency={http_idempotency}")
+    if lock["profiles"].get("jobs") != jobs:
+        raise AssertionError(f"sync canary lock did not record jobs={jobs}")
     assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
     shared_selected = authn != "none" or outbound_http == "bounded"
     assert_profile_pack(source, target, "egress-dns", shared_selected)
@@ -166,16 +171,23 @@ def assert_profile_output(
     assert_profile_pack(
         source, target, "http-idempotency-mounted", http_idempotency == "postgres" and authn == "oidc-introspection"
     )
+    assert_profile_pack(source, target, "jobs", jobs == "postgres")
+    assert_profile_pack(
+        source, target, "jobs-http-idempotency", jobs == "postgres" and http_idempotency == "postgres"
+    )
 
 
 def initialize(
     source: Path, target: Path, authn: str | None, outbound_http: str | None = None,
     http_idempotency: str | None = None,
+    *,
+    database: str = "none",
+    jobs: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [
         "bash", os.fspath(source / "scripts/init-module.sh"), "--repo", os.fspath(target),
         "--service-name", "canary-api", "--repository", "https://github.com/example/canary-api",
-        "--description", "Canary API", "--codeowner", "@example/platform", "--database", "none",
+        "--description", "Canary API", "--codeowner", "@example/platform", "--database", database,
         "--agent-harness", "claude",
     ]
     if authn is not None:
@@ -184,6 +196,8 @@ def initialize(
         command.extend(("--outbound-http", outbound_http))
     if http_idempotency is not None:
         command.extend(("--http-idempotency", http_idempotency))
+    if jobs is not None:
+        command.extend(("--jobs", jobs))
     return run(command, cwd=source)
 
 
@@ -229,6 +243,34 @@ def check(source: Path) -> None:
                 mismatch = initialize(source, profile_target, "oidc-jwt")
                 if mismatch.returncode == 0 or tree_state(profile_target) != before:
                     raise AssertionError("historical none sync canary accepted an authn profile migration")
+        # A DATABASE=postgres JOBS=none service keeps its migrations, and a
+        # full portable sync from a source that retains the jobs pack restores
+        # none of it.
+        jobs_none = work / "postgres-jobs-none"
+        clone(source, jobs_none)
+        jobs_none_initialized = initialize(source, jobs_none, None, database="postgres", jobs="none")
+        if jobs_none_initialized.returncode:
+            raise AssertionError(jobs_none_initialized.stderr)
+        assert_profile_output(source, jobs_none, "none", "none", jobs="none")
+        commit(jobs_none, "initialize postgres without jobs")
+        jobs_owned = jobs_none / "scripts/template-sync.sh"
+        jobs_owned.write_bytes(jobs_owned.read_bytes() + b"\n# committed full-sync drift\n")
+        commit_paths(jobs_none, "committed full sync drift", "scripts/template-sync.sh")
+        jobs_apply = sync(source, jobs_none, "--apply")
+        if jobs_apply.returncode:
+            raise AssertionError(f"postgres jobs-none full sync apply failed: {jobs_apply.stderr}")
+        if not (jobs_none / "migrations").is_dir():
+            raise AssertionError("postgres jobs-none sync removed migrations/")
+        for restored in (
+            "crates/infra-jobs",
+            "migrations/20260924000001_create_background_jobs.sql",
+            "crates/config/src/jobs.rs",
+            "docs/background-jobs.md",
+        ):
+            if (jobs_none / restored).exists() or (jobs_none / restored).is_symlink():
+                raise AssertionError(f"postgres jobs-none sync restored {restored}")
+        assert_profile_pack(source, jobs_none, "jobs", False)
+        assert_profile_pack(source, jobs_none, "jobs-http-idempotency", False)
         skill = target / ".agents/skills/local-service-skill"
         skill.mkdir(parents=True)
         (skill / ".service-owned").write_text("", encoding="utf-8")

@@ -23,6 +23,10 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-owner -->
 | `infra-idempotency-store` (`crates/infra-idempotency-store`) | The PostgreSQL idempotency record store: arbitration, the execution transaction, readback, startup check, and cleanup ([guide](../http-idempotency.md)). | HTTP types, Problems, business rules, readiness registration, or request routing. |
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-owner -->
+<!-- template:begin jobs:docs-boundaries-jobs-owners -->
+| `infra-jobs` (`crates/infra-jobs`) | The job table's statements, enqueue, the job-kind and handler contracts (`JobKind`, `Handler`, `Kinds`), and the engine ([guide](../background-jobs.md)). | Concrete kinds or handlers (they live in adapter crates), configuration, process lifecycle, or business rules. |
+| `jobs-worker` (`crates/jobs-worker`) | The worker's composition root and binary. | Engine mechanics, feature behavior. |
+<!-- template:end jobs:docs-boundaries-jobs-owners -->
 
 | `integration-tests` (`test/`) | Executable utility recipes and any selected profile proof. | Anything a binary runs; the service's process tests stay in `crates/service/tests/`. |
 | `crates/<feature>` (none yet) | Use cases, business types, invariants, domain errors, and the feature's `OpenApiRouter` with its handlers. | Transport policy, provider drivers, runtime configuration, process lifecycle. |
@@ -44,6 +48,14 @@ Its database-backed tests use the `integration-tests` package's opt-in
 `integration` feature and owned migration fixtures.
 
 <!-- template:end postgres:docs-boundaries-postgres-owners -->
+<!-- template:begin jobs:docs-boundaries-jobs-tests -->
+`integration-tests` also owns the jobs suites and one test-only binary,
+`jobs-worker-fixture`, which runs the worker composition with a test-only
+kind for the process proof and which no image ships. The owners table's
+"Anything a binary runs" concerns shipped binaries; the shipped worker's
+process tests stay in `crates/jobs-worker/tests/`.
+
+<!-- template:end jobs:docs-boundaries-jobs-tests -->
 
 ## Dependency Direction
 
@@ -72,6 +84,14 @@ main binary -> infra-idempotency-store
 infra-http -> infra-idempotency-store, sha2
 infra-idempotency-store -> infra-postgres, sqlx, tokio, tokio-util, tracing, thiserror
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-edges -->
+<!-- template:begin jobs:docs-boundaries-jobs-edges -->
+jobs-worker (composition root) -> service-config, health, infra-http,
+                                  infra-telemetry, infra-postgres, infra-jobs
+infra-jobs -> infra-postgres, sqlx, serde, serde_json, uuid, opentelemetry,
+              tracing-opentelemetry, metrics, humantime, tokio, tokio-util,
+              tracing, thiserror
+a feature's infra-<provider> adapter -> infra-jobs
+<!-- template:end jobs:docs-boundaries-jobs-edges -->
 
 
 integration-tests (test/)
@@ -109,6 +129,12 @@ owns the PostgreSQL mechanism behind the opaque `Tx` handle. Feature
 handlers consume only the `Idempotency` extractor and `Tx` through the
 supported composed route.
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-composition -->
+<!-- template:begin jobs:docs-boundaries-jobs-composition -->
+Jobs are a provider seam, not a transport contract: an adapter enqueues on
+the connection it already holds; kinds and handlers live in adapter crates
+and call feature use cases; features never depend on `infra-jobs`; the
+service composes nothing for jobs; the worker composes its own process.
+<!-- template:end jobs:docs-boundaries-jobs-composition -->
 
 ## Decisions Recorded Here
 
@@ -143,5 +169,11 @@ silently reopen:
   it depends on `infra-postgres` for admission and budget rendering, never
   the reverse. Persistence decisions: [Persistence](persistence.md#decisions-recorded-here).
 <!-- template:end postgres:docs-boundaries-migrator-decision -->
+<!-- template:begin jobs:docs-boundaries-jobs-decision -->
+- **`jobs-worker` is a library plus a binary in its own crate**: the
+  initializer requires the service package's binaries to be exactly the main
+  binary and `openapi`, and the process tests need the library entry with a
+  test-only kind.
+<!-- template:end jobs:docs-boundaries-jobs-decision -->
 - **`test/` is the package `integration-tests`**: a package named `test`
   collides with the built-in test crate.

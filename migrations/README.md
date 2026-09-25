@@ -13,6 +13,14 @@ The HTTP idempotency pack ships one forward-only migration,
 with the rest of the set. The service never creates or alters schema at
 runtime, and only `infra-idempotency-store` names the table.
 <!-- template:end http-idempotency:migrations-readme-http-idempotency -->
+<!-- template:begin jobs:migrations-readme-jobs -->
+The background jobs pack ships one forward-only migration,
+`20260924000001_create_background_jobs.sql`, which creates the
+`background_jobs` table and its claim-generation sequence; the existing
+`migrate` binary applies it with the rest of the set. Neither the service
+nor the worker creates or alters schema at runtime, and only
+`crates/infra-jobs` names the table.
+<!-- template:end jobs:migrations-readme-jobs -->
 
 Rules, proven by `cargo test -p migrate` over the embedded set:
 

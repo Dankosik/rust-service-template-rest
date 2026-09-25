@@ -189,6 +189,22 @@ every record inside a request) or `text` (local development).
   draws `health.probe_budget`, and the pool closes inside the `5s`
   dependency-close stage.
 <!-- template:end postgres:docs-config-postgres-budget -->
+<!-- template:begin jobs:docs-config-jobs -->
+- `jobs.max_workers` (environment `APP__JOBS__MAX_WORKERS`, default `1`,
+  `1..500`) is the most attempts one jobs worker process runs at once; every
+  binary validates it and only the worker uses it. The worker refuses
+  `postgres.max_connections` below `jobs.max_workers + 2`. The worker reuses
+  `http.grace_period` and `http.drain_timeout` with its own `17s` teardown
+  tail (release `2s`, listeners `2s`, background join `3s`, dependency close
+  `5s`, telemetry flush `5s`) and no readiness propagation delay, so its
+  default worst case is also 42 seconds inside 45, and the platform settings
+  above fit both entrypoints. The worker derives its identity from
+  `observability.otel.service_name` as `{service_name}-jobs-worker` (its
+  OpenTelemetry `service.name` and its PostgreSQL `application_name`, with
+  the service name cut to 51 bytes so the suffix survives PostgreSQL's
+  63-byte limit); no key controls it.
+  See the [guide](background-jobs.md#configure-and-size-the-worker).
+<!-- template:end jobs:docs-config-jobs -->
 <!-- template:begin authn:docs-config-authn-budgets -->
 - Authentication provider calls have a fixed three-second cap. Request-driven work receives at most the lesser of that cap and the remaining request budget less 100ms; exhausted request budget remains the existing `504` path. Introspection admits at most 32 simultaneous exchanges and rejects excess work as unavailable without queueing.
 <!-- template:end authn:docs-config-authn-budgets -->

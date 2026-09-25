@@ -173,6 +173,31 @@ statements are template-owned constants proven by the retained database
 suite. No migration-history exemption is adopted: the profile migration is
 ordinary forward-only history from the moment it merges.
 <!-- template:end http-idempotency:docs-persistence-http-idempotency -->
+<!-- template:begin jobs:docs-persistence-jobs -->
+
+## Background jobs profile
+
+`crates/infra-jobs` owns one table, `background_jobs`, and every statement
+against it; no other crate names the table. Enqueue (`infra_jobs::enqueue`)
+runs on the caller's `&mut PgConnection` inside the caller's transaction,
+under the caller's isolation level, with no transaction-control SQL; the job
+commits or rolls back with the caller's write under the commit-outcome
+policy this document records. Every worker statement runs in its own explicit
+`READ COMMITTED` transaction through `in_tx_with`, so a stricter server
+default cannot turn `SKIP LOCKED` claims into serialization failures.
+
+The worker's sessions carry a derived `application_name` of the form
+`{service_name}-jobs-worker`, with the service name cut to at most 51 bytes
+on a character boundary so the suffix survives PostgreSQL's 63-byte limit;
+no key controls it. Size `postgres.max_connections` for the worker as at
+least `jobs.max_workers + 2` (one connection per concurrent attempt plus the
+engine's statements and the readiness probe); the worker refuses less. The
+statements are template-owned constants proven by the jobs database suite,
+so they adopt no `query!` (the deferral stays at the first feature-owned
+repository). The schema is the pack's one forward-only migration, ordinary
+history from the moment it merges. See the [guide](../background-jobs.md)
+and [Async Architecture](async.md).
+<!-- template:end jobs:docs-persistence-jobs -->
 
 ## Decisions Recorded Here
 

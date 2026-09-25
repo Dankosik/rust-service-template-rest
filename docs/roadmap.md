@@ -24,7 +24,7 @@ is not a supported template state.
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | done |
 | 9 | Template initializer, profiles, and template sync | done on merge after required CI |
-| 10 | Optional capability profiles | 10.1, 10.2, and 10.3 merged; remaining profiles planned |
+| 10 | Optional capability profiles | 10.1, 10.2, and 10.3 merged; 10.4 locally accepted; remaining profiles planned |
 | 11 | Benchmarking and performance evidence | planned |
 | 12 | First release and derived-repository verification | planned |
 
@@ -34,7 +34,7 @@ remaining stages are implemented through skills; its capability skills and
 the Claude/Qwen discovery views follow their stages. Stage 9 depends on 4, 5, and 8. Stage 10 items are
 independent of each other and each depends on 9 for its profile marker,
 except that 10.3 also depends on 10.1 for an authentication engine and on 8
-for PostgreSQL.
+for PostgreSQL, and 10.4 also depends on 8 for PostgreSQL.
 
 ## Decisions fixed in stage 1
 
@@ -64,7 +64,7 @@ for PostgreSQL.
 | RFC 9457 `problem` package | `infra_http::problem` | Closed transport catalog, stable codes, no submitted values echoed; a `failure` leaf splits out with the gRPC profile. |
 | oapi-codegen strict server, hand-written `service.yaml`, runtime request validator | `utoipa` + `utoipa-axum`: handlers carry the contract, the generated `api/openapi/service.yaml` is committed and byte-compared by a test, Redocly lints it, oasdiff compares it with the pull-request base | No maintained Rust-native spec-first server generator exists for axum; the JVM `openapi-generator` output was rejected on quality ([HTTP Architecture](architecture/http.md#decisions-recorded-here)). The committed document stays the reviewed authority. Extractors are the request validator. |
 | `pgx` + `sqlc` + Goose | `sqlx` 0.9 (`postgres`, `runtime-tokio`, `tls-rustls-aws-lc-rs`, `migrate`): pool, transactions, embedded migrations under an advisory lock with checksums, `#[sqlx::test]` per-test databases; template-owned `Dsn` admission and commit-outcome policy in `crates/infra-postgres`; `crates/migrate` library plus binary; compose + `#[sqlx::test]` for proof | `refinery`, `diesel-async`, `sea-orm`, `testcontainers`, `cargo-nextest` rejected or deferred with reasons in [Persistence](architecture/persistence.md#decisions-recorded-here). `query!` macros with offline `.sqlx` metadata and `sqlx-cli` arrive with the first repository (stage 10). |
-| River jobs | Decision in stage 10 | Candidates: `apalis`, `underway`, or a template-owned PostgreSQL queue. |
+| River jobs | `infra-jobs` (stage 10.4): a template-owned PostgreSQL queue on `sqlx` 0.9, enqueued in the caller's transaction and run by the `jobs-worker` binary | No maintained crate with a stable release fills the four-part gap; [Async Architecture](architecture/async.md#decisions-recorded-here) records the candidates, the watch list, and the reopen conditions. |
 | NATS JetStream (`nats.go`) | `async-nats` | |
 | gRPC (`grpc-go`, buf) | `tonic` + `prost`, buf for lint and breaking checks | |
 | `golangci-lint`, `depguard` | clippy workspace lints; crate graph for direction; `cargo-deny` bans for forbidden crates; `cargo-shear` for unused dependencies | |
@@ -421,10 +421,14 @@ routing to the catalog. `rust-api-contract` arrived with stage 3 and
 `merge-conflict-resolution`, and the Claude/Qwen views with stage 6.
 `rust-sqlx` arrived with stage 8 (the `persistence` neighbor cluster and
 its edges to `rust-reliability`, `rust-errors`, `rust-security`,
-`rust-testing`, `rust-config`). Remaining for this stage: capability skills
-with their stages (`rust-tonic`, the profile skills), universal disciplines
-when a capability reaches them, and behavioural evaluation fixtures under
-`evals/` now that the reviewer roles exist.
+`rust-testing`, `rust-config`). Stage 10.4 ported the first universal
+discipline, `durable-background-jobs`, byte for byte from the Go template;
+`rust-reliability` reaches it, with its static fixture in
+`evals/rust-reliability/durable-background-jobs.md`. Remaining for this
+stage: capability skills with their stages (`rust-tonic`, the profile
+skills), the other universal disciplines when a capability reaches them, and
+behavioural evaluation fixtures under `evals/` now that the reviewer roles
+exist.
 
 Original mapping from the CLI pack:
 
@@ -616,6 +620,7 @@ markers, tests, and initializer support. Order by expected demand:
    `4819113b21c110e69f3f1d4d26f3bf9337c83b72`**;
    [adoption guide](http-idempotency.md).
 4. Durable background jobs on PostgreSQL and the `jobs-worker` binary.
+   **Locally accepted 2026-09-25**; [adoption guide](background-jobs.md).
 5. Outbound webhooks (Standard Webhooks signing, retry, public-address
    predicate) and inbound webhooks (verification, receipt deduplication,
    durable dispatch).
@@ -695,6 +700,36 @@ migration rehearsal, the image vulnerability scan, the database suite, and
 all four initializer parts, and
 [CodeQL](https://github.com/Dankosik/rust-service-template-rest/actions/runs/35986059988)
 passed `codeql-required`. Publication and deployment are not claimed.
+
+Stage 10.4 adds `JOBS=none|postgres`, which requires `DATABASE=postgres`.
+The selected pack holds the `infra-jobs` crate (enqueue inside the caller's
+transaction, the job-kind contracts, and the engine over one
+`background_jobs` table: fenced claims, persisted backoff, lost-worker
+recovery, and retention), the `jobs-worker` library and binary shipped as
+the image's `/jobs-worker` entrypoint, the `jobs.max_workers` setting, one
+forward-only migration, the [guide](background-jobs.md), and
+[Async Architecture](architecture/async.md). It stays inert: the service
+makes no jobs query, and nothing starts a worker until an operator deploys
+`/jobs-worker`; `none` removes it.
+
+Stage-10.4 local acceptance ran every local step of the `make plan` route:
+tool pins, the validation-routing self-tests, dependency gates, formatting,
+the workspace lint including the integration feature, build, 471 workspace
+tests, workflow and shell checks, instruction checks, migration checks, the
+Dockerfile check, and documentation. A one-shot comparison found the
+generated contract and projected `Cargo.lock` of all sixteen `JOBS=none`
+graphs equal to the `966aad8` baseline (32 of 32 digests), and the
+independent final review passed. Repairs during validation (the workspace
+lint over `infra-jobs`, its database tests, and one worker unit test; the
+guide's empty-kind refusal text; one reopen condition in the architecture
+leaf, corrected once) each reran only the evidence they invalidated. Local
+custody is under `.git/claude/background-jobs/delivery/`. The real-PostgreSQL
+suites (enqueue, execution with two racing engines, the worker process
+suite, the joint HTTP idempotency module, and the existing database proof),
+the 208 canonical projections and 26 runtime graphs, the runtime image build
+with its `/jobs-worker` step, the migration rehearsal, container security,
+the initializer parts' timing against the 373 s baseline, and every CI, PR,
+publication, or deployment result are CI-owned and pending; none is claimed.
 
 ### Stage 11: Benchmarking and performance evidence
 

@@ -4,6 +4,10 @@
 # starts under the hardened run flags, /health/ready answers, the startup
 # record carries the expected commit, and SIGTERM ends the process with exit
 # code 0 inside the 45 s grace budget (docs/configuration-source-policy.md).
+# A final step takes its /jobs-worker expectation from the repository's jobs
+# selection: where the pack is retained, the image must carry the entrypoint
+# and it must refuse to start before any database I/O; otherwise the image
+# must not carry it.
 #
 #   runtime-image-check.sh IMAGE [EXPECTED_COMMIT]
 #   RUNTIME_IMAGE_NETWORK      Docker network to join (a compose project's)
@@ -28,7 +32,7 @@ if [[ -n ${RUNTIME_IMAGE_POSTGRES_DSN:-} ]]; then
 fi
 
 cleanup() {
-	docker rm -f "${container}" >/dev/null 2>&1 || true
+	docker rm -f "${container}" "${container}-jobs-worker" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
@@ -106,3 +110,61 @@ exit_code=$(docker inspect -f '{{.State.ExitCode}}' "${container}")
 	exit 1
 }
 echo "runtime image stopped cleanly in ${stop_seconds}s (budget 45s)"
+
+# The /jobs-worker entrypoint. The repository decides what the image
+# must hold. Where the jobs pack is retained, the image carries /jobs-worker, and
+# the binary refuses before any database I/O under the hardened flags, with the
+# default configuration and no network. The template source registers no job
+# kind, so it must give the no-kind refusal. A derived service may have
+# registered kinds, so it may instead refuse first because PostgreSQL is
+# disabled by default. Where the pack is not retained, the image must not carry
+# the entrypoint.
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+jobs=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field jobs) || {
+	echo "cannot resolve the selected jobs profile" >&2
+	exit 2
+}
+worker="${container}-jobs-worker"
+docker create --name "${worker}" --label "runtime-check=${container}" \
+	--read-only \
+	--cap-drop=ALL \
+	--security-opt=no-new-privileges \
+	--network none \
+	--entrypoint /jobs-worker \
+	"${image}" >/dev/null
+has_worker=false
+if docker cp "${worker}:/jobs-worker" - >/dev/null 2>&1; then
+	has_worker=true
+fi
+case "${jobs}:${has_worker}" in
+none:false)
+	echo "jobs pack not retained; the image has no /jobs-worker entrypoint"
+	;;
+none:true)
+	echo "the jobs pack is not retained, but the image carries /jobs-worker" >&2
+	exit 1
+	;;
+postgres:false)
+	echo "the jobs pack is retained, but the image has no /jobs-worker entrypoint" >&2
+	exit 1
+	;;
+postgres:true)
+	expected='no job kind is registered'
+	if [[ -f "${root}/template.lock" ]]; then
+		expected='no job kind is registered|postgres\.enabled must be true to run the jobs worker'
+	fi
+	worker_output=$(docker start --attach "${worker}" 2>&1 || true)
+	worker_exit=$(docker inspect -f '{{.State.ExitCode}}' "${worker}")
+	refusal=$(grep -Eo "${expected}" <<<"${worker_output}" | head -n 1 || true)
+	if [[ ${worker_exit} != 1 || -z ${refusal} ]]; then
+		echo "jobs-worker did not give the expected startup refusal (exit ${worker_exit})" >&2
+		printf '%s\n' "${worker_output}" >&2
+		exit 1
+	fi
+	echo "jobs-worker refused before database I/O: ${refusal}"
+	;;
+*)
+	echo "unexpected jobs selection: ${jobs}" >&2
+	exit 1
+	;;
+esac

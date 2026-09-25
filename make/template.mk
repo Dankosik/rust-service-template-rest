@@ -115,6 +115,9 @@ export OUTBOUND_HTTP
 HTTP_IDEMPOTENCY ?= none
 export HTTP_IDEMPOTENCY
 
+JOBS ?= none
+export JOBS
+
 template-init: ## Initialize the service identity and selected profiles once
 	@bash scripts/init-module.sh --repo .
 

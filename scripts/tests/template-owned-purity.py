@@ -56,6 +56,8 @@ def check(root: Path) -> None:
         "request-budget": "remove_when_unselected",
         "http-idempotency": "remove_when_unselected",
         "http-idempotency-mounted": "remove_when_unselected",
+        "jobs": "remove_when_unselected",
+        "jobs-http-idempotency": "remove_when_unselected",
     }
     for name, removal_key in expected_profiles.items():
         section = profile.get(name)

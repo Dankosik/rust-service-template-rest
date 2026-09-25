@@ -24,6 +24,12 @@ url = { workspace = true }
 infra-postgres = { workspace = true }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "migrate", "macros"] }
 # template:end postgres:test-postgres-dependencies
+# template:begin jobs:test-jobs-dependencies
+infra-jobs = { workspace = true }
+jobs-worker = { workspace = true }
+serde = { workspace = true, features = ["std", "derive"] }
+tokio = { workspace = true, features = ["time"] }
+# template:end jobs:test-jobs-dependencies
 
 [dev-dependencies]
 url = { workspace = true }
@@ -86,3 +92,15 @@ utoipa = { workspace = true, features = ["macros"] }
 utoipa-axum = { workspace = true }
 async-trait = { workspace = true }
 # template:end http-idempotency-mounted:test-http-idempotency-mounted-dependencies
+# template:begin jobs:test-jobs-dev-dependencies
+nix = { workspace = true, features = ["signal"] }
+ureq = { workspace = true }
+# template:end jobs:test-jobs-dev-dependencies
+
+# template:begin jobs:test-jobs-worker-fixture
+[[bin]]
+name = "jobs-worker-fixture"
+path = "src/bin/jobs_worker_fixture.rs"
+required-features = ["integration"]
+test = false
+# template:end jobs:test-jobs-worker-fixture

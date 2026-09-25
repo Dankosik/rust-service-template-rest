@@ -38,6 +38,7 @@ from template_state import (
     safe_relative,
     selected_adapters,
     selected_http_idempotency,
+    selected_jobs,
     selected_outbound_http,
     selected_profiles,
     snapshot_tree,
@@ -809,6 +810,7 @@ def _run(arguments: argparse.Namespace) -> int:
         _database, harness = selected_profiles(target)
         selected_outbound_http(target)
         selected_http_idempotency(target)
+        selected_jobs(target)
         selected = set(selected_adapters(harness))
         manifest = parse_manifest(
             snapshot,

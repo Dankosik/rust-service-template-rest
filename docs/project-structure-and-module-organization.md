@@ -36,6 +36,11 @@ Do not create a crate, module, or directory before its first real artifact.
 | A feature's idempotent persistence adapter | `crates/infra-<provider>`, depending on the feature and on `infra-idempotency-store`, never the reverse |
 | A partially removable database-backed suite | `test/tests/<owner>/main.rs` as the crate root, with removable modules named by their own marker profile |
 <!-- template:end http-idempotency:docs-structure-http-idempotency-placement -->
+<!-- template:begin jobs:docs-structure-jobs-placement -->
+| The enqueue seam and the job engine | `crates/infra-jobs`; only adapters, the worker composition, and tests depend on it ([guide](background-jobs.md)) |
+| The jobs worker binary and its composition | `crates/jobs-worker`; a service registers its kinds in `src/main.rs` |
+| A job kind's payload type and handler | the adapter crate that enqueues it, `crates/infra-<provider>`, which calls the feature's use case |
+<!-- template:end jobs:docs-structure-jobs-placement -->
 
 | Ordinary behavior and boundary tests | `#[cfg(test)] mod tests` beside the owner |
 | Black-box tests of one crate's public surface, including the built binary | `crates/<crate>/tests/<owner>.rs` (`crates/service/tests/lifecycle.rs` drives the binary; `openapi.rs` holds the contract tests) |

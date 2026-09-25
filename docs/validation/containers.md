@@ -25,6 +25,23 @@ With the default configuration the stop takes about 15 s (the readiness
 propagation delay) inside the 45 s grace the
 [runtime budget policy](../configuration-source-policy.md) derives; a longer
 stop or a non-zero exit is the finding.
+<!-- template:begin jobs:docs-containers-jobs-worker-check -->
+
+The check then runs a `/jobs-worker` step whose expectation comes from the
+repository's jobs selection
+(`scripts/lib/template_state.py profile --field jobs`: `postgres` in the
+template source while `crates/infra-jobs` exists, otherwise the complete
+`template.lock`'s value). Where the pack is retained the image must carry
+`/jobs-worker`; the step starts it with `--entrypoint /jobs-worker`, the same
+hardened flags, `--network none`, and the default configuration, and requires
+exit `1` with a startup refusal before any database I/O: exactly
+`no job kind is registered` in the template source (no `template.lock`), and
+either that or `postgres.enabled must be true to run the jobs worker` in a
+derived service, which may have registered kinds. Where the pack is not
+retained, an image that carries `/jobs-worker` fails. The step ignores
+`RUNTIME_IMAGE_NETWORK` and `RUNTIME_IMAGE_POSTGRES_DSN`, so the migration
+rehearsal sees the same result.
+<!-- template:end jobs:docs-containers-jobs-worker-check -->
 
 Reuse that image for the scan and the SBOM only when those claims are
 required:

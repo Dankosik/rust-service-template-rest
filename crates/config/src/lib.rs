@@ -27,6 +27,9 @@ pub mod postgres;
 // template:begin http-idempotency:config-http-idempotency-module
 pub mod http_idempotency;
 // template:end http-idempotency:config-http-idempotency-module
+// template:begin jobs:config-jobs-module
+pub mod jobs;
+// template:end jobs:config-jobs-module
 
 mod cli;
 mod load;
@@ -56,6 +59,9 @@ pub use postgres::PostgresConfig;
 // template:begin http-idempotency:config-http-idempotency-export
 pub use http_idempotency::HttpIdempotencyConfig;
 // template:end http-idempotency:config-http-idempotency-export
+// template:begin jobs:config-jobs-export
+pub use jobs::JobsConfig;
+// template:end jobs:config-jobs-export
 pub use secret_policy::is_secret_like_key;
 pub use validate::ValidationError;
 
@@ -77,6 +83,9 @@ pub struct Config {
     // template:begin http-idempotency:config-http-idempotency-field
     pub http_idempotency: HttpIdempotencyConfig,
     // template:end http-idempotency:config-http-idempotency-field
+    // template:begin jobs:config-jobs-field
+    pub jobs: JobsConfig,
+    // template:end jobs:config-jobs-field
 }
 
 impl Config {
@@ -101,6 +110,9 @@ impl Config {
         // template:begin http-idempotency:config-http-idempotency-validate
         self.http_idempotency.validate()?;
         // template:end http-idempotency:config-http-idempotency-validate
+        // template:begin jobs:config-jobs-validate
+        self.jobs.validate()?;
+        // template:end jobs:config-jobs-validate
         Ok(())
     }
 }

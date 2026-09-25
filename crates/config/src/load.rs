@@ -249,6 +249,19 @@ mod tests {
     }
     // template:end http-idempotency:load-http-idempotency-environment
 
+    // template:begin jobs:load-jobs-environment
+    #[test]
+    fn jobs_environment_sets_max_workers() {
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__JOBS__MAX_WORKERS", "8")]),
+        )
+        .unwrap();
+        assert_eq!(cfg.jobs.max_workers, 8);
+    }
+    // template:end jobs:load-jobs-environment
+
     // template:begin oidc-introspection:load-introspection-environment
     #[test]
     fn introspection_environment_decodes_and_redacts_the_secret() {

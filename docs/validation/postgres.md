@@ -75,6 +75,28 @@ unknown-commit case (P6) uses a one-shot test proxy that acts on one
 both sockets before forwarding it, so the request sees a lost
 acknowledgement around a commit that did or did not happen; the readback's
 fresh connection passes through untouched. In the source template's
-initializer matrix, runtime graphs 13-16 run this suite once each, after
-their build and test, and need a usable Docker daemon.
+initializer matrix, runtime graphs 13-16 and 23-26 run this suite once each,
+after their build and test, and need a usable Docker daemon.
 <!-- template:end http-idempotency:docs-postgres-validation-http-idempotency -->
+<!-- template:begin jobs:docs-postgres-validation-jobs -->
+
+With the jobs pack retained, `ALLOW_HEAVY=1 make test-integration-db` also
+runs the jobs suite in `test/tests/jobs/`: `enqueue.rs` (atomicity through
+`in_tx`: a committed transaction enqueues, a rolled-back one does not;
+validation and database failure classes; every uniqueness row, including
+`40001` under `REPEATABLE READ`), `execution.rs` (claiming and exclusivity
+with two engines racing, retry scheduling, both terminal reasons, timeout,
+recovery of a lost worker's job within its bound, rejection of a superseded
+attempt's outcome, unknown kinds, retention; expiry cases are staged by
+setting database times), `process.rs` (the test-only `jobs-worker-fixture`
+binary, built only with the `integration` feature and shipped by no image:
+refusals with PostgreSQL disabled and with the jobs schema missing, ready
+then a committed job then exit `0` on `SIGTERM` with the `/metrics` lines,
+and an attempt that outlives a short drain exiting `3` with its job claimable
+again), and, where the HTTP idempotency pack is also retained,
+`http_idempotency.rs` (the joint proof through the idempotency store).
+`bash scripts/ci/test-integration-db.sh --test jobs` runs that target alone.
+In the source template's initializer matrix, runtime graphs 17-26 run this
+suite once each (23-26 with the joint module) and need a usable Docker
+daemon.
+<!-- template:end jobs:docs-postgres-validation-jobs -->

@@ -78,7 +78,10 @@ only for stable domain decisions.
 | Deployment policy for a derived service | [Railway Deployment Profile](railway-deployment-profile.md) |
 | The first feature on the scaffold | [First Production Feature](first-production-feature.md) |
 | What a service must decide before production | [Production Contract](production-contract.md) |
+<!-- template:begin jobs:docs-architecture-jobs-leaf -->
+| Durable background jobs: the job table, enqueue, claiming, the worker process | [Async Architecture](architecture/async.md) |
+<!-- template:end jobs:docs-architecture-jobs-leaf -->
 
-Queue, job, outbox, and event architecture (`architecture/async.md`) arrives
-with its profile; until then there is no owner to load. Load another leaf
-only for an independent changed pressure.
+Queue, job, outbox, and event architecture (`architecture/async.md`) exists
+only where a profile that owns it is retained; otherwise there is no owner to
+load. Load another leaf only for an independent changed pressure.

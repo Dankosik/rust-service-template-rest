@@ -46,14 +46,18 @@ impl Metrics {
     /// Returns [`MetricsError::Install`] when a recorder is already
     /// installed or the buckets are invalid.
     pub fn install(http_duration_metric: &str) -> Result<Self, MetricsError> {
-        let handle = PrometheusBuilder::new()
+        let builder = PrometheusBuilder::new()
             .set_buckets_for_metric(
                 Matcher::Full(http_duration_metric.to_owned()),
                 HTTP_DURATION_BUCKETS,
             )
-            .map_err(MetricsError::Install)?
-            .install_recorder()
             .map_err(MetricsError::Install)?;
+        Self::installed(builder)
+    }
+
+    /// Install `builder` and describe the process and trace-exporter metrics.
+    fn installed(builder: PrometheusBuilder) -> Result<Self, MetricsError> {
+        let handle = builder.install_recorder().map_err(MetricsError::Install)?;
         let process = metrics_process::Collector::default();
         process.describe();
         metrics::describe_gauge!(
@@ -102,6 +106,34 @@ impl Metrics {
         let _ = cancel.run_until_cancelled(reporter).await;
     }
 }
+
+// template:begin jobs:telemetry-jobs-histograms
+impl Metrics {
+    /// `install` plus explicit buckets for further histograms.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetricsError::Install`] when a recorder is already
+    /// installed or the buckets are invalid.
+    pub fn install_with_histograms(
+        http_duration_metric: &str,
+        histograms: &[(&str, &[f64])],
+    ) -> Result<Self, MetricsError> {
+        let mut builder = PrometheusBuilder::new()
+            .set_buckets_for_metric(
+                Matcher::Full(http_duration_metric.to_owned()),
+                HTTP_DURATION_BUCKETS,
+            )
+            .map_err(MetricsError::Install)?;
+        for &(name, buckets) in histograms {
+            builder = builder
+                .set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)
+                .map_err(MetricsError::Install)?;
+        }
+        Self::installed(builder)
+    }
+}
+// template:end jobs:telemetry-jobs-histograms
 
 /// The diagnostics router: `GET /metrics` only. Serve it on the private
 /// diagnostics listener, never on the application listener.

@@ -205,6 +205,19 @@ bound today, because `Tx`'s own type cannot enforce them:
 - it never names `http_idempotency_records`, the profile's own table; it
   only reads and writes the feature's own tables through the shared
   connection.
+  <!-- template:begin jobs:docs-http-idempotency-jobs-enqueue -->
+
+  With the [background jobs](background-jobs.md) pack retained, the adapter
+  may also enqueue a job with `infra_jobs::enqueue(connection(tx), ...)`:
+  the one template-owned write this rule admits. Such an adapter also
+  depends on `infra-jobs`, besides the feature and `infra-idempotency-store`
+  (so the "nothing else new" above describes an adapter that enqueues no job).
+  The job commits with the success record or not at all (a replayed, refused,
+  in-progress, or rolled-back attempt enqueues nothing). The adapter still
+  issues no transaction-control SQL and names neither
+  `http_idempotency_records` nor `background_jobs`, because the enqueue seam
+  owns its statement.
+  <!-- template:end jobs:docs-http-idempotency-jobs-enqueue -->
 
 ```rust,ignore
 // crates/widgets/src/http.rs — the port, feature-owned
