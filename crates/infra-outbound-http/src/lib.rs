@@ -88,7 +88,7 @@ pub enum Error {
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let client = Client::new(
-///     "https://provider.example/v1",
+///     "https://provider.example",
 ///     Limits {
 ///         max_active: 8,
 ///         operation_timeout: Duration::from_secs(2),

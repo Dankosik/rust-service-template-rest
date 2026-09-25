@@ -66,22 +66,25 @@ delivered to a provider had no effect.
 The API accepts `http::Request<bytes::Bytes>` and returns
 `http::Response<bytes::Bytes>`. This is a source-breaking migration: replace the former custom messages and
 string targets with standard messages, remove the three outgoing limits and
-constructor/operation cancellation arguments, and supply the complete path
-instead of relying on `Url::join` base-path semantics.
+constructor/operation cancellation arguments, configure the base as an origin,
+and supply the complete path instead of relying on `Url::join` base-path
+semantics.
 
 It has no replacement request/response structs,
 raw reqwest client, raw builder, response stream, tracker or shutdown handle.
 Do not log a standard message's `Debug` output when it might contain provider
 credentials or payloads.
 
-The base URL must be a nonempty canonical HTTPS URL with a host and no
-credentials, query, fragment, whitespace or controls. Literal IP hosts are
-admitted with the same public-address policy as DNS answers. Each typed request
-URI must be origin-form: it has a path and optional query, begins with `/`, and
-has neither scheme nor authority; `*` is refused. The adapter builds the target
-by applying the typed URI's path and query as URL components to the admitted
-base. It never concatenates or joins an attacker-controlled string, so the base
-host and port cannot change. A configured base path is not a prefix: `/v1/items`
+The base URL names only the provider origin: HTTPS with a host, an optional
+port, and no credentials, path, query, fragment, whitespace or controls. Literal
+IP hosts are admitted with the same public-address policy as DNS answers. Each
+typed request URI must be origin-form: it has a path and optional query, begins
+with `/`, and has neither scheme nor authority; `*` is refused. The adapter
+builds the target by applying the typed URI's path and query as URL components
+to the admitted base. It never concatenates or joins an attacker-controlled
+string, so the base host and port cannot change. A base path would not act as a
+prefix, so a base such as `https://api.example.com/v1` is refused at
+construction instead of being silently ignored; the request's `/v1/items`
 selects that path, and `//other.example/path` remains a path rather than an
 authority. `%23` is path or query data.
 

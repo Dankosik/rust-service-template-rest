@@ -726,8 +726,52 @@ async fn narrower_timeout_covers_stalled_body_and_releases_admission() {
 }
 
 #[test]
+fn base_url_names_one_public_https_origin() {
+    for base in [
+        "https://provider.example",
+        "https://provider.example/",
+        "https://provider.example:8443",
+        "https://8.8.8.8/",
+    ] {
+        assert!(policy::admit_base(base).is_ok(), "{base} must be admitted");
+    }
+    // A literal host never reaches the resolver, so this is its only admission.
+    for base in [
+        "https://127.0.0.1/",
+        "https://[::ffff:127.0.0.1]/",
+        "https://169.254.169.254/",
+        "https://[fd00:ec2::254]/",
+    ] {
+        assert!(
+            matches!(Client::new(base, limits()), Err(Error::Denied)),
+            "{base} must be denied"
+        );
+    }
+    // The request path replaces any base path, so a base path is refused
+    // instead of being silently ignored.
+    for base in [
+        "http://provider.example/",
+        "https://user:secret@provider.example/",
+        "https://provider.example/?q=1",
+        "https://provider.example/#fragment",
+        " https://provider.example/",
+        "https://provider.example/\u{0085}",
+        "https://provider.example/v1",
+        "https://provider.example/v1/",
+    ] {
+        assert!(
+            matches!(
+                Client::new(base, limits()),
+                Err(Error::InvalidConfiguration)
+            ),
+            "{base} must be refused"
+        );
+    }
+}
+
+#[test]
 fn uri_admission_uses_the_represented_origin_form() {
-    let base = policy::admit_base("https://authn.fixture.test/v1").expect("base URL");
+    let base = policy::admit_base("https://authn.fixture.test").expect("base URL");
     let target = policy::admit_target(
         &base,
         &"//other.fixture.test/items%23safe?q=%23"

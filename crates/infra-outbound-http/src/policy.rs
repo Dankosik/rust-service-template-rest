@@ -41,10 +41,13 @@ pub(crate) fn validate_limits(limits: &Limits) -> Result<(), Error> {
 pub(crate) fn admit_base(raw: &str) -> Result<Url, Error> {
     reject_untrusted_url_text(raw, Error::InvalidConfiguration)?;
     let base = Url::parse(raw).map_err(|_| Error::InvalidConfiguration)?;
+    // Each request path replaces the base path, so the base names only the
+    // origin; a configured path would otherwise be silently ignored.
     if base.scheme() != "https"
         || base.host().is_none()
         || !base.username().is_empty()
         || base.password().is_some()
+        || base.path() != "/"
         || base.query().is_some()
         || base.fragment().is_some()
     {
