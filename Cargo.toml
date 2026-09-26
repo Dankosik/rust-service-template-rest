@@ -23,6 +23,9 @@ infra-bearerauthn = { path = "crates/infra-bearerauthn" }
 # template:begin outbound-http:workspace-outbound-http-crate
 infra-outbound-http = { path = "crates/infra-outbound-http" }
 # template:end outbound-http:workspace-outbound-http-crate
+# template:begin outbound-auth:workspace-oauth2-crate
+infra-oauth2-client-credentials = { path = "crates/infra-oauth2-client-credentials" }
+# template:end outbound-auth:workspace-oauth2-crate
 # template:begin postgres:workspace-postgres-crates
 infra-postgres = { path = "crates/infra-postgres" }
 # template:end postgres:workspace-postgres-crates
@@ -51,6 +54,10 @@ log = { version = "0.4", default-features = false }
 # Idempotency structured strings (docs/http-idempotency.md).
 sfv = { version = "0.15.0", default-features = false }
 # template:end http-idempotency:workspace-http-idempotency-digest
+
+# template:begin outbound-auth:workspace-oauth2-dependency
+oauth2 = { version = "5.0.0", default-features = false }
+# template:end outbound-auth:workspace-oauth2-dependency
 
 # Runtime and transport
 futures-util = { version = "0.3", default-features = false }

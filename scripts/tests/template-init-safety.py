@@ -139,6 +139,7 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     lock["profiles"].pop("authn")
     lock["profiles"].pop("outbound_http", None)
+    lock["profiles"].pop("outbound_auth", None)
     lock["profiles"].pop("http_idempotency", None)
     lock["profiles"].pop("jobs", None)
     lock["profiles"].pop("webhooks", None)
@@ -155,6 +156,7 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     )
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     lock["profiles"].pop("outbound_http", None)
+    lock["profiles"].pop("outbound_auth", None)
     lock["profiles"].pop("http_idempotency", None)
     lock["profiles"].pop("jobs", None)
     lock["profiles"].pop("webhooks", None)
@@ -251,6 +253,7 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
         database="none",
         authn="none",
         outbound_http="none",
+        outbound_auth="none",
         http_idempotency="none",
         jobs="none",
         webhooks="none",
@@ -297,6 +300,7 @@ def assert_preflight_extraction(source: Path, work: Path) -> None:
             database="none",
             authn="none",
             outbound_http="none",
+            outbound_auth="none",
             http_idempotency="none",
             jobs="none",
             webhooks="none",
@@ -354,7 +358,7 @@ def must_refuse(
         raise AssertionError(f"{label}: initializer unexpectedly succeeded")
     if (
         label not in {
-            "duplicate-db", "duplicate-authn", "duplicate-outbound-http", "duplicate-http-idempotency",
+            "duplicate-db", "duplicate-authn", "duplicate-outbound-http", "duplicate-outbound-auth", "duplicate-http-idempotency",
             "duplicate-jobs", "jobs-flag-and-environment", "duplicate-webhooks", "webhooks-flag-and-environment",
             "duplicate-inbound-webhooks",
         }
@@ -401,13 +405,14 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
 
 def assert_profile_packs(
     source: Path, target: Path, *, database: str, authn: str, outbound_http: str, http_idempotency: str,
-    jobs: str, webhooks: str = "none", inbound_webhooks: str = "none",
+    jobs: str, webhooks: str = "none", inbound_webhooks: str = "none", outbound_auth: str = "none",
 ) -> None:
     assert_profile_pack(source, target, "postgres", database == "postgres")
     assert_profile_pack(source, target, "authn", authn != "none")
     assert_profile_pack(source, target, "oidc-jwt", authn == "oidc-jwt")
     assert_profile_pack(source, target, "oidc-introspection", authn == "oidc-introspection")
     assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
+    assert_profile_pack(source, target, "outbound-auth", outbound_auth == "oauth2-client-credentials")
     shared_selected = authn != "none" or outbound_http == "bounded"
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
     assert_profile_pack(
@@ -436,6 +441,12 @@ def assert_lock_outbound_http(target: Path, expected: str) -> None:
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     if lock["profiles"].get("outbound_http") != expected:
         raise AssertionError(f"template.lock did not record outbound_http={expected}")
+
+
+def assert_lock_outbound_auth(target: Path, expected: str) -> None:
+    lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
+    if lock["profiles"].get("outbound_auth") != expected:
+        raise AssertionError(f"template.lock did not record outbound_auth={expected}")
 
 
 def assert_lock_http_idempotency(target: Path, expected: str) -> None:
@@ -476,6 +487,28 @@ def assert_outbound_lock_refusals(source: Path, target: Path) -> None:
         result = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
         if result.returncode == 0 or state(target) != before:
             raise AssertionError(f"{label} outbound lock shape was not a preserving refusal")
+        lock_path.write_bytes(original)
+
+
+def assert_outbound_auth_lock_refusals(source: Path, target: Path) -> None:
+    lock_path = target / "template.lock"
+    original = lock_path.read_bytes()
+    cases = (
+        ("unknown-outbound-auth-value", lambda profiles: profiles.update(outbound_auth="oauth1")),
+        (
+            "oauth-without-bounded-http",
+            lambda profiles: profiles.update(outbound_auth="oauth2-client-credentials", outbound_http="none"),
+        ),
+    )
+    for label, mutate in cases:
+        lock = json.loads(original)
+        profiles = lock["profiles"]
+        mutate(profiles)
+        lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+        before = state(target)
+        result = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
+        if result.returncode == 0 or state(target) != before:
+            raise AssertionError(f"{label} outbound auth lock shape was not a preserving refusal")
         lock_path.write_bytes(original)
 
 
@@ -560,6 +593,10 @@ def check(source: Path) -> None:
         must_refuse(source, work, "duplicate-authn", "--authn", "none", "--authn", "oidc-jwt")
         must_refuse(source, work, "unknown-outbound-http", "--outbound-http", "unbounded")
         must_refuse(source, work, "duplicate-outbound-http", "--outbound-http", "none", "--outbound-http", "bounded")
+        must_refuse(source, work, "unknown-outbound-auth", "--outbound-auth", "oauth1")
+        must_refuse(
+            source, work, "duplicate-outbound-auth", "--outbound-auth", "none", "--outbound-auth", "oauth2-client-credentials"
+        )
         must_refuse(source, work, "unknown-http-idempotency", "--http-idempotency", "mysql")
         must_refuse(
             source, work, "duplicate-http-idempotency", "--http-idempotency", "none", "--http-idempotency", "postgres"
@@ -638,6 +675,7 @@ def check(source: Path) -> None:
         )
         assert_lock_authn(target, "none")
         assert_lock_outbound_http(target, "none")
+        assert_lock_outbound_auth(target, "none")
         assert_lock_http_idempotency(target, "none")
         assert_lock_jobs(target, "none")
         assert_lock_webhooks(target, "none", "none")
@@ -705,6 +743,7 @@ def check(source: Path) -> None:
             raise AssertionError("unknown historical inventory was accepted or mutated")
         inventory_path.write_bytes(current_inventory)
         assert_outbound_lock_refusals(source, target)
+        assert_outbound_auth_lock_refusals(source, target)
         assert_http_idempotency_lock_refusals(source, target)
         assert_jobs_lock_refusals(source, target)
         assert_webhook_lock_refusals(source, target)
@@ -842,6 +881,23 @@ def check(source: Path) -> None:
         outbound_replay = init(source, outbound_target, "--database", "none", "--outbound-http", "bounded", "--agent-harness", "core")
         if outbound_replay.returncode or state(outbound_target) != outbound_before:
             raise AssertionError("complete bounded outbound lock replay changed target bytes")
+        oauth_target = work / "oauth-replay"
+        clone(source, oauth_target)
+        oauth = init(source, oauth_target, "--database", "none", "--outbound-auth", "oauth2-client-credentials", "--agent-harness", "core")
+        if oauth.returncode:
+            raise AssertionError(f"OAuth initialization failed: {oauth.stderr}")
+        assert_profile_packs(
+            source, oauth_target, database="none", authn="none", outbound_http="bounded", outbound_auth="oauth2-client-credentials",
+            http_idempotency="none", jobs="none",
+        )
+        assert_lock_outbound_http(oauth_target, "bounded")
+        assert_lock_outbound_auth(oauth_target, "oauth2-client-credentials")
+        oauth_before = state(oauth_target)
+        oauth_replay = init(
+            source, oauth_target, "--database", "none", "--outbound-auth", "oauth2-client-credentials", "--agent-harness", "core"
+        )
+        if oauth_replay.returncode or state(oauth_target) != oauth_before:
+            raise AssertionError("complete OAuth lock replay changed target bytes")
         http_idempotency_target = work / "http-idempotency-replay"
         clone(source, http_idempotency_target)
         http_idempotency_result = init(

@@ -337,6 +337,240 @@ mod tests {
     }
     // template:end webhooks:load-webhooks-environment
 
+    // template:begin outbound-auth:load-integrations-environment
+    #[test]
+    fn oauth_environment_builds_a_named_tuple_and_redacts_its_values() {
+        use secrecy::ExposeSecret as _;
+
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+                    "https://identity.example/oauth2/token?tenant=blue",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
+                    "billing-service",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_SECRET",
+                    "test-client-secret",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__SCOPES",
+                    "billing.read billing.write",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__AUDIENCE",
+                    "https://billing-api.example",
+                ),
+            ]),
+        )
+        .unwrap();
+
+        let oauth = cfg
+            .integrations
+            .get("billing")
+            .and_then(|integration| integration.oauth.as_ref())
+            .expect("named OAuth tuple");
+        assert_eq!(
+            oauth.token_url,
+            "https://identity.example/oauth2/token?tenant=blue"
+        );
+        assert_eq!(oauth.client_id, "billing-service");
+        assert_eq!(oauth.client_secret.expose_secret(), "test-client-secret");
+        assert_eq!(oauth.scopes.as_slice(), ["billing.read", "billing.write"]);
+        assert_eq!(
+            oauth.audience.as_deref(),
+            Some("https://billing-api.example")
+        );
+
+        let debug = format!("{cfg:?}");
+        for value in [
+            "test-client-secret",
+            "billing.read",
+            "https://billing-api.example",
+            "identity.example/oauth2/token",
+        ] {
+            assert!(
+                !debug.contains(value),
+                "configuration debug output exposed {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn oauth_secret_in_a_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let leaked = write(
+            &dir,
+            "leaked.toml",
+            "[integrations.billing.oauth]\nclient_secret = \"test-client-secret\"\n",
+        );
+        let err = load_from(
+            &LoadOptions {
+                config: Some(leaked),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::SecretInFile { key, .. } if key == "integrations.billing.oauth.client_secret"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn oauth_invalid_values_fail_with_static_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let invalid = write(
+            &dir,
+            "invalid.toml",
+            "[integrations.billing.oauth]\ntoken_url = \"http://identity.example/token?private=value\"\nclient_id = \"billing-service\"\nscopes = [\"bad scope\"]\naudience = \"private-audience\"\n",
+        );
+        let err = load_from(
+            &LoadOptions {
+                config: Some(invalid),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[(
+                "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_SECRET",
+                "test-client-secret",
+            )]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.token_url" && error.message == "must use HTTPS"),
+            "{err}"
+        );
+        let rendered = err.to_string();
+        for value in [
+            "identity.example/token",
+            "private=value",
+            "private-audience",
+        ] {
+            assert!(
+                !rendered.contains(value),
+                "configuration error exposed {value}"
+            );
+        }
+
+        let wrong_type = write(
+            &dir,
+            "wrong-type.toml",
+            "[integrations.billing.oauth]\ntoken_url = 42\nclient_id = \"billing-service\"\n",
+        );
+        let err = load_from(
+            &LoadOptions {
+                config: Some(wrong_type),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[(
+                "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_SECRET",
+                "test-client-secret",
+            )]),
+        )
+        .unwrap_err();
+        assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+        assert!(err.to_string().contains("must be a string"), "{err}");
+        assert!(!err.to_string().contains("42"), "{err}");
+
+        for (name, contents, expected_key) in [
+            (
+                "invalid-integration.toml",
+                "[integrations]\nbilling = \"private-sentinel\"\n",
+                "integrations.billing",
+            ),
+            (
+                "invalid-oauth.toml",
+                "[integrations.billing]\noauth = \"private-sentinel\"\n",
+                "integrations.billing.oauth",
+            ),
+        ] {
+            let malformed = write(&dir, name, contents);
+            let err = load_from(
+                &LoadOptions {
+                    config: Some(malformed),
+                    ..LoadOptions::default()
+                },
+                BUILD,
+                env(&[]),
+            )
+            .unwrap_err();
+            let rendered = err.to_string();
+            assert!(rendered.contains(expected_key), "{rendered}");
+            assert!(!rendered.contains("private-sentinel"), "{rendered}");
+        }
+
+        let invalid_scope = write(
+            &dir,
+            "invalid-scope.toml",
+            "[integrations.billing.oauth]\ntoken_url = \"https://identity.example/token\"\nclient_id = \"billing-service\"\nscopes = [\"bad scope\"]\n",
+        );
+        let err = load_from(
+            &LoadOptions {
+                config: Some(invalid_scope),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[(
+                "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_SECRET",
+                "test-client-secret",
+            )]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.scopes" && error.message == "must contain RFC 6749 scope tokens"),
+            "{err}"
+        );
+        assert!(!err.to_string().contains("bad scope"), "{err}");
+
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[(
+                "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+                "https://identity.example/token",
+            )]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.client_id" && error.message == "cannot be empty"),
+            "{err}"
+        );
+
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+                    "https://@identity.example/token",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
+                    "billing-service",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_SECRET",
+                    "test-client-secret",
+                ),
+            ]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.token_url" && error.message == "must not include userinfo"),
+            "{err}"
+        );
+    }
+    // template:end outbound-auth:load-integrations-environment
+
     // template:begin inbound-webhooks:load-inbound-webhooks-environment
     #[test]
     fn inbound_webhooks_environment_builds_nested_endpoint_and_secret_maps() {

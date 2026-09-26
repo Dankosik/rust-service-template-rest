@@ -48,6 +48,7 @@ from template_state import (
     lock_has_explicit_outbound_http,
     load_lock,
     OUTBOUND_HTTP_CHOICES,
+    OUTBOUND_AUTH_CHOICES,
     parse_manifest,
     parse_json_bytes,
     safe_relative,
@@ -86,6 +87,7 @@ class InitInputs:
     database: str
     authn: str
     outbound_http: str
+    outbound_auth: str
     http_idempotency: str
     jobs: str
     webhooks: str
@@ -105,6 +107,7 @@ class InitInputs:
             "database": self.database,
             "authn": self.authn,
             "outbound_http": self.outbound_http,
+            "outbound_auth": self.outbound_auth,
             "http_idempotency": self.http_idempotency,
             "jobs": self.jobs,
             "webhooks": self.webhooks,
@@ -145,6 +148,7 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         database=_argument_value(arguments, "database", default="none"),
         authn=_argument_value(arguments, "authn", default="none"),
         outbound_http=_argument_value(arguments, "outbound_http", default="none"),
+        outbound_auth=_argument_value(arguments, "outbound_auth", default="none"),
         http_idempotency=_argument_value(arguments, "http_idempotency", default="none"),
         jobs=_argument_value(arguments, "jobs", default="none"),
         webhooks=_argument_value(arguments, "webhooks", default="none"),
@@ -157,6 +161,24 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         raise Refusal("AUTHN is unsupported")
     if inputs.outbound_http not in OUTBOUND_HTTP_CHOICES:
         raise Refusal("OUTBOUND_HTTP is unsupported")
+    if inputs.outbound_auth not in OUTBOUND_AUTH_CHOICES:
+        raise Refusal("OUTBOUND_AUTH is unsupported")
+    if inputs.outbound_auth == "oauth2-client-credentials":
+        inputs = InitInputs(
+            service_name=inputs.service_name,
+            repository=inputs.repository,
+            description=inputs.description,
+            codeowner=inputs.codeowner,
+            database=inputs.database,
+            authn=inputs.authn,
+            outbound_http="bounded",
+            outbound_auth=inputs.outbound_auth,
+            http_idempotency=inputs.http_idempotency,
+            jobs=inputs.jobs,
+            webhooks=inputs.webhooks,
+            inbound_webhooks=inputs.inbound_webhooks,
+            agent_harness=inputs.agent_harness,
+        )
     if inputs.http_idempotency not in HTTP_IDEMPOTENCY_CHOICES:
         raise Refusal("HTTP_IDEMPOTENCY is unsupported")
     if inputs.agent_harness not in HARNESS_CHOICES:
@@ -243,6 +265,7 @@ _WEBHOOKS_PROFILE_INVENTORY_KEYS = frozenset(
 
 # The DNS-bearing key sets above are supported historical replay input only.
 _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS = _WEBHOOKS_PROFILE_INVENTORY_KEYS - {"egress-dns"}
+_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS = _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS | {"outbound-auth"}
 
 
 def _profile_data(
@@ -262,11 +285,22 @@ def _profile_data(
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
         raise Refusal("template profile inventory has an unsupported schema")
     keys = frozenset(raw)
-    if keys == _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS or (
+    if keys == _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS or (
+        historical_egress and keys == (_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS | {"egress-dns"})
+    ):
+        include_authn = True
+        include_outbound = True
+        include_outbound_auth = True
+        include_tls_fixtures = True
+        include_http_idempotency = True
+        include_jobs = True
+        include_webhooks = True
+    elif keys == _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS or (
         historical_egress and keys == _WEBHOOKS_PROFILE_INVENTORY_KEYS
     ):
         include_authn = True
         include_outbound = True
+        include_outbound_auth = False
         include_tls_fixtures = True
         include_http_idempotency = True
         include_jobs = True
@@ -274,6 +308,7 @@ def _profile_data(
     elif historical_egress and keys == _JOBS_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
+        include_outbound_auth = False
         include_tls_fixtures = True
         include_http_idempotency = True
         include_jobs = True
@@ -281,6 +316,7 @@ def _profile_data(
     elif historical_jobs and keys == _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
+        include_outbound_auth = False
         include_tls_fixtures = True
         include_http_idempotency = True
         include_jobs = False
@@ -288,6 +324,7 @@ def _profile_data(
     elif historical_http_idempotency and keys == _TLS_FIXTURE_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
+        include_outbound_auth = False
         include_tls_fixtures = True
         include_http_idempotency = False
         include_jobs = False
@@ -295,6 +332,7 @@ def _profile_data(
     elif historical_outbound and keys == _CURRENT_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = False
+        include_outbound_auth = False
         include_tls_fixtures = False
         include_http_idempotency = False
         include_jobs = False
@@ -302,6 +340,7 @@ def _profile_data(
     elif historical_authn and keys == _LEGACY_PROFILE_INVENTORY_KEYS:
         include_authn = False
         include_outbound = False
+        include_outbound_auth = False
         include_tls_fixtures = False
         include_http_idempotency = False
         include_jobs = False
@@ -332,6 +371,14 @@ def _profile_data(
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
             removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
             markers.extend(_markers(profile, section["markers"]))
+    if include_outbound_auth:
+        section = raw["outbound-auth"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template outbound-auth inventory has an unsupported shape")
+        removals["outbound-auth"] = tuple(
+            _path_list(section["remove_when_unselected"], "outbound-auth remove_when_unselected")
+        )
+        markers.extend(_markers("outbound-auth", section["markers"]))
     if include_tls_fixtures:
         section = raw["tls-fixtures"]
         if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
@@ -508,6 +555,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.update(("authn", inputs.authn))
     if inputs.outbound_http == "bounded":
         selected.add("outbound-http")
+    if inputs.outbound_auth == "oauth2-client-credentials":
+        selected.add("outbound-auth")
     if inputs.authn != "none" or inputs.outbound_http == "bounded":
         selected.add("tls-fixtures")
     if inputs.outbound_http == "bounded":
@@ -1114,6 +1163,16 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
         # test support enable rcgen/aws_lc_rs and its weak x509-parser/verify-aws
         # edge; those aws-lc-rs defaults retain untrusted even without JWT.
         _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
+    if inputs.outbound_auth == "none":
+        # oauth2 enables url's serde feature; the source still uses url through
+        # retained shared consumers, so remove only that profile-specific edge.
+        _project_feature_edge(
+            records,
+            "url",
+            "2.5.8",
+            ["form_urlencoded", "idna", "percent-encoding", "serde", "serde_derive"],
+            ["form_urlencoded", "idna", "percent-encoding", "serde"],
+        )
 
 
 def _project_cargo_lock(snapshot: Path, inventory: dict[str, Any], inputs: InitInputs) -> None:
@@ -1269,6 +1328,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--database", action=SingleValue)
     parser.add_argument("--authn", action=SingleValue)
     parser.add_argument("--outbound-http", action=SingleValue)
+    parser.add_argument("--outbound-auth", action=SingleValue)
     parser.add_argument("--http-idempotency", action=SingleValue)
     parser.add_argument("--jobs", action=SingleValue)
     parser.add_argument("--webhooks", action=SingleValue)

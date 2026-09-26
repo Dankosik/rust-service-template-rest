@@ -13,11 +13,16 @@
 //! `docs/configuration-source-policy.md` for why, and for what the two
 //! pre-scans in [`load`] add that the crate does not.
 
+use std::collections::BTreeMap;
+
 pub mod app;
 pub mod health;
 pub mod http;
 pub mod log;
 pub mod observability;
+// template:begin outbound-auth:config-module
+pub mod integrations;
+// template:end outbound-auth:config-module
 // template:begin authn:config-module
 pub mod authn;
 // template:end authn:config-module
@@ -48,6 +53,9 @@ pub use app::{AppConfig, BuildInfo};
 pub use cli::{FromArgs, LoadOptions, process_failure};
 pub use health::HealthConfig;
 pub use http::HttpConfig;
+// template:begin outbound-auth:config-export
+pub use integrations::{IntegrationConfig, OAuthConfig, Scopes};
+// template:end outbound-auth:config-export
 // template:begin inbound-webhooks:config-inbound-webhooks-export
 pub use inbound_webhooks::{InboundWebhookEndpointConfig, InboundWebhooksConfig};
 // template:end inbound-webhooks:config-inbound-webhooks-export
@@ -89,6 +97,10 @@ pub struct Config {
     pub health: HealthConfig,
     pub log: LogConfig,
     pub observability: ObservabilityConfig,
+    // template:begin outbound-auth:config-field
+    #[serde(default, deserialize_with = "integrations::deserialize_integrations")]
+    pub integrations: BTreeMap<String, IntegrationConfig>,
+    // template:end outbound-auth:config-field
     // template:begin authn:config-field
     pub authn: AuthnConfig,
     // template:end authn:config-field
@@ -122,6 +134,9 @@ impl Config {
         self.health.validate()?;
         self.log.validate()?;
         self.observability.validate()?;
+        // template:begin outbound-auth:config-validate
+        integrations::validate_integrations(&self.integrations)?;
+        // template:end outbound-auth:config-validate
         // template:begin authn:config-validate
         self.authn.validate()?;
         // template:end authn:config-validate

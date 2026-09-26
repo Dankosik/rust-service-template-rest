@@ -651,7 +651,13 @@ markers, tests, and initializer support. Order by expected demand:
    messaging/outbox design owns its distinct delivery semantics.
 7. gRPC with `tonic`: server policy, interceptors, health, bounded drain,
    shared client connections, buf lint and breaking checks.
-8. OAuth 2.0 client-credentials outbound authentication.
+<!-- template:begin outbound-auth:roadmap-stage-10-8-outbound-auth -->
+8. OAuth 2.0 client-credentials outbound authentication:
+   `OUTBOUND_AUTH=oauth2-client-credentials` retains private per-integration
+   token reuse over bounded outbound HTTP; it is otherwise absent. The
+   [adoption guide](outbound-machine-authentication.md) and [decision
+   record](outbound-machine-authentication-decisions.md) define the profile.
+<!-- template:end outbound-auth:roadmap-stage-10-8-outbound-auth -->
 9. S3-compatible object storage with one fixed endpoint.
 10. `examples/reference-service`: one isolated vertical slice.
 
