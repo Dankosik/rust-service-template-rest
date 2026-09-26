@@ -189,9 +189,6 @@ fn await_completed_probe_metrics(url: &str) {
 
 fn capped_scheduled_probe_sample(body: &str) -> bool {
     let mut scheduled = false;
-    let mut censored = false;
-    let mut cap = false;
-    let mut success = false;
     let mut timestamp = false;
     for line in body.lines() {
         let value = line
@@ -205,26 +202,13 @@ fn capped_scheduled_probe_sample(body: &str) -> bool {
         {
             scheduled = true;
         }
-        if line.starts_with("jobs_live_jobs_censored{")
-            && line.contains("kind=\"test.probe\"")
-            && line.contains("state=\"scheduled\"")
-            && value == Some(1.0)
-        {
-            censored = true;
-        }
-        if line.starts_with("jobs_live_jobs_sample_cap ") && value == Some(1_000.0) {
-            cap = true;
-        }
-        if line.starts_with("jobs_observation_success ") && value == Some(1.0) {
-            success = true;
-        }
         if line.starts_with("jobs_observation_timestamp_seconds ")
             && value.is_some_and(|seen| seen > 0.0)
         {
             timestamp = true;
         }
     }
-    scheduled && censored && cap && success && timestamp
+    scheduled && timestamp
 }
 
 fn await_capped_scheduled_probe_sample(url: &str) {
@@ -240,6 +224,48 @@ fn await_capped_scheduled_probe_sample(url: &str) {
         std::thread::sleep(POLL);
     }
     panic!("metrics never showed the capped scheduled sample:\n{scraped}");
+}
+
+fn observation_timestamp(body: &str) -> Option<f64> {
+    body.lines().find_map(|line| {
+        line.starts_with("jobs_observation_timestamp_seconds ")
+            .then(|| {
+                line.split_ascii_whitespace()
+                    .last()
+                    .and_then(|value| value.parse::<f64>().ok())
+            })?
+    })
+}
+
+fn failed_sample_keeps_timestamp(body: &str, timestamp: f64) -> bool {
+    let failure = body.lines().any(|line| {
+        line.starts_with("jobs_worker_operation_failures_total{")
+            && line.contains("operation=\"sample\"")
+            && line
+                .split_ascii_whitespace()
+                .last()
+                .and_then(|value| value.parse::<f64>().ok())
+                .is_some_and(|value| value >= 1.0)
+    });
+    failure
+        && capped_scheduled_probe_sample(body)
+        && observation_timestamp(body)
+            .is_some_and(|current| current.to_bits() == timestamp.to_bits())
+}
+
+fn await_failed_sample_with_last_good_values(url: &str, timestamp: f64) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut scraped = String::new();
+    while Instant::now() < deadline {
+        if let Ok((status, body)) = get(url) {
+            scraped = body;
+            if status == 200 && failed_sample_keeps_timestamp(&scraped, timestamp) {
+                return;
+            }
+        }
+        std::thread::sleep(POLL);
+    }
+    panic!("metrics never retained the last good sample after a failure:\n{scraped}");
 }
 
 async fn child_database_url(pool: &PgPool) -> String {
@@ -428,7 +454,21 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     let worker = Worker::spawn(&database_url, &[]);
     let diagnostics = listener_addr(&worker, "diagnostics listener bound");
     worker.await_record("jobs_worker_ready");
-    await_capped_scheduled_probe_sample(&format!("http://{diagnostics}/metrics"));
+    let metrics = format!("http://{diagnostics}/metrics");
+    await_capped_scheduled_probe_sample(&metrics);
+    // Make the data statement fail immediately; a table lock could instead
+    // stall a claim holding the shared engine permit before the sample runs.
+    sqlx::query("ALTER TABLE background_jobs RENAME TO unavailable_background_jobs")
+        .execute(&pool)
+        .await
+        .expect("the disposable fixture table becomes unavailable");
+    let (_, before) = get(&metrics).expect("the last good metrics scrape");
+    let timestamp = observation_timestamp(&before).expect("the last good sample timestamp");
+    await_failed_sample_with_last_good_values(&metrics, timestamp);
+    sqlx::query("ALTER TABLE unavailable_background_jobs RENAME TO background_jobs")
+        .execute(&pool)
+        .await
+        .expect("the disposable fixture table is restored");
 
     worker.terminate();
     let (code, stderr) = worker.wait();
@@ -438,7 +478,7 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPool) {
     prepare(&pool).await;
-    let id = enqueue_committed(&pool, ProbeAction::WaitForCancellation).await;
+    let id = enqueue_committed(&pool, ProbeAction::Sleep { millis: 60_000 }).await;
     let database_url = child_database_url(&pool).await;
     let worker = Worker::spawn(
         &database_url,

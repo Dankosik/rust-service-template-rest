@@ -1,31 +1,24 @@
 //! The startup check, retention, and the live-job gauges.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use infra_postgres::{TxError, connection, in_tx_with};
 use sqlx::Row;
+use sqlx::pool::PoolConnection;
+use sqlx::{Postgres, postgres::PgConnection};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::{
-    OpFailed, Operation, OperationError, READ_COMMITTED, Shared, StartupError, backstop,
-    observe_failure, observe_recovery,
+    Operation, OperationError, Shared, StartupError, backstop, observe_failure, observe_recovery,
 };
 
 /// Gauge of live jobs. Labels `kind`, `state` (`available`, `scheduled`, `running`).
 pub const LIVE_JOBS_METRIC: &str = "jobs_live_jobs";
-/// Whether a live-job sample reached its per-kind/state cap. Labels `kind`, `state`.
-pub const LIVE_JOBS_CENSORED_METRIC: &str = "jobs_live_jobs_censored";
-/// The fixed maximum published live-job count.
-pub const LIVE_JOBS_SAMPLE_CAP_METRIC: &str = "jobs_live_jobs_sample_cap";
 /// Age of the oldest available job. Label `kind`. Zero when none.
 pub const OLDEST_AVAILABLE_AGE_METRIC: &str = "jobs_oldest_available_age_seconds";
-/// Database timestamp of the last successfully committed observation.
+/// Database timestamp of the last successful observation.
 pub const OBSERVATION_TIMESTAMP_METRIC: &str = "jobs_observation_timestamp_seconds";
-/// Whether the current observation gauges came from a successful sample.
-pub const OBSERVATION_SUCCESS_METRIC: &str = "jobs_observation_success";
 /// How long a completed job is kept.
 pub const RETAIN_COMPLETED_FOR: Duration = Duration::from_hours(24);
 /// How long a failed job is kept.
@@ -38,12 +31,13 @@ pub const RETENTION_INTERVAL: Duration = Duration::from_secs(60);
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 /// Maximum rows counted for one registered kind and live state.
 pub const LIVE_JOBS_SAMPLE_CAP: i64 = 1_000;
-const LIVE_JOBS_SAMPLE_CAP_VALUE: f64 = 1_000.0;
-/// Bound on the startup check, from acquire to the transaction's end.
+/// Bound on the startup check, from acquire through the session query.
 pub const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
-/// Whether the current session can write. Migration-history admission owns
-/// schema compatibility; this check keeps only the live writer property.
-const STARTUP_CHECK: &str = "SELECT NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS writable";
+/// Whether the current session has the worker's required defaults. Migration-history
+/// admission owns schema compatibility; this check keeps only live session properties.
+const STARTUP_CHECK: &str = "SELECT current_setting('server_encoding') AS server_encoding, \
+     NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS writable, \
+     current_setting('default_transaction_isolation') = 'read committed' AS read_committed";
 
 const RETAIN_COMPLETED: &str = "DELETE FROM background_jobs \
      WHERE id = ANY (ARRAY( \
@@ -84,7 +78,7 @@ const SAMPLE: &str = "WITH sampled AS ( \
              WHERE job.kind = registered.kind \
                AND job.state = 'pending' \
                AND job.not_before <= sampled.observed_at \
-             LIMIT 1001 \
+            LIMIT 1000 \
          ) AS capped \
      ) AS available \
      CROSS JOIN LATERAL ( \
@@ -95,7 +89,7 @@ const SAMPLE: &str = "WITH sampled AS ( \
              WHERE job.kind = registered.kind \
                AND job.state = 'pending' \
                AND job.not_before > sampled.observed_at \
-             LIMIT 1001 \
+            LIMIT 1000 \
          ) AS capped \
      ) AS scheduled \
      CROSS JOIN LATERAL ( \
@@ -105,7 +99,7 @@ const SAMPLE: &str = "WITH sampled AS ( \
              FROM background_jobs AS job \
              WHERE job.kind = registered.kind \
                AND job.state = 'running' \
-             LIMIT 1001 \
+            LIMIT 1000 \
          ) AS capped \
      ) AS running \
      LEFT JOIN LATERAL ( \
@@ -118,8 +112,9 @@ const SAMPLE: &str = "WITH sampled AS ( \
          LIMIT 1 \
      ) AS oldest ON true";
 
-const RETENTION_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '1000ms'";
-const SAMPLE_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '2000ms'";
+const RETENTION_STATEMENT_TIMEOUT: &str = "SET statement_timeout = '1000ms'";
+const SAMPLE_STATEMENT_TIMEOUT: &str = "SET statement_timeout = '2000ms'";
+const RESET_STATEMENT_TIMEOUT: &str = "RESET statement_timeout";
 
 /// Check UTF8 server encoding and a writable session, bounded to 5 s.
 ///
@@ -127,37 +122,43 @@ const SAMPLE_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '2000ms'";
 ///
 /// [`StartupError::UnsupportedEncoding`] when PostgreSQL is not UTF8,
 /// [`StartupError::NotWritable`] when `writable` is false, and
-/// [`StartupError::Unavailable`] for anything else, including the bound.
+/// [`StartupError::UnsupportedIsolation`] when the pool default is not read
+/// committed, and [`StartupError::Unavailable`] for anything else, including
+/// the bound.
 pub(crate) async fn check_startup(shared: &Shared) -> Result<(), StartupError> {
-    let check = in_tx_with(
-        &shared.pool,
-        READ_COMMITTED,
-        async |tx| -> Result<(), Refused> {
-            let conn = connection(tx);
-            let encoding: String = sqlx::query_scalar("SELECT current_setting('server_encoding')")
-                .fetch_one(&mut *conn)
-                .await
-                .map_err(|_| Refused(StartupError::Unavailable))?;
-            if encoding != "UTF8" {
-                return Err(Refused(StartupError::UnsupportedEncoding));
-            }
-            let row = sqlx::query(STARTUP_CHECK)
-                .fetch_one(&mut *conn)
-                .await
-                .map_err(|_| Refused(StartupError::Unavailable))?;
-            let writable = row
-                .try_get::<bool, _>("writable")
-                .map_err(|_| Refused(StartupError::Unavailable))?;
-            if writable {
-                Ok(())
-            } else {
-                Err(Refused(StartupError::NotWritable))
-            }
-        },
-    );
+    let check = async {
+        let mut connection = shared
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| StartupError::Unavailable)?;
+        let row = sqlx::query(STARTUP_CHECK)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| StartupError::Unavailable)?;
+        let encoding: String = row
+            .try_get("server_encoding")
+            .map_err(|_| StartupError::Unavailable)?;
+        if encoding != "UTF8" {
+            return Err(StartupError::UnsupportedEncoding);
+        }
+        let writable: bool = row
+            .try_get("writable")
+            .map_err(|_| StartupError::Unavailable)?;
+        if !writable {
+            return Err(StartupError::NotWritable);
+        }
+        let read_committed: bool = row
+            .try_get("read_committed")
+            .map_err(|_| StartupError::Unavailable)?;
+        if !read_committed {
+            return Err(StartupError::UnsupportedIsolation);
+        }
+        Ok(())
+    };
     match tokio::time::timeout(STARTUP_CHECK_BUDGET, check).await {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(Refused(refusal))) => Err(refusal),
+        Ok(Err(refusal)) => Err(refusal),
         Err(_elapsed) => Err(StartupError::Unavailable),
     }
 }
@@ -195,21 +196,16 @@ pub(crate) async fn run_retention(shared: Arc<Shared>, cancel: CancellationToken
 /// One gauge sample every 10 s, the first at once, until `cancel` fires.
 pub(crate) async fn run_sampling(shared: Arc<Shared>, cancel: CancellationToken) {
     let _ = Box::pin(cancel.run_until_cancelled(async {
-        describe_sampling_metrics();
-        let mut last_success_timestamp = 0.0;
-        publish_unavailable(&shared, last_success_timestamp);
         let mut ticker = tokio::time::interval(SAMPLE_INTERVAL);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
             match sample_once(&shared).await {
                 Ok(sample) => {
-                    last_success_timestamp = sample.observed_at;
                     publish_sample(&sample);
                     observe_recovery(&shared, Operation::Sample);
                 }
                 Err(error) => {
-                    publish_unavailable(&shared, last_success_timestamp);
                     observe_failure(&shared, Operation::Sample, error);
                 }
             }
@@ -218,18 +214,12 @@ pub(crate) async fn run_sampling(shared: Arc<Shared>, cancel: CancellationToken)
     .await;
 }
 
-fn describe_sampling_metrics() {
+/// Describe the queue-observation gauges and publish neutral pre-sample values.
+/// The worker composition root calls this once at startup.
+pub(crate) fn init_metrics(shared: &Shared) {
     metrics::describe_gauge!(
         LIVE_JOBS_METRIC,
-        "Per-process capped sample of live jobs by registered kind and state."
-    );
-    metrics::describe_gauge!(
-        LIVE_JOBS_CENSORED_METRIC,
-        "Whether a per-process live-job sample reached its cap by registered kind and state."
-    );
-    metrics::describe_gauge!(
-        LIVE_JOBS_SAMPLE_CAP_METRIC,
-        "Maximum count published by one per-process live-job sample."
+        "Per-process capped depth of live jobs by registered kind and state."
     );
     metrics::describe_gauge!(
         OLDEST_AVAILABLE_AGE_METRIC,
@@ -239,10 +229,13 @@ fn describe_sampling_metrics() {
         OBSERVATION_TIMESTAMP_METRIC,
         "Database Unix timestamp of the last successful jobs observation."
     );
-    metrics::describe_gauge!(
-        OBSERVATION_SUCCESS_METRIC,
-        "Whether the current jobs observation gauges came from a successful sample."
-    );
+    for kind in shared.registry.names() {
+        set_live(kind, "available", 0);
+        set_live(kind, "scheduled", 0);
+        set_live(kind, "running", 0);
+        metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => kind).set(0.0);
+    }
+    metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(0.0);
 }
 
 async fn delete_until(
@@ -269,28 +262,30 @@ async fn delete_batch(
     let Ok(_permit) = shared.permit.acquire().await else {
         return Err(OperationError::Acquire);
     };
-    let returned = AtomicBool::new(false);
-    backstop(
-        &returned,
-        in_tx_with(
-            &shared.pool,
-            READ_COMMITTED,
-            async |tx| -> Result<u64, OpFailed> {
-                let conn = connection(tx);
-                sqlx::query(RETENTION_STATEMENT_TIMEOUT)
-                    .execute(&mut *conn)
-                    .await?;
-                let deleted = sqlx::query(statement)
-                    .bind(age)
-                    .bind(RETENTION_BATCH_ROWS)
-                    .execute(&mut *conn)
-                    .await?
-                    .rows_affected();
-                returned.store(true, Ordering::SeqCst);
-                Ok(deleted)
-            },
-        ),
-    )
+    backstop(async {
+        let connection = shared
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| OperationError::Acquire)?;
+        let mut custody = StatementTimeoutCustody::new(connection);
+        sqlx::query(RETENTION_STATEMENT_TIMEOUT)
+            .execute(custody.connection())
+            .await
+            .map_err(|_| OperationError::Statement)?;
+        let deleted = sqlx::query(statement)
+            .bind(age)
+            .bind(RETENTION_BATCH_ROWS)
+            .execute(custody.connection())
+            .await
+            .map_err(|_| OperationError::Statement)?
+            .rows_affected();
+        custody
+            .reset()
+            .await
+            .map_err(|_| OperationError::Statement)?;
+        Ok(deleted)
+    })
     .await
 }
 
@@ -298,28 +293,30 @@ async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
     let Ok(_permit) = shared.permit.acquire().await else {
         return Err(OperationError::Acquire);
     };
-    let returned = AtomicBool::new(false);
-    backstop(
-        &returned,
-        in_tx_with(
-            &shared.pool,
-            READ_COMMITTED,
-            async |tx| -> Result<Sample, OpFailed> {
-                let conn = connection(tx);
-                sqlx::query(SAMPLE_STATEMENT_TIMEOUT)
-                    .execute(&mut *conn)
-                    .await?;
-                let kinds: Vec<&str> = shared.registry.names().collect();
-                let rows = sqlx::query(SAMPLE)
-                    .bind(kinds)
-                    .fetch_all(&mut *conn)
-                    .await?;
-                let decoded = decode_sample(&rows)?;
-                returned.store(true, Ordering::SeqCst);
-                Ok(decoded)
-            },
-        ),
-    )
+    let kinds: Vec<&str> = shared.registry.names().collect();
+    backstop(async {
+        let connection = shared
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| OperationError::Acquire)?;
+        let mut custody = StatementTimeoutCustody::new(connection);
+        sqlx::query(SAMPLE_STATEMENT_TIMEOUT)
+            .execute(custody.connection())
+            .await
+            .map_err(|_| OperationError::Statement)?;
+        let rows = sqlx::query(SAMPLE)
+            .bind(kinds)
+            .fetch_all(custody.connection())
+            .await
+            .map_err(|_| OperationError::Statement)?;
+        let decoded = decode_sample(&rows)?;
+        custody
+            .reset()
+            .await
+            .map_err(|_| OperationError::Statement)?;
+        Ok(decoded)
+    })
     .await
 }
 
@@ -336,24 +333,34 @@ struct Sample {
     observed_at: f64,
 }
 
-fn decode_sample(rows: &[sqlx::postgres::PgRow]) -> Result<Sample, OpFailed> {
+fn decode_sample(rows: &[sqlx::postgres::PgRow]) -> Result<Sample, OperationError> {
     let mut decoded = Vec::with_capacity(rows.len());
     let mut observed_at: Option<f64> = None;
     for row in rows {
-        let timestamp: f64 = row.try_get("observed_at")?;
+        let timestamp: f64 = row
+            .try_get("observed_at")
+            .map_err(|_| OperationError::Statement)?;
         match observed_at {
             Some(existing) if existing.to_bits() != timestamp.to_bits() => {
-                return Err(OpFailed(OperationError::Statement));
+                return Err(OperationError::Statement);
             }
             Some(_) => {}
             None => observed_at = Some(timestamp),
         }
         decoded.push(SampleRow {
-            kind: row.try_get("kind")?,
-            available: row.try_get("available")?,
-            scheduled: row.try_get("scheduled")?,
-            running: row.try_get("running")?,
-            oldest: row.try_get("oldest_available_seconds")?,
+            kind: row.try_get("kind").map_err(|_| OperationError::Statement)?,
+            available: row
+                .try_get("available")
+                .map_err(|_| OperationError::Statement)?,
+            scheduled: row
+                .try_get("scheduled")
+                .map_err(|_| OperationError::Statement)?,
+            running: row
+                .try_get("running")
+                .map_err(|_| OperationError::Statement)?,
+            oldest: row
+                .try_get("oldest_available_seconds")
+                .map_err(|_| OperationError::Statement)?,
         });
     }
     match observed_at {
@@ -361,12 +368,11 @@ fn decode_sample(rows: &[sqlx::postgres::PgRow]) -> Result<Sample, OpFailed> {
             rows: decoded,
             observed_at,
         }),
-        None => Err(OpFailed(OperationError::Statement)),
+        None => Err(OperationError::Statement),
     }
 }
 
 fn publish_sample(sample: &Sample) {
-    metrics::gauge!(LIVE_JOBS_SAMPLE_CAP_METRIC).set(LIVE_JOBS_SAMPLE_CAP_VALUE);
     for row in &sample.rows {
         set_live(&row.kind, "available", row.available);
         set_live(&row.kind, "scheduled", row.scheduled);
@@ -374,44 +380,49 @@ fn publish_sample(sample: &Sample) {
         metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => row.kind.clone()).set(row.oldest);
     }
     metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(sample.observed_at);
-    metrics::gauge!(OBSERVATION_SUCCESS_METRIC).set(1.0);
-}
-
-fn publish_unavailable(shared: &Shared, last_success_timestamp: f64) {
-    metrics::gauge!(LIVE_JOBS_SAMPLE_CAP_METRIC).set(LIVE_JOBS_SAMPLE_CAP_VALUE);
-    metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(last_success_timestamp);
-    metrics::gauge!(OBSERVATION_SUCCESS_METRIC).set(0.0);
-    for kind in shared.registry.names() {
-        set_live_unavailable(kind, "available");
-        set_live_unavailable(kind, "scheduled");
-        set_live_unavailable(kind, "running");
-        metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => kind).set(f64::NAN);
-    }
 }
 
 fn set_live(kind: impl Into<String>, state: &'static str, count: i64) {
     let kind = kind.into();
-    let censored = count > LIVE_JOBS_SAMPLE_CAP;
     #[allow(clippy::cast_precision_loss)]
-    let published = count.min(LIVE_JOBS_SAMPLE_CAP) as f64;
-    metrics::gauge!(LIVE_JOBS_METRIC, "kind" => kind.clone(), "state" => state).set(published);
-    metrics::gauge!(LIVE_JOBS_CENSORED_METRIC, "kind" => kind, "state" => state).set(if censored {
-        1.0
-    } else {
-        0.0
-    });
+    let value = count as f64;
+    metrics::gauge!(LIVE_JOBS_METRIC, "kind" => kind, "state" => state).set(value);
 }
 
-fn set_live_unavailable(kind: impl Into<String>, state: &'static str) {
-    let kind = kind.into();
-    metrics::gauge!(LIVE_JOBS_METRIC, "kind" => kind.clone(), "state" => state).set(f64::NAN);
-    metrics::gauge!(LIVE_JOBS_CENSORED_METRIC, "kind" => kind, "state" => state).set(f64::NAN);
+/// Owns a connection while a temporary session timeout is installed.
+///
+/// A cancellation or failed command can drop this guard while the timeout is
+/// installed. In that case the connection must be closed instead of reused.
+struct StatementTimeoutCustody {
+    connection: PoolConnection<Postgres>,
+    reset_acknowledged: bool,
 }
 
-struct Refused(StartupError);
+impl StatementTimeoutCustody {
+    fn new(connection: PoolConnection<Postgres>) -> Self {
+        Self {
+            connection,
+            reset_acknowledged: false,
+        }
+    }
 
-impl From<TxError> for Refused {
-    fn from(_err: TxError) -> Self {
-        Self(StartupError::Unavailable)
+    fn connection(&mut self) -> &mut PgConnection {
+        &mut self.connection
+    }
+
+    async fn reset(&mut self) -> Result<(), sqlx::Error> {
+        sqlx::query(RESET_STATEMENT_TIMEOUT)
+            .execute(self.connection())
+            .await?;
+        self.reset_acknowledged = true;
+        Ok(())
+    }
+}
+
+impl Drop for StatementTimeoutCustody {
+    fn drop(&mut self) {
+        if !self.reset_acknowledged {
+            self.connection.close_on_drop();
+        }
     }
 }

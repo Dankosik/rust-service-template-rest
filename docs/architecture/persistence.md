@@ -197,9 +197,18 @@ under the caller's isolation level, with no transaction-control SQL; the job
 commits or rolls back with the caller's write under the commit-outcome
 policy this document records. The insert is its only statement: UTF-8 is a
 schema precondition that the canonical migration enforces and the
-worker's startup check verifies. Every worker statement runs in its own
-explicit `READ COMMITTED` transaction through `in_tx_with`, so a stricter
-server default cannot turn `SKIP LOCKED` claims into serialization failures.
+worker's startup check verifies. The jobs worker pool selects session-default
+`READ COMMITTED` when it opens each physical connection, including
+replacements, and startup refuses another default. Claim, outcome, retention,
+and sample statements are individual autocommit statements. Enqueue and
+`complete_in_tx` remain caller-owned explicit transactions, preserving their
+isolation and commit-outcome meaning.
+
+Retention and sampling temporarily set their existing server statement limits
+(one and two seconds respectively) on an acquired session, execute one atomic
+statement, then acknowledge reset before returning the connection. Cancellation
+or an unacknowledged SET, statement, or RESET closes that connection rather
+than returning a session with altered settings to the pool.
 
 The worker's sessions carry a derived `application_name` of the form
 `{service_name}-jobs-worker`, with the service name cut to at most 51 bytes

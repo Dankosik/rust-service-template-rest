@@ -141,7 +141,7 @@ async fn welcome(job: infra_jobs::Job<Welcome>) -> Result<(), infra_jobs::JobErr
 
     match result {
         Err(WelcomeError::Tx(infra_postgres::TxError::CommitUnknown(error))) => {
-            Err(infra_jobs::JobError::transaction_unknown(error))
+            Err(infra_jobs::JobError::retryable(error))
         }
         Err(error) => Err(error.into()),
         Ok(()) => Ok(()),
@@ -151,10 +151,11 @@ async fn welcome(job: infra_jobs::Job<Welcome>) -> Result<(), infra_jobs::JobErr
 
 The derived error type preserves each cause and implements `Error`, so the
 existing conversion to retryable `JobError` remains available. Do not swallow
-`CompleteError::StaleClaim`; do not rerun a `CommitUnknown` closure. The
-transaction-unknown disposition records uncertainty and causes no later
-retry/fail/release transition. An external effect still needs provider or
-business idempotency: this API makes only the supplied PostgreSQL effect atomic.
+`CompleteError::StaleClaim` or rerun a `CommitUnknown` closure. Map the latter
+to ordinary retryable failure: its fenced outcome observes a committed COMPLETE
+as unchanged, can retry after rollback, and otherwise leaves ownership to lease
+expiry. An external effect still needs provider or business idempotency: this
+API makes only the supplied PostgreSQL effect atomic.
 
 `JobError::retry_after(error, delay)` and `JobError::snooze(delay)` return
 `Result<JobError, InvalidDelay>` and use enqueue's checked delay domain.
@@ -182,8 +183,9 @@ Registration rejects an empty set, duplicate/invalid names, and out-of-range
 policies. Defaults are 25 attempts and a 60-second timeout; accepted ranges
 are 1–25 attempts and 1 second–1 hour. The claiming worker's policy owns both.
 
-Ordinary retry delay is `attempt^4 * (0.9 + 0.2 * draw)` seconds with the
-claim's PostgreSQL random draw, rounded down to microseconds once. Exhaustion
+Ordinary retry delay is `attempt^4 * (0.9 + 0.2 * draw)` seconds, rounded down
+to microseconds once. The worker draws it only when it prepares a normal retry,
+then reuses that captured delay for persistence retries. Exhaustion
 and permanent failure are terminal. Summaries replace controls with spaces
 and are limited to 1024 UTF-8 bytes; handlers must not include secrets in them.
 Successful jobs remain for 24 hours and failed jobs for seven days. Retention
@@ -212,20 +214,25 @@ The policy registered for a kind supplies its timeout and attempt cap. A claim
 lease is fixed at `statement_timestamp() + timeout + 60 seconds`; the local
 deadline uses the same whole-microsecond timeout and is two seconds earlier.
 There are no renewal, heartbeat, upkeep, or claim-attribution reads. A failed
-or unknown claim acknowledgement never dispatches the returned row, and any
-committed row recovers when its original lease expires. Claims lock rows while
-they scan with `SKIP LOCKED`, so concurrent workers take disjoint jobs and a
-row another session holds is skipped rather than stalling the claim.
+or unavailable claim acknowledgement never dispatches the returned row, and
+any committed row recovers when its original lease expires. A stop never
+cancels an already-invoked claim: it may settle within its existing backstop
+and an acknowledged, locally-valid row still transfers to its supervisor. No
+new claim round begins after stop. Claims lock rows while they scan with
+`SKIP LOCKED`, so concurrent workers take disjoint jobs and a row another
+session holds is skipped rather than stalling the claim.
 
 One supervisor owns each admitted claim, slot, handler join, deadline, and
-intended queue transition through cleanup. It records a known handler result
-once and gives that result precedence over force or timeout. If an abort was
-requested but the handler joins successfully, that known result still wins.
-Once known, it is persisted and never replaced with release. Failed or unknown
-outcome acknowledgements retry the identical transition at one-second intervals
-within the local/cleanup deadline; a zero-row acknowledgement is merely
-unchanged, never durable attribution. At the deadline, leave recovery to lease
-expiry.
+intended queue transition through cleanup. On timeout or forced drain it first
+cancels the handler, gives it up to 100 ms of cooperative completion inside the
+existing deadline, and aborts only a still-running task. It records a known
+handler result once and gives that result precedence over force or timeout. If
+an abort was requested but the handler joins successfully, that known result
+still wins. Once known, it is persisted and never replaced with release. Failed
+or unavailable outcome acknowledgements retry the identical transition at
+one-second intervals within the local/cleanup deadline; a zero-row
+acknowledgement is merely unchanged, never durable attribution. At the
+deadline, leave recovery to lease expiry.
 
 On the first signal the worker disables readiness and stops claiming, then
 drains. A forced drain calls `Started::cancel_and_finish` for the same two
@@ -241,9 +248,13 @@ on the same row.
 ## Storage, observation, and inspection
 
 The canonical migration stores `payload` as `jsonb`, `unique_key` as
-`text COLLATE "C"`, includes `trace_state text`, and uses the running index
-`(kind, claim_expires_at, not_before, id)` for running rows. JSONB's semantic
-normalization is intentional.
+`text COLLATE "C"`, `created_at`, nullable UUID `attempted_by`, and
+`trace_state text`; it uses the running index `(kind, claim_expires_at,
+not_before, id)`. JSONB's semantic normalization is intentional. `created_at`
+is the enqueue database time and `attempted_by` is the stable random UUID for
+the worker process that most recently claimed the row. An expired running row
+gets a bounded payload-free rescue marker in `error_summary`; a normal later
+outcome may replace it. Pending rows are never marked as rescued.
 
 New trace data stores bounded ASCII `trace_context` and `trace_state` only.
 The worker extracts through the installed propagator and creates a span link,
@@ -255,25 +266,26 @@ listener:
 
 | Instrument | Labels | Meaning |
 | --- | --- | --- |
-| `jobs_attempts_total` | `kind`, `outcome` | Handler results as the worker observed them: `completed`, `retry`, `timeout`, `exhausted`, `permanent`, `snoozed`, `cancelled`, `transaction_unknown`. |
-| `jobs_persistence_total` | `kind`, `disposition` | Outcome writes: `applied`; `unchanged`, a zero-row write, which is normal after `complete_in_tx` and otherwise means a newer claim owns the row; `unknown`, left to lease expiry and logged at `warn`. |
+| `jobs_attempts_total` | `kind`, `outcome` | Handler results as the worker observed them: `completed`, `retry`, `timeout`, `exhausted`, `permanent`, `snoozed`, `cancelled`. |
+| `jobs_persistence_total` | `kind`, `disposition` | Outcome writes: `applied`; `unchanged`, an acknowledged zero-row write that makes no ownership attribution; `unknown`, left to lease expiry and logged at `warn`. |
 | `jobs_attempt_duration_seconds` | `kind` | Handler run time. |
+| `jobs_claim_duration_seconds` | none | Claim request duration through acknowledgement or failure. |
+| `jobs_queue_wait_seconds` | `kind` | Claimed-row database time minus its current `not_before`, floored at zero. |
 | `jobs_worker_operation_failures_total` | `operation` | Failed `claim`, `record`, `release`, `retention`, or `sample` statements. |
 
 Records never carry the payload: `job_failed` (`warn`), `job_attempt_failed`
 (`info`), `job_attempt_finished` (`info`, snooze and cancellation),
-`job_transaction_unknown` (`warn`), `job_attempt_completed` and
-`job_persistence_finished` (`debug`, or `warn` when unknown), and
+`job_attempt_completed` and `job_persistence_finished` (`debug`, or `warn`
+when unknown), and
 `jobs_operation_failed` / `jobs_operation_recovered` on the first failure
 and the first recovery of each operation.
 
 Every worker samples only registered kinds every ten seconds. For each kind and
-`available`, `scheduled`, or `running` state, it counts at most 1001 indexed
-rows, publishes a value capped at 1000 and a censoring gauge, and publishes the
-constant cap in `jobs_live_jobs_sample_cap`. Oldest available age uses an
-independent indexed due-row lookup. These samples are per-process and must not
-be summed across replicas; unknown kinds are not aggregated. Live jobs of a
-kind no worker registers, for example after a rename, appear only in SQL:
+`available`, `scheduled`, or `running` state, it counts at most 1000 indexed
+rows and publishes the value; 1000 means at least 1000 rows. Oldest available
+age uses an independent indexed due-row lookup. These samples are per-process
+and must not be summed across replicas; unknown kinds are not aggregated. Live
+jobs of a kind no worker registers, for example after a rename, appear only in SQL:
 
 ```sql
 SELECT kind, state, count(*) FROM background_jobs
@@ -282,13 +294,14 @@ WHERE state IN ('pending', 'running')
 GROUP BY kind, state;
 ```
 
-Before a first successful sample, backlog, age, and censoring are NaN,
-timestamp is 0, and success is 0. A successful sample publishes its database
-timestamp. A failure returns the values to NaN and success to 0 but retains the
-last-success timestamp. Alerting requires success=1, a nonzero timestamp, and
-freshness no older than 30 seconds. This distinguishes an exact empty queue,
-censoring, sample failure, and a stopped sampler. The two-second sample timeout
-is an elapsed-time limit, not a scan-size claim.
+Only `jobs_live_jobs`, `jobs_oldest_available_age_seconds`, and
+`jobs_observation_timestamp_seconds` represent sampling. Startup publishes
+zero for every registered kind/state and timestamp. A complete successful
+sample publishes values then timestamp; SQL, decode, or session-reset failure
+retains the last good values and timestamp while operation-failure telemetry
+records the failure. Alerting requires a nonzero timestamp no older than 30
+seconds. A successful empty queue reports zero values with a nonzero timestamp.
+The two-second sample timeout is an elapsed-time limit, not a scan-size claim.
 
 <!-- template:begin webhooks-common:docs-background-jobs-webhooks -->
 ## Webhook kinds
@@ -296,8 +309,9 @@ is an elapsed-time limit, not a scan-size claim.
 The optional provider uses the retained jobs worker and adds no worker binary,
 queue, or scheduling loop. A handler receives the dispatch deadline and must
 include all of its work inside that budget. `complete_in_tx(&mut Tx)` keeps
-fenced completion in the consumer's database transaction. Transaction-unknown
-stays a jobs outcome; no handler writes a competing failure/release transition.
+fenced completion in the consumer's database transaction. An uncertain
+transaction commit is ordinary retryable failure; no handler replays its
+business closure or writes a competing transition.
 <!-- template:end webhooks-common:docs-background-jobs-webhooks -->
 
 <!-- template:begin webhooks:docs-background-jobs-webhooks-outbound -->

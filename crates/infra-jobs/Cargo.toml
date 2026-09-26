@@ -18,13 +18,13 @@ metrics = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
-sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs"] }
+sqlx = { workspace = true, features = ["postgres", "uuid", "runtime-tokio", "tls-rustls-aws-lc-rs"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["std"] }
 tracing-opentelemetry = { workspace = true }
-uuid = { workspace = true, features = ["std"] }
+uuid = { workspace = true, features = ["std", "v4"] }
 
 [dev-dependencies]
 serde = { workspace = true, features = ["derive"] }

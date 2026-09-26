@@ -15,6 +15,7 @@ use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
 use crate::dsn::Dsn;
+use crate::transaction::Isolation;
 
 /// Bound on waiting for a pooled connection, including opening a new one.
 /// The startup connection draws the same budget.
@@ -67,6 +68,10 @@ pub struct PoolOptions<'a> {
     /// Reported as `application_name`, so `pg_stat_activity` attributes a
     /// session to the service instead of to an anonymous driver.
     pub application_name: &'a str,
+    /// The default isolation for every transaction on each physical
+    /// connection. [`Isolation::ServerDefault`] leaves the server setting
+    /// unchanged.
+    pub default_isolation: Isolation,
 }
 
 /// What a one-off session (the migrator) decides per connection.
@@ -95,13 +100,16 @@ pub struct SessionOptions<'a> {
 /// [`ACQUIRE_TIMEOUT`]; [`ConnectError::Connect`] when the first attempt is
 /// refused (credentials, TLS, or the server).
 pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, ConnectError> {
+    let default_isolation = default_isolation_setting(options.default_isolation);
+    let isolation_extra = default_isolation.map(|value| [("default_transaction_isolation", value)]);
+    let extra: &[(&str, &str)] = isolation_extra.as_ref().map_or(&[], |values| values);
     let connect_options = attach_session(
         dsn,
         options.application_name,
         STATEMENT_TIMEOUT,
         IDLE_IN_TRANSACTION_TIMEOUT,
         None,
-        &[],
+        &extra,
         Some(SLOW_STATEMENT_THRESHOLD),
     );
     PgPoolOptions::new()
@@ -173,6 +181,19 @@ fn attach_session(
         options = options.log_slow_statements(log::LevelFilter::Warn, threshold);
     }
     options
+}
+
+/// The startup-packet value for an opted-in pool default.
+///
+/// [`Isolation::ServerDefault`] deliberately does not render a GUC, so an
+/// existing service keeps the database's ambient transaction default.
+const fn default_isolation_setting(isolation: Isolation) -> Option<&'static str> {
+    match isolation {
+        Isolation::ServerDefault => None,
+        Isolation::ReadCommitted => Some("read committed"),
+        Isolation::RepeatableRead => Some("repeatable read"),
+        Isolation::Serializable => Some("serializable"),
+    }
 }
 
 /// Render a duration as a PostgreSQL runtime-parameter value.
@@ -278,6 +299,15 @@ mod tests {
         assert!(options.contains("-c lock_timeout=15000ms"), "{options}");
     }
 
+    #[test]
+    fn pool_default_isolation_only_renders_for_an_opted_in_pool() {
+        assert_eq!(default_isolation_setting(Isolation::ServerDefault), None);
+        assert_eq!(
+            default_isolation_setting(Isolation::ReadCommitted),
+            Some("read committed")
+        );
+    }
+
     #[tokio::test]
     async fn an_unreachable_host_fails_inside_the_acquire_budget() {
         // Port 1 on loopback is refused at once; the pool keeps retrying
@@ -293,6 +323,7 @@ mod tests {
             &PoolOptions {
                 max_connections: NonZeroU32::MIN,
                 application_name: "svc",
+                default_isolation: Isolation::ServerDefault,
             },
         )
         .await

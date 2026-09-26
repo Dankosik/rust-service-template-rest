@@ -40,14 +40,12 @@ pub trait JobKind: Serialize + DeserializeOwned + Send + Sync + 'static {
 pub struct JobId(uuid::Uuid);
 
 impl JobId {
-    /// The id as the database returns it (`id::text`).
-    ///
-    /// `None` when `text` is not a UUID.
-    pub(crate) const fn parse(text: &str) -> Option<Self> {
-        match uuid::Uuid::try_parse(text) {
-            Ok(id) => Some(Self(id)),
-            Err(_) => None,
-        }
+    pub(crate) const fn from_uuid(id: uuid::Uuid) -> Self {
+        Self(id)
+    }
+
+    pub(crate) const fn as_uuid(self) -> uuid::Uuid {
+        self.0
     }
 }
 
@@ -124,7 +122,7 @@ impl<K: JobKind> Job<K> {
     /// or [`CompleteError::Database`] when the statement fails.
     pub async fn complete_in_tx(&self, tx: &mut Tx<'_>) -> Result<(), CompleteError> {
         let affected = sqlx::query(crate::attempt::COMPLETE)
-            .bind(self.id.to_string())
+            .bind(self.id.as_uuid())
             .bind(self.generation)
             .execute(&mut *connection(tx))
             .await?
@@ -172,7 +170,6 @@ pub(crate) enum Disposition {
     RetryAfter(i64),
     RetryAfterAtLeast(i64),
     Snooze(i64),
-    TransactionUnknown,
 }
 
 /// A handler disposition. Not a [`std::error::Error`]; [`Display`] is the summary.
@@ -239,16 +236,6 @@ impl JobError {
             disposition: Disposition::Snooze(checked_delay_micros(delay)?),
             summary: String::new(),
         })
-    }
-
-    /// The caller's business transaction may have committed. Issue no queue
-    /// transition and never blindly replay that transaction's closure.
-    #[must_use]
-    pub fn transaction_unknown(error: impl fmt::Display) -> Self {
-        Self {
-            disposition: Disposition::TransactionUnknown,
-            summary: error.to_string(),
-        }
     }
 
     /// Whether the worker must not retry this failure.
@@ -708,20 +695,19 @@ mod tests {
     }
 
     #[test]
-    fn job_id_parse_and_display() {
+    fn job_id_uuid_display_preserves_external_format() {
         let text = "01234567-89ab-cdef-fedc-ba9876543210";
-        let id = JobId::parse(text).unwrap();
+        let id = JobId::from_uuid(uuid::Uuid::parse_str(text).unwrap());
         assert_eq!(id.to_string(), text);
         assert_eq!(
             format!("{id:?}"),
             "JobId(01234567-89ab-cdef-fedc-ba9876543210)"
         );
-        assert!(JobId::parse("not-a-uuid").is_none());
     }
 
     #[tokio::test]
     async fn dispatch_prepare_runs_the_handler_and_rejects_a_bad_payload() {
-        let id = JobId::parse("01234567-89ab-cdef-fedc-ba9876543210").unwrap();
+        let id = JobId::from_uuid(uuid::Uuid::from_u128(0x0123456789abcdeffedcba9876543210));
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut kinds = Kinds::new();
         kinds.register(Policy::default(), move |job: Job<Sample>| async move {
@@ -771,7 +757,7 @@ mod tests {
     #[tokio::test]
     async fn job_debug_omits_payload() {
         let job = Job {
-            id: JobId::parse("01234567-89ab-cdef-fedc-ba9876543210").unwrap(),
+            id: JobId::from_uuid(uuid::Uuid::from_u128(0x0123456789abcdeffedcba9876543210)),
             attempt: 4,
             generation: 99,
             payload: Sample {

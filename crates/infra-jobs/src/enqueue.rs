@@ -23,7 +23,7 @@ const ENQUEUE: &str = "INSERT INTO background_jobs (kind, payload, unique_key, n
              statement_timestamp() + ($4 * interval '1 microsecond'), $5, $6) \
      ON CONFLICT (kind, unique_key) WHERE unique_key IS NOT NULL AND state IN ('pending', 'running') \
      DO NOTHING \
-     RETURNING id::text AS id";
+     RETURNING id AS id";
 
 /// Delay and uniqueness for one enqueue.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -116,12 +116,7 @@ pub async fn enqueue<K: JobKind>(
     let Some(row) = row else {
         return Ok(Enqueued::Duplicate);
     };
-    let id: String = row.try_get("id").map_err(EnqueueError::Database)?;
-    let Some(id) = JobId::parse(&id) else {
-        return Err(EnqueueError::Database(sqlx::Error::Decode(
-            "job id is not a uuid".into(),
-        )));
-    };
+    let id = JobId::from_uuid(row.try_get("id").map_err(EnqueueError::Database)?);
     Ok(Enqueued::Created(id))
 }
 

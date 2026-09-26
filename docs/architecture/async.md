@@ -30,12 +30,20 @@ competing queue machinery.
 ## Storage and enqueue
 
 `background_jobs` retains its identity, state, attempt count, generation,
-timing, terminal history, and live unique-key constraint. Its canonical
+enqueue-time `created_at`, last successful claimant `attempted_by`, timing,
+terminal history, and live unique-key constraint. Its canonical
 migration requires a UTF-8 server and stores `payload` as `jsonb`, `unique_key`
 as `text COLLATE "C"`, nullable `trace_state`, and the running index
 `(kind, claim_expires_at, not_before, id) WHERE state = 'running'`. JSON values are the payload contract: PostgreSQL may normalize
 formatting, duplicate keys, and numeric spelling. `C` collation preserves
 exact UTF-8 key equality independent of the database default.
+
+The migration sets `autovacuum_vacuum_scale_factor = 0` and
+`autovacuum_vacuum_threshold = 5000` on this high-churn table. PostgreSQL
+server settings remain operator-owned: use an `autovacuum_naptime` around ten
+seconds, watch transaction age and xmin age, and consider PostgreSQL 17+
+`transaction_timeout` for other roles. The migration changes neither a server
+setting nor a role.
 
 Before database access, enqueue validates kind, key, delay, serialized size,
 and decoded NUL. It serializes once with `serde_json`; the validation detects
@@ -69,9 +77,12 @@ Registered policy supplies `(kind, max_attempts, timeout)`. A committed claim
 sets its immutable lease to `statement_timestamp() + timeout + 60 seconds`.
 The local deadline derives from the same whole-microsecond timeout and is two
 seconds earlier. Acknowledgement never resets it; there is no heartbeat,
-extension, upkeep task, or claim readback. A failed or unknown claim commit
-dispatches no returned rows and leaves any committed claim to expire. A claim
-acknowledged past its local deadline is likewise not dispatched.
+extension, upkeep task, or claim readback. A failed or unavailable claim
+acknowledgement dispatches no returned rows and leaves any committed claim to
+expire. A claim acknowledged past its local deadline is likewise not dispatched.
+Stop does not cancel a claim already invoked: it settles within its existing
+backstop, and an acknowledged locally-valid row transfers to its supervisor
+even if stop arrived in flight. No subsequent polling round starts after stop.
 
 Claims lock while they scan, the canonical `SKIP LOCKED` queue form: each
 registered kind's due pending rows and expired running rows are read in
@@ -81,8 +92,8 @@ skipped and the scan moves to the next one, so concurrent workers take
 disjoint jobs without underfilling their free slots, and a locked early job
 never blocks later work. The statement then updates the globally earliest at
 most `batch` of those rows; the update rechecks live eligibility. Candidates
-it locked but did not pick stay locked only until the short claim transaction
-commits. Choosing IDs before locking them was rejected: concurrent workers
+it locked but did not pick stay locked only until the claim autocommit
+statement completes. Choosing IDs before locking them was rejected: concurrent workers
 chose the same IDs, the losers claimed nothing until the next poll, and a
 one-slot worker stalled behind a locked earliest job. Measured on PostgreSQL
 18.6 with 20 ms jobs, eight one-slot workers claimed 42 jobs/s that way and
@@ -92,28 +103,31 @@ priority, fairness, or execution-order protocol.
 
 Each admitted supervisor owns one claim, slot, immutable deadline, handler
 join handle, and intended outcome until cleanup ends. It captures the outcome
-arguments once. A known handler result wins over force/timeout when its join
-completes; a successfully joined result also wins after an abort request. Once
-a result is known, the supervisor persists it and can never replace it with a
+arguments once. On timeout or forced drain it first cancels the handler and
+allows up to 100 ms of cooperative completion inside the existing deadline,
+then aborts only a still-running task. A known handler result wins over
+force/timeout when its join completes, including after an abort request. Once a
+result is known, the supervisor persists it and can never replace it with a
 release. A panic is a known failure. When joining or persistence cannot finish
 inside its deadline, it writes nothing further and expiry recovers the row.
 
 Every transition is fenced by `(id, claim_generation, state = 'running')`.
 An acknowledged one-row write is applied; an acknowledged zero-row write is
-unchanged and makes no attribution claim. Errors or unknown acknowledgement
+unchanged and makes no attribution claim. Errors or unavailable acknowledgement
 retry the identical operation at the existing one-second cadence only until
 the local or cleanup deadline. Unknown at deadline is uncertainty, not a
 durable outcome. A retry delay is captured once: `attempt^4 * (0.9 + 0.2 *
-draw)` seconds, with the PostgreSQL claim's `random()` draw and microsecond
-round-down.
+draw)` seconds with microsecond round-down; randomness is drawn only while a
+normal retry is prepared, never by the claim statement.
 
 `Job::complete_in_tx(&mut infra_postgres::Tx)` performs the same fenced COMPLETE
 inside the caller's transaction. It returns `CompleteError::StaleClaim` or its
 SQL cause and does not control the transaction. Callers must propagate it from
-their transaction closure so stale ownership rolls back preceding business writes. On a
-`CommitUnknown`, map the transaction result to
-`JobError::transaction_unknown(error)`: record uncertainty and issue no
-retry, failure, or release transition. Do not blindly replay the closure.
+their transaction closure so stale ownership rolls back preceding business
+writes. A `CommitUnknown` is an ordinary retryable handler failure: never
+replay its business closure. The following fenced outcome sees an already
+committed COMPLETE as unchanged, can retry after rollback, and otherwise
+leaves recovery to expiry when its acknowledgement cannot be established.
 
 `JobError::retry_after(error, delay)` and `JobError::snooze(delay)` use the
 same checked delay domain and return `Result<_, InvalidDelay>`. Retry-after
@@ -127,28 +141,30 @@ place in claim order rather than queueing behind the backlog.
 ## Observation and retention
 
 Every ten seconds each worker samples only registered kinds. For each kind and
-`available`, `scheduled`, and `running`, an indexed `SELECT 1 ... LIMIT 1001`
-publishes `min(count, 1000)` and a censoring gauge; the sample cap gauge is
-1000. The oldest available age is a separate indexed, due-pending lookup from
-the same database timestamp. These are per-process samples, not replica sums;
-the removed `<unregistered>` aggregate is not replaced. Unknown kinds remain
-unconsumed.
+`available`, `scheduled`, and `running`, an indexed query publishes the count
+capped at 1000; a value of 1000 means at least that many rows. The oldest
+available age is a separate indexed, due-pending lookup from the same database
+timestamp. These are per-process samples, not replica sums; the removed
+`<unregistered>` aggregate is not replaced. Unknown kinds remain unconsumed.
 
-Before a successful sample, backlog/age/censoring are NaN, timestamp is zero,
-and success is zero. A success publishes gauges and its database timestamp. A
-failure restores NaN and success zero while retaining the last-success
-timestamp. Consumers require success=1, timestamp>0, and age no greater than
-30 seconds, distinguishing unobserved, exact zero, censoring, failed sampling,
-and a stopped observer. The two-second statement timeout is a time backstop,
-not a scan-size proof. Retention remains bounded terminal deletion; it never
-deletes live rows. Terminal retention is independent of registered kinds.
+The only sampling gauges are `jobs_live_jobs{kind,state}`,
+`jobs_oldest_available_age_seconds{kind}`, and
+`jobs_observation_timestamp_seconds`. Before first success every registered
+value and timestamp is zero. A completely decoded successful sample publishes
+all values and then its database timestamp. A query, decode, or session-reset
+failure retains the last good values and timestamp; operation-failure telemetry
+still records the failure. Consumers reject timestamp zero or a timestamp older
+than 30 seconds. The two-second statement timeout is a time backstop, not a
+scan-size proof. Retention remains bounded terminal deletion; it never deletes
+live rows. Terminal retention is independent of registered kinds.
 
 ## Proof boundary
 
 Relevant proof must exercise stale transactional completion, both sides of an
-unknown commit, repeat snooze/refund, result-ready forced drain, disjoint
-claims with locked candidates, canonical-migration admission, trace-state and
-legacy parents, and every observation freshness state. Query
+unknown commit through ordinary retry, repeat snooze/refund, result-ready
+forced drain, stop during an in-flight claim, disjoint claims with locked
+candidates, canonical-migration admission, rescue identity/evidence,
+trace-state and legacy parents, and every observation freshness state. Query
 plans and lock observations support only the bounded-indexed claims above; no
 performance percentage is promised.
 

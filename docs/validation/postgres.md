@@ -41,9 +41,9 @@ make migration-check BASE_REF=origin/main
 
 The history check refuses a modified, deleted, or renamed migration and an
 added version older than the newest the base already has. Its only
-pre-adoption exception recognizes the reviewed replacement of the two
-idempotency/jobs create blobs and deletion of their two superseded simplify
-blobs as one exact four-file transition; it rejects partial or other rewrites.
+pre-adoption exception recognizes the reviewed exact jobs canonical-blob
+endpoint, including its retained historical PR #60 transition where applicable;
+it rejects partial or other rewrites. Runtime migration history remains strict.
 The source rules (positive version, forward-only, one transaction,
 `snake_case`) are the `migrate` crate's tests over the embedded set. Neither
 needs Docker.
@@ -93,15 +93,16 @@ runs the jobs suite in `test/tests/jobs/`: `enqueue.rs` (atomicity through
 `in_tx`: a committed transaction enqueues, a rolled-back one does not;
 validation and database failure classes; every uniqueness row, including
 `40001` under `REPEATABLE READ`), `execution.rs` (claiming and exclusivity
-with two engines racing, retry scheduling, both terminal reasons, timeout,
-recovery of a lost worker's job within its bound, rejection of a superseded
-attempt's outcome, unknown kinds, retention; expiry cases are staged by
+with two engines racing, retry scheduling, committed and rolled-back uncertain
+transactional COMPLETE through ordinary fenced retry, stop during a dispatched
+claim, grace/result precedence, cancellation-safe maintenance, reclaim evidence,
+and rejection of a superseded attempt's outcome; expiry cases are staged by
 setting database times), `process.rs` (the test-only `jobs-worker-fixture`
 binary, built only with the `integration` feature and shipped by no image:
 refusals with PostgreSQL disabled and with migration history missing, ready
 then a committed job then exit `0` on `SIGTERM` with the `/metrics` lines,
 and an attempt that outlives a short drain exiting `3` with its job claimable
-again), and, where the HTTP idempotency pack is also retained,
+again, plus zero/last-good sampling freshness), and, where the HTTP idempotency pack is also retained,
 `http_idempotency.rs` (the joint proof through the idempotency store).
 `bash scripts/ci/test-integration-db.sh --test jobs` runs that target alone.
 In the source template's initializer matrix, runtime graphs 17-26 run this

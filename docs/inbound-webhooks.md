@@ -125,10 +125,11 @@ The worker uses existing jobs policy (25 attempts, 60 seconds), resolves a
 consumer before opening a transaction, and snoozes a missing binding for 60
 seconds without spending an attempt. Database effects and
 `complete_in_tx(&mut Tx)` share a transaction, so a stale claim or consumer
-error rolls back business effects. Unknown commit uses the existing
-transaction-unknown outcome without a competing supervisor transition. An
-external consumer must supply recipient idempotency from endpoint/message
-identity because PostgreSQL cannot roll back its effect.
+error rolls back business effects. An unknown commit becomes ordinary retryable
+failure without replaying that transaction closure; a fenced later outcome
+cannot undo an already committed completion. An external consumer must supply
+recipient idempotency from endpoint/message identity because PostgreSQL cannot
+roll back its effect.
 
 Receipts have no expiry here: distinct identities grow receipt metadata and
 deleting it permits reacceptance. This profile does not certify payload erasure,
