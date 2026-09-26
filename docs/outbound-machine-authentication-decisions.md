@@ -136,6 +136,14 @@ the adapter receives primitives/SecretString through composition and does not
 depend on service-config. Normal config validation runs in every existing binary;
 there is no eager token call or extra service lifecycle field.
 
+The section decodes through `config::Value` instead of derived serde like the
+webhook sections. Derived decoding surfaces serde's `invalid type: string "..."`
+as a config-rs `Message` error, which echoes the rejected value; config-rs keeps
+its `Unexpected` type private, so a global redaction in `load` would have to
+parse error text. The explicit decoder keeps full key paths and unknown-key
+names without values. Reopen when config-rs exposes value-free type errors or
+the service adopts one loader-wide diagnostic policy for every section.
+
 Runtime errors separate caller Authorization conflict, acquisition failure,
 and existing resource transport failure. Acquisition reasons and all public
 Debug/Display are closed. Record `oauth2_token_acquisitions_total{outcome}` once
@@ -146,8 +154,8 @@ is emitted. Existing resource transport error policy remains unchanged.
 The production adapter's local token/resource-server proof covers encoding,
 audience and scope omission, permissive RFC success parsing, coalesced success/
 failure, expiry and non-retained responses, cancellation replacement, per-waiter
-budget, owner isolation, Bearer injection, 401 eviction, and 401/403 without
-replay. Reuse existing TLS/transport tests unless that implementation changes.
+budget, owner isolation, Bearer injection, 401 eviction that spares a newer
+token, and 401/403 without replay. Reuse existing TLS/transport tests unless that implementation changes.
 Negative proof
 covers Authorization conflict, secret files, safe diagnostics, token redirect,
 limit/timeout, and absence of resource dispatch. Test constructors remain

@@ -54,6 +54,8 @@ struct FixtureState {
     resource_requests: Mutex<Vec<CapturedRequest>>,
     token_received: Semaphore,
     token_gate: Mutex<Option<Arc<Semaphore>>>,
+    resource_received: Semaphore,
+    resource_gate: Mutex<Option<Arc<Semaphore>>>,
 }
 
 struct Fixture {
@@ -84,6 +86,8 @@ impl Fixture {
             resource_requests: Mutex::new(Vec::new()),
             token_received: Semaphore::new(0),
             token_gate: Mutex::new(None),
+            resource_received: Semaphore::new(0),
+            resource_gate: Mutex::new(None),
         });
         let (shutdown, receiver) = oneshot::channel();
         let task = tokio::spawn(serve(listener, state.clone(), receiver));
@@ -152,6 +156,23 @@ impl Fixture {
             .forget();
     }
 
+    fn block_resources(&self) -> Arc<Semaphore> {
+        let gate = Arc::new(Semaphore::new(0));
+        *self.state.resource_gate.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+
+    async fn resource_received(&self) {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            self.state.resource_received.acquire(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    }
+
     fn token_requests(&self) -> Vec<CapturedRequest> {
         self.state.token_requests.lock().unwrap().clone()
     }
@@ -209,6 +230,11 @@ async fn handle(mut stream: TcpStream, state: Arc<FixtureState>) {
         state.token_response.lock().unwrap().clone()
     } else {
         state.resource_requests.lock().unwrap().push(request);
+        state.resource_received.add_permits(1);
+        let gate = state.resource_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.acquire().await.unwrap().forget();
+        }
         state.resource_response.lock().unwrap().clone()
     };
     let _ = stream.write_all(&response).await;
@@ -771,5 +797,49 @@ async fn resource_401_and_403_pass_through_and_only_401_evicts_the_token() {
         );
         assert_eq!(fixture.resource_requests().len(), before_resources + 2);
     }
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn a_late_401_does_not_evict_a_newer_token() {
+    let fixture = Fixture::new().await;
+    fixture.token_json(
+        "200 OK",
+        &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 60}),
+    );
+    fixture.resource_status("401 Unauthorized");
+    let credentials = fixture.credentials(&[], None);
+    let client = credentials.http(fixture.resource_client());
+    let gate = fixture.block_resources();
+    let mut stale = Box::pin(client.execute(request(), operation(Duration::from_secs(10))));
+    tokio::select! { () = fixture.resource_received() => {}, result = &mut stale => panic!("response must be gated: {result:?}"), }
+
+    credentials.0.cache.invalidate(&()).await;
+    fixture.token_json(
+        "200 OK",
+        &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
+    );
+    credentials
+        .acquire(Instant::now() + Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    gate.add_permits(1);
+    assert_eq!(stale.await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    *fixture.state.resource_gate.lock().unwrap() = None;
+    fixture.resource_status("200 OK");
+    client
+        .execute(request(), operation(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(
+        fixture
+            .resource_requests()
+            .last()
+            .unwrap()
+            .header("authorization"),
+        Some("Bearer second")
+    );
     fixture.finish().await;
 }
