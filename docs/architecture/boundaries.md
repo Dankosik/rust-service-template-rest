@@ -15,11 +15,8 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | `infra-bearerauthn` (`crates/infra-bearerauthn`) | Bearer-envelope parsing, sealed verified identity and immutable typed claims access, canonical provider URL admission, and the selected OIDC JWT or introspection verifier with its trusted provider transport. | Authorization policy, configuration loading, route assembly, readiness, or application-visible raw tokens or mutable claim evidence. |
 <!-- template:end authn:docs-boundaries-authn-owner -->
 <!-- template:begin outbound-http:docs-boundaries-outbound-owner -->
-| `infra-outbound-http` (`crates/infra-outbound-http`) | Fixed-authority public HTTPS exchanges over standard `http::Request<Bytes>`/`Response<Bytes>`, five limits, component target composition, and operation lifetime ([guide](../outbound-http.md)). | Provider credentials, parsing, retries, configuration, readiness, bootstrap, or task tracking. |
+| `infra-outbound-http` (`crates/infra-outbound-http`) | Fixed trusted-origin HTTPS exchanges over standard `http::Request<Bytes>`/`Response<Bytes>`, finite limits, component target composition, operation lifetime, and private attempt observation ([guide](../outbound-http.md)). | Provider credentials, parsing, retries, configuration, readiness, bootstrap, or task tracking. |
 <!-- template:end outbound-http:docs-boundaries-outbound-owner -->
-<!-- template:begin egress-dns:docs-boundaries-egress-owner -->
-| `infra-egress-dns` (`crates/infra-egress-dns`) | Public-address admission, shared Hickory resolution, the common hardened HTTPS builder, and default-off generated TLS test material. | Consumer HTTP policy, provider failures, credentials, readiness, or service task tracking. |
-<!-- template:end egress-dns:docs-boundaries-egress-owner -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-owner -->
 | `infra-idempotency-store` (`crates/infra-idempotency-store`) | PostgreSQL idempotency arbitration and durable records ([guide](../http-idempotency.md)). | Migration-history admission, transaction lifecycle/connection ownership, HTTP types/Problems, business rules, readiness registration, or request routing. |
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-owner -->
@@ -73,11 +70,8 @@ main binary (crates/service, composition root)
 infra-http -> infra-bearerauthn
 <!-- template:end authn:docs-boundaries-authn-edges -->
 <!-- template:begin outbound-http:docs-boundaries-outbound-edges -->
-infra-outbound-http -> infra-egress-dns, reqwest, http, bytes, url, tokio
+infra-outbound-http -> reqwest, http, bytes, url, tokio, metrics, tracing
 <!-- template:end outbound-http:docs-boundaries-outbound-edges -->
-<!-- template:begin egress-dns:docs-boundaries-egress-edges -->
-infra-egress-dns -> reqwest, hickory-resolver, ipnet
-<!-- template:end egress-dns:docs-boundaries-egress-edges -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-edges -->
 main binary -> infra-idempotency-store
 infra-http -> infra-idempotency-store, infra-postgres (the Tx re-export), sha2, sfv

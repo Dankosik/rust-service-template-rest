@@ -32,9 +32,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json, Router};
 use axum_test::{TestRequest, TestResponse, TestServer};
 use health::Readiness;
-use infra_bearerauthn::test_support::{
-    FixtureTransport, prepare_introspection_with_fixture, tls_material,
-};
+use infra_bearerauthn::test_support::{FixtureTransport, prepare_introspection_with_fixture};
 use infra_bearerauthn::{IntrospectionCacheOptions, IntrospectionOptions, ProviderUrl, Verifier};
 use infra_http::idempotency::{
     Activation, Composer, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, Tx,
@@ -65,6 +63,11 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use crate::{
     Hold, RETENTION, RETRY_PAUSE, WAIT, bounded, close, count, make_read_only, template_pool,
 };
+
+#[path = "../../fixtures/tls.rs"]
+mod tls;
+
+use tls::TlsMaterial;
 
 const WIDGETS: &str = "/widgets";
 const PRIMARY_PREFIX: &str = "/primary";
@@ -312,7 +315,7 @@ fn forbidden() -> Response {
 /// token.
 struct Provider {
     address: SocketAddr,
-    root_der: Vec<u8>,
+    material: TlsMaterial,
     requests: Arc<AtomicUsize>,
     held: Arc<tokio::sync::Notify>,
     cancel: CancellationToken,
@@ -325,11 +328,8 @@ impl Provider {
             .await
             .expect("the provider listens");
         let address = listener.local_addr().expect("the provider's address");
-        let tls = tls_material(FIXTURE_HOST);
-        let acceptor = TlsAcceptor::from(Arc::new(tls_config(
-            tls.certificate_der,
-            tls.private_key_der,
-        )));
+        let material = TlsMaterial::new(FIXTURE_HOST);
+        let acceptor = TlsAcceptor::from(Arc::new(tls_config(&material)));
         let cancel = CancellationToken::new();
         let tasks = TaskTracker::new();
         let requests = Arc::new(AtomicUsize::new(0));
@@ -344,7 +344,7 @@ impl Provider {
         ));
         Self {
             address,
-            root_der: tls.root_der,
+            material,
             requests,
             held,
             cancel,
@@ -362,7 +362,7 @@ impl Provider {
         let transport = FixtureTransport::new(
             FIXTURE_HOST,
             self.address,
-            &self.root_der,
+            &self.material.root,
             self.cancel.child_token(),
         )
         .expect("the fixture transport");
@@ -391,14 +391,14 @@ impl Provider {
     }
 }
 
-fn tls_config(certificate_der: Vec<u8>, private_key_der: Vec<u8>) -> ServerConfig {
+fn tls_config(material: &TlsMaterial) -> ServerConfig {
     ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
         .with_safe_default_protocol_versions()
         .expect("fixture TLS protocol versions")
         .with_no_client_auth()
         .with_single_cert(
-            vec![CertificateDer::from(certificate_der)],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(private_key_der)),
+            vec![CertificateDer::from(material.cert.clone())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
         )
         .expect("the fixture certificate and key")
 }

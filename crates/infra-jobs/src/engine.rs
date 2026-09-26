@@ -4,10 +4,9 @@ use std::fmt;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
-use infra_postgres::{Isolation, TxError, TxOptions};
 use sqlx::postgres::PgPool;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
@@ -26,16 +25,10 @@ pub const LEASE_RESERVE: Duration = Duration::from_secs(60);
 pub const CANCEL_MARGIN: Duration = Duration::from_secs(2);
 /// How long an outcome write waits before it is sent again.
 pub const RECORD_RETRY_INTERVAL: Duration = Duration::from_secs(1);
-/// Client bound around one engine statement: acquire, statement, and commit.
+/// Client bound around one engine statement: acquire and statement acknowledgement.
 pub const OPERATION_BACKSTOP: Duration = Duration::from_secs(12);
 /// Counter of failed engine statements. Label `operation`.
 pub const OPERATION_FAILURES_METRIC: &str = "jobs_worker_operation_failures_total";
-
-/// Read committed, read-write. Keeps `SKIP LOCKED` from seeing a stricter default.
-pub(crate) const READ_COMMITTED: TxOptions = TxOptions {
-    isolation: Isolation::ReadCommitted,
-    read_only: false,
-};
 
 /// A worker's job engine. Cloning shares the pool, registry, and supervisor tracker.
 #[derive(Clone)]
@@ -75,29 +68,23 @@ pub enum StartupError {
     /// The session is read-only or recovering.
     #[error("the PostgreSQL session is not writable")]
     NotWritable,
+    /// The worker pool does not default to READ COMMITTED.
+    #[error("the jobs store requires READ COMMITTED session isolation")]
+    UnsupportedIsolation,
     /// Anything else, including the check's bound.
     #[error("the jobs store is unavailable")]
     Unavailable,
 }
 
-/// Why one engine statement did not finish as a known commit.
+/// Why one engine statement did not finish with an acknowledgement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum OperationError {
     /// The pool did not hand out a connection.
     #[error("acquire")]
     Acquire,
-    /// `BEGIN` failed.
-    #[error("begin")]
-    Begin,
     /// The statement failed, or a returned row did not decode.
     #[error("statement")]
     Statement,
-    /// The server rejected the commit. Nothing was written.
-    #[error("commit")]
-    Commit,
-    /// The statement returned and no commit acknowledgement followed.
-    #[error("commit outcome unknown")]
-    CommitUnknown,
     /// The client bound fired before the statement returned.
     #[error("timed out")]
     TimedOut,
@@ -109,23 +96,22 @@ impl OperationError {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Acquire => "acquire",
-            Self::Begin => "begin",
             Self::Statement => "statement",
-            Self::Commit => "commit",
-            Self::CommitUnknown => "commit_unknown",
             Self::TimedOut => "timed_out",
         }
     }
 }
 
 impl Engine {
-    /// Build an engine. Does no I/O.
+    /// Build an engine over a writable UTF8 pool with READ COMMITTED defaults.
+    /// Call [`Self::check_startup`] before starting it. Does no I/O.
     #[must_use]
     pub fn new(pool: PgPool, registry: Registry, max_workers: NonZeroU32) -> Self {
         let slots = usize::try_from(max_workers.get()).unwrap_or(usize::MAX);
         Self {
             shared: Arc::new(Shared {
                 pool,
+                worker_id: *WORKER_ID.get_or_init(uuid::Uuid::new_v4),
                 registry,
                 max_workers,
                 slots: Arc::new(Semaphore::new(slots)),
@@ -139,12 +125,14 @@ impl Engine {
         }
     }
 
-    /// Check UTF8 server encoding and a writable session, bounded to 5 s.
+    /// Check UTF8, READ COMMITTED defaults and a writable session, bounded to 5 s.
     ///
     /// # Errors
     ///
     /// [`StartupError::NotWritable`] when the session is read-only or recovering,
-    /// and [`StartupError::Unavailable`] for anything else, including the bound.
+    /// [`StartupError::UnsupportedEncoding`] or [`StartupError::UnsupportedIsolation`]
+    /// for incompatible session defaults, and [`StartupError::Unavailable`] for
+    /// anything else, including the bound.
     pub async fn check_startup(&self) -> Result<(), StartupError> {
         maintenance::check_startup(&self.shared).await
     }
@@ -163,6 +151,14 @@ impl Engine {
     /// Each task runs under a child of `cancel`. Does no I/O before it returns.
     #[must_use]
     pub fn start(&self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
+        crate::attempt::describe_metrics();
+        claim::describe_metrics();
+        maintenance::init_metrics(&self.shared);
+        metrics::describe_counter!(
+            OPERATION_FAILURES_METRIC,
+            "Failed worker database operations"
+        );
+        tracing::info!(worker.id = %self.shared.worker_id, "jobs_engine_starting");
         let stop = cancel.child_token();
         let failure = CancellationToken::new();
         spawn_guarded(
@@ -201,7 +197,7 @@ impl fmt::Debug for Engine {
 }
 
 impl Started {
-    /// Stop sends and admissions, including a claim awaiting acknowledgement.
+    /// Stop new claim rounds; an already dispatched claim retains custody.
     pub fn stop_claiming(&self) {
         self.stop.cancel();
     }
@@ -291,7 +287,10 @@ impl Drop for FailUnlessCancelled {
     }
 }
 
+static WORKER_ID: OnceLock<uuid::Uuid> = OnceLock::new();
+
 pub(crate) struct Shared {
+    pub(crate) worker_id: uuid::Uuid,
     pub(crate) pool: PgPool,
     pub(crate) registry: Registry,
     pub(crate) max_workers: NonZeroU32,
@@ -389,10 +388,6 @@ impl fmt::Debug for Failing {
 }
 
 pub(crate) fn observe_failure(shared: &Shared, operation: Operation, error: OperationError) {
-    metrics::describe_counter!(
-        OPERATION_FAILURES_METRIC,
-        "Failed worker database operations"
-    );
     metrics::counter!(OPERATION_FAILURES_METRIC, "operation" => operation.as_str()).increment(1);
     if !shared.failing.flag(operation).swap(true, Ordering::SeqCst) {
         tracing::warn!(
@@ -409,50 +404,13 @@ pub(crate) fn observe_recovery(shared: &Shared, operation: Operation) {
     }
 }
 
-/// The error of every engine transaction closure.
-#[derive(Debug)]
-pub(crate) struct OpFailed(pub(crate) OperationError);
-
-impl From<TxError> for OpFailed {
-    fn from(err: TxError) -> Self {
-        Self(match err {
-            TxError::Acquire(_) => OperationError::Acquire,
-            TxError::Begin(_) => OperationError::Begin,
-            TxError::CommitFailed(_) => OperationError::Commit,
-            TxError::CommitUnknown(_) => OperationError::CommitUnknown,
-        })
-    }
-}
-
-impl From<sqlx::Error> for OpFailed {
-    fn from(_err: sqlx::Error) -> Self {
-        Self(OperationError::Statement)
-    }
-}
-
-/// Bound one transaction by [`OPERATION_BACKSTOP`].
-///
-/// The closure sets `returned` once its statement has returned. An expiry after
-/// that is [`OperationError::CommitUnknown`]; before it, [`OperationError::TimedOut`].
-///
-/// # Errors
-///
-/// [`OperationError`] for an acquire, begin, statement, commit, unknown commit, or the bound.
+/// Bound acquire and full statement acknowledgement by [`OPERATION_BACKSTOP`].
 pub(crate) async fn backstop<T>(
-    returned: &AtomicBool,
-    transaction: impl Future<Output = Result<T, OpFailed>>,
+    operation: impl Future<Output = Result<T, OperationError>>,
 ) -> Result<T, OperationError> {
-    match tokio::time::timeout(OPERATION_BACKSTOP, transaction).await {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(OpFailed(error))) => Err(error),
-        Err(_elapsed) => {
-            if returned.load(Ordering::SeqCst) {
-                Err(OperationError::CommitUnknown)
-            } else {
-                Err(OperationError::TimedOut)
-            }
-        }
-    }
+    tokio::time::timeout(OPERATION_BACKSTOP, operation)
+        .await
+        .map_err(|_| OperationError::TimedOut)?
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -467,32 +425,10 @@ mod tests {
     use super::*;
 
     #[tokio::test(start_paused = true)]
-    async fn backstop_distinguishes_statement_timeout_from_unknown_commit() {
-        for (has_returned, expected) in [
-            (false, OperationError::TimedOut),
-            (true, OperationError::CommitUnknown),
-        ] {
-            let returned = AtomicBool::new(has_returned);
-            assert_eq!(
-                backstop(&returned, std::future::pending::<Result<(), OpFailed>>()).await,
-                Err(expected)
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn backstop_preserves_transaction_result() {
-        let returned = AtomicBool::new(false);
+    async fn backstop_bounds_an_unacknowledged_operation() {
         assert_eq!(
-            backstop(&returned, async { Ok::<_, OpFailed>(7) }).await,
-            Ok(7)
-        );
-        assert_eq!(
-            backstop(&returned, async {
-                Err::<(), _>(OpFailed(OperationError::Begin))
-            })
-            .await,
-            Err(OperationError::Begin)
+            backstop(std::future::pending::<Result<(), OperationError>>()).await,
+            Err(OperationError::TimedOut)
         );
     }
 }

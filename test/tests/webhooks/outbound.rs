@@ -47,7 +47,7 @@ fn outbound_with(destination: &str, active_key: &str, previous_key: Option<&str>
         )]),
         NonZeroU32::new(1).expect("one worker"),
     )
-    .expect("static public HTTPS endpoint")
+    .expect("static HTTPS endpoint")
 }
 
 async fn job_count(pool: &PgPool) -> i64 {

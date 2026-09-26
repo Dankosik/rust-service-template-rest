@@ -17,6 +17,10 @@ mod provider;
 mod refresh;
 // template:end oidc-jwt:authn-refresh-module
 
+#[cfg(test)]
+#[path = "../../../test/fixtures/tls.rs"]
+mod tls;
+
 use std::{fmt, future::Future, pin::Pin, sync::Arc};
 
 pub use bearer::{BearerToken, parse_bearer};
@@ -315,57 +319,6 @@ pub mod test_support {
     // template:begin oidc-introspection:authn-test-support-introspection-prepare
     pub use crate::introspection::prepare_introspection_with_fixture;
     // template:end oidc-introspection:authn-test-support-introspection-prepare
-
-    /// Fresh CA and named leaf material for normal TLS verification in tests.
-    pub struct TlsMaterial {
-        pub root_der: Vec<u8>,
-        pub certificate_der: Vec<u8>,
-        pub private_key_der: Vec<u8>,
-    }
-
-    impl fmt::Debug for TlsMaterial {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("TlsMaterial([REDACTED])")
-        }
-    }
-
-    /// Generates a CA and leaf valid around the current wall clock.
-    ///
-    /// # Panics
-    /// Panics when fixture key generation or certificate signing fails.
-    #[must_use]
-    #[allow(
-        clippy::expect_used,
-        reason = "unavailable fixture material is a test setup failure"
-    )]
-    pub fn tls_material(host: &str) -> TlsMaterial {
-        use rcgen::{
-            BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
-            KeyPair, KeyUsagePurpose,
-        };
-        let now = time::OffsetDateTime::now_utc();
-        let mut ca = CertificateParams::default();
-        ca.not_before = now - time::Duration::days(1);
-        ca.not_after = now + time::Duration::days(7);
-        ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        let issuer =
-            CertifiedIssuer::self_signed(ca, KeyPair::generate().expect("generate fixture CA key"))
-                .expect("sign fixture CA");
-        let leaf_key = KeyPair::generate().expect("generate fixture leaf key");
-        let mut leaf = CertificateParams::new(vec![host.to_owned()]).expect("fixture DNS SAN");
-        leaf.not_before = now - time::Duration::days(1);
-        leaf.not_after = now + time::Duration::days(7);
-        leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        let certificate = leaf
-            .signed_by(&leaf_key, &issuer)
-            .expect("sign fixture leaf");
-        TlsMaterial {
-            root_der: issuer.der().to_vec(),
-            certificate_der: certificate.der().to_vec(),
-            private_key_der: leaf_key.serialize_der(),
-        }
-    }
 
     /// Fixture-only custody for a real verifier transport. It cannot construct
     /// a principal or bypass verification.

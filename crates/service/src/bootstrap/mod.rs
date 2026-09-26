@@ -524,6 +524,7 @@ async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
             max_connections: config.postgres.pool_max_connections()?,
             // Same process identity as traces (`service.name`).
             application_name: &config.observability.otel.service_name,
+            default_isolation: infra_postgres::Isolation::ServerDefault,
         },
     )
     .await?;

@@ -210,15 +210,13 @@ a request cancels its introspection exchange; process-owned JWKS refresh remains
 independent and is cancelled and joined at shutdown.
 
 The pooled `reqwest` client owns ordinary runtime connection resources. It adds
-no readiness probe or periodic connection check. Authentication deliberately
-does not use the outbound HTTP profile's post-resolution address admission or
-its DNS owner: that policy remains necessary for independent untrusted outbound
-destinations. Generated CA and named-leaf test fixtures with current validity prove ordinary
-TLS and name validation without a production provider.
+no readiness probe or periodic connection check. Authentication has its own
+trusted-provider transport and does not share the outbound HTTP client.
+Shared generated test material continues to prove ordinary TLS and name
+validation without a production provider.
 
-The provider client limits header count but does not promise a separate
-application-selected aggregate outbound-header-byte cap. The service's inbound
-header limit and native `431` behavior remain separate. The default-off
+The provider client limits header count. The service's inbound header limit and
+native `431` behavior remain separate. The default-off
 `test-support` feature mounts the real verifier for consumer tests; it exposes
 no verification bypass or principal constructor. [Initializer validation](template-sync.md#validation-boundary)
 separates profile projection proof from runtime build and test evidence.

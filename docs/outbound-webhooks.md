@@ -120,12 +120,16 @@ named gaps or the retained Cargo graphs expose a concrete aws-lc backend drawbac
 The interoperable wire authority is the [Standard Webhooks
 specification](https://github.com/standard-webhooks/standard-webhooks/blob/bece768d960f09e242f5cd5686d859e475d6b478/spec/standard-webhooks.md).
 
-The existing outbound client owns actual-DNS public-address admission, hostname
-TLS, pooling, no proxy/redirect, and response bounds. Destinations are public
-HTTPS without credentials or fragments; existing paths, query strings, and HTTPS
-ports remain supported. A private 64-origin FIFO cache holds cloned fixed-
-authority clients, never locks across an await, and evicts an idle clone for a
-65th origin. Measured unacceptable cache churn is the reopen condition.
+The existing outbound client owns hostname TLS verification, pooling, no
+proxy/redirect, and response bounds. Its attempt telemetry carries the method,
+receiver host and port, status, and a static outcome, never the path, query,
+headers, or body. Endpoint URLs are trusted operator configuration: HTTPS without
+credentials or fragments, including private addresses the deployment trusts;
+existing paths, query strings, and HTTPS ports remain supported. The client is
+not an SSRF boundary, so never populate the endpoint map from tenant, request,
+or payload data. A private 64-origin FIFO cache holds cloned fixed-authority
+clients, never locks across an await, and evicts an idle clone for a 65th
+origin. Measured unacceptable cache churn is the reopen condition.
 
 The jobs deadline bounds signing, transport, and response reading to 30 seconds.
 A complete bounded 2xx completes delivery. 408, 425, 429, and 5xx retry; other

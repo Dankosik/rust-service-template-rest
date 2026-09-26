@@ -20,10 +20,12 @@ alters it at runtime.
 <!-- template:begin jobs:migrations-readme-jobs -->
 The background jobs pack creates `background_jobs` and its claim-generation
 sequence in `20260924000001_create_background_jobs.sql`. That canonical schema
-uses JSONB payloads, C-collated text unique keys, trace state, and the current
-partial indexes. The existing `migrate` binary applies it with the rest of the
-set. Neither the service nor worker creates or alters schema at runtime, and
-only `crates/infra-jobs` names the table.
+uses JSONB payloads, C-collated text unique keys, trace state, enqueue-time
+`created_at`, nullable UUID `attempted_by`, and the current partial indexes.
+It sets a table-local autovacuum scale factor of zero and threshold of 5,000;
+it does not change any server setting or role. The existing `migrate` binary
+applies it with the rest of the set. Neither the service nor worker creates or
+alters schema at runtime, and only `crates/infra-jobs` names the table.
 <!-- template:end jobs:migrations-readme-jobs -->
 
 Rules, proven by `cargo test -p migrate` over the embedded set:

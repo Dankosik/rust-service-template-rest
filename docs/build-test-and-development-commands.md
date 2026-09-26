@@ -30,13 +30,10 @@ With an authentication profile retained, `infra-bearerauthn` is also a package n
 <!-- template:begin outbound-http:docs-commands-outbound -->
 With `OUTBOUND_HTTP=bounded`, `infra-outbound-http` is available to
 `make test-package PKG=infra-outbound-http`; the [guide](outbound-http.md)
-owns construction and operation policy.
+owns construction and operation policy. Its default-off `test-support` feature
+is only for a consuming dev-dependency that uses the literal-loopback HTTP mock
+constructor; it is not a production configuration knob.
 <!-- template:end outbound-http:docs-commands-outbound -->
-<!-- template:begin egress-dns:docs-commands-egress -->
-`make test-package PKG=infra-egress-dns` exercises the shared public-address,
-resolver, and HTTPS-builder owner. Its default-off `test-support` feature
-supplies generated TLS material to the consumers' tests.
-<!-- template:end egress-dns:docs-commands-egress -->
 
 
 ## Contract

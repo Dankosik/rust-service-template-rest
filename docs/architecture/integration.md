@@ -83,17 +83,18 @@ owns request expiry; authentication has no request-deadline propagation.
 The adapter owns URL representation because discovery and direct adapter inputs
 must pass the same admission. Config owns field presence, type, and useful key
 context; bootstrap converts primitive configuration into adapter options. The validated
-cache-options constructor owns numeric ranges, including when caching is disabled. The
-independent outbound HTTP profile alone owns post-resolution public-address
-admission and its DNS dependency.
+cache-options constructor owns numeric ranges, including when caching is disabled.
+Authentication has its own trusted-provider transport and does not share the
+outbound HTTP client.
 <!-- template:end authn:docs-integration-authn-provider -->
 <!-- template:begin outbound-http:docs-integration-outbound -->
-A provider with a fixed public HTTPS dependency uses the retained
+A provider with an operator-selected fixed HTTPS dependency uses the retained
 [bounded outbound client](../outbound-http.md). The adapter supplies finite
-limits, credentials, a parent deadline with response reserve, and cancellation;
-it owns parsing and business errors. The client enforces same-authority targets,
-post-DNS public-address admission, bounded encoded bodies/headers and removal
-of correlation headers. Selection itself adds no neighbour or startup call.
+limits, credentials, and a parent deadline; it owns parsing, retry eligibility,
+and business errors. The client enforces same-origin targets, normal TLS,
+bounded encoded bodies/header count, and removal of correlation headers. Never
+construct it from a caller-controlled URL. Selection itself adds no neighbour or
+startup call.
 <!-- template:end outbound-http:docs-integration-outbound -->
 
 <!-- template:begin oidc-jwt:docs-integration-jwt -->

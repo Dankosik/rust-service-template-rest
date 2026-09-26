@@ -40,6 +40,24 @@ async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
         &PoolOptions {
             max_connections: NonZeroU32::new(max_connections).expect("pool size in tests"),
             application_name: APP,
+            default_isolation: Isolation::ServerDefault,
+        },
+    )
+    .await
+    .expect("pool connects")
+}
+
+async fn pool_with_default_isolation(
+    dsn: &Dsn,
+    max_connections: u32,
+    default_isolation: Isolation,
+) -> PgPool {
+    infra_postgres::connect(
+        dsn,
+        &PoolOptions {
+            max_connections: NonZeroU32::new(max_connections).expect("pool size in tests"),
+            application_name: APP,
+            default_isolation,
         },
     )
     .await
@@ -76,6 +94,7 @@ async fn show(pool: &PgPool, setting: &'static str) -> String {
         "statement_timeout" => "SHOW statement_timeout",
         "idle_in_transaction_session_timeout" => "SHOW idle_in_transaction_session_timeout",
         "application_name" => "SHOW application_name",
+        "default_transaction_isolation" => "SHOW default_transaction_isolation",
         other => panic!("unexpected setting {other}"),
     };
     sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
@@ -122,6 +141,49 @@ async fn pool_publishes_the_session_defaults(pool: PgPool) {
         infra_postgres::close(&ours, Duration::from_secs(5)).await,
         infra_postgres::Closed::Complete
     );
+}
+
+#[sqlx::test(migrations = false)]
+async fn pool_default_isolation_survives_replacement_and_explicit_transactions_override_it(
+    pool: PgPool,
+) {
+    let dsn = dsn_for(&pool).await;
+    let ours = pool_with_default_isolation(&dsn, 1, Isolation::ReadCommitted).await;
+
+    let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&ours)
+        .await
+        .unwrap();
+    let physical_connection = ours.acquire().await.unwrap();
+    physical_connection.close().await.unwrap();
+
+    let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&ours)
+        .await
+        .unwrap();
+    assert_ne!(
+        first_pid, second_pid,
+        "the pool opened a replacement connection"
+    );
+    assert_eq!(
+        show(&ours, "default_transaction_isolation").await,
+        "read committed"
+    );
+
+    let explicit: Result<String, AppError> = in_tx_with(
+        &ours,
+        TxOptions {
+            isolation: Isolation::Serializable,
+            read_only: false,
+        },
+        async |tx| {
+            Ok(sqlx::query_scalar("SHOW transaction_isolation")
+                .fetch_one(&mut *connection(tx))
+                .await?)
+        },
+    )
+    .await;
+    assert_eq!(explicit.unwrap(), "serializable");
 }
 
 #[sqlx::test(migrations = false)]

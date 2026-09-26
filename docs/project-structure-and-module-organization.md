@@ -22,11 +22,8 @@ Do not create a crate, module, or directory before its first real artifact.
 | Annotated route composition, final authentication policy, and principal extraction | `crates/infra-http/src/contract.rs` and `authn.rs`; service finalizes the assembled `OpenApiRouter`, while handlers receive only the sealed principal |
 <!-- template:end authn:docs-structure-authn-placement -->
 <!-- template:begin outbound-http:docs-structure-outbound-placement -->
-| Fixed-authority bounded HTTP exchanges | `crates/infra-outbound-http`; provider policy uses its standard `Request<Bytes>`/`Response<Bytes>` API ([guide](outbound-http.md)) |
+| Fixed trusted-origin bounded HTTP exchanges and attempt observation | `crates/infra-outbound-http`; provider policy uses its standard `Request<Bytes>`/`Response<Bytes>` API ([guide](outbound-http.md)) |
 <!-- template:end outbound-http:docs-structure-outbound-placement -->
-<!-- template:begin egress-dns:docs-structure-egress-placement -->
-| Public-address admission, shared resolver, and HTTPS builder | `crates/infra-egress-dns`; consumers own their HTTP policies and error mapping |
-<!-- template:end egress-dns:docs-structure-egress-placement -->
 <!-- template:begin request-budget:docs-structure-request-budget -->
 | Readonly inbound request deadline | `crates/infra-http/src/harden.rs`; exported as `infra_http::RequestDeadline` |
 <!-- template:end request-budget:docs-structure-request-budget -->

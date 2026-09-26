@@ -316,6 +316,7 @@ mod tests {
     use url::Url;
 
     use super::{Failure, ProviderClient, ProviderDeadline, ProviderUrl, new_fixture_client};
+    use crate::tls::TlsMaterial;
 
     const FIXTURE_HOST: &str = "authn.fixture.test";
 
@@ -359,7 +360,7 @@ mod tests {
         response: Vec<u8>,
         hold_open: bool,
     ) -> (std::net::SocketAddr, Vec<u8>, JoinHandle<Vec<u8>>) {
-        let material = crate::test_support::tls_material(FIXTURE_HOST);
+        let material = TlsMaterial::new(FIXTURE_HOST);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let config = ServerConfig::builder_with_provider(Arc::new(
@@ -369,8 +370,8 @@ mod tests {
         .unwrap()
         .with_no_client_auth()
         .with_single_cert(
-            vec![CertificateDer::from(material.certificate_der)],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.private_key_der)),
+            vec![CertificateDer::from(material.cert)],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key)),
         )
         .unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -402,7 +403,7 @@ mod tests {
             .await
             .unwrap()
         });
-        (address, material.root_der, server)
+        (address, material.root, server)
     }
 
     fn fixture_client(address: std::net::SocketAddr, root: &[u8]) -> ProviderClient {

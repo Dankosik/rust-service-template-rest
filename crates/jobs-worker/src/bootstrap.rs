@@ -234,7 +234,17 @@ fn install_observability(
     })?;
     let metrics = Metrics::install_with_histograms(
         HTTP_REQUESTS_DURATION_SECONDS,
-        &[(ATTEMPT_DURATION_METRIC, ATTEMPT_DURATION_BUCKETS)],
+        &[
+            (ATTEMPT_DURATION_METRIC, ATTEMPT_DURATION_BUCKETS),
+            (
+                infra_jobs::CLAIM_DURATION_METRIC,
+                infra_jobs::CLAIM_DURATION_BUCKETS,
+            ),
+            (
+                infra_jobs::QUEUE_WAIT_METRIC,
+                infra_jobs::QUEUE_WAIT_BUCKETS,
+            ),
+        ],
     )?;
     metrics.record_trace_exporter_initialized(matches!(
         tracer_provider.exporter_state,
@@ -287,6 +297,7 @@ async fn open_pool(
         &PoolOptions {
             max_connections: config.postgres.pool_max_connections()?,
             application_name: &application_name,
+            default_isolation: infra_postgres::Isolation::ReadCommitted,
         },
     )
     .await?;

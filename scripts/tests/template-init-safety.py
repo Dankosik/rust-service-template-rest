@@ -32,6 +32,41 @@ _HTTP_IDEMPOTENCY_ONLY_PROFILE_KEYS = (
     "outbound-http", "egress-dns", "tls-fixtures", "request-budget", "http-idempotency", "http-idempotency-mounted",
     "identity", "cargo_lock",
 )
+# Historical DNS pack is replay input only; never part of current selection.
+_HISTORICAL_EGRESS_PACK = {
+    "remove_when_unselected": [
+        "crates/infra-egress-dns/"
+    ],
+    "markers": [
+        {
+            "path": "Cargo.toml",
+            "ids": [
+                "workspace-egress-dns-crate",
+                "workspace-egress-dns",
+                "workspace-egress-tls-fixtures"
+            ]
+        },
+        {
+            "path": "docs/architecture/boundaries.md",
+            "ids": [
+                "docs-boundaries-egress-owner",
+                "docs-boundaries-egress-edges"
+            ]
+        },
+        {
+            "path": "docs/project-structure-and-module-organization.md",
+            "ids": [
+                "docs-structure-egress-placement"
+            ]
+        },
+        {
+            "path": "docs/build-test-and-development-commands.md",
+            "ids": [
+                "docs-commands-egress"
+            ]
+        }
+    ]
+}
 _NEW_PROJECTION_CHECKER = "scripts/tests/template-profile-projections.py"
 
 
@@ -129,6 +164,7 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
 
 def install_derived_outbound_only_none(source: Path, target: Path) -> None:
     profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
+    profile["egress-dns"] = _HISTORICAL_EGRESS_PACK
     outbound_only = {key: profile[key] for key in _OUTBOUND_ONLY_PROFILE_KEYS}
     (target / "scripts/lib/template_profiles.json").write_text(
         json.dumps(outbound_only, indent=2) + "\n", encoding="utf-8"
@@ -148,6 +184,7 @@ def install_derived_outbound_only_none(source: Path, target: Path) -> None:
 
 def install_derived_http_idempotency_only_none(source: Path, target: Path) -> None:
     profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
+    profile["egress-dns"] = _HISTORICAL_EGRESS_PACK
     http_idempotency_only = {key: profile[key] for key in _HTTP_IDEMPOTENCY_ONLY_PROFILE_KEYS}
     (target / "scripts/lib/template_profiles.json").write_text(
         json.dumps(http_idempotency_only, indent=2) + "\n", encoding="utf-8"
@@ -373,7 +410,6 @@ def assert_profile_packs(
     assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
     shared_selected = authn != "none" or outbound_http == "bounded"
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
-    assert_profile_pack(source, target, "egress-dns", outbound_http == "bounded")
     assert_profile_pack(
         source, target, "request-budget", outbound_http == "bounded" or http_idempotency == "postgres"
     )
@@ -650,6 +686,24 @@ def check(source: Path) -> None:
         repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
         if repeat.returncode or state(target) != after:
             raise AssertionError("matching complete-lock initialization was not a byte-preserving no-op")
+        # A complete previous-generation inventory is accepted only for no-op
+        # replay. Current projection must never select or emit its DNS pack.
+        inventory_path = target / "scripts/lib/template_profiles.json"
+        current_inventory = inventory_path.read_bytes()
+        historical_inventory = json.loads(current_inventory)
+        historical_inventory["egress-dns"] = _HISTORICAL_EGRESS_PACK
+        inventory_path.write_text(json.dumps(historical_inventory, indent=2) + "\n", encoding="utf-8")
+        historical_before = state(target)
+        historical_repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
+        if historical_repeat.returncode or state(target) != historical_before:
+            raise AssertionError("previous DNS inventory replay was not byte-preserving")
+        historical_inventory["unknown-pack"] = {"remove_when_unselected": [], "markers": []}
+        inventory_path.write_text(json.dumps(historical_inventory, indent=2) + "\n", encoding="utf-8")
+        unknown_before = state(target)
+        unknown_repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
+        if unknown_repeat.returncode == 0 or state(target) != unknown_before:
+            raise AssertionError("unknown historical inventory was accepted or mutated")
+        inventory_path.write_bytes(current_inventory)
         assert_outbound_lock_refusals(source, target)
         assert_http_idempotency_lock_refusals(source, target)
         assert_jobs_lock_refusals(source, target)

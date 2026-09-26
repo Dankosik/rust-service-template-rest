@@ -24,6 +24,14 @@ const HTTP_DURATION_BUCKETS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
+// template:begin outbound-http:telemetry-outbound-buckets-constants
+/// Explicit seconds buckets for bounded outbound exchanges.
+const OUTBOUND_HTTP_DURATION_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
+];
+const OUTBOUND_HTTP_DURATION_METRIC: &str = "http_client_request_duration_seconds";
+// template:end outbound-http:telemetry-outbound-buckets-constants
+
 #[derive(Debug, thiserror::Error)]
 pub enum MetricsError {
     #[error("install metrics recorder: {0}")]
@@ -57,6 +65,9 @@ impl Metrics {
 
     /// Install `builder` and describe the process and trace-exporter metrics.
     fn installed(builder: PrometheusBuilder) -> Result<Self, MetricsError> {
+        // template:begin outbound-http:telemetry-outbound-buckets-install
+        let builder = outbound_histogram_builder(builder).map_err(MetricsError::Install)?;
+        // template:end outbound-http:telemetry-outbound-buckets-install
         let handle = builder.install_recorder().map_err(MetricsError::Install)?;
         let process = metrics_process::Collector::default();
         process.describe();
@@ -135,6 +146,15 @@ impl Metrics {
 }
 // template:end jobs:telemetry-jobs-histograms
 
+// template:begin outbound-http:telemetry-outbound-buckets-helper
+fn outbound_histogram_builder(builder: PrometheusBuilder) -> Result<PrometheusBuilder, BuildError> {
+    builder.set_buckets_for_metric(
+        Matcher::Full(OUTBOUND_HTTP_DURATION_METRIC.to_owned()),
+        OUTBOUND_HTTP_DURATION_BUCKETS,
+    )
+}
+// template:end outbound-http:telemetry-outbound-buckets-helper
+
 /// The diagnostics router: `GET /metrics` only. Serve it on the private
 /// diagnostics listener, never on the application listener.
 ///
@@ -160,3 +180,28 @@ async fn render(State(metrics): State<Metrics>) -> Response {
     )
         .into_response()
 }
+
+// template:begin outbound-http:telemetry-outbound-histogram-test
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outbound_duration_uses_the_selected_prometheus_buckets() {
+        let recorder = outbound_histogram_builder(PrometheusBuilder::new())
+            .expect("outbound histogram buckets are valid")
+            .build_recorder();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        metrics::describe_histogram!(
+            OUTBOUND_HTTP_DURATION_METRIC,
+            metrics::Unit::Seconds,
+            "Outbound HTTP attempt duration in seconds"
+        );
+        metrics::histogram!(OUTBOUND_HTTP_DURATION_METRIC, "server.address" => "provider.test")
+            .record(0.075);
+        let scrape = recorder.handle().render();
+        assert!(scrape.contains("http_client_request_duration_seconds_bucket"));
+        assert!(scrape.contains("le=\"0.075\""));
+    }
+}
+// template:end outbound-http:telemetry-outbound-histogram-test
