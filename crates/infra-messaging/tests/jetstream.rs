@@ -410,7 +410,7 @@ async fn wait_for_dead_letter_after(
         }
     })
     .await
-    .expect("terminal source delivery must be transferred to the DLQ");
+    .expect("terminal source delivery must be transferred to the DLQ")
 }
 
 async fn redeliver_until_attempt(fixture: &Fixture, target_attempt: i64) {
@@ -828,15 +828,15 @@ async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_t
     .expect("fixture source stream is admitted");
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let calls_for_handler = Arc::clone(&handler_calls);
-    let mut registry = registry(&fixture);
-    registry
+    let mut handlers = registry(&fixture);
+    handlers
         .register::<ExampleEvent, _, _>(move |_, _| {
             calls_for_handler.fetch_add(1, Ordering::SeqCst);
             async { Ok(()) }
         })
         .expect("fixture handler is registered");
     let handle = messaging
-        .consumer(registry)
+        .consumer(handlers)
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
