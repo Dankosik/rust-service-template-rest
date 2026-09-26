@@ -271,13 +271,8 @@ mod tests {
 
     #[tokio::test]
     async fn implicit_head_inherits_get_but_native_method_fallback_remains() {
-        let contract = OpenApiRouter::with_openapi(Api::openapi());
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-        )]
-        let documented = utoipa_axum::routes!(documented_get);
-        let app = app(contract.routes(documented));
+        let app = app(OpenApiRouter::with_openapi(Api::openapi())
+            .routes(utoipa_axum::routes!(documented_get)));
         let head = app
             .clone()
             .oneshot(
@@ -320,14 +315,11 @@ mod tests {
 
     #[tokio::test]
     async fn finalized_contract_mounted_with_nest_keeps_its_policy() {
-        let contract = OpenApiRouter::with_openapi(Api::openapi());
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-        )]
-        let documented = utoipa_axum::routes!(documented_get);
-        let routes = finalize_public(contract.routes(documented))
-            .expect("the documented public contract finalizes");
+        let routes = finalize_public(
+            OpenApiRouter::with_openapi(Api::openapi())
+                .routes(utoipa_axum::routes!(documented_get)),
+        )
+        .expect("the documented public contract finalizes");
         let app = harden(
             axum::Router::new().nest("/mounted", routes),
             &HardenOptions {
@@ -356,14 +348,9 @@ mod tests {
         reason = "intentional unsupported route proves missing-policy denial"
     )]
     async fn served_operation_missing_policy_is_sanitized() {
-        let contract = OpenApiRouter::with_openapi(Api::openapi());
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-        )]
-        let documented = utoipa_axum::routes!(documented_get);
-        let contract = contract.routes(documented);
-        let (router, document) = contract.split_for_parts();
+        let (router, document) = OpenApiRouter::with_openapi(Api::openapi())
+            .routes(utoipa_axum::routes!(documented_get))
+            .split_for_parts();
         let mut contract = OpenApiRouter::from(router.route(
             "/undocumented",
             axum::routing::post(|| async { "must not run" }),

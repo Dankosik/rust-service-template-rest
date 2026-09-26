@@ -80,31 +80,22 @@ regenerated fails everywhere tests run.
    lives with that pack's seam and is registered through the pack's own
    composer. Request and response types derive `ToSchema`;
    `#[serde(deny_unknown_fields)]` closes an object.
-4. Bind each `utoipa_axum::routes!` invocation using the scoped expectation
-   below, then compose its result into the feature's `OpenApiRouter`. Merge that
-   router in `service::api::contract()`; the hardened chain is unchanged.
+4. Register the handler as `OpenApiRouter::routes(utoipa_axum::routes!(handler))`
+   in the feature's `OpenApiRouter`, and merge that router in
+   `service::api::contract()`; the hardened chain is unchanged.
 5. Run `make openapi-generate`, review the YAML diff as the contract change,
    then `make openapi-check`.
 6. Test the mounted router with a one-shot call asserting status, content
    type, problem code, and headers.
 
-Pinned Clippy checks the macro's generated `MethodRouter::on` calls. Isolate
-only the upstream macro invocation in an expected diagnostic:
-
-```rust
-#[expect(
-    clippy::disallowed_methods,
-    reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-)]
-let routes = utoipa_axum::routes!(handler);
-let router = OpenApiRouter::new().routes(routes);
-```
-
-The initializer must be exactly the macro invocation, with no block, closure,
-helper, composition or method addition. Compose, destructure or transform the
-tuple outside that statement. All raw-route and method-addition bans remain;
-normal Clippy also rejects an expectation that is no longer needed. Multi-handler
-macro calls group only annotated methods on the same path.
+`routes!` registers exactly the annotated methods, so the served routes and
+the document share one source. The final policy layer answers a sanitized
+`500` for a served method the document lacks, and HEAD follows GET unless the
+annotation documents HEAD. Clippy's `disallowed-methods` (`clippy.toml`)
+rejects the remaining escape hatches in application code: raw
+`OpenApiRouter`/`Router` routes and services, fallbacks, and separately
+registered HEAD or any-method handlers. Multi-handler macro calls group only
+annotated methods on the same path.
 
 The first operation that accepts parameters or a body also adds the mapping
 from extractor rejections to `400`/`415`/`422` problems with `invalid_params`
@@ -128,8 +119,8 @@ HEAD uses GET. A served method without policy produces sanitized `500`.
 `VerifiedPrincipal` exposes sealed identity and immutable typed `claims<T>()`
 from the same verified evidence, with sanitized access errors. Handlers never
 receive raw tokens or unverified claims. The normal Clippy gate rejects raw
-endpoint constructors, undocumented router entry points and local method
-additions; supported authoring uses annotated routes, OpenAPI merge and nest.
+routes, fallbacks and separate HEAD handlers; supported authoring uses
+annotated routes, OpenAPI merge and nest.
 Response completeness and optional `x-security-decision` consistency belong
 to the OpenAPI gate; startup checks effective security. Health probes remain
 explicitly public, so supplied Authorization does not cause provider work.

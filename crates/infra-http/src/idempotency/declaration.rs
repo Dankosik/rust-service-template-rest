@@ -457,10 +457,6 @@ mod tests {
     }
 
     fn prepared_routes() -> (UtoipaMethodRouter, ComposedOperation) {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-        )]
         let mut routes: UtoipaMethodRouter = routes!(create_widget);
         let identity = prepare(&mut routes.1).expect("normal protected route prepares");
         (routes, identity)
@@ -511,12 +507,7 @@ mod tests {
     fn preparation_accepts_only_matching_generated_values_and_rejects_conflicts() {
         type ConflictCase = (fn(&mut Operation), Rule);
 
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-        )]
-        let routes: UtoipaMethodRouter = routes!(create_widget);
-        let (_, mut idempotent, _) = routes;
+        let (_, mut idempotent, _): UtoipaMethodRouter = routes!(create_widget);
         let operation = idempotent
             .paths
             .get_mut(WIDGETS)
@@ -568,12 +559,7 @@ mod tests {
             ),
         ];
         for (change, rule) in cases {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-            )]
-            let routes: UtoipaMethodRouter = routes!(create_widget);
-            let (_, mut paths, _) = routes;
+            let (_, mut paths, _): UtoipaMethodRouter = routes!(create_widget);
             change(
                 paths
                     .paths
@@ -589,28 +575,13 @@ mod tests {
 
     #[test]
     fn preparation_requires_one_supported_operation_with_an_operation_id() {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-        )]
-        let routes: UtoipaMethodRouter = routes!(get_widget);
-        let (_, mut unsupported, _) = routes;
+        let (_, mut unsupported, _): UtoipaMethodRouter = routes!(get_widget);
         assert_eq!(prepare(&mut unsupported).unwrap_err().rule(), Rule::Method);
 
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-        )]
-        let routes: UtoipaMethodRouter = routes!(create_widget, get_widget);
-        let (_, mut multiple, _) = routes;
+        let (_, mut multiple, _): UtoipaMethodRouter = routes!(create_widget, get_widget);
         assert_eq!(prepare(&mut multiple).unwrap_err().rule(), Rule::Shape);
 
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-        )]
-        let routes: UtoipaMethodRouter = routes!(create_widget);
-        let (_, mut unnamed, _) = routes;
+        let (_, mut unnamed, _): UtoipaMethodRouter = routes!(create_widget);
         unnamed
             .paths
             .get_mut(WIDGETS)

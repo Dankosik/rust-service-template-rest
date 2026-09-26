@@ -56,17 +56,8 @@ precedes key handling without per-operation wrapping:
 
 ```rust,ignore
 // crates/service/src/api.rs, inside contract(idempotency: &mut Composer):
-#[expect(
-    clippy::disallowed_methods,
-    reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-)]
-let routes = utoipa_axum::routes!(widgets::http::create_widget);
-let router = router.routes(idempotency.route(routes));
+.routes(idempotency.route(utoipa_axum::routes!(widgets::http::create_widget)))
 ```
-
-Keep the macro invocation as the entire attributed initializer. Composition,
-destructuring and tuple changes occur afterward; do not put a block, closure,
-helper or extra method call under that expectation.
 
 Regenerate and review the OpenAPI document after composition changes. The
 generated key description covers both wire encodings and decoded length; it

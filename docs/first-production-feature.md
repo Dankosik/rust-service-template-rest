@@ -187,18 +187,10 @@ pub fn router<S>() -> OpenApiRouter<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-    )]
-    let routes = utoipa_axum::routes!(get_greeting);
-    OpenApiRouter::with_openapi(utoipa::openapi::OpenApi::default()).routes(routes)
+    OpenApiRouter::with_openapi(utoipa::openapi::OpenApi::default())
+        .routes(utoipa_axum::routes!(get_greeting))
 }
 ```
-
-The expectation covers only the macro initializer, whose generated method calls
-trigger Clippy. Compose or destructure its result afterward; no block, closure,
-helper or extra method call belongs inside the attributed statement.
 
 What each choice buys:
 
@@ -268,8 +260,9 @@ With the idempotency pack retained, `contract` also takes the idempotency
 composer: `pub fn contract(idempotency: &mut infra_http::idempotency::Composer) -> OpenApiRouter<ReadinessReader>`,
 merging components with
 `.merge(OpenApiRouter::with_openapi(idempotency.components()))` and composing an
-idempotent operation with `.routes(idempotency.route(routes))`, where `routes`
-is bound by the same macro-only expectation shown above.
+idempotent operation with
+`.routes(idempotency.route(utoipa_axum::routes!(handler)))` instead of a plain
+`.merge`.
 <!-- template:end http-idempotency:docs-first-feature-http-idempotency-contract -->
 
 Nothing else in `service` changes: the hardened chain, the listeners, and

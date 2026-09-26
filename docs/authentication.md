@@ -31,15 +31,11 @@ The final HTTP layer enforces the resulting policy before idempotency admission
 and handler extraction, preserving native `404`, `405`, and implicit-HEAD
 behavior. HEAD uses an explicit HEAD policy when documented, otherwise GET.
 A matched served operation missing policy is a sanitized `500 internal_error`.
-Bind each `utoipa_axum::routes!(handler)` as the entire initializer of a local
-`let` with the statement-scoped `clippy::disallowed_methods` expectation shown
-in [HTTP authoring](architecture/http.md#adding-an-operation). Pass that tuple
-to `OpenApiRouter::routes` outside the attributed statement, then merge or nest
-other OpenAPI routers. Blocks, closures, helpers and extra method calls cannot
-share the expectation. The normal Clippy gate retains all raw endpoint and
-method-addition bans. After successful authentication the raw
-`Authorization` field is removed, so only verified identity crosses the
-boundary.
+Register operations as `OpenApiRouter::routes(utoipa_axum::routes!(handler))`
+([HTTP authoring](architecture/http.md#adding-an-operation)); Clippy rejects
+raw routes, fallbacks and separately registered HEAD handlers. After successful
+authentication the raw `Authorization` field is removed, so only verified
+identity crosses the boundary.
 
 The boundary accepts exactly one `Authorization` field with a case-insensitive
 `Bearer` scheme and RFC 6750 token alphabet. Missing credentials or one

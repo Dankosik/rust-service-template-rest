@@ -529,20 +529,10 @@ fn widget_contract(composer: &mut Composer) -> OpenApiRouter<health::ReadinessRe
     // As `service::api::contract` assembles it: the transport router
     // registers the shared problem responses the family references (the
     // 403 among them must resolve), and the composer adds its own.
-    let contract = OpenApiRouter::with_openapi(bearer_document()).merge(infra_http::router());
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-    )]
-    let create = routes!(create_widget);
-    let contract = contract.routes(composer.route(create));
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-    )]
-    let replace = routes!(replace_widget);
-    contract
-        .routes(composer.route(replace))
+    OpenApiRouter::with_openapi(bearer_document())
+        .merge(infra_http::router())
+        .routes(composer.route(routes!(create_widget)))
+        .routes(composer.route(routes!(replace_widget)))
         .merge(OpenApiRouter::with_openapi(composer.components()))
 }
 
@@ -866,19 +856,10 @@ async fn inherited_get() -> &'static str {
 #[tokio::test]
 async fn final_document_controls_head_policy_and_preserves_native_fallbacks() {
     let provider = Provider::start().await;
-    let contract = OpenApiRouter::with_openapi(bearer_document()).merge(infra_http::router());
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-    )]
-    let authorization = routes!(authorized_without_idempotency, public_head);
-    let contract = contract.routes(authorization);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-    )]
-    let inherited = routes!(inherited_get);
-    let contract = contract.routes(inherited);
+    let contract = OpenApiRouter::with_openapi(bearer_document())
+        .merge(infra_http::router())
+        .routes(routes!(authorized_without_idempotency, public_head))
+        .routes(routes!(inherited_get));
     // The inherited operation deliberately has no failure-documentation family:
     // runtime startup owns security, while the OpenAPI gate owns completeness.
     let router = infra_http::authn::finalize(contract, provider.verifier())
@@ -935,13 +916,7 @@ async fn final_document_controls_head_policy_and_preserves_native_fallbacks() {
 }
 
 fn timeout_router(verifier: Verifier, timeout: Duration, delay: Duration) -> Router {
-    let contract = OpenApiRouter::with_openapi(bearer_document());
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-    )]
-    let inherited = routes!(inherited_get);
-    let contract = contract.routes(inherited);
+    let contract = OpenApiRouter::with_openapi(bearer_document()).routes(routes!(inherited_get));
     let router = infra_http::authn::finalize(contract, verifier).unwrap();
     let router = router.layer(axum::middleware::from_fn(
         move |request, next: axum::middleware::Next| async move {
@@ -1034,13 +1009,9 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
     let _local = metrics::set_default_local_recorder(&recorder);
     let provider = Provider::start().await;
     let root_policy = bearer_document();
-    let contract = OpenApiRouter::with_openapi(root_policy).merge(infra_http::router());
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-    )]
-    let authorization = routes!(authorized_without_idempotency);
-    let contract = contract.routes(authorization);
+    let contract = OpenApiRouter::with_openapi(root_policy)
+        .merge(infra_http::router())
+        .routes(routes!(authorized_without_idempotency));
     let router = infra_http::authn::finalize(contract, provider.verifier())
         .expect("the protected contract finalizes without an idempotency composer");
     let server = TestServer::new(harden(

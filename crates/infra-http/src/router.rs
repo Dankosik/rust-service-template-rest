@@ -1,10 +1,10 @@
 //! The operations this crate owns: the platform probes, seeded with the
 //! problem components every operation references.
 //!
-//! [`router`] returns a [`OpenApiRouter`], so the axum routes, their OpenAPI
-//! description stay together until the service
-//! crate finalizes policy and supplies state. New operations join a feature
-//! carrier, never this file or the hardened chain.
+//! [`router`] returns an [`OpenApiRouter`], so the axum routes and their
+//! OpenAPI description stay together until the service crate finalizes policy
+//! and supplies state. New operations join a feature carrier, never this file
+//! or the hardened chain.
 
 // Probe handlers live in `probes`; the readiness reader comes from the
 // `health` crate.
@@ -24,19 +24,9 @@ pub(crate) const HEALTH_PROBE_ROUTES: &[&str] = &[probes::LIVE_PATH, probes::REA
 /// calls `with_state` before [`crate::harden`]. One `routes!` call per path:
 /// the macro groups the methods of a single path.
 pub fn router() -> OpenApiRouter<ReadinessReader> {
-    let router = OpenApiRouter::with_openapi(ProblemComponents::openapi());
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-    )]
-    let live = routes!(probes::live);
-    let router = router.routes(live);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-    )]
-    let ready = routes!(probes::ready);
-    router.routes(ready)
+    OpenApiRouter::with_openapi(ProblemComponents::openapi())
+        .routes(routes!(probes::live))
+        .routes(routes!(probes::ready))
 }
 
 #[cfg(test)]

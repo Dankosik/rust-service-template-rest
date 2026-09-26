@@ -143,13 +143,7 @@ mod tests {
     }
 
     fn protected_test_contract() -> OpenApiRouter<ReadinessReader> {
-        let contract = assemble();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-        )]
-        let route = utoipa_axum::routes!(protected);
-        contract.routes(route)
+        assemble().routes(utoipa_axum::routes!(protected))
     }
 
     #[test]
@@ -202,13 +196,7 @@ mod idempotency_tests {
     /// The production contract with the test route composed through the
     /// same composer.
     fn with_test_route(idempotency: &mut Composer) -> OpenApiRouter<ReadinessReader> {
-        let contract = contract(idempotency);
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-        )]
-        let route = utoipa_axum::routes!(idempotent);
-        contract.routes(idempotency.route(route))
+        contract(idempotency).routes(idempotency.route(utoipa_axum::routes!(idempotent)))
     }
 
     /// Agreement of the contract `compose` builds through a fresh inert
