@@ -41,9 +41,9 @@ use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, ResolvedSampler, TracingOptions,
     diagnostics_router, install_subscriber, install_tracer_provider,
 };
-// template:begin service-secrets:bootstrap-postgres-secret-import
+// template:begin integration:bootstrap-postgres-secret-import
 use secrecy::ExposeSecret;
-// template:end service-secrets:bootstrap-postgres-secret-import
+// template:end integration:bootstrap-postgres-secret-import
 use service_config::{
     AppConfig, BuildInfo, Config, FromArgs, LogFormat, TracesSampler, process_failure,
 };

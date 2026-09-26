@@ -273,9 +273,7 @@ impl<T: Unpin> Stream for RawLaterStream<T> {
         if let Some(first) = self.first.take() {
             return Poll::Ready(Some(Ok(first)));
         }
-        if self.panic {
-            panic!("later panic detail: do not leak");
-        }
+        assert!(!self.panic, "later panic detail: do not leak");
         Poll::Ready(Some(Err(Status::permission_denied(
             "later forged detail: do not leak",
         ))))

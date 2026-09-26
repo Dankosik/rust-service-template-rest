@@ -779,7 +779,7 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("outbox")
     if inputs.jobs == "postgres" or inputs.messaging == "nats-jetstream":
         selected.add("worker")
-    if inputs.database == "postgres" or inputs.messaging == "nats-jetstream":
+    if inputs.database == "postgres" or inputs.messaging == "nats-jetstream" or inputs.grpc == "enabled":
         selected.add("service-secrets")
     if inputs.database == "postgres" or inputs.messaging == "nats-jetstream":
         selected.add("integration")

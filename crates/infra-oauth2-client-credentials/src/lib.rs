@@ -161,12 +161,14 @@ impl Credentials {
         if Instant::now() >= deadline {
             return Err(AcquisitionError::Timeout);
         }
-        let result = tokio::time::timeout_at(
-            deadline,
-            self.0.cache.try_get_with((), self.0.fetch(deadline)),
-        )
-        .await
-        .map_err(|_| AcquisitionError::Timeout)?;
+        // Give Moka a Send initializer without propagating nested opaque futures.
+        // It borrows this owner and remains lazy until elected by the cache.
+        let init: Pin<
+            Box<dyn Future<Output = Result<Arc<CachedCredential>, FillError>> + Send + '_>,
+        > = Box::pin(self.0.fetch(deadline));
+        let result = tokio::time::timeout_at(deadline, self.0.cache.try_get_with((), init))
+            .await
+            .map_err(|_| AcquisitionError::Timeout)?;
         match result {
             Ok(value) => Ok(value),
             Err(error) => match error.as_ref() {

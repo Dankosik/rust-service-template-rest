@@ -1215,8 +1215,7 @@
   "service-secrets": {
     "remove_when_unselected": [],
     "markers": [
-      {"path": "crates/service/Cargo.toml", "ids": ["service-secrecy-dependency"]},
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-postgres-secret-import"]}
+      {"path": "crates/service/Cargo.toml", "ids": ["service-secrecy-dependency"]}
     ]
   },
   "integration": {
@@ -1226,7 +1225,8 @@
     "markers": [
       {"path": "env/docker-compose.yml", "ids": ["compose-file"]},
       {"path": ".github/dependabot.yml", "ids": ["dependabot-compose"]},
-      {"path": ".github/workflows/ci.yml", "ids": ["ci-integration-job", "ci-required-integration-need"]}
+      {"path": ".github/workflows/ci.yml", "ids": ["ci-integration-job", "ci-required-integration-need"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-postgres-secret-import"]}
     ]
   },
   "jobs-messaging": {
