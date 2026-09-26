@@ -54,7 +54,7 @@ impl Producer {
         Ok(prepared)
     }
 
-    /// Dispatches and awaits one confirmed JetStream acknowledgment under one deadline.
+    /// Dispatches and awaits one confirmed `JetStream` acknowledgment under one deadline.
     ///
     /// # Errors
     ///

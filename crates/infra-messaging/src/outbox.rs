@@ -1,4 +1,4 @@
-//! Transactional JetStream publication through the canonical jobs queue.
+//! Transactional `JetStream` publication through the canonical jobs queue.
 //!
 //! This module stores the already serialized event bytes with its immutable
 //! route and identity. Jobs owns every queue statement and the caller owns the

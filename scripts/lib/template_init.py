@@ -381,6 +381,19 @@ def _profile_data(
         include_webhooks = False
         include_messaging = False
         include_outbox = False
+    elif historical_jobs and historical_egress and keys == (
+        _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS - {"tls-fixtures"}
+    ):
+        # Exact HTTP-idempotency/DNS generation, before jobs or TLS fixtures.
+        include_authn = True
+        include_outbound = True
+        include_outbound_auth = False
+        include_tls_fixtures = False
+        include_http_idempotency = True
+        include_jobs = False
+        include_webhooks = False
+        include_messaging = False
+        include_outbox = False
     elif historical_jobs and keys == _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
@@ -396,6 +409,18 @@ def _profile_data(
         include_outbound = True
         include_outbound_auth = False
         include_tls_fixtures = True
+        include_http_idempotency = False
+        include_jobs = False
+        include_webhooks = False
+        include_messaging = False
+        include_outbox = False
+    elif historical_egress and keys == _OUTBOUND_PROFILE_INVENTORY_KEYS:
+        # Exact outbound-HTTP/DNS generation, before TLS fixtures or jobs.
+        # Accepted only for byte-preserving replay, never current projection.
+        include_authn = True
+        include_outbound = True
+        include_outbound_auth = False
+        include_tls_fixtures = False
         include_http_idempotency = False
         include_jobs = False
         include_webhooks = False
@@ -1264,6 +1289,12 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
         # async-nats alone enables bytes/serde. Removing messaging must also
         # remove that registry feature edge from the retained bytes package.
         _project_feature_edge(records, "bytes", "1.12.1", ["serde"], [])
+        # NATS nkeys selects ed25519-dalek/digest -> signature/digest. JWT
+        # retains signature's rand_core edge but does not select digest.
+        _project_feature_edge(
+            records, "signature", "2.2.0",
+            ["digest 0.10.7", "rand_core 0.6.4"], ["rand_core 0.6.4"],
+        )
     if inputs.database == "none":
         for name, version, expected, retained in (
             ("bitflags", "2.13.2", ["serde_core"], []),
@@ -1276,10 +1307,11 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
             _project_feature_edge(records, name, version, expected, retained)
     if inputs.authn != "oidc-jwt":
         _project_feature_edge(records, "zeroize", "1.9.0", ["zeroize_derive"], [])
-    if inputs.authn == "none" and inputs.outbound_http == "none":
+    if inputs.authn == "none" and inputs.outbound_http == "none" and inputs.messaging == "none":
         # Generated TLS fixtures retained by either authentication or outbound
         # test support enable rcgen/aws_lc_rs and its weak x509-parser/verify-aws
-        # edge; those aws-lc-rs defaults retain untrusted even without JWT.
+        # edge; NATS also enables aws-lc-rs defaults directly. Either owner
+        # retains untrusted even without JWT.
         _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
     if inputs.outbound_auth == "none":
         # oauth2 enables url's serde feature; the source still uses url through

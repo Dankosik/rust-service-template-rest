@@ -179,7 +179,7 @@ fn invalid_configuration_exits_one_with_the_key_named() {
 #[test]
 fn active_messaging_refuses_missing_credentials_before_listener_admission() {
     let (code, stderr) = Service::spawn(&[
-        ("APP__MESSAGING__URLS__0", "tls://nats.example:4222"),
+        ("APP__MESSAGING__URLS", "tls://nats.example:4222"),
         ("APP__MESSAGING__SOURCE_STREAM", "events"),
     ])
     .wait();
@@ -200,7 +200,7 @@ fn sigterm_cancels_a_stalled_messaging_connect_before_its_startup_timeout() {
     let url = format!("nats://{}", broker.local_addr().unwrap());
     let mut service = Service::spawn(&[
         ("APP__APP__ENV", "local"),
-        ("APP__MESSAGING__URLS__0", &url),
+        ("APP__MESSAGING__URLS", &url),
         ("APP__MESSAGING__SOURCE_STREAM", "events"),
         ("APP__MESSAGING__ALLOW_PLAINTEXT", "true"),
         ("APP__MESSAGING__ALLOW_UNAUTHENTICATED", "true"),

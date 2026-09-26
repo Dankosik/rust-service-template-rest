@@ -110,7 +110,7 @@ impl Worker {
             // template:begin outbox:test-jobs-process-nats-environment
             .env("APP__POSTGRES__MAX_CONNECTIONS", "6")
             .env("APP__APP__ENV", "local")
-            .env("APP__MESSAGING__URLS", format!("[\"{}\"]", nats.url))
+            .env("APP__MESSAGING__URLS", &nats.url)
             .env("APP__MESSAGING__SOURCE_STREAM", &nats.stream)
             .env("APP__MESSAGING__MAX_PAYLOAD_BYTES", "1 KiB")
             .env("APP__MESSAGING__ALLOW_PLAINTEXT", "true")

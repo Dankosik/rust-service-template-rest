@@ -49,4 +49,4 @@ if [[ -z ${NATS_URL:-} ]]; then
 	NATS_URL="nats://127.0.0.1:${port}"
 fi
 export NATS_URL
-cargo test --locked -p infra-messaging --test jetstream "$@"
+cargo test --locked -p infra-messaging --features integration --test jetstream "$@"

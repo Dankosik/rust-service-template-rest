@@ -66,6 +66,11 @@ where
     V: Into<std::ffi::OsString>,
 {
     let namespace = collect_namespace(environment)?;
+    // template:begin messaging:load-messaging-list-namespace
+    let (list_namespace, namespace): (config::Map<_, _>, config::Map<_, _>) = namespace
+        .into_iter()
+        .partition(|(key, _)| key.eq_ignore_ascii_case("APP__MESSAGING__URLS"));
+    // template:end messaging:load-messaging-list-namespace
 
     let mut builder = config::Config::builder();
     for path in options.files() {
@@ -82,6 +87,18 @@ where
         // An empty value is still an explicit override; validation decides.
         .ignore_empty(false)
         .source(Some(namespace));
+    // template:begin messaging:load-messaging-list-source
+    // Enable config-rs's list parser only for URLs. Its try_parsing also
+    // coerces scalar numbers/booleans, so secrets stay in the unchanged source.
+    builder = builder.add_source(
+        env_source
+            .clone()
+            .source(Some(list_namespace))
+            .try_parsing(true)
+            .list_separator(",")
+            .with_list_parse_key("messaging.urls"),
+    );
+    // template:end messaging:load-messaging-list-source
     let merged = builder
         .add_source(env_source)
         .build()
@@ -348,7 +365,7 @@ mod tests {
             env(&[
                 (
                     "APP__MESSAGING__URLS",
-                    "[\"tls://nats-a.example:4222\", \"tls://nats-b.example:4222\"]",
+                    "tls://nats-a.example:4222,tls://nats-b.example:4222",
                 ),
                 ("APP__MESSAGING__CREDENTIALS", "fixture-credentials"),
                 ("APP__MESSAGING__ROOT_CA_PATH", "/etc/nats/root-ca.pem"),
@@ -379,6 +396,28 @@ mod tests {
         assert_eq!(cfg.messaging.max_payload_bytes, bytesize::ByteSize::mib(2));
         assert_eq!(cfg.messaging.consumer_concurrency, 2);
         assert!(!format!("{cfg:?}").contains("fixture-credentials"));
+    }
+
+    #[test]
+    fn messaging_url_list_parsing_preserves_scalar_secret_bytes() {
+        use secrecy::ExposeSecret as _;
+
+        for secret in ["00123", "TRUE"] {
+            let cfg = load_from(
+                &LoadOptions::default(),
+                BUILD,
+                env(&[
+                    ("APP__MESSAGING__URLS", "tls://nats.example:4222"),
+                    ("APP__MESSAGING__CREDENTIALS", secret),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(cfg.messaging.urls, ["tls://nats.example:4222"]);
+            assert_eq!(
+                cfg.messaging.credentials.as_ref().unwrap().expose_secret(),
+                secret
+            );
+        }
     }
 
     #[test]

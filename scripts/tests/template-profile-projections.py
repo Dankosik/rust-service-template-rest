@@ -334,8 +334,8 @@ def _inputs(
     initializer, database: str, authn: str, outbound_http: str, http_idempotency: str,
     jobs: str, webhooks: str, inbound_webhooks: str, harness: str, outbound_auth: str = "none",
 ):
-    # Matches the CI runner's identity convention. The `JOBS=none` identity is
-    # unchanged from before the jobs pack.
+    # Canonical projection identities remain stable across harness comparisons.
+    # Runtime representatives use their graph number to stay within the name bound.
     if webhooks != "none" or inbound_webhooks != "none":
         authn_code = {"none": "n", "oidc-jwt": "j", "oidc-introspection": "i"}[authn]
         service_name = (

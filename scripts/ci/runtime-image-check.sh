@@ -151,24 +151,16 @@ true:false)
 		exit 1
 		;;
 true:true)
-		expected='no job kind or typed message handler is registered: register this service.s retained capabilities in crates/jobs-worker/src/main.rs'
-		if [[ ${jobs} == postgres && ${messaging} == none ]]; then
-			expected='no job kind is registered'
-		fi
-		if [[ -f "${root}/template.lock" ]]; then
-			if [[ ${jobs} == postgres && ${messaging} == none ]]; then
-				expected='no job kind is registered|postgres\.enabled must be true to run the jobs worker'
-			fi
-	else
-		webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field webhooks)
-		inbound_webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field inbound_webhooks)
-		if [[ ${webhooks} != none || ${inbound_webhooks} != none ]]; then
-			expected='postgres\.enabled must be true to run the jobs worker'
-		fi
+	expected="no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs"
+	webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field webhooks)
+	inbound_webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field inbound_webhooks)
+	outbox=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field outbox)
+	if [[ ${webhooks} != none || ${inbound_webhooks} != none || ${outbox} == postgres ]]; then
+		expected='postgres.enabled must be true to run the jobs worker'
 	fi
 	worker_output=$(docker start --attach "${worker}" 2>&1 || true)
 	worker_exit=$(docker inspect -f '{{.State.ExitCode}}' "${worker}")
-	refusal=$(grep -Eo "${expected}" <<<"${worker_output}" | head -n 1 || true)
+	refusal=$(grep -Fo "${expected}" <<<"${worker_output}" | head -n 1 || true)
 	if [[ ${worker_exit} != 1 || -z ${refusal} ]]; then
 		echo "jobs-worker did not give the expected startup refusal (exit ${worker_exit})" >&2
 		printf '%s\n' "${worker_output}" >&2

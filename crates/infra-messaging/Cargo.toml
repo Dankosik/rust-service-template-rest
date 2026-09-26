@@ -8,6 +8,14 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Real broker tests run only through the explicit messaging integration owner.
+integration = []
+
+[[test]]
+name = "jetstream"
+required-features = ["integration"]
+
 [lints]
 workspace = true
 

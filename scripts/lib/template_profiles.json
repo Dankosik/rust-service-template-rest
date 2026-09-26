@@ -857,7 +857,7 @@
     "markers": [
       {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
-      {"path": "crates/config/src/load.rs", "ids": ["load-messaging-environment"]},
+      {"path": "crates/config/src/load.rs", "ids": ["load-messaging-environment", "load-messaging-list-namespace", "load-messaging-list-source"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-messaging-dependency"]},
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["service-bootstrap-messaging-imports", "service-bootstrap-messaging-errors", "service-bootstrap-messaging-startup-budget", "service-bootstrap-messaging-options", "service-bootstrap-prepared-messaging-field", "service-bootstrap-messaging-startup", "service-bootstrap-messaging-startup-close", "service-bootstrap-messaging-opened", "service-bootstrap-prepared-messaging-value", "service-bootstrap-destructure-messaging", "service-bootstrap-shutdown-messaging", "service-bootstrap-messaging-functions", "service-bootstrap-stopped-startup-messaging"]},
       {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["service-shutdown-messaging-imports", "service-shutdown-plan-messaging", "service-shutdown-startup-messaging-close", "service-shutdown-close-messaging-argument", "service-shutdown-dependency-messaging-close", "service-shutdown-stopped-startup-messaging-argument", "service-shutdown-stopped-startup-messaging-parameter"]},

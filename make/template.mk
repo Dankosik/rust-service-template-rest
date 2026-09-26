@@ -108,7 +108,9 @@ endif
 
 ifeq ($(MESSAGING_PROFILE),none)
 ACTIVE_TEMPLATE_STANDARD_TARGETS := $(filter-out $(MESSAGING_PROFILE_TARGETS),$(ACTIVE_TEMPLATE_STANDARD_TARGETS))
-else ifneq ($(MESSAGING_PROFILE),nats-jetstream)
+else ifeq ($(MESSAGING_PROFILE),nats-jetstream)
+MESSAGING_LINT_FEATURES := --features infra-messaging/integration
+else
 $(error unable to select messaging profile; template.lock must be complete and supported)
 endif
 
@@ -172,11 +174,11 @@ fmt-check: ## Fail when formatting differs from rustfmt output
 INTEGRATION_LINT_FEATURES ?=
 
 lint: ## Clippy over all targets, warnings are errors
-	$(CARGO) clippy --workspace --all-targets $(INTEGRATION_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
+	$(CARGO) clippy --workspace --all-targets $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
 
 lint-changed: ## Clippy over the crates in PKGS="<crate> <crate>", warnings are errors
 	$(REQUIRE_PKGS)
-	$(CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
+	$(CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
 
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py

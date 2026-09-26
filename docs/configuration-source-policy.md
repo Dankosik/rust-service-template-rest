@@ -67,6 +67,12 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   development/test escape hatch, never a production default. Configuration
   validates shape and resource bounds before any provider I/O; the adapter maps
   the admitted snapshot to its client options.
+  `messaging.urls` uses a TOML array or one comma-separated
+  `APP__MESSAGING__URLS` value, for example
+  `tls://nats-a.example:4222,tls://nats-b.example:4222`. A single URL is written
+  directly; JSON array syntax is not an environment format. List parsing is
+  confined to this key, so other environment strings, including credentials,
+  keep their exact bytes.
 <!-- template:end messaging:docs-config-messaging-source -->
 <!-- template:begin outbox:docs-config-outbox-source -->
 - `OUTBOX=postgres` is initializer/profile selection, not a configuration

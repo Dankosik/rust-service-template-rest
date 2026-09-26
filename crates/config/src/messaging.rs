@@ -1,4 +1,4 @@
-//! JetStream connection and delivery-admission configuration.
+//! `JetStream` connection and delivery-admission configuration.
 //!
 //! This section owns startup input only. It never contacts a broker or
 //! reconciles operator-owned streams.
@@ -17,7 +17,7 @@ use crate::validate::{ValidationError, int_range, non_empty};
 const DELIVERY_OVERHEAD_BYTES: u64 = 8 * 1024;
 const MAX_RESIDENT_DELIVERY_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Optional JetStream connection and worker limits.
+/// Optional `JetStream` connection and worker limits.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MessagingConfig {
@@ -92,7 +92,7 @@ impl MessagingConfig {
         self.required_credentials(app_env)?;
         required(
             "messaging.source_stream",
-            &self.source_stream,
+            self.source_stream.as_deref(),
             "an active producer",
         )?;
         Ok(())
@@ -107,17 +107,17 @@ impl MessagingConfig {
         self.validate_producer(app_env)?;
         required(
             "messaging.consumer_durable",
-            &self.consumer_durable,
+            self.consumer_durable.as_deref(),
             "an active consumer",
         )?;
         required(
             "messaging.consumer_filter_subject",
-            &self.consumer_filter_subject,
+            self.consumer_filter_subject.as_deref(),
             "an active consumer",
         )?;
         required(
             "messaging.dlq_subject",
-            &self.dlq_subject,
+            self.dlq_subject.as_deref(),
             "an active consumer",
         )?;
         Ok(())
@@ -230,12 +230,10 @@ impl MessagingConfig {
 
 fn required<'a>(
     key: &str,
-    value: &'a Option<String>,
+    value: Option<&'a str>,
     requirement: &str,
 ) -> Result<&'a str, ValidationError> {
-    value
-        .as_deref()
-        .ok_or_else(|| ValidationError::new(key, format!("is required for {requirement}")))
+    value.ok_or_else(|| ValidationError::new(key, format!("is required for {requirement}")))
 }
 
 fn is_local_development(app_env: &str) -> bool {

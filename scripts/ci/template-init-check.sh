@@ -216,10 +216,10 @@ run_graph() {
 		identity="matrix-w${graph}"
 		description="Webhook matrix ${database} ${authn} ${outbound_http} ${outbound_auth} ${http_idempotency} ${webhooks} ${inbound_webhooks}"
 	elif [[ ${jobs} == none ]]; then
-		identity="matrix-${database}-${authn}-${outbound_http}-${outbound_auth}-${http_idempotency}-core"
+		identity="matrix-${graph}-core"
 		description="Matrix ${database} ${authn} ${outbound_http} ${outbound_auth} ${http_idempotency} core"
 	else
-		identity="matrix-${database}-${authn}-${outbound_http}-${outbound_auth}-${http_idempotency}-jobs-core"
+		identity="matrix-${graph}-jobs-core"
 		description="Matrix ${database} ${authn} ${outbound_http} ${outbound_auth} ${http_idempotency} jobs core"
 	fi
 	if [[ ${http_idempotency} == postgres ]]; then

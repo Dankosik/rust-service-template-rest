@@ -1,4 +1,4 @@
-//! Bounded JetStream publication and typed event delivery.
+//! Bounded `JetStream` publication and typed event delivery.
 //!
 //! Composition supplies validated configuration and routes. This crate owns
 //! Go-compatible bytes, broker finality and consumer settlement; feature code

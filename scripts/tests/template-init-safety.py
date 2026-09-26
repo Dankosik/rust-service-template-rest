@@ -19,18 +19,20 @@ sys.dont_write_bytecode = True
 
 _LEGACY_B206_PROFILE_SHA256 = "75e68f9c7defd4031f5d7a0bc2866f337a6c79f69a69f56c79a268d48d8d6530"
 _LEGACY_B206_REVISION = "b2060279370713f05be81b1ad44a31e3e960bccc"
+_HISTORICAL_OUTBOUND_REVISION = "43b7588edbdb1ebfbc478fb28e0e3d2e77417960"
+_HISTORICAL_HTTP_IDEMPOTENCY_REVISION = "4819113b21c110e69f3f1d4d26f3bf9337c83b72"
 _LEGACY_PROFILE_KEYS = ("schema_version", "source_only", "postgres", "identity", "cargo_lock")
 _AUTH_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection", "identity", "cargo_lock",
 )
 _OUTBOUND_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection",
-    "outbound-http", "egress-dns", "tls-fixtures", "request-budget", "identity", "cargo_lock",
+    "identity", "cargo_lock", "outbound-http", "egress-dns", "request-budget",
 )
 _HTTP_IDEMPOTENCY_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection",
-    "outbound-http", "egress-dns", "tls-fixtures", "request-budget", "http-idempotency", "http-idempotency-mounted",
-    "identity", "cargo_lock",
+    "identity", "cargo_lock", "outbound-http", "egress-dns", "request-budget", "http-idempotency",
+    "http-idempotency-mounted",
 )
 # Historical DNS pack is replay input only; never part of current selection.
 _HISTORICAL_EGRESS_PACK = {
@@ -176,8 +178,8 @@ def install_derived_outbound_only_none(source: Path, target: Path) -> None:
         json.dumps(outbound_only, indent=2) + "\n", encoding="utf-8"
     )
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
-    # The outbound generation's four-field shape, whatever an earlier
-    # fixture left in the lock: a missing selection there means `none`.
+    # The DNS-bearing outbound generation's four-field shape: a missing
+    # later selection means `none` during replay.
     profiles = lock["profiles"]
     lock["profiles"] = {
         "database": profiles["database"],
@@ -185,6 +187,7 @@ def install_derived_outbound_only_none(source: Path, target: Path) -> None:
         "outbound_http": profiles.get("outbound_http", "none"),
         "agent_harness": profiles["agent_harness"],
     }
+    lock["source"]["checkout_revision"] = _HISTORICAL_OUTBOUND_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -206,6 +209,7 @@ def install_derived_http_idempotency_only_none(source: Path, target: Path) -> No
         "http_idempotency": profiles.get("http_idempotency", "none"),
         "agent_harness": profiles["agent_harness"],
     }
+    lock["source"]["checkout_revision"] = _HISTORICAL_HTTP_IDEMPOTENCY_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -796,17 +800,18 @@ def check(source: Path) -> None:
         repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
         if repeat.returncode or state(target) != after:
             raise AssertionError("matching complete-lock initialization was not a byte-preserving no-op")
-        # A complete previous-generation inventory is accepted only for no-op
+        # A complete DNS-generation inventory is accepted only for no-op
         # replay. Current projection must never select or emit its DNS pack.
         inventory_path = target / "scripts/lib/template_profiles.json"
+        lock_path = target / "template.lock"
         current_inventory = inventory_path.read_bytes()
-        historical_inventory = json.loads(current_inventory)
-        historical_inventory["egress-dns"] = _HISTORICAL_EGRESS_PACK
-        inventory_path.write_text(json.dumps(historical_inventory, indent=2) + "\n", encoding="utf-8")
+        current_lock = lock_path.read_bytes()
+        install_derived_outbound_only_none(source, target)
         historical_before = state(target)
         historical_repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
         if historical_repeat.returncode or state(target) != historical_before:
             raise AssertionError("previous DNS inventory replay was not byte-preserving")
+        historical_inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
         historical_inventory["unknown-pack"] = {"remove_when_unselected": [], "markers": []}
         inventory_path.write_text(json.dumps(historical_inventory, indent=2) + "\n", encoding="utf-8")
         unknown_before = state(target)
@@ -814,6 +819,7 @@ def check(source: Path) -> None:
         if unknown_repeat.returncode == 0 or state(target) != unknown_before:
             raise AssertionError("unknown historical inventory was accepted or mutated")
         inventory_path.write_bytes(current_inventory)
+        lock_path.write_bytes(current_lock)
         assert_outbound_lock_refusals(source, target)
         assert_outbound_auth_lock_refusals(source, target)
         assert_http_idempotency_lock_refusals(source, target)
