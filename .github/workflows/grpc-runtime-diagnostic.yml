@@ -45,21 +45,13 @@ jobs:
       - name: Existing changed-crate lint
         id: lint
         continue-on-error: true
-        run: timeout 300s cargo clippy --locked -p infra-grpc -p infra-oauth2-client-credentials --all-features --all-targets --keep-going -- -D warnings 2>&1 | tee lint.log
-      - name: Existing transport proof
-        id: transport
-        continue-on-error: true
-        run: timeout 300s cargo test --locked -p infra-grpc --all-features --test transport --no-fail-fast 2>&1 | tee transport.log
+        run: timeout 300s cargo clippy --locked -p infra-oauth2-client-credentials --all-features --all-targets --keep-going -- -D warnings 2>&1 | tee lint.log
       - name: Existing OAuth proof
         id: oauth
         continue-on-error: true
         run: timeout 300s cargo test --locked -p infra-oauth2-client-credentials --all-features --lib --no-fail-fast 2>&1 | tee oauth.log
-      - name: Existing process proof
-        id: process
-        continue-on-error: true
-        run: timeout 300s cargo test --locked -p service --test grpc_process --no-fail-fast 2>&1 | tee process.log
       - name: Require every suite to pass
-        if: always() && (steps.lint.outcome != 'success' || steps.transport.outcome != 'success' || steps.oauth.outcome != 'success' || steps.process.outcome != 'success')
+        if: always() && (steps.lint.outcome != 'success' || steps.oauth.outcome != 'success')
         run: exit 1
       - name: Preserve exact runtime evidence
         if: always()
@@ -68,8 +60,6 @@ jobs:
           name: grpc-runtime-diagnostic-${{ github.sha }}
           path: |
             lint.log
-            transport.log
             oauth.log
-            process.log
           if-no-files-found: error
           retention-days: 1

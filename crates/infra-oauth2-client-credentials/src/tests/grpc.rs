@@ -522,31 +522,40 @@ async fn grpc_hard_expiry_before_dispatch_refuses_the_resource_call() {
     let tokens = Fixture::new().await;
     tokens.token_json(
         "200 OK",
-        &serde_json::json!({"access_token": "late", "token_type": "Bearer", "expires_in": 1}),
+        &serde_json::json!({"access_token": "cached", "token_type": "Bearer", "expires_in": 60}),
     );
     let resource = ResourceFixture::new().await;
     let credentials = tokens.credentials(&[], None);
-    let gate = tokens.block_tokens();
     let mut client = resource.client(&credentials);
-    let mut call = Box::pin(client.unary(rpc(
-        UnaryRequest {
-            message: "expiry".to_owned(),
-        },
-        Duration::from_secs(10),
-    )));
-    tokio::select! {
-        () = tokens.token_received() => {},
-        result = &mut call => panic!("expiry call completed before token release: {result:?}"),
-    }
+    let response = client
+        .unary(rpc(
+            UnaryRequest {
+                message: "warm".to_owned(),
+            },
+            Duration::from_secs(10),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(response.message, "warm");
+
+    // Moka's real clock retains the valid cached value while Tokio's clock
+    // moves past its hard expiry, isolating the adapter's pre-dispatch check.
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::time::advance(Duration::from_secs(61)).await;
     tokio::time::resume();
-    gate.add_permits(1);
-    assert_eq!(
-        call.as_mut().await.unwrap_err().code(),
-        Code::DeadlineExceeded
-    );
-    assert_eq!(resource.calls(), 0);
+    let error = client
+        .unary(rpc(
+            UnaryRequest {
+                message: "expiry".to_owned(),
+            },
+            Duration::from_secs(10),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::DeadlineExceeded);
+    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(resource.calls(), 1);
     resource.finish().await;
     tokens.finish().await;
 }
