@@ -1,6 +1,6 @@
-//! Real PostgreSQL and JetStream proof for transactional outbox publication.
+//! Real PostgreSQL and `JetStream` proof for transactional outbox publication.
 //!
-//! Each case provisions its own JetStream source stream and SQLx database. The
+//! Each case provisions its own `JetStream` source stream and `SQLx` database. The
 //! carrier drives the public outbox enqueue and registry APIs through the
 //! production jobs engine; it does not replace broker acknowledgement, queue
 //! transitions, or the publisher with a test double.
@@ -24,7 +24,7 @@ use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued};
 use infra_messaging::{
     ConsumerOptions, HandlerError, Messaging, MessagingOptions, Registry, Route,
 };
-use infra_postgres::{Closed, Dsn, Isolation, PgPool, PoolOptions, TxError, connection, in_tx};
+use infra_postgres::{Closed, Isolation, PgPool, PoolOptions, TxError, connection, in_tx};
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
 use infra_jobs::{JobError, Kinds, Policy};
 use infra_webhooks::inbound::{
@@ -524,11 +524,11 @@ impl std::fmt::Display for Step {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(pool: PgPool) {
     let fixture = Fixture::create().await;
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         messaging_options(&fixture),
         Instant::now() + WAIT,
         CancellationToken::new(),
-    )
+    ))
     .await
     .expect("producer-only messaging admits the provisioned stream");
     let business = template_pool(&pool, 3).await;
@@ -711,11 +711,11 @@ async fn live_event_identity_is_idempotent_only_for_equal_immutable_intent(pool:
 async fn lost_broker_ack_snoozes_then_republishes_the_same_immutable_identity(pool: PgPool) {
     let fixture = Fixture::create().await;
     let relay = AckDroppingRelay::start(&fixture.stream).await;
-    let first_messaging = Messaging::connect(
+    let first_messaging = Box::pin(Messaging::connect(
         messaging_options_with_servers(&fixture, vec![relay.url.clone()]),
         Instant::now() + WAIT,
         CancellationToken::new(),
-    )
+    ))
     .await
     .expect("producer-only messaging admits through the transparent relay");
     let jobs = template_pool(&pool, 3).await;
@@ -771,11 +771,11 @@ async fn lost_broker_ack_snoozes_then_republishes_the_same_immutable_identity(po
         .execute(&jobs)
         .await
         .expect("ambiguous intent is made due for its same-ID retry");
-    let retry_messaging = Messaging::connect(
+    let retry_messaging = Box::pin(Messaging::connect(
         messaging_options(&fixture),
         Instant::now() + WAIT,
         CancellationToken::new(),
-    )
+    ))
     .await
     .expect("direct producer reconnects after the relay closes");
     let retry_pool = template_pool(&pool, 3).await;
@@ -806,11 +806,11 @@ async fn final_attempt_topology_refusal_snoozes_then_recovery_keeps_publication_
     pool: PgPool,
 ) {
     let fixture = Fixture::create().await;
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         messaging_options(&fixture),
         Instant::now() + WAIT,
         CancellationToken::new(),
-    )
+    ))
     .await
     .expect("producer-only messaging admits before the controlled outage");
     let jobs = template_pool(&pool, 3).await;
@@ -894,11 +894,11 @@ async fn final_attempt_topology_refusal_snoozes_then_recovery_keeps_publication_
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn malformed_stored_intent_is_terminal_and_never_false_completion(pool: PgPool) {
     let fixture = Fixture::create().await;
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         messaging_options(&fixture),
         Instant::now() + WAIT,
         CancellationToken::new(),
-    )
+    ))
     .await
     .expect("producer-only messaging admits the fixture stream");
     let jobs = template_pool(&pool, 3).await;
@@ -951,11 +951,11 @@ async fn malformed_stored_intent_is_terminal_and_never_false_completion(pool: Pg
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(pool: PgPool) {
     let fixture = Fixture::create_with_consumer(true).await;
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         consumer_options(&fixture),
         Instant::now() + WAIT,
         CancellationToken::new(),
-    )
+    ))
     .await
     .expect("messaging consumer topology admits");
     let effects = template_pool(&pool, 3).await;
@@ -1106,11 +1106,11 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
     pool: PgPool,
 ) {
     let fixture = Fixture::create().await;
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         messaging_options(&fixture),
         Instant::now() + WAIT,
         CancellationToken::new(),
-    )
+    ))
     .await
     .expect("producer-only messaging admits the fixture stream");
     let shared_pool = template_pool(&pool, 6).await;

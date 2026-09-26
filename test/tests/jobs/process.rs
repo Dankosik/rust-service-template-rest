@@ -1,5 +1,5 @@
 //! Process proof of the jobs worker on the test-only fixture binary against
-//! real PostgreSQL and, in retained outbox profiles, a real JetStream source
+//! real PostgreSQL and, in retained outbox profiles, a real `JetStream` source
 //! stream. Refusals exit 1, a ready worker runs a committed job and exits 0 on
 //! SIGTERM with its attempt metrics on the diagnostics listener, and an attempt
 //! that outlives a short drain exits 3 with its job released for an immediate
