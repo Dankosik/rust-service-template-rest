@@ -643,6 +643,7 @@
         "ids": [
           "config-integration-grpc-field",
           "config-integration-grpc-type",
+          "config-integration-grpc-import",
           "config-integration-grpc-decode",
           "config-integration-grpc-value",
           "config-integration-grpc-parser",

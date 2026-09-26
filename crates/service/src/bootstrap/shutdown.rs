@@ -293,6 +293,10 @@ pub(crate) struct Plan<'a> {
     pub(crate) signals: &'a mut Signals,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the ordered shutdown stages share one deadline and retain their task owners"
+)]
 pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     let budget = Budget::start(plan.http_config.grace_period);
     tracing::info!(grace = ?plan.http_config.grace_period, "shutdown_started");

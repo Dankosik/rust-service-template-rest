@@ -11,7 +11,10 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 use url::Url;
 
-use crate::{GrpcSecurity, ValidationError};
+use crate::ValidationError;
+// template:begin grpc:config-integration-grpc-import
+use crate::GrpcSecurity;
+// template:end grpc:config-integration-grpc-import
 
 /// One named integration's optional authentication input.
 #[derive(Clone, Debug, Default)]

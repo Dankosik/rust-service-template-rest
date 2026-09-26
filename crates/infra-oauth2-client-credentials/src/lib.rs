@@ -161,10 +161,12 @@ impl Credentials {
         if Instant::now() >= deadline {
             return Err(AcquisitionError::Timeout);
         }
-        // Erase Moka's borrowed waiter future before the outer async Send proof.
-        let pending: Pin<Box<dyn Future<Output = _> + Send + '_>> =
-            Box::pin(self.0.cache.try_get_with((), self.0.fetch(deadline)));
-        let result = tokio::time::timeout_at(deadline, pending)
+        // Give Moka an owned, Send initializer independent of the cache borrow.
+        // It stays lazy and is dropped with this deadline-bounded acquisition.
+        let init: Pin<
+            Box<dyn Future<Output = Result<Arc<CachedCredential>, FillError>> + Send + 'static>,
+        > = Box::pin(Arc::clone(&self.0).fetch(deadline));
+        let result = tokio::time::timeout_at(deadline, self.0.cache.try_get_with((), init))
             .await
             .map_err(|_| AcquisitionError::Timeout)?;
         match result {
@@ -220,7 +222,10 @@ impl AuthenticatedClient {
 }
 
 impl Owner {
-    async fn fetch(&self, caller_deadline: Instant) -> Result<Arc<CachedCredential>, FillError> {
+    async fn fetch(
+        self: Arc<Self>,
+        caller_deadline: Instant,
+    ) -> Result<Arc<CachedCredential>, FillError> {
         let started = Instant::now();
         let deadline = caller_deadline.min(started + FETCH_TIMEOUT);
         let mut attempt = Attempt {

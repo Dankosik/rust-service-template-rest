@@ -784,6 +784,10 @@ struct Prepared<'a> {
     // template:end inbound-webhooks:bootstrap-webhooks-prepared-field
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "listener admission and ownership transfer form one ordered startup transaction"
+)]
 async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapError> {
     let Prepared {
         config,
