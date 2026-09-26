@@ -401,10 +401,9 @@ async fn wait_for_dead_letter_after(
             if let Ok(record) = stream
                 .get_last_raw_message_by_subject(&fixture.dlq_subject)
                 .await
+                && record.sequence > after_sequence
             {
-                if record.sequence > after_sequence {
-                    return record;
-                }
+                return record;
             }
             cadence.tick().await;
         }
@@ -478,9 +477,13 @@ fn assert_dead_letter(
 async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_definite_refusal() {
     let fixture = Fixture::create_with_source_limit(false, 1).await;
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(options(&fixture, None, 1024), deadline(), cancel.clone())
-        .await
-        .expect("fixture source stream is admitted");
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, None, 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect("fixture source stream is admitted");
     let original = event("event-publication");
     let prepared = registry(&fixture)
         .prepare(&original, 1024)
@@ -521,11 +524,11 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
     let fixture = Fixture::create(false).await;
     let relay = AckDroppingRelay::start(&fixture.stream).await;
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         options_with_servers(&fixture, vec![relay.url.clone()], None, 1024),
         deadline(),
         cancel.clone(),
-    )
+    ))
     .await
     .expect("fixture source stream is admitted through the transparent relay");
     let prepared = registry(&fixture)
@@ -565,9 +568,13 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
     close(messaging).await;
     relay.join().await;
 
-    let retry = Messaging::connect(options(&fixture, None, 1024), deadline(), cancel.clone())
-        .await
-        .expect("direct retry producer is admitted after relay shutdown");
+    let retry = Box::pin(Messaging::connect(
+        options(&fixture, None, 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect("direct retry producer is admitted after relay shutdown");
     let acknowledgment = retry
         .producer()
         .publish(&prepared, deadline(), &cancel)
@@ -598,11 +605,11 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
 async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    )
+    ))
     .await
     .expect("fixture source stream is admitted");
     let (observed_tx, observed_rx) = oneshot::channel();
@@ -654,11 +661,11 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
 async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked() {
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    )
+    ))
     .await
     .expect("fixture source stream is admitted");
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -720,11 +727,11 @@ async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked(
 async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_identity() {
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    )
+    ))
     .await
     .expect("fixture source stream is admitted");
     let (called_tx, called_rx) = oneshot::channel();
@@ -819,11 +826,11 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
 async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_to_dlq() {
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    )
+    ))
     .await
     .expect("fixture source stream is admitted");
     let handler_calls = Arc::new(AtomicUsize::new(0));
@@ -909,11 +916,11 @@ async fn definite_dlq_refusal_leaves_the_permanent_source_delivery_unacknowledge
         .await
         .expect("fixture DLQ fill receives an acknowledgment");
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    )
+    ))
     .await
     .expect("fixture source stream is admitted");
     let mut registry = registry(&fixture);
@@ -953,11 +960,11 @@ async fn definite_dlq_refusal_leaves_the_permanent_source_delivery_unacknowledge
 async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    )
+    ))
     .await
     .expect("fixture source stream is admitted");
     let prepared = messaging
@@ -1008,11 +1015,11 @@ async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
 async fn handler_panic_is_terminal_and_leaves_its_source_unacknowledged() {
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    )
+    ))
     .await
     .expect("fixture source stream is admitted");
     let mut registry = registry(&fixture);
@@ -1052,18 +1059,44 @@ async fn handler_panic_is_terminal_and_leaves_its_source_unacknowledged() {
 async fn oversized_source_message_is_terminal_without_invoking_the_handler() {
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(
+    let producer = Box::pin(Messaging::connect(
+        options(&fixture, None, 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect("fixture producer is admitted against the original source bound");
+    let oversized = registry(&fixture)
+        .prepare(&event_with_value("event-oversized", &"x".repeat(128)), 1024)
+        .expect("fixture event is valid for the original producer bound");
+    producer
+        .producer()
+        .publish(&oversized, deadline(), &cancel)
+        .await
+        .expect("source retains the event before the operator shrinks its bound");
+    close(producer).await;
+
+    let source = fixture
+        .jetstream
+        .get_stream(&fixture.stream)
+        .await
+        .expect("fixture source is available for the operator update");
+    let mut source_config = source.cached_info().config.clone();
+    source_config.max_message_size = 32 + 8 * 1024;
+    let updated = fixture
+        .jetstream
+        .update_stream(source_config)
+        .await
+        .expect("operator can shrink the stream limit without deleting retained records");
+    assert_eq!(updated.state.messages, 1);
+
+    let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 32),
         deadline(),
         cancel.clone(),
-    )
+    ))
     .await
     .expect("fixture source stream is admitted for the smaller delivery bound");
-    let oversized = registry(&fixture)
-        .prepare(&event_with_value("event-oversized", &"x".repeat(128)), 1024)
-        .expect("fixture event is valid for the source but larger than the consumer bound");
-    let headers = infra_messaging::wire::encode_prepared(&oversized)
-        .expect("oversized fixture has a valid envelope");
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let calls_for_handler = Arc::clone(&handler_calls);
     let mut registry = registry(&fixture);
@@ -1078,17 +1111,6 @@ async fn oversized_source_message_is_terminal_without_invoking_the_handler() {
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
-    fixture
-        .jetstream
-        .publish_with_headers(
-            fixture.subject.clone(),
-            headers,
-            oversized.payload().clone(),
-        )
-        .await
-        .expect("oversized fixture message is accepted by the source stream")
-        .await
-        .expect("oversized fixture message receives a source publication acknowledgment");
 
     let failure = timeout(Duration::from_secs(3), handle.failed())
         .await
@@ -1109,11 +1131,11 @@ async fn oversized_source_message_is_terminal_without_invoking_the_handler() {
 async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    )
+    ))
     .await
     .expect("fixture source stream is admitted");
     let started = Arc::new(Notify::new());
@@ -1163,11 +1185,11 @@ async fn consumer_resident_delivery_bound_is_refused() {
         ..consumer_options(&fixture)
     };
 
-    let result = Messaging::connect(
+    let result = Box::pin(Messaging::connect(
         options(&fixture, Some(invalid), 32 * 1024 * 1024),
         deadline(),
         cancel,
-    )
+    ))
     .await;
 
     assert!(matches!(result, Err(MessagingError::Bounds)));
@@ -1178,11 +1200,11 @@ async fn consumer_resident_delivery_bound_is_refused() {
 async fn consumer_reconciles_its_named_durable_without_stream_administration() {
     let fixture = Fixture::create(false).await;
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    )
+    ))
     .await
     .expect("fixture source stream is admitted");
     let mut registry = registry(&fixture);
