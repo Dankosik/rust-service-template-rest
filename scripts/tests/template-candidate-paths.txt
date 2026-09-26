@@ -9,6 +9,7 @@ scripts/lib/template_state.py
 scripts/lib/template_profiles.json
 crates/infra-bearerauthn/
 crates/infra-outbound-http/
+crates/infra-oauth2-client-credentials/
 crates/infra-webhooks/
 crates/infra-idempotency-store/
 crates/infra-jobs/
@@ -18,6 +19,7 @@ crates/config/src/http_idempotency.rs
 crates/config/src/jobs.rs
 crates/config/src/webhooks.rs
 crates/config/src/inbound_webhooks.rs
+crates/config/src/integrations.rs
 crates/infra-http/src/webhooks.rs
 crates/infra-http/src/authn.rs
 crates/infra-http/src/idempotency/
@@ -27,6 +29,8 @@ migrations/20260926022945_create_webhook_receipts.sql
 docs/authentication.md
 docs/outbound-http.md
 docs/outbound-http-decisions.md
+docs/outbound-machine-authentication.md
+docs/outbound-machine-authentication-decisions.md
 docs/http-idempotency.md
 docs/background-jobs.md
 docs/outbound-webhooks.md

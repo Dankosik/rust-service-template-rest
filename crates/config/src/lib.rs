@@ -21,6 +21,9 @@ pub mod observability;
 // template:begin messaging:config-module
 pub mod messaging;
 // template:end messaging:config-module
+// template:begin outbound-auth:config-module
+pub mod integrations;
+// template:end outbound-auth:config-module
 // template:begin authn:config-module
 pub mod authn;
 // template:end authn:config-module
@@ -51,6 +54,9 @@ pub use app::{AppConfig, BuildInfo};
 pub use cli::{FromArgs, LoadOptions, process_failure};
 pub use health::HealthConfig;
 pub use http::HttpConfig;
+// template:begin outbound-auth:config-export
+pub use integrations::{IntegrationConfig, OAuthConfig, Scopes};
+// template:end outbound-auth:config-export
 // template:begin inbound-webhooks:config-inbound-webhooks-export
 pub use inbound_webhooks::{InboundWebhookEndpointConfig, InboundWebhooksConfig};
 // template:end inbound-webhooks:config-inbound-webhooks-export
@@ -98,6 +104,10 @@ pub struct Config {
     // template:begin messaging:config-field
     pub messaging: MessagingConfig,
     // template:end messaging:config-field
+    // template:begin outbound-auth:config-field
+    #[serde(default, deserialize_with = "integrations::deserialize_integrations")]
+    pub integrations: std::collections::BTreeMap<String, IntegrationConfig>,
+    // template:end outbound-auth:config-field
     // template:begin authn:config-field
     pub authn: AuthnConfig,
     // template:end authn:config-field
@@ -134,6 +144,9 @@ impl Config {
         // template:begin messaging:config-validate
         self.messaging.validate(&self.app.env)?;
         // template:end messaging:config-validate
+        // template:begin outbound-auth:config-validate
+        integrations::validate_integrations(&self.integrations)?;
+        // template:end outbound-auth:config-validate
         // template:begin authn:config-validate
         self.authn.validate()?;
         // template:end authn:config-validate

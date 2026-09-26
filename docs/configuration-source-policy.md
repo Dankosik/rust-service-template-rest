@@ -92,6 +92,17 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   required only when at least one idempotent operation is served; an
   inactive boundary needs no value.
 <!-- template:end http-idempotency:docs-config-http-idempotency -->
+<!-- template:begin outbound-auth:docs-config-outbound-auth -->
+- `integrations.<name>.oauth` is an immutable optional OAuth2 client-credentials
+  tuple. Empty integration maps and entries without `oauth` are inert; a present
+  tuple must contain valid `token_url`, `client_id`, and an environment-only
+  nonempty `APP__INTEGRATIONS__<NAME>__OAUTH__CLIENT_SECRET`. Nonsecret
+  `scopes` and optional `audience` follow normal TOML/environment layering;
+  scopes use a TOML list or one space-separated environment value. File secrets
+  are refused by the recursive secret guard. The [outbound machine-authentication
+  guide](outbound-machine-authentication.md) owns endpoint admission and
+  provider compatibility.
+<!-- template:end outbound-auth:docs-config-outbound-auth -->
 
 ## OpenTelemetry Environment Policy
 

@@ -63,7 +63,7 @@ separate acceptance gate.
 The source template additionally selects the initializer matrix on
 `initializer_runtime`, the paths that can change an initialized service's
 build and tests or the initializer itself. Eight parallel parts together run
-`make template-init-check`. The source part proves all 368 canonical profile
+`make template-init-check`. The source part proves the 368 baseline canonical profile
 and harness projections. The 26 existing runtime graphs retain their public
 initializer, build, test and selected database proof; their numbering and
 baseline command scopes are unchanged.
@@ -85,6 +85,17 @@ profile tuple, command, result and duration. Initializations within a part
 reuse one absolute Cargo target. The five parts after `database-postgres`
 restore its cache and save none; their retained full database suites require
 Docker.
+
+<!-- template:begin outbound-auth:docs-ci-outbound-auth-gates -->
+OAuth adds four source projections and runtime graphs 50--53, without another
+CI part or harness cross-product. The database-none part owns 50--52 (OAuth
+alone, with JWT, with introspection); jobs-http-idempotency-2 owns the maximal
+PostgreSQL graph 53. Graph 54 joins the database-none part for the
+messaging/OAuth seam, and graph 55 joins jobs-http-idempotency-2 for the full
+outbox/OAuth pack. Each runs initialization, locked metadata and compilation
+of retained test targets; the workspace quality gate runs the OAuth behavior
+suite. Database-free graphs do not request the removed integration-test feature.
+<!-- template:end outbound-auth:docs-ci-outbound-auth-gates -->
 
 A change to projected text alone selects `module_initializer` without the
 runtime surface and runs the Cargo-free `initializer (projections)` job.

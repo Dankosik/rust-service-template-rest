@@ -25,13 +25,13 @@ use infra_messaging::{
     ConsumerOptions, HandlerError, Messaging, MessagingOptions, Registry, Route,
 };
 use infra_postgres::{Closed, Dsn, Isolation, PgPool, PoolOptions, TxError, connection, in_tx};
-// template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-imports
+// template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
 use infra_jobs::{JobError, Kinds, Policy};
 use infra_webhooks::inbound::{
     Consumer as WebhookConsumer, Consumers, Incoming, Processor, Receiver,
 };
 use infra_webhooks::protocol::KeyRing;
-// template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-imports
+// template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
 use integration_tests::dsn_for;
 use sqlx::Row;
 use tokio::sync::Notify;

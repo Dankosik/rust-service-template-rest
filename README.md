@@ -73,7 +73,7 @@ without PostgreSQL or jobs. It is inert until configured and reuses the retained
 `jobs-worker`; it does not add a sample event or HTTP route. The [durable
 messaging guide](docs/durable-messaging.md) owns Go interoperability, operator
 topology, handler idempotency, and the selected worker's limits. `OUTBOX` is a
-separate later PostgreSQL/jobs extension and is unavailable in a messaging-only
+separate PostgreSQL/jobs extension and is unavailable in a messaging-only
 selection.
 <!-- template:end messaging:docs-readme-messaging-profile -->
 <!-- template:begin outbox:docs-readme-outbox-profile -->
@@ -92,6 +92,16 @@ The outbound direction is documented in
 The inbound direction is documented in
 [Inbound webhooks](docs/inbound-webhooks.md).
 <!-- template:end inbound-webhooks:readme-webhooks-inbound-guide -->
+
+<!-- template:begin outbound-auth:readme-outbound-auth-profile -->
+The optional outbound machine-authentication profile is selected by
+`OUTBOUND_AUTH=none|oauth2-client-credentials`, defaulting to `none`.
+Selecting OAuth2 also retains bounded outbound HTTP, but starts no provider
+call, task, listener, or readiness dependency. Concrete integrations compose
+their own private authenticated client. See [Outbound machine
+authentication](docs/outbound-machine-authentication.md) and its [decision
+record](docs/outbound-machine-authentication-decisions.md).
+<!-- template:end outbound-auth:readme-outbound-auth-profile -->
 
 The database and installed adapters are selected by `template.lock`; the source
 checkout without a lock carries PostgreSQL and all six adapters. A retained

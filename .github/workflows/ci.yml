@@ -587,14 +587,12 @@ jobs:
       fail-fast: false
       matrix:
         # Together the parts are `make template-init-check`: the source
-        # suites with the canonical projections, the forty-six established
-        # graphs. template-init-check.sh numbers DATABASE none 1-6, postgres
-        # 7-12, http-idempotency 13-16, jobs 17-22, and jobs with
-        # http-idempotency 23-26. Webhook graphs 27-46 extend the five
-        # jobs-compatible profile families without multiplying harnesses. Graph
-        # 47 adds messaging-only. 48 is complete outbox; 49 keeps both webhook
-        # directions and HTTP idempotency with outbox, without a Cartesian matrix.
-        # Broker and Go-wire behavior stay in the integration job.
+        # suites with the canonical projections and fifty-five runtime graphs.
+        # Graphs 1-46 retain the established database, idempotency, jobs, and
+        # webhook representatives. Graphs 47-49 retain messaging and outbox;
+        # 50-53 retain OAuth; 54 proves messaging plus OAuth without PostgreSQL;
+        # and 55 proves the full outbox/OAuth neighboring pack. Broker and Go-wire
+        # behavior stay in the selected integration job.
         # `source`, `database-none`, and
         # `database-postgres` keep their own warm target caches. Every part
         # with `cache` restores that part's cache (database-postgres) and
@@ -603,7 +601,7 @@ jobs:
         include:
           - part: source
           - part: database-none
-            graphs: 1,2,3,4,5,6,47
+            graphs: 1,2,3,4,5,6,47,50,51,52,54
           - part: database-postgres
             graphs: 7,8,9,10,11,12
           - part: http-idempotency
@@ -623,7 +621,7 @@ jobs:
             cache: database-postgres
             docker: true
           - part: jobs-http-idempotency-2
-            graphs: 25,26,28,34,38,42,46,49
+            graphs: 25,26,28,34,38,42,46,49,53,55
             cache: database-postgres
             docker: true
     steps:

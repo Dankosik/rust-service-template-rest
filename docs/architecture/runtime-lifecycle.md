@@ -55,6 +55,13 @@ shutdown stage. The client adds no readiness probe or teardown stage. JWT refres
 remains the separate process-owned task that the existing tracker cancels and
 joins.
 <!-- template:end outbound-http:docs-lifecycle-outbound -->
+<!-- template:begin outbound-auth:docs-lifecycle-outbound-auth -->
+The retained OAuth2 profile is inert until a concrete integration constructs an
+authenticated client. Token acquisition is request-owned work: it consumes the
+caller deadline, has no detached refresh or maintenance task, and releases its
+private cache when its last owner is dropped. It adds no readiness probe,
+bootstrap provider call, or teardown stage.
+<!-- template:end outbound-auth:docs-lifecycle-outbound-auth -->
 
 
 <!-- template:begin postgres:docs-lifecycle-postgres-startup -->

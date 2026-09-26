@@ -553,6 +553,97 @@
   "cargo_lock": {
     "schema_version": 1
   },
+  "config-url": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "crates/config/Cargo.toml", "id": "config-url-dependency"}
+    ]
+  },
+  "outbound-auth": {
+    "remove_when_unselected": [
+      "crates/infra-oauth2-client-credentials/",
+      "crates/config/src/integrations.rs",
+      "docs/outbound-machine-authentication.md",
+      "docs/outbound-machine-authentication-decisions.md"
+    ],
+    "markers": [
+      {
+        "path": "Cargo.toml",
+        "ids": [
+          "workspace-oauth2-dependency"
+        ]
+      },
+      {
+        "path": "crates/config/src/lib.rs",
+        "ids": [
+          "config-module",
+          "config-export",
+          "config-field",
+          "config-validate"
+        ]
+      },
+      {
+        "path": "crates/config/src/load.rs",
+        "id": "load-integrations-environment"
+      },
+      {
+        "path": "README.md",
+        "id": "readme-outbound-auth-profile"
+      },
+      {
+        "path": "docs/roadmap.md",
+        "id": "roadmap-stage-10-8-outbound-auth"
+      },
+      {
+        "path": "docs/build-test-and-development-commands.md",
+        "id": "docs-commands-outbound-auth"
+      },
+      {
+        "path": "docs/configuration-source-policy.md",
+        "id": "docs-config-outbound-auth"
+      },
+      {
+        "path": "docs/template-sync.md",
+        "ids": [
+          "docs-template-init-outbound-auth",
+          "docs-template-init-outbound-auth-sync",
+          "docs-template-init-outbound-auth-proof"
+        ]
+      },
+      {
+        "path": "docs/architecture/boundaries.md",
+        "ids": [
+          "docs-boundaries-outbound-auth-owner",
+          "docs-boundaries-outbound-auth-edges",
+          "docs-boundaries-outbound-auth-composition"
+        ]
+      },
+      {
+        "path": "docs/architecture/integration.md",
+        "id": "docs-integration-outbound-auth"
+      },
+      {
+        "path": "docs/architecture/runtime-lifecycle.md",
+        "id": "docs-lifecycle-outbound-auth"
+      },
+      {
+        "path": "docs/project-structure-and-module-organization.md",
+        "id": "docs-structure-outbound-auth-placement"
+      },
+      {
+        "path": "docs/outbound-machine-authentication.md",
+        "id": "docs-outbound-machine-authentication-guide"
+      },
+      {
+        "path": "docs/outbound-machine-authentication-decisions.md",
+        "id": "docs-outbound-machine-authentication-decisions"
+      },
+      {
+        "path": "docs/ci-cd-production-ready.md",
+        "id": "docs-ci-outbound-auth-gates"
+      }
+    ]
+  },
   "outbound-http": {
     "remove_when_unselected": [
       "crates/infra-outbound-http/",
@@ -765,7 +856,6 @@
     ],
     "markers": [
       {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client"]},
-      {"path": "crates/config/Cargo.toml", "ids": ["config-messaging-url-dependency"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-messaging-environment"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-messaging-dependency"]},
@@ -837,7 +927,7 @@
       {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-outbox-pool", "worker-bootstrap-outbox-capacity", "worker-bootstrap-outbox-config", "worker-bootstrap-outbox-messaging", "worker-bootstrap-outbox-engine", "worker-bootstrap-outbox-registration", "worker-bootstrap-outbox-kind-error", "worker-bootstrap-append-publisher"]},
       {"path": "crates/jobs-worker/src/main.rs", "ids": ["worker-outbox-registration"]},
       {"path": "crates/jobs-worker/tests/process.rs", "ids": ["worker-process-outbox-capacity"]},
-      {"path": "test/tests/jobs/process.rs", "ids": ["test-jobs-process-nats-imports", "test-jobs-process-nats-fixture", "test-jobs-process-nats-fixture-argument", "test-jobs-process-nats-fixture-cleanup", "test-jobs-process-nats-fixture-parameter", "test-jobs-process-nats-fixture-use", "test-jobs-process-nats-environment", "test-jobs-process-outbox-capacity", "test-jobs-process-shared-engines"]},
+      {"path": "test/tests/jobs/process.rs", "ids": ["test-jobs-process-nats-imports", "test-jobs-process-nats-imports-2", "test-jobs-process-nats-fixture", "test-jobs-process-nats-fixture-argument", "test-jobs-process-nats-fixture-argument-2", "test-jobs-process-nats-fixture-argument-3", "test-jobs-process-nats-fixture-argument-4", "test-jobs-process-nats-fixture-argument-5", "test-jobs-process-nats-fixture-cleanup", "test-jobs-process-nats-fixture-cleanup-2", "test-jobs-process-nats-fixture-cleanup-3", "test-jobs-process-nats-fixture-cleanup-4", "test-jobs-process-nats-fixture-cleanup-5", "test-jobs-process-nats-fixture-parameter", "test-jobs-process-nats-fixture-use", "test-jobs-process-nats-fixture-use-2", "test-jobs-process-nats-fixture-use-3", "test-jobs-process-nats-fixture-use-4", "test-jobs-process-nats-fixture-use-5", "test-jobs-process-nats-environment", "test-jobs-process-outbox-capacity", "test-jobs-process-shared-engines"]},
       {"path": "test/Cargo.toml", "ids": ["test-messaging-outbox-dependencies"]},
       {"path": "README.md", "ids": ["docs-readme-outbox-profile"]},
       {"path": "docs/postgres-transactional-outbox.md", "ids": ["docs-postgres-transactional-outbox"]},
@@ -1158,7 +1248,7 @@
       {
         "path": "test/tests/messaging_outbox.rs",
         "ids": [
-          "outbox-test-messaging-outbox-inbound-imports",
+          "outbox-test-messaging-outbox-inbound-imports", "outbox-test-messaging-outbox-inbound-imports-2",
           "outbox-test-messaging-outbox-inbound-fixture",
           "outbox-test-messaging-outbox-webhook-capacity"
         ]

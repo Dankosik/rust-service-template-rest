@@ -17,6 +17,9 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 <!-- template:begin outbound-http:docs-boundaries-outbound-owner -->
 | `infra-outbound-http` (`crates/infra-outbound-http`) | Fixed trusted-origin HTTPS exchanges over standard `http::Request<Bytes>`/`Response<Bytes>`, finite limits, component target composition, operation lifetime, and private attempt observation ([guide](../outbound-http.md)). | Provider credentials, parsing, retries, configuration, readiness, bootstrap, or task tracking. |
 <!-- template:end outbound-http:docs-boundaries-outbound-owner -->
+<!-- template:begin outbound-auth:docs-boundaries-outbound-auth-owner -->
+| `infra-oauth2-client-credentials` (`crates/infra-oauth2-client-credentials`) | Private, per-immutable-tuple OAuth2 client-credentials acquisition and reuse, sanitized failures, and one authenticated bounded resource client ([guide](../outbound-machine-authentication.md)). | Named configuration loading, provider registration, readiness, bootstrap, business mapping, a public token source, or gRPC composition. |
+<!-- template:end outbound-auth:docs-boundaries-outbound-auth-owner -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-owner -->
 | `infra-idempotency-store` (`crates/infra-idempotency-store`) | PostgreSQL idempotency arbitration and durable records ([guide](../http-idempotency.md)). | Migration-history admission, transaction lifecycle/connection ownership, HTTP types/Problems, business rules, readiness registration, or request routing. |
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-owner -->
@@ -95,6 +98,9 @@ infra-messaging::outbox -> domain-events, infra-jobs, infra-postgres, base64
 <!-- template:begin outbound-http:docs-boundaries-outbound-edges -->
 infra-outbound-http -> reqwest, http, bytes, url, tokio, metrics, tracing
 <!-- template:end outbound-http:docs-boundaries-outbound-edges -->
+<!-- template:begin outbound-auth:docs-boundaries-outbound-auth-edges -->
+infra-oauth2-client-credentials -> infra-outbound-http, oauth2, moka, http, bytes, tokio, secrecy
+<!-- template:end outbound-auth:docs-boundaries-outbound-auth-edges -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-edges -->
 main binary -> infra-idempotency-store
 infra-http -> infra-idempotency-store, infra-postgres (the Tx re-export), sha2, sfv
@@ -149,6 +155,12 @@ owns PostgreSQL arbitration and records. `infra-postgres` owns the opaque
 Feature handlers consume `Idempotency` and that `Tx` through the supported
 composed route, while provider adapters alone use the connection.
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-composition -->
+<!-- template:begin outbound-auth:docs-boundaries-outbound-auth-composition -->
+OAuth2 machine authentication is a provider-infrastructure boundary: a concrete
+adapter translates named config into private credentials, binds them to its
+bounded resource client, and maps its own business errors. The service has no
+OAuth registry or readiness wiring, and features do not receive tokens.
+<!-- template:end outbound-auth:docs-boundaries-outbound-auth-composition -->
 <!-- template:begin jobs:docs-boundaries-jobs-composition -->
 Jobs are a provider seam, not a transport contract: an adapter enqueues on
 the connection it already holds; kinds and handlers live in adapter crates

@@ -332,7 +332,7 @@ def _compare_lock(reference: bytes, actual: bytes, harness: str, initializer) ->
 
 def _inputs(
     initializer, database: str, authn: str, outbound_http: str, http_idempotency: str,
-    jobs: str, webhooks: str, inbound_webhooks: str, harness: str,
+    jobs: str, webhooks: str, inbound_webhooks: str, harness: str, outbound_auth: str = "none",
 ):
     # Matches the CI runner's identity convention. The `JOBS=none` identity is
     # unchanged from before the jobs pack.
@@ -360,6 +360,7 @@ def _inputs(
         database=database,
         authn=authn,
         outbound_http=outbound_http,
+        outbound_auth=outbound_auth,
         http_idempotency=http_idempotency,
         jobs=jobs,
         messaging="none",
@@ -393,6 +394,7 @@ def _refused_namespace(
         database=database,
         authn=authn,
         outbound_http=outbound_http,
+        outbound_auth="none",
         http_idempotency=http_idempotency,
         jobs=jobs,
         messaging="none",
@@ -495,6 +497,46 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
     initializer._project_staged(destination, inputs, profiles)
     initializer._postconditions(destination, inputs, profiles, initial=True)
     return _tree(destination, initializer)
+
+
+def _check_oauth_projections(source: Path, candidate: str, initializer, work: Path) -> None:
+    """Project the four accepted OAuth combinations without multiplying harnesses."""
+
+    outbound_paths = frozenset(
+        relative.rstrip("/") for relative in initializer._profile_data(source).removals["outbound-auth"]
+    )
+    scenarios = (
+        ("none", "none", "none", "none", "none", "none"),
+        ("none", "oidc-jwt", "none", "none", "none", "none"),
+        ("none", "oidc-introspection", "none", "none", "none", "none"),
+        ("postgres", "oidc-introspection", "postgres", "postgres", "durable", "standard-webhooks"),
+    )
+    for index, (database, authn, http_idempotency, jobs, webhooks, inbound_webhooks) in enumerate(scenarios, 1):
+        inputs = _inputs(
+            initializer, database, authn, "bounded", http_idempotency, jobs, webhooks, inbound_webhooks, "core",
+            outbound_auth="oauth2-client-credentials",
+        )
+        with tempfile.TemporaryDirectory(prefix=f"oauth-{index}-", dir=work) as selection:
+            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+        for relative in outbound_paths:
+            if relative not in nodes and not any(path.startswith(f"{relative}/") for path in nodes):
+                raise initializer.Refusal(f"OAuth projection omitted profile output: {relative}")
+        profiles = inputs.profiles()
+        if profiles["outbound_auth"] != "oauth2-client-credentials" or profiles["outbound_http"] != "bounded":
+            raise initializer.Refusal("OAuth projection did not retain its effective bounded HTTP profile")
+        _emit(
+            "oauth-selection",
+            scenario=index,
+            database=database,
+            authn=authn,
+            http_idempotency=http_idempotency,
+            jobs=jobs,
+            webhooks=webhooks,
+            inbound_webhooks=inbound_webhooks,
+            profiles=profiles,
+            tree_sha256=_tree_digest(nodes),
+            lock_sha256=hashlib.sha256(initializer._lock_bytes(inputs, candidate, "complete")).hexdigest(),
+        )
 
 
 def check(source: Path) -> None:
@@ -670,6 +712,7 @@ def check(source: Path) -> None:
                                             tree_result="equal",
                                             lock_result="agent_harness_only",
                                         )
+        _check_oauth_projections(source, candidate, initializer, work)
 
 
 def _expect_refusal(initializer, action, label: str) -> None:

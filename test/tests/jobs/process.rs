@@ -13,9 +13,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-// template:begin outbox:test-jobs-process-nats-imports
+// template:begin outbox:test-jobs-process-nats-imports-2
 use async_nats::jetstream::{self, stream};
-// template:end outbox:test-jobs-process-nats-imports
+// template:end outbox:test-jobs-process-nats-imports-2
 use infra_jobs::{EnqueueOptions, Enqueued, JobKind, enqueue};
 use infra_postgres::{PgPool, TxError, in_tx};
 use integration_tests::jobs::{CREATE_PROBE_ATTEMPTS, Probe, ProbeAction};
@@ -497,23 +497,23 @@ async fn postgres_disabled_exits_1(pool: PgPool) {
 #[sqlx::test(migrations = false)]
 async fn missing_migration_history_exits_1_before_jobs_admission(pool: PgPool) {
     let database_url = child_database_url(&pool).await;
-    // template:begin outbox:test-jobs-process-nats-fixture-use
+    // template:begin outbox:test-jobs-process-nats-fixture-use-2
     let nats = NatsFixture::create().await;
-    // template:end outbox:test-jobs-process-nats-fixture-use
+    // template:end outbox:test-jobs-process-nats-fixture-use-2
     let worker = Worker::spawn(
         &database_url,
-        // template:begin outbox:test-jobs-process-nats-fixture-argument
+        // template:begin outbox:test-jobs-process-nats-fixture-argument-2
         &nats,
-        // template:end outbox:test-jobs-process-nats-fixture-argument
+        // template:end outbox:test-jobs-process-nats-fixture-argument-2
         &[],
     );
     assert_refused(
         worker,
         "postgres migration history: embedded migrations are pending",
     );
-    // template:begin outbox:test-jobs-process-nats-fixture-cleanup
+    // template:begin outbox:test-jobs-process-nats-fixture-cleanup-2
     nats.cleanup().await;
-    // template:end outbox:test-jobs-process-nats-fixture-cleanup
+    // template:end outbox:test-jobs-process-nats-fixture-cleanup-2
 }
 
 // template:begin outbox:test-jobs-process-outbox-capacity
@@ -539,14 +539,14 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     prepare(&pool).await;
     let id = enqueue_committed(&pool, ProbeAction::Succeed).await;
     let database_url = child_database_url(&pool).await;
-    // template:begin outbox:test-jobs-process-nats-fixture-use
+    // template:begin outbox:test-jobs-process-nats-fixture-use-3
     let nats = NatsFixture::create().await;
-    // template:end outbox:test-jobs-process-nats-fixture-use
+    // template:end outbox:test-jobs-process-nats-fixture-use-3
     let worker = Worker::spawn(
         &database_url,
-        // template:begin outbox:test-jobs-process-nats-fixture-argument
+        // template:begin outbox:test-jobs-process-nats-fixture-argument-3
         &nats,
-        // template:end outbox:test-jobs-process-nats-fixture-argument
+        // template:end outbox:test-jobs-process-nats-fixture-argument-3
         &[],
     );
     let api = listener_addr(&worker, "http listener bound");
@@ -569,9 +569,9 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     worker.terminate();
     let (code, stderr) = worker.wait();
     assert_eq!(code, Some(0), "stderr: {stderr}");
-    // template:begin outbox:test-jobs-process-nats-fixture-cleanup
+    // template:begin outbox:test-jobs-process-nats-fixture-cleanup-3
     nats.cleanup().await;
-    // template:end outbox:test-jobs-process-nats-fixture-cleanup
+    // template:end outbox:test-jobs-process-nats-fixture-cleanup-3
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -588,14 +588,14 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     .expect("the scheduled jobs");
     assert_eq!(inserted.rows_affected(), 1_001);
     let database_url = child_database_url(&pool).await;
-    // template:begin outbox:test-jobs-process-nats-fixture-use
+    // template:begin outbox:test-jobs-process-nats-fixture-use-4
     let nats = NatsFixture::create().await;
-    // template:end outbox:test-jobs-process-nats-fixture-use
+    // template:end outbox:test-jobs-process-nats-fixture-use-4
     let worker = Worker::spawn(
         &database_url,
-        // template:begin outbox:test-jobs-process-nats-fixture-argument
+        // template:begin outbox:test-jobs-process-nats-fixture-argument-4
         &nats,
-        // template:end outbox:test-jobs-process-nats-fixture-argument
+        // template:end outbox:test-jobs-process-nats-fixture-argument-4
         &[],
     );
     let diagnostics = listener_addr(&worker, "diagnostics listener bound");
@@ -619,9 +619,9 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     worker.terminate();
     let (code, stderr) = worker.wait();
     assert_eq!(code, Some(0), "stderr: {stderr}");
-    // template:begin outbox:test-jobs-process-nats-fixture-cleanup
+    // template:begin outbox:test-jobs-process-nats-fixture-cleanup-4
     nats.cleanup().await;
-    // template:end outbox:test-jobs-process-nats-fixture-cleanup
+    // template:end outbox:test-jobs-process-nats-fixture-cleanup-4
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -629,14 +629,14 @@ async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPo
     prepare(&pool).await;
     let id = enqueue_committed(&pool, ProbeAction::Sleep { millis: 60_000 }).await;
     let database_url = child_database_url(&pool).await;
-    // template:begin outbox:test-jobs-process-nats-fixture-use
+    // template:begin outbox:test-jobs-process-nats-fixture-use-5
     let nats = NatsFixture::create().await;
-    // template:end outbox:test-jobs-process-nats-fixture-use
+    // template:end outbox:test-jobs-process-nats-fixture-use-5
     let worker = Worker::spawn(
         &database_url,
-        // template:begin outbox:test-jobs-process-nats-fixture-argument
+        // template:begin outbox:test-jobs-process-nats-fixture-argument-5
         &nats,
-        // template:end outbox:test-jobs-process-nats-fixture-argument
+        // template:end outbox:test-jobs-process-nats-fixture-argument-5
         &[
             ("APP__HTTP__DRAIN_TIMEOUT", "1s"),
             ("APP__HTTP__READINESS_PROPAGATION_DELAY", "0s"),
@@ -661,7 +661,7 @@ async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPo
     let (code, stderr) = worker.wait();
     assert_eq!(code, Some(3), "stderr: {stderr}");
     assert_claimable(&pool, &id).await;
-    // template:begin outbox:test-jobs-process-nats-fixture-cleanup
+    // template:begin outbox:test-jobs-process-nats-fixture-cleanup-5
     nats.cleanup().await;
-    // template:end outbox:test-jobs-process-nats-fixture-cleanup
+    // template:end outbox:test-jobs-process-nats-fixture-cleanup-5
 }

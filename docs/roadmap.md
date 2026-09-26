@@ -24,7 +24,7 @@ is not a supported template state.
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | done |
 | 9 | Template initializer, profiles, and template sync | done on merge after required CI |
-| 10 | Optional capability profiles | 10.1, 10.2, 10.3, and 10.4 merged; remaining profiles planned |
+| 10 | Optional capability profiles | 10.1, 10.2, 10.3, 10.4, and 10.8 merged; 10.6 implemented with assembled CI pending; remaining profiles planned |
 | 11 | Benchmarking and performance evidence | planned |
 | 12 | First release and derived-repository verification | planned |
 
@@ -656,7 +656,14 @@ markers, tests, and initializer support. Order by expected demand:
    pending; no delivery result is claimed.
 7. gRPC with `tonic`: server policy, interceptors, health, bounded drain,
    shared client connections, buf lint and breaking checks.
+<!-- template:begin outbound-auth:roadmap-stage-10-8-outbound-auth -->
 8. OAuth 2.0 client-credentials outbound authentication.
+   **Implemented in [PR #64](https://github.com/Dankosik/rust-service-template-rest/pull/64).**
+   `OUTBOUND_AUTH=oauth2-client-credentials` retains private per-integration
+   token reuse over bounded outbound HTTP; it is otherwise absent. The
+   [adoption guide](outbound-machine-authentication.md) and [decision
+   record](outbound-machine-authentication-decisions.md) define the profile.
+<!-- template:end outbound-auth:roadmap-stage-10-8-outbound-auth -->
 9. S3-compatible object storage with one fixed endpoint.
 10. `examples/reference-service`: one isolated vertical slice.
 

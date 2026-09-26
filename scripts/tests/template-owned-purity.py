@@ -51,6 +51,7 @@ def check(root: Path) -> None:
         "authn": "remove_when_unselected",
         "oidc-jwt": "remove_when_unselected",
         "oidc-introspection": "remove_when_unselected",
+        "outbound-auth": "remove_when_unselected",
         "outbound-http": "remove_when_unselected",
         "tls-fixtures": "remove_when_unselected",
         "request-budget": "remove_when_unselected",
@@ -61,7 +62,8 @@ def check(root: Path) -> None:
         "messaging": "remove_when_unselected",
         "worker": "remove_when_unselected",
         "service-secrets": "remove_when_unselected",
-        "jobs-messaging": "remove_when_unselected",
+        "outbox": "remove_when_unselected",
+        "config-url": "remove_when_unselected",
         "integration": "remove_when_unselected",
         "webhooks-common": "remove_when_unselected",
         "webhooks": "remove_when_unselected",
@@ -75,7 +77,7 @@ def check(root: Path) -> None:
         markers = section["markers"]
         if not isinstance(removals, list) or not isinstance(markers, list) or not markers:
             raise AssertionError(f"profile inventory has an incomplete {name} projection")
-        if name not in {"request-budget", "tls-fixtures", "service-secrets", "jobs-messaging"} and not removals:
+        if name not in {"request-budget", "tls-fixtures", "service-secrets", "config-url"} and not removals:
             raise AssertionError(f"profile inventory has no removable {name} output")
         for relative in removals:
             plain = relative.rstrip("/")
