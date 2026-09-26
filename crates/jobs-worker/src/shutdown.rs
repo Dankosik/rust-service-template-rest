@@ -430,7 +430,7 @@ async fn drain(
             // template:end messaging:worker-shutdown-drain-messaging
             false
         };
-        let (_, messaging_failed) = tokio::join!(jobs, messages);
+        let ((), messaging_failed) = tokio::join!(jobs, messages);
         messaging_failed
     };
     let forced = tokio::select! {

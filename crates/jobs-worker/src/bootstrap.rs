@@ -179,14 +179,14 @@ pub(crate) async fn serve(
             return Err(WorkerError::Signals(err));
         }
     };
-    let prepared = match prepare(
+    let prepared = match Box::pin(prepare(
         &config,
         register,
         &mut signals,
         &cancel,
         &tracker,
         &mut opened,
-    )
+    ))
     .await
     {
         Ok(prepared) => prepared,
@@ -267,6 +267,10 @@ pub(crate) async fn serve(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "keep pool and broker admission with startup resource ownership in one ordered sequence"
+)]
 async fn prepare(
     config: &Config,
     register: crate::Register,
@@ -393,7 +397,9 @@ async fn prepare(
     };
     // template:end messaging:worker-bootstrap-messaging-connect
     // template:begin outbox:worker-bootstrap-outbox-engine
-    let publisher = if !startup_stopped {
+    let publisher = if startup_stopped {
+        None
+    } else {
         let messaging = opened
             .messaging
             .as_ref()
@@ -413,8 +419,6 @@ async fn prepare(
         );
         publisher.check_startup().await?;
         Some(publisher)
-    } else {
-        None
     };
     // template:end outbox:worker-bootstrap-outbox-engine
     // template:begin jobs:worker-bootstrap-ordinary-engine
@@ -719,7 +723,10 @@ async fn bind_listeners(
 }
 
 // template:begin messaging:worker-bootstrap-messaging-options
-fn messaging_options(config: &Config, consumes: bool) -> Result<MessagingOptions, WorkerError> {
+fn messaging_options(
+    config: &Config,
+    needs_subscription: bool,
+) -> Result<MessagingOptions, WorkerError> {
     let messaging = &config.messaging;
     let source_stream =
         messaging
@@ -728,7 +735,7 @@ fn messaging_options(config: &Config, consumes: bool) -> Result<MessagingOptions
             .ok_or(WorkerError::MessagingConfigRequired {
                 key: "messaging.source_stream",
             })?;
-    let consumer = if consumes {
+    let consumer = if needs_subscription {
         Some(ConsumerOptions {
             durable_name: messaging.consumer_durable.clone().ok_or(
                 WorkerError::MessagingConfigRequired {

@@ -187,6 +187,10 @@ where
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "keep acquired startup resources, admission, and their shared error cleanup in one composition scope"
+)]
 async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // Before this point SIGTERM has its default disposition and kills the
     // process; install the handlers first and keep them for the lifetime.
@@ -234,7 +238,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // template:begin messaging:service-bootstrap-messaging-opened
     let mut messaging = None;
     // template:end messaging:service-bootstrap-messaging-opened
-    let outcome = async {
+    let outcome = Box::pin(async {
         let probes: Vec<Box<dyn Probe>> = Vec::new();
         #[allow(
             unused_variables,
@@ -258,7 +262,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
         let startup_stop: Option<tokio::time::Instant> = None;
         // template:begin messaging:service-bootstrap-messaging-startup
         let (probes, opened_messaging, startup_stop) =
-            prepare_messaging(probes, &config, &cancel, &mut signals).await?;
+            Box::pin(prepare_messaging(probes, &config, &cancel, &mut signals)).await?;
         messaging = opened_messaging;
         // template:end messaging:service-bootstrap-messaging-startup
         if let Some(deadline) = startup_stop {
@@ -316,7 +320,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             // template:end inbound-webhooks:bootstrap-webhooks-prepared-value
         })
         .await
-    }
+    })
     .await;
     // Bind, admission, or connect failure: cancel and join tracked tasks,
     // then close any opened pool. `Server` only cancels accept. Dropping
