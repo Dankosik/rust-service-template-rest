@@ -59,17 +59,20 @@ joins.
 <!-- template:begin postgres:docs-lifecycle-postgres-startup -->
 With the PostgreSQL profile retained and `postgres.enabled`, bootstrap admits
 the DSN and opens the first connection inside the acquire budget
-(`postgres_pool_opened`). The probe joins readiness, the pool gauge task joins
-the tracker, and an unreachable database is a startup failure
+(`postgres_pool_opened`). It then verifies, in one read-only check bounded to
+five seconds including acquire, that every embedded migration is applied with
+its checksum: pending or divergent history is a sanitized startup failure,
+while versions from a later release are admitted so a rollback still starts.
+The probe joins readiness, the pool gauge task joins the tracker, and an
+unreachable database is a startup failure
 ([Persistence](persistence.md)).
 <!-- template:end postgres:docs-lifecycle-postgres-startup -->
 <!-- template:begin http-idempotency:docs-lifecycle-http-idempotency -->
-With the HTTP idempotency profile retained, the composer built into
-`service::api::contract()` also proves declaration and agreement:
-`Composer::agree` runs against the assembled document before readiness
-admission, and any violation is a startup failure with a sanitized
-diagnostic. An `Active` result requires `postgres.enabled`, a set retention,
-the profile schema, and a writable session, then starts the boundary before
+With the HTTP idempotency profile retained, each `Composer::route` validates
+its route locally and returns `CompositionError` before serving on failure.
+After all routes compose, `finish` activates their count without inspecting
+the assembled document. An `Active` result requires `postgres.enabled`, a set
+retention, admitted migration history, and a writable session, then starts the boundary before
 admission continues; an `Inactive` result does nothing further. While
 active, a background cleanup task joins the existing `TaskTracker` with a
 child cancellation token and is cancelled and joined in the existing

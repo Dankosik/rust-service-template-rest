@@ -4,8 +4,11 @@ Select `HTTP_IDEMPOTENCY=postgres` (or `--http-idempotency postgres`) during
 initialization to retain this pack. It requires `DATABASE=postgres` and an
 authentication engine: a key is scoped to a verified caller. The default
 `none` removes the boundary, configuration, migration, tests, and this guide.
-Retaining the pack performs no query and starts no task until a protected
-operation opts in through `Composer::route`.
+Retaining the pack performs no request-time query or task until a protected
+operation opts in through `Composer::route`. Enabled PostgreSQL startup first
+verifies, read-only through `migrate`, that every embedded migration is
+applied with its checksum; versions from a later release are admitted, so a
+rollback still starts.
 
 An opted-in operation gives each verified caller and key at most one committed
 participating database effect during the configured retention period. The
@@ -14,17 +17,24 @@ name is not part of that durable identity.
 
 ## Compose a protected operation
 
-`Composer::route(infra_http::routes!(handler))` is the sole opt-in. It adds
-the required `Idempotency-Key` header and generated Problem responses to the
-route value that is served. Adopters retain their normal protected-operation
+`Composer::route(infra_http::routes!(handler))?` is the sole opt-in. It returns
+`Result<RegisteredRoutes<_>, CompositionError>` after it adds the required
+`Idempotency-Key` header and generated Problem responses to the route value
+that is served. The service assembly calls `finish(self) -> Activation` after
+all routes are composed; activation counts those routes and does not inspect
+the generated document. Invalid local composition therefore fails assembly
+before serving. Adopters retain their normal protected-operation
 security, success, and business-response declarations; they do not
 hand-declare idempotency metadata or validators. The composed operation must
 be POST, PUT, PATCH, or DELETE, effectively protected by the assembled OpenAPI
 policy (normally the retained profile's root bearer requirement; an optional
 `x-security-decision` must agree, and an anonymous alternative or public
 override cannot scope a caller key), declare at least one 2xx response and no
-1xx/3xx response. `Composer::agree` rejects disagreement between composition
-and the assembled OpenAPI document before readiness.
+1xx/3xx response. Referenced success Response Objects are unsupported at this
+seam and fail composition; an idempotent operation declares its success
+response inline so the composer can enforce the stored-header allowlist.
+Existing OpenAPI gates continue to own generic reference resolution,
+operation-ID uniqueness, and generated-contract drift.
 
 At request time the hardened body limit and deadline apply, authentication runs
 before key processing, and ordinary extraction, validation, and authorization
@@ -46,6 +56,14 @@ async fn create_widget(
 }
 ```
 
+The handler must return the response from `execute`, or preserve its response
+extensions. A private extension marks a successful response as executed or
+replayed; a handler-created 2xx response without that marker becomes the
+existing sanitized wiring 500. This detects a response that is disconnected
+from the atomic seam. It cannot roll back an effect a handler performed outside
+that seam. Ordinary non-2xx validation and authorization responses remain
+valid without the extension.
+
 The handler keeps its ordinary protected-operation annotation (its success
 response and `ProtectedOperationProblemResponses`; security normally inherits
 the root bearer default) with no idempotency metadata. Compose it inside
@@ -55,7 +73,7 @@ precedes key handling without per-operation wrapping:
 
 ```rust,ignore
 // crates/service/src/api.rs, inside contract(idempotency: &mut Composer):
-.routes(idempotency.route(infra_http::routes!(widgets::http::create_widget)))
+.routes(idempotency.route(infra_http::routes!(widgets::http::create_widget))?)
 ```
 
 Regenerate and review the OpenAPI document after composition changes. The
@@ -167,7 +185,12 @@ each lowercase name and exact value bytes, including repeated fields. Invalid
 or null stored pairs, non-2xx status, and oversized records are integrity
 faults and never replay or execute work. Other handler headers are stripped
 before storage while current request/trace,
-security, and framing headers are generated normally.
+security, and framing headers are generated normally. A replay adds exactly
+`Idempotent-Replayed: true`; a fresh success, mismatch, in-progress response,
+or failure has no boundary-generated replay header. The header is generated
+after the handler returns from private response provenance and is never stored.
+Handler-supplied values are stripped, so they cannot impersonate or suppress
+the marker.
 
 ## Retention, diagnostics, and maintenance
 
@@ -218,19 +241,6 @@ and transaction age, then inspect a committed row by full scope digest. A 409
 proves an in-flight attempt, not a durable in-progress row, and never exposes
 raw key or caller value.
 
-The legacy digest-only rows cannot be reinterpreted. The maintenance-only
-transition is: quiesce idempotent traffic and cleanup; drain/stop every old
-replica; count legacy rows and observe their maximum expiry; wait until database
-time passes every live expiry; apply the guarded forward migration; start only
-new replicas; verify schema admission and readiness for every replica; then
-reopen traffic. The migration takes its lock before checking rows, refuses while
-any are live, may replace expired/empty legacy state, and leaves applied
-migrations unchanged. Its existing 15 s lock and 5 min total bounds apply.
-Do not run old and new implementations together. Before a successful migration,
-old binary/schema remain the rollback path; after it, roll forward or use a
-separately authorized database recovery, never restart old code. See
-[Migrations](../migrations/README.md) and [PostgreSQL validation](validation/postgres.md).
-
 ## Roll it out
 
 Apply the migrations with the `migrate` job before the release that composes
@@ -261,9 +271,13 @@ lock, and a live record decides before the lock result. The primary key and
 an upsert that replaces only an expired row are the backstop. A duplicate
 gets 409 instead of waiting because `sqlx` 0.9 keeps a dropped waiting
 request's connection busy until the server statement ends, and `REPEATABLE
-READ` would hide the committed record from it. Reopen for a `sqlx` release
-that cancels server statements on drop, measured harmful 409 churn, or an
-operation that needs stricter isolation.
+READ` would hide the committed record from it. A private pending-BEGIN guard
+marks an acquired connection `close_on_drop` until BEGIN returns, so a cancelled
+BEGIN cannot return an untracked transaction to a later borrower. Remove that
+guard only after upgrading to a released sqlx version containing the upstream
+cancellation repair (or an equivalent fix) and retaining its regression proof.
+Reopen for measured harmful 409 churn or an operation that needs stricter
+isolation.
 
 The fingerprint hashes the received request rather than a typed or canonical
 form, so it cannot omit a path, query, or body value; RFC 8785 serializes

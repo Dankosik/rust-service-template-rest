@@ -5,11 +5,10 @@
 //! without waiting, then reads a live record. A live record decides before
 //! lock ownership; only a missing live record with the lock runs work.
 
-use std::borrow::Cow;
 use std::fmt;
 use std::time::Duration;
 
-use infra_postgres::{Tx, TxError, connection, in_tx_with};
+use infra_postgres::{Tx, TxError, connection, failure_cause, in_tx_with, sqlstate, transient};
 use sqlx::Row;
 use sqlx::postgres::{PgConnection, PgRow};
 
@@ -298,7 +297,7 @@ fn classify_tx<T>(err: TxError) -> Attempted<T> {
 
 fn classify_sql<T>(err: &sqlx::Error, phase: &'static str, commit_unknown: bool) -> Attempted<T> {
     let unavailable = match sqlstate(err).as_deref() {
-        Some(code) => transient_sqlstate(code),
+        Some(code) => transient(code),
         None => {
             matches!(
                 err,
@@ -328,24 +327,6 @@ fn classify_sql<T>(err: &sqlx::Error, phase: &'static str, commit_unknown: bool)
     }
 }
 
-fn transient_sqlstate(code: &str) -> bool {
-    code.starts_with("08")
-        || code.starts_with("53")
-        || matches!(
-            code,
-            "40001" | "40003" | "40P01" | "57P01" | "57P02" | "57P03" | "57014" | "25006"
-        )
-}
-
-fn sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
-    err.as_database_error()?.code().filter(|code| {
-        code.len() == 5
-            && code
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-    })
-}
-
 fn log_sql_failure(phase: &'static str, failure_class: &'static str, err: &sqlx::Error) {
     if let Some(code) = sqlstate(err) {
         tracing::warn!(
@@ -355,17 +336,7 @@ fn log_sql_failure(phase: &'static str, failure_class: &'static str, err: &sqlx:
             sqlstate = code.as_ref()
         );
     } else {
-        let cause = match err {
-            sqlx::Error::Database(_) => "database",
-            sqlx::Error::PoolTimedOut => "pool_timeout",
-            sqlx::Error::PoolClosed => "pool_closed",
-            sqlx::Error::Io(_) => "io",
-            sqlx::Error::Tls(_) => "tls",
-            sqlx::Error::Protocol(_) => "protocol",
-            sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => "decode",
-            sqlx::Error::WorkerCrashed => "worker_crashed",
-            _ => "driver",
-        };
+        let cause = failure_cause(err);
         tracing::warn!(
             event = "http_idempotency_store_failure",
             phase,
@@ -377,6 +348,7 @@ fn log_sql_failure(phase: &'static str, failure_class: &'static str, err: &sqlx:
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::collections::BTreeMap;
     use std::error::Error as StdError;
     use std::sync::{Arc, Mutex};

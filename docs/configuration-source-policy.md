@@ -188,7 +188,9 @@ every record inside a request) or `text` (local development).
   are constants in the adapter
   ([Persistence](architecture/persistence.md#budgets)); the readiness probe
   draws `health.probe_budget`, and the pool closes inside the `5s`
-  dependency-close stage.
+  dependency-close stage. Enabled service and worker startup also bound the
+  read-only embedded migration-history check to `5s`, including pool acquire.
+  This is a separate sequential startup step, with no new configuration key.
 <!-- template:end postgres:docs-config-postgres-budget -->
 <!-- template:begin jobs:docs-config-jobs -->
 - `jobs.max_workers` (environment `APP__JOBS__MAX_WORKERS`, default `1`,

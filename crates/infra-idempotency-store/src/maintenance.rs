@@ -1,6 +1,5 @@
 //! The startup check and the bounded cleanup of expired records.
 
-use std::borrow::Cow;
 use std::time::Duration;
 
 use infra_postgres::{TxError, connection, in_tx, in_tx_with};
@@ -20,17 +19,10 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 /// The most rows one cleanup batch deletes: the `LIMIT` in [`CLEANUP_BATCH`].
 const CLEANUP_BATCH_ROWS: u64 = 500;
 
-/// The writer check and the table's shape. The catalog identity check refuses
-/// the old `bytea` header column even when every named column exists.
+/// Whether the current session can write. Migration-history admission owns
+/// schema compatibility; this check keeps only the live writer property.
 const STARTUP_CHECK: &str = "SELECT NOT pg_is_in_recovery() \
-    AND current_setting('transaction_read_only') = 'off' AS writable, \
-    (SELECT count(*) FROM (SELECT scope_key, fingerprint, status, headers, body, issuer, \
-    caller_kind, caller_value, expires_at FROM http_idempotency_records LIMIT 0) AS shape) \
-    AS shape_rows, \
-    (SELECT a.atttypid = to_regtype('http_idempotency_header_pair[]') \
-    FROM pg_catalog.pg_attribute AS a \
-    WHERE a.attrelid = 'http_idempotency_records'::regclass \
-    AND a.attname = 'headers' AND NOT a.attisdropped) AS headers_type_matches";
+    AND current_setting('transaction_read_only') = 'off' AS writable";
 
 /// Bounds a cleanup batch on the server, so a batch whose client has gone
 /// still ends within 1 s.
@@ -47,9 +39,6 @@ const CLEANUP_BATCH: &str = "DELETE FROM http_idempotency_records WHERE scope_ke
 /// Why an active idempotency boundary cannot start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StartupError {
-    /// The table, required metadata, or structured-header type is missing.
-    #[error("the idempotency schema is missing")]
-    SchemaMissing,
     /// The session is read-only or recovering.
     #[error("the PostgreSQL session is not writable")]
     NotWritable,
@@ -72,12 +61,10 @@ pub enum CleanupError {
 }
 
 impl Store {
-    /// Check the schema shape and a writable session, bounded to 5 s.
+    /// Check that the current session is writable, bounded to 5 s.
     ///
     /// # Errors
     ///
-    /// [`StartupError::SchemaMissing`] for a missing table, column, or the
-    /// required structured-header type (SQLSTATE `42P01` or `42703`),
     /// [`StartupError::NotWritable`] for a read-only or recovering session,
     /// and [`StartupError::Unavailable`] for anything else, including the
     /// bound and an inert store.
@@ -92,15 +79,11 @@ impl Store {
                 let row = sqlx::query(STARTUP_CHECK)
                     .fetch_one(connection(tx))
                     .await
-                    .map_err(|err| Refused(schema_refusal(&err)))?;
-                match (
-                    row.try_get::<bool, _>("writable"),
-                    row.try_get::<Option<bool>, _>("headers_type_matches"),
-                ) {
-                    (Ok(true), Ok(Some(true))) => Ok(()),
-                    (Ok(false), _) => Err(Refused(StartupError::NotWritable)),
-                    (Ok(true), Ok(_)) => Err(Refused(StartupError::SchemaMissing)),
-                    _ => Err(Refused(StartupError::Unavailable)),
+                    .map_err(|_| Refused(StartupError::Unavailable))?;
+                match row.try_get::<bool, _>("writable") {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(Refused(StartupError::NotWritable)),
+                    Err(_) => Err(Refused(StartupError::Unavailable)),
                 }
             },
         );
@@ -179,19 +162,6 @@ impl From<TxError> for Refused {
     fn from(_: TxError) -> Self {
         Self(StartupError::Unavailable)
     }
-}
-
-/// SQLSTATE `42P01` (undefined table) or `42703` (undefined column) means
-/// the migration has not run; any other statement failure is unavailability.
-fn schema_refusal(err: &sqlx::Error) -> StartupError {
-    match sqlstate(err).as_deref() {
-        Some("42P01" | "42703") => StartupError::SchemaMissing,
-        _ => StartupError::Unavailable,
-    }
-}
-
-fn sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
-    err.as_database_error()?.code()
 }
 
 /// A failed cleanup batch, by class, which leaves the batch's transaction as

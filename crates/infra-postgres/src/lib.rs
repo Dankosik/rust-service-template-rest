@@ -10,11 +10,15 @@
 //! `docs/architecture/persistence.md`.
 
 mod dsn;
+mod error;
 mod pool;
 mod probe;
 mod transaction;
 
 pub use dsn::{AMBIENT_ENVIRONMENT, Dsn, DsnError};
+pub use error::{
+    commit_definitely_failed, failure_cause, raw_sqlstate, retryable, sqlstate, transient,
+};
 pub use pool::{
     ACQUIRE_TIMEOUT, CONNECTION_COUNT_METRIC, Closed, ConnectError, IDLE_IN_TRANSACTION_TIMEOUT,
     PoolOptions, SLOW_STATEMENT_THRESHOLD, STATEMENT_TIMEOUT, SessionOptions, close, connect,
@@ -23,5 +27,5 @@ pub use pool::{
 pub use probe::PostgresProbe;
 pub use sqlx::postgres::PgPool;
 pub use transaction::{
-    Isolation, ROLLBACK_TIMEOUT, Tx, TxError, TxOptions, connection, in_tx, in_tx_with, retryable,
+    Isolation, ROLLBACK_TIMEOUT, Tx, TxError, TxOptions, connection, in_tx, in_tx_with,
 };

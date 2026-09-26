@@ -49,7 +49,7 @@ and decoded NUL. It serializes once with `serde_json` and rejects a `\u0000`
 escape (a NUL character), which JSONB cannot store. Valid payload and key
 bind as text with explicit JSONB/text casts, and the insert is the only
 statement enqueue sends. UTF-8 is a schema precondition rather than a
-per-call check: the simplification migration refuses a non-UTF-8 database,
+per-call check: the canonical migration requires a UTF-8 database,
 and the worker's startup check verifies it. The typed validation failures
 include `InvalidKind`, `InvalidUniqueKey`, `InvalidDelay`,
 `PayloadContainsNul`, `Serialize`, and `PayloadTooLarge`. Database errors
@@ -240,12 +240,10 @@ on the same row.
 
 ## Storage, observation, and inspection
 
-The forward simplification migration converts `payload` from `bytea` to
-`jsonb`, `unique_key` to `text COLLATE "C"`, adds `trace_state text`, and
-replaces the running index with `(kind, claim_expires_at, not_before, id)` for
-running rows. It preserves job identity, state, generation, attempts, times,
-and terminal history. JSONB's semantic normalization is intentional; legacy
-payloads or database encodings that cannot convert are refused.
+The canonical migration stores `payload` as `jsonb`, `unique_key` as
+`text COLLATE "C"`, includes `trace_state text`, and uses the running index
+`(kind, claim_expires_at, not_before, id)` for running rows. JSONB's semantic
+normalization is intentional.
 
 New trace data stores bounded ASCII `trace_context` and `trace_state` only.
 The worker extracts through the installed propagator and creates a span link,
@@ -292,8 +290,6 @@ freshness no older than 30 seconds. This distinguishes an exact empty queue,
 censoring, sample failure, and a stopped sampler. The two-second sample timeout
 is an elapsed-time limit, not a scan-size claim.
 
-## Roll out the conversion
-
 <!-- template:begin webhooks-common:docs-background-jobs-webhooks -->
 ## Webhook kinds
 
@@ -314,29 +310,6 @@ A missing historical key snoozes for 60 seconds without consuming an attempt.
 `webhooks.process` uses the existing 25-attempt, 60-second policy. A missing
 consumer binding snoozes for 60 seconds without consuming an attempt.
 <!-- template:end inbound-webhooks:docs-background-jobs-webhooks-inbound -->
-
-Before the maintenance window, use an approved database session with a finite
-statement timeout to force conversion of every old row without exposing data:
-
-```sql
-SHOW server_encoding;
-SELECT count(convert_from(payload, 'UTF8')::jsonb) AS payloads,
-       count(convert_from(unique_key, 'UTF8')) AS keys
-FROM background_jobs;
-```
-
-A conversion error is a refusal; repairing or deleting data needs a separate
-decision. The migration repeats conversion under its table lock, so this
-preflight cannot authorize overlapping old producers.
-
-This is a stopped-producer/worker conversion. Inventory and stop every old
-producer and worker before `/migrate` applies
-`20260925000001_simplify_background_jobs.sql`; old bytea binaries cannot run
-against new JSONB/text columns. The migrator applies the forward file atomically
-after the operator's read-only preflight. A known failure rolls back the file and its
-history row. For an unknown migrator outcome, inspect migration history and
-schema before selecting a binary. After a successful conversion, old binaries
-and a down migration are not recovery; use a compatible forward repair.
 
 The pack still has no operator pause, cancel, redrive, priority, queue,
 workflow, or generic business-closure replay API. The retained webhook provider
