@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validate all canonical projections and forty-six distinct runtime graphs from
+# Validate all canonical projections and fifty distinct runtime graphs from
 # one private, fixed source candidate. The shared checkout is never staged or committed.
 set -euo pipefail
 
@@ -11,7 +11,7 @@ runtime_graphs=all
 
 validate_runtime_graphs() {
 	local selection=$1 number seen=,
-	[[ ${selection} =~ ^([1-9]|[1-3][0-9]|4[0-6])(,([1-9]|[1-3][0-9]|4[0-6]))*$ ]] || return 1
+	[[ ${selection} =~ ^([1-9]|[1-4][0-9]|50)(,([1-9]|[1-4][0-9]|50))*$ ]] || return 1
 	local -a numbers
 	IFS=, read -r -a numbers <<<"${selection}"
 	for number in "${numbers[@]}"; do
@@ -33,7 +33,7 @@ while (($#)); do
 		;;
 	--runtime-graphs)
 		[[ ${mode} == full ]] || { echo "validation modes cannot be combined" >&2; exit 2; }
-		validate_runtime_graphs "${2:-}" || { echo "--runtime-graphs requires distinct comma-separated graph IDs 1..46" >&2; exit 2; }
+		validate_runtime_graphs "${2:-}" || { echo "--runtime-graphs requires distinct comma-separated graph IDs 1..50" >&2; exit 2; }
 		mode=runtime-graphs
 		runtime_graphs=$2
 		shift 2
@@ -109,7 +109,7 @@ snapshot_candidate() {
 	while IFS= read -r relative || [[ -n ${relative} ]]; do
 		[[ -z ${relative} || ${relative} == \#* ]] && continue
 		if [[ ${relative} == */ ]]; then
-			[[ ${relative} == evals/template-initializer/ || ${relative} == specs/template-initializer/ || ${relative} == crates/infra-bearerauthn/ || ${relative} == crates/infra-outbound-http/ || ${relative} == crates/infra-webhooks/ || ${relative} == crates/webhook-consumers/ || ${relative} == crates/infra-idempotency-store/ || ${relative} == crates/infra-http/src/idempotency/ || ${relative} == test/tests/http_idempotency/ || ${relative} == crates/infra-jobs/ || ${relative} == crates/jobs-worker/ || ${relative} == test/tests/jobs/ || ${relative} == test/tests/webhooks/ || ${relative} == test/src/bin/ || ${relative} == docs/universal-disciplines/ || ${relative} == evals/rust-reliability/ ]] || {
+			[[ ${relative} == evals/template-initializer/ || ${relative} == specs/template-initializer/ || ${relative} == crates/infra-bearerauthn/ || ${relative} == crates/infra-outbound-http/ || ${relative} == crates/infra-oauth2-client-credentials/ || ${relative} == crates/infra-webhooks/ || ${relative} == crates/webhook-consumers/ || ${relative} == crates/infra-idempotency-store/ || ${relative} == crates/infra-http/src/idempotency/ || ${relative} == test/tests/http_idempotency/ || ${relative} == crates/infra-jobs/ || ${relative} == crates/jobs-worker/ || ${relative} == test/tests/jobs/ || ${relative} == test/tests/webhooks/ || ${relative} == test/src/bin/ || ${relative} == docs/universal-disciplines/ || ${relative} == evals/rust-reliability/ ]] || {
 				echo "candidate directory is not authorized: ${relative}" >&2; return 2
 			}
 			while IFS= read -r -d '' nested; do
@@ -173,19 +173,19 @@ recorder_self_test() {
 	grep -q 'status=failed label=forced-failure exit_code=7 ' "${receipt}"
 	[[ ! -e ${later} ]] || { echo "recorder self-test executed a later stage" >&2; return 1; }
 	local mode=full runtime_graphs=all number invalid
-	for number in {1..46}; do
+	for number in {1..50}; do
 		runtime_graph_selected "${number}" || { echo "default full mode skipped graph ${number}" >&2; return 1; }
 	done
 	mode=runtime-graphs
-	runtime_graphs="3,4,5,6,$(seq -s, 9 46)"
+	runtime_graphs="3,4,5,6,$(seq -s, 9 50)"
 	validate_runtime_graphs "${runtime_graphs}"
-	for number in {1..46}; do
+	for number in {1..50}; do
 		case "${number}" in
 		1 | 2 | 7 | 8) if runtime_graph_selected "${number}"; then echo "subset selected graph ${number}" >&2; return 1; fi ;;
 		*) runtime_graph_selected "${number}" || { echo "subset skipped graph ${number}" >&2; return 1; } ;;
 		esac
 	done
-	for invalid in '' 0 47 01 '1,1' '2,,3' '1,'; do
+	for invalid in '' 0 51 01 '1,1' '2,,3' '1,'; do
 		if validate_runtime_graphs "${invalid}"; then echo "invalid graph selection accepted" >&2; return 1; fi
 	done
 	printf 'template initializer graph selection self-test: pass\n'
@@ -202,18 +202,18 @@ record_source_suites() {
 }
 
 run_graph() {
-	local graph=$1 database=$2 authn=$3 outbound_http=$4 http_idempotency=$5 jobs=$6 webhooks=$7 inbound_webhooks=$8
+	local graph=$1 database=$2 authn=$3 outbound_http=$4 outbound_auth=$5 http_idempotency=$6 jobs=$7 webhooks=$8 inbound_webhooks=$9
 	local target output_revision openapi_sha256 cargo_lock_sha256 identity description full_graph
 	local -a db_tests=()
 	if [[ ${webhooks} != none || ${inbound_webhooks} != none ]]; then
 		identity="matrix-w${graph}"
-		description="Webhook matrix ${database} ${authn} ${outbound_http} ${http_idempotency} ${webhooks} ${inbound_webhooks}"
+		description="Webhook matrix ${database} ${authn} ${outbound_http} ${outbound_auth} ${http_idempotency} ${webhooks} ${inbound_webhooks}"
 	elif [[ ${jobs} == none ]]; then
 		identity="matrix-${database}-${authn}-${outbound_http}-${http_idempotency}-core"
-		description="Matrix ${database} ${authn} ${outbound_http} ${http_idempotency} core"
+		description="Matrix ${database} ${authn} ${outbound_http} ${outbound_auth} ${http_idempotency} core"
 	else
 		identity="matrix-${database}-${authn}-${outbound_http}-${http_idempotency}-jobs-core"
-		description="Matrix ${database} ${authn} ${outbound_http} ${http_idempotency} jobs core"
+		description="Matrix ${database} ${authn} ${outbound_http} ${outbound_auth} ${http_idempotency} jobs core"
 	fi
 	if [[ ${http_idempotency} == postgres ]]; then
 		db_tests+=(--test http_idempotency)
@@ -232,29 +232,29 @@ run_graph() {
 	if [[ ${full_graph} == true ]] && [[ ${webhooks} != none || ${inbound_webhooks} != none ]]; then
 		db_tests+=(--test webhooks)
 	fi
-	target=${work}/runtime-${graph}-${database}-${authn}-${outbound_http}-${http_idempotency}-${jobs}-${webhooks}-${inbound_webhooks}
+	target=${work}/runtime-${graph}-${database}-${authn}-${outbound_http}-${outbound_auth}-${http_idempotency}-${jobs}-${webhooks}-${inbound_webhooks}
 	git clone --quiet --no-local "${source}" "${target}"
-	printf 'runtime_graph=%s database=%s authn=%s outbound_http=%s http_idempotency=%s jobs=%s webhooks=%s inbound_webhooks=%s harness=core candidate=%s\n' \
-		"${graph}" "${database}" "${authn}" "${outbound_http}" "${http_idempotency}" "${jobs}" "${webhooks}" "${inbound_webhooks}" "${candidate}" >>"${receipt}"
+	printf 'runtime_graph=%s database=%s authn=%s outbound_http=%s outbound_auth=%s http_idempotency=%s jobs=%s webhooks=%s inbound_webhooks=%s harness=core candidate=%s\n' \
+		"${graph}" "${database}" "${authn}" "${outbound_http}" "${outbound_auth}" "${http_idempotency}" "${jobs}" "${webhooks}" "${inbound_webhooks}" "${candidate}" >>"${receipt}"
 	record_command "${receipt}" "${log_dir}/runtime-${graph}-init.log" "runtime-${graph}-init" \
 		"${scrubbed_identity[@]}" bash "${source}/scripts/init-module.sh" --repo "${target}" \
 		--service-name "${identity}" \
 		--repository "https://github.com/example/${identity}" \
 		--description "${description}" \
 		--codeowner @example/platform --database "${database}" --authn "${authn}" \
-		--outbound-http "${outbound_http}" --http-idempotency "${http_idempotency}" --jobs "${jobs}" \
+		--outbound-http "${outbound_http}" --outbound-auth "${outbound_auth}" --http-idempotency "${http_idempotency}" --jobs "${jobs}" \
 		--webhooks "${webhooks}" --inbound-webhooks "${inbound_webhooks}" --agent-harness core
 	git -C "${target}" config user.email template-init-check@example.invalid
 	git -C "${target}" config user.name template-init-check
 	git -C "${target}" add -A
-	git -C "${target}" commit -qm "initialized ${database}/${authn}/${outbound_http}/${http_idempotency}/${jobs}/core"
+	git -C "${target}" commit -qm "initialized ${database}/${authn}/${outbound_http}/${outbound_auth}/${http_idempotency}/${jobs}/core"
 	output_revision=$(git -C "${target}" rev-parse HEAD)
 	openapi_sha256=$(shasum -a 256 "${target}/api/openapi/service.yaml" | awk '{print $1}')
 	cargo_lock_sha256=$(shasum -a 256 "${target}/Cargo.lock" | awk '{print $1}')
 	printf 'status=passed label=runtime-%s-initialized output_revision=%s openapi_sha256=%s cargo_lock_sha256=%s\n' \
 		"${graph}" "${output_revision}" "${openapi_sha256}" "${cargo_lock_sha256}" >>"${receipt}"
-	printf 'template initializer runtime_graph=%s database=%s authn=%s outbound_http=%s http_idempotency=%s jobs=%s webhooks=%s inbound_webhooks=%s candidate=%s revision=%s\n' \
-		"${graph}" "${database}" "${authn}" "${outbound_http}" "${http_idempotency}" "${jobs}" "${webhooks}" "${inbound_webhooks}" "${candidate}" "${output_revision}"
+	printf 'template initializer runtime_graph=%s database=%s authn=%s outbound_http=%s outbound_auth=%s http_idempotency=%s jobs=%s webhooks=%s inbound_webhooks=%s candidate=%s revision=%s\n' \
+		"${graph}" "${database}" "${authn}" "${outbound_http}" "${outbound_auth}" "${http_idempotency}" "${jobs}" "${webhooks}" "${inbound_webhooks}" "${candidate}" "${output_revision}"
 	if ((graph > 26)); then
 		# The child shell expands its manifest argument; the caller must preserve $1.
 		# shellcheck disable=SC2016
@@ -273,11 +273,17 @@ run_graph() {
 		fi
 		return
 	fi
+	local -a check_features=()
+	if [[ ${database} == postgres ]]; then
+		check_features=(--features integration-tests/integration)
+	fi
 	record_command "${receipt}" "${log_dir}/runtime-${graph}-check.log" "runtime-${graph}-check" \
 		"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" cargo check --workspace --all-targets \
-			--features integration-tests/integration --locked --offline --manifest-path "${target}/Cargo.toml"
-	record_command "${receipt}" "${log_dir}/runtime-${graph}-provider.log" "runtime-${graph}-provider" \
-		"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" make -C "${target}" test-package PKG=infra-webhooks
+			"${check_features[@]}" --locked --offline --manifest-path "${target}/Cargo.toml"
+	if [[ ${outbound_auth} == none ]]; then
+		record_command "${receipt}" "${log_dir}/runtime-${graph}-provider.log" "runtime-${graph}-provider" \
+			"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" make -C "${target}" test-package PKG=infra-webhooks
+	fi
 	if [[ ${inbound_webhooks} == standard-webhooks ]]; then
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-contract.log" "runtime-${graph}-contract" \
 			"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" cargo test -p "${identity}" --test openapi --locked --offline --manifest-path "${target}/Cargo.toml"
@@ -288,9 +294,9 @@ run_graph() {
 }
 
 run_validation() {
-	local work source candidate database authn outbound_http graph=0 common receipt_dir receipt log_dir target_cache
+	local work source candidate database authn outbound_http outbound_auth graph=0 common receipt_dir receipt log_dir target_cache
 	local started=${SECONDS}
-	local -a scrubbed_identity=(env -u SERVICE_NAME -u REPOSITORY -u DESCRIPTION -u CODEOWNER -u DATABASE -u AUTHN -u OUTBOUND_HTTP -u HTTP_IDEMPOTENCY -u JOBS -u WEBHOOKS -u INBOUND_WEBHOOKS -u AGENT_HARNESS)
+	local -a scrubbed_identity=(env -u SERVICE_NAME -u REPOSITORY -u DESCRIPTION -u CODEOWNER -u DATABASE -u AUTHN -u OUTBOUND_HTTP -u OUTBOUND_AUTH -u HTTP_IDEMPOTENCY -u JOBS -u WEBHOOKS -u INBOUND_WEBHOOKS -u AGENT_HARNESS)
 	work=$(mktemp -d)
 	trap 'rm -rf -- "${work}"' RETURN
 	common=$(git -C "${repo}" rev-parse --git-common-dir)
@@ -325,7 +331,7 @@ run_validation() {
 				for outbound_http in none bounded; do
 					((graph += 1))
 					runtime_graph_selected "${graph}" || continue
-					run_graph "${graph}" "${database}" "${authn}" "${outbound_http}" none none none none
+					run_graph "${graph}" "${database}" "${authn}" "${outbound_http}" none none none none none
 				done
 			done
 		done
@@ -333,21 +339,21 @@ run_validation() {
 			for outbound_http in none bounded; do
 				((graph += 1))
 				runtime_graph_selected "${graph}" || continue
-				run_graph "${graph}" postgres "${authn}" "${outbound_http}" postgres none none none
+				run_graph "${graph}" postgres "${authn}" "${outbound_http}" none postgres none none none
 			done
 		done
 		for authn in none oidc-jwt oidc-introspection; do
 			for outbound_http in none bounded; do
 				((graph += 1))
 				runtime_graph_selected "${graph}" || continue
-				run_graph "${graph}" postgres "${authn}" "${outbound_http}" none postgres none none
+				run_graph "${graph}" postgres "${authn}" "${outbound_http}" none none postgres none none
 			done
 		done
 		for authn in oidc-jwt oidc-introspection; do
 			for outbound_http in none bounded; do
 				((graph += 1))
 				runtime_graph_selected "${graph}" || continue
-				run_graph "${graph}" postgres "${authn}" "${outbound_http}" postgres postgres none none
+				run_graph "${graph}" postgres "${authn}" "${outbound_http}" none postgres postgres none none
 			done
 		done
 		for selection in none:none oidc-jwt:none oidc-introspection:none oidc-jwt:postgres oidc-introspection:postgres; do
@@ -356,24 +362,35 @@ run_validation() {
 				if [[ ${outbound_http} == none ]]; then
 					((graph += 1))
 					runtime_graph_selected "${graph}" || continue
-					run_graph "${graph}" postgres "${authn}" none "${http_idempotency}" postgres none standard-webhooks
+					run_graph "${graph}" postgres "${authn}" none none "${http_idempotency}" postgres none standard-webhooks
 					continue
 				fi
 				((graph += 1))
 				if runtime_graph_selected "${graph}"; then
-					run_graph "${graph}" postgres "${authn}" bounded "${http_idempotency}" postgres none standard-webhooks
+					run_graph "${graph}" postgres "${authn}" bounded none "${http_idempotency}" postgres none standard-webhooks
 				fi
 				((graph += 1))
 				if runtime_graph_selected "${graph}"; then
-					run_graph "${graph}" postgres "${authn}" bounded "${http_idempotency}" postgres durable none
+					run_graph "${graph}" postgres "${authn}" bounded none "${http_idempotency}" postgres durable none
 				fi
 				((graph += 1))
 				if runtime_graph_selected "${graph}"; then
-					run_graph "${graph}" postgres "${authn}" bounded "${http_idempotency}" postgres durable standard-webhooks
+					run_graph "${graph}" postgres "${authn}" bounded none "${http_idempotency}" postgres durable standard-webhooks
 				fi
 			done
 		done
-		[[ ${graph} == 46 ]] || { echo "webhook graph inventory ended at ${graph}, expected 46" >&2; return 1; }
+		# OAuth adds only the four accepted representative graphs; it does not
+		# multiply the established database, harness, and profile matrix.
+		for authn in none oidc-jwt oidc-introspection; do
+			((graph += 1))
+			runtime_graph_selected "${graph}" || continue
+			run_graph "${graph}" none "${authn}" none oauth2-client-credentials none none none none
+		done
+		((graph += 1))
+		if runtime_graph_selected "${graph}"; then
+			run_graph "${graph}" postgres oidc-introspection none oauth2-client-credentials postgres postgres durable standard-webhooks
+		fi
+		[[ ${graph} == 50 ]] || { echo "profile graph inventory ended at ${graph}, expected 50" >&2; return 1; }
 	fi
 	printf 'state=passed\nduration_seconds=%s\n' "$((SECONDS - started))" >>"${receipt}"
 }

@@ -55,6 +55,10 @@ log = { version = "0.4", default-features = false }
 sfv = { version = "0.15.0", default-features = false }
 # template:end http-idempotency:workspace-http-idempotency-digest
 
+# template:begin outbound-auth:workspace-oauth2-dependency
+oauth2 = { version = "5.0.0", default-features = false }
+# template:end outbound-auth:workspace-oauth2-dependency
+
 # Runtime and transport
 futures-util = { version = "0.3", default-features = false }
 axum = { version = "0.8.9", default-features = false }

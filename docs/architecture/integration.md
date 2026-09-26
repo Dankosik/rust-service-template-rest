@@ -101,6 +101,15 @@ bounded encoded bodies/header count, and removal of correlation headers. Never
 construct it from a caller-controlled URL. Selection itself adds no neighbour or
 startup call.
 <!-- template:end outbound-http:docs-integration-outbound -->
+<!-- template:begin outbound-auth:docs-integration-outbound-auth -->
+An integration that needs OAuth2 client credentials composes its named immutable
+configuration into `infra-oauth2-client-credentials` and binds it to its
+existing bounded resource client. The adapter alone holds credentials; feature
+code receives its existing provider port, never a token or generic token source.
+The token endpoint is fixed operator input and uses the same trusted HTTPS
+transport boundary. Selection adds neither a provider registration nor live
+provider certification.
+<!-- template:end outbound-auth:docs-integration-outbound-auth -->
 
 <!-- template:begin oidc-jwt:docs-integration-jwt -->
 JWT mode uses OIDC discovery and JWKS only from the exact configured issuer's discovery result. It accepts access tokens under configured algorithms and compatible eligible keys; token headers never choose a trust destination. Refresh replaces a key set atomically, retains the last usable set after a failed fetch, and is not a revocation service.

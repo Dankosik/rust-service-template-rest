@@ -34,6 +34,15 @@ owns construction and operation policy. Its default-off `test-support` feature
 is only for a consuming dev-dependency that uses the literal-loopback HTTP mock
 constructor; it is not a production configuration knob.
 <!-- template:end outbound-http:docs-commands-outbound -->
+<!-- template:begin outbound-auth:docs-commands-outbound-auth -->
+With `OUTBOUND_AUTH=oauth2-client-credentials`,
+`infra-oauth2-client-credentials` is available to
+`make test-package PKG=infra-oauth2-client-credentials`. Its tests consume
+bounded outbound HTTP's dev-only mock support; the profile adds no runtime
+command, provider call, or live-provider certification claim. [Outbound machine
+authentication](outbound-machine-authentication.md) owns construction and
+compatibility limits.
+<!-- template:end outbound-auth:docs-commands-outbound-auth -->
 
 
 ## Contract

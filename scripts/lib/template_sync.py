@@ -40,6 +40,7 @@ from template_state import (
     selected_http_idempotency,
     selected_inbound_webhooks,
     selected_jobs,
+    selected_outbound_auth,
     selected_outbound_http,
     selected_profiles,
     selected_webhooks,
@@ -811,6 +812,7 @@ def _run(arguments: argparse.Namespace) -> int:
         assert target_lock is not None
         _database, harness = selected_profiles(target)
         selected_outbound_http(target)
+        selected_outbound_auth(target)
         selected_http_idempotency(target)
         selected_jobs(target)
         selected_webhooks(target)
