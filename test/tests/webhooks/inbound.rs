@@ -105,16 +105,16 @@ async fn proxied_pool(pool: &PgPool) -> (CommitProxy, PgPool) {
     (proxy, super::template_pool(&proxied, 3).await)
 }
 
-async fn until(what: &str, mut ready: impl AsyncFnMut() -> Option<()>) {
+async fn until<T>(what: &str, mut ready: impl AsyncFnMut() -> Option<T>) -> T {
     super::bounded(what, async {
         loop {
-            if ready().await.is_some() {
-                return;
+            if let Some(value) = ready().await {
+                return value;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
-    .await;
+    .await
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -438,7 +438,7 @@ async fn unknown_processor_commit_does_not_add_a_competing_retry(pool: PgPool) {
     }))
     .expect("historical inbound payload");
     infra_postgres::in_tx(&pool, async |tx| -> Result<(), infra_postgres::TxError> {
-        infra_jobs::enqueue(tx, &incoming, infra_jobs::EnqueueOptions::default())
+        let _enqueued = infra_jobs::enqueue(tx, &incoming, infra_jobs::EnqueueOptions::default())
             .await
             .expect("enqueue historical payload");
         Ok(())
@@ -745,7 +745,7 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
     }))
     .expect("legacy inbound payload");
     infra_postgres::in_tx(&pool, async |tx| -> Result<(), infra_postgres::TxError> {
-        infra_jobs::enqueue(tx, &incoming, infra_jobs::EnqueueOptions::default())
+        let _enqueued = infra_jobs::enqueue(tx, &incoming, infra_jobs::EnqueueOptions::default())
             .await
             .expect("enqueue legacy fixture");
         Ok(())

@@ -28,14 +28,15 @@ mod process;
 mod http_idempotency;
 // template:end jobs-http-idempotency:jobs-http-idempotency-module
 
-use std::borrow::Cow;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 use futures_util::FutureExt as _;
-use infra_postgres::{Closed, Dsn, PgPool, PoolOptions};
+use infra_postgres::{Closed, Dsn, Isolation, PgPool, PoolOptions};
+
+pub(crate) use infra_postgres::raw_sqlstate as sqlstate;
 
 const APP: &str = "integration-tests-jobs";
 /// Bound on every wait in this suite.
@@ -52,6 +53,7 @@ pub(crate) async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
         &PoolOptions {
             max_connections: NonZeroU32::new(max_connections).expect("a pool size"),
             application_name: APP,
+            default_isolation: Isolation::ReadCommitted,
         },
     )
     .await
@@ -74,11 +76,6 @@ pub(crate) async fn job_count(pool: &PgPool) -> i64 {
         .fetch_one(pool)
         .await
         .expect("a job count")
-}
-
-/// SQLSTATE of a database error, when the driver reported one.
-pub(crate) fn sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
-    err.as_database_error()?.code()
 }
 
 /// `future`, which must finish within [`WAIT`].

@@ -8,7 +8,6 @@ scripts/lib/template_sync.py
 scripts/lib/template_state.py
 scripts/lib/template_profiles.json
 crates/infra-bearerauthn/
-crates/infra-egress-dns/
 crates/infra-outbound-http/
 crates/infra-webhooks/
 crates/webhook-consumers/
@@ -29,6 +28,7 @@ migrations/20260926022945_create_webhook_receipts.sql
 migrations/20260926130000_native_webhook_receipts.sql
 docs/authentication.md
 docs/outbound-http.md
+docs/outbound-http-decisions.md
 docs/http-idempotency.md
 docs/background-jobs.md
 docs/outbound-webhooks.md
@@ -47,6 +47,8 @@ scripts/tests/template-profile-projections.py
 scripts/tests/template-init-safety.py
 scripts/tests/template-sync-canary.py
 test/tests/http_idempotency/
+test/tests/outbound_http.rs
+test/fixtures/tls.rs
 test/src/jobs.rs
 test/src/bin/
 test/tests/jobs/

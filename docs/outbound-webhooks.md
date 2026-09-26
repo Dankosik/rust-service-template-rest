@@ -117,11 +117,15 @@ The interoperable wire authority is the [Standard Webhooks
 specification](https://github.com/standard-webhooks/standard-webhooks/blob/bece768d960f09e242f5cd5686d859e475d6b478/spec/standard-webhooks.md).
 
 The outbound snapshot builds one fixed-authority client and one decoded key ring
-for each configured endpoint before claims. The client owns actual-DNS
-public-address admission, hostname TLS, pooling, no proxy/redirect, and response
-bounds. Destinations are public HTTPS without credentials or fragments; existing
-paths, query strings, and HTTPS ports remain supported. There is no historical
-client cache or saved-routing revalidation.
+for each configured endpoint before claims. The client owns hostname TLS
+verification, pooling, no proxy/redirect, and response bounds. Its attempt
+telemetry carries the method, receiver host and port, status, and a static
+outcome, never the path, query, headers, or body. Endpoint URLs are trusted
+operator configuration: HTTPS without credentials or fragments, including
+private addresses the deployment trusts; existing paths, query strings, and
+HTTPS ports remain supported. The client is not an SSRF boundary, so never
+populate the endpoint map from tenant, request, or payload data. There is no
+historical client cache or saved-routing revalidation.
 
 The jobs deadline bounds signing, transport, and response reading to 30 seconds.
 A complete bounded 2xx completes delivery; 410 is a permanent `endpoint_gone`

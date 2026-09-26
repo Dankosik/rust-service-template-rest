@@ -57,6 +57,7 @@ pub(crate) enum Fault {
 pub(crate) struct Armed {
     fault: Fault,
     statement: Option<&'static str>,
+    autocommit: bool,
 }
 
 impl From<Fault> for Armed {
@@ -64,6 +65,7 @@ impl From<Fault> for Armed {
         Self {
             fault,
             statement: None,
+            autocommit: false,
         }
     }
 }
@@ -73,6 +75,7 @@ impl From<(Fault, &'static str)> for Armed {
         Self {
             fault,
             statement: Some(statement),
+            autocommit: false,
         }
     }
 }
@@ -202,6 +205,16 @@ impl CommitProxy {
         *lock(&self.arming) = Arming::Armed(fault.into());
     }
 
+    /// Act once on the matching autocommit statement's completion boundary.
+    /// Extended queries commit at Sync; simple queries complete in their own message.
+    pub(crate) fn arm_autocommit(&self, fault: Fault, statement: &'static str) {
+        *lock(&self.arming) = Arming::Armed(Armed {
+            fault,
+            statement: Some(statement),
+            autocommit: true,
+        });
+    }
+
     /// The fault the proxy acted on, once it has.
     pub(crate) fn fired(&self) -> Option<Fault> {
         match *lock(&self.arming) {
@@ -286,7 +299,7 @@ async fn relay(
     let _ = upstream.set_nodelay(true);
     let mut frontend = Frontend::default();
     let mut backend = Vec::new();
-    // Set once `COMMIT` is forwarded under `ForwardThenDrop`: from then on the
+    // Set once the commit boundary is forwarded under `ForwardThenDrop`: from then on the
     // client is not read, and the server's answer is framed and swallowed.
     let mut committing = false;
     let mut holding_begin = false;
@@ -302,7 +315,7 @@ async fn relay(
                         return;
                     };
                     let hold_begin = Frontend::claim_begin(&message, &begin_hold);
-                    match frontend.commit_fault(&message, &arming) {
+                    match frontend.operation_fault(&message, &arming) {
                         Some(Fault::DropBeforeForward) => return,
                         Some(Fault::ForwardThenDrop) => committing = true,
                         None => {}
@@ -324,7 +337,7 @@ async fn relay(
                     return;
                 }
                 if committing {
-                    // The answer to `COMMIT` is never relayed: close once
+                    // The final acknowledgement is never relayed: close once
                     // the server is ready again, which it is only after the
                     // commit.
                     if !matches!(holds_ready_for_query(&backend), Ok(false)) {
@@ -379,8 +392,8 @@ impl Frontend {
         }))
     }
 
-    /// Track SQL per connection, then consume only the matching transaction's commit.
-    fn commit_fault(&mut self, message: &[u8], arming: &Mutex<Arming>) -> Option<Fault> {
+    /// Track SQL per connection and fault only its selected completion boundary.
+    fn operation_fault(&mut self, message: &[u8], arming: &Mutex<Arming>) -> Option<Fault> {
         if message.first() == Some(&b'P') {
             let mut fields = message.get(5..)?.split(|byte| *byte == 0);
             let name = fields.next()?;
@@ -394,14 +407,15 @@ impl Frontend {
             self.portals.insert(portal.to_vec(), statement.to_vec());
         }
         let sql = match message.first() {
-            Some(b'Q') => message.get(5..)?.strip_suffix(&[0])?,
+            Some(b'Q') => Some(message.get(5..)?.strip_suffix(&[0])?),
             Some(b'E') => {
                 let portal = message.get(5..)?.split(|byte| *byte == 0).next()?;
-                self.statements.get(self.portals.get(portal)?)?.as_slice()
+                Some(self.statements.get(self.portals.get(portal)?)?.as_slice())
             }
+            Some(b'S') => None,
             _ => return None,
         };
-        if sql.starts_with(b"BEGIN") || sql == b"ROLLBACK" {
+        if sql.is_some_and(|sql| sql.starts_with(b"BEGIN") || sql == b"ROLLBACK") {
             self.matched = false;
             return None;
         }
@@ -413,10 +427,15 @@ impl Frontend {
             }
             return None;
         };
-        if let Some(statement) = armed.statement {
+        if let (Some(statement), Some(sql)) = (armed.statement, sql) {
             self.matched |= std::str::from_utf8(sql).is_ok_and(|sql| sql.contains(statement));
         }
-        if !commit {
+        let boundary = if armed.autocommit {
+            matches!(message.first(), Some(b'Q' | b'S')) && self.matched
+        } else {
+            commit
+        };
+        if !boundary {
             return None;
         }
         let matches = armed.statement.is_none() || self.matched;

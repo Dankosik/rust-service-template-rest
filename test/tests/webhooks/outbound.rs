@@ -1,7 +1,6 @@
 use std::{collections::BTreeMap, num::NonZeroU32, sync::Arc, time::Duration};
 
 use base64::Engine as _;
-use infra_egress_dns::test_support::TlsMaterial;
 use infra_jobs::{Engine, Kinds};
 use infra_postgres::{PgPool, TxError, in_tx};
 use infra_webhooks::{
@@ -14,13 +13,6 @@ use tokio::{
     net::TcpListener,
     sync::Notify,
     task::JoinHandle,
-};
-use tokio_rustls::{
-    TlsAcceptor,
-    rustls::{
-        ServerConfig,
-        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-    },
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -79,10 +71,9 @@ fn dispatcher(
     outbound: &Outbound,
     endpoints: &[&str],
     address: std::net::SocketAddr,
-    material: &TlsMaterial,
 ) -> Dispatcher {
     outbound
-        .dispatcher_for_test_fixture(keys(endpoints), address, &material.root)
+        .dispatcher_for_test_http(keys(endpoints), address)
         .expect("fixture dispatcher")
 }
 
@@ -187,21 +178,6 @@ async fn job_is_snoozed(pool: &PgPool, id: &str) {
     .await;
 }
 
-fn acceptor(material: &TlsMaterial) -> TlsAcceptor {
-    let config = ServerConfig::builder_with_provider(Arc::new(
-        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .expect("fixture TLS protocol versions")
-    .with_no_client_auth()
-    .with_single_cert(
-        vec![CertificateDer::from(material.cert.clone())],
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
-    )
-    .expect("fixture certificate and key");
-    TlsAcceptor::from(Arc::new(config))
-}
-
 async fn read_headers<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Vec<u8> {
     let mut request = Vec::new();
     let mut chunk = [0_u8; 256];
@@ -235,7 +211,6 @@ async fn read_headers<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Vec<u8
 }
 
 async fn reply_peer(
-    material: &TlsMaterial,
     status: u16,
 ) -> (
     std::net::SocketAddr,
@@ -246,14 +221,9 @@ async fn reply_peer(
         .await
         .expect("fixture listener");
     let address = listener.local_addr().expect("fixture address");
-    let acceptor = acceptor(material);
     let (sent, captured) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
-        let (socket, _) = listener.accept().await.expect("fixture accepts connection");
-        let mut stream = acceptor
-            .accept(socket)
-            .await
-            .expect("fixture TLS handshake");
+        let (mut stream, _) = listener.accept().await.expect("fixture accepts connection");
         let headers = read_headers(&mut stream).await;
         sent.send(headers)
             .expect("request capture remains available");
@@ -359,15 +329,11 @@ async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgP
         (410, "failed"),
         (204, "completed"),
     ] {
-        let material = TlsMaterial::new(FIXTURE_HOST);
-        let (address, captured, peer) = reply_peer(&material, status).await;
+        let (address, captured, peer) = reply_peer(status).await;
         let configured = outbound(&[("partner", "/events?source=queue")]);
         let id = enqueue(&pool, &configured, "partner", b"{\"event\":\"status\"}").await;
-        let running = RunningDispatcher::start(
-            &pool,
-            dispatcher(&configured, &["partner"], address, &material),
-            1,
-        );
+        let running =
+            RunningDispatcher::start(&pool, dispatcher(&configured, &["partner"], address), 1);
 
         job_is(&pool, &id, expected_state, 1).await;
         let row = sqlx::query(
@@ -453,13 +419,9 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
     .await
     .expect("obsolete routing values do not constrain the legacy common payload");
 
-    let material = TlsMaterial::new(FIXTURE_HOST);
-    let (address, captured, peer) = reply_peer(&material, 200).await;
-    let running = RunningDispatcher::start(
-        &pool,
-        dispatcher(&configured, &["partner"], address, &material),
-        1,
-    );
+    let (address, captured, peer) = reply_peer(200).await;
+    let running =
+        RunningDispatcher::start(&pool, dispatcher(&configured, &["partner"], address), 1);
     job_is(&pool, &id, "completed", 1).await;
     let request = super::bounded("fixture request capture", captured)
         .await
@@ -572,12 +534,10 @@ async fn invalid_or_unsupported_common_payloads_fail_permanently_before_transpor
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn one_held_endpoint_refunds_capacity_while_another_same_origin_endpoint_runs(pool: PgPool) {
-    let material = TlsMaterial::new(FIXTURE_HOST);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("fixture listener");
     let address = listener.local_addr().expect("fixture address");
-    let acceptor = acceptor(&material);
     let held = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let other_received = Arc::new(Notify::new());
@@ -586,19 +546,11 @@ async fn one_held_endpoint_refunds_capacity_while_another_same_origin_endpoint_r
         let release = Arc::clone(&release);
         let other_received = Arc::clone(&other_received);
         tokio::spawn(async move {
-            let (first_socket, _) = listener.accept().await.expect("held exchange connects");
-            let mut first = acceptor
-                .accept(first_socket)
-                .await
-                .expect("held TLS handshake");
+            let (mut first, _) = listener.accept().await.expect("held exchange connects");
             read_headers(&mut first).await;
             held.notify_one();
 
-            let (other_socket, _) = listener.accept().await.expect("other exchange connects");
-            let mut other = acceptor
-                .accept(other_socket)
-                .await
-                .expect("other TLS handshake");
+            let (mut other, _) = listener.accept().await.expect("other exchange connects");
             read_headers(&mut other).await;
             other_received.notify_one();
             other
@@ -619,7 +571,7 @@ async fn one_held_endpoint_refunds_capacity_while_another_same_origin_endpoint_r
     let configured = outbound(&[("held", "/held"), ("other", "/other")]);
     let running = RunningDispatcher::start(
         &pool,
-        dispatcher(&configured, &["held", "other"], address, &material),
+        dispatcher(&configured, &["held", "other"], address),
         2,
     );
     let first = enqueue(&pool, &configured, "held", b"{\"event\":\"first\"}").await;

@@ -175,8 +175,8 @@ for the shipped binary, and the test-only `jobs-worker-fixture` suite in
 | 10 | `register(&mut kinds, &support)`, then `kinds.validate()` | `job kind registration failed: ...`; `job kinds are invalid: ...` (a set with no kind says `no job kind is registered`) |
 | 11 | `jobs_worker_starting` record | |
 | 12 | Metrics upkeep and Tokio runtime metrics tasks join the tracker | |
-| 13 | `Dsn::admit`, `infra_postgres::connect` with the derived `application_name`; `postgres_pool_opened`; pool gauge task | `configuration is invalid: postgres.dsn: ...`; `postgres connect: ...` |
-| 14 | `Engine::check_startup` (UTF-8 server, JSONB/text columns, and trace-state included) | `jobs startup check: the jobs schema is missing` / `the PostgreSQL session is not writable` / `the jobs store is unavailable` |
+| 13 | `Dsn::admit`, `infra_postgres::connect` with the derived `application_name` and `READ COMMITTED` default; `postgres_pool_opened`; pool gauge task | `configuration is invalid: postgres.dsn: ...`; `postgres connect: ...` |
+| 14 | `Engine::check_startup` (UTF-8 server, writable session, and `READ COMMITTED` default) | `jobs startup check: the jobs store requires READ COMMITTED session isolation` / `the PostgreSQL session is not writable` / `the jobs store is unavailable` |
 | 15 | Bind the health listener (`http.addr`), then the diagnostics listener (`observability.metrics.addr`, when set); `http listener bound`, `diagnostics listener bound` | `bind http listener ...` |
 | 16 | If a stop signal is already pending (`Signals::pending()`), start no engine and run the shutdown plan with no engine. Otherwise `Engine::start` (claiming begins); `jobs_claiming_started` | |
 | 17 | Readiness admission (`refresh`, then `verdict` over `[PostgresProbe]`), raced against the stop signals: a signal abandons admission, and the shutdown plan runs with the started engine | `startup admission: ...` |
@@ -214,7 +214,7 @@ that votes degraded makes the exit code `3`.
 
 | Stage | Ceiling | Records | Votes degraded (exit 3) when |
 | --- | --- | --- | --- |
-| Readiness off, claiming stopped | immediate | `shutdown_started`, `readiness_disabled`, `claiming_stopped` (in-flight count) | never |
+| Readiness off, claiming stopped | immediate | `shutdown_started`, `readiness_disabled`, `claiming_stopped` (in-flight count) | never; a claim already dispatched may settle under its existing backstop |
 | Drain in-flight attempts until `Started::drained()`; a second signal ends it | `http.drain_timeout` (25 s); no propagation delay | `drain_started`, then `drain_completed` or `drain_forced` (in-flight attempts, reason `budget` or `second_signal`) | the drain ends before `drained()` resolved (forced) |
 | Only after a forced drain: `Started::cancel_and_finish` | 2 s | `attempts_finished` (known results, cancelled handlers, acknowledged releases, uncertainty) | `DrainEnd::timed_out` |
 | Close the health listener and the diagnostics listener concurrently | 2 s | `listeners_stopped`; `diagnostics_forced` for a scrape overrun | the health listener overruns (a diagnostics overrun is forced closed without a vote, as in the service) |

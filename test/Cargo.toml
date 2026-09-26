@@ -8,6 +8,13 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# template:begin http-idempotency-mounted:test-http-idempotency-mounted-tls-dependency-scan
+# cargo-shear 1.13.4 misses the mounted test's #[path] inclusion of
+# test/fixtures/tls.rs. Remove this exception when it follows that source.
+[package.metadata.cargo-shear]
+ignored = ["rcgen"]
+# template:end http-idempotency-mounted:test-http-idempotency-mounted-tls-dependency-scan
+
 [lints]
 workspace = true
 
@@ -41,16 +48,11 @@ features = ["test-support"]
 # template:end webhooks-common:test-webhooks-dependencies
 
 [dev-dependencies]
-# template:begin webhooks:test-webhooks-fixture-dependencies
-infra-egress-dns = { workspace = true, features = ["test-support"] }
-# template:end webhooks:test-webhooks-fixture-dependencies
-# template:begin tls-fixtures:test-shared-tls-dependency
-tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
-# template:end tls-fixtures:test-shared-tls-dependency
-# template:begin webhooks-common:test-webhooks-http-dependency
-http = { workspace = true }
-# template:end webhooks-common:test-webhooks-http-dependency
+# template:begin outbound-http:test-outbound-http-dependencies
+infra-outbound-http = { workspace = true, features = ["test-support"] }
+# template:end outbound-http:test-outbound-http-dependencies
 # template:begin inbound-webhooks:test-inbound-webhooks-dependencies
+http = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 # template:end inbound-webhooks:test-inbound-webhooks-dependencies
 url = { workspace = true }
@@ -104,6 +106,8 @@ migrate = { workspace = true }
 infra-idempotency-store = { workspace = true }
 # template:end http-idempotency:test-http-idempotency-dependencies
 # template:begin http-idempotency-mounted:test-http-idempotency-mounted-dependencies
+tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
+rcgen = { workspace = true, features = ["aws_lc_rs"] }
 infra-bearerauthn = { workspace = true, features = ["test-support"] }
 secrecy = { workspace = true }
 metrics = { workspace = true }

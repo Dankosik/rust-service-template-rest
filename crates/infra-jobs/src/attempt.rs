@@ -1,10 +1,9 @@
 //! One supervisor owns its handler and fixed queue outcome through cleanup.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use infra_postgres::{connection, in_tx_with};
 use sqlx::postgres::PgConnection;
 use tokio::task::JoinError;
 use tokio::time::Instant;
@@ -12,11 +11,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::engine::{
-    OpFailed, Operation, OperationError, READ_COMMITTED, RECORD_RETRY_INTERVAL, Shared, backstop,
-    observe_failure, observe_recovery,
+    Operation, OperationError, RECORD_RETRY_INTERVAL, Shared, backstop, observe_failure,
+    observe_recovery,
 };
 use crate::kind::{Disposition, HandlerFuture, JobError, JobId, Policy};
 use crate::trace_context;
+
+const COOPERATIVE_GRACE: Duration = Duration::from_millis(100);
 
 /// The longest stored failure summary, in bytes.
 pub const ERROR_SUMMARY_MAX_BYTES: usize = 1024;
@@ -62,7 +63,6 @@ enum Outcome {
     Permanent,
     Snoozed,
     Cancelled,
-    TransactionUnknown,
 }
 
 impl Outcome {
@@ -75,9 +75,24 @@ impl Outcome {
             Self::Permanent => "permanent",
             Self::Snoozed => "snoozed",
             Self::Cancelled => "cancelled",
-            Self::TransactionUnknown => "transaction_unknown",
         }
     }
+}
+
+/// Describe attempt metrics once during engine startup.
+pub(crate) fn describe_metrics() {
+    metrics::describe_counter!(
+        ATTEMPTS_METRIC,
+        "Observed attempt dispositions, independent of queue-write acknowledgement"
+    );
+    metrics::describe_histogram!(
+        ATTEMPT_DURATION_METRIC,
+        "Observed handler duration in seconds"
+    );
+    metrics::describe_counter!(
+        PERSISTENCE_METRIC,
+        "Queue outcome acknowledgement disposition"
+    );
 }
 
 struct Intended {
@@ -111,14 +126,6 @@ pub(crate) fn record_exhausted(id: JobId, kind: &'static str, attempt: u16, summ
 }
 
 fn record(attempt: &AttemptId, intended: &Intended, ran: Option<Duration>) {
-    metrics::describe_counter!(
-        ATTEMPTS_METRIC,
-        "Observed attempt dispositions, independent of queue-write acknowledgement"
-    );
-    metrics::describe_histogram!(
-        ATTEMPT_DURATION_METRIC,
-        "Observed handler duration in seconds"
-    );
     metrics::counter!(ATTEMPTS_METRIC, "kind" => attempt.kind, "outcome" => intended.outcome.as_str()).increment(1);
     if let Some(ran) = ran {
         metrics::histogram!(ATTEMPT_DURATION_METRIC, "kind" => attempt.kind)
@@ -130,9 +137,6 @@ fn record(attempt: &AttemptId, intended: &Intended, ran: Option<Duration>) {
         }
         Outcome::Snoozed | Outcome::Cancelled => {
             tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, outcome = intended.outcome.as_str(), "job_attempt_finished");
-        }
-        Outcome::TransactionUnknown => {
-            tracing::warn!(job.id = %attempt.id, job.kind = attempt.kind, "job_transaction_unknown");
         }
         Outcome::Retry | Outcome::Timeout => {
             tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.attempt, retry_in_micros = intended.delay_micros, error = intended.summary.as_deref().unwrap_or(""), "job_attempt_failed");
@@ -156,7 +160,6 @@ pub(crate) async fn supervise(
         payload,
         trace_context: parent,
         trace_state,
-        jitter,
         slot,
     } = claimed;
     let _slot = slot;
@@ -171,20 +174,13 @@ pub(crate) async fn supervise(
             attempt,
         },
         payload,
-        jitter,
         deadline,
     )
     .instrument(span)
     .await;
 }
 
-async fn run_attempt(
-    shared: &Shared,
-    attempt: AttemptId,
-    payload: Vec<u8>,
-    jitter: f64,
-    deadline: Instant,
-) {
+async fn run_attempt(shared: &Shared, attempt: AttemptId, payload: Vec<u8>, deadline: Instant) {
     if Instant::now() >= shared.deadline(deadline) {
         uncertain(shared, &attempt);
         return;
@@ -219,7 +215,7 @@ async fn run_attempt(
             (ended, Some(started.elapsed()))
         }
     };
-    let intended = map_outcome(attempt.kind, attempt.attempt, policy, jitter, ended);
+    let intended = map_outcome(attempt.kind, attempt.attempt, policy, ended);
     if intended.outcome == Outcome::Cancelled {
         shared.counters.cancelled.fetch_add(1, Ordering::Relaxed);
     } else {
@@ -229,14 +225,11 @@ async fn run_attempt(
             .fetch_add(1, Ordering::Relaxed);
     }
     record(&attempt, &intended, ran);
-    if intended.outcome == Outcome::TransactionUnknown {
-        uncertain(shared, &attempt);
-        return;
-    }
     persist(shared, &attempt, &intended, deadline).await;
 }
 
-/// Poll a ready result before cancellation. Even after abort, a joined result wins.
+/// Poll a ready result before cancellation; it wins as is. After cancellation
+/// only success wins (see [`ended_after_cancel`]).
 async fn drive(
     shared: &Shared,
     future: HandlerFuture,
@@ -252,19 +245,46 @@ async fn drive(
         () = tokio::time::sleep_until(deadline) => Ended::Timeout,
     };
     cancel.cancel();
+    let grace_deadline = Instant::now()
+        .checked_add(COOPERATIVE_GRACE)
+        .unwrap_or(local)
+        .min(shared.deadline(local));
+    loop {
+        let forced = shared.force.is_cancelled();
+        let deadline = shared.deadline(local);
+        tokio::select! {
+            biased;
+            result = &mut join => return Some(ended_after_cancel(&result, reason)),
+            () = shared.force.cancelled(), if !forced => {},
+            () = tokio::time::sleep_until(grace_deadline.min(deadline)) => break,
+        }
+    }
+    if Instant::now() >= shared.deadline(local) {
+        join.abort();
+        return None;
+    }
     join.abort();
     loop {
         let forced = shared.force.is_cancelled();
         let deadline = shared.deadline(local);
         tokio::select! {
             biased;
-            result = &mut join => return Some(match result {
-                Err(error) if error.is_cancelled() => reason,
-                result => ended_from(result),
-            }),
+            result = &mut join => return Some(ended_after_cancel(&result, reason)),
             () = shared.force.cancelled(), if !forced => {},
             () = tokio::time::sleep_until(deadline) => return None,
         }
+    }
+}
+
+/// A result that joins after the supervisor cancelled the handler. Success
+/// means the work finished, so it is kept. An error, snooze, or panic is how
+/// the handler reacted to the cancellation, so it takes the cancellation's
+/// `reason`: a forced drain still releases the job and refunds its attempt.
+fn ended_after_cancel(result: &Result<Result<(), JobError>, JoinError>, reason: Ended) -> Ended {
+    if matches!(result, Ok(Ok(()))) {
+        Ended::Success
+    } else {
+        reason
     }
 }
 
@@ -331,10 +351,6 @@ async fn persist(shared: &Shared, attempt: &AttemptId, intended: &Intended, loca
 }
 
 fn persistence(kind: &'static str, disposition: &'static str) {
-    metrics::describe_counter!(
-        PERSISTENCE_METRIC,
-        "Queue outcome acknowledgement disposition"
-    );
     metrics::counter!(PERSISTENCE_METRIC, "kind" => kind, "disposition" => disposition)
         .increment(1);
 }
@@ -356,25 +372,26 @@ async fn send_outcome(
     attempt: &AttemptId,
     intended: &Intended,
 ) -> Result<u64, OperationError> {
-    let returned = AtomicBool::new(false);
-    let id = attempt.id.to_string();
-    backstop(
-        &returned,
-        in_tx_with(
-            &shared.pool,
-            READ_COMMITTED,
-            async |tx| -> Result<u64, OpFailed> {
-                let affected = execute(connection(tx), &id, attempt.generation, intended).await?;
-                returned.store(true, Ordering::SeqCst);
-                Ok(affected)
-            },
-        ),
-    )
+    backstop(async {
+        let mut connection = shared
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| OperationError::Acquire)?;
+        execute(
+            &mut connection,
+            &attempt.id.to_string(),
+            attempt.generation,
+            intended,
+        )
+        .await
+        .map_err(statement_error)
+    })
     .await
 }
 
 async fn execute(
-    conn: &mut PgConnection,
+    connection: &mut PgConnection,
     id: &str,
     generation: i64,
     intended: &Intended,
@@ -398,9 +415,12 @@ async fn execute(
             .bind(generation)
             .bind(intended.outcome.as_str())
             .bind(intended.summary.as_deref().unwrap_or("")),
-        Outcome::TransactionUnknown => return Ok(0),
     };
-    Ok(query.execute(conn).await?.rows_affected())
+    Ok(query.execute(connection).await?.rows_affected())
+}
+
+fn statement_error(_error: sqlx::Error) -> OperationError {
+    OperationError::Statement
 }
 
 enum Ended {
@@ -412,13 +432,7 @@ enum Ended {
     Cancelled,
 }
 
-fn map_outcome(
-    kind: &'static str,
-    attempt: u16,
-    policy: Policy,
-    jitter: f64,
-    ended: Ended,
-) -> Intended {
+fn map_outcome(kind: &'static str, attempt: u16, policy: Policy, ended: Ended) -> Intended {
     let empty = |outcome| Intended {
         outcome,
         summary: None,
@@ -435,7 +449,6 @@ fn map_outcome(
                     delay_micros,
                 };
             }
-            Disposition::TransactionUnknown => return empty(Outcome::TransactionUnknown),
             Disposition::Permanent => {
                 return Intended {
                     outcome: Outcome::Permanent,
@@ -472,9 +485,20 @@ fn map_outcome(
         delay_micros: if exhausted {
             0
         } else {
-            delay.unwrap_or_else(|| backoff(attempt, jitter).max(floor.unwrap_or_default()))
+            delay.unwrap_or_else(|| backoff(attempt, retry_jitter()).max(floor.unwrap_or_default()))
         },
     }
+}
+
+fn retry_jitter() -> f64 {
+    const RANDOM_BITS: u128 = (1_u128 << 53) - 1;
+    const RANDOM_RANGE: f64 = 9_007_199_254_740_992.0;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the selected 53 random bits fit exactly in an f64 mantissa"
+    )]
+    let draw = (uuid::Uuid::new_v4().as_u128() & RANDOM_BITS) as f64;
+    draw / RANDOM_RANGE
 }
 
 fn payload_summary(kind: &str, error: &serde_json::Error) -> String {
@@ -505,7 +529,7 @@ fn summary(text: &str) -> String {
 }
 
 fn backoff(attempt: u16, draw: f64) -> i64 {
-    // Registered policies cap attempts at 25, so the finite SQL draw fits i64 microseconds.
+    // Registered policies cap attempts at 25, so the finite UUID draw fits i64 microseconds.
     #[allow(
         clippy::cast_possible_truncation,
         reason = "accepted jitter rounds down to microseconds; the policy bound fits i64"
@@ -519,11 +543,11 @@ mod tests {
     use super::*;
 
     fn outcome(ended: Ended, attempt: u16) -> Intended {
-        map_outcome("sample", attempt, Policy::default(), 0.5, ended)
+        map_outcome("sample", attempt, Policy::default(), ended)
     }
 
     #[test]
-    fn dispositions_preserve_cap_snooze_and_transaction_uncertainty() {
+    fn dispositions_preserve_cap_and_snooze() {
         assert_eq!(outcome(Ended::Success, 25).outcome, Outcome::Completed);
         assert_eq!(
             outcome(Ended::Error(JobError::retryable("fail")), 25).outcome,
@@ -547,7 +571,7 @@ mod tests {
             ),
             3,
         );
-        assert_eq!(backoff.delay_micros, 81_000_000);
+        assert!((72_900_000..89_100_000).contains(&backoff.delay_micros));
         let snooze = outcome(
             Ended::Error(JobError::snooze(Duration::from_micros(7)).unwrap()),
             25,
@@ -555,10 +579,6 @@ mod tests {
         assert_eq!(snooze.outcome, Outcome::Snoozed);
         assert_eq!(snooze.delay_micros, 7);
         assert!(snooze.summary.is_none());
-        assert_eq!(
-            outcome(Ended::Error(JobError::transaction_unknown("commit")), 25).outcome,
-            Outcome::TransactionUnknown
-        );
         assert_eq!(
             outcome(Ended::Panic, 1).summary.as_deref(),
             Some("handler panicked")
@@ -571,7 +591,11 @@ mod tests {
     }
 
     #[test]
-    fn sql_draw_determines_fixed_microsecond_jitter() {
+    fn retry_jitter_stays_in_the_accepted_range() {
+        for _ in 0..100 {
+            let draw = retry_jitter();
+            assert!((0.0..1.0).contains(&draw));
+        }
         for attempt in 1..=25 {
             let base = i64::from(attempt).pow(4) * 1_000_000;
             assert_eq!(backoff(attempt, 0.5), base);
