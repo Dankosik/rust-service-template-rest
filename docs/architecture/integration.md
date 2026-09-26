@@ -80,9 +80,9 @@ three-second attempt cap inside the request's remaining budget.
 
 The adapter owns URL representation because discovery and direct adapter inputs
 must pass the same admission. Config owns field presence, type, and useful key
-context; bootstrap converts primitive configuration into adapter options. The
-Authentication has its own trusted-provider transport and does not share an
-outbound resolver or builder.
+context; bootstrap converts primitive configuration into adapter options.
+Authentication has its own trusted-provider transport and does not share the
+outbound HTTP client.
 <!-- template:end authn:docs-integration-authn-provider -->
 <!-- template:begin outbound-http:docs-integration-outbound -->
 A provider with an operator-selected fixed HTTPS dependency uses the retained

@@ -6,7 +6,8 @@ use tracing::Span;
 
 use crate::Error;
 
-const REQUEST_DURATION_METRIC: &str = "http.client.request.duration";
+// OpenTelemetry `http.client.request.duration`, in the recorder's Prometheus naming.
+const REQUEST_DURATION_METRIC: &str = "http_client_request_duration_seconds";
 
 /// One polled outbound attempt. The guard retains only bounded configured
 /// identity and outcome state, never caller request data or transport errors.

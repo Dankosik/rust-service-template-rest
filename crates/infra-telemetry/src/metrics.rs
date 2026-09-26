@@ -29,7 +29,7 @@ const HTTP_DURATION_BUCKETS: &[f64] = &[
 const OUTBOUND_HTTP_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
 ];
-const OUTBOUND_HTTP_DURATION_METRIC: &str = "http.client.request.duration";
+const OUTBOUND_HTTP_DURATION_METRIC: &str = "http_client_request_duration_seconds";
 // template:end outbound-http:telemetry-outbound-buckets-constants
 
 #[derive(Debug, thiserror::Error)]
@@ -196,7 +196,7 @@ mod tests {
         metrics::histogram!(OUTBOUND_HTTP_DURATION_METRIC, "server.address" => "provider.test")
             .record(0.075);
         let scrape = recorder.handle().render();
-        assert!(scrape.contains("http_client_request_duration_bucket"));
+        assert!(scrape.contains("http_client_request_duration_seconds_bucket"));
         assert!(scrape.contains("le=\"0.075\""));
     }
 }

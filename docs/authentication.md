@@ -181,7 +181,7 @@ the remaining request deadline less its 100ms response reserve.
 
 The pooled `reqwest` client owns ordinary runtime connection resources. It adds
 no readiness probe or periodic connection check. Authentication has its own
-trusted-provider transport and does not share an outbound resolver or builder.
+trusted-provider transport and does not share the outbound HTTP client.
 Shared generated test material continues to prove ordinary TLS and name
 validation without a production provider.
 

@@ -52,7 +52,7 @@ The transport never retries or reconciles an uncertain effect. For an adapter-ow
 
 The client returns `InvalidConfiguration`, `InvalidTarget`, `AtCapacity`, `Timeout`, `ResponseBodyTooLarge`, `ClientBuild`, or `Transport`. Retained reqwest errors are sanitized without a URL. Provider adapters map these errors at their own boundary; this client does not construct inbound Problems.
 
-Each polled attempt records a bounded client span and the `http.client.request.duration` histogram in seconds. The signal contains only the standard method or `_OTHER`, configured origin address/port, a finite outcome, known status, and a static failure type. It never includes a full URL, path, query, headers, credentials, body, request identifier, or arbitrary error text. A dropped pending attempt is observed as caller cancellation rather than provider success or failure.
+Each polled attempt records a bounded client span and the OpenTelemetry `http.client.request.duration` histogram, exported in the service's Prometheus naming as `http_client_request_duration_seconds`. The signal contains only the standard method or `_OTHER`, configured origin address/port, a finite outcome, known status, and a static failure type. It never includes a full URL, path, query, headers, credentials, body, request identifier, or arbitrary error text. A dropped pending attempt is observed as caller cancellation rather than provider success or failure.
 
 ## Test-only HTTP mock support
 

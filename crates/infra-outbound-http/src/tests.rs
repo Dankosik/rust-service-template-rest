@@ -77,7 +77,7 @@ impl tracing::Subscriber for SpanDiagnostics {
 fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
     PrometheusBuilder::new()
         .set_buckets_for_metric(
-            Matcher::Full("http.client.request.duration".to_owned()),
+            Matcher::Full("http_client_request_duration_seconds".to_owned()),
             &[0.005, 0.01, 0.025, 0.05, 0.1, 1.0],
         )
         .expect("observation buckets are valid")
@@ -88,7 +88,7 @@ fn recorded_count(scrape: &str, required_labels: &[&str]) -> usize {
     scrape
         .lines()
         .filter(|line| {
-            line.starts_with("http_client_request_duration_count")
+            line.starts_with("http_client_request_duration_seconds_count")
                 && required_labels.iter().all(|label| line.contains(label))
                 && line.ends_with(" 1")
         })

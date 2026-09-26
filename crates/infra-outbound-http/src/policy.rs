@@ -1,5 +1,7 @@
 use tokio::{sync::Semaphore, time::Instant};
-use url::{Host, Url};
+#[cfg(feature = "test-support")]
+use url::Host;
+use url::Url;
 
 use crate::{Error, HeaderMap, Limits, header};
 
@@ -48,10 +50,6 @@ pub(crate) fn admit_base(raw: &str) -> Result<Url, Error> {
         || base.fragment().is_some()
     {
         return Err(Error::InvalidConfiguration);
-    }
-    match base.host() {
-        Some(Host::Ipv4(_) | Host::Ipv6(_) | Host::Domain(_)) => {}
-        None => return Err(Error::InvalidConfiguration),
     }
     Ok(base)
 }
