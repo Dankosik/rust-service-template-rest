@@ -11,22 +11,18 @@ use tonic_types::{ErrorDetails, StatusExt as _};
 /// closed shared failure catalog.  The source is never sent on the wire.
 #[must_use]
 pub fn classified_status(failure: ClassifiedFailure) -> Status {
-    let mut trusted = ClassifiedFailure::new(failure.code());
-    if let Some(retry_after) = failure.retry_after() {
-        trusted = trusted.with_retry_after(retry_after);
-    }
     let mut details = ErrorDetails::new();
-    details.set_error_info(trusted.code().as_str(), "service", HashMap::new());
-    if let Some(retry_after) = trusted.retry_after() {
+    details.set_error_info(failure.code().as_str(), "service", HashMap::new());
+    if let Some(retry_after) = failure.retry_after() {
         details.set_retry_info(Some(retry_after));
     }
     let mut status = Status::with_error_details(
-        code(trusted.meaning()),
-        safe_message(trusted.meaning()),
+        code(failure.meaning()),
+        safe_message(failure.meaning()),
         details,
     );
     status.set_source(Arc::new(ClassifiedMarker {
-        failure: trusted,
+        failure,
         validation: Vec::new(),
     }));
     status

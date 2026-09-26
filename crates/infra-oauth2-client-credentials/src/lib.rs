@@ -3,7 +3,7 @@
 //! Composition prepares one immutable credential owner and binds it to a
 //! resource client. Neither access tokens nor raw provider errors leave it.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, future::Future, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use http::{HeaderValue, Request, Response, header::AUTHORIZATION};
@@ -157,22 +157,28 @@ impl Credentials {
         }
     }
 
-    async fn acquire(&self, deadline: Instant) -> Result<Arc<CachedCredential>, AcquisitionError> {
-        if Instant::now() >= deadline {
-            return Err(AcquisitionError::Timeout);
-        }
-        let result = tokio::time::timeout_at(
-            deadline,
-            self.0.cache.try_get_with((), self.0.fetch(deadline)),
-        )
-        .await
-        .map_err(|_| AcquisitionError::Timeout)?;
-        match result {
-            Ok(value) => Ok(value),
-            Err(error) => match error.as_ref() {
-                FillError::NotRetained(value) => Ok(value.clone()),
-                FillError::Failed(error) => Err(*error),
-            },
+    fn acquire(
+        &self,
+        deadline: Instant,
+    ) -> impl Future<Output = Result<Arc<CachedCredential>, AcquisitionError>> + Send + '_ {
+        // Establish Send at this borrow boundary for the boxed transport future.
+        async move {
+            if Instant::now() >= deadline {
+                return Err(AcquisitionError::Timeout);
+            }
+            let result = tokio::time::timeout_at(
+                deadline,
+                self.0.cache.try_get_with((), self.0.fetch(deadline)),
+            )
+            .await
+            .map_err(|_| AcquisitionError::Timeout)?;
+            match result {
+                Ok(value) => Ok(value),
+                Err(error) => match error.as_ref() {
+                    FillError::NotRetained(value) => Ok(value.clone()),
+                    FillError::Failed(error) => Err(*error),
+                },
+            }
         }
     }
 }

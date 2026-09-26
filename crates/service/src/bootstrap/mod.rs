@@ -838,7 +838,7 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
     // template:end grpc:bootstrap-grpc-prepare-finish
     // The routes and the committed OpenAPI document are the two halves of
     // one contract. Assembly is pure, so it runs before readiness admission.
-    let contract = service::api::contract(
+    let contract = crate::api::contract(
         // template:begin http-idempotency:bootstrap-http-idempotency-contract-composer
         &mut composer,
         // template:end http-idempotency:bootstrap-http-idempotency-contract-composer

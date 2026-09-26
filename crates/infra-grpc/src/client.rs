@@ -92,12 +92,17 @@ impl fmt::Debug for Client {
 impl Client {
     /// Parses an explicit trusted destination and constructs a lazy channel.
     /// It performs neither DNS nor network I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] for an invalid destination or
+    /// unusable TLS trust or client identity material.
     pub fn new(destination: &str, security: ClientSecurity) -> Result<Self, Error> {
         let endpoint = Endpoint::from_shared(destination.to_owned())
             .map_err(|_| Error::InvalidConfiguration)?;
         let channel = match security {
             ClientSecurity::Plaintext => endpoint.connect_lazy(),
-            ClientSecurity::Tls(material) => crate::tls::client_channel(endpoint, material)?,
+            ClientSecurity::Tls(material) => crate::tls::client_channel(&endpoint, material)?,
         };
         Ok(Self {
             channel,
@@ -113,6 +118,11 @@ impl Client {
 
     /// Admits one generated, descriptor-derived method catalog.  Construction
     /// stays lazy; registration performs no resolver or connection work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidRegistration`] if the catalog does not match its
+    /// descriptor set, contains invalid paths, or repeats a registered method.
     pub fn with_service(mut self, descriptor: ServiceDescriptor) -> Result<Self, Error> {
         if !crate::registration::descriptor_matches_fds(descriptor) {
             return Err(Error::InvalidRegistration);
@@ -191,7 +201,7 @@ impl Service<Request<Body>> for Client {
                         body,
                         operation.deadline,
                         observation,
-                        tracker,
+                        &tracker,
                         crate::observe::status_code(&parts.headers),
                     ));
                     Ok(Response::from_parts(parts, body))
@@ -223,7 +233,7 @@ impl ClientBody {
         body: Body,
         deadline: Instant,
         observation: crate::observe::Observation,
-        tracker: TaskTracker,
+        tracker: &TaskTracker,
         initial_status: Option<tonic::Code>,
     ) -> Self {
         let state = Arc::new(ClientBodyState {
@@ -426,9 +436,9 @@ fn grpc_timeout(duration: Duration) -> String {
         ('n', duration.as_nanos()),
         ('u', duration.as_micros()),
         ('m', duration.as_millis()),
-        ('S', duration.as_secs() as u128),
-        ('M', (duration.as_secs() / 60) as u128),
-        ('H', (duration.as_secs() / (60 * 60)) as u128),
+        ('S', u128::from(duration.as_secs())),
+        ('M', u128::from(duration.as_secs() / 60)),
+        ('H', u128::from(duration.as_secs() / (60 * 60))),
     ] {
         if value <= MAX {
             return format!("{value}{unit}");

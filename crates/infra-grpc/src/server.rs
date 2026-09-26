@@ -36,7 +36,7 @@ use crate::{Error, Services};
 const BUSINESS_LIMIT: usize = 256;
 const HEALTH_LIMIT: usize = 4096;
 const CONNECTION_LIMIT: usize = 4096;
-const MAX_METADATA_BYTES: usize = 16 * 1024;
+const MAX_METADATA_BYTES: u16 = 16 * 1024;
 const UNARY_DEADLINE: Duration = Duration::from_secs(8);
 const INITIAL_CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -119,6 +119,12 @@ impl std::fmt::Debug for RunningServer {
 impl Server {
     /// Validates policy, generated descriptors, authentication mode, and TLS
     /// material.  It has no listener, network I/O, or readiness side effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::IncompatibleDrainBudget`] when the drain budget cannot
+    /// contain a unary call, or [`Error::InvalidConfiguration`] for unusable TLS
+    /// material.
     pub fn prepare(
         services: Services,
         readiness: ::health::ReadinessReader,
@@ -136,7 +142,7 @@ impl Server {
         let tracker = TaskTracker::new();
         let routes = routes
             .add_service(health::server(
-                readiness.clone(),
+                readiness,
                 &registry,
                 Arc::clone(&startup),
                 cancel.child_token(),
@@ -164,6 +170,10 @@ impl Server {
 
 impl PreparedServer {
     /// Binds the listener without admitting any business RPCs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Transport`] if binding or reading the bound address fails.
     pub async fn bind(self, address: SocketAddr) -> Result<BoundServer, Error> {
         let listener = TcpListener::bind(address)
             .await
@@ -183,7 +193,7 @@ impl BoundServer {
         self.local_addr
     }
 
-    /// Starts the listener while health remains NOT_SERVING until
+    /// Starts the listener while health remains `NOT_SERVING` until
     /// [`RunningServer::open_admission`] is called.
     pub fn start(self) -> RunningServer {
         let business = Arc::new(Semaphore::new(BUSINESS_LIMIT));
@@ -237,7 +247,7 @@ impl RunningServer {
         }
     }
 
-    /// Reject new business work immediately and publish health NOT_SERVING.
+    /// Reject new business work immediately and publish health `NOT_SERVING`.
     /// Health remains reachable until the later transport drain.
     pub fn begin_drain(&self) {
         self.business_open.store(false, Ordering::Release);
@@ -247,6 +257,11 @@ impl RunningServer {
 
     /// Finishes admitted business bodies or cancels them at the shared process
     /// deadline, then closes listener/connection/H2 task ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DrainTimedOut`] if calls or cleanup outlive the deadline,
+    /// or [`Error::Transport`] if the accept task fails while joining.
     pub async fn drain(&mut self, deadline: Instant) -> Result<(), Error> {
         self.begin_drain();
         while self.business.available_permits() != BUSINESS_LIMIT && Instant::now() < deadline {
@@ -264,6 +279,12 @@ impl RunningServer {
     /// Cancel and join transport tasks within an existing cleanup budget.
     /// A timeout retains task custody in this server for the caller's next
     /// cleanup stage or final runtime shutdown; it never detaches a handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DrainTimedOut`] if cleanup outlives the deadline, or
+    /// [`Error::Transport`] if the accept task fails for a reason other than
+    /// cancellation.
     pub async fn join_shutdown(&mut self, deadline: Instant) -> Result<(), Error> {
         self.cancel.cancel();
         self.tracker.close();
@@ -330,6 +351,10 @@ where
         Poll::Ready(Ok(()))
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keep admission, initial-future cancellation, and response-body ownership transfer in one scope"
+    )]
     fn call(&mut self, mut request: Request<B>) -> Self::Future {
         let path = request.uri().path();
         let health_check = path == "/grpc.health.v1.Health/Check";
@@ -375,7 +400,7 @@ where
         let business_open = Arc::clone(&self.business_open);
         let cancellation = self.cancel.child_token();
         let tracker = self.tracker.clone();
-        let deadline = deadline(&request, known.map(|method| method.cardinality()));
+        let deadline = deadline(&request, known.map(crate::Method::cardinality));
         Box::pin(async move {
             let permit = match permit {
                 Ok(permit) => permit,
@@ -387,7 +412,7 @@ where
                 }
             };
             let state = CallState::new(Some(permit), deadline, validation, observation);
-            if metadata_bytes(request.headers()) > MAX_METADATA_BYTES {
+            if metadata_bytes(request.headers()) > usize::from(MAX_METADATA_BYTES) {
                 return Ok(status_response_state(
                     state,
                     Error::MetadataTooLarge.status(),
@@ -558,8 +583,10 @@ fn deadline<B>(request: &Request<B>, cardinality: Option<crate::Cardinality>) ->
     match cardinality {
         Some(crate::Cardinality::Unary) => Some(
             caller
-                .map(|duration| Instant::now() + duration)
-                .unwrap_or_else(|| Instant::now() + UNARY_DEADLINE)
+                .map_or_else(
+                    || Instant::now() + UNARY_DEADLINE,
+                    |duration| Instant::now() + duration,
+                )
                 .min(Instant::now() + UNARY_DEADLINE),
         ),
         Some(_) | None => caller.map(|duration| Instant::now() + duration),
@@ -644,8 +671,7 @@ async fn accept_loop(
                     match tls {
                         Some(acceptor) => match tokio::time::timeout(INITIAL_CONNECTION_TIMEOUT, acceptor.accept(stream)).await {
                             Ok(Ok(stream)) => serve_connection(stream, service, cancel, tracker).await,
-                            Err(_) => {}
-                            Ok(Err(_)) => {}
+                            Err(_) | Ok(Err(_)) => {}
                         },
                         None => {
                             if wait_for_first_byte(&stream).await {
@@ -684,7 +710,7 @@ async fn serve_connection<IO>(
     let mut builder = hyper::server::conn::http2::Builder::new(executor);
     builder
         .max_concurrent_streams(100)
-        .max_header_list_size(MAX_METADATA_BYTES as u32);
+        .max_header_list_size(u32::from(MAX_METADATA_BYTES));
     let connection =
         builder.serve_connection(TokioIo::new(stream), TowerToHyperService::new(service));
     tokio::select! {

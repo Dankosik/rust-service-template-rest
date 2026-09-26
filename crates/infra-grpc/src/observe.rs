@@ -141,13 +141,13 @@ struct HeaderInjector<'a>(&'a mut HeaderMap);
 
 impl Injector for HeaderInjector<'_> {
     fn set(&mut self, key: &str, value: String) {
-        if matches!(key, "traceparent" | "tracestate") {
-            if let (Ok(name), Ok(value)) = (
+        if matches!(key, "traceparent" | "tracestate")
+            && let (Ok(name), Ok(value)) = (
                 http::header::HeaderName::from_bytes(key.as_bytes()),
                 http::HeaderValue::from_str(&value),
-            ) {
-                self.0.insert(name, value);
-            }
+            )
+        {
+            self.0.insert(name, value);
         }
     }
 }

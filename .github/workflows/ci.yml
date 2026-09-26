@@ -359,7 +359,7 @@ jobs:
       # template:begin grpc:ci-grpc-generator-dependencies
       - name: Generator dependency policy
         if: needs.changes.outputs.grpc_schema == 'true'
-        run: cargo-deny --manifest-path tools/grpc-codegen/Cargo.toml --locked check --config deny.toml
+        run: cargo-deny --manifest-path tools/grpc-codegen/Cargo.toml --config deny.toml --locked check
       # template:end grpc:ci-grpc-generator-dependencies
       - name: Workflow security
         if: needs.changes.outputs.github_workflows == 'true'

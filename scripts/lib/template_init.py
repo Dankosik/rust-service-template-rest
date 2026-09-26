@@ -1452,6 +1452,13 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
             ["aws-lc-rs", "log", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
             ["aws-lc-rs", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
         )
+        _project_feature_edge(
+            records,
+            "rcgen",
+            "0.14.10",
+            ["aws-lc-rs", "pem", "rustls-pki-types", "time", "x509-parser", "yasna"],
+            ["aws-lc-rs", "rustls-pki-types", "time", "x509-parser", "yasna"],
+        )
     if (
         inputs.authn == "none"
         and inputs.outbound_http == "none"

@@ -25,6 +25,11 @@ pub use service_failure::{AT_CAPACITY_DETAIL, SANITIZED_DETAIL};
 use utoipa::ToSchema;
 
 /// HTTP's RFC 9457 projection of the shared failure identity.
+#[allow(
+    clippy::too_many_lines,
+    clippy::match_same_arms,
+    reason = "One exhaustive wire projection keeps independently removable profile arms together."
+)]
 const fn http_meta(code: Code) -> HttpCodeMeta {
     match code {
         Code::BadRequest => HttpCodeMeta {

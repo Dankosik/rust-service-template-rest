@@ -9,7 +9,7 @@ use crate::Error;
 use crate::client::ClientTlsMaterial;
 
 /// Server certificate material admitted by configuration.  The private key is
-/// redacted by configuration and this type never implements Debug.
+/// redacted by configuration; this type's `Debug` reports only material presence.
 #[derive(Clone)]
 pub struct ServerTlsMaterial {
     pub certificate_pem: Vec<u8>,
@@ -52,7 +52,7 @@ pub(crate) fn server_config(material: &ServerTlsMaterial) -> Result<Arc<ServerCo
 }
 
 pub(crate) fn client_channel(
-    endpoint: Endpoint,
+    endpoint: &Endpoint,
     material: ClientTlsMaterial,
 ) -> Result<Channel, Error> {
     let config = client_config(material)?;

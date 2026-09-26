@@ -45,6 +45,7 @@ utoipa = { workspace = true, features = ["macros"] }
 utoipa-axum = { workspace = true }
 
 [dev-dependencies]
+itertools = { workspace = true, features = ["use_std"] }
 uuid = { workspace = true, features = ["std"] }
 axum-test = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }

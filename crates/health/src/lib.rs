@@ -709,7 +709,7 @@ mod tests {
         readiness.tx.send_modify(|snapshot| {
             snapshot.stale_after = Some(policy().stale_after());
         });
-        let reader = readiness.reader();
+        let mut reader = readiness.reader();
         let waiter = tokio::spawn(async move {
             let result = reader.changed_verdict().await;
             (reader, result)
@@ -721,7 +721,7 @@ mod tests {
         );
 
         tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
-        let (reader, result) = tokio::time::timeout(Duration::from_secs(1), waiter)
+        let (mut reader, result) = tokio::time::timeout(Duration::from_secs(1), waiter)
             .await
             .expect("stale boundary waiter must finish")
             .expect("stale boundary waiter must not panic");

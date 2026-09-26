@@ -2121,6 +2121,7 @@ dependencies = [
  "infra-idempotency-store",
  "infra-postgres",
  "infra-webhooks",
+ "itertools 0.15.0",
  "metrics",
  "serde",
  "serde_json",
