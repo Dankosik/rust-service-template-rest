@@ -607,8 +607,7 @@ async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) 
     run.started.stop_claiming();
     hold.commit().await.expect("the candidate lock releases");
     let end = run.started.cancel_and_finish(RELEASE_BUDGET).await;
-    assert_eq!(end.known_results, 1);
-    assert_eq!(end.cancelled, 0);
+    assert_eq!(end.cancelled, 1);
     assert!(!end.timed_out, "{end:?}");
     join(run, &[&jobs, &locker]).await;
 }
@@ -742,8 +741,7 @@ async fn x1_claim_takes_only_free_slots(pool: PgPool) {
     run.started.stop_claiming();
     let end = run.started.cancel_and_finish(RELEASE_BUDGET).await;
     assert!(!end.timed_out, "{end:?}");
-    assert_eq!(end.known_results, 2);
-    assert_eq!(end.cancelled, 0);
+    assert_eq!(end.cancelled, 2);
     join(run, &[&jobs]).await;
 }
 
@@ -1000,7 +998,14 @@ fn gate_registry(gate: Arc<GateState>) -> infra_jobs::Registry {
     kinds.validate().expect("the gate registry")
 }
 
-fn grace_registry(gate: Arc<GraceState>) -> infra_jobs::Registry {
+/// How a cooperative handler answers its cancellation token.
+#[derive(Clone, Copy)]
+enum Reaction {
+    Complete,
+    Fail,
+}
+
+fn grace_registry(gate: Arc<GraceState>, reaction: Reaction) -> infra_jobs::Registry {
     let mut kinds = Kinds::new();
     kinds.register::<Gate>(
         Policy {
@@ -1012,7 +1017,10 @@ fn grace_registry(gate: Arc<GraceState>) -> infra_jobs::Registry {
             async move {
                 gate.entered.notify_one();
                 job.cancellation().cancelled().await;
-                Ok::<(), JobError>(())
+                match reaction {
+                    Reaction::Complete => Ok(()),
+                    Reaction::Fail => Err(JobError::retryable("cancelled by the worker")),
+                }
             }
         },
     );
@@ -1864,9 +1872,13 @@ async fn w4_x7_cancel_and_finish_returns_the_budget_unit(pool: PgPool) {
     join(run, &[&jobs]).await;
 }
 
-#[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn w4_grace_keeps_a_handler_result_that_arrives_after_forced_cancellation(pool: PgPool) {
-    let jobs = open(&pool, 1).await;
+/// Force-cancel one cooperative handler and return the drain counters, the
+/// claimed row, and the row after cleanup.
+async fn force_cancel_cooperative(
+    pool: &PgPool,
+    reaction: Reaction,
+) -> (DrainEnd, JobView, JobView) {
+    let jobs = open(pool, 1).await;
     let gate = Arc::new(GraceState {
         entered: Notify::new(),
     });
@@ -1880,14 +1892,23 @@ async fn w4_grace_keeps_a_handler_result_that_arrives_after_forced_cancellation(
         .await,
         "the grace job commits",
     );
-    let run = start(&jobs, grace_registry(Arc::clone(&gate)), 1);
+    let run = start(&jobs, grace_registry(Arc::clone(&gate), reaction), 1);
     super::bounded(
         "the handler waits for cancellation",
         gate.entered.notified(),
     )
     .await;
+    let claimed = load(&jobs, &id).await;
 
     let end = run.started.cancel_and_finish(RELEASE_BUDGET).await;
+    let after = load(&jobs, &id).await;
+    join(run, &[&jobs]).await;
+    (end, claimed, after)
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn w4_grace_keeps_a_success_that_arrives_after_forced_cancellation(pool: PgPool) {
+    let (end, _, completed) = force_cancel_cooperative(&pool, Reaction::Complete).await;
     assert_eq!(
         end,
         DrainEnd {
@@ -1898,11 +1919,32 @@ async fn w4_grace_keeps_a_handler_result_that_arrives_after_forced_cancellation(
             timed_out: false,
         }
     );
-    let completed = load(&jobs, &id).await;
     assert_eq!(completed.state, "completed");
     assert_eq!(completed.attempts, 1);
     assert!(completed.claim_cleared);
-    join(run, &[&jobs]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn w4_grace_releases_a_failure_that_answers_forced_cancellation(pool: PgPool) {
+    let (end, claimed, released) = force_cancel_cooperative(&pool, Reaction::Fail).await;
+    assert_eq!(
+        end,
+        DrainEnd {
+            known_results: 0,
+            cancelled: 1,
+            released: 1,
+            uncertain: 0,
+            timed_out: false,
+        },
+        "a handler that fails because it was cancelled is released, not retried"
+    );
+    assert_eq!(released.state, "pending");
+    assert_eq!(released.attempts, 0, "the release refunds the attempt");
+    assert!(released.claim_cleared);
+    assert_eq!(
+        released.not_before_us, claimed.not_before_us,
+        "a released job keeps its place in claim order"
+    );
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

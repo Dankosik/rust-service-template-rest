@@ -228,7 +228,8 @@ async fn run_attempt(shared: &Shared, attempt: AttemptId, payload: Vec<u8>, dead
     persist(shared, &attempt, &intended, deadline).await;
 }
 
-/// Poll a ready result before cancellation. Even after abort, a joined result wins.
+/// Poll a ready result before cancellation; it wins as is. After cancellation
+/// only success wins (see [`ended_after_cancel`]).
 async fn drive(
     shared: &Shared,
     future: HandlerFuture,
@@ -253,10 +254,7 @@ async fn drive(
         let deadline = shared.deadline(local);
         tokio::select! {
             biased;
-            result = &mut join => return Some(match result {
-                Err(error) if error.is_cancelled() => reason,
-                result => ended_from(result),
-            }),
+            result = &mut join => return Some(ended_after_cancel(&result, reason)),
             () = shared.force.cancelled(), if !forced => {},
             () = tokio::time::sleep_until(grace_deadline.min(deadline)) => break,
         }
@@ -271,13 +269,22 @@ async fn drive(
         let deadline = shared.deadline(local);
         tokio::select! {
             biased;
-            result = &mut join => return Some(match result {
-                Err(error) if error.is_cancelled() => reason,
-                result => ended_from(result),
-            }),
+            result = &mut join => return Some(ended_after_cancel(&result, reason)),
             () = shared.force.cancelled(), if !forced => {},
             () = tokio::time::sleep_until(deadline) => return None,
         }
+    }
+}
+
+/// A result that joins after the supervisor cancelled the handler. Success
+/// means the work finished, so it is kept. An error, snooze, or panic is how
+/// the handler reacted to the cancellation, so it takes the cancellation's
+/// `reason`: a forced drain still releases the job and refunds its attempt.
+fn ended_after_cancel(result: &Result<Result<(), JobError>, JoinError>, reason: Ended) -> Ended {
+    if matches!(result, Ok(Ok(()))) {
+        Ended::Success
+    } else {
+        reason
     }
 }
 

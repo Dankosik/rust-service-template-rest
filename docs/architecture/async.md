@@ -105,10 +105,13 @@ Each admitted supervisor owns one claim, slot, immutable deadline, handler
 join handle, and intended outcome until cleanup ends. It captures the outcome
 arguments once. On timeout or forced drain it first cancels the handler and
 allows up to 100 ms of cooperative completion inside the existing deadline,
-then aborts only a still-running task. A known handler result wins over
-force/timeout when its join completes, including after an abort request. Once a
-result is known, the supervisor persists it and can never replace it with a
-release. A panic is a known failure. When joining or persistence cannot finish
+then aborts only a still-running task. A handler result that joins before the
+cancellation is known and wins over force/timeout. After the cancellation only
+a successful join is known; an error, snooze, or panic that answers it takes
+the cancellation's disposition, so a forced drain releases the job however a
+cooperative handler reacts. Once a result is known, the supervisor persists it
+and can never replace it with a release. A panic before cancellation is a
+known failure. When joining or persistence cannot finish
 inside its deadline, it writes nothing further and expiry recovers the row.
 
 Every transition is fenced by `(id, claim_generation, state = 'running')`.

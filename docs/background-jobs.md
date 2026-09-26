@@ -100,8 +100,11 @@ their existing meanings. A retryable error, panic, timeout, or decode failure
 uses the persisted retry policy; a permanent error becomes terminal.
 
 `job.cancellation()` fires at the kind's timeout and when a forced drain
-cancels the attempt. The handler task is also aborted, which takes effect at
-its next `.await`. Work started with `tokio::task::spawn_blocking` is not
+cancels the attempt. The handler then has up to 100 ms to return before its
+task is aborted, which takes effect at its next `.await`. Returning `Ok(())`
+in that window completes the job; any other return counts as the cancellation
+itself, so a forced drain still releases the job and refunds the attempt.
+Work started with `tokio::task::spawn_blocking` is not
 stopped, so check the token inside blocking loops and expect the job to run
 again while that work may still be running.
 
@@ -226,9 +229,10 @@ One supervisor owns each admitted claim, slot, handler join, deadline, and
 intended queue transition through cleanup. On timeout or forced drain it first
 cancels the handler, gives it up to 100 ms of cooperative completion inside the
 existing deadline, and aborts only a still-running task. It records a known
-handler result once and gives that result precedence over force or timeout. If
-an abort was requested but the handler joins successfully, that known result
-still wins. Once known, it is persisted and never replaced with release. Failed
+handler result once and gives that result precedence over force or timeout.
+After the cancellation only success is known: an error, snooze, or panic that
+answers it is recorded as the timeout or, in a forced drain, as a release.
+Once known, a result is persisted and never replaced with release. Failed
 or unavailable outcome acknowledgements retry the identical transition at
 one-second intervals within the local/cleanup deadline; a zero-row
 acknowledgement is merely unchanged, never durable attribution. At the
