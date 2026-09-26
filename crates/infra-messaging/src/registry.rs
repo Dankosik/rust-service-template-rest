@@ -123,13 +123,12 @@ impl Registry {
         self.handlers.insert(
             key,
             Arc::new(move |envelope, cancel| {
-                let payload = match serde_json::from_slice::<T>(&envelope.payload) {
-                    Ok(payload) => payload,
-                    Err(_) => return Box::pin(async { Err(HandlerError::Permanent) }),
+                let Ok(payload) = serde_json::from_slice::<T>(&envelope.payload) else {
+                    return Box::pin(async { Err(HandlerError::Permanent) });
                 };
-                let event = match Event::new(envelope.message_id, envelope.occurred_at, payload) {
-                    Ok(event) => event,
-                    Err(_) => return Box::pin(async { Err(HandlerError::Permanent) }),
+                let Ok(event) = Event::new(envelope.message_id, envelope.occurred_at, payload)
+                else {
+                    return Box::pin(async { Err(HandlerError::Permanent) });
                 };
                 Box::pin(handler(event, cancel))
             }),

@@ -160,8 +160,8 @@ pub(crate) async fn publish_raw(
                         .expected_stream(expected_stream),
                 )
                 .await
-                .map_err(classify_publish)?;
-            let ack = ack.await.map_err(classify_publish)?;
+                .map_err(|error| classify_publish(&error))?;
+            let ack = ack.await.map_err(|error| classify_publish(&error))?;
             if ack.stream != expected_stream {
                 return Err(PublishError::Ambiguous);
             }
@@ -173,21 +173,19 @@ pub(crate) async fn publish_raw(
         };
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => None,
-            _ = tokio::time::sleep_until(deadline) => None,
+            () = cancel.cancelled() => None,
+            () = tokio::time::sleep_until(deadline) => None,
             result = exchange => Some(result),
         }
     };
-    result.unwrap_or_else(|| {
-        Err(if dispatched {
-            PublishError::Ambiguous
-        } else {
-            PublishError::Rejected
-        })
-    })
+    result.unwrap_or(Err(if dispatched {
+        PublishError::Ambiguous
+    } else {
+        PublishError::Rejected
+    }))
 }
 
-fn classify_publish(error: async_nats::jetstream::context::PublishError) -> PublishError {
+fn classify_publish(error: &async_nats::jetstream::context::PublishError) -> PublishError {
     match error.kind() {
         PublishErrorKind::StreamNotFound
         | PublishErrorKind::WrongLastMessageId

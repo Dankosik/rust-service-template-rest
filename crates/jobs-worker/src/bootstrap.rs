@@ -475,7 +475,7 @@ async fn prepare(
     // template:end jobs:worker-bootstrap-start-admitted-jobs
     // template:begin messaging:worker-bootstrap-start-admitted-consumer
     if admitted && let Some(consumer) = consumer {
-        opened.consumer = Some(consumer.start(cancel.child_token()));
+        opened.consumer = Some(consumer.start(cancel));
         tracing::info!("messaging_consuming_started");
     }
     // template:end messaging:worker-bootstrap-start-admitted-consumer

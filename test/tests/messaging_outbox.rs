@@ -79,7 +79,7 @@ impl Fixture {
     }
 
     async fn create_with_consumer(with_consumer: bool) -> Self {
-        Self::create_with_window(with_consumer, Duration::from_millis(1)).await
+        Self::create_with_window(with_consumer, Duration::from_millis(100)).await
     }
 
     async fn create_with_window(with_consumer: bool, duplicate_window: Duration) -> Self {
@@ -435,7 +435,7 @@ async fn until<T>(what: &str, mut check: impl AsyncFnMut() -> Option<T>) -> T {
 async fn job(pool: &PgPool, key: &str) -> JobRow {
     let row = sqlx::query(
         "SELECT id::text AS id, state, attempts, claim_generation, failure_reason, \
-         EXTRACT(EPOCH FROM (not_before - clock_timestamp())) AS snooze_delay_seconds \
+         EXTRACT(EPOCH FROM (not_before - clock_timestamp()))::double precision AS snooze_delay_seconds \
          FROM background_jobs WHERE kind = $1 AND unique_key = $2",
     )
     .bind(OUTBOX_KIND)
@@ -902,23 +902,28 @@ async fn malformed_stored_intent_is_terminal_and_never_false_completion(pool: Pg
     .await
     .expect("producer-only messaging admits the fixture stream");
     let jobs = template_pool(&pool, 3).await;
-    let key = "event-malformed";
-    let malformed = serde_json::json!({
-        "version": 1, "subject": fixture.subject, "message_id": key,
-        "publication_id": key, "event_type": Created::EVENT_TYPE,
-        "schema_version": Created::SCHEMA_VERSION,
-        "occurred_at_unix_seconds": 1_700_000_000i64,
-        "occurred_at_nanosecond": 0u32, "payload_base64": "not-base64"
-    });
-    sqlx::query(
-        "INSERT INTO background_jobs (kind, payload, unique_key) VALUES ($1, $2::jsonb, $3)",
+    let logical_id = "event-malformed";
+    let key = event_key(logical_id);
+    let intent = prepared(&fixture, logical_id, "stored before corruption");
+    assert_eq!(
+        in_tx(&jobs, async |tx| -> Result<_, Step> {
+            intent.enqueue(tx).await.map_err(Step::from)
+        })
+        .await
+        .expect("canonical outbox intent commits"),
+        OutboxEnqueued::Created
+    );
+    let corrupted = sqlx::query(
+        "UPDATE background_jobs \
+         SET payload = jsonb_set(payload, '{payload_base64}', to_jsonb('not-base64'::text), false) \
+         WHERE kind = $1 AND unique_key = $2",
     )
     .bind(OUTBOX_KIND)
-    .bind(malformed.to_string())
-    .bind(key)
+    .bind(&key)
     .execute(&jobs)
     .await
-    .expect("controlled malformed immutable intent is stored");
+    .expect("only the stored payload encoding is corrupted");
+    assert_eq!(corrupted.rows_affected(), 1);
 
     let publisher = template_pool(&pool, 3).await;
     let run = start(
@@ -930,7 +935,7 @@ async fn malformed_stored_intent_is_terminal_and_never_false_completion(pool: Pg
     let failed = until(
         "malformed intent becomes visible terminal history",
         async || {
-            let row = job(&jobs, key).await;
+            let row = job(&jobs, &key).await;
             (row.state == "failed").then_some(row)
         },
     )
@@ -968,7 +973,6 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
             let invoked = Arc::clone(&invoked_handler);
             let logical_id = event.id().to_owned();
             async move {
-                invoked.fetch_add(1, Ordering::SeqCst);
                 sqlx::query(
                     "INSERT INTO messaging_effects (logical_id) VALUES ($1) ON CONFLICT DO NOTHING",
                 )
@@ -976,6 +980,7 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
                 .execute(&pool)
                 .await
                 .map_err(|_| HandlerError::Retryable)?;
+                invoked.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
         })
@@ -984,7 +989,7 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
         .consumer(registry)
         .await
         .expect("consumer admits")
-        .start(CancellationToken::new());
+        .start(&CancellationToken::new());
     let event = prepared(&fixture, "event-durable-effect", "same");
     messaging
         .producer()
@@ -999,7 +1004,7 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
         (effects == 1).then_some(())
     })
     .await;
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokio::time::sleep(fixture.duplicate_window + Duration::from_millis(20)).await;
     messaging
         .producer()
         .publish(&event, Instant::now() + WAIT, &CancellationToken::new())

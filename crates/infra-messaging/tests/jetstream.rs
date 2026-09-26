@@ -624,7 +624,7 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
-        .start(cancel.clone());
+        .start(&cancel);
     let prepared = messaging
         .producer()
         .prepare(fixture.subject.clone(), &event("event-consumer"))
@@ -690,7 +690,7 @@ async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked(
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
-        .start(cancel.clone());
+        .start(&cancel);
     let prepared = messaging
         .producer()
         .prepare(fixture.subject.clone(), &event("event-retry"))
@@ -746,7 +746,7 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
-        .start(cancel.clone());
+        .start(&cancel);
     let prepared = messaging
         .producer()
         .prepare(fixture.subject.clone(), &event("event-permanent"))
@@ -839,7 +839,7 @@ async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_t
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
-        .start(cancel.clone());
+        .start(&cancel);
     let malformed = Bytes::from_static(b"not-a-go-compatible-envelope");
     fixture
         .jetstream
@@ -924,7 +924,7 @@ async fn definite_dlq_refusal_leaves_the_permanent_source_delivery_unacknowledge
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
-        .start(cancel.clone());
+        .start(&cancel);
     let prepared = messaging
         .producer()
         .prepare(fixture.subject.clone(), &event("event-dlq-refused"))
@@ -984,7 +984,7 @@ async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
-        .start(cancel.clone());
+        .start(&cancel);
 
     let dead_letter = wait_for_dead_letter(&fixture).await;
     assert_dead_letter(
@@ -1023,7 +1023,7 @@ async fn handler_panic_is_terminal_and_leaves_its_source_unacknowledged() {
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
-        .start(cancel.clone());
+        .start(&cancel);
     let prepared = messaging
         .producer()
         .prepare(fixture.subject.clone(), &event("event-panic"))
@@ -1077,7 +1077,7 @@ async fn oversized_source_message_is_terminal_without_invoking_the_handler() {
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
-        .start(cancel.clone());
+        .start(&cancel);
     fixture
         .jetstream
         .publish_with_headers(
@@ -1132,7 +1132,7 @@ async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
-        .start(cancel.clone());
+        .start(&cancel);
     let prepared = messaging
         .producer()
         .prepare(fixture.subject.clone(), &event("event-drain"))
@@ -1194,7 +1194,7 @@ async fn consumer_reconciles_its_named_durable_without_stream_administration() {
         .consumer(registry)
         .await
         .expect("adapter creates or reconciles only its named durable consumer")
-        .start(cancel.clone());
+        .start(&cancel);
     let stream = fixture
         .jetstream
         .get_stream(&fixture.stream)

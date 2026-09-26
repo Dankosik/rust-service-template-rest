@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn stored_intent_rejects_invalid_base64_before_broker_dispatch() {
-        let mut stored = PublishDomainEvent::from(&prepared(Bytes::from_static(br#"{}"#)));
+        let mut stored = PublishDomainEvent::from(&prepared(Bytes::from_static(br"{}")));
         stored.payload_base64 = "not-base64".to_owned();
 
         assert!(stored.prepared().is_err());
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn storage_preserves_distinct_redrive_publication_identity() {
-        let mut event = prepared(Bytes::from_static(br#"{}"#));
+        let mut event = prepared(Bytes::from_static(br"{}"));
         event.publication_id = "redrive-8e51b5a19b7924ce".to_owned();
 
         let restored = PublishDomainEvent::from(&event)
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn payload_limit_fits_exact_base64_boundary_for_varied_metadata() {
-        let compact = PublishDomainEvent::from(&prepared(Bytes::from_static(br#"{}"#)));
+        let compact = PublishDomainEvent::from(&prepared(Bytes::from_static(br"{}")));
         let wide = PublishDomainEvent {
             version: FORMAT_VERSION,
             subject: "s".repeat(256),

@@ -157,7 +157,7 @@ impl Messaging {
             connect
                 .connect(options.servers.clone())
                 .await
-                .map_err(classify_connect)
+                .map_err(|error| classify_connect(&error))
         })
         .await?;
         let jetstream = async_nats::jetstream::context::ContextBuilder::new()
@@ -350,8 +350,8 @@ async fn close_client(
     };
     tokio::select! {
         biased;
-        _ = cancel.cancelled() => CloseOutcome::TimedOut,
-        _ = tokio::time::sleep_until(deadline) => CloseOutcome::TimedOut,
+        () = cancel.cancelled() => CloseOutcome::TimedOut,
+        () = tokio::time::sleep_until(deadline) => CloseOutcome::TimedOut,
         result = drain => result,
     }
 }
@@ -364,8 +364,8 @@ async fn admission<T>(
     let deadline = deadline.min(Instant::now() + BROKER_OPERATION_BUDGET);
     tokio::select! {
         biased;
-        _ = cancel.cancelled() => Err(MessagingError::Cancelled),
-        _ = tokio::time::sleep_until(deadline) => Err(MessagingError::TimedOut { budget: BROKER_OPERATION_BUDGET }),
+        () = cancel.cancelled() => Err(MessagingError::Cancelled),
+        () = tokio::time::sleep_until(deadline) => Err(MessagingError::TimedOut { budget: BROKER_OPERATION_BUDGET }),
         result = operation => result,
     }
 }
@@ -485,10 +485,10 @@ fn classify_topology(error: &(dyn std::error::Error + 'static)) -> MessagingErro
             _ => {}
         }
     }
-    if let Some(error) = error.downcast_ref::<async_nats::jetstream::Error>() {
-        if matches!(error.code(), 401 | 403) {
-            return MessagingError::Authentication;
-        }
+    if let Some(error) = error.downcast_ref::<async_nats::jetstream::Error>()
+        && matches!(error.code(), 401 | 403)
+    {
+        return MessagingError::Authentication;
     }
     error
         .source()
@@ -529,8 +529,8 @@ fn validate_options(options: &MessagingOptions) -> Result<(), MessagingError> {
             ));
         }
     }
-    if let Some(consumer) = &options.consumer {
-        if consumer.concurrency == 0
+    if let Some(consumer) = &options.consumer
+        && (consumer.concurrency == 0
             || consumer.durable_name.is_empty()
             || !valid_filter(&consumer.filter_subject)
             || !valid_subject(&consumer.dlq_subject)
@@ -538,15 +538,14 @@ fn validate_options(options: &MessagingOptions) -> Result<(), MessagingError> {
             || consumer
                 .concurrency
                 .saturating_mul(options.max_payload_bytes.saturating_add(8 * 1024))
-                > RESIDENT_DELIVERY_LIMIT
-        {
-            return Err(MessagingError::Bounds);
-        }
+                > RESIDENT_DELIVERY_LIMIT)
+    {
+        return Err(MessagingError::Bounds);
     }
     Ok(())
 }
 
-fn classify_connect(error: async_nats::ConnectError) -> MessagingError {
+fn classify_connect(error: &async_nats::ConnectError) -> MessagingError {
     match error.kind() {
         ConnectErrorKind::Authentication | ConnectErrorKind::AuthorizationViolation => {
             MessagingError::Authentication

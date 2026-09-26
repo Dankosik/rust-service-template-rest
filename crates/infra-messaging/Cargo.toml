@@ -14,6 +14,7 @@ integration = []
 
 [[test]]
 name = "jetstream"
+path = "tests/jetstream.rs"
 required-features = ["integration"]
 
 [lints]

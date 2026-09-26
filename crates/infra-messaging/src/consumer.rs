@@ -101,7 +101,9 @@ impl Consumer {
                     )
                     .map_err(|_| MessagingError::Topology)?
                 }
-                Err(error) if error.kind() == ConsumerInfoErrorKind::NotFound => Default::default(),
+                Err(error) if error.kind() == ConsumerInfoErrorKind::NotFound => {
+                    async_nats::jetstream::consumer::pull::Config::default()
+                }
                 Err(_) => return Err(MessagingError::Topology),
             };
             if config.headers_only || !config.backoff.is_empty() {
@@ -145,7 +147,7 @@ impl Consumer {
         };
         let pull = tokio::select! {
             biased;
-            _ = shared.startup_cancel.cancelled() => return Err(MessagingError::Cancelled),
+            () = shared.startup_cancel.cancelled() => return Err(MessagingError::Cancelled),
             result = tokio::time::timeout_at(deadline, admission) => result
                 .map_err(|_| MessagingError::TimedOut { budget: BROKER_OPERATION_BUDGET })??,
         };
@@ -159,7 +161,7 @@ impl Consumer {
 
     /// Starts admission under the root token; admitted work has its own lifetime.
     #[must_use]
-    pub fn start(self, cancel: CancellationToken) -> ConsumerHandle {
+    pub fn start(self, cancel: &CancellationToken) -> ConsumerHandle {
         let stop = cancel.child_token();
         let force = CancellationToken::new();
         let task_stop = stop.clone();
@@ -195,7 +197,7 @@ impl Consumer {
             while !tasks.is_empty() {
                 let next = tokio::select! {
                     biased;
-                    _ = force.cancelled() => Err(ConsumerError::DrainTimedOut),
+                    () = force.cancelled() => Err(ConsumerError::DrainTimedOut),
                     next = tasks.join_next() => joined(next),
                 };
                 if let Err(error) = next {
@@ -232,8 +234,8 @@ impl Consumer {
             if free == 0 {
                 tokio::select! {
                     biased;
-                    _ = force.cancelled() => return Err(ConsumerError::DrainTimedOut),
-                    _ = stop.cancelled() => return Ok(()),
+                    () = force.cancelled() => return Err(ConsumerError::DrainTimedOut),
+                    () = stop.cancelled() => return Ok(()),
                     next = tasks.join_next() => joined(next)?,
                 }
                 continue;
@@ -252,8 +254,8 @@ impl Consumer {
             let mut batch = loop {
                 tokio::select! {
                     biased;
-                    _ = force.cancelled() => return Err(ConsumerError::DrainTimedOut),
-                    _ = stop.cancelled() => return Ok(()),
+                    () = force.cancelled() => return Err(ConsumerError::DrainTimedOut),
+                    () = stop.cancelled() => return Ok(()),
                     next = tasks.join_next(), if !tasks.is_empty() => joined(next)?,
                     result = &mut fetch => break result.map_err(|_| ConsumerError::Terminal)?
                         .map_err(|_| ConsumerError::Terminal)?,
@@ -262,8 +264,8 @@ impl Consumer {
             loop {
                 tokio::select! {
                     biased;
-                    _ = force.cancelled() => return Err(ConsumerError::DrainTimedOut),
-                    _ = stop.cancelled() => return Ok(()),
+                    () = force.cancelled() => return Err(ConsumerError::DrainTimedOut),
+                    () = stop.cancelled() => return Ok(()),
                     next = tasks.join_next(), if !tasks.is_empty() => joined(next)?,
                     next = batch.next() => {
                         let Some(next) = next else { break; };
@@ -387,11 +389,11 @@ async fn handle_delivery(
     {
         return Err(ConsumerError::SourceOversized);
     }
-    let envelope =
-        match wire::decode_envelope(source.subject.as_ref(), headers, source.payload.clone()) {
-            Ok(envelope) => envelope,
-            Err(_) => return dead_letter(shared, options, &source, "malformed", cancel).await,
-        };
+    let Ok(envelope) =
+        wire::decode_envelope(source.subject.as_ref(), headers, source.payload.clone())
+    else {
+        return dead_letter(shared, options, &source, "malformed", cancel).await;
+    };
     if info.delivered > 5 {
         return dead_letter(shared, options, &source, "exhausted", cancel).await;
     }
@@ -403,7 +405,7 @@ async fn handle_delivery(
     };
     let result = tokio::select! {
         biased;
-        _ = cancel.cancelled() => return Ok(()),
+        () = cancel.cancelled() => return Ok(()),
         result = tokio::time::timeout(HANDLER_TIMEOUT,
             registry.dispatch(source.subject.as_ref(), envelope, handler_cancel.clone())) => result,
     };
@@ -531,7 +533,7 @@ async fn dead_letter(
 async fn acknowledge(source: &Message, cancel: &CancellationToken) -> Result<(), ConsumerError> {
     let result = tokio::select! {
         biased;
-        _ = cancel.cancelled() => return Ok(()),
+        () = cancel.cancelled() => return Ok(()),
         result = tokio::time::timeout(BROKER_OPERATION_BUDGET, source.double_ack()) => result,
     };
     if matches!(result, Ok(Ok(()))) {
@@ -550,7 +552,7 @@ async fn request_redelivery(
 ) -> Result<(), ConsumerError> {
     tokio::select! {
         biased;
-        _ = cancel.cancelled() => Ok(()),
+        () = cancel.cancelled() => Ok(()),
         result = tokio::time::timeout(BROKER_OPERATION_BUDGET, source.ack_with(AckKind::Nak(Some(delay)))) => {
             result.map_err(|_| ConsumerError::RedeliveryFailed)?
                 .map_err(|_| ConsumerError::RedeliveryFailed)

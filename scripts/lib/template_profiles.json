@@ -4,6 +4,7 @@
     "make/source.mk",
     "scripts/ci/template-init-check.sh",
     "scripts/tests/template-candidate-paths.txt",
+    "scripts/tests/fixtures/",
     "scripts/tests/template-owned-purity.py",
     "scripts/tests/template-profile-projections.py",
     "scripts/tests/template-init-safety.py",
@@ -812,7 +813,6 @@
       {"path": "crates/config/src/lib.rs", "ids": ["config-jobs-module", "config-jobs-export", "config-jobs-field", "config-jobs-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-jobs-environment"]},
       {"path": "crates/config/src/observability.rs", "ids": ["otel-jobs-worker-identity-doc"]},
-      {"path": "crates/infra-telemetry/src/metrics.rs", "ids": ["telemetry-jobs-histograms"]},
       {"path": "test/Cargo.toml", "ids": ["test-jobs-dependencies", "test-jobs-dev-dependencies", "test-jobs-worker-fixture"]},
       {"path": "test/src/lib.rs", "ids": ["test-lib-jobs-module"]},
       {"path": "test/README.md", "ids": ["test-readme-jobs"]},
@@ -893,6 +893,7 @@
     ],
     "markers": [
       {"path": "Cargo.toml", "ids": ["workspace-worker-crate"]},
+      {"path": "crates/infra-telemetry/src/metrics.rs", "ids": ["telemetry-worker-histograms"]},
       {"path": "build/docker/Dockerfile", "ids": ["docker-jobs-worker-build", "docker-jobs-worker-output", "docker-jobs-worker-runtime"]},
       {"path": "docs/architecture/async.md", "ids": ["docs-async-worker-lifetime"]}
     ]

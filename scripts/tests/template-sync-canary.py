@@ -15,7 +15,7 @@ from pathlib import Path
 _LEGACY_B206_PROFILE_SHA256 = "75e68f9c7defd4031f5d7a0bc2866f337a6c79f69a69f56c79a268d48d8d6530"
 _LEGACY_B206_REVISION = "b2060279370713f05be81b1ad44a31e3e960bccc"
 _HISTORICAL_OUTBOUND_REVISION = "43b7588edbdb1ebfbc478fb28e0e3d2e77417960"
-_LEGACY_PROFILE_KEYS = ("schema_version", "source_only", "postgres", "identity", "cargo_lock")
+_LEGACY_B206_PROFILE_PATH = "scripts/tests/fixtures/template-profiles-b206.json"
 _AUTH_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection", "identity", "cargo_lock",
 )
@@ -58,7 +58,6 @@ _HISTORICAL_EGRESS_PACK = {
         }
     ]
 }
-_NEW_PROJECTION_CHECKER = "scripts/tests/template-profile-projections.py"
 
 
 def run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -117,15 +116,8 @@ def clone(source: Path, destination: Path) -> None:
 
 
 def install_historical_none(source: Path, target: Path) -> None:
-    profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
-    legacy = {key: profile[key] for key in _LEGACY_PROFILE_KEYS}
-    source_only = legacy["source_only"]
-    if not isinstance(source_only, list) or source_only.count(_NEW_PROJECTION_CHECKER) != 1:
-        raise AssertionError("current profile inventory lacks exactly one projection checker entry")
-    legacy["source_only"] = [item for item in source_only if item != _NEW_PROJECTION_CHECKER]
-    # The shared PostgreSQL proxy did not exist in the pinned b206 inventory.
-    legacy["postgres"]["remove_when_none"].remove("test/tests/support/commit_proxy.rs")
-    rendered = (json.dumps(legacy, indent=2) + "\n").encode("utf-8")
+    # Frozen bytes from _LEGACY_B206_REVISION, independent of current profiles.
+    rendered = (source / _LEGACY_B206_PROFILE_PATH).read_bytes()
     if hashlib.sha256(rendered).hexdigest() != _LEGACY_B206_PROFILE_SHA256:
         raise AssertionError("legacy b206 profile inventory bytes changed")
     (target / "scripts/lib/template_profiles.json").write_bytes(rendered)
