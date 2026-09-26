@@ -888,7 +888,10 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
     let pki = Pki::new("provider.test");
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let acceptor = TlsAcceptor::from(Arc::new(server_tls_config(&pki, false)));
+    let mut tls = server_tls_config(&pki, false);
+    // This provider writes HTTP/1.1; advertising h2 would select the wrong wire protocol.
+    tls.alpn_protocols.clear();
+    let acceptor = TlsAcceptor::from(Arc::new(tls));
     let cancel = CancellationToken::new();
     let requests = Arc::new(AtomicUsize::new(0));
     let task = tokio::spawn({
@@ -920,6 +923,7 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
                             body.len()
                         );
                         let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = stream.shutdown().await;
                     }
                 });
             }

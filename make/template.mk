@@ -154,15 +154,15 @@ run: ## Start the HTTP service locally with env/config/local.toml
 	$(CARGO) run -p $(SERVICE_BIN) $(CARGO_FLAGS) -- --config $(LOCAL_CONFIG)
 
 test: ## Run the ordinary workspace unit-test suite
-	$(CARGO) test --workspace $(CARGO_FLAGS)
+	$(CARGO) test --workspace --no-fail-fast $(CARGO_FLAGS)
 
 test-package: ## Run one crate's tests; requires PKG=<crate name>
 	@test -n "$(PKG)" || { echo "test-package requires PKG=<crate name>" >&2; exit 2; }
-	$(CARGO) test -p $(PKG) $(CARGO_FLAGS)
+	$(CARGO) test -p $(PKG) --no-fail-fast $(CARGO_FLAGS)
 
 test-changed: ## Run the tests of the crates in PKGS="<crate> <crate>"
 	$(REQUIRE_PKGS)
-	$(CARGO) test $(addprefix -p ,$(PKGS)) $(CARGO_FLAGS)
+	$(CARGO) test $(addprefix -p ,$(PKGS)) --no-fail-fast $(CARGO_FLAGS)
 
 test-integration-messaging: ## JetStream adapter proof against a throwaway Compose NATS; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
 	$(HEAVY_GUARD)

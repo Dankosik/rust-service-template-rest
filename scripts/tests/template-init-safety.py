@@ -444,7 +444,10 @@ def assert_profile_packs(
     assert_profile_pack(source, target, "outbox", outbox == "postgres")
     assert_profile_pack(source, target, "messaging", messaging == "nats-jetstream")
     assert_profile_pack(source, target, "worker", jobs == "postgres" or messaging == "nats-jetstream")
-    assert_profile_pack(source, target, "service-secrets", database == "postgres" or messaging == "nats-jetstream")
+    assert_profile_pack(
+        source, target, "service-secrets",
+        database == "postgres" or messaging == "nats-jetstream" or grpc == "enabled",
+    )
     assert_profile_pack(source, target, "integration", database == "postgres" or messaging == "nats-jetstream")
     assert_profile_pack(source, target, "jobs-messaging", jobs == "postgres" and messaging == "nats-jetstream")
     assert_profile_pack(source, target, "webhooks-common", webhooks == "durable" or inbound_webhooks == "standard-webhooks")
@@ -1104,7 +1107,7 @@ def check(source: Path) -> None:
             raise AssertionError(f"outbox initialization failed: {outbox_result.stderr}")
         assert_profile_packs(
             source, outbox_target, database="postgres", authn="none", outbound_http="none",
-            http_idempotency="none", jobs="postgres", outbox="postgres",
+            http_idempotency="none", jobs="postgres", messaging="nats-jetstream", outbox="postgres",
         )
         assert_lock_outbox(outbox_target, "postgres")
         outbox_before = state(outbox_target)
