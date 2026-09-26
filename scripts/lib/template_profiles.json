@@ -575,7 +575,6 @@
       {
         "path": "Cargo.toml",
         "ids": [
-          "workspace-oauth2-crate",
           "workspace-oauth2-dependency"
         ]
       },

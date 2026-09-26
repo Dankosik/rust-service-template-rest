@@ -48,6 +48,17 @@ proxy, redirect, decompression, or internal retry.
 
 ## Compose an integration
 
+The retained crate is a workspace member without an unused dependency alias.
+When a concrete provider first consumes it, add the dependency once under the
+root `[workspace.dependencies]`:
+
+```toml
+infra-oauth2-client-credentials = { path = "crates/infra-oauth2-client-credentials" }
+```
+
+That provider then declares `infra-oauth2-client-credentials = { workspace = true }`
+in its own `[dependencies]`.
+
 `infra-oauth2-client-credentials` owns an opaque cloneable `Credentials`, prepared
 from its `Options`. Composition code translates one named config into options,
 constructs credentials, and binds them with `credentials.http(resource_client)`.
