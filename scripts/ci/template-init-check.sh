@@ -204,8 +204,8 @@ record_source_suites() {
 
 run_graph() {
 	local graph=$1 database=$2 authn=$3 outbound_http=$4 outbound_auth=$5 http_idempotency=$6 jobs=$7 messaging=$8 outbox=$9 webhooks=${10} inbound_webhooks=${11} grpc=${12:-none}
-	local target output_revision openapi_sha256 cargo_lock_sha256 identity description full_graph
-	local -a db_tests=()
+	local target output_revision openapi_sha256 cargo_lock_sha256 identity description full_graph source_common source_tools_root
+	local -a db_tests=() runtime_environment=("${scrubbed_identity[@]}" "CARGO_TARGET_DIR=${target_cache}")
 	if [[ ${outbox} == postgres ]]; then
 		identity="matrix-outbox-${graph}"
 		description="Transactional outbox matrix ${database} ${authn} ${outbound_http} ${outbound_auth} ${http_idempotency} ${webhooks} ${inbound_webhooks}"
@@ -244,10 +244,16 @@ run_graph() {
 	fi
 	target=${work}/runtime-${graph}-${database}-${authn}-${outbound_http}-${outbound_auth}-${http_idempotency}-${jobs}-${messaging}-${outbox}-${webhooks}-${inbound_webhooks}-${grpc}
 	git clone --quiet --no-local "${source}" "${target}"
+	if [[ ${grpc} == enabled ]]; then
+		source_common=$(git -C "${source}" rev-parse --git-common-dir)
+		[[ ${source_common} == /* ]] || source_common=${source}/${source_common}
+		source_tools_root=${TOOLS_ROOT:-$(cd "${source_common}" && pwd)/tools}
+		runtime_environment+=("TOOLS_ROOT=${source_tools_root}")
+	fi
 	printf 'runtime_graph=%s database=%s authn=%s outbound_http=%s outbound_auth=%s grpc=%s http_idempotency=%s jobs=%s messaging=%s outbox=%s webhooks=%s inbound_webhooks=%s harness=core candidate=%s\n' \
 		"${graph}" "${database}" "${authn}" "${outbound_http}" "${outbound_auth}" "${grpc}" "${http_idempotency}" "${jobs}" "${messaging}" "${outbox}" "${webhooks}" "${inbound_webhooks}" "${candidate}" >>"${receipt}"
 	record_command "${receipt}" "${log_dir}/runtime-${graph}-init.log" "runtime-${graph}-init" \
-		"${scrubbed_identity[@]}" bash "${source}/scripts/init-module.sh" --repo "${target}" \
+		"${runtime_environment[@]}" bash "${source}/scripts/init-module.sh" --repo "${target}" \
 		--service-name "${identity}" \
 		--repository "https://github.com/example/${identity}" \
 		--description "${description}" \
@@ -269,17 +275,17 @@ run_graph() {
 		# The child shell expands its manifest argument; the caller must preserve $1.
 		# shellcheck disable=SC2016
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-metadata.log" "runtime-${graph}-metadata" \
-			"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" bash -c \
+			"${runtime_environment[@]}" bash -c \
 			'exec cargo metadata --locked --offline --format-version 1 --manifest-path "$1" >/dev/null' _ "${target}/Cargo.toml"
 	fi
 	if [[ ${full_graph} == true ]]; then
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-build.log" "runtime-${graph}-build" \
-			"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" make -C "${target}" build
+			"${runtime_environment[@]}" make -C "${target}" build
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-test.log" "runtime-${graph}-test" \
-			"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" make -C "${target}" test
+			"${runtime_environment[@]}" make -C "${target}" test
 		if ((${#db_tests[@]} > 0)); then
 			record_command "${receipt}" "${log_dir}/runtime-${graph}-db.log" "runtime-${graph}-db" \
-				"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" REQUIRE_DOCKER=1 bash "${target}/scripts/ci/test-integration-db.sh" "${db_tests[@]}"
+				"${runtime_environment[@]}" REQUIRE_DOCKER=1 bash "${target}/scripts/ci/test-integration-db.sh" "${db_tests[@]}"
 		fi
 		return
 	fi
@@ -288,17 +294,17 @@ run_graph() {
 		check_features=(--features integration-tests/integration)
 	fi
 	record_command "${receipt}" "${log_dir}/runtime-${graph}-check.log" "runtime-${graph}-check" \
-		"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" cargo check --workspace --all-targets \
+		"${runtime_environment[@]}" cargo check --workspace --all-targets \
 			"${check_features[@]}" --locked --offline --manifest-path "${target}/Cargo.toml"
 	if [[ ${webhooks} != none || ${inbound_webhooks} != none ]]; then
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-provider.log" "runtime-${graph}-provider" \
-			"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" make -C "${target}" test-package PKG=infra-webhooks
+			"${runtime_environment[@]}" make -C "${target}" test-package PKG=infra-webhooks
 	fi
 	if [[ ${inbound_webhooks} == standard-webhooks ]]; then
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-contract.log" "runtime-${graph}-contract" \
-			"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" cargo test -p "${identity}" --test openapi --locked --offline --manifest-path "${target}/Cargo.toml"
+			"${runtime_environment[@]}" cargo test -p "${identity}" --test openapi --locked --offline --manifest-path "${target}/Cargo.toml"
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-lifecycle.log" "runtime-${graph}-lifecycle" \
-			"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" cargo test -p "${identity}" --test lifecycle \
+			"${runtime_environment[@]}" cargo test -p "${identity}" --test lifecycle \
 				inert_inbound_webhook_route_rejects_unknown_endpoint_without_signature_work --locked --offline --manifest-path "${target}/Cargo.toml"
 	fi
 }

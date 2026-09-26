@@ -1599,7 +1599,6 @@ dependencies = [
  "prost",
  "prost-reflect",
  "tonic",
- "tonic-prost",
 ]
 
 [[package]]
@@ -4353,7 +4352,6 @@ name = "service"
 version = "0.1.0"
 dependencies = [
  "axum",
- "base64 0.23.1",
  "futures-util",
  "gethostname",
  "grpc-contracts",

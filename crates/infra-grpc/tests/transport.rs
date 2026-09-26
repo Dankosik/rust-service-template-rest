@@ -56,6 +56,7 @@ use rustls::{
 use secrecy::SecretString;
 // template:end authn:grpc-transport-test-auth-secret
 use tokio::{
+    io::AsyncReadExt as _,
     net::TcpStream,
     sync::Notify,
     time::{Instant, timeout},
@@ -64,10 +65,7 @@ use tokio::{
 use tokio::net::TcpListener;
 // template:end authn:grpc-transport-test-auth-listener
 // template:begin authn:grpc-transport-test-auth-io
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    task::JoinHandle,
-};
+use tokio::{io::AsyncWriteExt as _, task::JoinHandle};
 // template:end authn:grpc-transport-test-auth-io
 // template:begin authn:grpc-transport-test-auth-tls-acceptor
 use tokio_rustls::TlsAcceptor;
@@ -204,7 +202,7 @@ impl EchoService for Echo {
         self.observe(&request, Seen::ServerStream);
         let message = request.into_inner().message;
         let stream: ResponseStream<ServerStreamResponse> = match message.as_str() {
-            "deadline-stream" => Box::pin(HeldStream {
+            "deadline-stream" | "hold-stream" => Box::pin(HeldStream {
                 first: Some(ServerStreamResponse {
                     message: "first".to_owned(),
                 }),
@@ -566,18 +564,37 @@ async fn initial_and_later_handler_failures_are_sanitized_on_the_wire() {
 async fn held_business_calls_shed_without_starving_standard_health_and_release_after_cancellation()
 {
     let fixture = Fixture::plaintext().await;
+    // Admit one authenticated stream at a time so the fixture's single
+    // introspection slot does not shed calls before transport capacity fills.
+    // Three connections keep each below the native 100-stream connection cap.
+    let mut clients = [
+        fixture.native_client().await,
+        fixture.native_client().await,
+        fixture.native_client().await,
+    ];
     let mut calls = Vec::new();
-    for _ in 0..256 {
-        let mut client = fixture.client();
-        calls.push(tokio::spawn(async move {
-            client
-                .unary(request(UnaryRequest {
-                    message: "hold".to_owned(),
-                }))
+    for index in 0..256 {
+        let mut response = timeout(
+            DEADLINE,
+            clients[index % 3].server_stream(request(ServerStreamRequest {
+                message: "hold-stream".to_owned(),
+            })),
+        )
+        .await
+        .expect("stream admission completes")
+        .expect("stream authenticates")
+        .into_inner();
+        assert_eq!(
+            timeout(DEADLINE, response.message())
                 .await
-        }));
+                .expect("held stream starts")
+                .unwrap()
+                .unwrap()
+                .message,
+            "first"
+        );
+        calls.push(response);
     }
-    fixture.echo.wait_for_entries(256).await;
     let exhausted = fixture
         .client()
         .unary(request(UnaryRequest {
@@ -592,18 +609,18 @@ async fn held_business_calls_shed_without_starving_standard_health_and_release_a
         .connect()
         .await
         .unwrap();
-    let health = HealthClient::new(channel)
-        .check(Request::new(HealthCheckRequest {
+    let health = timeout(
+        DEADLINE,
+        HealthClient::new(channel).check(Request::new(HealthCheckRequest {
             service: String::new(),
-        }))
-        .await
-        .unwrap();
+        })),
+    )
+    .await
+    .expect("health is not starved by business capacity")
+    .unwrap();
     assert_eq!(health.into_inner().status, ServingStatus::Serving as i32);
 
-    fixture.echo.release.cancel();
-    for call in calls {
-        let _ = call.await.expect("client task joins");
-    }
+    drop(calls);
     timeout(DEADLINE, async {
         while fixture.echo.dropped.load(Ordering::Acquire) < 256 {
             tokio::task::yield_now().await;
@@ -623,15 +640,44 @@ async fn held_business_calls_shed_without_starving_standard_health_and_release_a
             .message,
         "after"
     );
+    drop(clients);
     fixture.stop().await;
 }
 
 #[tokio::test]
 async fn caller_deadline_cancels_work_and_releases_its_permit() {
     let fixture = Fixture::plaintext().await;
-    // This native client adds no local timer: only the real server can return
-    // DEADLINE_EXCEEDED and drop the indefinitely suspended handler.
-    let mut client = fixture.native_client().await;
+    // Channel installs its own grpc-timeout timer, which can race the server
+    // into CANCELLED. Keep native tonic messages over Hyper's HTTP/2 transport
+    // here so only the server under test owns the one-second request deadline.
+    let stream = timeout(DEADLINE, TcpStream::connect(fixture.address))
+        .await
+        .unwrap()
+        .unwrap();
+    let (sender, connection) = timeout(
+        DEADLINE,
+        hyper::client::conn::http2::handshake::<_, _, tonic::body::Body>(
+            hyper_util::rt::TokioExecutor::new(),
+            hyper_util::rt::TokioIo::new(stream),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let connection = tokio::spawn(connection);
+    let address = fixture.address;
+    let transport = tower::service_fn(move |mut request: http::Request<tonic::body::Body>| {
+        let mut sender = sender.clone();
+        let uri = format!("http://{address}{}", request.uri().path())
+            .parse()
+            .unwrap();
+        *request.uri_mut() = uri;
+        async move {
+            sender.ready().await?;
+            sender.send_request(request).await
+        }
+    });
+    let mut client = EchoServiceClient::new(transport);
     let mut deadline = request(UnaryRequest {
         message: "deadline".to_owned(),
     });
@@ -658,6 +704,10 @@ async fn caller_deadline_cancels_work_and_releases_its_permit() {
         "after"
     );
     fixture.stop().await;
+    let _ = timeout(DEADLINE, connection)
+        .await
+        .expect("HTTP/2 driver stops")
+        .expect("HTTP/2 driver joins");
 }
 
 #[tokio::test]
@@ -1076,8 +1126,23 @@ async fn assert_tls_denied(
             .connect(ServerName::try_from("localhost").unwrap(), stream),
     )
     .await;
+    let denied = match result {
+        Ok(Err(_)) => true,
+        Ok(Ok(mut stream)) => {
+            // TLS 1.3 can finish the client's flight before the client reads
+            // the server's certificate-required or untrusted-certificate alert.
+            // A timeout is not proof of denial: observe an error or peer close.
+            let mut byte = [0_u8; 1];
+            matches!(
+                timeout(DEADLINE, stream.read(&mut byte)).await,
+                Ok(Err(_) | Ok(0))
+            )
+        }
+        Err(_) => false,
+    };
     assert!(
-        matches!(result, Ok(Err(_))),
-        "TLS peer unexpectedly accepted a forbidden handshake"
+        denied,
+        "server did not reject TLS peer (tls12={tls12}, identity={})",
+        identity.is_some()
     );
 }

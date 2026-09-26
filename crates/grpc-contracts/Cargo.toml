@@ -16,5 +16,3 @@ infra-grpc = { workspace = true }
 prost = { workspace = true, features = ["std", "derive"] }
 prost-reflect = { workspace = true, features = ["derive"] }
 tonic = { workspace = true, features = ["codegen"] }
-tonic-prost = { workspace = true }
-

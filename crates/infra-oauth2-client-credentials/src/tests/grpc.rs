@@ -23,10 +23,11 @@ use hyper_util::{
 use infra_grpc::{Client, ClientSecurity, Operation};
 use tokio::{
     net::TcpListener,
-    sync::oneshot,
+    sync::{Semaphore, oneshot},
     task::{JoinHandle, JoinSet},
     time::Instant,
 };
+use tokio_stream::StreamExt as _;
 use tonic::{Code, Request, Response, Status, body::Body, metadata::MetadataValue};
 use tower::service_fn;
 
@@ -64,6 +65,7 @@ struct StreamPeer {
 #[derive(Clone)]
 struct ClientStreamPeer {
     calls: Arc<AtomicUsize>,
+    first_item_received: Arc<Semaphore>,
 }
 
 impl tonic::server::ClientStreamingService<ClientStreamRequest> for ClientStreamPeer {
@@ -72,6 +74,7 @@ impl tonic::server::ClientStreamingService<ClientStreamRequest> for ClientStream
 
     fn call(&mut self, request: Request<tonic::Streaming<ClientStreamRequest>>) -> Self::Future {
         let calls = Arc::clone(&self.calls);
+        let first_item_received = Arc::clone(&self.first_item_received);
         Box::pin(async move {
             let mut messages = request.into_inner();
             let Some(_) = messages.message().await? else {
@@ -80,6 +83,7 @@ impl tonic::server::ClientStreamingService<ClientStreamRequest> for ClientStream
                 ));
             };
             calls.fetch_add(1, Ordering::SeqCst);
+            first_item_received.add_permits(1);
             while messages.message().await?.is_some() {}
             Ok(Response::new(ClientStreamResponse {
                 message: "complete".to_owned(),
@@ -116,6 +120,7 @@ impl tonic::server::ServerStreamingService<ServerStreamRequest> for StreamPeer {
 struct ResourceFixture {
     address: SocketAddr,
     calls: Arc<AtomicUsize>,
+    first_stream_item_received: Arc<Semaphore>,
     shutdown: oneshot::Sender<()>,
     task: JoinHandle<()>,
 }
@@ -125,11 +130,18 @@ impl ResourceFixture {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
+        let first_stream_item_received = Arc::new(Semaphore::new(0));
         let (shutdown, receiver) = oneshot::channel();
-        let task = tokio::spawn(serve_peer(listener, Arc::clone(&calls), receiver));
+        let task = tokio::spawn(serve_peer(
+            listener,
+            Arc::clone(&calls),
+            Arc::clone(&first_stream_item_received),
+            receiver,
+        ));
         Self {
             address,
             calls,
+            first_stream_item_received,
             shutdown,
             task,
         }
@@ -161,6 +173,10 @@ impl ResourceFixture {
         self.calls.load(Ordering::SeqCst)
     }
 
+    fn first_stream_item_received(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.first_stream_item_received)
+    }
+
     async fn finish(self) {
         self.shutdown.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(2), self.task)
@@ -173,6 +189,7 @@ impl ResourceFixture {
 async fn serve_peer(
     listener: TcpListener,
     calls: Arc<AtomicUsize>,
+    first_stream_item_received: Arc<Semaphore>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut connections = JoinSet::new();
@@ -182,7 +199,11 @@ async fn serve_peer(
             Some(result) = connections.join_next(), if !connections.is_empty() => result.unwrap(),
             accepted = listener.accept() => {
                 let (stream, _) = accepted.unwrap();
-                connections.spawn(serve_connection(stream, Arc::clone(&calls)));
+                connections.spawn(serve_connection(
+                    stream,
+                    Arc::clone(&calls),
+                    Arc::clone(&first_stream_item_received),
+                ));
             }
         }
     }
@@ -197,10 +218,15 @@ async fn serve_peer(
     }
 }
 
-async fn serve_connection(stream: tokio::net::TcpStream, calls: Arc<AtomicUsize>) {
+async fn serve_connection(
+    stream: tokio::net::TcpStream,
+    calls: Arc<AtomicUsize>,
+    first_stream_item_received: Arc<Semaphore>,
+) {
     let service = service_fn(move |request| {
         let calls = Arc::clone(&calls);
-        async move { Ok::<_, Infallible>(route_peer(request, calls).await) }
+        let first_stream_item_received = Arc::clone(&first_stream_item_received);
+        async move { Ok::<_, Infallible>(route_peer(request, calls, first_stream_item_received).await) }
     });
     let connection = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
         .serve_connection(TokioIo::new(stream), TowerToHyperService::new(service));
@@ -210,6 +236,7 @@ async fn serve_connection(stream: tokio::net::TcpStream, calls: Arc<AtomicUsize>
 async fn route_peer(
     request: HyperRequest<Incoming>,
     calls: Arc<AtomicUsize>,
+    first_stream_item_received: Arc<Semaphore>,
 ) -> HyperResponse<Body> {
     match request.uri().path() {
         "/example.v1.EchoService/Unary" => {
@@ -232,7 +259,13 @@ async fn route_peer(
                 ClientStreamResponse,
                 ClientStreamRequest,
             >::default())
-            .client_streaming(ClientStreamPeer { calls }, request)
+            .client_streaming(
+                ClientStreamPeer {
+                    calls,
+                    first_item_received: first_stream_item_received,
+                },
+                request,
+            )
             .await
         }
         _ => {
@@ -267,6 +300,28 @@ fn string_payload_for_encoded_len(encoded_len: usize) -> String {
     let payload_len = encoded_len - 5;
     assert_eq!(1 + varint_len(payload_len) + payload_len, encoded_len);
     "x".repeat(payload_len)
+}
+
+fn stream_with_later_oversized_item(
+    first_stream_item_received: Arc<Semaphore>,
+    oversized: String,
+) -> impl tokio_stream::Stream<Item = ClientStreamRequest> {
+    tokio_stream::iter([ClientStreamRequest {
+        message: "first".to_owned(),
+    }])
+    .chain(
+        tokio_stream::once(ClientStreamRequest { message: oversized }).then(move |item| {
+            let received = Arc::clone(&first_stream_item_received);
+            async move {
+                tokio::time::timeout(Duration::from_secs(2), received.acquire_owned())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .forget();
+                item
+            }
+        }),
+    )
 }
 
 #[tokio::test]
@@ -530,16 +585,14 @@ async fn generated_unary_client_enforces_the_four_mebib_encoded_limit_for_bare_a
 }
 
 #[tokio::test]
-async fn generated_client_stream_rejects_a_later_oversized_item_with_native_encoding_status() {
+async fn generated_client_stream_rejects_a_later_oversized_item_for_bare_and_oauth_transports() {
     let resource = ResourceFixture::new().await;
     let oversized = string_payload_for_encoded_len(MAX_MESSAGE_BYTES + 1);
     let mut client = resource.bare_client();
-    let mut request = Request::new(tokio_stream::iter([
-        ClientStreamRequest {
-            message: "first".to_owned(),
-        },
-        ClientStreamRequest { message: oversized },
-    ]));
+    let mut request = Request::new(stream_with_later_oversized_item(
+        resource.first_stream_item_received(),
+        oversized.clone(),
+    ));
     request.extensions_mut().insert(Operation {
         deadline: Instant::now() + Duration::from_secs(10),
     });
@@ -548,5 +601,23 @@ async fn generated_client_stream_rejects_a_later_oversized_item_with_native_enco
 
     assert_eq!(error.code(), Code::Internal);
     assert_eq!(resource.calls(), 1);
+
+    let tokens = Fixture::new().await;
+    let credentials = tokens.credentials(&[], None);
+    let mut client = resource.client(&credentials);
+    let mut request = Request::new(stream_with_later_oversized_item(
+        resource.first_stream_item_received(),
+        oversized,
+    ));
+    request.extensions_mut().insert(Operation {
+        deadline: Instant::now() + Duration::from_secs(10),
+    });
+
+    let error = client.client_stream(request).await.unwrap_err();
+
+    assert_eq!(error.code(), Code::Internal);
+    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(resource.calls(), 2);
     resource.finish().await;
+    tokens.finish().await;
 }

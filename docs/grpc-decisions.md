@@ -142,6 +142,15 @@ cancellable incoming stream does not disable the conflicting timer. Reopen if
 tonic exposes a supported outer/disabled timeout hook with equivalent task
 ownership.
 
+The client still uses native `Channel`. In the locked tonic 0.14.6 source,
+`transport/channel/service/connection.rs` installs `GrpcTimeout` even without
+an endpoint timeout; `transport/service/grpc_timeout.rs` reads the request's
+`grpc-timeout` and returns `TimeoutExpired`, which `status.rs` maps to `CANCELLED`.
+That initial client timer may beat the governed server's `DEADLINE_EXCEEDED`.
+No custom remapper makes these client outcomes uniform. Server-deadline proof
+uses generated tonic RPCs over Hyper's HTTP/2 sender to observe the server timer;
+client and OAuth budget tests keep the shipped channel path.
+
 Existing rustls/tokio-rustls configs explicitly select TLS 1.3, normal hostname
 and chain validation, and required client certificates when a client CA exists.
 Tonic `ServerTlsConfig` has no protocol-floor setter; relying on absence of a

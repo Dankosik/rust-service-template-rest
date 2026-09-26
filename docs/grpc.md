@@ -165,6 +165,10 @@ let response = client.unary(request).await?;
 
 The absolute operation deadline is required, bounded by any current parent and
 spent across readiness, connect, dispatch and the response's terminal lifetime.
+The governed server reports its expired deadline as `DEADLINE_EXCEEDED`.
+Before response headers, tonic's native `Channel` also enforces `grpc-timeout`
+and can report `CANCELLED` when its timer wins. Client timeout codes therefore
+retain native tonic behavior while spending the same operation budget.
 The stateless generated client codec enforces per-message size without capturing
 an inbound call, so nested outbound calls remain independent. No automatic
 application retry, replay, hedging, discovery or client health polling is added.

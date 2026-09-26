@@ -73,7 +73,6 @@ tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 # template:end grpc:service-grpc-example-dependencies
 # template:begin grpc-jwt:service-grpc-jwt-test-dependencies
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
-base64 = { workspace = true, features = ["alloc"] }
 # template:end grpc-jwt:service-grpc-jwt-test-dependencies
 # template:begin authn:service-authn-test-dependencies
 axum = { workspace = true }
