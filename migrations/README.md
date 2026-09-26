@@ -9,7 +9,7 @@ the empty-history path. Rationale: [Persistence Architecture](../docs/architectu
 <!-- template:begin http-idempotency:migrations-readme-http-idempotency -->
 The HTTP idempotency pack first creates `http_idempotency_records` in
 `20260923000001_create_http_idempotency_records.sql`. Its guarded replacement,
-`20260925000001_simplify_http_idempotency_records.sql`, takes an ACCESS
+`20260926001448_simplify_http_idempotency_records.sql`, takes an ACCESS
 EXCLUSIVE table lock before refusing any row whose `expires_at` is still live.
 It deletes only expired rows, replaces the legacy binary-header format with the
 `http_idempotency_header_pair[]` composite array, and adds verified caller
@@ -27,11 +27,14 @@ migration or restore from an operator-managed backup. Applied migration files
 remain byte-for-byte history.
 <!-- template:end http-idempotency:migrations-readme-http-idempotency -->
 <!-- template:begin jobs:migrations-readme-jobs -->
-The background jobs pack ships one forward-only migration,
-`20260924000001_create_background_jobs.sql`, which creates the
-`background_jobs` table and its claim-generation sequence; the existing
-`migrate` binary applies it with the rest of the set. Neither the service
-nor the worker creates or alters schema at runtime, and only
+The background jobs pack ships two forward-only migrations:
+`20260924000001_create_background_jobs.sql` creates the `background_jobs`
+table and its claim-generation sequence, and
+`20260925000001_simplify_background_jobs.sql` converts payload to JSONB,
+unique keys to C-collated text, adds trace-state, and replaces the running
+index. The existing `migrate` binary applies both with the rest of the set.
+The conversion requires all old producers and workers to be stopped; neither
+the service nor worker creates or alters schema at runtime, and only
 `crates/infra-jobs` names the table.
 <!-- template:end jobs:migrations-readme-jobs -->
 

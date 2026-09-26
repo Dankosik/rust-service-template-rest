@@ -29,8 +29,9 @@ With the HTTP idempotency profile retained, the same command also runs
 PostgreSQL arbitration, equal replay/mismatch, rollback and expiry, same-key
 retry after uncertainty, 25P02 mapping, byte-preserving seven-header replay,
 caller metadata, and guarded legacy migration. They use the ordinary provider
-error seam; no `commit_proxy.rs`, forced lost-COMMIT acknowledgement, readback,
-or replacement fault framework remains. The mounted HTTP proof runs where the
+error seam; this suite uses no commit proxy (the jobs suite keeps its own in
+`tests/support/commit_proxy.rs`), forced lost-COMMIT acknowledgement, readback,
+or replacement fault framework. The mounted HTTP proof runs where the
 introspection engine is retained.
 <!-- template:end http-idempotency:test-readme-http-idempotency -->
 <!-- template:begin jobs:test-readme-jobs -->

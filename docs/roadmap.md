@@ -623,11 +623,14 @@ markers, tests, and initializer support. Order by expected demand:
    **Merged via PR #51 at
    `48e565af7c2875832996816b975a2e2b01457d4f`**;
    [adoption guide](background-jobs.md).
-5. Outbound webhooks (Standard Webhooks signing, retry, public-address
-   predicate) and inbound webhooks (verification, receipt deduplication,
-   durable dispatch).
+5. Outbound and inbound webhooks: Standard Webhooks signing, retry,
+   public-address predicate, verification, receipt deduplication, and durable
+   dispatch. Reuse `infra-jobs` scheduling, attempts, and fenced completion;
+   this stage does not add a second queue or a generic lifecycle crate.
 6. NATS JetStream messaging with typed domain events and a `worker` binary;
-   transactional outbox with an `outbox-relay` binary.
+   transactional outbox with an `outbox-relay` binary. Reuse `infra-jobs` for
+   durable local scheduling and completion where that boundary applies; the
+   messaging/outbox design owns its distinct delivery semantics.
 7. gRPC with `tonic`: server policy, interceptors, health, bounded drain,
    shared client connections, buf lint and breaking checks.
 8. OAuth 2.0 client-credentials outbound authentication.
@@ -719,8 +722,8 @@ The selected pack holds the `infra-jobs` crate (enqueue inside the caller's
 transaction, the job-kind contracts, and the engine over one
 `background_jobs` table: fenced claims, persisted backoff, lost-worker
 recovery, and retention), the `jobs-worker` library and binary shipped as
-the image's `/jobs-worker` entrypoint, the `jobs.max_workers` setting, one
-forward-only migration, the [guide](background-jobs.md), and
+the image's `/jobs-worker` entrypoint, the `jobs.max_workers` setting, the
+creation and simplification forward-only migrations, the [guide](background-jobs.md), and
 [Async Architecture](architecture/async.md). It stays inert: the service
 makes no jobs query, and nothing starts a worker until an operator deploys
 `/jobs-worker`; `none` removes it.
@@ -751,6 +754,15 @@ build step grew from 293 s to 406 s with the third release binary. The
 slowest initializer part took 278 s, inside the image job, so the
 initializer stayed off the critical path. Publication and deployment are not
 claimed.
+
+The subsequent jobs simplification retains that profile boundary while
+replacing lease upkeep and outcome attribution with a fixed lease and
+supervisor-owned outcome. It converts payloads to JSONB and unique keys to
+C-collated text through a stopped-producer/worker forward migration. Future
+stage 10.5 (webhooks) and 10.6 (messaging/outbox) reuse the jobs scheduling,
+attempt, and fenced-completion mechanisms. Process lifecycle ownership stays
+separate until a shared signal, deadline, or tracked-task teardown change
+justifies extraction; another binary alone does not.
 
 ### Stage 11: Benchmarking and performance evidence
 

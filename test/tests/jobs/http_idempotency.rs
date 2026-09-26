@@ -124,8 +124,8 @@ async fn row_is(pool: &PgPool, id: &str, widget: u64) -> bool {
     sqlx::query_scalar(
         "SELECT id::text = $1 \
          AND kind = $2 \
-         AND convert_from(payload, 'UTF8') = $3 \
-         AND convert_from(unique_key, 'UTF8') = $4 \
+         AND payload = $3::jsonb \
+         AND unique_key = $4 \
          AND state = 'pending' \
          FROM background_jobs",
     )
