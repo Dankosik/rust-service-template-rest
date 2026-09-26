@@ -245,7 +245,7 @@ classify() {
 		api/openapi/* | env/config/* | .github/workflows/ci.yml | \
 		scripts/init-module.sh | scripts/template-sync.sh | scripts/lib/template_*.py | scripts/lib/template_profiles.json | \
 		template-owned.paths | \
-		scripts/ci/template-init-check.sh | scripts/tests/template-* | \
+		scripts/ci/template-init-check.sh | scripts/tests/template-* | scripts/tests/fixtures/template-profiles-b206.json | \
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
 		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
 		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/domain-events/* | crates/infra-messaging/* | \
@@ -618,6 +618,9 @@ EOF
 			"shell rust_source cargo_dependencies"
 	done
 	assert_case scripts/tests/template-profile-projections.py \
+		"module_initializer initializer_runtime" \
+		"rust_source cargo_dependencies shell github_workflows db_integration"
+	assert_case scripts/tests/fixtures/template-profiles-b206.json \
 		"module_initializer initializer_runtime" \
 		"rust_source cargo_dependencies shell github_workflows db_integration"
 	for file in changed-surfaces git-changed-paths affected-crates verify validation-lock measure; do
