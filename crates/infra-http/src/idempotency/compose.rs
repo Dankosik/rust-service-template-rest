@@ -8,11 +8,11 @@ use std::convert::Infallible;
 use std::error::Error as StdError;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::RequestExt;
 use axum::body::{Body, Bytes};
 use axum::extract::{FromRequestParts, OriginalUri, Request, State};
+use axum::http::HeaderValue;
 use axum::http::header::CONTENT_TYPE;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -20,10 +20,10 @@ use http_body_util::{BodyExt, Full, LengthLimitError};
 use infra_idempotency_store::Store;
 use utoipa::OpenApi as _;
 
-use super::declaration::{self, AgreementError, ComposedOperation};
-use super::execute::{Attempt, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, sanitized};
+use super::declaration::{self, CompositionError};
+use super::execute::{Attempt, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, Provenance, sanitized};
 use super::identity;
-use super::openapi::{IdempotencyComponents, KEY_HEADER};
+use super::openapi::{IdempotencyComponents, KEY_HEADER, REPLAYED_HEADER};
 use crate::authn::VerifiedPrincipal;
 use crate::harden::RequestDeadline;
 use crate::problem::{Code, Problem};
@@ -41,8 +41,7 @@ const BODY_LIMIT_DETAIL: &str = "request body exceeds the configured limit";
 #[derive(Debug)]
 pub struct Composer {
     store: Store,
-    composed: std::collections::BTreeSet<ComposedOperation>,
-    failures: Vec<AgreementError>,
+    operations: usize,
 }
 
 /// Whether composition served any idempotent operation.
@@ -64,8 +63,7 @@ impl Composer {
     pub fn new(store: Store) -> Self {
         Self {
             store,
-            composed: std::collections::BTreeSet::new(),
-            failures: Vec::new(),
+            operations: 0,
         }
     }
 
@@ -79,10 +77,17 @@ impl Composer {
     /// Make one annotated route carrier idempotent and generate its served
     /// contract metadata.
     ///
-    /// Key handling stays inside final authentication. A carrier that breaks a
-    /// declaration rule remains fail-closed as sanitized 500 endpoints, and
-    /// [`Composer::agree`] reports the declaration error before admission.
-    pub fn route<S>(&mut self, mut routes: UtoipaMethodRouter<S>) -> UtoipaMethodRouter<S>
+    /// Key handling stays inside final authentication. An invalid declaration
+    /// stops route assembly before the service can serve it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompositionError`] when this route's local contract cannot
+    /// support idempotent execution and replay.
+    pub fn route<S>(
+        &mut self,
+        mut routes: UtoipaMethodRouter<S>,
+    ) -> Result<UtoipaMethodRouter<S>, CompositionError>
     where
         S: Clone + Send + Sync + 'static,
     {
@@ -91,23 +96,16 @@ impl Composer {
             metrics::Unit::Count,
             "Outcomes of requests to idempotent operations, by outcome."
         );
-        let operation = declaration::prepare(&mut routes.1);
-        let operation = match operation {
-            Ok(operation) => operation,
-            Err(failure) => {
-                self.failures.push(failure);
-                return refuse(routes);
-            }
-        };
+        let operation = declaration::prepare(&mut routes.1)?;
         let keys = KeyLayer {
             store: self.store.clone(),
-            operation: Arc::from(operation.operation_id.as_str()),
+            operation: Arc::from(operation),
         };
-        self.composed.insert(operation);
+        self.operations += 1;
         routes.2 = routes
             .2
             .route_layer(middleware::from_fn_with_state(keys, handle_key));
-        routes
+        Ok(routes)
     }
 
     /// Register the generated idempotency Problem components for the contract
@@ -121,38 +119,17 @@ impl Composer {
         IdempotencyComponents::openapi()
     }
 
-    /// Verify the one assembled agreement and select activation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AgreementError`] when a composed route or the final document
-    /// breaks an idempotency declaration rule.
-    pub fn agree(self, document: &utoipa::openapi::OpenApi) -> Result<Activation, AgreementError> {
-        if let Some(failure) = self.failures.into_iter().next() {
-            return Err(failure);
-        }
-        declaration::agree(document, &self.composed)?;
-        Ok(match NonZeroUsize::new(self.composed.len()) {
+    /// Select activation from successfully composed routes alone.
+    #[must_use]
+    pub fn finish(self) -> Activation {
+        match NonZeroUsize::new(self.operations) {
             Some(operations) => Activation::Active {
                 store: self.store,
                 operations,
             },
             None => Activation::Inactive,
-        })
+        }
     }
-}
-
-/// The fail-closed form of a carrier that broke a declaration rule.
-fn refuse<S>(mut routes: UtoipaMethodRouter<S>) -> UtoipaMethodRouter<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    routes.2 = routes
-        .2
-        .route_layer(middleware::from_fn(|request: Request, _: Next| {
-            std::future::ready(sanitized(request_id::request_id(request.extensions())))
-        }));
-    routes
 }
 
 #[derive(Clone)]
@@ -224,7 +201,6 @@ async fn handle_key(State(keys): State<KeyLayer>, request: Request, next: Next) 
     else {
         return wiring_failure(&keys.operation, "fingerprint_unencodable", request_id);
     };
-    let seam_used = Arc::new(AtomicBool::new(false));
     let operation = Arc::clone(&keys.operation);
     parts.extensions.insert(Attempt {
         store: keys.store,
@@ -234,17 +210,11 @@ async fn handle_key(State(keys): State<KeyLayer>, request: Request, next: Next) 
         operation: keys.operation,
         deadline,
         request_id: request_id.clone(),
-        seam_used: Arc::clone(&seam_used),
     });
     let response = next
         .run(Request::from_parts(parts, restore_body(body, trailers)))
         .await;
-    guard_wiring(
-        response,
-        seam_used.load(Ordering::Relaxed),
-        &operation,
-        request_id,
-    )
+    normalize_response(response, &operation, request_id)
 }
 
 fn restore_body(body: Bytes, trailers: Option<axum::http::HeaderMap>) -> Body {
@@ -294,16 +264,26 @@ fn unreadable_body(request_id: Option<String>) -> Response {
         .into_response()
 }
 
-fn guard_wiring(
-    response: Response,
-    seam_used: bool,
+fn normalize_response(
+    mut response: Response,
     operation: &str,
     request_id: Option<String>,
 ) -> Response {
-    if seam_used || !response.status().is_success() {
+    let provenance = response.extensions_mut().remove::<Provenance>();
+    response.headers_mut().remove(REPLAYED_HEADER);
+    if !response.status().is_success() {
         return response;
     }
-    wiring_failure(operation, "seam_unused", request_id)
+    match provenance {
+        Some(Provenance::Executed) => response,
+        Some(Provenance::Replayed) => {
+            response
+                .headers_mut()
+                .insert(REPLAYED_HEADER, HeaderValue::from_static("true"));
+            response
+        }
+        None => wiring_failure(operation, "seam_unused", request_id),
+    }
 }
 
 fn wiring_failure(operation: &str, failure: &'static str, request_id: Option<String>) -> Response {
@@ -313,6 +293,7 @@ fn wiring_failure(operation: &str, failure: &'static str, request_id: Option<Str
 
 #[cfg(test)]
 mod tests {
+    use axum::http::StatusCode;
     use axum::http::{HeaderMap, HeaderValue};
     use http_body_util::BodyExt;
 
@@ -347,5 +328,43 @@ mod tests {
         assert_eq!(problem["code"], "bad_request");
         assert!(problem.to_string().contains(INVALID_KEY_REASON));
         assert!(!problem.to_string().contains("submitted-secret"));
+    }
+
+    #[test]
+    fn response_normalization_seals_replay_metadata_after_the_handler() {
+        let mut replay = Response::new(Body::empty());
+        *replay.status_mut() = StatusCode::CREATED;
+        replay
+            .headers_mut()
+            .insert(REPLAYED_HEADER, HeaderValue::from_static("forged"));
+        let replay = super::super::execute::mark_provenance(replay, Provenance::Replayed);
+        let replay = normalize_response(replay, "test", None);
+        assert_eq!(
+            replay.headers().get(REPLAYED_HEADER),
+            Some(&HeaderValue::from_static("true"))
+        );
+        assert_eq!(replay.headers().get_all(REPLAYED_HEADER).iter().count(), 1);
+
+        let mut executed = Response::new(Body::empty());
+        *executed.status_mut() = StatusCode::CREATED;
+        executed
+            .headers_mut()
+            .insert(REPLAYED_HEADER, HeaderValue::from_static("forged"));
+        let executed = super::super::execute::mark_provenance(executed, Provenance::Executed);
+        let executed = normalize_response(executed, "test", None);
+        assert!(!executed.headers().contains_key(REPLAYED_HEADER));
+
+        let mut failure = Response::new(Body::empty());
+        *failure.status_mut() = StatusCode::BAD_REQUEST;
+        failure
+            .headers_mut()
+            .insert(REPLAYED_HEADER, HeaderValue::from_static("forged"));
+        let failure = normalize_response(failure, "test", None);
+        assert_eq!(failure.status(), StatusCode::BAD_REQUEST);
+        assert!(!failure.headers().contains_key(REPLAYED_HEADER));
+
+        let missing = normalize_response(Response::new(Body::empty()), "test", None);
+        assert_eq!(missing.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!missing.headers().contains_key(REPLAYED_HEADER));
     }
 }

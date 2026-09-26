@@ -21,7 +21,7 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | `infra-egress-dns` (`crates/infra-egress-dns`) | Public-address admission, shared Hickory resolution, the common hardened HTTPS builder, and default-off generated TLS test material. | Consumer HTTP policy, provider failures, credentials, readiness, or service task tracking. |
 <!-- template:end egress-dns:docs-boundaries-egress-owner -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-owner -->
-| `infra-idempotency-store` (`crates/infra-idempotency-store`) | PostgreSQL idempotency arbitration, durable records, schema admission and maintenance ([guide](../http-idempotency.md)). | Transaction lifecycle/connection ownership, HTTP types/Problems, business rules, readiness registration, or request routing. |
+| `infra-idempotency-store` (`crates/infra-idempotency-store`) | PostgreSQL idempotency arbitration and durable records ([guide](../http-idempotency.md)). | Migration-history admission, transaction lifecycle/connection ownership, HTTP types/Problems, business rules, readiness registration, or request routing. |
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-owner -->
 <!-- template:begin jobs:docs-boundaries-jobs-owners -->
 | `infra-jobs` (`crates/infra-jobs`) | The job table's statements, enqueue, the job-kind and handler contracts (`JobKind`, `Handler`, `Kinds`), and the engine ([guide](../background-jobs.md)). | Concrete kinds or handlers (they live in adapter crates), configuration, process lifecycle, or business rules. |
@@ -122,9 +122,10 @@ routes into authentication.
 <!-- template:end authn:docs-boundaries-authn-composition -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-composition -->
 HTTP idempotency is a shared inbound transport contract, not a feature
-adapter: `infra-http` composes it the way it composes authentication,
-through `Composer::route` and `Composer::agree`, and owns key handling,
-declaration and agreement, and Problem mapping. `infra-idempotency-store`
+adapter: `infra-http` composes it through fallible `Composer::route` and owns
+key handling, declaration, response provenance, and Problem mapping. The
+service assembly calls `finish` to activate the successfully composed routes.
+`infra-idempotency-store`
 owns PostgreSQL arbitration and records. `infra-postgres` owns the opaque
 `Tx`; `infra_http::idempotency` re-exports it only as an inbound contract, so
 `infra-http` depends on `infra-postgres` only while this profile is retained.

@@ -20,6 +20,7 @@
 mod mounted;
 // template:end http-idempotency-mounted:http-idempotency-mounted-module
 
+use std::fmt::Write as _;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::panic::AssertUnwindSafe;
@@ -502,6 +503,72 @@ async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(p
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p3_a_long_verified_caller_identity_commits_and_replays(pool: PgPool) {
+    create_effects(&pool).await;
+    let (store_pool, store) = replica(&dsn_for(&pool).await).await;
+    // This is deliberately larger than PostgreSQL's btree entry limit and
+    // non-repeating. A raw caller-value index would reject the committed
+    // record; digest-backed scope identity must preserve the caller domain.
+    let mut caller_value = String::new();
+    for part in 0..2_048 {
+        write!(&mut caller_value, "caller-{part:08x};").expect("String writes do not fail");
+    }
+    let caller = caller(&caller_value);
+    let record = success(INPUT, r#"{"id":1,"name":"long-caller"}"#);
+
+    let first: Attempted<()> = store
+        .attempt(
+            &ScopeKey::from_digest(SCOPE),
+            &caller,
+            &INPUT,
+            async |tx: &mut Tx<'_>| {
+                sqlx::query("INSERT INTO effects DEFAULT VALUES")
+                    .execute(connection(tx))
+                    .await
+                    .expect("the committed effect");
+                WorkOutput::Commit(record.clone())
+            },
+        )
+        .await;
+    match first {
+        Attempted::Committed(actual) => assert_eq!(actual, record),
+        unexpected => panic!("expected a committed long-caller record, got {unexpected:?}"),
+    }
+
+    let replayed: Attempted<()> = store
+        .attempt(
+            &ScopeKey::from_digest(SCOPE),
+            &caller,
+            &INPUT,
+            async |tx: &mut Tx<'_>| {
+                sqlx::query("INSERT INTO effects DEFAULT VALUES")
+                    .execute(connection(tx))
+                    .await
+                    .expect("a replay must not run this effect");
+                WorkOutput::Commit(record.clone())
+            },
+        )
+        .await;
+    match replayed {
+        Attempted::Live {
+            matched: true,
+            record: actual,
+        } => assert_eq!(actual, record),
+        unexpected => panic!("expected a matching long-caller replay, got {unexpected:?}"),
+    }
+    assert_eq!(count(&pool, EFFECTS).await, 1);
+    let stored: String = sqlx::query_scalar(
+        "SELECT caller_value FROM http_idempotency_records WHERE scope_key = $1",
+    )
+    .bind(SCOPE)
+    .fetch_one(&pool)
+    .await
+    .expect("the stored caller identity");
+    assert_eq!(stored, caller_value);
+    close(&[&store_pool]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p4_an_expired_record_is_not_replayed_and_is_replaced(pool: PgPool) {
     create_effects(&pool).await;
     let dsn = dsn_for(&pool).await;
@@ -716,72 +783,8 @@ async fn p7_a_dropped_attempt_leaves_no_effect_and_frees_its_key(pool: PgPool) {
     close(&[&pool_1, &pool_2]).await;
 }
 
-#[sqlx::test(migrations = false)]
-async fn p8_startup_refuses_a_missing_schema(pool: PgPool) {
-    let (store_pool, store) = replica(&dsn_for(&pool).await).await;
-    assert_eq!(
-        store.check_startup().await,
-        Err(StartupError::SchemaMissing)
-    );
-    // A table without the store's columns is a missing schema too.
-    pool.execute("CREATE TABLE http_idempotency_records (scope_key bytea PRIMARY KEY)")
-        .await
-        .expect("a partial table");
-    assert_eq!(
-        store.check_startup().await,
-        Err(StartupError::SchemaMissing)
-    );
-    close(&[&store_pool]).await;
-}
-
-#[sqlx::test(migrations = false)]
-async fn p8_a_live_legacy_row_refuses_the_transition_and_is_preserved(pool: PgPool) {
-    pool.execute(include_str!(
-        "../../../migrations/20260923000001_create_http_idempotency_records.sql"
-    ))
-    .await
-    .expect("the legacy schema");
-    migrate::MIGRATOR
-        .skip(&pool, Some(20_260_923_000_001))
-        .await
-        .expect("the legacy migration is marked applied");
-    sqlx::query(
-        "INSERT INTO http_idempotency_records \
-         (scope_key, fingerprint, format, status, headers, body, expires_at) \
-         VALUES ($1, $2, 1, 201, '', 'legacy-response', clock_timestamp() + interval '1 hour')",
-    )
-    .bind(SCOPE)
-    .bind(INPUT)
-    .execute(&pool)
-    .await
-    .expect("the live legacy row");
-
-    let refused = migrate::MIGRATOR.run(&pool).await;
-    assert!(refused.is_err(), "a live legacy row refuses the transition");
-    assert_eq!(records(&pool, SCOPE).await, 1, "the guarded row survives");
-    let legacy_format: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
-         WHERE table_name = 'http_idempotency_records' AND column_name = 'format')",
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("the pre-transition schema remains");
-    assert!(
-        legacy_format,
-        "the transition rolled its schema change back"
-    );
-
-    // The new store refuses the legacy schema before readiness admission.
-    let (store_pool, store) = replica(&dsn_for(&pool).await).await;
-    assert_eq!(
-        store.check_startup().await,
-        Err(StartupError::SchemaMissing)
-    );
-    close(&[&store_pool]).await;
-}
-
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn p8_startup_accepts_a_migrated_writer_and_refuses_a_read_only_session(pool: PgPool) {
+async fn p8_startup_admits_a_migrated_writer_and_refuses_a_read_only_session(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     let (writer_pool, writer) = replica(&dsn).await;
     assert_eq!(writer.check_startup().await, Ok(()));

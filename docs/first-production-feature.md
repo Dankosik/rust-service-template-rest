@@ -33,10 +33,9 @@ tracker or cancellation token to this library-owned resolver/pool work.
 For an operation that must commit its business effect at most once per
 caller and key, the retained [HTTP idempotency profile](http-idempotency.md)
 composes replay and arbitration around it. Keep the operation's ordinary
-protected annotation and compose the route through `Composer::route` rather
-than the plain `routes!` merge: the composer generates `x-idempotent`, the
-`Idempotency-Key` parameter, and the idempotency responses, so do not declare
-them by hand.
+protected annotation and compose the route through fallible `Composer::route`:
+the composer generates the `Idempotency-Key` parameter and idempotency
+responses, so do not declare them by hand.
 <!-- template:end http-idempotency:docs-first-feature-http-idempotency -->
 
 
@@ -257,12 +256,13 @@ pub fn contract() -> OpenApiRouter<ReadinessReader> {
 
 <!-- template:begin http-idempotency:docs-first-feature-http-idempotency-contract -->
 With the idempotency pack retained, `contract` also takes the idempotency
-composer: `pub fn contract(idempotency: &mut infra_http::idempotency::Composer) -> OpenApiRouter<ReadinessReader>`,
+composer: `pub fn contract(idempotency: &mut infra_http::idempotency::Composer) -> Result<OpenApiRouter<ReadinessReader>, Box<dyn Error + Send + Sync>>`,
 merging components with
 `.merge(OpenApiRouter::with_openapi(idempotency.components()))` and composing an
 idempotent operation with
-`.routes(idempotency.route(utoipa_axum::routes!(handler)))` instead of a plain
-`.merge`.
+`.routes(idempotency.route(utoipa_axum::routes!(handler))?)` instead of a plain
+`.merge`. Propagate `CompositionError` through the existing assembly error path and call
+`finish` once after every route is composed.
 <!-- template:end http-idempotency:docs-first-feature-http-idempotency-contract -->
 
 Nothing else in `service` changes: the hardened chain, the listeners, and

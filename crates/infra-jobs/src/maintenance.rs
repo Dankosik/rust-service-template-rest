@@ -1,6 +1,5 @@
 //! The startup check, retention, and the live-job gauges.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -42,23 +41,9 @@ pub const LIVE_JOBS_SAMPLE_CAP: i64 = 1_000;
 const LIVE_JOBS_SAMPLE_CAP_VALUE: f64 = 1_000.0;
 /// Bound on the startup check, from acquire to the transaction's end.
 pub const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
-/// The writer check and the table's shape. A missing table or column fails the statement.
-const STARTUP_CHECK: &str = "SELECT NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS writable, \
-     (SELECT count(*) FROM (SELECT id, kind, payload, unique_key, state, failure_reason, attempts, \
-          claim_generation, not_before, claim_expires_at, finished_at, error_summary, trace_context, trace_state \
-      FROM background_jobs LIMIT 0) AS shape) AS shape_rows, \
-     COALESCE((SELECT attribute.atttypid = 'jsonb'::regtype \
-          FROM pg_attribute AS attribute \
-          WHERE attribute.attrelid = 'background_jobs'::regclass \
-            AND attribute.attname = 'payload' \
-            AND attribute.attnum > 0 \
-            AND NOT attribute.attisdropped), false) AS payload_jsonb, \
-     COALESCE((SELECT attribute.atttypid = 'text'::regtype \
-          FROM pg_attribute AS attribute \
-          WHERE attribute.attrelid = 'background_jobs'::regclass \
-            AND attribute.attname = 'unique_key' \
-            AND attribute.attnum > 0 \
-            AND NOT attribute.attisdropped), false) AS unique_key_text";
+/// Whether the current session can write. Migration-history admission owns
+/// schema compatibility; this check keeps only the live writer property.
+const STARTUP_CHECK: &str = "SELECT NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS writable";
 
 const RETAIN_COMPLETED: &str = "DELETE FROM background_jobs \
      WHERE id = ANY (ARRAY( \
@@ -136,11 +121,10 @@ const SAMPLE: &str = "WITH sampled AS ( \
 const RETENTION_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '1000ms'";
 const SAMPLE_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '2000ms'";
 
-/// Check the schema shape and a writable session, bounded to 5 s.
+/// Check UTF8 server encoding and a writable session, bounded to 5 s.
 ///
 /// # Errors
 ///
-/// [`StartupError::SchemaMissing`] for SQLSTATE `42P01` or `42703`,
 /// [`StartupError::UnsupportedEncoding`] when PostgreSQL is not UTF8,
 /// [`StartupError::NotWritable`] when `writable` is false, and
 /// [`StartupError::Unavailable`] for anything else, including the bound.
@@ -160,22 +144,14 @@ pub(crate) async fn check_startup(shared: &Shared) -> Result<(), StartupError> {
             let row = sqlx::query(STARTUP_CHECK)
                 .fetch_one(&mut *conn)
                 .await
-                .map_err(|err| Refused(schema_refusal(&err)))?;
-            let payload_jsonb = row
-                .try_get::<bool, _>("payload_jsonb")
-                .map_err(|_| Refused(StartupError::Unavailable))?;
-            let unique_key_text = row
-                .try_get::<bool, _>("unique_key_text")
                 .map_err(|_| Refused(StartupError::Unavailable))?;
             let writable = row
                 .try_get::<bool, _>("writable")
                 .map_err(|_| Refused(StartupError::Unavailable))?;
-            if !payload_jsonb || !unique_key_text {
-                Err(Refused(StartupError::SchemaMissing))
-            } else if !writable {
-                Err(Refused(StartupError::NotWritable))
-            } else {
+            if writable {
                 Ok(())
+            } else {
+                Err(Refused(StartupError::NotWritable))
             }
         },
     );
@@ -438,15 +414,4 @@ impl From<TxError> for Refused {
     fn from(_err: TxError) -> Self {
         Self(StartupError::Unavailable)
     }
-}
-
-fn schema_refusal(err: &sqlx::Error) -> StartupError {
-    match sqlstate(err).as_deref() {
-        Some("42P01" | "42703") => StartupError::SchemaMissing,
-        _ => StartupError::Unavailable,
-    }
-}
-
-fn sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
-    err.as_database_error()?.code()
 }

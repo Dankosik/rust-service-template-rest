@@ -37,6 +37,7 @@ infra-bearerauthn = { workspace = true }
 # template:end authn:service-authn-dependency
 # template:begin postgres:service-postgres-dependency
 infra-postgres = { workspace = true }
+migrate = { workspace = true }
 secrecy = { workspace = true }
 # template:end postgres:service-postgres-dependency
 # template:begin http-idempotency:service-http-idempotency-dependency

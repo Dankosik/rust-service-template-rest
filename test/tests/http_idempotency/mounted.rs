@@ -7,7 +7,7 @@
 //! `Idempotency::execute`, where the port's adapter writes through
 //! `infra_postgres::connection`. `Composer::route` composes it with
 //! the real introspection verifier, which asks a TLS fixture provider on
-//! loopback; agreement is asserted active, and `axum-test` drives the
+//! loopback; activation is asserted active, and `axum-test` drives the
 //! hardened router. Each response is checked for status, content type,
 //! Problem code, and headers, and the outcome counter is read from a
 //! thread-local Prometheus recorder: `#[sqlx::test]` runs a current-thread
@@ -289,6 +289,10 @@ fn created_response(widget: Widget) -> Response {
         LAST_MODIFIED,
         HeaderValue::from_static("Sun, 06 Nov 1994 08:49:37 GMT"),
     );
+    // The outer idempotency boundary owns this reserved response metadata.
+    // Supplying a conflicting handler value proves it cannot be captured or
+    // returned as a replay claim.
+    headers.insert("idempotent-replayed", HeaderValue::from_static("false"));
     response
 }
 
@@ -531,8 +535,16 @@ fn widget_contract(composer: &mut Composer) -> OpenApiRouter<health::ReadinessRe
     // 403 among them must resolve), and the composer adds its own.
     OpenApiRouter::with_openapi(bearer_document())
         .merge(infra_http::router())
-        .routes(composer.route(routes!(create_widget)))
-        .routes(composer.route(routes!(replace_widget)))
+        .routes(
+            composer
+                .route(routes!(create_widget))
+                .expect("the create route composes"),
+        )
+        .routes(
+            composer
+                .route(routes!(replace_widget))
+                .expect("the replace route composes"),
+        )
         .merge(OpenApiRouter::with_openapi(composer.components()))
 }
 
@@ -565,10 +577,7 @@ impl Mounted {
         });
         let mut composer = Composer::new(Store::new(store_pool.clone(), RETENTION));
         let contract = widget_contract(&mut composer);
-        let document = contract.get_openapi().clone();
-        let activation = composer
-            .agree(&document)
-            .expect("the composed operation agrees with the document");
+        let activation = composer.finish();
         assert!(
             matches!(activation, Activation::Active { .. }),
             "{activation:?}"
@@ -1248,6 +1257,10 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
 
     let first = mounted.create(ALICE, "k-1", &input, "req-first").await;
     let widget = created(&first, "req-first");
+    assert!(
+        first.maybe_header("idempotent-replayed").is_none(),
+        "a fresh success must not carry handler-supplied replay metadata"
+    );
     assert_eq!(outcomes(&recorder), counts(&[("executed", 1)]));
 
     // Member order and whitespace are raw request identity: they do not
@@ -1277,6 +1290,11 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     // Exact method/path/query/content type/body bytes replay the response.
     let exact = mounted.create(ALICE, "k-1", &input, "req-exact").await;
     created(&exact, "req-exact");
+    assert_eq!(
+        exact.maybe_header("idempotent-replayed"),
+        Some(HeaderValue::from_static("true")),
+        "only the decoded stored response becomes a replay"
+    );
     assert_eq!(exact.as_bytes(), first.as_bytes());
 
     // Authorization runs on every attempt: the same caller through a revoked
@@ -1306,6 +1324,10 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     assert_ne!(created(&other, "req-bob")["id"], widget["id"]);
     let again = mounted.create(ALICE, "k-1", &input, "req-again").await;
     created(&again, "req-again");
+    assert_eq!(
+        again.maybe_header("idempotent-replayed"),
+        Some(HeaderValue::from_static("true"))
+    );
     assert_eq!(again.as_bytes(), first.as_bytes());
     assert_eq!(
         outcomes(&recorder),

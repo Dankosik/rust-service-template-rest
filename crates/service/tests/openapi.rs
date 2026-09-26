@@ -26,7 +26,8 @@ const HTTP_METHODS: &[&str] = &[
 const PROTECTED_PROBLEM_STATUSES: &[&str] = &["400", "401", "403", "503", "504"];
 
 fn document() -> Value {
-    serde_json::to_value(service::api::document()).expect("document serializes")
+    serde_json::to_value(service::api::document().expect("document composes"))
+        .expect("document serializes")
 }
 
 /// `(method, path, operation)` for every operation in `document`.
@@ -303,25 +304,41 @@ fn retained_idempotency_document_declares_the_family_components() {
     }
 }
 
-/// The composer serves exactly the operations the assembled document
-/// declares idempotent: none, and so inactive, until one opts in.
+/// Only `Composer::route` may declare `Idempotency-Key`: a hand-written
+/// declaration on an uncomposed operation would promise a replay that no
+/// boundary enforces.
 #[test]
-fn assembled_contract_agrees_with_its_idempotent_declarations() {
+fn only_composed_operations_declare_the_idempotency_key() {
     use infra_http::idempotency::{Activation, Composer};
 
-    let declared = operations(&document())
-        .iter()
-        .filter(|(_, _, operation)| operation.get("x-idempotent").is_some())
-        .count();
     let mut composer = Composer::inert();
-    let contract = service::api::contract(&mut composer);
-    match composer.agree(contract.get_openapi()) {
-        Ok(Activation::Inactive) => assert_eq!(declared, 0),
-        Ok(Activation::Active {
-            operations: served, ..
-        }) => assert_eq!(served.get(), declared),
-        Err(err) => panic!("the assembled contract disagrees: {err}"),
-    }
+    let contract = service::api::contract(&mut composer).expect("contract composes");
+    let document = serde_json::to_value(contract.get_openapi()).expect("document serializes");
+    let declared = operations(&document)
+        .iter()
+        .filter(|(_, _, operation)| declares_idempotency_key(operation))
+        .count();
+    let served = match composer.finish() {
+        Activation::Inactive => 0,
+        Activation::Active {
+            operations: count, ..
+        } => count.get(),
+    };
+    assert_eq!(declared, served);
+}
+
+/// An `Idempotency-Key` header parameter, in any letter case.
+fn declares_idempotency_key(operation: &Value) -> bool {
+    operation["parameters"]
+        .as_array()
+        .is_some_and(|parameters| {
+            parameters.iter().any(|parameter| {
+                parameter["in"] == "header"
+                    && parameter["name"]
+                        .as_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("Idempotency-Key"))
+            })
+        })
 }
 
 // template:end http-idempotency:service-openapi-http-idempotency-contract

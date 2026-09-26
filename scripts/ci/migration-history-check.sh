@@ -130,7 +130,38 @@ fi
 # shellcheck disable=SC2016
 is_migration='$NF ~ /^[0-9]+_.+\.sql$/'
 diff_status=$(git diff --name-status --find-renames --find-copies "${base}" -- "${migration_dir}/")
-changes=$(printf '%s\n' "${diff_status}" | awk -F'\t' '$1 != "A" && $1 != ""' | awk -F/ "${is_migration}" || true)
+
+idempotency_create="migrations/20260923000001_create_http_idempotency_records.sql"
+jobs_create="migrations/20260924000001_create_background_jobs.sql"
+jobs_simplify="migrations/20260925000001_simplify_background_jobs.sql"
+idempotency_simplify="migrations/20260926001448_simplify_http_idempotency_records.sql"
+transition_status=$(printf '%s\n' "${diff_status}" | awk -F'\t' -v first="${idempotency_create}" -v second="${jobs_create}" -v third="${jobs_simplify}" -v fourth="${idempotency_simplify}" '$2 == first || $2 == second || $2 == third || $2 == fourth')
+
+# The only pre-adoption history rewrite accepted by this gate. It is exact by
+# path and old/new blob identity, so a later edit, a partial squash, or a
+# different rewrite still falls through to the append-only refusal below.
+reviewed_pre_adoption_squash() {
+	[[ ${migration_dir} == migrations ]] || return 1
+	local expected_status=$'M\t'"${idempotency_create}"$'\nM\t'"${jobs_create}"$'\nD\t'"${jobs_simplify}"$'\nD\t'"${idempotency_simplify}"
+	[[ ${transition_status} == "${expected_status}" ]] || return 1
+	[[ $(git rev-parse "${base}:${idempotency_create}" 2>/dev/null) == 67545b94cfe4f58f931b24515801f6ab6e157720 ]] || return 1
+	[[ $(git rev-parse "${base}:${jobs_create}" 2>/dev/null) == 167ca4d43efd05cd6e521a3818cf07a317005138 ]] || return 1
+	[[ $(git rev-parse "${base}:${jobs_simplify}" 2>/dev/null) == 8e947805e66ce535f3853a08704fd70ff8e66a89 ]] || return 1
+	[[ $(git rev-parse "${base}:${idempotency_simplify}" 2>/dev/null) == e98208f8aab9b15b6c369a16383fa4d1a549e7d1 ]] || return 1
+	[[ -f ${idempotency_create} && -f ${jobs_create} && ! -e ${jobs_simplify} && ! -e ${idempotency_simplify} ]] || return 1
+	[[ $(git hash-object "${idempotency_create}") == ca23412adb35422a42235979356b13358723bf85 ]] || return 1
+	[[ $(git hash-object "${jobs_create}") == 600b30e77bcc5e6bdb0607b4f3d58fd2779cd874 ]] || return 1
+	return 0
+}
+
+if reviewed_pre_adoption_squash; then
+	# The exception clears only its four known rewrite/delete entries. New
+	# migration files still pass through the normal ordering check below.
+	changes=$(printf '%s\n' "${diff_status}" | awk -F'\t' -v first="${idempotency_create}" -v second="${jobs_create}" -v third="${jobs_simplify}" -v fourth="${idempotency_simplify}" '$2 != first && $2 != second && $2 != third && $2 != fourth && $1 != "A" && $1 != ""' | awk -F/ "${is_migration}" || true)
+else
+	changes=$(printf '%s\n' "${diff_status}" | awk -F'\t' '$1 != "A" && $1 != ""' | awk -F/ "${is_migration}" || true)
+fi
+
 if [[ -n ${changes} ]]; then
 	echo "migration history: applied migration files are append-only; only additions are allowed (${scope})" >&2
 	printf '%s\n' "${changes}" >&2

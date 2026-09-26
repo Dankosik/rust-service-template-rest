@@ -23,7 +23,14 @@ if [[ -z ${requested_image} ]]; then
 	make runtime-image-build RUNTIME_IMAGE="${image}"
 fi
 
-trap compose_postgres_down EXIT INT TERM
+history_container=''
+cleanup() {
+	if [[ -n ${history_container} ]]; then
+		docker rm -f "${history_container}" >/dev/null 2>&1 || true
+	fi
+	compose_postgres_down
+}
+trap cleanup EXIT INT TERM
 compose_postgres_up service-migration
 dsn=$(compose_postgres_network_dsn)
 
@@ -36,6 +43,42 @@ run_migrate() {
 		-e "APP__POSTGRES__DSN=${dsn}" \
 		--entrypoint /migrate "${image}"
 }
+
+# A nonempty embedded set cannot admit an absent history: startup checks it
+# read-only and must refuse before the migrator creates bookkeeping. An empty
+# source set intentionally admits an empty database, so preserve that profile's
+# contract by skipping this nonempty-source scenario.
+if compgen -G 'migrations/*.sql' >/dev/null; then
+	history_container=$(docker run -d --network "${COMPOSE_NETWORK}" \
+		--read-only --cap-drop=ALL --security-opt=no-new-privileges \
+		-e APP__POSTGRES__ENABLED=true \
+		-e "APP__POSTGRES__DSN=${dsn}" \
+		"${image}")
+	history_deadline=$((SECONDS + 30))
+	while [[ $(docker inspect --format '{{.State.Running}}' "${history_container}") == true ]]; do
+		if ((SECONDS >= history_deadline)); then
+			echo "service did not refuse missing migration history within 30 seconds" >&2
+			docker logs "${history_container}" >&2
+			exit 1
+		fi
+		sleep 0.1
+	done
+	history_exit=$(docker inspect --format '{{.State.ExitCode}}' "${history_container}")
+	history_refusal=$(docker logs "${history_container}" 2>&1)
+	docker rm "${history_container}" >/dev/null
+	history_container=''
+	if [[ ${history_exit} == 0 ]]; then
+		echo "service admitted missing migration history" >&2
+		printf '%s\n' "${history_refusal}" >&2
+		exit 1
+	fi
+	grep -Fq 'postgres migration history: embedded migrations are pending' <<<"${history_refusal}" || {
+		echo "service did not refuse missing migration history" >&2
+		printf '%s\n' "${history_refusal}" >&2
+		exit 1
+	}
+	echo "service refused missing migration history before migration"
+fi
 
 first=$(run_migrate)
 printf '%s\n' "${first}"

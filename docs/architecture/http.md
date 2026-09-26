@@ -136,13 +136,14 @@ timer alone owns `504 request_timeout`.
 <!-- template:end request-budget:docs-http-request-budget -->
 <!-- template:begin http-idempotency:docs-http-idempotent-composition -->
 With a retained idempotency profile, compose an idempotent operation through
-`Composer::route(routes)` using the macro-only binding above. Key handling wraps the upstream
-`UtoipaMethodRouter` tuple; final authentication remains outside it, so at request time
-authentication decides before key validation, and both precede any handler
-extractor. `Composer::agree(document)` re-checks the declaration rules
-against the assembled contract and activates the boundary; a violation fails
-startup and the contract tests. The [HTTP idempotency guide](../http-idempotency.md)
-owns retained-profile activation, retry, and data-custody decisions.
+`Composer::route(routes)?` using the macro-only binding above. The fallible
+local composition validates the route carrier before it can be served;
+`Composer::finish(self) -> Activation` then activates the count of successfully
+composed operations without reading the assembled document. Key handling wraps
+the upstream `UtoipaMethodRouter` tuple; final authentication remains outside
+it, so at request time authentication decides before key validation, and both
+precede any handler extractor. The [HTTP idempotency guide](../http-idempotency.md)
+owns activation, retry, and data-custody decisions.
 
 The composed seam captures the bounded original URI, received Content-Type
 values, and raw body once, restores the body for extraction, then lets normal
