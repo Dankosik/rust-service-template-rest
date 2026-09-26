@@ -232,31 +232,55 @@ no automatic rollback, reset, retry or destructive resume.
 
 ## Validation boundary
 
+<!-- template:begin webhooks-common:docs-template-sync-webhooks -->
+## Webhook profile projection
+
+`WEBHOOKS` accepts `none` or `durable`; `INBOUND_WEBHOOKS` accepts `none` or
+`standard-webhooks`, and both default to `none`. Each selected direction requires
+`DATABASE=postgres` and `JOBS=postgres`; outbound additionally requires
+`OUTBOUND_HTTP=bounded`. Invalid values or combinations refuse before target
+mutation. A retained capability remains runtime-inert until endpoints/bindings
+are configured.
+
+The lock records both choices. Historical locks infer them as `none` only through
+the existing compatible historical shapes; changing an established choice remains
+a refused profile migration. The initializer removes absent shared protocol,
+directional crate/dependency, docs, migration, route, test, and marker edges.
+Outbound-only removes ingress/receipt material; inbound-only does not retain
+outbound HTTP or DNS solely for webhooks.
+<!-- template:end webhooks-common:docs-template-sync-webhooks -->
+
 Use the service's [command policy](build-test-and-development-commands.md) and
 [validation router](validation-routing.md) for ordinary development.
 The source template additionally owns `make template-owned-purity-check` and
-`ALLOW_FULL=1 make template-init-check`. It checks all 208 canonical profile
-and harness projections, then initializes, builds and tests twenty-six core
-representatives: one per DATABASE × AUTHN × OUTBOUND_HTTP × HTTP_IDEMPOTENCY
-× JOBS runtime graph, of which graphs 13-16 and 23-26 also run their retained
-idempotency database suite and graphs 17-26 run the jobs suite (in 23-26 with
-its joint module), each in one `test-integration-db.sh` call. Exact
-non-harness tree equality proves that the other harness choices do not change
-runtime or contract-generation inputs.
+`ALLOW_FULL=1 make template-init-check`. It checks 368 cheap canonical
+profile/harness projections, then initializes and validates 46 runtime graphs.
+Graphs 1--26 are the existing baseline. Graphs 27--46 add five auth/idempotency
+blocks, each ordered as inbound-only without bounded outbound HTTP, inbound-only
+with it, outbound-only with it, and both directions with it: graphs 27--30 use
+`AUTHN=none HTTP_IDEMPOTENCY=none`; 31--34 use `oidc-jwt/none`; 35--38 use
+`oidc-introspection/none`; 39--42 use `oidc-jwt/postgres`; and 43--46 use
+`oidc-introspection/postgres`. The three full new shapes are 27 (inbound), 29
+(outbound), and 30 (both). The other seventeen retain locked/offline metadata
+plus `cargo check --workspace --all-targets --features integration-tests/integration`
+proof. Inbound-focused graphs also run the existing service OpenAPI test and
+`inert_inbound_webhook_route_rejects_unknown_endpoint_without_signature_work`
+lifecycle test. This focused proof avoids repeating a full workspace/database
+suite. Exact non-harness tree equality proves that other harness choices do not
+alter runtime or contract-generation inputs.
 Quality, dependency, image and database gates retain their own scopes; the
 initializer command does not repeat the full aggregate per harness. Every
 initialization in one run shares one absolute Cargo target (an explicit
 `CARGO_TARGET_DIR`, or the run's private one), so the locked dependency graph
-compiles once. CI runs the check as eight parallel parts: the source suites
-with the projections, graphs 1-6, graphs 7-12, graphs 13-16, graphs 17-19,
-graphs 20-22, graphs 23-24, and graphs 25-26, the last five of which also
-need Docker for their database suites. `make verify` leaves it to
+compiles once. CI retains eight partitions. Its recorded graph plan assigns the
+new graphs by observed duration and retains each graph's selected full or focused
+proof; it does not redesign unrelated pipeline work. `make verify` leaves it to
 CI unless `ALLOW_FULL=1`. A change to projected text alone runs only
 `make template-init-projections`, locally and in CI.
 
 `bash scripts/ci/template-init-check.sh --projections-only` records the
-focused 208-projection proof without Cargo or full/heavy admission. It does
-not claim 208 public-CLI initializations or builds. `--source-checks` keeps
+focused 368-projection proof without Cargo or full/heavy admission. It does
+not claim 368 public-CLI initializations or builds. `--source-checks` keeps
 the source safety/purity/sync route. The public initializer always performs
 its complete locked metadata, formatting and OpenAPI preflight before
 changing a target; neither focused proof mode changes that command. These

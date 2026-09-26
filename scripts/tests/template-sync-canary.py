@@ -98,6 +98,8 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("outbound_http", None)
     lock["profiles"].pop("http_idempotency", None)
     lock["profiles"].pop("jobs", None)
+    lock["profiles"].pop("webhooks", None)
+    lock["profiles"].pop("inbound_webhooks", None)
     lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
@@ -112,6 +114,8 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("outbound_http", None)
     lock["profiles"].pop("http_idempotency", None)
     lock["profiles"].pop("jobs", None)
+    lock["profiles"].pop("webhooks", None)
+    lock["profiles"].pop("inbound_webhooks", None)
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -152,7 +156,7 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
 
 def assert_profile_output(
     source: Path, target: Path, authn: str, outbound_http: str, http_idempotency: str = "none",
-    jobs: str = "none",
+    jobs: str = "none", webhooks: str = "none", inbound_webhooks: str = "none",
 ) -> None:
     for profile, selected in (("authn", authn != "none"), ("oidc-jwt", authn == "oidc-jwt"), ("oidc-introspection", authn == "oidc-introspection")):
         assert_profile_pack(source, target, profile, selected)
@@ -165,6 +169,10 @@ def assert_profile_output(
         raise AssertionError(f"sync canary lock did not record http_idempotency={http_idempotency}")
     if lock["profiles"].get("jobs") != jobs:
         raise AssertionError(f"sync canary lock did not record jobs={jobs}")
+    if lock["profiles"].get("webhooks") != webhooks:
+        raise AssertionError(f"sync canary lock did not record webhooks={webhooks}")
+    if lock["profiles"].get("inbound_webhooks") != inbound_webhooks:
+        raise AssertionError(f"sync canary lock did not record inbound_webhooks={inbound_webhooks}")
     assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
     shared_selected = authn != "none" or outbound_http == "bounded"
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
@@ -178,6 +186,9 @@ def assert_profile_output(
     assert_profile_pack(
         source, target, "jobs-http-idempotency", jobs == "postgres" and http_idempotency == "postgres"
     )
+    assert_profile_pack(source, target, "webhooks-common", webhooks == "durable" or inbound_webhooks == "standard-webhooks")
+    assert_profile_pack(source, target, "webhooks", webhooks == "durable")
+    assert_profile_pack(source, target, "inbound-webhooks", inbound_webhooks == "standard-webhooks")
 
 
 def initialize(
@@ -186,6 +197,8 @@ def initialize(
     *,
     database: str = "none",
     jobs: str | None = None,
+    webhooks: str | None = None,
+    inbound_webhooks: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [
         "bash", os.fspath(source / "scripts/init-module.sh"), "--repo", os.fspath(target),
@@ -201,6 +214,10 @@ def initialize(
         command.extend(("--http-idempotency", http_idempotency))
     if jobs is not None:
         command.extend(("--jobs", jobs))
+    if webhooks is not None:
+        command.extend(("--webhooks", webhooks))
+    if inbound_webhooks is not None:
+        command.extend(("--inbound-webhooks", inbound_webhooks))
     return run(command, cwd=source)
 
 
@@ -213,6 +230,26 @@ def check(source: Path) -> None:
         if initialized.returncode:
             raise AssertionError(initialized.stderr)
         assert_profile_output(source, target, "oidc-jwt", "bounded")
+        webhook_target = work / "webhooks"
+        clone(source, webhook_target)
+        webhook_initialized = initialize(
+            source, webhook_target, "none", "bounded", database="postgres", jobs="postgres",
+            webhooks="durable", inbound_webhooks="standard-webhooks",
+        )
+        if webhook_initialized.returncode:
+            raise AssertionError(webhook_initialized.stderr)
+        assert_profile_output(
+            source, webhook_target, "none", "bounded", jobs="postgres",
+            webhooks="durable", inbound_webhooks="standard-webhooks",
+        )
+        # Initialization removes unselected adapter carriers. Commit that
+        # derived baseline before sync admission, as the existing jobs-none
+        # canary does, so the sync check exercises parity rather than its
+        # production dirty-selected-target refusal.
+        commit(webhook_target, "initialize webhook profiles")
+        webhook_sync = sync(source, webhook_target, "--check")
+        if webhook_sync.returncode:
+            raise AssertionError(f"webhook profile sync parity failed: {webhook_sync.stderr}")
         for authn in ("oidc-introspection", None):
             profile_target = work / f"profile-{authn or 'historical-none'}"
             clone(source, profile_target)

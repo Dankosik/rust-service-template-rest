@@ -118,6 +118,12 @@ export HTTP_IDEMPOTENCY
 JOBS ?= none
 export JOBS
 
+WEBHOOKS ?= none
+export WEBHOOKS
+
+INBOUND_WEBHOOKS ?= none
+export INBOUND_WEBHOOKS
+
 template-init: ## Initialize the service identity and selected profiles once
 	@bash scripts/init-module.sh --repo .
 

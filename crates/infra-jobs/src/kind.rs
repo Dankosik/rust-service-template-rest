@@ -7,10 +7,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use infra_postgres::{Tx, connection};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use sqlx::Connection as _;
-use sqlx::postgres::{PgConnection, PgPool};
+use sqlx::postgres::PgPool;
+use tokio::time::Instant;
 
 use crate::enqueue::{InvalidDelay, checked_delay_micros};
 use tokio_util::sync::CancellationToken;
@@ -72,6 +73,7 @@ pub struct Job<K> {
     payload: K,
     cancellation: CancellationToken,
     pool: PgPool,
+    deadline: Instant,
 }
 
 impl<K: JobKind> Job<K> {
@@ -105,6 +107,12 @@ impl<K: JobKind> Job<K> {
         self.cancellation.clone()
     }
 
+    /// The supervisor's fixed deadline for this attempt.
+    #[must_use]
+    pub const fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
     /// Complete this fenced claim on the caller's already-open transaction.
     ///
     /// Propagate this error out of the transaction closure so stale ownership
@@ -112,17 +120,13 @@ impl<K: JobKind> Job<K> {
     ///
     /// # Errors
     ///
-    /// [`CompleteError::NoTransaction`] outside a tracked transaction,
     /// [`CompleteError::StaleClaim`] when this running claim no longer exists,
     /// or [`CompleteError::Database`] when the statement fails.
-    pub async fn complete_in_tx(&self, conn: &mut PgConnection) -> Result<(), CompleteError> {
-        if !conn.is_in_transaction() {
-            return Err(CompleteError::NoTransaction);
-        }
+    pub async fn complete_in_tx(&self, tx: &mut Tx<'_>) -> Result<(), CompleteError> {
         let affected = sqlx::query(crate::attempt::COMPLETE)
             .bind(self.id.to_string())
             .bind(self.generation)
-            .execute(conn)
+            .execute(&mut *connection(tx))
             .await?
             .rows_affected();
         if affected == 1 {
@@ -153,9 +157,6 @@ impl<K: JobKind> fmt::Debug for Job<K> {
 /// Why transactional completion could not establish current ownership.
 #[derive(Debug, thiserror::Error)]
 pub enum CompleteError {
-    /// The connection has no sqlx-tracked transaction.
-    #[error("job completion requires an open transaction")]
-    NoTransaction,
     /// The running row no longer has this job's fencing generation.
     #[error("job claim is stale")]
     StaleClaim,
@@ -169,6 +170,7 @@ pub(crate) enum Disposition {
     Retry,
     Permanent,
     RetryAfter(i64),
+    RetryAfterAtLeast(i64),
     Snooze(i64),
     TransactionUnknown,
 }
@@ -206,6 +208,24 @@ impl JobError {
     pub fn retry_after(error: impl fmt::Display, delay: Duration) -> Result<Self, InvalidDelay> {
         Ok(Self {
             disposition: Disposition::RetryAfter(checked_delay_micros(delay)?),
+            summary: error.to_string(),
+        })
+    }
+
+    /// Retry after at least `delay`, spending this attempt.
+    ///
+    /// Jobs retains its normal jittered backoff and stores whichever delay is
+    /// longer. The floor never bypasses exhaustion.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidDelay`] if the floor exceeds [`crate::MAX_DELAY`].
+    pub fn retry_after_at_least(
+        error: impl fmt::Display,
+        delay: Duration,
+    ) -> Result<Self, InvalidDelay> {
+        Ok(Self {
+            disposition: Disposition::RetryAfterAtLeast(checked_delay_micros(delay)?),
             summary: error.to_string(),
         })
     }
@@ -473,11 +493,16 @@ pub(crate) type HandlerFuture =
 
 pub(crate) trait Dispatch: Send + Sync {
     /// Decode `payload` and build the handler's future.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "dispatch assembles one Job from the claim and its fixed attempt custody"
+    )]
     fn prepare(
         &self,
         id: JobId,
         attempt: u16,
         generation: i64,
+        deadline: Instant,
         payload: &[u8],
         cancellation: CancellationToken,
         pool: PgPool,
@@ -499,6 +524,7 @@ where
         id: JobId,
         attempt: u16,
         generation: i64,
+        deadline: Instant,
         payload: &[u8],
         cancellation: CancellationToken,
         pool: PgPool,
@@ -511,6 +537,7 @@ where
             payload: decoded,
             cancellation,
             pool,
+            deadline,
         };
         let handler = Arc::clone(&self.handler);
         Ok(Box::pin(async move { handler.run(job).await }))
@@ -695,10 +722,12 @@ mod tests {
     #[tokio::test]
     async fn dispatch_prepare_runs_the_handler_and_rejects_a_bad_payload() {
         let id = JobId::parse("01234567-89ab-cdef-fedc-ba9876543210").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
         let mut kinds = Kinds::new();
         kinds.register(Policy::default(), move |job: Job<Sample>| async move {
             assert_eq!(job.id(), id);
             assert_eq!(job.attempt(), 3);
+            assert_eq!(job.deadline(), deadline);
             assert_eq!(
                 job.payload(),
                 &Sample {
@@ -719,6 +748,7 @@ mod tests {
                 id,
                 3,
                 99,
+                deadline,
                 br#"{"n":7,"secret":"payload-secret"}"#,
                 token,
                 lazy_pool(),
@@ -726,10 +756,15 @@ mod tests {
             .unwrap();
         future.await.unwrap();
 
-        let err =
-            registered
-                .dispatch
-                .prepare(id, 1, 99, b"null", CancellationToken::new(), lazy_pool());
+        let err = registered.dispatch.prepare(
+            id,
+            1,
+            99,
+            Instant::now(),
+            b"null",
+            CancellationToken::new(),
+            lazy_pool(),
+        );
         assert!(err.is_err());
     }
 
@@ -745,6 +780,7 @@ mod tests {
             },
             cancellation: CancellationToken::new(),
             pool: lazy_pool(),
+            deadline: Instant::now(),
         };
         let text = format!("{job:?}");
         assert!(!text.contains("payload-secret"));

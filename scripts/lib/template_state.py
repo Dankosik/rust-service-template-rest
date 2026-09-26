@@ -33,6 +33,8 @@ AUTHN_CHOICES = ("none", "oidc-jwt", "oidc-introspection")
 OUTBOUND_HTTP_CHOICES = ("none", "bounded")
 HTTP_IDEMPOTENCY_CHOICES = ("none", "postgres")
 JOBS_CHOICES = ("none", "postgres")
+WEBHOOKS_CHOICES = ("none", "durable")
+INBOUND_WEBHOOKS_CHOICES = ("none", "standard-webhooks")
 HARNESS_CHOICES = ("core", "codex", "claude", "qwen", "cursor", "grok", "opencode", "all")
 
 
@@ -264,6 +266,28 @@ def jobs_requirement(database: str) -> str | None:
     return None
 
 
+def webhooks_requirement(database: str, jobs: str, outbound_http: str) -> str | None:
+    """Return the unmet durable-outbound webhook prerequisite, if any."""
+
+    if database != "postgres":
+        return "WEBHOOKS=durable requires DATABASE=postgres"
+    if jobs != "postgres":
+        return "WEBHOOKS=durable requires JOBS=postgres"
+    if outbound_http != "bounded":
+        return "WEBHOOKS=durable requires OUTBOUND_HTTP=bounded"
+    return None
+
+
+def inbound_webhooks_requirement(database: str, jobs: str) -> str | None:
+    """Return the unmet durable-inbound webhook prerequisite, if any."""
+
+    if database != "postgres":
+        return "INBOUND_WEBHOOKS=standard-webhooks requires DATABASE=postgres"
+    if jobs != "postgres":
+        return "INBOUND_WEBHOOKS=standard-webhooks requires JOBS=postgres"
+    return None
+
+
 def validate_profiles(value: object) -> dict[str, str]:
     if not isinstance(value, dict) or set(value) not in (
         {"database", "agent_harness"},
@@ -271,6 +295,10 @@ def validate_profiles(value: object) -> dict[str, str]:
         {"database", "authn", "outbound_http", "agent_harness"},
         {"database", "authn", "outbound_http", "http_idempotency", "agent_harness"},
         {"database", "authn", "outbound_http", "http_idempotency", "jobs", "agent_harness"},
+        {
+            "database", "authn", "outbound_http", "http_idempotency", "jobs", "webhooks",
+            "inbound_webhooks", "agent_harness",
+        },
     ):
         raise Refusal("profiles has an unsupported shape")
     database = value["database"]
@@ -278,6 +306,8 @@ def validate_profiles(value: object) -> dict[str, str]:
     outbound_http = value.get("outbound_http", "none")
     http_idempotency = value.get("http_idempotency", "none")
     jobs = value.get("jobs", "none")
+    webhooks = value.get("webhooks", "none")
+    inbound_webhooks = value.get("inbound_webhooks", "none")
     harness = value["agent_harness"]
     if not isinstance(database, str) or database not in DATABASE_CHOICES:
         raise Refusal("profiles.database is unsupported")
@@ -297,6 +327,24 @@ def validate_profiles(value: object) -> dict[str, str]:
         raise Refusal("profiles.jobs is unsupported")
     if jobs == "postgres" and jobs_requirement(database) is not None:
         raise Refusal("profiles.jobs=postgres requires profiles.database=postgres")
+    if not isinstance(webhooks, str) or webhooks not in WEBHOOKS_CHOICES:
+        raise Refusal("profiles.webhooks is unsupported")
+    if webhooks == "durable":
+        requirement = webhooks_requirement(database, jobs, outbound_http)
+        if requirement == "WEBHOOKS=durable requires DATABASE=postgres":
+            raise Refusal("profiles.webhooks=durable requires profiles.database=postgres")
+        if requirement == "WEBHOOKS=durable requires JOBS=postgres":
+            raise Refusal("profiles.webhooks=durable requires profiles.jobs=postgres")
+        if requirement == "WEBHOOKS=durable requires OUTBOUND_HTTP=bounded":
+            raise Refusal("profiles.webhooks=durable requires profiles.outbound_http=bounded")
+    if not isinstance(inbound_webhooks, str) or inbound_webhooks not in INBOUND_WEBHOOKS_CHOICES:
+        raise Refusal("profiles.inbound_webhooks is unsupported")
+    if inbound_webhooks == "standard-webhooks":
+        requirement = inbound_webhooks_requirement(database, jobs)
+        if requirement == "INBOUND_WEBHOOKS=standard-webhooks requires DATABASE=postgres":
+            raise Refusal("profiles.inbound_webhooks=standard-webhooks requires profiles.database=postgres")
+        if requirement == "INBOUND_WEBHOOKS=standard-webhooks requires JOBS=postgres":
+            raise Refusal("profiles.inbound_webhooks=standard-webhooks requires profiles.jobs=postgres")
     if not isinstance(harness, str) or harness not in HARNESS_CHOICES:
         raise Refusal("profiles.agent_harness is unsupported")
     # Schema-1 locks issued before authentication existed select the historical
@@ -308,6 +356,8 @@ def validate_profiles(value: object) -> dict[str, str]:
         "outbound_http": outbound_http,
         "http_idempotency": http_idempotency,
         "jobs": jobs,
+        "webhooks": webhooks,
+        "inbound_webhooks": inbound_webhooks,
         "agent_harness": harness,
     }
 
@@ -434,6 +484,40 @@ def lock_has_explicit_jobs(root: Path, required: bool = False) -> bool:
     return "jobs" in profiles
 
 
+def lock_has_explicit_webhooks(root: Path, required: bool = False) -> bool:
+    """Tell a current lock from the prior shape without rewriting it."""
+
+    path = Path(root) / LOCK_NAME
+    if not path.exists() and not path.is_symlink():
+        if required:
+            raise Refusal("template.lock is required")
+        return False
+    _regular_file(path, LOCK_NAME)
+    raw = parse_json_bytes(path.read_bytes(), LOCK_NAME)
+    validate_lock(raw)
+    assert isinstance(raw, dict)
+    profiles = raw["profiles"]
+    assert isinstance(profiles, dict)
+    return "webhooks" in profiles
+
+
+def lock_has_explicit_inbound_webhooks(root: Path, required: bool = False) -> bool:
+    """Tell a current lock from the prior shape without rewriting it."""
+
+    path = Path(root) / LOCK_NAME
+    if not path.exists() and not path.is_symlink():
+        if required:
+            raise Refusal("template.lock is required")
+        return False
+    _regular_file(path, LOCK_NAME)
+    raw = parse_json_bytes(path.read_bytes(), LOCK_NAME)
+    validate_lock(raw)
+    assert isinstance(raw, dict)
+    profiles = raw["profiles"]
+    assert isinstance(profiles, dict)
+    return "inbound_webhooks" in profiles
+
+
 def selected_profiles(root: Path) -> tuple[str, str]:
     """Return database and harness; the uninitialized source is postgres/all."""
 
@@ -493,6 +577,30 @@ def selected_jobs(root: Path) -> str:
     if lock["state"] != "complete":
         raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
     return lock["profiles"]["jobs"]
+
+
+def selected_webhooks(root: Path) -> str:
+    """Return the normalized outbound webhook selection, or source capability."""
+
+    root = Path(root)
+    lock = load_lock(root)
+    if lock is None:
+        return "durable" if (root / "crates/infra-webhooks/src/outbound.rs").is_file() else "none"
+    if lock["state"] != "complete":
+        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
+    return lock["profiles"]["webhooks"]
+
+
+def selected_inbound_webhooks(root: Path) -> str:
+    """Return the normalized inbound webhook selection, or source capability."""
+
+    root = Path(root)
+    lock = load_lock(root)
+    if lock is None:
+        return "standard-webhooks" if (root / "crates/infra-webhooks/src/inbound.rs").is_file() else "none"
+    if lock["state"] != "complete":
+        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
+    return lock["profiles"]["inbound_webhooks"]
 
 
 def selected_adapters(harness: str) -> tuple[str, ...]:
@@ -1065,6 +1173,8 @@ def _profile_command(arguments: argparse.Namespace) -> int:
             "outbound_http": selected_outbound_http(root),
             "http_idempotency": selected_http_idempotency(root),
             "jobs": selected_jobs(root),
+            "webhooks": selected_webhooks(root),
+            "inbound_webhooks": selected_inbound_webhooks(root),
             "agent_harness": harness,
         }[arguments.field]
         print(value)
@@ -1080,7 +1190,11 @@ def build_parser() -> argparse.ArgumentParser:
     profile = commands.add_parser("profile", help="print selected profile data")
     profile.add_argument("--repo", required=True, type=Path)
     profile.add_argument(
-        "--field", required=True, choices=("database", "authn", "outbound_http", "http_idempotency", "jobs", "agent_harness")
+        "--field", required=True,
+        choices=(
+            "database", "authn", "outbound_http", "http_idempotency", "jobs", "webhooks",
+            "inbound_webhooks", "agent_harness",
+        ),
     )
     profile.set_defaults(handler=_profile_command)
     return parser
