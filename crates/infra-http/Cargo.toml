@@ -18,6 +18,9 @@ axum = { workspace = true, features = ["http1", "tokio", "matched-path", "origin
 axum-prometheus = { workspace = true, features = ["prometheus"] }
 axum-tracing-opentelemetry = { workspace = true, features = ["tracing_level_info"] }
 health = { workspace = true }
+# template:begin inbound-webhooks:http-webhooks-dependency
+infra-webhooks = { workspace = true }
+# template:end inbound-webhooks:http-webhooks-dependency
 # template:begin authn:http-authn-dependency
 infra-bearerauthn = { workspace = true }
 # template:end authn:http-authn-dependency

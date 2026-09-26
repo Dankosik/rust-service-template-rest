@@ -106,6 +106,8 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("outbound_http", None)
     lock["profiles"].pop("http_idempotency", None)
     lock["profiles"].pop("jobs", None)
+    lock["profiles"].pop("webhooks", None)
+    lock["profiles"].pop("inbound_webhooks", None)
     lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
@@ -120,6 +122,8 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("outbound_http", None)
     lock["profiles"].pop("http_idempotency", None)
     lock["profiles"].pop("jobs", None)
+    lock["profiles"].pop("webhooks", None)
+    lock["profiles"].pop("inbound_webhooks", None)
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -212,6 +216,8 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
         outbound_http="none",
         http_idempotency="none",
         jobs="none",
+        webhooks="none",
+        inbound_webhooks="none",
         agent_harness="core",
     )
     for label, contents in (
@@ -256,6 +262,8 @@ def assert_preflight_extraction(source: Path, work: Path) -> None:
             outbound_http="none",
             http_idempotency="none",
             jobs="none",
+            webhooks="none",
+            inbound_webhooks="none",
             agent_harness="core",
         )
 
@@ -310,7 +318,8 @@ def must_refuse(
     if (
         label not in {
             "duplicate-db", "duplicate-authn", "duplicate-outbound-http", "duplicate-http-idempotency",
-            "duplicate-jobs", "jobs-flag-and-environment",
+            "duplicate-jobs", "jobs-flag-and-environment", "duplicate-webhooks", "webhooks-flag-and-environment",
+            "duplicate-inbound-webhooks",
         }
         and "may be supplied once" in result.stderr
     ):
@@ -354,7 +363,8 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
 
 
 def assert_profile_packs(
-    source: Path, target: Path, *, database: str, authn: str, outbound_http: str, http_idempotency: str, jobs: str
+    source: Path, target: Path, *, database: str, authn: str, outbound_http: str, http_idempotency: str,
+    jobs: str, webhooks: str = "none", inbound_webhooks: str = "none",
 ) -> None:
     assert_profile_pack(source, target, "postgres", database == "postgres")
     assert_profile_pack(source, target, "authn", authn != "none")
@@ -375,6 +385,9 @@ def assert_profile_packs(
     assert_profile_pack(
         source, target, "jobs-http-idempotency", jobs == "postgres" and http_idempotency == "postgres"
     )
+    assert_profile_pack(source, target, "webhooks-common", webhooks == "durable" or inbound_webhooks == "standard-webhooks")
+    assert_profile_pack(source, target, "webhooks", webhooks == "durable")
+    assert_profile_pack(source, target, "inbound-webhooks", inbound_webhooks == "standard-webhooks")
 
 
 def assert_lock_authn(target: Path, expected: str) -> None:
@@ -399,6 +412,14 @@ def assert_lock_jobs(target: Path, expected: str) -> None:
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     if lock["profiles"].get("jobs") != expected:
         raise AssertionError(f"template.lock did not record jobs={expected}")
+
+
+def assert_lock_webhooks(target: Path, webhooks: str, inbound_webhooks: str) -> None:
+    lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
+    if lock["profiles"].get("webhooks") != webhooks:
+        raise AssertionError(f"template.lock did not record webhooks={webhooks}")
+    if lock["profiles"].get("inbound_webhooks") != inbound_webhooks:
+        raise AssertionError(f"template.lock did not record inbound_webhooks={inbound_webhooks}")
 
 
 def assert_outbound_lock_refusals(source: Path, target: Path) -> None:
@@ -467,6 +488,28 @@ def assert_jobs_lock_refusals(source: Path, target: Path) -> None:
         lock_path.write_bytes(original)
 
 
+def assert_webhook_lock_refusals(source: Path, target: Path) -> None:
+    lock_path = target / "template.lock"
+    original = lock_path.read_bytes()
+    cases = (
+        ("unknown-webhooks-value", lambda profiles: profiles.update(webhooks="streaming")),
+        ("unknown-inbound-webhooks-value", lambda profiles: profiles.update(inbound_webhooks="signed")),
+        ("webhooks-without-outbound-http", lambda profiles: profiles.update(webhooks="durable", database="postgres", jobs="postgres")),
+        ("inbound-webhooks-without-jobs", lambda profiles: profiles.update(inbound_webhooks="standard-webhooks", database="postgres")),
+        ("missing-webhooks", lambda profiles: profiles.pop("webhooks")),
+    )
+    for label, mutate in cases:
+        lock = json.loads(original)
+        profiles = lock["profiles"]
+        mutate(profiles)
+        lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+        before = state(target)
+        result = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
+        if result.returncode == 0 or state(target) != before:
+            raise AssertionError(f"{label} webhook lock shape was not a preserving refusal")
+        lock_path.write_bytes(original)
+
+
 def check(source: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="template-init-safety-") as temp:
         work = Path(temp)
@@ -502,6 +545,43 @@ def check(source: Path) -> None:
             source, work, "jobs-requires-database", "--database", "none", "--jobs", "postgres",
             expected="JOBS=postgres requires DATABASE=postgres",
         )
+        must_refuse(source, work, "unknown-webhooks", "--webhooks", "ephemeral", expected="WEBHOOKS is unsupported")
+        must_refuse(
+            source, work, "duplicate-webhooks", "--webhooks", "none", "--webhooks", "durable",
+            expected="--webhooks may be supplied once",
+        )
+        must_refuse(
+            source, work, "webhooks-flag-and-environment", "--webhooks", "none",
+            environment={"WEBHOOKS": "none"}, expected="WEBHOOKS may be supplied once, by flag or environment",
+        )
+        must_refuse(
+            source, work, "webhooks-requires-database", "--webhooks", "durable",
+            expected="WEBHOOKS=durable requires DATABASE=postgres",
+        )
+        must_refuse(
+            source, work, "webhooks-requires-jobs", "--database", "postgres", "--outbound-http", "bounded",
+            "--webhooks", "durable", expected="WEBHOOKS=durable requires JOBS=postgres",
+        )
+        must_refuse(
+            source, work, "webhooks-requires-outbound-http", "--database", "postgres", "--jobs", "postgres",
+            "--webhooks", "durable", expected="WEBHOOKS=durable requires OUTBOUND_HTTP=bounded",
+        )
+        must_refuse(
+            source, work, "unknown-inbound-webhooks", "--inbound-webhooks", "legacy",
+            expected="INBOUND_WEBHOOKS is unsupported",
+        )
+        must_refuse(
+            source, work, "duplicate-inbound-webhooks", "--inbound-webhooks", "none", "--inbound-webhooks", "standard-webhooks",
+            expected="--inbound-webhooks may be supplied once",
+        )
+        must_refuse(
+            source, work, "inbound-webhooks-requires-database", "--inbound-webhooks", "standard-webhooks",
+            expected="INBOUND_WEBHOOKS=standard-webhooks requires DATABASE=postgres",
+        )
+        must_refuse(
+            source, work, "inbound-webhooks-requires-jobs", "--database", "postgres",
+            "--inbound-webhooks", "standard-webhooks", expected="INBOUND_WEBHOOKS=standard-webhooks requires JOBS=postgres",
+        )
         must_refuse(source, work, "codeowner-depth", "--codeowner", "@a/b/c")
         must_refuse(source, work, "reserved-abstract", "--service-name", "abstract")
         must_refuse(source, work, "reserved-gen", "--service-name", "gen")
@@ -524,6 +604,7 @@ def check(source: Path) -> None:
         assert_lock_outbound_http(target, "none")
         assert_lock_http_idempotency(target, "none")
         assert_lock_jobs(target, "none")
+        assert_lock_webhooks(target, "none", "none")
         for removed in [
             "make/source.mk", "scripts/ci/template-init-check.sh", "scripts/tests/template-init-safety.py",
             "crates/infra-postgres", "crates/migrate", "migrations", "env/docker-compose.yml",
@@ -572,6 +653,7 @@ def check(source: Path) -> None:
         assert_outbound_lock_refusals(source, target)
         assert_http_idempotency_lock_refusals(source, target)
         assert_jobs_lock_refusals(source, target)
+        assert_webhook_lock_refusals(source, target)
         install_derived_auth_only_none(source, target)
         auth_only_before = state(target)
         auth_only_repeat = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
@@ -761,6 +843,26 @@ def check(source: Path) -> None:
                 "'template initialization choices differ from the complete template.lock': "
                 f"{jobs_revert_mismatch.stderr}"
             )
+        webhooks_target = work / "webhooks-replay"
+        clone(source, webhooks_target)
+        webhooks_result = init(
+            source, webhooks_target, "--database", "postgres", "--jobs", "postgres", "--outbound-http", "bounded",
+            "--webhooks", "durable", "--inbound-webhooks", "standard-webhooks", "--agent-harness", "core",
+        )
+        if webhooks_result.returncode:
+            raise AssertionError(f"webhooks initialization failed: {webhooks_result.stderr}")
+        assert_profile_packs(
+            source, webhooks_target, database="postgres", authn="none", outbound_http="bounded",
+            http_idempotency="none", jobs="postgres", webhooks="durable", inbound_webhooks="standard-webhooks",
+        )
+        assert_lock_webhooks(webhooks_target, "durable", "standard-webhooks")
+        webhooks_before = state(webhooks_target)
+        webhooks_replay = init(
+            source, webhooks_target, "--database", "postgres", "--jobs", "postgres", "--outbound-http", "bounded",
+            "--webhooks", "durable", "--inbound-webhooks", "standard-webhooks", "--agent-harness", "core",
+        )
+        if webhooks_replay.returncode or state(webhooks_target) != webhooks_before:
+            raise AssertionError("complete webhook lock replay changed target bytes")
         for permitted in ("union", "raw"):
             allowed = work / f"permitted-{permitted}"
             clone(source, allowed)

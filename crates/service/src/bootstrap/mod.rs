@@ -15,6 +15,11 @@ use std::time::Duration;
 
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
+// template:begin inbound-webhooks:bootstrap-webhooks-imports
+use infra_http::webhooks::WebhookState;
+use infra_webhooks::inbound::{Consumers, Receiver};
+use infra_webhooks::protocol::{KeyRing, SigningKey};
+// template:end inbound-webhooks:bootstrap-webhooks-imports
 // template:begin authn:bootstrap-authn-imports
 use infra_bearerauthn::Verifier;
 // template:end authn:bootstrap-authn-imports
@@ -103,6 +108,23 @@ pub(crate) enum BootstrapError {
     #[error("http idempotency startup: {0}")]
     HttpIdempotencyStartup(#[from] infra_idempotency_store::StartupError),
     // template:end http-idempotency:bootstrap-http-idempotency-errors
+    // template:begin inbound-webhooks:bootstrap-webhooks-errors
+    #[error(
+        "configuration is invalid: postgres.enabled must be true when inbound webhook endpoints are configured"
+    )]
+    InboundWebhooksPostgresRequired,
+    #[error("inbound webhook endpoint {endpoint} references unavailable key {key}")]
+    InboundWebhookKeyReference { endpoint: String, key: String },
+    #[error("inbound webhook endpoint {endpoint} key {key} is invalid: {source}")]
+    InboundWebhookKey {
+        endpoint: String,
+        key: String,
+        #[source]
+        source: infra_webhooks::protocol::ProtocolError,
+    },
+    #[error("inbound webhook endpoint {endpoint} has no consumer binding")]
+    InboundWebhookConsumerMissing { endpoint: String },
+    // template:end inbound-webhooks:bootstrap-webhooks-errors
     #[error(transparent)]
     Server(#[from] infra_http::ServerError),
 }
@@ -209,6 +231,9 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
         // template:begin http-idempotency:bootstrap-http-idempotency-composer
         let composer = prepare_http_idempotency(&config, postgres_pool.as_ref());
         // template:end http-idempotency:bootstrap-http-idempotency-composer
+        // template:begin inbound-webhooks:bootstrap-webhooks-prepare
+        let webhook_state = prepare_inbound_webhooks(&config, postgres_pool.as_ref())?;
+        // template:end inbound-webhooks:bootstrap-webhooks-prepare
 
         // Admission runs even without probes so the first probe after bind
         // answers from an evaluation.
@@ -235,6 +260,9 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             // template:begin http-idempotency:bootstrap-http-idempotency-prepared-value
             composer,
             // template:end http-idempotency:bootstrap-http-idempotency-prepared-value
+            // template:begin inbound-webhooks:bootstrap-webhooks-prepared-value
+            webhook_state,
+            // template:end inbound-webhooks:bootstrap-webhooks-prepared-value
         })
         .await
     }
@@ -253,6 +281,83 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     }
     outcome
 }
+
+// template:begin inbound-webhooks:bootstrap-webhooks-constructor
+/// Build a receiver from the immutable startup snapshot.  An empty configured
+/// endpoint map is a retained, inert route; an active endpoint cannot reach
+/// listener admission without PostgreSQL and every referenced key.
+fn prepare_inbound_webhooks(
+    config: &Config,
+    postgres_pool: Option<&PgPool>,
+) -> Result<WebhookState, BootstrapError> {
+    if config.inbound_webhooks.endpoints.is_empty() {
+        return Ok(WebhookState::inert());
+    }
+    let pool = postgres_pool.ok_or(BootstrapError::InboundWebhooksPostgresRequired)?;
+    // The template has no domain consumer.  A derived service adds its real
+    // adapter to this same registry constructor in both roots; serving an
+    // endpoint without that binding could durably accept work it cannot own.
+    let consumers = Consumers::new();
+    for endpoint_id in config.inbound_webhooks.endpoints.keys() {
+        if !consumers.contains(endpoint_id) {
+            return Err(BootstrapError::InboundWebhookConsumerMissing {
+                endpoint: endpoint_id.clone(),
+            });
+        }
+    }
+    let bindings = config
+        .inbound_webhooks
+        .endpoints
+        .iter()
+        .map(|(endpoint_id, endpoint)| {
+            let active = config
+                .inbound_webhooks
+                .secrets
+                .get(&endpoint.active_key)
+                .ok_or_else(|| BootstrapError::InboundWebhookKeyReference {
+                    endpoint: endpoint_id.clone(),
+                    key: endpoint.active_key.clone(),
+                })?;
+            let previous = endpoint
+                .previous_key
+                .as_ref()
+                .map(|key| {
+                    config.inbound_webhooks.secrets.get(key).ok_or_else(|| {
+                        BootstrapError::InboundWebhookKeyReference {
+                            endpoint: endpoint_id.clone(),
+                            key: key.clone(),
+                        }
+                    })
+                })
+                .transpose()?;
+            let active = SigningKey::from_encoded(active.expose_secret()).map_err(|source| {
+                BootstrapError::InboundWebhookKey {
+                    endpoint: endpoint_id.clone(),
+                    key: endpoint.active_key.clone(),
+                    source,
+                }
+            })?;
+            let previous = endpoint
+                .previous_key
+                .as_ref()
+                .zip(previous)
+                .map(|(key, value)| {
+                    SigningKey::from_encoded(value.expose_secret()).map_err(|source| {
+                        BootstrapError::InboundWebhookKey {
+                            endpoint: endpoint_id.clone(),
+                            key: key.clone(),
+                            source,
+                        }
+                    })
+                })
+                .transpose()?;
+            let key = KeyRing::new(active, previous);
+            Ok((endpoint_id.clone(), key))
+        })
+        .collect::<Result<Vec<_>, BootstrapError>>()?;
+    Ok(WebhookState::active(Receiver::new(pool.clone(), bindings)))
+}
+// template:end inbound-webhooks:bootstrap-webhooks-constructor
 
 // template:begin authn:bootstrap-prepare-auth-prefix
 #[allow(
@@ -506,6 +611,9 @@ struct Prepared<'a> {
     /// A unique move: agreement consumes it before admission.
     composer: Composer,
     // template:end http-idempotency:bootstrap-http-idempotency-prepared-field
+    // template:begin inbound-webhooks:bootstrap-webhooks-prepared-field
+    webhook_state: WebhookState,
+    // template:end inbound-webhooks:bootstrap-webhooks-prepared-field
 }
 
 async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapError> {
@@ -525,6 +633,9 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         // template:begin http-idempotency:bootstrap-http-idempotency-destructure
         mut composer,
         // template:end http-idempotency:bootstrap-http-idempotency-destructure
+        // template:begin inbound-webhooks:bootstrap-webhooks-destructure
+        webhook_state,
+        // template:end inbound-webhooks:bootstrap-webhooks-destructure
     } = prepared;
     // The routes and the committed OpenAPI document are the two halves of
     // one contract. Assembly is pure, so it runs before readiness admission.
@@ -562,6 +673,9 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
             .unwrap_or(usize::MAX),
         max_connections: config.http.connection_cap(),
     };
+    // template:begin inbound-webhooks:bootstrap-webhooks-route-state
+    let routes = infra_http::webhooks::with_webhook_state(routes, webhook_state);
+    // template:end inbound-webhooks:bootstrap-webhooks-route-state
     let app = infra_http::harden(
         routes.with_state(readiness.reader()),
         &HardenOptions {

@@ -36,9 +36,10 @@ flushes telemetry. [Configuration](docs/configuration-source-policy.md) and
 
 ## Initialize a fresh template checkout
 
-A clean tracked checkout can select one of 16 combinations: database `none` or
-`postgres`, and agent harness `core`, `codex`, `claude`, `qwen`, `cursor`, `grok`,
-`opencode`, or `all`. `none`/`all` are the defaults.
+A clean tracked checkout selects database, optional capability profiles, and an
+agent harness. `DATABASE` defaults to `none`; `AGENT_HARNESS` defaults to `all`
+and accepts `core`, `codex`, `claude`, `qwen`, `cursor`, `grok`, `opencode`, or
+`all`. Capability profiles are documented with their owning guides.
 
 ```sh
 make template-init SERVICE_NAME=catalog-api \
@@ -57,6 +58,25 @@ never stages or commits the result. Review and commit the initialized diff.
 prerequisites, refusal and recovery.
 
 ## Profiles and local owners
+
+<!-- template:begin webhooks-common:readme-webhooks-profiles -->
+The optional webhook profiles are selected by `WEBHOOKS=none|durable` and
+`INBOUND_WEBHOOKS=none|standard-webhooks`, both defaulting to `none`. Each
+requires PostgreSQL and jobs; durable outbound additionally requires bounded
+outbound HTTP. Retention is inert until static environment-backed endpoints and,
+for inbound processing, explicit service/worker consumer bindings exist. See
+the selected direction guide.
+<!-- template:end webhooks-common:readme-webhooks-profiles -->
+
+<!-- template:begin webhooks:readme-webhooks-outbound-guide -->
+The outbound direction is documented in
+[Outbound webhooks](docs/outbound-webhooks.md).
+<!-- template:end webhooks:readme-webhooks-outbound-guide -->
+
+<!-- template:begin inbound-webhooks:readme-webhooks-inbound-guide -->
+The inbound direction is documented in
+[Inbound webhooks](docs/inbound-webhooks.md).
+<!-- template:end inbound-webhooks:readme-webhooks-inbound-guide -->
 
 The database and installed adapters are selected by `template.lock`; the source
 checkout without a lock carries PostgreSQL and all six adapters. A retained

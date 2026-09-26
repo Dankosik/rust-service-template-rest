@@ -228,6 +228,20 @@ exists. Public operations, including probes, explicitly override it with
 
 ### Gotchas
 
+<!-- template:begin inbound-webhooks:docs-http-inbound-webhooks -->
+## Signed webhook ingress
+
+When retained, `POST /webhooks/{endpoint_id}` is an annotated `OpenApiRouter`
+operation. It deliberately uses the existing zero-group `security()` annotation
+to generate explicit `security: []`, overriding root bearer authentication. That
+OpenAPI expression means bearer is not required; it does not waive the required
+Standard Webhooks header/signature verification performed before persistence.
+
+The handler receives bounded raw bytes, maps receiver outcomes to 204/400/404/
+409/413/503 problems, and preserves existing hardened-chain outcomes. The
+generated OpenAPI document remains handler-derived and must not be hand-edited.
+<!-- template:end inbound-webhooks:docs-http-inbound-webhooks -->
+
 1. `routes!(a, b)` groups methods of one path; two `GET` handlers on
    different paths in one `routes!` panic with "Overlapping method route".
    One `.routes(routes!(handler))` per path.

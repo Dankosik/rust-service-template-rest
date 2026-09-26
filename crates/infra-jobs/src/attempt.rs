@@ -193,11 +193,16 @@ async fn run_attempt(
         return;
     };
     let policy = registered.policy;
+    let attempt_deadline = Instant::now()
+        .checked_add(policy.timeout)
+        .unwrap_or(deadline)
+        .min(deadline);
     let cancel = CancellationToken::new();
     let prepared = registered.dispatch.prepare(
         attempt.id,
         attempt.attempt,
         attempt.generation,
+        attempt_deadline,
         &payload,
         cancel.clone(),
         shared.pool.clone(),
@@ -206,7 +211,8 @@ async fn run_attempt(
         Err(error) => (Ended::Payload(error), None),
         Ok(future) => {
             let started = Instant::now();
-            let Some(ended) = drive(shared, future, cancel, policy.timeout, deadline).await else {
+            let Some(ended) = drive(shared, future, cancel, attempt_deadline, deadline).await
+            else {
                 uncertain(shared, &attempt);
                 return;
             };
@@ -235,19 +241,15 @@ async fn drive(
     shared: &Shared,
     future: HandlerFuture,
     cancel: CancellationToken,
-    timeout: Duration,
+    deadline: Instant,
     local: Instant,
 ) -> Option<Ended> {
     let mut join = tokio::spawn(future.instrument(tracing::Span::current()));
-    let timeout_at = Instant::now()
-        .checked_add(timeout)
-        .unwrap_or(local)
-        .min(local);
     let reason = tokio::select! {
         biased;
         result = &mut join => return Some(ended_from(result)),
         () = shared.force.cancelled() => Ended::Cancelled,
-        () = tokio::time::sleep_until(timeout_at) => Ended::Timeout,
+        () = tokio::time::sleep_until(deadline) => Ended::Timeout,
     };
     cancel.cancel();
     join.abort();
@@ -422,7 +424,7 @@ fn map_outcome(
         summary: None,
         delay_micros: 0,
     };
-    let (text, delay, timed_out) = match ended {
+    let (text, delay, floor, timed_out) = match ended {
         Ended::Success => return empty(Outcome::Completed),
         Ended::Cancelled => return empty(Outcome::Cancelled),
         Ended::Error(error) => match error.disposition {
@@ -441,16 +443,18 @@ fn map_outcome(
                     delay_micros: 0,
                 };
             }
-            Disposition::RetryAfter(delay) => (error.to_string(), Some(delay), false),
-            Disposition::Retry => (error.to_string(), None, false),
+            Disposition::RetryAfter(delay) => (error.to_string(), Some(delay), None, false),
+            Disposition::RetryAfterAtLeast(delay) => (error.to_string(), None, Some(delay), false),
+            Disposition::Retry => (error.to_string(), None, None, false),
         },
-        Ended::Panic => ("handler panicked".to_owned(), None, false),
-        Ended::Payload(error) => (payload_summary(kind, &error), None, false),
+        Ended::Panic => ("handler panicked".to_owned(), None, None, false),
+        Ended::Payload(error) => (payload_summary(kind, &error), None, None, false),
         Ended::Timeout => (
             format!(
                 "attempt timed out after {}",
                 humantime::format_duration(policy.timeout)
             ),
+            None,
             None,
             true,
         ),
@@ -468,7 +472,7 @@ fn map_outcome(
         delay_micros: if exhausted {
             0
         } else {
-            delay.unwrap_or_else(|| backoff(attempt, jitter))
+            delay.unwrap_or_else(|| backoff(attempt, jitter).max(floor.unwrap_or_default()))
         },
     }
 }
@@ -530,6 +534,20 @@ mod tests {
             1,
         );
         assert_eq!(retry.delay_micros, 9);
+        let floor = outcome(
+            Ended::Error(
+                JobError::retry_after_at_least("at least", Duration::from_secs(2)).unwrap(),
+            ),
+            1,
+        );
+        assert_eq!(floor.delay_micros, 2_000_000);
+        let backoff = outcome(
+            Ended::Error(
+                JobError::retry_after_at_least("at least", Duration::from_secs(2)).unwrap(),
+            ),
+            3,
+        );
+        assert_eq!(backoff.delay_micros, 81_000_000);
         let snooze = outcome(
             Ended::Error(JobError::snooze(Duration::from_micros(7)).unwrap()),
             25,

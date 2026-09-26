@@ -278,6 +278,105 @@ mod tests {
     }
     // template:end jobs:load-jobs-environment
 
+    // template:begin webhooks:load-webhooks-environment
+    #[test]
+    fn webhooks_environment_builds_nested_endpoint_and_secret_maps() {
+        use secrecy::ExposeSecret as _;
+
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                (
+                    "APP__WEBHOOKS__ENDPOINTS__PARTNER__URL",
+                    "https://partner.example/events",
+                ),
+                (
+                    "APP__WEBHOOKS__ENDPOINTS__PARTNER__ACTIVE_KEY",
+                    "partner_v2",
+                ),
+                ("APP__WEBHOOKS__SECRETS__PARTNER_V2", "fixture-secret"),
+            ]),
+        )
+        .unwrap();
+        let endpoint = cfg.webhooks.endpoints.get("partner").unwrap();
+        assert_eq!(endpoint.url, "https://partner.example/events");
+        assert_eq!(endpoint.active_key, "partner_v2");
+        assert_eq!(
+            cfg.webhooks
+                .secrets
+                .get("partner_v2")
+                .unwrap()
+                .expose_secret(),
+            "fixture-secret"
+        );
+        assert!(!format!("{cfg:?}").contains("fixture-secret"));
+    }
+
+    #[test]
+    fn webhooks_secret_in_a_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let leaked = write(
+            &dir,
+            "leaked.toml",
+            "[webhooks.secrets]\npartner_v2 = \"whsec_private\"\n",
+        );
+        let err = load_from(
+            &LoadOptions {
+                config: Some(leaked),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::SecretInFile { key, .. } if key == "webhooks.secrets.partner_v2"),
+            "{err}"
+        );
+    }
+    // template:end webhooks:load-webhooks-environment
+
+    // template:begin inbound-webhooks:load-inbound-webhooks-environment
+    #[test]
+    fn inbound_webhooks_environment_builds_nested_endpoint_and_secret_maps() {
+        use secrecy::ExposeSecret as _;
+
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                (
+                    "APP__INBOUND_WEBHOOKS__ENDPOINTS__PARTNER__ACTIVE_KEY",
+                    "partner_v2",
+                ),
+                (
+                    "APP__INBOUND_WEBHOOKS__SECRETS__PARTNER_V2",
+                    "fixture-secret",
+                ),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.inbound_webhooks
+                .endpoints
+                .get("partner")
+                .unwrap()
+                .active_key,
+            "partner_v2"
+        );
+        assert_eq!(
+            cfg.inbound_webhooks
+                .secrets
+                .get("partner_v2")
+                .unwrap()
+                .expose_secret(),
+            "fixture-secret"
+        );
+        assert!(!format!("{cfg:?}").contains("fixture-secret"));
+    }
+    // template:end inbound-webhooks:load-inbound-webhooks-environment
+
     // template:begin oidc-introspection:load-introspection-environment
     fn introspection_environment(extra: &[(&str, &str)]) -> Vec<(String, String)> {
         let mut values = env(&[

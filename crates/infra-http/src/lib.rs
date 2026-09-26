@@ -11,6 +11,9 @@
 
 pub mod contract;
 pub mod problem;
+// template:begin inbound-webhooks:http-webhooks-module
+pub mod webhooks;
+// template:end inbound-webhooks:http-webhooks-module
 // template:begin authn:infra-http-authn-module
 pub mod authn;
 // template:end authn:infra-http-authn-module

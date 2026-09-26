@@ -147,6 +147,47 @@ fn document_has_the_probe_operations() {
     }
 }
 
+// template:begin inbound-webhooks:service-webhooks-contract-test
+#[test]
+fn webhook_ingress_is_public_to_bearer_auth_but_declares_signature_and_problem_contracts() {
+    let document = document();
+    let operation = &document["paths"]["/webhooks/{endpoint_id}"]["post"];
+    assert_eq!(operation["operationId"], "receiveWebhook");
+    let content = &operation["requestBody"]["content"]["*/*"];
+    assert!(content.is_object(), "raw webhook content must be declared");
+    assert!(
+        content.get("schema").is_none(),
+        "raw signed bytes must not acquire a JSON payload schema"
+    );
+    assert!(
+        is_public(&document, operation),
+        "webhook ingress must override root bearer security"
+    );
+    let parameters = operation["parameters"]
+        .as_array()
+        .expect("webhook parameters");
+    for required in [
+        "endpoint_id",
+        "webhook-id",
+        "webhook-timestamp",
+        "webhook-signature",
+    ] {
+        assert!(
+            parameters.iter().any(|parameter| {
+                parameter["name"] == required && parameter["required"] == true
+            }),
+            "missing required {required}"
+        );
+    }
+    for status in ["204", "400", "404", "409", "413", "500", "503"] {
+        assert!(
+            response(&document, operation, status).is_some(),
+            "webhook ingress lacks {status}"
+        );
+    }
+}
+// template:end inbound-webhooks:service-webhooks-contract-test
+
 #[test]
 fn every_operation_has_supported_security_and_matching_optional_context() {
     let document = document();
