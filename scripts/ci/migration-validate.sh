@@ -72,7 +72,7 @@ if compgen -G 'migrations/*.sql' >/dev/null; then
 		printf '%s\n' "${history_refusal}" >&2
 		exit 1
 	fi
-	grep -Fq 'postgres migration history: the migration history is unavailable' <<<"${history_refusal}" || {
+	grep -Fq 'postgres migration history: embedded migrations are pending' <<<"${history_refusal}" || {
 		echo "service did not refuse missing migration history" >&2
 		printf '%s\n' "${history_refusal}" >&2
 		exit 1

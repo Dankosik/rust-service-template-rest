@@ -19,7 +19,7 @@ should weigh before reopening them.
 | `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), read-only embedded-history verification (`verify_history`), the source rules beyond the resolver's, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
 | `migrations/` | Forward-only SQL files, one transaction each, `<version>_<snake_case>.sql` ([rules](../../migrations/README.md)). | Access code; a repository adapts to the schema, never the reverse. |
 | `service-config` (`postgres` section) | `postgres.enabled`, `postgres.dsn` (secret, environment only), `postgres.max_connections`. | DSN shape (the adapter refuses what the driver would accept). |
-| `service` bootstrap | Opening the pool before readiness admission when the profile is enabled, registering the probe and the gauge task, partial-startup cleanup, closing the pool in the dependency-close stage. | Pool mechanics, migration execution. |
+| `service` bootstrap | Opening the pool before readiness admission when the profile is enabled, verifying the embedded migration history, registering the probe and the gauge task, partial-startup cleanup, closing the pool in the dependency-close stage. | Pool mechanics, migration execution. |
 | `test/` (`integration-tests`) | Database-backed proof behind the `integration` feature; fixtures under `test/fixtures/migrations/`. | Anything the service binary runs. |
 
 Future feature crates own persistence ports and business invariants; a
@@ -135,6 +135,21 @@ The `migrate` binary loads the same configuration as the service, requires
 exits 1 on failure. In the image it runs as
 `--entrypoint /migrate`; a stop signal drops the run.
 
+The service, and the jobs worker when that pack is retained, never run
+migrations at startup. After the pool opens they call
+`migrate::verify_history`: one read-only statement, bounded with its acquire
+to five seconds, that requires every embedded migration to be applied
+successfully with its checksum. An absent or incomplete history is `Pending`
+(run the migrator first); a failed row, a checksum mismatch, or an applied
+version inside the embedded range that the binary does not embed is
+`Mismatch`. A version above the newest embedded migration belongs to a later
+release that already migrated the database and is admitted, as Flyway admits
+future migrations by default, so a rolled-back binary or a replica restarted
+mid-rollout still starts. A migration therefore keeps the previous release
+working (expand before contract), which rolling deployment already requires.
+The check replaces per-profile table, column, and type probes and does not
+prove that an operator left the schema unaltered.
+
 ## Proof
 
 Unit tests need no Docker: admission, budgets rendering, commit
@@ -172,11 +187,9 @@ provides the composite `Type`/`Encode`/`Decode` and array support. Native
 `bytea` preserves every header value byte without a binary format or the
 extra byte-encoding policy that `jsonb` would require. No query macros or
 offline metadata are introduced for these constant statements.
-Startup admission verifies the exact embedded migration-version and checksum
-set through `migrate`; it does not probe profile tables, columns, or types.
-The check is read-only, bounded with its pool acquire to five seconds, and
-refuses missing, pending, failed, unknown, or checksum-mismatched history.
-It does not establish that an operator has not subsequently altered a schema.
+Startup admits the profile schema through the general migration-history
+check ([Migrations](#migrations)); the store probes no table, column, or type
+and keeps only its writable-session check.
 
 This retargets three persistence deferrals: `query!` with offline `.sqlx`
 metadata and `sqlx-cli`, and per-query tracing spans, move from "the first

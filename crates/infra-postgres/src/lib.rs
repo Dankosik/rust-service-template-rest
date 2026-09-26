@@ -17,8 +17,7 @@ mod transaction;
 
 pub use dsn::{AMBIENT_ENVIRONMENT, Dsn, DsnError};
 pub use error::{
-    commit_definitely_failed, failure_cause, idempotency_transient, raw_sqlstate, retryable,
-    sqlstate,
+    commit_definitely_failed, failure_cause, raw_sqlstate, retryable, sqlstate, transient,
 };
 pub use pool::{
     ACQUIRE_TIMEOUT, CONNECTION_COUNT_METRIC, Closed, ConnectError, IDLE_IN_TRANSACTION_TIMEOUT,

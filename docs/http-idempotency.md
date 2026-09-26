@@ -6,9 +6,9 @@ authentication engine: a key is scoped to a verified caller. The default
 `none` removes the boundary, configuration, migration, tests, and this guide.
 Retaining the pack performs no request-time query or task until a protected
 operation opts in through `Composer::route`. Enabled PostgreSQL startup first
-verifies the embedded migration history through `migrate`; the check is
-read-only and refuses an absent, pending, failed, unknown, or checksum-mismatched
-history.
+verifies, read-only through `migrate`, that every embedded migration is
+applied with its checksum; versions from a later release are admitted, so a
+rollback still starts.
 
 An opted-in operation gives each verified caller and key at most one committed
 participating database effect during the configured retention period. The

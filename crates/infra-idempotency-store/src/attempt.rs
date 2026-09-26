@@ -8,9 +8,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use infra_postgres::{
-    Tx, TxError, connection, failure_cause, idempotency_transient, in_tx_with, sqlstate,
-};
+use infra_postgres::{Tx, TxError, connection, failure_cause, in_tx_with, sqlstate, transient};
 use sqlx::Row;
 use sqlx::postgres::{PgConnection, PgRow};
 
@@ -299,7 +297,7 @@ fn classify_tx<T>(err: TxError) -> Attempted<T> {
 
 fn classify_sql<T>(err: &sqlx::Error, phase: &'static str, commit_unknown: bool) -> Attempted<T> {
     let unavailable = match sqlstate(err).as_deref() {
-        Some(code) => idempotency_transient(code),
+        Some(code) => transient(code),
         None => {
             matches!(
                 err,

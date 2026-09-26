@@ -59,9 +59,10 @@ joins.
 <!-- template:begin postgres:docs-lifecycle-postgres-startup -->
 With the PostgreSQL profile retained and `postgres.enabled`, bootstrap admits
 the DSN and opens the first connection inside the acquire budget
-(`postgres_pool_opened`). It then verifies the embedded migration history in a
-read-only check bounded to five seconds, including acquire; a missing, pending,
-failed, unknown, or checksum-mismatched history is a sanitized startup failure.
+(`postgres_pool_opened`). It then verifies, in one read-only check bounded to
+five seconds including acquire, that every embedded migration is applied with
+its checksum: pending or divergent history is a sanitized startup failure,
+while versions from a later release are admitted so a rollback still starts.
 The probe joins readiness, the pool gauge task joins the tracker, and an
 unreachable database is a startup failure
 ([Persistence](persistence.md)).

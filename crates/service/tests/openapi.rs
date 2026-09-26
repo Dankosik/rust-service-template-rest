@@ -304,15 +304,41 @@ fn retained_idempotency_document_declares_the_family_components() {
     }
 }
 
-/// An API without composed routes remains inactive without inspecting a
-/// completed document.
+/// Only `Composer::route` may declare `Idempotency-Key`: a hand-written
+/// declaration on an uncomposed operation would promise a replay that no
+/// boundary enforces.
 #[test]
-fn assembled_contract_finishes_inactive_without_document_reconciliation() {
+fn only_composed_operations_declare_the_idempotency_key() {
     use infra_http::idempotency::{Activation, Composer};
 
     let mut composer = Composer::inert();
-    let _contract = service::api::contract(&mut composer).expect("contract composes");
-    assert!(matches!(composer.finish(), Activation::Inactive));
+    let contract = service::api::contract(&mut composer).expect("contract composes");
+    let document = serde_json::to_value(contract.document()).expect("document serializes");
+    let declared = operations(&document)
+        .iter()
+        .filter(|(_, _, operation)| declares_idempotency_key(operation))
+        .count();
+    let served = match composer.finish() {
+        Activation::Inactive => 0,
+        Activation::Active {
+            operations: count, ..
+        } => count.get(),
+    };
+    assert_eq!(declared, served);
+}
+
+/// An `Idempotency-Key` header parameter, in any letter case.
+fn declares_idempotency_key(operation: &Value) -> bool {
+    operation["parameters"]
+        .as_array()
+        .is_some_and(|parameters| {
+            parameters.iter().any(|parameter| {
+                parameter["in"] == "header"
+                    && parameter["name"]
+                        .as_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("Idempotency-Key"))
+            })
+        })
 }
 
 // template:end http-idempotency:service-openapi-http-idempotency-contract
