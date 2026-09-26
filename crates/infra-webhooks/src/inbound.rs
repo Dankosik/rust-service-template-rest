@@ -189,7 +189,7 @@ impl fmt::Debug for Receiver {
         formatter
             .debug_struct("Receiver")
             .field("endpoint_count", &self.endpoints.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -439,6 +439,10 @@ mod base64_bytes {
 mod optional_base64_bytes {
     use super::*;
 
+    #[allow(
+        clippy::ref_option,
+        reason = "serde passes a reference to the optional field"
+    )]
     pub(super) fn serialize<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,

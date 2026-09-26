@@ -253,7 +253,8 @@ run_graph() {
 		"${graph}" "${database}" "${authn}" "${outbound_http}" "${http_idempotency}" "${jobs}" "${webhooks}" "${inbound_webhooks}" "${candidate}" "${output_revision}"
 	if ((graph > 26)); then
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-metadata.log" "runtime-${graph}-metadata" \
-			"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" cargo metadata --locked --offline --format-version 1 --manifest-path "${target}/Cargo.toml"
+			"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" bash -c \
+			'exec cargo metadata --locked --offline --format-version 1 --manifest-path "$1" >/dev/null' _ "${target}/Cargo.toml"
 	fi
 	if [[ ${full_graph} == true ]]; then
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-build.log" "runtime-${graph}-build" \

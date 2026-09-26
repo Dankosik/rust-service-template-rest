@@ -210,27 +210,46 @@ async fn enqueue_failure_rolls_back_the_new_receipt(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn lost_receipt_commit_acknowledgement_returns_unavailable_and_retry_converges(pool: PgPool) {
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
-    let (proxy, proxied) = proxied_pool(&pool).await;
     let body = b"{\"lost_ack\":true}";
-    let headers = signed_headers(&keys, "message-unknown", body);
-    proxy.arm((Fault::ForwardThenDrop, "INSERT INTO webhook_receipts"));
-    assert_eq!(
-        receiver(proxied.clone())
-            .receive(ENDPOINT, &headers, body, SystemTime::now())
-            .await,
-        Err(ReceiveError::Unavailable)
-    );
-    assert_eq!(proxy.fired(), Some(Fault::ForwardThenDrop));
-    assert_eq!(receipt_count(&pool).await, 1);
-    assert_eq!(job_count(&pool).await, 1);
-    assert_eq!(
-        receiver(pool.clone())
-            .receive(ENDPOINT, &headers, body, SystemTime::now())
-            .await,
-        Ok(ReceiptOutcome::Duplicate)
-    );
-    super::close(&[&pool, &proxied]).await;
-    proxy.shutdown().await;
+    for (fault, message_id, committed, retry_outcome) in [
+        (
+            Fault::DropBeforeForward,
+            "message-before-commit",
+            false,
+            ReceiptOutcome::Accepted,
+        ),
+        (
+            Fault::ForwardThenDrop,
+            "message-after-commit",
+            true,
+            ReceiptOutcome::Duplicate,
+        ),
+    ] {
+        let previous = receipt_count(&pool).await;
+        let (proxy, proxied) = proxied_pool(&pool).await;
+        let headers = signed_headers(&keys, message_id, body);
+        proxy.arm((fault, "INSERT INTO webhook_receipts"));
+        assert_eq!(
+            receiver(proxied.clone())
+                .receive(ENDPOINT, &headers, body, SystemTime::now())
+                .await,
+            Err(ReceiveError::Unavailable)
+        );
+        assert_eq!(proxy.fired(), Some(fault));
+        assert_eq!(receipt_count(&pool).await, previous + i64::from(committed));
+        assert_eq!(job_count(&pool).await, previous + i64::from(committed));
+        assert_eq!(
+            receiver(pool.clone())
+                .receive(ENDPOINT, &headers, body, SystemTime::now())
+                .await,
+            Ok(retry_outcome)
+        );
+        assert_eq!(receipt_count(&pool).await, previous + 1);
+        assert_eq!(job_count(&pool).await, previous + 1);
+        super::close(&[&proxied]).await;
+        proxy.shutdown().await;
+    }
+    super::close(&[&pool]).await;
 }
 
 #[derive(Default)]

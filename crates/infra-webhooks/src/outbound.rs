@@ -28,7 +28,7 @@ use crate::protocol::{KeyRing, MAX_BODY_BYTES, SigningKey};
 const DELIVERY_KIND: &str = "webhooks.deliver";
 const DELIVERY_VERSION: u8 = 1;
 const CACHE_CAPACITY: usize = 64;
-const RETRY_AFTER_CAP: Duration = Duration::from_secs(24 * 60 * 60);
+const RETRY_AFTER_CAP: Duration = Duration::from_hours(24);
 const MISSING_SECRET_DELAY: Duration = Duration::from_secs(60);
 const DEFAULT_CONTENT_TYPE: &str = "application/json";
 const RESPONSE_HEADER_COUNT: usize = 64;
@@ -231,26 +231,20 @@ impl Dispatcher {
         if delivery.version != DELIVERY_VERSION || delivery.body.len() > MAX_BODY_BYTES {
             return Err(JobError::permanent(DeliveryOutcome::InvalidPayload));
         }
-        let keys = match self.key_ring(delivery) {
-            Some(keys) => keys,
-            None => {
-                tracing::info!(
-                    webhook.outcome = "missing_secret",
-                    "webhook_delivery_deferred"
-                );
-                return Err(JobError::snooze(MISSING_SECRET_DELAY)?);
-            }
+        let Some(keys) = self.key_ring(delivery) else {
+            tracing::info!(
+                webhook.outcome = "missing_secret",
+                "webhook_delivery_deferred"
+            );
+            return Err(JobError::snooze(MISSING_SECRET_DELAY)?);
         };
-        let destination = match parse_destination(&delivery.destination) {
-            Ok(destination) => destination,
-            Err(_) => {
-                tracing::warn!(
-                    webhook.outcome = "permanent",
-                    webhook.reason = "invalid_destination",
-                    "webhook_delivery_finished"
-                );
-                return Err(JobError::permanent(DeliveryOutcome::InvalidDestination));
-            }
+        let Ok(destination) = parse_destination(&delivery.destination) else {
+            tracing::warn!(
+                webhook.outcome = "permanent",
+                webhook.reason = "invalid_destination",
+                "webhook_delivery_finished"
+            );
+            return Err(JobError::permanent(DeliveryOutcome::InvalidDestination));
         };
         let timestamp = unix_timestamp(SystemTime::now())
             .ok_or_else(|| JobError::retryable(DeliveryOutcome::ClockUnavailable))?;
@@ -289,55 +283,7 @@ impl Dispatcher {
                 },
             )
             .await;
-        match response {
-            Ok(response) if response.status().is_success() => {
-                tracing::debug!(
-                    webhook.outcome = "delivered",
-                    http.status = response.status().as_u16(),
-                    "webhook_delivery_finished"
-                );
-                Ok(())
-            }
-            Ok(response) if retryable_status(response.status()) => {
-                tracing::info!(
-                    webhook.outcome = "retryable",
-                    http.status = response.status().as_u16(),
-                    "webhook_delivery_finished"
-                );
-                let response_time = SystemTime::now();
-                if let Some(delay) = retry_after(response.headers(), response_time) {
-                    return Err(JobError::retry_after_at_least(
-                        DeliveryOutcome::Retryable,
-                        delay,
-                    )?);
-                }
-                Err(JobError::retryable(DeliveryOutcome::Retryable))
-            }
-            Ok(response) => {
-                tracing::warn!(
-                    webhook.outcome = "permanent",
-                    http.status = response.status().as_u16(),
-                    "webhook_delivery_finished"
-                );
-                Err(JobError::permanent(DeliveryOutcome::PermanentResponse))
-            }
-            Err(error) if is_permanent_transport_error(&error) => {
-                tracing::warn!(
-                    webhook.outcome = "permanent",
-                    webhook.reason = "invalid_destination",
-                    "webhook_delivery_finished"
-                );
-                Err(JobError::permanent(DeliveryOutcome::InvalidDestination))
-            }
-            Err(_) => {
-                tracing::info!(
-                    webhook.outcome = "retryable",
-                    webhook.reason = "transport_uncertain",
-                    "webhook_delivery_finished"
-                );
-                Err(JobError::retryable(DeliveryOutcome::TransportUncertain))
-            }
-        }
+        classify_response(response, SystemTime::now())
     }
 
     fn key_ring(&self, delivery: &Delivery) -> Option<KeyRing> {
@@ -539,10 +485,10 @@ fn origin(destination: &Url) -> Result<String, OutboundError> {
     origin.set_fragment(None);
     origin
         .set_username("")
-        .map_err(|_| OutboundError::InvalidEndpoint)?;
+        .map_err(|()| OutboundError::InvalidEndpoint)?;
     origin
         .set_password(None)
-        .map_err(|_| OutboundError::InvalidEndpoint)?;
+        .map_err(|()| OutboundError::InvalidEndpoint)?;
     Ok(origin.to_string())
 }
 
@@ -577,6 +523,60 @@ fn origin_form(destination: &Url) -> Result<Uri, OutboundError> {
     target.parse().map_err(|_| OutboundError::InvalidEndpoint)
 }
 
+fn classify_response(
+    response: Result<http::Response<Bytes>, HttpError>,
+    response_time: SystemTime,
+) -> Result<(), JobError> {
+    match response {
+        Ok(response) if response.status().is_success() => {
+            tracing::debug!(
+                webhook.outcome = "delivered",
+                http.status = response.status().as_u16(),
+                "webhook_delivery_finished"
+            );
+            Ok(())
+        }
+        Ok(response) if retryable_status(response.status()) => {
+            tracing::info!(
+                webhook.outcome = "retryable",
+                http.status = response.status().as_u16(),
+                "webhook_delivery_finished"
+            );
+            if let Some(delay) = retry_after(response.headers(), response_time) {
+                return Err(JobError::retry_after_at_least(
+                    DeliveryOutcome::Retryable,
+                    delay,
+                )?);
+            }
+            Err(JobError::retryable(DeliveryOutcome::Retryable))
+        }
+        Ok(response) => {
+            tracing::warn!(
+                webhook.outcome = "permanent",
+                http.status = response.status().as_u16(),
+                "webhook_delivery_finished"
+            );
+            Err(JobError::permanent(DeliveryOutcome::PermanentResponse))
+        }
+        Err(error) if is_permanent_transport_error(&error) => {
+            tracing::warn!(
+                webhook.outcome = "permanent",
+                webhook.reason = "invalid_destination",
+                "webhook_delivery_finished"
+            );
+            Err(JobError::permanent(DeliveryOutcome::InvalidDestination))
+        }
+        Err(_) => {
+            tracing::info!(
+                webhook.outcome = "retryable",
+                webhook.reason = "transport_uncertain",
+                "webhook_delivery_finished"
+            );
+            Err(JobError::retryable(DeliveryOutcome::TransportUncertain))
+        }
+    }
+}
+
 fn retryable_status(status: StatusCode) -> bool {
     status.is_server_error()
         || matches!(
@@ -592,7 +592,12 @@ fn retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
         return None;
     }
     let value = first.to_str().ok()?;
-    if let Ok(seconds) = value.parse::<u64>() {
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let seconds = value.bytes().fold(0_u64, |seconds, byte| {
+            seconds
+                .saturating_mul(10)
+                .saturating_add(u64::from(byte - b'0'))
+        });
         return Some(Duration::from_secs(seconds).min(RETRY_AFTER_CAP));
     }
     let at = httpdate::parse_http_date(value).ok()?;
@@ -890,9 +895,20 @@ mod tests {
 
     #[test]
     fn retry_after_uses_a_capped_delta_or_future_http_date() {
-        let mut delta = HeaderMap::new();
-        delta.insert(header::RETRY_AFTER, HeaderValue::from_static("90000"));
-        assert_eq!(retry_after(&delta, UNIX_EPOCH), Some(RETRY_AFTER_CAP));
+        for value in [
+            "90000",
+            "18446744073709551616",
+            "999999999999999999999999999999999",
+        ] {
+            let mut delta = HeaderMap::new();
+            delta.insert(header::RETRY_AFTER, HeaderValue::from_static(value));
+            assert_eq!(retry_after(&delta, UNIX_EPOCH), Some(RETRY_AFTER_CAP));
+        }
+        for value in ["+3600", "-1", "1.5", "", " 3600"] {
+            let mut invalid = HeaderMap::new();
+            invalid.insert(header::RETRY_AFTER, HeaderValue::from_static(value));
+            assert_eq!(retry_after(&invalid, UNIX_EPOCH), None);
+        }
 
         let now = UNIX_EPOCH + Duration::from_secs(1_000);
         let mut date = HeaderMap::new();

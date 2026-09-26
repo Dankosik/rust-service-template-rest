@@ -201,7 +201,7 @@ pub fn verify(
     let message = signed_message(message_id.as_bytes(), timestamp, body)?;
 
     let mut saw_signature = false;
-    for value in headers.get_all("webhook-signature").iter() {
+    for value in &headers.get_all("webhook-signature") {
         saw_signature = true;
         if signature_matches(&keys.active, &message, value)
             || keys
@@ -411,7 +411,7 @@ mod tests {
         let keys = KeyRing::from_encoded(ARBITRARY_BYTES_KEY, None).unwrap();
         let body = b"raw\0bytes";
         let good = keys.signatures(b"msg_1", 1, body).unwrap();
-        let headers = headers("msg_1", "+0001", &format!("v2,nope {} v1,not-base64", good));
+        let headers = headers("msg_1", "+0001", &format!("v2,nope {good} v1,not-base64"));
 
         assert!(
             keys.verify(&headers, body, UNIX_EPOCH + Duration::from_secs(1))

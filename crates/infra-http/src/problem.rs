@@ -491,6 +491,8 @@ pub mod responses {
         Conflict(#[ref_response] WebhookConflict),
         #[response(status = 413)]
         RequestEntityTooLarge(#[ref_response] RequestEntityTooLarge),
+        #[response(status = 500)]
+        InternalServerError(#[ref_response] InternalServerError),
         #[response(status = 503)]
         Unavailable(#[ref_response] ServiceUnavailable),
     }

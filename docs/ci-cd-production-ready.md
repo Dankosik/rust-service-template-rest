@@ -42,29 +42,36 @@ rehearsal in place of plain lifecycle: `/migrate` against a fresh database,
 
 The source template additionally selects the initializer matrix on
 `initializer_runtime`, the paths that can change an initialized service's
-build and tests or the initializer itself: eight parallel parts that together
-are `make template-init-check`. `source` runs the source suites and the 208
-canonical projection checks that establish exact harness independence;
-`database-none` and `database-postgres` run graphs 1-6 and 7-12 of the
-DATABASE × AUTHN × OUTBOUND_HTTP × HTTP_IDEMPOTENCY × JOBS representatives,
-split by DATABASE. The five parts after `database-postgres` need a usable
-Docker daemon because they also run their retained database suites, restoring
-that part's cache and saving none: `http-idempotency` (graphs 13-16, the
-idempotency suite), `jobs-1` (graphs 17-19, the jobs suite), `jobs-2` (graphs
-20-22, the jobs suite), `jobs-http-idempotency-1` (graphs 23-24, the jobs
-suite with its joint module and the idempotency suite), and
-`jobs-http-idempotency-2` (graphs 25-26, the same). Every graph goes through
-the public initializer, build and tests once. Every initialization in a part
-reuses that part's warm target cache, so the locked dependency graph compiles
-once per part, not once per initialization. A change to projected text alone
-(documentation, instructions, harness carriers, workflow and image metadata)
-selects `module_initializer` without the runtime surface and runs one
-Cargo-free job, `initializer (projections)`, instead. It requires no Docker
-or per-harness full aggregate; other quality, security, image and database
-jobs retain their own gates. The runner and its source-only Make include are
-removed from derived services, so initializer proof cannot recur there.
-[Initialization validation](template-sync.md#validation-boundary) defines the
-proof scopes and focused mode.
+build and tests or the initializer itself. Eight parallel parts together run
+`make template-init-check`. The source part proves all 368 canonical profile
+and harness projections. The 26 existing runtime graphs retain their public
+initializer, build, test and selected database proof; their numbering and
+baseline command scopes are unchanged.
+
+Webhook graphs 27–46 add the five jobs-compatible authentication/idempotency
+families, each with inbound-only (outbound HTTP absent or bounded), outbound-only,
+and both directions. Every new graph runs the public initializer and actual
+locked/offline Cargo metadata. Graphs 27, 29 and 30 run full build/test/database
+proof once per new capability shape. The other 17 compile all retained test
+targets and run the provider suite; inbound selections also run generated
+contract and mounted inert-route process checks. These focused runs do not
+repeat the full database suites.
+
+The existing eight CI parts and warm-cache arrangement remain: source suites;
+`database-none` (1–6); `database-postgres` (7–12); `http-idempotency` (13–16);
+and four jobs parts containing baseline graphs 17–26 plus the new webhook
+graphs. The exact graph IDs per part live in `ci.yml`; the runner records each
+profile tuple, command, result and duration. Initializations within a part
+reuse one absolute Cargo target. The five parts after `database-postgres`
+restore its cache and save none; their retained full database suites require
+Docker.
+
+A change to projected text alone selects `module_initializer` without the
+runtime surface and runs the Cargo-free `initializer (projections)` job.
+Other quality, security, image and database jobs keep their own gates. The
+source-only runner and Make include are removed from derived services, so
+initializer proof cannot recur there. [Initialization validation](template-sync.md#validation-boundary)
+defines the proof scopes and focused mode.
 
 A weekly schedule and manual dispatch select every surface, because advisory
 databases move without a commit. Tags select every surface too. A docs-only
@@ -201,7 +208,7 @@ job, while every other job finished within 8 minutes.
 | Decision | Alternative rejected | Why |
 | --- | --- | --- |
 | The initializer's staged OpenAPI build reuses an explicit absolute `CARGO_TARGET_DIR`, and `template-init-check.sh` exports its one cache to every initialization | a private target per initialization | about 22 initializations per run each compiled the locked graph cold, about 50 s apiece on the 4-vCPU runner, while each representative's build took 3–5 s and its tests 7–14 s on the warm cache; staged files are written fresh, so Cargo still rebuilds every workspace crate |
-| The initializer as an eight-part matrix: source suites with projections, graphs 1–6, graphs 7–12, graphs 13–16 (Docker, the retained idempotency database suite), graphs 17–19 and 20–22 (Docker, the jobs database suite), graphs 23–24 and 25–26 (Docker, the jobs suite with its joint module and the idempotency suite) | one sequential job | public-repository runners run the parts in parallel at no cost; `required` still reads one aggregate result; each part keeps its own warm cache; the five parts after the third restore its cache and save none, so the repository's cache budget gains no new cache; the jobs graphs are split into four parts so that no initializer part outlasts the image job, the slowest other job `required` waits for |
+| The initializer keeps eight parts, retaining the 26 baseline graphs and distributing 20 webhook graphs across the existing jobs parts | one sequential job or full database proof for every cross-profile combination | `required` reads one aggregate result; parts share the existing cache arrangement; three new full capability shapes plus 17 focused combinations bound duplicate builds and database execution; command-duration receipts expose changes to the critical path |
 | `initializer_runtime` selects the matrix; projected text alone runs the Cargo-free projections | the whole matrix for every projected path | 250 of the 355 tracked files `module_initializer` selects are documentation, instructions, harness carriers or metadata, which cannot change a build; the projections prove their markers and harness independence in about a minute instead of the matrix's three |
 | CI builds with `CARGO_PROFILE_DEV_DEBUG=line-tables-only`, and every target cache key carries the level | full debuginfo | the `quality` and initializer caches were 4.2 and 4.1 GB, 8.7 of the repository's 10 GB, so the integration, Go-tool and buildx caches were evicted and one restore took 50–126 s; line tables keep file:line in test backtraces |
 | `make verify` leaves heavy steps and the initializer matrix to CI and records a partial receipt | refusing to run without `ALLOW_HEAVY=1` or `ALLOW_FULL=1` | the refusal led agents to run the full matrix on a workstation, 40 minutes and more with several GB of temporary targets, while CI runs the same gates in parallel |

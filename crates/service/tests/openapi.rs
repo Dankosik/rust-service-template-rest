@@ -173,7 +173,7 @@ fn webhook_ingress_is_public_to_bearer_auth_but_declares_signature_and_problem_c
             "missing required {required}"
         );
     }
-    for status in ["204", "400", "404", "409", "413", "503"] {
+    for status in ["204", "400", "404", "409", "413", "500", "503"] {
         assert!(
             response(&document, operation, status).is_some(),
             "webhook ingress lacks {status}"
