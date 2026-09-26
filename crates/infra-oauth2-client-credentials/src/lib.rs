@@ -3,7 +3,7 @@
 //! Composition prepares one immutable credential owner and binds it to a
 //! resource client. Neither access tokens nor raw provider errors leave it.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use http::{HeaderValue, Request, Response, header::AUTHORIZATION};
@@ -19,6 +19,11 @@ use url::Url;
 
 #[cfg(test)]
 mod tests;
+
+// template:begin outbound-auth-grpc:oauth-grpc-module
+#[cfg(feature = "grpc")]
+pub mod grpc;
+// template:end outbound-auth-grpc:oauth-grpc-module
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const REUSE_MARGIN: Duration = Duration::from_secs(10);
@@ -254,7 +259,11 @@ impl Owner {
         if let Some(audience) = &self.audience {
             exchange = exchange.add_extra_param("audience", audience.as_str());
         }
-        let hook = |request| self.exchange(request, deadline);
+        let hook = TokenHttpClient {
+            endpoint: self.endpoint.clone(),
+            transport: self.transport.clone(),
+            deadline,
+        };
         let response = tokio::time::timeout_at(deadline, exchange.request_async(&hook))
             .await
             .map_err(|_| AcquisitionError::Timeout)?
@@ -300,42 +309,55 @@ impl Owner {
             reuse_until,
         })
     }
+}
 
-    async fn exchange(
-        &self,
-        request: oauth2::HttpRequest,
-        deadline: Instant,
-    ) -> Result<oauth2::HttpResponse, AcquisitionError> {
-        if request.uri() != self.endpoint.as_str() {
-            return Err(AcquisitionError::InvalidResponse);
-        }
-        let (mut parts, body) = request.into_parts();
-        parts.uri = self.endpoint[url::Position::BeforePath..]
-            .parse()
-            .map_err(|_| AcquisitionError::InvalidResponse)?;
-        if let Some(header) = parts.headers.get_mut(AUTHORIZATION) {
-            header.set_sensitive(true);
-        }
-        let response = self
-            .transport
-            .execute(
-                Request::from_parts(parts, Bytes::from(body)),
-                Operation {
-                    deadline,
-                    response_body_bytes: None,
-                },
-            )
-            .await
-            .map_err(|error| match error {
-                infra_outbound_http::Error::Timeout { .. } => AcquisitionError::Timeout,
-                infra_outbound_http::Error::ResponseBodyTooLarge => AcquisitionError::ResponseLimit,
-                _ => AcquisitionError::Transport,
-            })?;
-        if !response.status().is_success() {
-            return Err(AcquisitionError::Rejected);
-        }
-        let (parts, body) = response.into_parts();
-        Ok(Response::from_parts(parts, body.to_vec()))
+struct TokenHttpClient {
+    endpoint: Url,
+    transport: Client,
+    deadline: Instant,
+}
+
+impl<'client> oauth2::AsyncHttpClient<'client> for TokenHttpClient {
+    type Error = AcquisitionError;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<oauth2::HttpResponse, Self::Error>> + Send + 'client>>;
+
+    fn call(&'client self, request: oauth2::HttpRequest) -> Self::Future {
+        let deadline = self.deadline;
+        Box::pin(async move {
+            if request.uri() != self.endpoint.as_str() {
+                return Err(AcquisitionError::InvalidResponse);
+            }
+            let (mut parts, body) = request.into_parts();
+            parts.uri = self.endpoint[url::Position::BeforePath..]
+                .parse()
+                .map_err(|_| AcquisitionError::InvalidResponse)?;
+            if let Some(header) = parts.headers.get_mut(AUTHORIZATION) {
+                header.set_sensitive(true);
+            }
+            let response = self
+                .transport
+                .execute(
+                    Request::from_parts(parts, Bytes::from(body)),
+                    Operation {
+                        deadline,
+                        response_body_bytes: None,
+                    },
+                )
+                .await
+                .map_err(|error| match error {
+                    infra_outbound_http::Error::Timeout { .. } => AcquisitionError::Timeout,
+                    infra_outbound_http::Error::ResponseBodyTooLarge => {
+                        AcquisitionError::ResponseLimit
+                    }
+                    _ => AcquisitionError::Transport,
+                })?;
+            if !response.status().is_success() {
+                return Err(AcquisitionError::Rejected);
+            }
+            let (parts, body) = response.into_parts();
+            Ok(Response::from_parts(parts, body.to_vec()))
+        })
     }
 }
 

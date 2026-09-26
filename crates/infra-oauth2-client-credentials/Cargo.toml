@@ -11,7 +11,18 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# template:begin outbound-auth-grpc:oauth-grpc-feature
+[features]
+default = ["grpc"]
+grpc = ["dep:infra-grpc", "dep:tonic", "dep:tower"]
+# template:end outbound-auth-grpc:oauth-grpc-feature
+
 [dependencies]
+# template:begin outbound-auth-grpc:oauth-grpc-dependencies
+infra-grpc = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true, features = ["codegen"] }
+tower = { workspace = true, optional = true }
+# template:end outbound-auth-grpc:oauth-grpc-dependencies
 bytes = { workspace = true, features = ["std"] }
 http = { workspace = true }
 infra-outbound-http = { workspace = true }
@@ -24,6 +35,14 @@ tokio = { workspace = true, features = ["time"] }
 url = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+# template:begin outbound-auth-grpc:oauth-grpc-test-dependencies
+grpc-contracts = { workspace = true }
+hyper = { workspace = true, features = ["server", "http2"] }
+hyper-util = { workspace = true, features = ["tokio", "service"] }
+tonic-prost = { workspace = true }
+tokio-stream = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+# template:end outbound-auth-grpc:oauth-grpc-test-dependencies
 infra-outbound-http = { workspace = true, features = ["test-support"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "sync", "time", "net", "io-util"] }

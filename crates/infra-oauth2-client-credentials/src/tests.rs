@@ -29,6 +29,11 @@ use url::Url;
 
 use super::{AcquisitionError, Credentials, Error, FETCH_TIMEOUT, Options, TOKEN_LIMITS};
 
+// template:begin outbound-auth-grpc:oauth-grpc-tests-module
+#[cfg(feature = "grpc")]
+mod grpc;
+// template:end outbound-auth-grpc:oauth-grpc-tests-module
+
 const TOKEN_PATH: &str = "/token";
 const RESOURCE_PATH: &str = "/resource";
 

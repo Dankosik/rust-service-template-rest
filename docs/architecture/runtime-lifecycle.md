@@ -285,6 +285,18 @@ path.
 
 ## Decisions Recorded Here
 
+<!-- template:begin grpc:docs-runtime-grpc -->
+The optional gRPC listener uses the same bootstrap. It prepares descriptors,
+validation, verifier and TLS before serving, remains NOT_SERVING until startup
+admission, and reads cached readiness including its exact stale boundary. At
+first stop it rejects new business calls and publishes terminal health before
+propagation. HTTP and gRPC then drain concurrently under the remaining effective
+deadline; health watchers do not own business completion. Forced drain drops and
+joins connections, H2 streams and transport waiters before the existing teardown
+tail. It does not change NATS/provider shutdown ownership or add a second budget.
+See [gRPC](../grpc.md#health-shutdown-and-observation).
+<!-- template:end grpc:docs-runtime-grpc -->
+
 - **Tokio multi-thread runtime owned by `bootstrap::run`**, sized by
   `available_parallelism`, which honours cgroup quotas; no `GOMAXPROCS` or
   `memory_limit_ratio` equivalent exists because there is no garbage

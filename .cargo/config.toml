@@ -1,0 +1,4 @@
+# template:begin grpc:protoc-environment
+[env]
+PROTOC = { value = "scripts/grpc-protoc.py", relative = true }
+# template:end grpc:protoc-environment

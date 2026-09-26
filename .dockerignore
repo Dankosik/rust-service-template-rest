@@ -8,6 +8,15 @@
 !Cargo.toml
 !Cargo.lock
 !crates/
+!.cargo/
+.cargo/*
+!.cargo/config.toml
+!scripts/
+scripts/*
+!scripts/grpc-protoc.py
+!tools/
+tools/*
+!tools/versions.env
 # The migrate binary embeds the migration set at compile time.
 !migrations/
 # A workspace member cargo must see; its tests and fixtures are not built.

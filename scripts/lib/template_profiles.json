@@ -315,8 +315,13 @@
       {"path": "crates/config/src/load.rs", "ids": ["load-authn-config-import"]},
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-authn-dependency"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-authn-module", "infra-http-authn-exports"]},
-      {"path": "crates/infra-http/src/problem.rs", "ids": ["http-authentication-codes", "http-authentication-code-meta", "http-authentication-problem-responses", "http-authentication-problem-components"]},
+      {"path": "crates/infra-http/src/problem.rs", "ids": ["http-authentication-code-meta", "http-authentication-problem-responses", "http-authentication-problem-components"]},
+      {"path": "crates/service-failure/src/lib.rs", "ids": ["http-authentication-codes", "service-failure-authentication-code-all", "service-failure-authentication-code-wire", "service-failure-authentication-code-meaning", "service-failure-authentication-unauthenticated-meaning", "service-failure-authentication-unavailable-meaning"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-authn-dependency", "service-authn-test-dependencies"]},
+      {"path": "crates/infra-grpc/Cargo.toml", "ids": ["grpc-bearer-dependency", "grpc-bearer-test-dependency"]},
+      {"path": "crates/infra-grpc/src/server.rs", "ids": ["grpc-server-prepared-verifier-field", "grpc-server-prepare-verifier", "grpc-server-prepared-verifier-init", "grpc-server-inbound-verifier-field", "grpc-server-bound-verifier-move", "grpc-server-authn-verifier-clone", "grpc-server-authn-verify", "grpc-server-authentication-status"]},
+      {"path": "crates/infra-grpc/tests/transport.rs", "id": "grpc-transport-test-unknown-provider"},
+      {"path": "crates/infra-grpc/tests/transport.rs", "ids": ["grpc-transport-test-auth-imports", "grpc-transport-test-auth-secret", "grpc-transport-test-auth-time", "grpc-transport-test-auth-io", "grpc-transport-test-auth-tls-acceptor", "grpc-transport-test-auth-provider-field", "grpc-transport-test-auth-fixture", "grpc-transport-test-auth-server-argument", "grpc-transport-test-auth-provider-init", "grpc-transport-test-auth-provider-stop", "grpc-transport-test-auth-cardinalities", "grpc-transport-test-auth-stream-identity", "grpc-transport-test-auth-provider", "grpc-transport-test-auth-listener", "grpc-transport-test-auth-ca-der", "grpc-transport-test-auth-ca-der-init", "grpc-transport-test-seen-identity-field", "grpc-transport-test-seen-principal", "grpc-transport-test-drain-provider-before", "grpc-transport-test-drain-provider-after"]},
       {"path": "crates/service/src/api.rs", "ids": ["service-api-authn-imports", "service-api-authn-document-security", "service-api-authn-security-scheme", "service-api-protected-test-route"]},
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-authn-imports", "bootstrap-authn-config-import", "bootstrap-authn-errors", "bootstrap-authn-prepare", "bootstrap-prepare-auth-prefix", "bootstrap-prepare-auth-suffix", "bootstrap-auth-provider-url", "bootstrap-prepared-auth-enabled", "bootstrap-authn-finalize-enabled"]},
       {"path": "crates/service/tests/lifecycle.rs", "ids": ["service-lifecycle-disabled-authn"]},
@@ -554,6 +559,303 @@
   "cargo_lock": {
     "schema_version": 1
   },
+  "grpc": {
+    "remove_when_unselected": [
+      ".cargo/config.toml",
+      "api/proto/",
+      "buf.lock",
+      "buf.yaml",
+      "crates/config/src/grpc.rs",
+      "crates/grpc-contracts/",
+      "crates/infra-grpc/",
+      "crates/service/examples/grpc.rs",
+      "crates/service/src/grpc.rs",
+      "docs/grpc.md",
+      "docs/grpc-decisions.md",
+      "scripts/ci/grpc-check.sh",
+      "scripts/grpc-generate.sh",
+      "scripts/grpc-protoc.py",
+      "scripts/tests/grpc-protoc.py",
+      "tools/grpc-codegen/"
+    ],
+    "markers": [
+      {
+        "path": "Cargo.toml",
+        "ids": [
+          "workspace-grpc-generator",
+          "workspace-grpc-crates",
+          "workspace-grpc-dependencies"
+        ]
+      },
+      {
+        "path": ".github/workflows/codeql.yml",
+        "id": "codeql-grpc-compiler"
+      },
+      {
+        "path": "crates/service/src/lib.rs",
+        "id": "service-registration-module"
+      },
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "ids": [
+          "bootstrap-registration",
+          "bootstrap-prepared-registration",
+          "bootstrap-destructure-registration",
+          "bootstrap-grpc-imports",
+          "bootstrap-grpc-error",
+          "bootstrap-grpc-runtime-owner",
+          "bootstrap-grpc-runtime-owner-argument",
+          "bootstrap-grpc-runtime-owner-release",
+          "bootstrap-grpc-runtime-owner-parameter",
+          "bootstrap-grpc-serve-registration-argument",
+          "bootstrap-grpc-serve-registration-parameter",
+          "bootstrap-grpc-prepare-start",
+          "bootstrap-grpc-prepare-call",
+          "bootstrap-grpc-prepare-finish",
+          "bootstrap-grpc-bind",
+          "bootstrap-grpc-open-admission",
+          "shutdown-plan-grpc"
+        ]
+      },
+      {
+        "path": "crates/service/src/bootstrap/shutdown.rs",
+        "ids": [
+          "shutdown-imports",
+          "shutdown-plan-grpc",
+          "shutdown-begin-grpc-drain",
+          "shutdown-concurrent-grpc-drain",
+          "shutdown-grpc-cleanup-join"
+        ]
+      },
+      {
+        "path": "crates/config/src/lib.rs",
+        "ids": [
+          "config-module",
+          "config-export",
+          "config-field",
+          "config-validate",
+          "config-integration-grpc-export"
+        ]
+      },
+      {
+        "path": "crates/config/src/integrations.rs",
+        "ids": [
+          "config-integration-grpc-field",
+          "config-integration-grpc-type",
+          "config-integration-grpc-import",
+          "config-integration-grpc-decode",
+          "config-integration-grpc-value",
+          "config-integration-grpc-parser",
+          "config-integration-grpc-material-parser",
+          "config-integration-grpc-validate",
+          "config-integration-grpc-validation"
+        ]
+      },
+      {
+        "path": "crates/config/src/load.rs",
+        "ids": [
+          "load-listener-environment",
+          "load-integration-grpc-environment"
+        ]
+      },
+      {
+        "path": "crates/health/src/lib.rs",
+        "ids": [
+          "health-reader-stale-edge",
+          "health-reader-stale-edge-init",
+          "health-changed-verdict",
+          "health-changed-verdict-test"
+        ]
+      },
+      {
+        "path": "crates/service/Cargo.toml",
+        "ids": [
+          "service-grpc-dependencies",
+          "service-grpc-example-dependencies"
+        ]
+      },
+      {
+        "path": ".cargo/config.toml",
+        "id": "protoc-environment"
+      },
+      {
+        "path": "build/docker/Dockerfile",
+        "id": "docker-protoc-build-deps"
+      },
+      {
+        "path": "make/template.mk",
+        "id": "make-grpc-targets"
+      },
+      {
+        "path": "scripts/ci/changed-surfaces.sh",
+        "ids": [
+          "classifier-grpc-surface",
+          "classifier-grpc-schema",
+          "classifier-grpc-initializer",
+          "classifier-grpc-tests"
+        ]
+      },
+      {
+        "path": "scripts/ci/verify.sh",
+        "id": "verify-grpc-schema"
+      },
+      {
+        "path": "scripts/ci/tools-check.sh",
+        "id": "tools-check-protoc"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "ids": [
+          "ci-grpc-output",
+          "ci-grpc-job",
+          "ci-required-grpc-need",
+          "ci-grpc-generator-dependencies",
+          "ci-required-grpc-success"
+        ]
+      },
+      {
+        "path": "tools/versions.env",
+        "ids": [
+          "tools-buf-version",
+          "tools-protoc-version"
+        ]
+      },
+      {
+        "path": "README.md",
+        "id": "readme-grpc-profile"
+      },
+      {
+        "path": "docs/architecture/boundaries.md",
+        "ids": [
+          "docs-boundaries-grpc-owners",
+          "docs-boundaries-grpc-edges"
+        ]
+      },
+      {
+        "path": "docs/repo-architecture.md",
+        "id": "docs-architecture-grpc-source"
+      },
+      {
+        "path": "docs/validation/generated.md",
+        "id": "docs-validation-grpc-generated"
+      },
+      {
+        "path": "docs/architecture/runtime-lifecycle.md",
+        "id": "docs-runtime-grpc"
+      },
+      {
+        "path": "docs/roadmap.md",
+        "id": "roadmap-stage-10-7"
+      },
+      {
+        "path": "docs/build-test-and-development-commands.md",
+        "id": "docs-command-grpc"
+      },
+      {
+        "path": "docs/ci-cd-production-ready.md",
+        "id": "docs-ci-grpc-gates"
+      },
+      {
+        "path": "docs/configuration-source-policy.md",
+        "id": "docs-config-grpc"
+      },
+      {
+        "path": "docs/template-sync.md",
+        "id": "docs-template-init-grpc"
+      },
+      {
+        "path": "make/template.mk",
+        "id": "make-grpc-standard-targets"
+      },
+      {
+        "path": "deny.toml",
+        "id": "grpc-validator-license"
+      }
+    ]
+  },
+  "grpc-none": {
+    "remove_when_unselected": [],
+    "markers": []
+  },
+  "grpc-authn": {
+    "remove_when_unselected": [],
+    "markers": [
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "ids": [
+          "bootstrap-grpc-verifier",
+          "bootstrap-grpc-verifier-argument"
+        ]
+      }
+    ]
+  },
+  "grpc-jwt": {
+    "remove_when_unselected": [
+      "crates/service/tests/grpc_process.rs"
+    ],
+    "markers": [
+      {
+        "path": "crates/service/Cargo.toml",
+        "id": "service-grpc-jwt-test-dependencies"
+      }
+    ]
+  },
+  "outbound-auth-grpc": {
+    "remove_when_unselected": [
+      "crates/infra-oauth2-client-credentials/src/grpc.rs",
+      "crates/infra-oauth2-client-credentials/src/tests/grpc.rs"
+    ],
+    "markers": [
+      {
+        "path": "crates/infra-oauth2-client-credentials/Cargo.toml",
+        "ids": [
+          "oauth-grpc-feature",
+          "oauth-grpc-dependencies",
+          "oauth-grpc-test-dependencies"
+        ]
+      },
+      {
+        "path": "crates/infra-oauth2-client-credentials/src/lib.rs",
+        "id": "oauth-grpc-module"
+      },
+      {
+        "path": "crates/infra-oauth2-client-credentials/src/tests.rs",
+        "id": "oauth-grpc-tests-module"
+      },
+      {
+        "path": "docs/grpc.md",
+        "id": "docs-grpc-oauth"
+      },
+      {
+        "path": "docs/architecture/boundaries.md",
+        "id": "docs-boundaries-grpc-oauth-edge"
+      },
+      {
+        "path": "docs/outbound-machine-authentication.md",
+        "id": "docs-oauth-grpc-binding"
+      },
+      {
+        "path": "docs/outbound-machine-authentication-decisions.md",
+        "id": "docs-oauth-grpc-decision"
+      }
+    ]
+  },
+  "client-integrations": {
+    "remove_when_unselected": [
+      "crates/config/src/integrations.rs"
+    ],
+    "markers": [
+      {
+        "path": "crates/config/src/lib.rs",
+        "ids": [
+          "config-module",
+          "config-field",
+          "config-validate",
+          "config-integration-export"
+        ]
+      }
+    ]
+  },
   "config-url": {
     "remove_when_unselected": [],
     "markers": [
@@ -563,7 +865,6 @@
   "outbound-auth": {
     "remove_when_unselected": [
       "crates/infra-oauth2-client-credentials/",
-      "crates/config/src/integrations.rs",
       "docs/outbound-machine-authentication.md",
       "docs/outbound-machine-authentication-decisions.md"
     ],
@@ -577,10 +878,21 @@
       {
         "path": "crates/config/src/lib.rs",
         "ids": [
-          "config-module",
-          "config-export",
-          "config-field",
-          "config-validate"
+          "config-export"
+        ]
+      },
+      {
+        "path": "crates/config/src/integrations.rs",
+        "ids": [
+          "config-integration-oauth-imports",
+          "config-integration-oauth-url-import",
+          "config-integration-oauth-field",
+          "config-integration-oauth-types",
+          "config-integration-oauth-decode",
+          "config-integration-oauth-value",
+          "config-integration-oauth-parser",
+          "config-integration-oauth-validate",
+          "config-integration-oauth-validation"
         ]
       },
       {
@@ -758,7 +1070,8 @@
       {"path": "Cargo.toml", "ids": ["workspace-http-idempotency-store", "workspace-http-idempotency-digest"]},
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-idempotency-dependencies"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-idempotency-module"]},
-      {"path": "crates/infra-http/src/problem.rs", "ids": ["http-idempotency-codes", "http-idempotency-code-meta"]},
+      {"path": "crates/infra-http/src/problem.rs", "ids": ["http-idempotency-code-meta"]},
+      {"path": "crates/service-failure/src/lib.rs", "ids": ["http-idempotency-codes", "service-failure-idempotency-code-all", "service-failure-idempotency-code-meaning", "service-failure-idempotency-code-wire", "service-failure-idempotency-conflict-meaning", "service-failure-idempotency-unavailable-meaning"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-http-idempotency-module", "config-http-idempotency-export", "config-http-idempotency-field", "config-http-idempotency-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-http-idempotency-environment"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-http-idempotency-dependency"]},
@@ -901,8 +1214,7 @@
   "service-secrets": {
     "remove_when_unselected": [],
     "markers": [
-      {"path": "crates/service/Cargo.toml", "ids": ["service-secrecy-dependency"]},
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-postgres-secret-import"]}
+      {"path": "crates/service/Cargo.toml", "ids": ["service-secrecy-dependency"]}
     ]
   },
   "integration": {
@@ -912,8 +1224,13 @@
     "markers": [
       {"path": "env/docker-compose.yml", "ids": ["compose-file"]},
       {"path": ".github/dependabot.yml", "ids": ["dependabot-compose"]},
-      {"path": ".github/workflows/ci.yml", "ids": ["ci-integration-job", "ci-required-integration-need"]}
+      {"path": ".github/workflows/ci.yml", "ids": ["ci-integration-job", "ci-required-integration-need"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-postgres-secret-import"]}
     ]
+  },
+  "jobs-messaging": {
+    "remove_when_unselected": [],
+    "markers": []
   },
   "outbox": {
     "remove_when_unselected": [
@@ -1189,12 +1506,12 @@
       {
         "path": "crates/infra-http/src/problem.rs",
         "ids": [
-          "http-webhook-codes",
           "http-webhook-code-meta",
           "http-webhook-problem-responses",
           "http-webhook-problem-components"
         ]
       },
+      {"path": "crates/service-failure/src/lib.rs", "ids": ["http-webhook-codes", "service-failure-webhook-code-all", "service-failure-webhook-code-meaning", "service-failure-webhook-code-wire", "service-failure-webhook-conflict-meaning"]},
       {
         "path": "crates/service/Cargo.toml",
         "ids": [

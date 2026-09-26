@@ -48,6 +48,7 @@ OASDIFF ?= go run github.com/oasdiff/oasdiff@v$(OASDIFF_VERSION)
 # same versions as prebuilt binaries (taiki-e/install-action) and runs them
 # from PATH.
 TOOLS_ROOT ?= $(abspath $(or $(shell git rev-parse --git-common-dir 2>/dev/null),.git))/tools
+export TOOLS_ROOT
 ifeq ($(CI),true)
 CARGO_DENY ?= cargo-deny
 CARGO_SHEAR ?= cargo-shear
@@ -86,6 +87,9 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
 	publish-image-metadata-check compose-up compose-down test-integration-db test-integration-messaging migration-check migration-history-self-test migration-validate \
 	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test
+# template:begin grpc:make-grpc-standard-targets
+TEMPLATE_STANDARD_TARGETS += grpc-tools grpc-generate grpc-check
+# template:end grpc:make-grpc-standard-targets
 
 # Source-only checks are contributed by make/source.mk in the template source.
 SOURCE_CHECK_TARGETS ?=
@@ -174,11 +178,11 @@ fmt-check: ## Fail when formatting differs from rustfmt output
 INTEGRATION_LINT_FEATURES ?=
 
 lint: ## Clippy over all targets, warnings are errors
-	$(CARGO) clippy --workspace --all-targets $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
+	$(CARGO) clippy --workspace --all-targets --keep-going $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
 
 lint-changed: ## Clippy over the crates in PKGS="<crate> <crate>", warnings are errors
 	$(REQUIRE_PKGS)
-	$(CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
+	$(CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets --keep-going $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
 
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py
@@ -315,6 +319,24 @@ container-sbom: ## Write a CycloneDX SBOM of CONTAINER_IMAGE to SBOM_OUTPUT with
 
 publish-image-metadata-check: ## Self-test of the publication naming and tag promotion
 	bash scripts/ci/publish-image-metadata.sh self-test
+
+# template:begin grpc:make-grpc-targets
+.PHONY: grpc-tools grpc-generate grpc-check
+GRPC ?= none
+export GRPC
+grpc-tools: ## Provision the pinned, checksum-verified compiler for dependency schemas
+	python3 scripts/grpc-protoc.py --provision
+
+build run test test-package test-changed lint lint-changed openapi-generate openapi-check tools-check: grpc-tools
+$(filter test-integration-db test-integration-messaging migration-check,$(ACTIVE_TEMPLATE_STANDARD_TARGETS)): grpc-tools
+
+grpc-generate: ## Generate committed protobuf Rust from pinned Buf descriptors
+	$(VALIDATION_LOCK) bash scripts/grpc-generate.sh
+
+grpc-check: ## Check protobuf format, lint, generation drift and PR-base compatibility; ALLOW_HEAVY=1
+	$(HEAVY_GUARD)
+	$(VALIDATION_LOCK) bash scripts/ci/grpc-check.sh
+# template:end grpc:make-grpc-targets
 
 openapi-generate: ## Regenerate api/openapi/service.yaml from the Rust contract
 	@tmp="$$(mktemp)" && $(CARGO) run -q -p $(SERVICE_BIN) --bin openapi $(CARGO_FLAGS) > "$$tmp" && mv "$$tmp" $(OPENAPI_FILE)

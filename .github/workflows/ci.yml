@@ -45,6 +45,9 @@ jobs:
       dependency_policy: ${{ steps.surfaces.outputs.dependency_policy }}
       lint_config: ${{ steps.surfaces.outputs.lint_config }}
       openapi: ${{ steps.surfaces.outputs.openapi }}
+      # template:begin grpc:ci-grpc-output
+      grpc_schema: ${{ steps.surfaces.outputs.grpc_schema }}
+      # template:end grpc:ci-grpc-output
       tool_manifest: ${{ steps.surfaces.outputs.tool_manifest }}
       github_workflows: ${{ steps.surfaces.outputs.github_workflows }}
       dependency_automation: ${{ steps.surfaces.outputs.dependency_automation }}
@@ -92,6 +95,38 @@ jobs:
           else
             bash ./scripts/ci/changed-surfaces.sh --all | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
           fi
+
+  # template:begin grpc:ci-grpc-job
+  grpc:
+    needs: changes
+    if: needs.changes.outputs.grpc_schema == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - name: Restore generator cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/grpc-codegen
+          key: grpc-codegen-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'tools/grpc-codegen/Cargo.lock') }}
+      - name: Check schema and committed generation
+        env:
+          GRPC_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || github.sha }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/grpc-codegen
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${GRPC_BASE_REF}"
+          bash ./scripts/ci/measure.sh grpc-schema -- make grpc-check
+  # template:end grpc:ci-grpc-job
 
   quality:
     needs: changes
@@ -182,7 +217,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${EVENT_NAME}" != pull_request && "${EVENT_NAME}" != merge_group ]] || [[ "${CARGO_DEPENDENCIES}" == true || "${FALLBACK}" == true ]]; then
-            bash ./scripts/ci/measure.sh quality-workspace -- make lint build test
+            bash ./scripts/ci/measure.sh quality-workspace -- make --keep-going lint build test
             exit 0
           fi
           if [[ "${LINT_CONFIG}" == true ]]; then
@@ -321,6 +356,11 @@ jobs:
       - name: Dependency policy
         if: needs.changes.outputs.cargo_dependencies == 'true' || needs.changes.outputs.dependency_policy == 'true'
         run: bash ./scripts/ci/measure.sh security-deny -- make deny
+      # template:begin grpc:ci-grpc-generator-dependencies
+      - name: Generator dependency policy
+        if: needs.changes.outputs.grpc_schema == 'true'
+        run: cargo-deny --manifest-path tools/grpc-codegen/Cargo.toml --config deny.toml --locked check
+      # template:end grpc:ci-grpc-generator-dependencies
       - name: Workflow security
         if: needs.changes.outputs.github_workflows == 'true'
         env:
@@ -599,7 +639,7 @@ jobs:
       fail-fast: false
       matrix:
         # Together the parts are `make template-init-check`: the source
-        # suites with the canonical projections and fifty-six runtime graphs.
+        # suites with the canonical projections and sixty-one runtime graphs.
         # Graphs 1-46 retain the established database, idempotency, jobs, and
         # webhook representatives. Graphs 47-49 retain messaging and outbox;
         # 50-53 retain OAuth; 54 proves messaging plus OAuth without PostgreSQL;
@@ -614,7 +654,7 @@ jobs:
         include:
           - part: source
           - part: database-none
-            graphs: 1,2,3,4,5,6,47,50,51,52,54
+            graphs: 1,2,3,4,5,6,47,50,51,52,54,57,58,59,60
           - part: database-postgres
             graphs: 7,8,9,10,11,12
           - part: http-idempotency
@@ -634,7 +674,7 @@ jobs:
             cache: database-postgres
             docker: true
           - part: jobs-http-idempotency-2
-            graphs: 25,26,28,34,38,42,46,49,53,55
+            graphs: 25,26,28,34,38,42,46,49,53,55,61
             cache: database-postgres
             docker: true
     steps:
@@ -735,6 +775,9 @@ jobs:
     needs:
       - changes
       - quality
+      # template:begin grpc:ci-required-grpc-need
+      - grpc
+      # template:end grpc:ci-required-grpc-need
       - security
       - secrets
       - delivery
@@ -754,6 +797,11 @@ jobs:
       - name: Require selected initializer matrix success
         if: needs.changes.outputs.initializer_runtime == 'true' && needs.initializer.result != 'success'
         run: exit 1
+      # template:begin grpc:ci-required-grpc-success
+      - name: Require selected protobuf contract success
+        if: needs.changes.outputs.grpc_schema == 'true' && needs.grpc.result != 'success'
+        run: exit 1
+      # template:end grpc:ci-required-grpc-success
       - name: Require selected initializer projections success
         if: >-
           needs.changes.outputs.module_initializer == 'true' &&

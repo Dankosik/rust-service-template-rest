@@ -112,6 +112,18 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
 
 ## OpenTelemetry Environment Policy
 
+<!-- template:begin grpc:docs-config-grpc -->
+The optional `grpc` section defaults disabled. Enabling it requires an address
+and explicit plaintext or TLS security; bearer verification remains valid with
+either mode. PEM certificate/CA values are ordinary configuration, while
+`grpc.private_key` and `integrations.<name>.grpc.private_key` are environment-only
+secrets. TLS parsing and certificate matching belong to the transport's startup
+admission, and disabled listeners perform no TLS/network work. Config Debug
+omits all trust/identity material. Client integration inputs select a trusted
+destination, explicit security, optional CA and optional paired certificate/key;
+they do not create a client registry or token owner. See [gRPC](grpc.md).
+<!-- template:end grpc:docs-config-grpc -->
+
 Typed configuration owns service identity and takes precedence; the official
 OpenTelemetry environment stays a supported platform fallback:
 

@@ -134,6 +134,7 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("authn")
     lock["profiles"].pop("outbound_http", None)
     lock["profiles"].pop("outbound_auth", None)
+    lock["profiles"].pop("grpc", None)
     lock["profiles"].pop("http_idempotency", None)
     lock["profiles"].pop("jobs", None)
     lock["profiles"].pop("messaging", None)
@@ -153,6 +154,7 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     lock["profiles"].pop("outbound_http", None)
     lock["profiles"].pop("outbound_auth", None)
+    lock["profiles"].pop("grpc", None)
     lock["profiles"].pop("http_idempotency", None)
     lock["profiles"].pop("jobs", None)
     lock["profiles"].pop("messaging", None)
@@ -254,6 +256,7 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
         authn="none",
         outbound_http="none",
         outbound_auth="none",
+        grpc="none",
         http_idempotency="none",
         jobs="none",
         messaging="none",
@@ -303,6 +306,7 @@ def assert_preflight_extraction(source: Path, work: Path) -> None:
             authn="none",
             outbound_http="none",
             outbound_auth="none",
+            grpc="none",
             http_idempotency="none",
             jobs="none",
             messaging="none",
@@ -410,8 +414,8 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
 
 def assert_profile_packs(
     source: Path, target: Path, *, database: str, authn: str, outbound_http: str, http_idempotency: str,
-    jobs: str, outbound_auth: str = "none", outbox: str = "none", webhooks: str = "none",
-    inbound_webhooks: str = "none",
+    jobs: str, outbound_auth: str = "none", grpc: str = "none", messaging: str = "none", outbox: str = "none",
+    webhooks: str = "none", inbound_webhooks: str = "none",
 ) -> None:
     assert_profile_pack(source, target, "postgres", database == "postgres")
     assert_profile_pack(source, target, "authn", authn != "none")
@@ -419,7 +423,12 @@ def assert_profile_packs(
     assert_profile_pack(source, target, "oidc-introspection", authn == "oidc-introspection")
     assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
     assert_profile_pack(source, target, "outbound-auth", outbound_auth == "oauth2-client-credentials")
-    shared_selected = authn != "none" or outbound_http == "bounded"
+    assert_profile_pack(source, target, "grpc", grpc == "enabled")
+    assert_profile_pack(
+        source, target, "outbound-auth-grpc", grpc == "enabled" and outbound_auth == "oauth2-client-credentials"
+    )
+    assert_profile_pack(source, target, "config-url", messaging == "nats-jetstream" or outbound_auth == "oauth2-client-credentials")
+    shared_selected = authn != "none" or outbound_http == "bounded" or grpc == "enabled"
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
     assert_profile_pack(
         source, target, "request-budget", outbound_http == "bounded" or http_idempotency == "postgres"
@@ -433,6 +442,11 @@ def assert_profile_packs(
         source, target, "jobs-http-idempotency", jobs == "postgres" and http_idempotency == "postgres"
     )
     assert_profile_pack(source, target, "outbox", outbox == "postgres")
+    assert_profile_pack(source, target, "messaging", messaging == "nats-jetstream")
+    assert_profile_pack(source, target, "worker", jobs == "postgres" or messaging == "nats-jetstream")
+    assert_profile_pack(source, target, "service-secrets", database == "postgres" or messaging == "nats-jetstream")
+    assert_profile_pack(source, target, "integration", database == "postgres" or messaging == "nats-jetstream")
+    assert_profile_pack(source, target, "jobs-messaging", jobs == "postgres" and messaging == "nats-jetstream")
     assert_profile_pack(source, target, "webhooks-common", webhooks == "durable" or inbound_webhooks == "standard-webhooks")
     assert_profile_pack(source, target, "webhooks", webhooks == "durable")
     assert_profile_pack(source, target, "inbound-webhooks", inbound_webhooks == "standard-webhooks")
@@ -454,6 +468,12 @@ def assert_lock_outbound_auth(target: Path, expected: str) -> None:
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     if lock["profiles"].get("outbound_auth") != expected:
         raise AssertionError(f"template.lock did not record outbound_auth={expected}")
+
+
+def assert_lock_grpc(target: Path, expected: str) -> None:
+    lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
+    if lock["profiles"].get("grpc") != expected:
+        raise AssertionError(f"template.lock did not record grpc={expected}")
 
 
 def assert_lock_http_idempotency(target: Path, expected: str) -> None:
@@ -523,6 +543,19 @@ def assert_outbound_auth_lock_refusals(source: Path, target: Path) -> None:
         if result.returncode == 0 or state(target) != before:
             raise AssertionError(f"{label} outbound auth lock shape was not a preserving refusal")
         lock_path.write_bytes(original)
+
+
+def assert_grpc_lock_refusals(source: Path, target: Path) -> None:
+    lock_path = target / "template.lock"
+    original = lock_path.read_bytes()
+    lock = json.loads(original)
+    lock["profiles"]["grpc"] = "disabled"
+    lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+    before = state(target)
+    result = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
+    if result.returncode == 0 or state(target) != before:
+        raise AssertionError("invalid gRPC lock selection was not a preserving refusal")
+    lock_path.write_bytes(original)
 
 
 def assert_http_idempotency_lock_refusals(source: Path, target: Path) -> None:
@@ -743,6 +776,7 @@ def check(source: Path) -> None:
         assert_lock_authn(target, "none")
         assert_lock_outbound_http(target, "none")
         assert_lock_outbound_auth(target, "none")
+        assert_lock_grpc(target, "none")
         assert_lock_http_idempotency(target, "none")
         assert_lock_jobs(target, "none")
         assert_lock_outbox(target, "none")
@@ -814,6 +848,7 @@ def check(source: Path) -> None:
         lock_path.write_bytes(current_lock)
         assert_outbound_lock_refusals(source, target)
         assert_outbound_auth_lock_refusals(source, target)
+        assert_grpc_lock_refusals(source, target)
         assert_http_idempotency_lock_refusals(source, target)
         assert_jobs_lock_refusals(source, target)
         assert_outbox_lock_refusals(source, target)
@@ -969,6 +1004,20 @@ def check(source: Path) -> None:
         )
         if oauth_replay.returncode or state(oauth_target) != oauth_before:
             raise AssertionError("complete OAuth lock replay changed target bytes")
+        grpc_target = work / "grpc-replay"
+        clone(source, grpc_target)
+        grpc = init(source, grpc_target, "--database", "none", "--grpc", "enabled", "--agent-harness", "core")
+        if grpc.returncode:
+            raise AssertionError(f"gRPC initialization failed: {grpc.stderr}")
+        assert_profile_packs(
+            source, grpc_target, database="none", authn="none", outbound_http="none", http_idempotency="none",
+            jobs="none", grpc="enabled",
+        )
+        assert_lock_grpc(grpc_target, "enabled")
+        grpc_before = state(grpc_target)
+        grpc_replay = init(source, grpc_target, "--database", "none", "--grpc", "enabled", "--agent-harness", "core")
+        if grpc_replay.returncode or state(grpc_target) != grpc_before:
+            raise AssertionError("complete gRPC lock replay changed target bytes")
         http_idempotency_target = work / "http-idempotency-replay"
         clone(source, http_idempotency_target)
         http_idempotency_result = init(

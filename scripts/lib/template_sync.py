@@ -44,6 +44,7 @@ from template_state import (
     selected_outbox,
     selected_outbound_auth,
     selected_outbound_http,
+    selected_grpc,
     selected_profiles,
     selected_webhooks,
     snapshot_tree,
@@ -595,16 +596,20 @@ def _standard_targets(snapshot: Path) -> set[str]:
     start = next((index for index, line in enumerate(lines) if re.match(r"^TEMPLATE_STANDARD_TARGETS\s*:=", line)), None)
     if start is None:
         raise Refusal("make/template.mk has no static TEMPLATE_STANDARD_TARGETS registry")
-    first = re.match(r"^TEMPLATE_STANDARD_TARGETS\s*:=\s*(.*)$", lines[start])
-    assert first is not None
-    pieces = [first.group(1)]
-    index = start
-    while pieces[-1].rstrip().endswith("\\"):
-        pieces[-1] = pieces[-1].rstrip()[:-1]
-        index += 1
-        if index >= len(lines):
-            raise Refusal("TEMPLATE_STANDARD_TARGETS has an incomplete continuation")
-        pieces.append(lines[index].strip())
+    pieces: list[str] = []
+    for index in range(start, len(lines)):
+        declaration = re.match(r"^TEMPLATE_STANDARD_TARGETS\s*(:=|\+=)\s*(.*)$", lines[index])
+        if declaration is None:
+            continue
+        if declaration.group(1) == ":=" and index != start:
+            raise Refusal("TEMPLATE_STANDARD_TARGETS has more than one owner")
+        pieces.append(declaration.group(2))
+        while pieces[-1].rstrip().endswith("\\"):
+            pieces[-1] = pieces[-1].rstrip()[:-1]
+            index += 1
+            if index >= len(lines):
+                raise Refusal("TEMPLATE_STANDARD_TARGETS has an incomplete continuation")
+            pieces.append(lines[index].strip())
     raw = " ".join(pieces)
     if "$" in raw:
         raise Refusal("TEMPLATE_STANDARD_TARGETS must be static data")
@@ -815,6 +820,7 @@ def _run(arguments: argparse.Namespace) -> int:
         _database, harness = selected_profiles(target)
         selected_outbound_http(target)
         selected_outbound_auth(target)
+        selected_grpc(target)
         selected_http_idempotency(target)
         selected_jobs(target)
         selected_messaging(target)

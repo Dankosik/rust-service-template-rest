@@ -96,6 +96,19 @@ library behavior, not a detached application retry. Bound all active callers
 by the existing inbound/job admission and their deadlines; the only cache key
 is unit, so cache cardinality cannot grow with caller input.
 
+The private per-exchange `TokenHttpClient` owns a clone of the fixed endpoint,
+a clone of the shared outbound HTTP client, and the absolute attempt deadline.
+It implements `oauth2::AsyncHttpClient` directly for every call lifetime,
+exposing a boxed `Send` associated future as in oauth2's
+[supported async adapter](https://github.com/ramosbugs/oauth2-rs/blob/5.0.0/src/reqwest_client.rs).
+Its concrete type carries no borrowed owner lifetime. Acquisition passes the
+lazy `fetch(deadline)` future directly to Moka's `try_get_with` and awaits the
+lookup under the caller's `timeout_at`. Only the elected initializer creates
+and polls the exchange; dropping the caller drops its pending work under the
+original deadline. Credentials and the cache stay with the existing private
+owner. Reopen this type boundary only with compiler evidence and the existing
+cancellation/deadline proof; it adds no task, cache, token source, or replay.
+
 `CachedCredential` has private sensitive header and optional Tokio monotonic
 hard expiry. Representable positive expiry is `acquisition_start + expires_in`.
 Its cache cutoff is `hard_expiry - 10s`; if the cutoff is already reached,
@@ -155,9 +168,15 @@ reachability. Do not multiply by every harness/database/profile permutation or
 repeat identical full builds; harness projections remain separate static proof.
 Heavy validation remains CI-owned.
 
-The second landing stage merges current main and adds concrete gRPC composition,
-with the same private-token ownership, deadline accounting, and unauthenticated/
-permission-denied pass-through. No gRPC dependency or unused interface is added
-in this stage before that boundary exists. Exact-head CI and whole-result review
-belong to delivery; no deployment or image publication is authorized.
+Exact-head CI and whole-result review belong to delivery; no deployment or image
+publication is implied by template proof.
 <!-- template:end outbound-auth:docs-outbound-machine-authentication-decisions -->
+
+<!-- template:begin outbound-auth-grpc:docs-oauth-grpc-decision -->
+The concrete gRPC binding is now inside `Credentials`, with the same private-token
+ownership, original deadline and no-replay response behavior. Its optional
+dependency points from OAuth to `infra-grpc`; removing either profile removes
+the bridge. Native generated clients use the concrete authenticated Service,
+without a generic authorizer or public acquisition API. See the [transport
+decision record](grpc-decisions.md).
+<!-- template:end outbound-auth-grpc:docs-oauth-grpc-decision -->
