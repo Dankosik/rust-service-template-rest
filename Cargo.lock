@@ -2201,6 +2201,7 @@ dependencies = [
  "bytes",
  "grpc-contracts",
  "http",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "infra-grpc",

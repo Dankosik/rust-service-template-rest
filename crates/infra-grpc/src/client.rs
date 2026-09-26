@@ -203,6 +203,7 @@ impl Service<Request<Body>> for Client {
                         observation,
                         &tracker,
                         crate::observe::status_code(&parts.headers),
+                        parts.status,
                     ));
                     Ok(Response::from_parts(parts, body))
                 }
@@ -226,6 +227,7 @@ struct ClientBodyState {
 struct ClientBody {
     state: Arc<ClientBodyState>,
     emitted_terminal: bool,
+    http_status: http::StatusCode,
 }
 
 impl ClientBody {
@@ -235,6 +237,7 @@ impl ClientBody {
         observation: crate::observe::Observation,
         tracker: &TaskTracker,
         initial_status: Option<tonic::Code>,
+        http_status: http::StatusCode,
     ) -> Self {
         let state = Arc::new(ClientBodyState {
             body: Mutex::new(Some(body)),
@@ -259,6 +262,7 @@ impl ClientBody {
         Self {
             state,
             emitted_terminal: initial_status.is_some(),
+            http_status,
         }
     }
 
@@ -348,8 +352,8 @@ impl HttpBody for ClientBody {
         match polled {
             Some(Poll::Ready(Some(Ok(frame)))) => {
                 if let Some(trailers) = frame.trailers_ref() {
-                    let code =
-                        crate::observe::status_code(trailers).unwrap_or(tonic::Code::Unknown);
+                    let code = crate::observe::status_code(trailers)
+                        .unwrap_or_else(|| http_status_fallback(self.http_status));
                     let status = self.state.finish(Some(tonic::Status::new(code, "")));
                     if status.code() != code {
                         return self.terminal_frame(status);
@@ -366,8 +370,14 @@ impl HttpBody for ClientBody {
                 self.terminal_frame(status)
             }
             Some(Poll::Ready(None)) | None => {
-                let status = self.state.finish(None);
-                self.terminal_frame(status)
+                let code = http_status_fallback(self.http_status);
+                let status = self.state.finish(Some(tonic::Status::new(code, "")));
+                if status.code() != code {
+                    return self.terminal_frame(status);
+                }
+                // Let tonic infer missing grpc-status from the retained HTTP status.
+                self.emitted_terminal = true;
+                Poll::Ready(None)
             }
             Some(Poll::Pending) => Poll::Pending,
         }
@@ -386,6 +396,25 @@ impl Drop for ClientBody {
     fn drop(&mut self) {
         self.state
             .finish(Some(tonic::Status::cancelled("request cancelled")));
+    }
+}
+
+// tonic's native inference is private; this closed mapping is only for observation
+// and terminal arbitration. The original response remains the decoding authority.
+fn http_status_fallback(status: http::StatusCode) -> tonic::Code {
+    use http::StatusCode;
+    use tonic::Code;
+
+    match status {
+        StatusCode::BAD_REQUEST => Code::Internal,
+        StatusCode::UNAUTHORIZED => Code::Unauthenticated,
+        StatusCode::FORBIDDEN => Code::PermissionDenied,
+        StatusCode::NOT_FOUND => Code::Unimplemented,
+        StatusCode::TOO_MANY_REQUESTS
+        | StatusCode::BAD_GATEWAY
+        | StatusCode::SERVICE_UNAVAILABLE
+        | StatusCode::GATEWAY_TIMEOUT => Code::Unavailable,
+        _ => Code::Unknown,
     }
 }
 

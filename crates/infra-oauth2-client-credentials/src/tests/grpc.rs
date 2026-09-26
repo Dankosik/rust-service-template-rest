@@ -15,6 +15,7 @@ use grpc_contracts::generated::{
     UnaryRequest, UnaryResponse, echo_service_client::EchoServiceClient,
     echo_service_client_transport,
 };
+use http_body_util::{BodyExt as _, Full};
 use hyper::{Request as HyperRequest, Response as HyperResponse, body::Incoming};
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
@@ -60,6 +61,12 @@ impl tonic::server::UnaryService<UnaryRequest> for UnaryPeer {
 #[derive(Clone)]
 struct StreamPeer {
     calls: Arc<AtomicUsize>,
+    terminal: Arc<StreamTerminal>,
+}
+
+struct StreamTerminal {
+    started: Semaphore,
+    release: Semaphore,
 }
 
 #[derive(Clone)]
@@ -101,17 +108,42 @@ impl tonic::server::ServerStreamingService<ServerStreamRequest> for StreamPeer {
 
     fn call(&mut self, request: Request<ServerStreamRequest>) -> Self::Future {
         let calls = Arc::clone(&self.calls);
+        let terminal = Arc::clone(&self.terminal);
         Box::pin(async move {
             calls.fetch_add(1, Ordering::SeqCst);
             let message = request.into_inner().message;
-            let response: Self::ResponseStream = Box::pin(tokio_stream::iter([
-                Ok(ServerStreamResponse {
-                    message: format!("{message}-one"),
+            let first = Ok(ServerStreamResponse {
+                message: format!("{message}-one"),
+            });
+            let response: Self::ResponseStream = Box::pin(tokio_stream::once(first).chain(
+                tokio_stream::once(message).then(move |message| {
+                    let terminal = Arc::clone(&terminal);
+                    async move {
+                        if message == "delayed-unauthenticated" {
+                            terminal.started.add_permits(1);
+                            tokio::time::timeout(
+                                Duration::from_secs(20),
+                                terminal.release.acquire(),
+                            )
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .forget();
+                        }
+                        match message.as_str() {
+                            "unauthenticated" | "delayed-unauthenticated" => {
+                                Err(Status::unauthenticated("resource rejected credentials"))
+                            }
+                            "permission-denied" => {
+                                Err(Status::permission_denied("resource denied access"))
+                            }
+                            _ => Ok(ServerStreamResponse {
+                                message: format!("{message}-two"),
+                            }),
+                        }
+                    }
                 }),
-                Ok(ServerStreamResponse {
-                    message: format!("{message}-two"),
-                }),
-            ]));
+            ));
             Ok(Response::new(response))
         })
     }
@@ -121,6 +153,7 @@ struct ResourceFixture {
     address: SocketAddr,
     calls: Arc<AtomicUsize>,
     first_stream_item_received: Arc<Semaphore>,
+    terminal: Arc<StreamTerminal>,
     shutdown: oneshot::Sender<()>,
     task: JoinHandle<()>,
 }
@@ -131,17 +164,23 @@ impl ResourceFixture {
         let address = listener.local_addr().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let first_stream_item_received = Arc::new(Semaphore::new(0));
+        let terminal = Arc::new(StreamTerminal {
+            started: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
         let (shutdown, receiver) = oneshot::channel();
         let task = tokio::spawn(serve_peer(
             listener,
             Arc::clone(&calls),
             Arc::clone(&first_stream_item_received),
+            Arc::clone(&terminal),
             receiver,
         ));
         Self {
             address,
             calls,
             first_stream_item_received,
+            terminal,
             shutdown,
             task,
         }
@@ -190,6 +229,7 @@ async fn serve_peer(
     listener: TcpListener,
     calls: Arc<AtomicUsize>,
     first_stream_item_received: Arc<Semaphore>,
+    terminal: Arc<StreamTerminal>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut connections = JoinSet::new();
@@ -203,6 +243,7 @@ async fn serve_peer(
                     stream,
                     Arc::clone(&calls),
                     Arc::clone(&first_stream_item_received),
+                    Arc::clone(&terminal),
                 ));
             }
         }
@@ -222,11 +263,17 @@ async fn serve_connection(
     stream: tokio::net::TcpStream,
     calls: Arc<AtomicUsize>,
     first_stream_item_received: Arc<Semaphore>,
+    terminal: Arc<StreamTerminal>,
 ) {
     let service = service_fn(move |request| {
         let calls = Arc::clone(&calls);
         let first_stream_item_received = Arc::clone(&first_stream_item_received);
-        async move { Ok::<_, Infallible>(route_peer(request, calls, first_stream_item_received).await) }
+        let terminal = Arc::clone(&terminal);
+        async move {
+            Ok::<_, Infallible>(
+                route_peer(request, calls, first_stream_item_received, terminal).await,
+            )
+        }
     });
     let connection = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
         .serve_connection(TokioIo::new(stream), TowerToHyperService::new(service));
@@ -237,7 +284,42 @@ async fn route_peer(
     request: HyperRequest<Incoming>,
     calls: Arc<AtomicUsize>,
     first_stream_item_received: Arc<Semaphore>,
+    terminal: Arc<StreamTerminal>,
 ) -> HyperResponse<Body> {
+    if let Some(status) = request.headers().get("x-fixture-http-status") {
+        calls.fetch_add(1, Ordering::SeqCst);
+        let mut response = HyperResponse::builder()
+            .status(http::StatusCode::from_bytes(status.as_bytes()).unwrap())
+            .header("content-type", "application/grpc");
+        if let Some(status) = request.headers().get("x-fixture-initial-status") {
+            response = response.header("grpc-status", status);
+        }
+        let body = if request.headers().contains_key("x-fixture-body-error") {
+            // A valid empty protobuf message followed by a reset, never a peer status.
+            Body::new(
+                Full::new(bytes::Bytes::from_static(&[0, 0, 0, 0, 0]))
+                    .map_err(|never| match never {})
+                    .with_trailers(async move {
+                        tokio::time::timeout(Duration::from_secs(20), terminal.release.acquire())
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .forget();
+                        Some(Err(Status::unavailable("fixture body failure")))
+                    }),
+            )
+        } else if request.headers().contains_key("x-fixture-trailers") {
+            let mut trailers = http::HeaderMap::new();
+            trailers.insert("peer-proof", http::HeaderValue::from_static("preserved"));
+            if let Some(status) = request.headers().get("x-fixture-terminal-status") {
+                trailers.insert("grpc-status", status.clone());
+            }
+            Body::new(Body::empty().with_trailers(std::future::ready(Some(Ok(trailers)))))
+        } else {
+            Body::empty()
+        };
+        return response.body(body).unwrap();
+    }
     match request.uri().path() {
         "/example.v1.EchoService/Unary" => {
             tonic::server::Grpc::new(
@@ -251,7 +333,7 @@ async fn route_peer(
                 ServerStreamResponse,
                 ServerStreamRequest,
             >::default())
-            .server_streaming(StreamPeer { calls }, request)
+            .server_streaming(StreamPeer { calls, terminal }, request)
             .await
         }
         "/example.v1.EchoService/ClientStream" => {
@@ -460,22 +542,27 @@ async fn grpc_hard_expiry_before_dispatch_refuses_the_resource_call() {
     tokio::time::advance(Duration::from_secs(2)).await;
     tokio::time::resume();
     gate.add_permits(1);
-    assert_eq!(call.as_mut().await.unwrap_err().code(), Code::Unavailable);
+    assert_eq!(
+        call.as_mut().await.unwrap_err().code(),
+        Code::DeadlineExceeded
+    );
     assert_eq!(resource.calls(), 0);
     resource.finish().await;
     tokens.finish().await;
 }
 
 #[tokio::test]
-async fn grpc_resource_authentication_statuses_pass_through_without_cache_invalidation_or_replay() {
+async fn grpc_initial_authentication_statuses_pass_through_and_only_rejection_evicts() {
     let tokens = Fixture::new().await;
     let resource = ResourceFixture::new().await;
-    let credentials = tokens.credentials(&[], None);
-    let mut client = resource.client(&credentials);
-    for (message, expected) in [
-        ("unauthenticated", Code::Unauthenticated),
-        ("permission-denied", Code::PermissionDenied),
+    for (message, expected, extra_fetches) in [
+        ("unauthenticated", Code::Unauthenticated, 1),
+        ("permission-denied", Code::PermissionDenied, 0),
     ] {
+        let credentials = tokens.credentials(&[], None);
+        let mut client = resource.client(&credentials);
+        let before_tokens = tokens.token_requests().len();
+        let before_calls = resource.calls();
         let error = client
             .unary(rpc(
                 UnaryRequest {
@@ -486,7 +573,321 @@ async fn grpc_resource_authentication_statuses_pass_through_without_cache_invali
             .await
             .unwrap_err();
         assert_eq!(error.code(), expected);
+        assert_eq!(tokens.token_requests().len(), before_tokens + 1);
+        assert_eq!(resource.calls(), before_calls + 1);
+        client
+            .unary(rpc(
+                UnaryRequest {
+                    message: "success".to_owned(),
+                },
+                Duration::from_secs(10),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            tokens.token_requests().len(),
+            before_tokens + 1 + extra_fetches
+        );
+        assert_eq!(resource.calls(), before_calls + 2);
     }
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
+async fn grpc_terminal_authentication_status_evicts_before_the_next_call_without_replay() {
+    let tokens = Fixture::new().await;
+    let resource = ResourceFixture::new().await;
+    for (message, expected, extra_fetches) in [
+        ("unauthenticated", Code::Unauthenticated, 1),
+        ("permission-denied", Code::PermissionDenied, 0),
+    ] {
+        let credentials = tokens.credentials(&[], None);
+        let before_tokens = tokens.token_requests().len();
+        let before_calls = resource.calls();
+        let mut stream = resource
+            .client(&credentials)
+            .server_stream(rpc(
+                ServerStreamRequest {
+                    message: message.to_owned(),
+                },
+                Duration::from_secs(10),
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            stream.message().await.unwrap().unwrap().message,
+            format!("{message}-one")
+        );
+        assert_eq!(tokens.token_requests().len(), before_tokens + 1);
+        let error = stream.message().await.unwrap_err();
+        assert_eq!(error.code(), expected);
+        assert_eq!(
+            error.message(),
+            if extra_fetches == 1 {
+                "resource rejected credentials"
+            } else {
+                "resource denied access"
+            }
+        );
+        assert_eq!(tokens.token_requests().len(), before_tokens + 1);
+        assert_eq!(resource.calls(), before_calls + 1);
+        resource
+            .client(&credentials)
+            .unary(rpc(
+                UnaryRequest {
+                    message: "success".to_owned(),
+                },
+                Duration::from_secs(10),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            tokens.token_requests().len(),
+            before_tokens + 1 + extra_fetches
+        );
+        assert_eq!(resource.calls(), before_calls + 2);
+    }
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
+async fn grpc_late_rejection_of_an_old_stream_spares_the_newer_cached_credential() {
+    let tokens = Fixture::new().await;
+    tokens.token_json(
+        "200 OK",
+        &serde_json::json!({
+            "access_token": "first", "token_type": "Bearer", "expires_in": 1,
+        }),
+    );
+    let resource = ResourceFixture::new().await;
+    let credentials = tokens.credentials(&[], None);
+    let mut stream = resource
+        .client(&credentials)
+        .server_stream(rpc(
+            ServerStreamRequest {
+                message: "delayed-unauthenticated".to_owned(),
+            },
+            Duration::from_secs(10),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(stream.message().await.unwrap().is_some());
+    tokio::time::timeout(Duration::from_secs(2), resource.terminal.started.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::time::resume();
+    tokens.token_json(
+        "200 OK",
+        &serde_json::json!({
+            "access_token": "second", "token_type": "Bearer", "expires_in": 60,
+        }),
+    );
+    resource
+        .client(&credentials)
+        .unary(rpc(
+            UnaryRequest {
+                message: "success".to_owned(),
+            },
+            Duration::from_secs(10),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(tokens.token_requests().len(), 2);
+
+    resource.terminal.release.add_permits(1);
+    assert_eq!(
+        stream.message().await.unwrap_err().code(),
+        Code::Unauthenticated
+    );
+    resource
+        .client(&credentials)
+        .unary(rpc(
+            UnaryRequest {
+                message: "success".to_owned(),
+            },
+            Duration::from_secs(10),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(tokens.token_requests().len(), 2);
+    assert_eq!(resource.calls(), 3);
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
+async fn grpc_deadline_and_unread_drop_do_not_invalidate_stream_credentials() {
+    let tokens = Fixture::new().await;
+    let resource = ResourceFixture::new().await;
+    for expire in [false, true] {
+        let credentials = tokens.credentials(&[], None);
+        let before_tokens = tokens.token_requests().len();
+        let mut stream = resource
+            .client(&credentials)
+            .server_stream(rpc(
+                ServerStreamRequest {
+                    message: "delayed-unauthenticated".to_owned(),
+                },
+                Duration::from_secs(1),
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(stream.message().await.unwrap().is_some());
+        tokio::time::timeout(Duration::from_secs(2), resource.terminal.started.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        if expire {
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(2)).await;
+            assert_eq!(
+                stream.message().await.unwrap_err().code(),
+                Code::DeadlineExceeded
+            );
+            tokio::time::resume();
+        }
+        drop(stream);
+        resource
+            .client(&credentials)
+            .unary(rpc(
+                UnaryRequest {
+                    message: "success".to_owned(),
+                },
+                Duration::from_secs(10),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(tokens.token_requests().len(), before_tokens + 1);
+    }
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
+async fn grpc_http_fallback_requires_absent_status_and_completes_without_hanging() {
+    let tokens = Fixture::new().await;
+    let resource = ResourceFixture::new().await;
+    for (http_status, initial, terminal, trailers, expected, extra_fetches) in [
+        ("401", None, None, false, Code::Unauthenticated, 1),
+        ("401", None, None, true, Code::Unauthenticated, 1),
+        ("200", None, None, false, Code::Unknown, 0),
+        ("403", None, None, false, Code::PermissionDenied, 0),
+        ("401", Some("0"), Some("16"), true, Code::Internal, 0),
+        ("401", Some("7"), None, false, Code::PermissionDenied, 0),
+        ("401", Some("invalid"), None, false, Code::Unknown, 0),
+        ("401", None, Some("7"), true, Code::PermissionDenied, 0),
+        ("401", None, Some("0"), true, Code::Internal, 0),
+        ("401", None, Some("invalid"), true, Code::Unknown, 0),
+    ] {
+        let credentials = tokens.credentials(&[], None);
+        let before_tokens = tokens.token_requests().len();
+        let before_calls = resource.calls();
+        let mut request = rpc(UnaryRequest::default(), Duration::from_secs(10));
+        request.metadata_mut().insert(
+            "x-fixture-http-status",
+            MetadataValue::from_static(http_status),
+        );
+        if let Some(status) = initial {
+            request.metadata_mut().insert(
+                "x-fixture-initial-status",
+                MetadataValue::from_static(status),
+            );
+        }
+        if trailers {
+            request
+                .metadata_mut()
+                .insert("x-fixture-trailers", MetadataValue::from_static("yes"));
+        }
+        if let Some(status) = terminal {
+            request.metadata_mut().insert(
+                "x-fixture-terminal-status",
+                MetadataValue::from_static(status),
+            );
+        }
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            resource.client(&credentials).unary(request),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            error.code(),
+            expected,
+            "HTTP {http_status}, initial {initial:?}, terminal {terminal:?}"
+        );
+        if terminal == Some("7") {
+            assert_eq!(error.metadata().get("peer-proof").unwrap(), "preserved");
+        }
+        assert_eq!(tokens.token_requests().len(), before_tokens + 1);
+        assert_eq!(resource.calls(), before_calls + 1);
+        resource
+            .client(&credentials)
+            .unary(rpc(
+                UnaryRequest {
+                    message: "success".to_owned(),
+                },
+                Duration::from_secs(10),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            tokens.token_requests().len(),
+            before_tokens + 1 + extra_fetches
+        );
+        assert_eq!(resource.calls(), before_calls + 2);
+    }
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
+async fn grpc_body_failure_does_not_turn_http_401_into_a_remote_rejection() {
+    let tokens = Fixture::new().await;
+    let resource = ResourceFixture::new().await;
+    let credentials = tokens.credentials(&[], None);
+    let mut request = rpc(ServerStreamRequest::default(), Duration::from_secs(10));
+    request
+        .metadata_mut()
+        .insert("x-fixture-http-status", MetadataValue::from_static("401"));
+    request
+        .metadata_mut()
+        .insert("x-fixture-body-error", MetadataValue::from_static("yes"));
+    let mut stream = resource
+        .client(&credentials)
+        .server_stream(request)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(stream.message().await.unwrap().is_some());
+    resource.terminal.release.add_permits(1);
+    let error = tokio::time::timeout(Duration::from_secs(2), stream.message())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_ne!(error.code(), Code::Unauthenticated);
+    assert!(!error.message().contains("fixture body failure"));
+    resource
+        .client(&credentials)
+        .unary(rpc(
+            UnaryRequest {
+                message: "success".to_owned(),
+            },
+            Duration::from_secs(10),
+        ))
+        .await
+        .unwrap();
     assert_eq!(tokens.token_requests().len(), 1);
     assert_eq!(resource.calls(), 2);
     resource.finish().await;
@@ -519,6 +920,7 @@ async fn grpc_stream_authorizes_once_at_opening_without_refresh_on_later_polls()
     );
     assert_eq!(tokens.token_requests().len(), 1);
     assert_eq!(resource.calls(), 1);
+    assert!(stream.message().await.unwrap().is_none());
     drop(stream);
     resource.finish().await;
     tokens.finish().await;

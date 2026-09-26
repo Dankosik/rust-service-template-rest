@@ -6,10 +6,11 @@ use std::{
     task::{Context, Poll},
 };
 
-use http::{Request, Response, header::AUTHORIZATION};
+use http::{Request, Response, StatusCode, header::AUTHORIZATION};
+use http_body_util::BodyExt as _;
 use infra_grpc::{Client, Operation};
-use tokio::time::Instant;
-use tonic::{Status, body::Body};
+use tokio::{sync::oneshot, time::Instant};
+use tonic::{Code, Status, body::Body};
 use tower::Service;
 
 use crate::{AcquisitionError, Credentials};
@@ -76,13 +77,54 @@ impl Service<Request<Body>> for AuthenticatedClient {
                 .hard_expiry
                 .is_some_and(|expiry| Instant::now() >= expiry)
             {
-                return Err(Status::unavailable("client credentials unavailable"));
+                return Err(acquisition_status(AcquisitionError::Timeout));
             }
             // The cache owner validates the bearer grammar and marks this value sensitive.
             request
                 .headers_mut()
                 .insert(AUTHORIZATION, value.header.clone());
-            resource.call(request).await
+            let response = resource.call(request).await?;
+            if let Some(status) = response.headers().get("grpc-status") {
+                if Code::from_bytes(status.as_bytes()) == Code::Unauthenticated {
+                    let _ =
+                        tokio::time::timeout_at(operation.deadline, credentials.invalidate(&value))
+                            .await;
+                }
+                return Ok(response);
+            }
+
+            let (parts, body) = response.into_parts();
+            let http_status = parts.status;
+            let (sender, receiver) = oneshot::channel();
+            let mut sender = Some(sender);
+            let body = body
+                .inspect_frame(move |frame| {
+                    if let Some(trailers) = frame.trailers_ref()
+                        && let Some(sender) = sender.take()
+                    {
+                        let status = trailers
+                            .get("grpc-status")
+                            .map(|status| Code::from_bytes(status.as_bytes()));
+                        let _ = sender.send(status);
+                    }
+                })
+                // Drop the observer at EOF/error so status-less completion closes the channel.
+                .fuse()
+                .with_trailers(async move {
+                    let rejected = match receiver.await {
+                        Ok(Some(code)) => code == Code::Unauthenticated,
+                        Ok(None) | Err(_) => http_status == StatusCode::UNAUTHORIZED,
+                    };
+                    if rejected {
+                        let _ = tokio::time::timeout_at(
+                            operation.deadline,
+                            credentials.invalidate(&value),
+                        )
+                        .await;
+                    }
+                    None
+                });
+            Ok(Response::from_parts(parts, Body::new(body)))
         })
     }
 }

@@ -827,6 +827,10 @@
         "id": "docs-grpc-oauth"
       },
       {
+        "path": "docs/grpc-decisions.md",
+        "id": "docs-grpc-oauth-eviction"
+      },
+      {
         "path": "docs/architecture/boundaries.md",
         "id": "docs-boundaries-grpc-oauth-edge"
       },

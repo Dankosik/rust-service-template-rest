@@ -151,6 +151,38 @@ No custom remapper makes these client outcomes uniform. Server-deadline proof
 uses generated tonic RPCs over Hyper's HTTP/2 sender to observe the server timer;
 client and OAuth budget tests keep the shipped channel path.
 
+The outbound body preserves a peer's clean EOF and trailers without a
+`grpc-status`, so tonic can apply its native HTTP-status fallback. An earlier
+deadline or cancellation still wins. The existing observation owner records
+the same closed fallback code; tonic's `infer_grpc_status` helper is private,
+so this small HTTP-code mapping follows the locked
+[status implementation](https://docs.rs/tonic/0.14.6/src/tonic/status.rs.html).
+It does not synthesize fallback trailers or reinterpret body errors as a peer
+authentication rejection.
+
+<!-- template:begin outbound-auth-grpc:docs-grpc-oauth-eviction -->
+The private OAuth bridge reuses `Credentials::invalidate` and Moka's
+`entry().and_compute_with` / `Arc::ptr_eq` check for a rejected credential.
+An initial `grpc-status` is terminal in tonic; an explicit `UNAUTHENTICATED`
+there triggers conditional eviction before returning the unchanged response.
+Otherwise the existing `http-body-util` 0.1.5
+[body combinators](https://docs.rs/http-body-util/0.1.5/http_body_util/trait.BodyExt.html)
+form `inspect_frame(...).fuse().with_trailers(...)`, boxed by tonic's `Body`.
+The inspector passes only an optional native status code through a private
+oneshot, taking its sender on any trailer. Clean EOF drops the sender; body
+errors and consumer drop bypass or cancel the hook. The hook returns no new
+trailers, preserving the original frame.
+
+Explicit status, including malformed status becoming `UNKNOWN`, wins over
+HTTP fallback. Only an observed `UNAUTHENTICATED` or absent-status HTTP 401
+conditionally evicts the exact used credential. `PERMISSION_DENIED` retains it.
+Eviction is awaited within the original remaining deadline; exhausted cleanup
+does not alter the response or create background work. This adds only optional
+use of the already locked body utility and Tokio sync feature, with no new
+crate version, custom body state machine, token getter, cache, or replay.
+Reopen if a supported library hook replaces these response-lifetime combinators.
+<!-- template:end outbound-auth-grpc:docs-grpc-oauth-eviction -->
+
 Existing rustls/tokio-rustls configs explicitly select TLS 1.3, normal hostname
 and chain validation, and required client certificates when a client CA exists.
 Tonic `ServerTlsConfig` has no protocol-floor setter; relying on absence of a

@@ -186,9 +186,19 @@ let client = grpc_contracts::generated::echo_service_client::EchoServiceClient::
 Preexisting Authorization is rejected before token or resource I/O. Acquisition
 and hard-expiry checks spend the original deadline; failure prevents dispatch.
 One sensitive bearer value is injected at opening. A stream does not refresh it
-mid-call. Resource `UNAUTHENTICATED` and `PERMISSION_DENIED` pass through without
-token invalidation or replay. The [OAuth owner](outbound-machine-authentication.md)
-keeps the token, cache and coalescing policy; there is no public token getter.
+mid-call. An observed resource `UNAUTHENTICATED` conditionally removes only the
+exact credential used by that call while it is still cached; a newer replacement
+survives. This covers native status in initial headers or terminal trailers, and
+HTTP 401 fallback only when no `grpc-status` is present. `PERMISSION_DENIED`,
+including native HTTP 403 fallback, keeps the credential. Explicit `grpc-status`
+takes precedence over HTTP status, including malformed values mapping to `UNKNOWN`.
+
+Cleanup spends only the original remaining deadline and never changes the
+response or replays the RPC. Eviction is not guaranteed after budget exhaustion
+or when the caller drops before observing the terminal rejection; no background
+cleanup is started. Hard expiry before dispatch is a timeout and sends no
+resource request. The [OAuth owner](outbound-machine-authentication.md) keeps
+the token, cache and coalescing policy; there is no public token getter.
 <!-- template:end outbound-auth-grpc:docs-grpc-oauth -->
 
 ## Health, shutdown and observation
