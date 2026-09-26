@@ -12,8 +12,8 @@ use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use infra_messaging::wire::{
-    CREATED_AT, DEAD_LETTER_REASON, NATS_MSG_ID, DeadLetterRecord, dead_letter_id,
-    decode_envelope, encode_prepared, restore_dead_letter,
+    CREATED_AT, DEAD_LETTER_REASON, DeadLetterRecord, NATS_MSG_ID, dead_letter_id, decode_envelope,
+    encode_prepared, restore_dead_letter,
 };
 use infra_messaging::{Registry, Route};
 use serde::Deserialize;
@@ -144,9 +144,24 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
     )
     .unwrap_or_else(|error| panic!("{}: Go record rejected by Rust: {error}", fixture.name));
 
-    assert_eq!(decoded.message_id(), fixture.decoded.message_id, "{} message ID", fixture.name);
-    assert_eq!(decoded.event_type(), fixture.decoded.event_type, "{} event type", fixture.name);
-    assert_eq!(decoded.schema_version(), schema_version(&fixture.decoded.schema), "{} schema", fixture.name);
+    assert_eq!(
+        decoded.message_id(),
+        fixture.decoded.message_id,
+        "{} message ID",
+        fixture.name
+    );
+    assert_eq!(
+        decoded.event_type(),
+        fixture.decoded.event_type,
+        "{} event type",
+        fixture.name
+    );
+    assert_eq!(
+        decoded.schema_version(),
+        schema_version(&fixture.decoded.schema),
+        "{} schema",
+        fixture.name
+    );
     assert_eq!(
         decoded.occurred_at().unix_timestamp(),
         fixture.decoded.unix_seconds,
@@ -165,7 +180,11 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
         "{} raw payload",
         fixture.name
     );
-    assert_eq!(fixture.inbound.subject, fixture.decoded.subject, "{} subject", fixture.name);
+    assert_eq!(
+        fixture.inbound.subject, fixture.decoded.subject,
+        "{} subject",
+        fixture.name
+    );
     assert_eq!(
         fixture.inbound.headers.get(NATS_MSG_ID),
         Some(&fixture.decoded.publication_id),
@@ -230,7 +249,11 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
         fixture.name
     );
     assert_eq!(
-        fixture.dlq.headers.get(DEAD_LETTER_REASON).map(String::as_str),
+        fixture
+            .dlq
+            .headers
+            .get(DEAD_LETTER_REASON)
+            .map(String::as_str),
         Some("exhausted"),
         "{} DLQ reason",
         fixture.name
@@ -245,11 +268,36 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
         stored_at: parse_timestamp(&fixture.dlq.stored_at),
     })
     .unwrap_or_else(|error| panic!("{}: Go DLQ record rejected by Rust: {error}", fixture.name));
-    assert_eq!(restored.subject(), fixture.restored.subject, "{} restored subject", fixture.name);
-    assert_eq!(restored.message_id(), fixture.restored.message_id, "{} restored message ID", fixture.name);
-    assert_eq!(restored.publication_id(), fixture.restored.publication_id, "{} redrive hash", fixture.name);
-    assert_eq!(restored.event_type(), fixture.restored.event_type, "{} restored type", fixture.name);
-    assert_eq!(restored.schema(), fixture.restored.schema, "{} restored schema", fixture.name);
+    assert_eq!(
+        restored.subject(),
+        fixture.restored.subject,
+        "{} restored subject",
+        fixture.name
+    );
+    assert_eq!(
+        restored.message_id(),
+        fixture.restored.message_id,
+        "{} restored message ID",
+        fixture.name
+    );
+    assert_eq!(
+        restored.publication_id(),
+        fixture.restored.publication_id,
+        "{} redrive hash",
+        fixture.name
+    );
+    assert_eq!(
+        restored.event_type(),
+        fixture.restored.event_type,
+        "{} restored type",
+        fixture.name
+    );
+    assert_eq!(
+        restored.schema(),
+        fixture.restored.schema,
+        "{} restored schema",
+        fixture.name
+    );
     assert_eq!(
         restored.occurred_at().unix_timestamp(),
         fixture.restored.unix_seconds,
@@ -292,7 +340,10 @@ fn verify_production_limits(fixtures: &FixtureSet) {
     assert_eq!(decoded.schema_version(), u16::MAX);
 
     let event = bridge_event("x".repeat(257));
-    assert!(event.is_err(), "over-limit Go identity must reject before encoding");
+    assert!(
+        event.is_err(),
+        "over-limit Go identity must reject before encoding"
+    );
 
     let registry = Registry::new([Route::new::<BridgePayload>("events.created")])
         .expect("bridge route admits");
@@ -357,14 +408,21 @@ fn header_values(headers: &HeaderMap) -> BTreeMap<String, String> {
     headers
         .iter()
         .map(|(name, values)| {
-            assert_eq!(values.len(), 1, "production normal envelope has one value per header");
+            assert_eq!(
+                values.len(),
+                1,
+                "production normal envelope has one value per header"
+            );
             (name.to_string(), values[0].to_string())
         })
         .collect()
 }
 
 fn body(encoded: &str) -> Bytes {
-    STANDARD.decode(encoded).expect("fixture body is base64").into()
+    STANDARD
+        .decode(encoded)
+        .expect("fixture body is base64")
+        .into()
 }
 
 fn parse_timestamp(value: &str) -> OffsetDateTime {

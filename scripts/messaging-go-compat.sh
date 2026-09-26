@@ -196,7 +196,7 @@ func generatedFixtures(t *testing.T) compatFixtureSet {
 	}
 }
 
-func generateFixture(t *testing.T, name, subject, messageID, publicationID, eventType string, version uint16, occurredAt, inboundCreatedAt string, payload []byte) compatFixtureCase {
+func generateFixture(t *testing.T, name, subject, messageID, publicationID, eventType string, version uint16, occurredAt string, payload []byte, inboundCreatedAt string) compatFixtureCase {
 	t.Helper()
 	createdAt, err := time.Parse(time.RFC3339Nano, occurredAt)
 	if err != nil { t.Fatal(err) }
@@ -216,7 +216,7 @@ func generateFixture(t *testing.T, name, subject, messageID, publicationID, even
 		Type: decoded.eventType, Schema: decoded.schema, CreatedAt: decoded.createdAt, Payload: decoded.payload,
 	}, len(decoded.payload))
 	if err != nil { t.Fatalf("re-emit buildNATSMessage: %v", err) }
-	_, _, reencodedGoDecodes := decodeMessage(recordMsg(t, cloneRecord(reencoded, "EVENTS", 17, "2026-09-26T12:35:00.000000001Z"), meta), meta)
+	_, _, reencodedDecodeErr := decodeMessage(recordMsg(t, cloneRecord(reencoded, "EVENTS", 17, "2026-09-26T12:35:00.000000001Z"), meta), meta)
 	dlq, _ := deadLetterMessage(recordMsg(t, inbound, meta), meta, decoded, deadLetterExhausted)
 	dlqRecord := cloneRecord(dlq, "EVENTS_DLQ", 29, "2026-09-26T12:36:00.000000002Z")
 	restored, err := RestoreDeadLetter(recordMsg(t, dlqRecord, recordMetadata(t, dlqRecord)))
@@ -228,7 +228,7 @@ func generateFixture(t *testing.T, name, subject, messageID, publicationID, even
 		Inbound: inbound,
 		Decoded: decodedRecord(decoded),
 		Reencoded: cloneRecord(reencoded, "", 0, ""),
-		ReencodedGoDecodes: reencodedGoDecodes,
+		ReencodedGoDecodes: reencodedDecodeErr == nil,
 		DLQ: dlqRecord,
 		Restored: eventRecord(restored),
 	}
@@ -250,7 +250,8 @@ func verifyFixture(t *testing.T, fixture compatFixtureCase) {
 	}, len(decoded.payload))
 	if err != nil { t.Fatalf("%s re-emit buildNATSMessage: %v", fixture.Name, err) }
 	if got := cloneRecord(reencoded, "", 0, ""); !reflect.DeepEqual(got, fixture.Reencoded) { t.Fatalf("%s reencoded Go record drifted\n got %#v\nwant %#v", fixture.Name, got, fixture.Reencoded) }
-	_, _, reencodedGoDecodes := decodeMessage(recordMsg(t, cloneRecord(reencoded, "EVENTS", 17, "2026-09-26T12:35:00.000000001Z"), inboundMeta), inboundMeta)
+	_, _, reencodedDecodeErr := decodeMessage(recordMsg(t, cloneRecord(reencoded, "EVENTS", 17, "2026-09-26T12:35:00.000000001Z"), inboundMeta), inboundMeta)
+	reencodedGoDecodes := reencodedDecodeErr == nil
 	if reencodedGoDecodes != fixture.ReencodedGoDecodes { t.Fatalf("%s reencoded Go decode observation drifted: got %t, want %t", fixture.Name, reencodedGoDecodes, fixture.ReencodedGoDecodes) }
 	dlq, _ := deadLetterMessage(recordMsg(t, fixture.Inbound, inboundMeta), inboundMeta, decoded, deadLetterExhausted)
 	if got := cloneRecord(dlq, fixture.DLQ.Stream, fixture.DLQ.StreamSequence, fixture.DLQ.StoredAt); !reflect.DeepEqual(got, fixture.DLQ) { t.Fatalf("%s DLQ Go record drifted\n got %#v\nwant %#v", fixture.Name, got, fixture.DLQ) }

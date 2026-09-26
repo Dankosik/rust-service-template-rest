@@ -30,7 +30,16 @@ cleanup() {
 if [[ -z ${NATS_URL:-} ]]; then
 	require_docker
 	trap cleanup EXIT INT TERM
-	NATS_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml up -d --wait nats
+	started=true
+	if ! NATS_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml up -d --wait nats; then
+		NATS_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml ps --all || true
+		NATS_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml logs --no-color --tail 100 nats || true
+		container_id=$(NATS_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml ps --all --quiet nats) || true
+		if [[ -n ${container_id:-} ]]; then
+			docker inspect --format '{{json .State}}' "${container_id}" || true
+		fi
+		exit 1
+	fi
 	address=$(NATS_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml port nats 4222)
 	port=${address##*:}
 	if [[ -z ${port} ]]; then
@@ -38,7 +47,6 @@ if [[ -z ${NATS_URL:-} ]]; then
 		exit 1
 	fi
 	NATS_URL="nats://127.0.0.1:${port}"
-	started=true
 fi
 export NATS_URL
 cargo test --locked -p infra-messaging --test jetstream "$@"

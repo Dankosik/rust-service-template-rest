@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use async_nats::HeaderMap;
+use async_nats::jetstream::ErrorCode;
 use async_nats::jetstream::context::PublishErrorKind;
-use async_nats::jetstream::errors::ErrorCode;
 use async_nats::jetstream::message::PublishMessage;
 use bytes::Bytes;
 use domain_events::{Event, EventPayload};
@@ -197,7 +197,7 @@ fn classify_publish(error: async_nats::jetstream::context::PublishError) -> Publ
         PublishErrorKind::Other => {
             let refused = error
                 .source()
-                .and_then(|source| source.downcast_ref::<async_nats::jetstream::errors::Error>())
+                .and_then(|source| source.downcast_ref::<async_nats::jetstream::Error>())
                 .is_some_and(|error| {
                     matches!(
                         error.error_code(),

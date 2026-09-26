@@ -18,7 +18,15 @@ if [[ ${INTEGRATION_COMPOSE_MANAGED:-} != 1 ]]; then
 	trap compose_postgres_down EXIT INT TERM
 	compose_postgres_up service-db
 	if [[ $(python3 scripts/lib/template_state.py profile --repo . --field messaging) == nats-jetstream ]]; then
-		NATS_PORT=0 compose_postgres up -d --wait nats
+		if ! NATS_PORT=0 compose_postgres up -d --wait nats; then
+			NATS_PORT=0 compose_postgres ps --all || true
+			NATS_PORT=0 compose_postgres logs --no-color --tail 100 nats || true
+			container_id=$(NATS_PORT=0 compose_postgres ps --all --quiet nats) || true
+			if [[ -n ${container_id:-} ]]; then
+				docker inspect --format '{{json .State}}' "${container_id}" || true
+			fi
+			exit 1
+		fi
 		address=$(NATS_PORT=0 compose_postgres port nats 4222)
 		port=${address##*:}
 		[[ -n ${port} ]] || { echo "failed to resolve the compose NATS port" >&2; exit 1; }

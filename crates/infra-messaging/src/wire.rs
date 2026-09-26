@@ -375,6 +375,7 @@ fn record_id(
     stored_at: OffsetDateTime,
     publication_id: &str,
 ) -> Result<String, MessagingError> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let stored_at = format_timestamp(stored_at)?;
     let sequence = stream_sequence.to_string();
     let input = [
@@ -385,7 +386,13 @@ fn record_id(
     ]
     .join("\0");
     let digest = Sha256::digest(input.as_bytes());
-    Ok(format!("{prefix}{digest:x}"))
+    let mut id = String::with_capacity(prefix.len() + digest.len() * 2);
+    id.push_str(prefix);
+    for byte in digest.iter().copied() {
+        id.push(char::from(HEX[usize::from(byte >> 4)]));
+        id.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Ok(id)
 }
 
 fn is_zero_time(value: OffsetDateTime) -> bool {

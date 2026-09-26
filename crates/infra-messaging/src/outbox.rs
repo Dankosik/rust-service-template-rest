@@ -229,7 +229,14 @@ impl PublishDomainEvent {
 struct StoredIntentError;
 
 fn event_key(message_id: &str) -> String {
-    format!("event-{:x}", Sha256::digest(message_id.as_bytes()))
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut key = String::with_capacity(70);
+    key.push_str("event-");
+    for byte in Sha256::digest(message_id.as_bytes()) {
+        key.push(char::from(HEX[usize::from(byte >> 4)]));
+        key.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    key
 }
 
 fn max_payload_bytes(intent: &PublishDomainEvent) -> Result<usize, infra_jobs::EnqueueError> {

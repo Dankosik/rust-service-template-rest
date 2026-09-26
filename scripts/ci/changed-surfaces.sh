@@ -166,6 +166,14 @@ classify() {
 			mark db_integration
 			;;
 	esac; fi
+		# The migration set and everything that rehearses it against the image.
+		case "${file}" in
+		migrations/*.sql | crates/migrate/* | env/docker-compose.yml | scripts/ci/migration-validate.sh | scripts/ci/migration-history-check.sh | scripts/lib/compose-postgres.sh)
+			# A migration source changes the image payload. The image surface
+			# stays profile-neutral; postgres is what admits this extra source.
+			mark migrations runtime_image
+			;;
+		esac; fi
 	# JetStream proof is independent from PostgreSQL and follows the concrete
 	# adapter, its broker runner, Compose input, and actual-Go bridge.
 	if [[ ${messaging} == nats-jetstream ]]; then case "${file}" in
@@ -176,18 +184,10 @@ classify() {
 		;;
 	esac; fi
 	if [[ ${outbox} == postgres ]]; then case "${file}" in
-		crates/infra-jobs/* | crates/infra-postgres/* | crates/config/src/jobs.rs)
-			mark messaging_integration
+		crates/infra-messaging/src/outbox.rs | crates/infra-jobs/* | crates/infra-postgres/* | crates/config/src/jobs.rs)
+			mark db_integration messaging_integration
 			;;
 	esac; fi
-		# The migration set and everything that rehearses it against the image.
-		case "${file}" in
-		migrations/*.sql | crates/migrate/* | env/docker-compose.yml | scripts/ci/migration-validate.sh | scripts/ci/migration-history-check.sh | scripts/lib/compose-postgres.sh)
-			# A migration source changes the image payload. The image surface
-			# stays profile-neutral; postgres is what admits this extra source.
-			mark migrations runtime_image
-			;;
-		esac; fi
 		case "${file}" in
 		deny.toml) mark dependency_policy ;;
 		esac
@@ -403,6 +403,9 @@ EOF
 		"rust_source messaging_integration module_initializer initializer_runtime" \
 		"cargo_dependencies db_integration migrations"
 	: >"${classifier_root}/crates/infra-messaging/src/outbox.rs"
+	assert_case crates/infra-messaging/src/outbox.rs \
+		"rust_source db_integration messaging_integration module_initializer initializer_runtime" \
+		"cargo_dependencies migrations"
 	assert_case crates/infra-jobs/src/enqueue.rs \
 		"rust_source db_integration messaging_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations"
@@ -637,12 +640,37 @@ EOF
 	has_line "${output}" 'db_integration=false'
 	has_line "${output}" 'migrations=false'
 
+	# Messaging-only derivations must select NATS even when PostgreSQL is absent.
+	cp "${derived_fixture}/template.lock" "${derived_fixture}/template.lock.before-messaging"
+	python3 - "${derived_fixture}/template.lock" <<'PY_LOCK'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+lock = json.loads(path.read_text())
+lock["profiles"].update({
+    "authn": "none", "outbound_http": "none", "outbound_auth": "none",
+    "http_idempotency": "none", "jobs": "none", "messaging": "nats-jetstream",
+    "outbox": "none", "webhooks": "none", "inbound_webhooks": "none",
+})
+path.write_text(json.dumps(lock) + "\n")
+PY_LOCK
+	classifier_root=${derived_fixture}
+	assert_case crates/infra-messaging/src/wire.rs \
+		"rust_source messaging_integration" \
+		"db_integration migrations module_initializer initializer_runtime"
+	classifier_root=${source_fixture}
+	mv "${derived_fixture}/template.lock.before-messaging" "${derived_fixture}/template.lock"
+
+	# All applicable source surfaces includes a retained messaging capability.
+	mkdir -p "${source_fixture}/crates/infra-messaging"
 	output="$(cd "${source_fixture}" && bash scripts/ci/changed-surfaces.sh --all)"
 	for name in "${names[@]}"; do
 		has_line "${output}" "${name}=true"
 	done
 	output="$(cd "${derived_fixture}" && bash scripts/ci/changed-surfaces.sh --all)"
 	has_line "${output}" 'db_integration=false'
+	has_line "${output}" 'messaging_integration=false'
 	has_line "${output}" 'migrations=false'
 	has_line "${output}" 'module_initializer=false'
 	has_line "${output}" 'initializer_runtime=false'

@@ -960,7 +960,9 @@ def _run_staged_command(snapshot: Path, command: Sequence[str], operation: str) 
     except OSError as error:
         raise ToolFailure(f"staged {operation} tool is unavailable") from error
     if result.returncode:
-        raise Refusal(f"staged {operation} failed (exit {result.returncode})")
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        diagnostic = f"\n{detail[:8192]}" if detail else ""
+        raise Refusal(f"staged {operation} failed (exit {result.returncode}){diagnostic}")
     return result.stdout
 
 
@@ -1258,6 +1260,10 @@ def _project_feature_edge(
 def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInputs) -> None:
     """Remove only source-anchored feature edges made unreachable by a profile."""
 
+    if inputs.messaging == "none":
+        # async-nats alone enables bytes/serde. Removing messaging must also
+        # remove that registry feature edge from the retained bytes package.
+        _project_feature_edge(records, "bytes", "1.12.1", ["serde"], [])
     if inputs.database == "none":
         for name, version, expected, retained in (
             ("bitflags", "2.13.2", ["serde_core"], []),

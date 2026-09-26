@@ -485,7 +485,7 @@ fn classify_topology(error: &(dyn std::error::Error + 'static)) -> MessagingErro
             _ => {}
         }
     }
-    if let Some(error) = error.downcast_ref::<async_nats::jetstream::errors::Error>() {
+    if let Some(error) = error.downcast_ref::<async_nats::jetstream::Error>() {
         if matches!(error.code(), 401 | 403) {
             return MessagingError::Authentication;
         }
