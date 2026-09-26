@@ -154,7 +154,7 @@ The only sampling gauges are `jobs_live_jobs{kind,state}`,
 `jobs_oldest_available_age_seconds{kind}`, and
 `jobs_observation_timestamp_seconds`. Before first success every registered
 value and timestamp is zero. A completely decoded successful sample publishes
-all values and then its database timestamp. A query, decode, or session-reset
+all values and then its database timestamp. A query or decode
 failure retains the last good values and timestamp; operation-failure telemetry
 still records the failure. Consumers reject timestamp zero or a timestamp older
 than 30 seconds. The two-second statement timeout is a time backstop, not a

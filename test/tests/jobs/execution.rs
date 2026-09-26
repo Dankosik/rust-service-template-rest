@@ -2071,7 +2071,7 @@ async fn x3_reclaim_keeps_enqueue_and_claim_identity_with_rescue_evidence(pool: 
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn x12_cancelled_retention_closes_the_temporary_timeout_session(pool: PgPool) {
+async fn x12_cancelled_retention_leaves_no_short_timeout_in_the_pool(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     let jobs = super::template_pool(&dsn, 1).await;
     let engine = Engine::new(
@@ -2079,10 +2079,6 @@ async fn x12_cancelled_retention_closes_the_temporary_timeout_session(pool: PgPo
         probe_registry(2, DEFAULT_TIMEOUT),
         NonZeroU32::new(1).expect("one worker"),
     );
-    let initial_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&jobs)
-        .await
-        .expect("the pool backend");
     let mut blocker = pool.begin().await.expect("the table lock transaction");
     sqlx::query("LOCK TABLE background_jobs IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *blocker)
@@ -2103,18 +2099,13 @@ async fn x12_cancelled_retention_closes_the_temporary_timeout_session(pool: PgPo
     );
     blocker.commit().await.expect("the table lock releases");
 
-    let row = sqlx::query(
-        "SELECT pg_backend_pid() AS pid, current_setting('statement_timeout') AS statement_timeout",
-    )
-    .fetch_one(&jobs)
-    .await
-    .expect("a replacement pool session");
-    let pid: i32 = row.try_get("pid").expect("pid");
-    let statement_timeout: String = row.try_get("statement_timeout").expect("statement timeout");
-    assert_ne!(
-        pid, initial_pid,
-        "the cancelled configured session must not return to the pool"
-    );
+    // The pool's only session ran the cancelled statement; whether it is
+    // reused or replaced, it must carry the pool default, not retention's 1 s.
+    let statement_timeout: String =
+        sqlx::query_scalar("SELECT current_setting('statement_timeout')")
+            .fetch_one(&jobs)
+            .await
+            .expect("a pool session after the cancelled retention");
     assert_eq!(statement_timeout, "8s");
     super::close(&[&jobs]).await;
 }

@@ -301,7 +301,7 @@ GROUP BY kind, state;
 Only `jobs_live_jobs`, `jobs_oldest_available_age_seconds`, and
 `jobs_observation_timestamp_seconds` represent sampling. Startup publishes
 zero for every registered kind/state and timestamp. A complete successful
-sample publishes values then timestamp; SQL, decode, or session-reset failure
+sample publishes values then timestamp; an SQL or decode failure
 retains the last good values and timestamp while operation-failure telemetry
 records the failure. Alerting requires a nonzero timestamp no older than 30
 seconds. A successful empty queue reports zero values with a nonzero timestamp.

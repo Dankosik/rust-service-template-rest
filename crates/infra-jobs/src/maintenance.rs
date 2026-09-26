@@ -3,9 +3,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use infra_postgres::{TxError, connection, in_tx};
 use sqlx::Row;
-use sqlx::pool::PoolConnection;
-use sqlx::{Postgres, postgres::PgConnection};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -112,9 +111,10 @@ const SAMPLE: &str = "WITH sampled AS ( \
          LIMIT 1 \
      ) AS oldest ON true";
 
-const RETENTION_STATEMENT_TIMEOUT: &str = "SET statement_timeout = '1000ms'";
-const SAMPLE_STATEMENT_TIMEOUT: &str = "SET statement_timeout = '2000ms'";
-const RESET_STATEMENT_TIMEOUT: &str = "RESET statement_timeout";
+// `SET LOCAL` lasts until the transaction ends, so PostgreSQL restores the
+// session timeout itself on commit, rollback, or a dropped connection.
+const RETENTION_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '1000ms'";
+const SAMPLE_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '2000ms'";
 
 /// Check UTF8 server encoding and a writable session, bounded to 5 s.
 ///
@@ -263,28 +263,20 @@ async fn delete_batch(
         return Err(OperationError::Acquire);
     };
     backstop(async {
-        let connection = shared
-            .pool
-            .acquire()
-            .await
-            .map_err(|_| OperationError::Acquire)?;
-        let mut custody = StatementTimeoutCustody::new(connection);
-        sqlx::query(RETENTION_STATEMENT_TIMEOUT)
-            .execute(custody.connection())
-            .await
-            .map_err(|_| OperationError::Statement)?;
-        let deleted = sqlx::query(statement)
-            .bind(age)
-            .bind(RETENTION_BATCH_ROWS)
-            .execute(custody.connection())
-            .await
-            .map_err(|_| OperationError::Statement)?
-            .rows_affected();
-        custody
-            .reset()
-            .await
-            .map_err(|_| OperationError::Statement)?;
-        Ok(deleted)
+        in_tx(&shared.pool, async |tx| -> Result<u64, Failed> {
+            let conn = connection(tx);
+            sqlx::query(RETENTION_STATEMENT_TIMEOUT)
+                .execute(&mut *conn)
+                .await?;
+            Ok(sqlx::query(statement)
+                .bind(age)
+                .bind(RETENTION_BATCH_ROWS)
+                .execute(&mut *conn)
+                .await?
+                .rows_affected())
+        })
+        .await
+        .map_err(|Failed(error)| error)
     })
     .await
 }
@@ -295,29 +287,41 @@ async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
     };
     let kinds: Vec<&str> = shared.registry.names().collect();
     backstop(async {
-        let connection = shared
-            .pool
-            .acquire()
-            .await
-            .map_err(|_| OperationError::Acquire)?;
-        let mut custody = StatementTimeoutCustody::new(connection);
-        sqlx::query(SAMPLE_STATEMENT_TIMEOUT)
-            .execute(custody.connection())
-            .await
-            .map_err(|_| OperationError::Statement)?;
-        let rows = sqlx::query(SAMPLE)
-            .bind(kinds)
-            .fetch_all(custody.connection())
-            .await
-            .map_err(|_| OperationError::Statement)?;
-        let decoded = decode_sample(&rows)?;
-        custody
-            .reset()
-            .await
-            .map_err(|_| OperationError::Statement)?;
-        Ok(decoded)
+        in_tx(&shared.pool, async |tx| -> Result<Sample, Failed> {
+            let conn = connection(tx);
+            sqlx::query(SAMPLE_STATEMENT_TIMEOUT)
+                .execute(&mut *conn)
+                .await?;
+            let rows = sqlx::query(SAMPLE)
+                .bind(kinds)
+                .fetch_all(&mut *conn)
+                .await?;
+            decode_sample(&rows).map_err(Failed)
+        })
+        .await
+        .map_err(|Failed(error)| error)
     })
     .await
+}
+
+/// The error of a maintenance transaction closure.
+struct Failed(OperationError);
+
+impl From<TxError> for Failed {
+    fn from(error: TxError) -> Self {
+        Self(match error {
+            TxError::Acquire(_) => OperationError::Acquire,
+            TxError::Begin(_) | TxError::CommitFailed(_) | TxError::CommitUnknown(_) => {
+                OperationError::Statement
+            }
+        })
+    }
+}
+
+impl From<sqlx::Error> for Failed {
+    fn from(_error: sqlx::Error) -> Self {
+        Self(OperationError::Statement)
+    }
 }
 
 struct SampleRow {
@@ -387,42 +391,4 @@ fn set_live(kind: impl Into<String>, state: &'static str, count: i64) {
     #[allow(clippy::cast_precision_loss)]
     let value = count as f64;
     metrics::gauge!(LIVE_JOBS_METRIC, "kind" => kind, "state" => state).set(value);
-}
-
-/// Owns a connection while a temporary session timeout is installed.
-///
-/// A cancellation or failed command can drop this guard while the timeout is
-/// installed. In that case the connection must be closed instead of reused.
-struct StatementTimeoutCustody {
-    connection: PoolConnection<Postgres>,
-    reset_acknowledged: bool,
-}
-
-impl StatementTimeoutCustody {
-    fn new(connection: PoolConnection<Postgres>) -> Self {
-        Self {
-            connection,
-            reset_acknowledged: false,
-        }
-    }
-
-    fn connection(&mut self) -> &mut PgConnection {
-        &mut self.connection
-    }
-
-    async fn reset(&mut self) -> Result<(), sqlx::Error> {
-        sqlx::query(RESET_STATEMENT_TIMEOUT)
-            .execute(self.connection())
-            .await?;
-        self.reset_acknowledged = true;
-        Ok(())
-    }
-}
-
-impl Drop for StatementTimeoutCustody {
-    fn drop(&mut self) {
-        if !self.reset_acknowledged {
-            self.connection.close_on_drop();
-        }
-    }
 }
