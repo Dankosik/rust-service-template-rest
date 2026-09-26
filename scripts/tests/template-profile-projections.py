@@ -414,6 +414,31 @@ def _assert_no_jobs_output(initializer, nodes: dict[str, Node], paths: Iterable[
             raise initializer.Refusal(f"jobs=none selection retained profile output: {relative}")
 
 
+def _assert_introspection_cache_output(initializer, nodes: dict[str, Node], authn: str) -> None:
+    # The projected public configuration and adapter API must exist only for
+    # introspection. These are profile contracts, not private implementation names.
+    surfaces = {
+        "crates/config/src/authn.rs": (
+            rb"\bcache_enabled\s*:\s*bool\b",
+            rb"\bcache_capacity\s*:\s*usize\b",
+            rb"\bcache_ttl\s*:\s*Duration\b",
+        ),
+        "crates/infra-bearerauthn/src/lib.rs": (
+            rb"\bpub\s+struct\s+IntrospectionCacheOptions\b",
+            rb"\bpub\s+cache\s*:\s*Option<IntrospectionCacheOptions>",
+        ),
+        "crates/service/src/bootstrap/mod.rs": (rb"\bIntrospectionCacheOptions\b",),
+    }
+    for relative, patterns in surfaces.items():
+        node = nodes.get(relative)
+        payload = node.payload if node is not None and isinstance(node.payload, bytes) else b""
+        for pattern in patterns:
+            if bool(re.search(pattern, payload)) != (authn == "oidc-introspection"):
+                raise initializer.Refusal(
+                    f"authn={authn} has an incorrect introspection cache projection: {relative} {pattern!r}"
+                )
+
+
 def _project(source: Path, candidate: str, initializer, inputs, destination: Path) -> dict[str, Node]:
     initializer.snapshot_tree(source, destination, candidate)
     profiles = initializer._profile_data(destination)
@@ -492,6 +517,7 @@ def check(source: Path) -> None:
                                     _assert_no_http_idempotency_output(initializer, nodes, idempotency_paths)
                                 if jobs == "none":
                                     _assert_no_jobs_output(initializer, nodes, jobs_paths)
+                                _assert_introspection_cache_output(initializer, nodes, authn)
                                 digest = _tree_digest(nodes)
                                 lock = initializer._lock_bytes(inputs, candidate, "complete")
                                 lock_sha256 = hashlib.sha256(lock).hexdigest()

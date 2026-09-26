@@ -45,9 +45,10 @@ sqlx = { version = "0.9.0", default-features = false }
 log = { version = "0.4", default-features = false }
 # template:end postgres:workspace-postgres-dependencies
 # template:begin http-idempotency:workspace-http-idempotency-digest
-# Idempotency scope and fingerprint digests (docs/http-idempotency.md). The
-# same release `sqlx-postgres` already resolves, with the same features.
+# Idempotency request identity (docs/http-idempotency.md): SHA-256 uses
+# the release already resolved by sqlx-postgres; sfv owns structured strings.
 sha2 = { version = "0.11.0", default-features = false }
+sfv = { version = "0.15.0", default-features = false }
 # template:end http-idempotency:workspace-http-idempotency-digest
 
 # Runtime and transport
@@ -140,6 +141,7 @@ hickory-resolver = { version = "0.26.3", default-features = false }
 # template:end egress-dns:workspace-egress-dns
 # template:begin oidc-jwt:workspace-authn-jwt
 jsonwebtoken = { version = "=11.1.0", default-features = false }
+aws-lc-rs = { version = "=1.18.1", default-features = false }
 # template:end oidc-jwt:workspace-authn-jwt
 
 # Build metadata
@@ -151,8 +153,10 @@ rstest = { version = "0.27.0", default-features = false }
 tempfile = "3"
 nix = { version = "0.31.3", default-features = false }
 ureq = { version = "3.4.2", default-features = false }
-# template:begin egress-dns:workspace-egress-tls-fixtures
+# template:begin tls-fixtures:workspace-tls-fixtures
 tokio-rustls = { version = "0.26.5", default-features = false }
+# template:end tls-fixtures:workspace-tls-fixtures
+# template:begin egress-dns:workspace-egress-tls-fixtures
 rcgen = { version = "0.14.10", default-features = false }
 # template:end egress-dns:workspace-egress-tls-fixtures
 

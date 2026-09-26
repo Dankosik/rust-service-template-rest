@@ -1,32 +1,30 @@
 //! The operations this crate owns: the platform probes, seeded with the
 //! problem components every operation references.
 //!
-//! [`router`] returns an [`OpenApiRouter`], so the axum routes and their
-//! OpenAPI description come from one construction. The service crate merges
-//! it with feature routers, splits it into the served `Router` and the
-//! document, and wraps the routes in [`crate::harden`]. New operations join
-//! a feature router, never this file or the hardened chain.
+//! [`router`] returns a [`ContractRouter`], so the axum routes, their OpenAPI
+//! description, and actual registered methods stay together until the service
+//! crate finalizes policy and supplies state. New operations join a feature
+//! carrier, never this file or the hardened chain.
 
 // Probe handlers live in `probes`; the readiness reader comes from the
 // `health` crate.
-use health::ReadinessReader;
-use utoipa::OpenApi;
-use utoipa_axum::router::OpenApiRouter;
-use utoipa_axum::routes;
-
+use crate::contract::ContractRouter;
 use crate::probes;
 use crate::problem::responses::ProblemComponents;
+use crate::routes;
+use health::ReadinessReader;
+use utoipa::OpenApi;
 
 /// Route templates served without an access-log line unless enabled.
 pub(crate) const HEALTH_PROBE_ROUTES: &[&str] = &[probes::LIVE_PATH, probes::READY_PATH];
 
 /// The probe routes with their contract and the problem components, as one
-/// [`OpenApiRouter`] whose [`ReadinessReader`] state is still unapplied: the
-/// service crate's `api::contract` merges this value, and bootstrap splits
-/// it and calls `with_state` before [`crate::harden`]. One `routes!` call
-/// per path: the macro groups the methods of a single path.
-pub fn router() -> OpenApiRouter<ReadinessReader> {
-    OpenApiRouter::with_openapi(ProblemComponents::openapi())
+/// [`ContractRouter`] whose [`ReadinessReader`] state is still unapplied: the
+/// service crate's `api::contract` merges this value, finalizes policy, then
+/// calls `with_state` before [`crate::harden`]. One `routes!` call per path:
+/// the macro groups the methods of a single path.
+pub fn router() -> ContractRouter<ReadinessReader> {
+    ContractRouter::with_openapi(ProblemComponents::openapi())
         .routes(routes!(probes::live))
         .routes(routes!(probes::ready))
 }
@@ -68,9 +66,13 @@ mod tests {
     }
 
     fn app(reader: ReadinessReader) -> (axum::Router, serde_json::Value) {
-        let (routes, document) = router().split_for_parts();
-        let document = serde_json::to_value(document).unwrap();
-        (harden(routes.with_state(reader), &options()), document)
+        let contract = router();
+        let document = serde_json::to_value(contract.document()).unwrap();
+        let routes = contract
+            .finalize_public()
+            .expect("the probe contract is public")
+            .with_state(reader);
+        (harden(routes, &options()), document)
     }
 
     fn media_type(response: &Response) -> String {
@@ -107,7 +109,7 @@ mod tests {
 
     #[test]
     fn document_paths_are_the_access_log_probe_routes() {
-        let (_, document) = router().split_for_parts();
+        let document = router().into_document();
         assert_eq!(
             document
                 .paths

@@ -22,9 +22,6 @@ secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["std", "derive"] }
 thiserror = { workspace = true }
 toml = { workspace = true, features = ["parse"] }
-# template:begin authn:config-authn-url
-url = { workspace = true, features = ["std"] }
-# template:end authn:config-authn-url
 
 [build-dependencies]
 vergen-gitcl = { workspace = true }

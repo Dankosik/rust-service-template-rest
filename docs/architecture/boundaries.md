@@ -6,13 +6,13 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 
 | Crate (path) | Owns | Does not own |
 | --- | --- | --- |
-| Service package (`crates/service/Cargo.toml`) | The main binary named by that manifest: `main` maps the bootstrap result to an exit code; `bootstrap` composes configuration, telemetry, readiness, the route tree, the two listeners, background tasks, signals, and the staged teardown; `api` merges every `OpenApiRouter` into the one contract whose halves are the served router and the document; the `openapi` binary renders it; the process tests drive the built binary. | Business behavior, request handling beyond composition, provider details. |
+| Service package (`crates/service/Cargo.toml`) | The main binary named by that manifest: `main` maps the bootstrap result to an exit code; `bootstrap` composes configuration, telemetry, readiness, the route tree, the two listeners, background tasks, signals, and the staged teardown; `api` merges every `ContractRouter` into the one contract and finalizes its served router; the `openapi` binary renders its document; the process tests drive the built binary. | Business behavior, request handling beyond composition, provider details. |
 | `service-config` (`crates/config`) | One validated immutable snapshot: section types with defaults and validation in `<section>.rs`, loader precedence, the `APP__` name pre-scan, the secret-in-file refusal, `SecretString` fields, human-form durations and sizes, build metadata (`app.version`, `app.commit`). | Feature behavior, dependency wiring, request handling, telemetry construction. |
 | `health` (`crates/health`) | The readiness refresher over `tokio::sync::watch`: probe trait, failure threshold, staleness guard, drain flag, O(1) snapshot reads. | Probe implementations, HTTP handlers, the schedule (bootstrap owns the policy values). |
 | `infra-http` (`crates/infra-http`) | The hardened middleware chain, the bounded accept loop (`Server`), the probe handlers with their `#[utoipa::path]` contract, the RFC 9457 `Problem` type and closed code catalog, request-id admission, the route-template access log. | Business rules, configuration loading, feature routes (they merge in `service::api`). |
 | `infra-telemetry` (`crates/infra-telemetry`) | Subscriber installation (`json`/`text`), the tracer provider with the OTLP endpoint resolution and ambient-credential refusal, the Prometheus recorder with process and Tokio runtime metrics, the diagnostics router. | Feature semantics, startup logging content, request routing, which fields a handler emits. |
 <!-- template:begin authn:docs-boundaries-authn-owner -->
-| `infra-bearerauthn` (`crates/infra-bearerauthn`) | Bearer-envelope parsing, sealed verified identity, fixed verification failures, strict claims, and the selected OIDC JWT or introspection verifier with its provider transport. | Authorization policy, configuration loading, route assembly, readiness, or an application-visible raw token/claims API. |
+| `infra-bearerauthn` (`crates/infra-bearerauthn`) | Bearer-envelope parsing, sealed verified identity, typed claims, canonical provider URL admission, and the selected OIDC JWT or introspection verifier with its trusted provider transport. | Authorization policy, configuration loading, route assembly, readiness, or an application-visible raw token/claims API. |
 <!-- template:end authn:docs-boundaries-authn-owner -->
 <!-- template:begin outbound-http:docs-boundaries-outbound-owner -->
 | `infra-outbound-http` (`crates/infra-outbound-http`) | Fixed-authority public HTTPS exchanges over standard `http::Request<Bytes>`/`Response<Bytes>`, five limits, component target composition, and operation lifetime ([guide](../outbound-http.md)). | Provider credentials, parsing, retries, configuration, readiness, bootstrap, or task tracking. |
@@ -21,7 +21,7 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | `infra-egress-dns` (`crates/infra-egress-dns`) | Public-address admission, shared Hickory resolution, the common hardened HTTPS builder, and default-off generated TLS test material. | Consumer HTTP policy, provider failures, credentials, readiness, or service task tracking. |
 <!-- template:end egress-dns:docs-boundaries-egress-owner -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-owner -->
-| `infra-idempotency-store` (`crates/infra-idempotency-store`) | The PostgreSQL idempotency record store: arbitration, the execution transaction, readback, startup check, and cleanup ([guide](../http-idempotency.md)). | HTTP types, Problems, business rules, readiness registration, or request routing. |
+| `infra-idempotency-store` (`crates/infra-idempotency-store`) | PostgreSQL idempotency arbitration, durable records, schema admission and maintenance ([guide](../http-idempotency.md)). | Transaction lifecycle/connection ownership, HTTP types/Problems, business rules, readiness registration, or request routing. |
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-owner -->
 <!-- template:begin jobs:docs-boundaries-jobs-owners -->
 | `infra-jobs` (`crates/infra-jobs`) | The job table's statements, enqueue, the job-kind and handler contracts (`JobKind`, `Handler`, `Kinds`), and the engine ([guide](../background-jobs.md)). | Concrete kinds or handlers (they live in adapter crates), configuration, process lifecycle, or business rules. |
@@ -29,7 +29,7 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 <!-- template:end jobs:docs-boundaries-jobs-owners -->
 
 | `integration-tests` (`test/`) | Executable utility recipes and any selected profile proof. | Anything a binary runs; the service's process tests stay in `crates/service/tests/`. |
-| `crates/<feature>` (none yet) | Use cases, business types, invariants, domain errors, and the feature's `OpenApiRouter` with its handlers. | Transport policy, provider drivers, runtime configuration, process lifecycle. |
+| `crates/<feature>` (none yet) | Use cases, business types, invariants, domain errors, and the feature's `ContractRouter` registrations with its handlers. | Transport policy, provider drivers, runtime configuration, process lifecycle. |
 | `crates/infra-<provider>` (further adapters) | One transport or provider adapter: admission, budgets, mapping to feature-owned types. | Business rules, config precedence, other adapters' policy. |
 | `api/openapi/service.yaml` | The committed, reviewed, lint-checked, compatibility-judged form of the contract. | Runtime logic; it is generated, never edited. |
 | `env/config/local.toml` | The local baseline for `make run`. | Deployment values (`APP__*` environment). |
@@ -71,7 +71,6 @@ main binary (crates/service, composition root)
 <!-- template:begin authn:docs-boundaries-authn-edges -->
   -> infra-bearerauthn
 infra-http -> infra-bearerauthn
-infra-bearerauthn -> infra-egress-dns
 <!-- template:end authn:docs-boundaries-authn-edges -->
 <!-- template:begin outbound-http:docs-boundaries-outbound-edges -->
 infra-outbound-http -> infra-egress-dns, reqwest, http, bytes, url, tokio
@@ -81,7 +80,7 @@ infra-egress-dns -> reqwest, hickory-resolver, ipnet
 <!-- template:end egress-dns:docs-boundaries-egress-edges -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-edges -->
 main binary -> infra-idempotency-store
-infra-http -> infra-idempotency-store, sha2
+infra-http -> infra-idempotency-store, infra-postgres (the Tx re-export), sha2, sfv
 infra-idempotency-store -> infra-postgres, sqlx, tokio, tokio-util, tracing, thiserror
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-edges -->
 <!-- template:begin jobs:docs-boundaries-jobs-edges -->
@@ -116,18 +115,21 @@ either.
 
 <!-- template:begin authn:docs-boundaries-authn-composition -->
 Authentication is a shared inbound transport contract, not a feature adapter:
-`service` owns verifier preparation and lifecycle; `infra-http` owns protected
-method composition and Problem mapping. Feature handlers consume only
-`VerifiedPrincipal` through the supported protected route tuple.
+`service` owns verifier preparation and lifecycle; `infra-http` finalizes the
+assembled `ContractRouter` into one policy layer and maps Problems. Feature
+handlers consume only the sealed `VerifiedPrincipal`; they do not opt individual
+routes into authentication.
 <!-- template:end authn:docs-boundaries-authn-composition -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-composition -->
 HTTP idempotency is a shared inbound transport contract, not a feature
 adapter: `infra-http` composes it the way it composes authentication,
 through `Composer::route` and `Composer::agree`, and owns key handling,
 declaration and agreement, and Problem mapping. `infra-idempotency-store`
-owns the PostgreSQL mechanism behind the opaque `Tx` handle. Feature
-handlers consume only the `Idempotency` extractor and `Tx` through the
-supported composed route.
+owns PostgreSQL arbitration and records. `infra-postgres` owns the opaque
+`Tx`; `infra_http::idempotency` re-exports it only as an inbound contract, so
+`infra-http` depends on `infra-postgres` only while this profile is retained.
+Feature handlers consume `Idempotency` and that `Tx` through the supported
+composed route, while provider adapters alone use the connection.
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-composition -->
 <!-- template:begin jobs:docs-boundaries-jobs-composition -->
 Jobs are a provider seam, not a transport contract: an adapter enqueues on

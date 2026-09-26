@@ -1887,8 +1887,8 @@ dependencies = [
 name = "infra-bearerauthn"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "base64 0.23.1",
- "infra-egress-dns",
  "jsonwebtoken",
  "metrics",
  "reqwest",
@@ -1899,6 +1899,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
+ "tracing",
  "url",
 ]
 
@@ -1927,19 +1928,18 @@ dependencies = [
  "http-body-util",
  "hyper-util",
  "infra-bearerauthn",
- "infra-egress-dns",
  "infra-idempotency-store",
+ "infra-postgres",
  "itertools 0.15.0",
  "metrics",
- "secrecy",
  "serde",
  "serde_json",
  "serde_with",
+ "sfv",
  "sha2 0.11.0",
  "strum",
  "thiserror",
  "tokio",
- "tokio-rustls",
  "tokio-util",
  "tower",
  "tower-http 0.7.1",
@@ -2069,7 +2069,6 @@ dependencies = [
  "heck",
  "indexmap 2.14.2",
  "infra-bearerauthn",
- "infra-egress-dns",
  "infra-http",
  "infra-idempotency-store",
  "infra-jobs",
@@ -2105,7 +2104,6 @@ dependencies = [
  "ureq",
  "url",
  "utoipa",
- "utoipa-axum",
  "uuid",
  "validator",
  "walkdir",
@@ -3879,7 +3877,6 @@ dependencies = [
  "tracing",
  "ureq",
  "utoipa",
- "utoipa-axum",
 ]
 
 [[package]]
@@ -3897,8 +3894,18 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
- "url",
  "vergen-gitcl",
+]
+
+[[package]]
+name = "sfv"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "890ef0e5532daf21fdaa3dbaf991417187f3a87ab69231fe69be942495746480"
+dependencies = [
+ "base64 0.22.1",
+ "indexmap 2.14.2",
+ "ref-cast",
 ]
 
 [[package]]

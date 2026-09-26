@@ -1,23 +1,19 @@
-//! The declaration rules of an idempotent operation and the two-way
-//! agreement between the document and the composed routes.
+//! Generation of an idempotent route's contract and the assembled agreement.
 //!
-//! [`check_route`] checks one tuple before it is composed; [`agree`]
-//! re-checks every idempotent operation on the assembled document, where
-//! response references resolve, and adds the document-wide rules. Rule 3,
-//! the protected-operation contract, is `protect`'s own acceptance of the
-//! tuple and is not repeated here. Operations are read in their generated
-//! JSON form, as the committed contract renders them.
+//! [`prepare`] is the only idempotency opt-in: it mutates one documented route
+//! carrier before final contract authentication wraps it and it is served.
+//! [`agree`] is read-only and checks the resulting document once, after
+//! response references can resolve. Final contract authentication owns
+//! protected-operation policy acceptance.
 
 use std::collections::BTreeSet;
 
 use serde_json::Value;
-use utoipa::IntoResponses as _;
 use utoipa::openapi::OpenApi;
 use utoipa::openapi::path::{Operation, PathItem, Paths};
 
 use super::openapi::{
-    AUTHORIZATION_STATUS, FIXED_PROBLEM_STATUSES, IdempotentOperationProblemResponses, KEY_HEADER,
-    KEY_MAX_LENGTH, KEY_MIN_LENGTH, KEY_PATTERN, REPLAYABLE_HEADERS, RESPONSE_COMPONENTS,
+    KEY_HEADER, RESPONSE_COMPONENTS, key_parameter, replaces_protected_response, response_family,
 };
 
 /// The operation extension that declares an idempotent operation.
@@ -29,10 +25,18 @@ const PROBLEM_SCHEMA: &str = "#/components/schemas/Problem";
 /// The label of a failure that belongs to no single operation.
 const DOCUMENT: &str = "document";
 
-/// The idempotent operations of the document and the routes composed
-/// through [`Composer::route`](super::Composer::route) disagree, or an
-/// operation breaks a declaration rule. Sanitized: it names the operation
-/// and one fixed rule, never request data.
+/// The route identity retained from the same tuple that receives middleware.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct ComposedOperation {
+    path: String,
+    method: &'static str,
+    pub(super) operation_id: String,
+}
+
+/// The idempotent operations of the document and the routes composed through
+/// [`Composer::route`](super::Composer::route) disagree, or a tuple cannot be
+/// prepared. Sanitized: it names an operation and one fixed rule, never
+/// request data.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("idempotent operation contract is invalid: {operation}: {}", .rule.text())]
 pub struct AgreementError {
@@ -54,20 +58,20 @@ impl AgreementError {
     }
 }
 
-/// One declaration or agreement rule.
+/// One preparation or agreement rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Rule {
     Shape,
     Undeclared,
     NotTrue,
     Method,
-    Protected,
     KeyParameter,
     SuccessResponses,
     ProblemResponses,
     NotComposed,
     UndeclaredKey,
     Components,
+    DuplicateOperationId,
     Unreadable,
 }
 
@@ -77,18 +81,17 @@ impl Rule {
             Self::Shape => {
                 "a composed route must be one path and one operation with an operationId"
             }
-            Self::Undeclared => "a route composed as idempotent must declare x-idempotent: true",
+            Self::Undeclared => "a composed route must declare generated idempotency metadata",
             Self::NotTrue => "x-idempotent must be the boolean true",
             Self::Method => "the method must be POST, PUT, PATCH, or DELETE",
-            Self::Protected => "the operation must meet the protected-operation contract",
             Self::KeyParameter => {
-                "Idempotency-Key must be one required header parameter with the exact schema"
+                "Idempotency-Key must be absent or one byte-equal generated header parameter"
             }
             Self::SuccessResponses => {
                 "declare a 2xx response, no 1xx or 3xx response, and only replayable 2xx headers"
             }
             Self::ProblemResponses => {
-                "the operation must declare the idempotent operation problem responses"
+                "a generated response slot conflicts with the idempotency response family"
             }
             Self::NotComposed => {
                 "an operation declaring x-idempotent: true must be composed as idempotent"
@@ -97,73 +100,148 @@ impl Rule {
                 "an Idempotency-Key header parameter requires x-idempotent: true"
             }
             Self::Components => "the idempotency response components must be registered",
+            Self::DuplicateOperationId => "operationId must be unique in the assembled document",
             Self::Unreadable => "the contract cannot be read",
         }
     }
 }
 
-/// Check one `routes!` tuple before it is composed and return its
-/// `operationId`. Response references cannot resolve without the document,
-/// so [`agree`] checks what they name.
-pub(super) fn check_route(paths: &Paths) -> Result<String, AgreementError> {
-    let mut routed = paths.paths.values().flat_map(operations);
-    let (Some((method, operation)), None) = (routed.next(), routed.next()) else {
-        return Err(AgreementError::new(route_label(paths), Rule::Shape));
+/// Generate the idempotency contract for one `routes!` tuple and return its
+/// path, method, and `operationId` for the composer to record.
+///
+/// The tuple has no adopter-facing idempotency annotation. A preexisting
+/// `x-idempotent: true`, generated key parameter, or generated response is
+/// accepted only when it is the exact generated value, which keeps repeated
+/// preparation idempotent without admitting parallel contract ownership.
+pub(super) fn prepare(paths: &mut Paths) -> Result<ComposedOperation, AgreementError> {
+    let label = route_label(paths);
+    if paths.paths.len() != 1 {
+        return Err(AgreementError::new(label, Rule::Shape));
+    }
+    let Some((path, item)) = paths.paths.iter_mut().next() else {
+        return Err(AgreementError::new(label, Rule::Shape));
+    };
+    let Some((method, operation)) = one_operation_mut(item) else {
+        return Err(AgreementError::new(label, Rule::Shape));
     };
     let Some(operation_id) = operation.operation_id.clone() else {
-        return Err(AgreementError::new(route_label(paths), Rule::Shape));
+        return Err(AgreementError::new(label, Rule::Shape));
     };
-    let Ok(operation) = serde_json::to_value(operation) else {
-        return Err(AgreementError::new(operation_id, Rule::Unreadable));
-    };
-    let checked = match operation.get(EXTENSION) {
-        Some(Value::Bool(true)) => check_operation(method, &operation, None),
-        None => Err(Rule::Undeclared),
-        Some(_) => Err(Rule::NotTrue),
-    };
-    match checked {
-        Ok(()) => Ok(operation_id),
-        Err(rule) => Err(AgreementError::new(operation_id, rule)),
+    if !IDEMPOTENT_METHODS.contains(&method) {
+        return Err(AgreementError::new(operation_id, Rule::Method));
     }
+    match operation
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.get(EXTENSION))
+    {
+        None | Some(Value::Bool(true)) => {}
+        Some(_) => return Err(AgreementError::new(operation_id, Rule::NotTrue)),
+    }
+
+    let generated_key = key_parameter();
+    let mut existing_keys = operation
+        .parameters
+        .as_deref()
+        .into_iter()
+        .flatten()
+        .filter(|parameter| {
+            parameter.parameter_in == utoipa::openapi::path::ParameterIn::Header
+                && parameter.name.eq_ignore_ascii_case(KEY_HEADER)
+        });
+    let add_key = match (existing_keys.next(), existing_keys.next()) {
+        (None, None) => true,
+        (Some(existing), None) if existing == &generated_key => false,
+        _ => return Err(AgreementError::new(operation_id, Rule::KeyParameter)),
+    };
+
+    let family = response_family();
+    for (status, generated) in &family {
+        match operation.responses.responses.get(status) {
+            None => {}
+            Some(existing) if existing == generated => {}
+            Some(existing) if replaces_protected_response(status, existing) => {}
+            Some(_) => return Err(AgreementError::new(operation_id, Rule::ProblemResponses)),
+        }
+    }
+
+    operation
+        .extensions
+        .get_or_insert_default()
+        .insert(EXTENSION.to_owned(), Value::Bool(true));
+    if add_key {
+        operation
+            .parameters
+            .get_or_insert_default()
+            .push(generated_key);
+    }
+    operation.responses.responses.extend(family);
+    Ok(ComposedOperation {
+        path: path.clone(),
+        method,
+        operation_id,
+    })
 }
 
-/// The document-wide agreement: every operation declaring `x-idempotent`
-/// declares `true`, is composed, and meets the rules with its references
-/// resolved; every composed operation is declared; no other operation
-/// declares the key; and the family's components are registered.
-pub(super) fn agree(document: &OpenApi, composed: &BTreeSet<String>) -> Result<(), AgreementError> {
+/// The document-wide agreement: every generated declaration corresponds to a
+/// composed tuple and every composed operation is declared; no other operation
+/// advertises the key; operation IDs are unique; response references resolve;
+/// preserved successes and 403 responses remain compatible; and the family's
+/// components are registered.
+pub(super) fn agree(
+    document: &OpenApi,
+    composed: &BTreeSet<ComposedOperation>,
+) -> Result<(), AgreementError> {
     let Ok(components) = serde_json::to_value(&document.components) else {
         return Err(AgreementError::new(DOCUMENT, Rule::Unreadable));
     };
     let mut declared = BTreeSet::new();
+    let mut operation_ids = BTreeSet::new();
     for (path, item) in &document.paths.paths {
         for (method, operation) in operations(item) {
             let label = operation
                 .operation_id
                 .clone()
                 .unwrap_or_else(|| format!("{} {path}", method.to_ascii_uppercase()));
-            let Ok(operation) = serde_json::to_value(operation) else {
-                return Err(AgreementError::new(label, Rule::Unreadable));
-            };
-            let checked = match operation.get(EXTENSION) {
-                None if key_parameters(&operation).next().is_some() => Err(Rule::UndeclaredKey),
-                None => continue,
-                Some(Value::Bool(true)) if composed.contains(&label) => {
-                    check_operation(method, &operation, Some(&components))
+            if let Some(operation_id) = operation.operation_id.as_deref()
+                && !operation_ids.insert(operation_id)
+            {
+                return Err(AgreementError::new(label, Rule::DuplicateOperationId));
+            }
+            let declaration = operation
+                .extensions
+                .as_ref()
+                .and_then(|extensions| extensions.get(EXTENSION));
+            match declaration {
+                None if declares_key(operation) => {
+                    return Err(AgreementError::new(label, Rule::UndeclaredKey));
                 }
-                Some(Value::Bool(true)) => Err(Rule::NotComposed),
-                Some(_) => Err(Rule::NotTrue),
-            };
-            match checked {
-                Ok(()) => {
-                    declared.insert(label);
+                None => {}
+                Some(Value::Bool(true)) => {
+                    let Some(operation_id) = operation.operation_id.as_deref() else {
+                        return Err(AgreementError::new(label, Rule::Shape));
+                    };
+                    let identity = ComposedOperation {
+                        path: path.clone(),
+                        method,
+                        operation_id: operation_id.to_owned(),
+                    };
+                    if !composed.contains(&identity) {
+                        return Err(AgreementError::new(label, Rule::NotComposed));
+                    }
+                    let Ok(operation) = serde_json::to_value(operation) else {
+                        return Err(AgreementError::new(label, Rule::Unreadable));
+                    };
+                    check_responses(&operation, &components)
+                        .map_err(|rule| AgreementError::new(label, rule))?;
+                    declared.insert(identity);
                 }
-                Err(rule) => return Err(AgreementError::new(label, rule)),
+                Some(_) => return Err(AgreementError::new(label, Rule::NotTrue)),
             }
         }
     }
     if let Some(missing) = composed.difference(&declared).next() {
-        return Err(AgreementError::new(missing.clone(), Rule::Undeclared));
+        return Err(AgreementError::new(&missing.operation_id, Rule::Undeclared));
     }
     let registered = components.get("responses");
     if RESPONSE_COMPONENTS.iter().any(|name| {
@@ -176,27 +254,21 @@ pub(super) fn agree(document: &OpenApi, composed: &BTreeSet<String>) -> Result<(
     Ok(())
 }
 
-/// Rules 2, 4, 5, and 6 on one operation's JSON form. `components` is the
-/// document's when references can resolve; a tuple checked before
-/// composition passes `None`, and its references wait for [`agree`].
-fn check_operation(
-    method: &str,
-    operation: &Value,
-    components: Option<&Value>,
-) -> Result<(), Rule> {
-    if !IDEMPOTENT_METHODS.contains(&method) {
-        return Err(Rule::Method);
-    }
-    if !declares_key(operation) {
-        return Err(Rule::KeyParameter);
-    }
-    if !declares_successes(operation, components) {
-        return Err(Rule::SuccessResponses);
-    }
-    if !declares_problems(operation, components) {
-        return Err(Rule::ProblemResponses);
-    }
-    Ok(())
+fn one_operation_mut(item: &mut PathItem) -> Option<(&'static str, &mut Operation)> {
+    let mut operations = [
+        ("get", item.get.as_mut()),
+        ("put", item.put.as_mut()),
+        ("post", item.post.as_mut()),
+        ("delete", item.delete.as_mut()),
+        ("options", item.options.as_mut()),
+        ("head", item.head.as_mut()),
+        ("patch", item.patch.as_mut()),
+        ("trace", item.trace.as_mut()),
+    ]
+    .into_iter()
+    .filter_map(|(method, operation)| operation.map(|operation| (method, operation)));
+    let operation = operations.next()?;
+    operations.next().is_none().then_some(operation)
 }
 
 fn operations(item: &PathItem) -> impl Iterator<Item = (&'static str, &Operation)> {
@@ -224,60 +296,65 @@ fn route_label(paths: &Paths) -> String {
 }
 
 /// Header parameters named `Idempotency-Key`, compared case-insensitively.
-fn key_parameters(operation: &Value) -> impl Iterator<Item = &Value> {
+fn declares_key(operation: &Operation) -> bool {
     operation
-        .get("parameters")
-        .and_then(Value::as_array)
+        .parameters
+        .as_deref()
         .into_iter()
         .flatten()
-        .filter(|parameter| {
-            parameter.get("in").and_then(Value::as_str) == Some("header")
-                && parameter
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| name.eq_ignore_ascii_case(KEY_HEADER))
+        .any(|parameter| {
+            parameter.parameter_in == utoipa::openapi::path::ParameterIn::Header
+                && parameter.name.eq_ignore_ascii_case(KEY_HEADER)
         })
 }
 
-fn declares_key(operation: &Value) -> bool {
-    let mut keys = key_parameters(operation);
-    let (Some(key), None) = (keys.next(), keys.next()) else {
-        return false;
-    };
-    let schema = &key["schema"];
-    key.get("required") == Some(&Value::Bool(true))
-        && schema.get("type").and_then(Value::as_str) == Some("string")
-        && schema.get("minLength").and_then(Value::as_u64) == Some(KEY_MIN_LENGTH)
-        && schema.get("maxLength").and_then(Value::as_u64) == Some(KEY_MAX_LENGTH)
-        && schema.get("pattern").and_then(Value::as_str) == Some(KEY_PATTERN)
-}
-
-fn declares_successes(operation: &Value, components: Option<&Value>) -> bool {
+fn check_responses(operation: &Value, components: &Value) -> Result<(), Rule> {
     let Some(responses) = operation.get("responses").and_then(Value::as_object) else {
-        return false;
+        return Err(Rule::SuccessResponses);
     };
     let mut success = false;
+    let mut problem_403 = false;
     for (status, response) in responses {
+        let Resolved::Response(response) = resolve(response, components) else {
+            return Err(if status.starts_with('2') {
+                Rule::SuccessResponses
+            } else {
+                Rule::ProblemResponses
+            });
+        };
         match status.as_bytes().first() {
-            Some(b'1' | b'3') => return false,
+            Some(b'1' | b'3') => return Err(Rule::SuccessResponses),
             Some(b'2') => {
                 success = true;
-                let replayable = match resolve(response, components) {
-                    Resolved::Response(response) => declares_only_replayable_headers(response),
-                    Resolved::Deferred => true,
-                    Resolved::Dangling => false,
-                };
-                if !replayable {
-                    return false;
+                if !declares_only_replayable_headers(response) {
+                    return Err(Rule::SuccessResponses);
                 }
             }
             _ => {}
         }
+        if status == "403" {
+            problem_403 = is_problem_response(response);
+        }
     }
-    success
+    if !success {
+        return Err(Rule::SuccessResponses);
+    }
+    if !problem_403 {
+        return Err(Rule::ProblemResponses);
+    }
+    Ok(())
 }
 
 fn declares_only_replayable_headers(response: &Value) -> bool {
+    const REPLAYABLE_HEADERS: [&str; 7] = [
+        "Content-Type",
+        "Content-Encoding",
+        "Content-Language",
+        "Content-Disposition",
+        "Location",
+        "ETag",
+        "Last-Modified",
+    ];
     match response.get("headers") {
         None => true,
         Some(headers) => headers.as_object().is_some_and(|headers| {
@@ -288,27 +365,6 @@ fn declares_only_replayable_headers(response: &Value) -> bool {
             })
         }),
     }
-}
-
-fn declares_problems(operation: &Value, components: Option<&Value>) -> bool {
-    let Ok(expected) = serde_json::to_value(IdempotentOperationProblemResponses::responses())
-    else {
-        return false;
-    };
-    let responses = &operation["responses"];
-    let fixed = FIXED_PROBLEM_STATUSES.iter().all(|status| {
-        responses
-            .get(*status)
-            .is_some_and(|declared| expected.get(*status) == Some(declared))
-    });
-    fixed
-        && responses.get(AUTHORIZATION_STATUS).is_some_and(|declared| {
-            match resolve(declared, components) {
-                Resolved::Response(response) => is_problem_response(response),
-                Resolved::Deferred => true,
-                Resolved::Dangling => false,
-            }
-        })
 }
 
 fn is_problem_response(response: &Value) -> bool {
@@ -323,37 +379,40 @@ fn is_problem_response(response: &Value) -> bool {
 
 enum Resolved<'a> {
     Response(&'a Value),
-    /// A component reference in a tuple checked without its document.
-    Deferred,
-    /// A reference to no component of the document.
+    /// A reference to no component of the assembled document.
     Dangling,
 }
 
-fn resolve<'a>(response: &'a Value, components: Option<&'a Value>) -> Resolved<'a> {
-    let Some(reference) = response.get("$ref") else {
-        return Resolved::Response(response);
-    };
-    let Some(components) = components else {
-        return Resolved::Deferred;
-    };
-    reference
-        .as_str()
-        .and_then(|reference| reference.strip_prefix(RESPONSE_REFERENCE))
-        .and_then(|name| components.get("responses")?.get(name))
-        .map_or(Resolved::Dangling, Resolved::Response)
+fn resolve<'a>(mut response: &'a Value, components: &'a Value) -> Resolved<'a> {
+    let registered = components.get("responses").and_then(Value::as_object);
+    // More hops than registered components means a reference cycle.
+    for _ in 0..=registered.map_or(0, serde_json::Map::len) {
+        let Some(reference) = response.get("$ref") else {
+            return Resolved::Response(response);
+        };
+        let Some(target) = reference
+            .as_str()
+            .and_then(|reference| reference.strip_prefix(RESPONSE_REFERENCE))
+            .and_then(|name| registered?.get(name))
+        else {
+            return Resolved::Dangling;
+        };
+        response = target;
+    }
+    Resolved::Dangling
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
     use utoipa::OpenApi as _;
+    use utoipa::openapi::response::Response;
     use utoipa_axum::router::{OpenApiRouter, UtoipaMethodRouter};
     use utoipa_axum::routes;
 
     use super::*;
-    use crate::idempotency::IdempotencyKey;
-    use crate::idempotency::openapi::IdempotencyComponents;
-    use crate::problem::responses::ProblemComponents;
+    use crate::idempotency::openapi::{IdempotencyComponents, key_parameter, response_family};
+    use crate::problem::responses::{ProblemComponents, ProtectedOperationProblemResponses};
 
     const WIDGETS: &str = "/_test/widgets";
     const CREATE_WIDGET: &str = "infraHttpTestCreateWidget";
@@ -362,15 +421,11 @@ mod tests {
         post,
         path = "/_test/widgets",
         operation_id = "infraHttpTestCreateWidget",
-        params(IdempotencyKey),
         security(("bearerAuth" = [])),
-        extensions(
-            ("x-security-decision" = json!({
-                "exposure": "protected",
-                "rationale": "test-only idempotent operation"
-            })),
-            ("x-idempotent" = json!(true))
-        ),
+        extensions(("x-security-decision" = json!({
+            "exposure": "protected",
+            "rationale": "test-only operation with composer-generated idempotency metadata"
+        }))),
         responses(
             (
                 status = 201,
@@ -379,7 +434,7 @@ mod tests {
                 body = String,
                 headers(("Location" = String, description = "the created widget"))
             ),
-            IdempotentOperationProblemResponses,
+            ProtectedOperationProblemResponses,
         )
     )]
     async fn create_widget() -> &'static str {
@@ -387,45 +442,24 @@ mod tests {
     }
 
     #[utoipa::path(
-        put,
+        get,
         path = "/_test/widgets",
-        operation_id = "infraHttpTestReplaceWidget",
-        params(IdempotencyKey),
+        operation_id = "infraHttpTestGetWidget",
         security(("bearerAuth" = [])),
-        extensions(("x-idempotent" = json!(true))),
-        responses((status = 200, description = "replaced"), IdempotentOperationProblemResponses)
-    )]
-    async fn replace_widget() -> &'static str {
-        "replaced"
-    }
-
-    #[utoipa::path(
-        post,
-        path = "/_test/declared-string",
-        operation_id = "infraHttpTestDeclaredString",
-        params(IdempotencyKey),
-        security(("bearerAuth" = [])),
-        extensions(("x-idempotent" = json!("true"))),
-        responses((status = 201, description = "created"), IdempotentOperationProblemResponses)
-    )]
-    async fn declared_string() -> &'static str {
-        "created"
-    }
-
-    #[utoipa::path(
-        post,
-        path = "/_test/keyed",
-        operation_id = "infraHttpTestKeyed",
-        params(IdempotencyKey),
-        security(),
         extensions(("x-security-decision" = json!({
-            "exposure": "public",
-            "rationale": "test-only operation that must not advertise a key it ignores"
+            "exposure": "protected",
+            "rationale": "test-only operation with an unsupported idempotency method"
         }))),
-        responses((status = 204, description = "done"))
+        responses((status = 200, description = "found"), ProtectedOperationProblemResponses)
     )]
-    async fn keyed() -> &'static str {
-        "done"
+    async fn get_widget() -> &'static str {
+        "found"
+    }
+
+    fn prepared_routes() -> (UtoipaMethodRouter, ComposedOperation) {
+        let mut routes: UtoipaMethodRouter = routes!(create_widget);
+        let identity = prepare(&mut routes.1).expect("normal protected route prepares");
+        (routes, identity)
     }
 
     fn document(routes: UtoipaMethodRouter) -> OpenApi {
@@ -435,260 +469,284 @@ mod tests {
             .into_openapi()
     }
 
-    fn composed(operations: &[&str]) -> BTreeSet<String> {
-        operations
-            .iter()
-            .map(|operation| (*operation).to_owned())
-            .collect()
-    }
-
-    fn widget_operation() -> Value {
-        let (_, paths, _): UtoipaMethodRouter = routes!(create_widget);
-        serde_json::to_value(paths.paths[WIDGETS].post.as_ref().unwrap()).unwrap()
-    }
-
-    fn widget_components() -> Value {
-        serde_json::to_value(document(routes!(create_widget)).components).unwrap()
-    }
-
-    fn widget_with(change: impl FnOnce(&mut Value)) -> Value {
-        let mut operation = widget_operation();
-        change(&mut operation);
-        operation
+    fn prepared_document() -> (OpenApi, BTreeSet<ComposedOperation>) {
+        let (routes, identity) = prepared_routes();
+        (document(routes), BTreeSet::from([identity]))
     }
 
     #[test]
-    fn a_generated_idempotent_operation_meets_every_rule() {
-        let (_, paths, _): UtoipaMethodRouter = routes!(create_widget);
-        assert_eq!(check_route(&paths), Ok(CREATE_WIDGET.to_owned()));
-        assert_eq!(
-            agree(
-                &document(routes!(create_widget)),
-                &composed(&[CREATE_WIDGET])
-            ),
-            Ok(())
-        );
-        let components = widget_components();
-        assert_eq!(
-            check_operation("post", &widget_operation(), Some(&components)),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn only_post_put_patch_and_delete_can_be_idempotent() {
-        let operation = widget_operation();
-        for method in ["post", "put", "patch", "delete"] {
-            assert_eq!(
-                check_operation(method, &operation, None),
-                Ok(()),
-                "{method}"
-            );
-        }
-        for method in ["get", "head", "options", "trace"] {
-            assert_eq!(
-                check_operation(method, &operation, None),
-                Err(Rule::Method),
-                "{method}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_key_is_one_required_header_with_the_exact_schema() {
-        let lowercase = widget_with(|operation| {
-            operation["parameters"][0]["name"] = json!("idempotency-key");
-        });
-        assert_eq!(check_operation("post", &lowercase, None), Ok(()));
-        let violations = [
-            widget_with(|operation| operation["parameters"] = json!([])),
-            widget_with(|operation| operation["parameters"][0]["required"] = json!(false)),
-            widget_with(|operation| operation["parameters"][0]["in"] = json!("query")),
-            widget_with(|operation| {
-                operation["parameters"][0]["schema"]["type"] = json!("integer");
-            }),
-            widget_with(|operation| operation["parameters"][0]["schema"]["minLength"] = json!(0)),
-            widget_with(|operation| operation["parameters"][0]["schema"]["maxLength"] = json!(256)),
-            widget_with(|operation| {
-                operation["parameters"][0]["schema"]["pattern"] = json!("^[A-Za-z0-9]+$");
-            }),
-            widget_with(|operation| {
-                let mut repeated = operation["parameters"][0].clone();
-                repeated["name"] = json!("IDEMPOTENCY-KEY");
-                operation["parameters"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(repeated);
-            }),
-        ];
-        for violation in violations {
-            assert_eq!(
-                check_operation("post", &violation, None),
-                Err(Rule::KeyParameter),
-                "{violation}"
-            );
-        }
-    }
-
-    #[test]
-    fn successes_are_2xx_only_with_replayable_headers() {
-        let components = widget_components();
-        let replayable = widget_with(|operation| {
-            operation["responses"]["201"]["headers"]["content-language"] = json!({});
-        });
-        assert_eq!(
-            check_operation("post", &replayable, Some(&components)),
-            Ok(())
-        );
-        let referenced = widget_with(|operation| {
-            operation["responses"]["201"] = json!({"$ref": "#/components/responses/Widget"});
-        });
-        assert_eq!(check_operation("post", &referenced, None), Ok(()));
-        assert_eq!(
-            check_operation("post", &referenced, Some(&components)),
-            Err(Rule::SuccessResponses)
-        );
-        let violations = [
-            widget_with(|operation| {
-                operation["responses"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("201");
-            }),
-            widget_with(|operation| {
-                operation["responses"]["101"] = json!({"description": "switching"});
-            }),
-            widget_with(|operation| {
-                operation["responses"]["303"] = json!({"description": "see other"});
-            }),
-            widget_with(|operation| operation["responses"]["201"]["headers"]["ETag"] = json!({})),
-        ];
-        for violation in violations {
-            assert_eq!(
-                check_operation("post", &violation, Some(&components)),
-                Err(Rule::SuccessResponses),
-                "{violation}"
-            );
-        }
-    }
-
-    #[test]
-    fn problem_responses_are_the_family_with_a_replaceable_403() {
-        let components = widget_components();
-        let own_authorization = widget_with(|operation| {
-            operation["responses"]["403"] = json!({
-                "description": "the caller may not create widgets",
-                "content": {"application/problem+json": {
-                    "schema": {"$ref": "#/components/schemas/Problem"}
-                }}
-            });
-        });
-        assert_eq!(
-            check_operation("post", &own_authorization, Some(&components)),
-            Ok(())
-        );
-        let dangling = widget_with(|operation| {
-            operation["responses"]["403"] = json!({"$ref": "#/components/responses/Missing"});
-        });
-        assert_eq!(check_operation("post", &dangling, None), Ok(()));
-        let violations = [
-            dangling,
-            widget_with(|operation| {
-                operation["responses"]["403"] = json!({
-                    "description": "no",
-                    "content": {"text/plain": {"schema": {"type": "string"}}}
-                });
-            }),
-            widget_with(|operation| {
-                operation["responses"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("403");
-            }),
-            widget_with(|operation| {
-                operation["responses"]["409"] = json!({"description": "conflict"});
-            }),
-            widget_with(|operation| {
-                operation["responses"]["503"] =
-                    json!({"$ref": "#/components/responses/AuthenticationUnavailable"});
-            }),
-            widget_with(|operation| {
-                operation["responses"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("504");
-            }),
-        ];
-        for violation in violations {
-            assert_eq!(
-                check_operation("post", &violation, Some(&components)),
-                Err(Rule::ProblemResponses),
-                "{violation}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_composed_tuple_is_one_operation_declaring_the_boolean_true() {
-        let (_, paths, _): UtoipaMethodRouter = routes!(declared_string);
-        assert_eq!(check_route(&paths).unwrap_err().rule(), Rule::NotTrue);
-        let (_, paths, _): UtoipaMethodRouter = routes!(keyed);
-        assert_eq!(check_route(&paths).unwrap_err().rule(), Rule::Undeclared);
-        let (_, paths, _): UtoipaMethodRouter = routes!(create_widget, replace_widget);
-        assert_eq!(check_route(&paths).unwrap_err().rule(), Rule::Shape);
-    }
-
-    #[test]
-    fn agreement_is_two_way() {
-        let error = agree(&document(routes!(create_widget)), &BTreeSet::new()).unwrap_err();
-        assert_eq!(error, AgreementError::new(CREATE_WIDGET, Rule::NotComposed));
-
-        let error = agree(
-            &document(routes!(create_widget)),
-            &composed(&[CREATE_WIDGET, "infraHttpTestGhost"]),
+    fn preparation_generates_metadata_key_and_family_from_a_normal_protected_tuple() {
+        let (document, composed) = prepared_document();
+        let operation = serde_json::to_value(
+            document.paths.paths[WIDGETS]
+                .post
+                .as_ref()
+                .expect("prepared post operation"),
         )
-        .unwrap_err();
+        .expect("operation serializes");
+        assert_eq!(operation[EXTENSION], true);
+        assert_eq!(operation["parameters"].as_array().map(Vec::len), Some(1));
+        assert_eq!(operation["parameters"][0]["name"], KEY_HEADER);
+        assert!(
+            operation["parameters"][0]["schema"]
+                .get("pattern")
+                .is_none()
+        );
+        assert!(
+            operation["parameters"][0]["schema"]
+                .get("maxLength")
+                .is_none()
+        );
+        for status in ["400", "409", "413", "422", "500", "503"] {
+            assert!(operation["responses"].get(status).is_some(), "{status}");
+        }
+        assert_eq!(agree(&document, &composed), Ok(()));
+    }
+
+    #[test]
+    fn preparation_accepts_only_matching_generated_values_and_rejects_conflicts() {
+        type ConflictCase = (fn(&mut Operation), Rule);
+
+        let (_, mut idempotent, _): UtoipaMethodRouter = routes!(create_widget);
+        let operation = idempotent
+            .paths
+            .get_mut(WIDGETS)
+            .expect("widget path")
+            .post
+            .as_mut()
+            .expect("post operation");
+        operation
+            .extensions
+            .get_or_insert_default()
+            .insert(EXTENSION.to_owned(), json!(true));
+        operation.parameters = Some(vec![key_parameter()]);
+        operation.responses.responses.extend(response_family());
         assert_eq!(
-            error,
-            AgreementError::new("infraHttpTestGhost", Rule::Undeclared)
+            prepare(&mut idempotent),
+            Ok(ComposedOperation {
+                path: WIDGETS.to_owned(),
+                method: "post",
+                operation_id: CREATE_WIDGET.to_owned(),
+            })
         );
 
-        let error = agree(&document(routes!(keyed)), &BTreeSet::new()).unwrap_err();
-        assert_eq!(
-            error,
-            AgreementError::new("infraHttpTestKeyed", Rule::UndeclaredKey)
-        );
+        let cases: [ConflictCase; 3] = [
+            (
+                |operation| {
+                    operation
+                        .extensions
+                        .get_or_insert_default()
+                        .insert(EXTENSION.to_owned(), json!(false));
+                },
+                Rule::NotTrue,
+            ),
+            (
+                |operation| {
+                    let mut parameter = key_parameter();
+                    parameter.description = Some("different key contract".to_owned());
+                    operation.parameters = Some(vec![parameter]);
+                },
+                Rule::KeyParameter,
+            ),
+            (
+                |operation| {
+                    operation
+                        .responses
+                        .responses
+                        .insert("409".to_owned(), Response::new("business conflict").into());
+                },
+                Rule::ProblemResponses,
+            ),
+        ];
+        for (change, rule) in cases {
+            let (_, mut paths, _): UtoipaMethodRouter = routes!(create_widget);
+            change(
+                paths
+                    .paths
+                    .get_mut(WIDGETS)
+                    .expect("widget path")
+                    .post
+                    .as_mut()
+                    .expect("post operation"),
+            );
+            assert_eq!(prepare(&mut paths).unwrap_err().rule(), rule);
+        }
+    }
 
-        let mut not_true = document(routes!(create_widget));
-        not_true
+    #[test]
+    fn preparation_requires_one_supported_operation_with_an_operation_id() {
+        let (_, mut unsupported, _): UtoipaMethodRouter = routes!(get_widget);
+        assert_eq!(prepare(&mut unsupported).unwrap_err().rule(), Rule::Method);
+
+        let (_, mut multiple, _): UtoipaMethodRouter = routes!(create_widget, get_widget);
+        assert_eq!(prepare(&mut multiple).unwrap_err().rule(), Rule::Shape);
+
+        let (_, mut unnamed, _): UtoipaMethodRouter = routes!(create_widget);
+        unnamed
+            .paths
+            .get_mut(WIDGETS)
+            .expect("widget path")
+            .post
+            .as_mut()
+            .expect("post operation")
+            .operation_id = None;
+        assert_eq!(prepare(&mut unnamed).unwrap_err().rule(), Rule::Shape);
+    }
+
+    #[test]
+    fn assembled_agreement_rejects_only_unresolved_or_incompatible_document_facts() {
+        let (document, composed) = prepared_document();
+        assert_eq!(agree(&document, &composed), Ok(()));
+
+        let mut custom_403 = document.clone();
+        custom_403
             .paths
             .paths
             .get_mut(WIDGETS)
-            .and_then(|item| item.post.as_mut())
-            .and_then(|operation| operation.extensions.as_mut())
-            .unwrap()
-            .insert(EXTENSION.to_owned(), json!(1));
-        let error = agree(&not_true, &composed(&[CREATE_WIDGET])).unwrap_err();
-        assert_eq!(error, AgreementError::new(CREATE_WIDGET, Rule::NotTrue));
-    }
-
-    #[test]
-    fn the_family_components_must_be_registered() {
-        let empty = OpenApiRouter::<()>::with_openapi(ProblemComponents::openapi()).into_openapi();
-        let error = agree(&empty, &BTreeSet::new()).unwrap_err();
-        assert_eq!(error, AgreementError::new(DOCUMENT, Rule::Components));
-        let registered = OpenApiRouter::<()>::with_openapi(ProblemComponents::openapi())
-            .merge(OpenApiRouter::with_openapi(IdempotencyComponents::openapi()))
-            .into_openapi();
-        assert_eq!(agree(&registered, &BTreeSet::new()), Ok(()));
-    }
-
-    #[test]
-    fn the_error_names_the_operation_and_one_static_rule() {
+            .expect("widget path")
+            .post
+            .as_mut()
+            .expect("post operation")
+            .responses
+            .responses
+            .insert(
+                "403".to_owned(),
+                Response::new("not a Problem response").into(),
+            );
         assert_eq!(
-            AgreementError::new("createWidget", Rule::Method).to_string(),
-            "idempotent operation contract is invalid: createWidget: \
-             the method must be POST, PUT, PATCH, or DELETE"
+            agree(&custom_403, &composed).unwrap_err().rule(),
+            Rule::ProblemResponses
         );
+
+        let mut unreplayable_success = document.clone();
+        let response = unreplayable_success
+            .paths
+            .paths
+            .get_mut(WIDGETS)
+            .expect("widget path")
+            .post
+            .as_mut()
+            .expect("post operation")
+            .responses
+            .responses
+            .get_mut("201")
+            .expect("created response");
+        let utoipa::openapi::RefOr::T(response) = response else {
+            panic!("inline created response")
+        };
+        response.headers.insert(
+            "Set-Cookie".to_owned(),
+            utoipa::openapi::header::Header::default(),
+        );
+        assert_eq!(
+            agree(&unreplayable_success, &composed).unwrap_err().rule(),
+            Rule::SuccessResponses
+        );
+
+        let mut uncomposed = document;
+        uncomposed
+            .paths
+            .paths
+            .get_mut(WIDGETS)
+            .expect("widget path")
+            .post
+            .as_mut()
+            .expect("post operation")
+            .operation_id = Some("infraHttpTestUncomposed".to_owned());
+        assert_eq!(
+            agree(&uncomposed, &composed).unwrap_err().rule(),
+            Rule::NotComposed
+        );
+    }
+
+    #[test]
+    fn assembled_agreement_rejects_path_or_method_changes_with_the_same_operation_id() {
+        let (document, composed) = prepared_document();
+        assert_eq!(agree(&document, &composed), Ok(()));
+
+        let mut moved = document.clone();
+        let route = moved.paths.paths.remove(WIDGETS).expect("widget path");
+        moved.paths.paths.insert("/_test/moved".to_owned(), route);
+        assert_eq!(
+            agree(&moved, &composed).unwrap_err().rule(),
+            Rule::NotComposed
+        );
+
+        let mut changed_method = document;
+        let route = changed_method
+            .paths
+            .paths
+            .get_mut(WIDGETS)
+            .expect("widget path");
+        route.put = route.post.take();
+        assert_eq!(
+            agree(&changed_method, &composed).unwrap_err().rule(),
+            Rule::NotComposed
+        );
+    }
+
+    #[test]
+    fn assembled_agreement_resolves_shared_and_preserved_response_references() {
+        use utoipa::openapi::Ref;
+
+        let (document, composed) = prepared_document();
+        for component in ["RequestEntityTooLarge", "InternalServerError"] {
+            let mut dangling = document.clone();
+            dangling
+                .components
+                .as_mut()
+                .expect("components")
+                .responses
+                .remove(component);
+            assert_eq!(
+                agree(&dangling, &composed).unwrap_err().rule(),
+                Rule::ProblemResponses,
+                "{component}"
+            );
+        }
+
+        let mut custom = document;
+        let responses = &mut custom
+            .paths
+            .paths
+            .get_mut(WIDGETS)
+            .expect("widget path")
+            .post
+            .as_mut()
+            .expect("post operation")
+            .responses
+            .responses;
+        let forbidden = responses
+            .remove("403")
+            .expect("protected forbidden response");
+        responses.insert(
+            "403".to_owned(),
+            Ref::from_response_name("CustomForbidden").into(),
+        );
+        custom
+            .components
+            .as_mut()
+            .expect("components")
+            .responses
+            .insert("CustomForbidden".to_owned(), forbidden);
+        assert_eq!(agree(&custom, &composed), Ok(()));
+
+        for reference in [
+            "#/components/responses/Missing",
+            "#/components/schemas/Problem",
+            "#/components/responses/CustomForbidden",
+        ] {
+            custom
+                .components
+                .as_mut()
+                .expect("components")
+                .responses
+                .insert("CustomForbidden".to_owned(), Ref::new(reference).into());
+            assert_eq!(
+                agree(&custom, &composed).unwrap_err().rule(),
+                Rule::ProblemResponses,
+                "{reference}"
+            );
+        }
     }
 }

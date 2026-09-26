@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use health::Probe;
 use infra_postgres::{
-    ACQUIRE_TIMEOUT, Dsn, Isolation, PgPool, PoolOptions, PostgresProbe, TxError, TxOptions, in_tx,
-    in_tx_with, retryable,
+    ACQUIRE_TIMEOUT, Dsn, Isolation, PgPool, PoolOptions, PostgresProbe, TxError, TxOptions,
+    connection, in_tx, in_tx_with, retryable,
 };
 use integration_tests::{dsn_for, fixture_dir};
 use migrate::{MIGRATOR, RunError, RunOptions, Stage};
@@ -111,8 +111,8 @@ async fn in_tx_commits_on_ok_and_rolls_back_on_err(pool: PgPool) {
         .await
         .unwrap();
 
-    let inserted: Result<u64, AppError> = in_tx(&pool, async |conn| {
-        Ok(conn
+    let inserted: Result<u64, AppError> = in_tx(&pool, async |tx| {
+        Ok(connection(tx)
             .execute("INSERT INTO t VALUES (1)")
             .await?
             .rows_affected())
@@ -120,8 +120,8 @@ async fn in_tx_commits_on_ok_and_rolls_back_on_err(pool: PgPool) {
     .await;
     assert_eq!(inserted.unwrap(), 1);
 
-    let failed: Result<(), AppError> = in_tx(&pool, async |conn| {
-        conn.execute("INSERT INTO t VALUES (2)").await?;
+    let failed: Result<(), AppError> = in_tx(&pool, async |tx| {
+        connection(tx).execute("INSERT INTO t VALUES (2)").await?;
         Err(AppError::Business)
     })
     .await;
@@ -142,8 +142,10 @@ async fn a_commit_the_server_rejects_is_commit_failed(pool: PgPool) {
     )
     .await
     .unwrap();
-    let result: Result<(), AppError> = in_tx(&pool, async |conn| {
-        conn.execute("INSERT INTO t VALUES (1, 1), (2, 1)").await?;
+    let result: Result<(), AppError> = in_tx(&pool, async |tx| {
+        connection(tx)
+            .execute("INSERT INTO t VALUES (1, 1), (2, 1)")
+            .await?;
         Ok(())
     })
     .await;
@@ -176,9 +178,9 @@ async fn a_serialization_failure_is_retryable(pool: PgPool) {
             isolation: Isolation::Serializable,
             read_only: false,
         },
-        async |conn| {
+        async |tx| {
             let seen: i32 = sqlx::query_scalar("SELECT n FROM counters WHERE id = 1")
-                .fetch_one(&mut *conn)
+                .fetch_one(&mut *connection(tx))
                 .await?;
             // A second writer commits between our read and our write.
             let concurrent: Result<(), AppError> = in_tx_with(
@@ -187,8 +189,9 @@ async fn a_serialization_failure_is_retryable(pool: PgPool) {
                     isolation: Isolation::Serializable,
                     read_only: false,
                 },
-                async |conn| {
-                    conn.execute("UPDATE counters SET n = n + 1 WHERE id = 1")
+                async |tx| {
+                    connection(tx)
+                        .execute("UPDATE counters SET n = n + 1 WHERE id = 1")
                         .await?;
                     Ok(())
                 },
@@ -197,7 +200,7 @@ async fn a_serialization_failure_is_retryable(pool: PgPool) {
             concurrent.expect("the concurrent writer commits first");
             sqlx::query("UPDATE counters SET n = $1 WHERE id = 1")
                 .bind(seen + 1)
-                .execute(&mut *conn)
+                .execute(&mut *connection(tx))
                 .await?;
             Ok(())
         },
@@ -221,8 +224,8 @@ async fn a_read_only_transaction_refuses_writes(pool: PgPool) {
             isolation: Isolation::ReadCommitted,
             read_only: true,
         },
-        async |conn| {
-            conn.execute("INSERT INTO t VALUES (1)").await?;
+        async |tx| {
+            connection(tx).execute("INSERT INTO t VALUES (1)").await?;
             Ok(())
         },
     )

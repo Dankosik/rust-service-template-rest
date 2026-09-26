@@ -29,15 +29,16 @@ otlp_headers = ""
 # template:begin authn:local-config-section
 [authn]
 # Authentication remains inert until a derived service selects an authn profile.
-# Set shared trust values with APP__AUTHN__*.
 mode = "none"
-issuer = ""
-audience = ""
 # template:end authn:local-config-section
 # template:begin oidc-introspection:local-config-introspection-inputs
 # The client secret is environment-only and intentionally omitted here.
-introspection_endpoint = ""
-introspection_client_id = ""
+# Set these only with mode = "oidc-introspection" and its issuer/audience.
+# introspection_endpoint = "https://issuer.example/introspect"
+# introspection_client_id = "service-client"
+# cache_enabled = false
+# cache_capacity = 256
+# cache_ttl = "30s"
 # template:end oidc-introspection:local-config-introspection-inputs
 
 # template:begin postgres:local-config

@@ -50,7 +50,6 @@ pub enum Code {
     IdempotencyRequestInProgress,
     IdempotencyKeyMismatch,
     IdempotencyUnavailable,
-    IdempotencyOutcomeUnknown,
     // template:end http-idempotency:http-idempotency-codes
     Forbidden,
     NotFound,
@@ -170,12 +169,6 @@ impl Code {
             },
             Code::IdempotencyUnavailable => CodeMeta {
                 wire: "idempotency_unavailable",
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                title: "service unavailable",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4"),
-            },
-            Code::IdempotencyOutcomeUnknown => CodeMeta {
-                wire: "idempotency_outcome_unknown",
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 title: "service unavailable",
                 type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4"),

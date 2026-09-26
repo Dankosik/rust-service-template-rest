@@ -44,36 +44,32 @@ use their own binary in `crates/service/src/bin` only when they share the
 service's composition, otherwise their own crate with its own lifecycle.
 
 <!-- template:begin authn:docs-integration-authn-provider -->
-Inbound authentication's provider destination is fixed by validated configuration,
-never by the caller. The adapter permits only HTTPS, normal TLS hostname/certificate
-validation, public-unicast destinations, no redirects or proxy, and a 1 MiB
-response body. It shares the resolver and 30-second idle pool with the bounded
-outbound profile; a library stale-connection retry is limited to before request
-writing. Provider work is bounded by three seconds and the enclosing request
-deadline; the HTTP transport's existing inbound header limit is separate from the
-provider-client header-count limit.
+Inbound authentication's provider destination is fixed by configuration or an
+exact-issuer discovery response, never by the caller. The adapter's one
+`ProviderUrl` grammar admits HTTPS, host, and no userinfo, query, fragment,
+whitespace, or controls before I/O. It retains normal TLS hostname/certificate
+validation, permits configured private HTTPS providers, disables redirects,
+ambient proxy and retry, and caps a response at 1 MiB. Provider work has a
+three-second attempt cap inside the request's remaining budget.
 
-Provider URL syntax is checked both by `crates/config/src/authn.rs` and by
-`crates/infra-bearerauthn/src/provider.rs`. Keep their HTTPS, host, userinfo,
-query, fragment and whitespace rules aligned. The checks have separate owners:
-configuration reports the offending key, while runtime also admits discovered
-JWKS URLs and direct adapter inputs. Moving either check to the other crate
-would discard one of those boundaries; a shared crate for this single grammar
-would add more ownership than it removes.
+The adapter owns URL representation because discovery and direct adapter inputs
+must pass the same admission. Config owns field presence, type, and useful key
+context; bootstrap converts primitive configuration into adapter options. The
+independent outbound HTTP profile alone owns post-resolution public-address
+admission and its DNS dependency.
 <!-- template:end authn:docs-integration-authn-provider -->
 <!-- template:begin outbound-http:docs-integration-outbound -->
 A provider with a fixed public HTTPS dependency uses the retained
 [bounded outbound client](../outbound-http.md). The adapter supplies finite
-limits, credentials, and a parent deadline with response reserve; it owns parsing
-and business errors. The client takes a standard `Request<Bytes>`, enforces
-origin-form component composition and same-authority targets, admits complete DNS
-answer sets, and returns bounded `Response<Bytes>` after removing correlation
-headers. Selection itself adds no neighbour or startup call.
+limits, credentials, a parent deadline with response reserve, and cancellation;
+it owns parsing and business errors. The client enforces same-authority targets,
+post-DNS public-address admission, bounded encoded bodies/headers and removal
+of correlation headers. Selection itself adds no neighbour or startup call.
 <!-- template:end outbound-http:docs-integration-outbound -->
 
 <!-- template:begin oidc-jwt:docs-integration-jwt -->
 JWT mode uses OIDC discovery and JWKS only from the exact configured issuer's discovery result. It accepts signed RS256 access tokens against eligible RSA keys; token headers never choose a trust destination. Refresh replaces a key set atomically, retains the last usable set after a failed fetch, and is not a revocation service.
 <!-- template:end oidc-jwt:docs-integration-jwt -->
 <!-- template:begin oidc-introspection:docs-integration-introspection -->
-Introspection sends exactly one RFC 7662 POST for each admitted request, with the opaque token in form data and `client_secret_basic` credentials. It has no cache, retry, redirect, or remembered outage; a provider failure affects that request only.
+Introspection sends one RFC 7662 POST per admitted cache miss, with the opaque token in form data and `client_secret_basic` credentials. The cache is disabled by default; enabling it permits bounded positive reuse within the same verifier's immutable trust context. Reuse ends at the earlier of the fixed TTL and token expiry, without expiry leeway. A valid hit can delay observing revocation or provider outages until that boundary. Negative results, provider failures, and expired entries never supply cached success; misses keep the same provider/deadline path, with no retry, redirect, or remembered outage. The verifier owns and releases the store without a background task; [Authentication](../authentication.md#oidc-introspection) defines the operator inputs and storage bounds.
 <!-- template:end oidc-introspection:docs-integration-introspection -->

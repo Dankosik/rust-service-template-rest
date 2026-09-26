@@ -59,8 +59,9 @@ readiness probe; every operation's deadline fits inside
   `observability.metrics.addr` binds IPv4 all-interfaces (`0.0.0.0`); deployment keeps it
   private.
 - Egress, identity, and authorization authorities: Unresolved. The template
-  ships no authentication and no outbound client; every operation carries an
-  explicit `x-security-decision`.
+  ships no authentication and no outbound client; a retained authentication
+  profile supplies a global bearer default and explicit `security: []` marks a
+  public operation.
 
 ## Operation and recovery
 

@@ -2,15 +2,14 @@
 //!
 //! Owns the one profile table, `http_idempotency_records`: arbitration of a
 //! scoped key at the writer, the one execution transaction that commits the
-//! work together with its success record, the readback after an unknown
-//! commit outcome, the startup check, and the bounded cleanup of expired
+//! work together with its success record, the startup check, and the bounded cleanup of expired
 //! records. It knows nothing about HTTP: the inbound seam in
 //! `infra_http::idempotency` derives scopes and fingerprints, captures and
 //! decodes stored successes, and maps [`Attempted`] to responses.
 //!
 //! No other crate names the table. A feature's persistence adapter reaches
-//! the transaction's connection only through [`connection`], which the seam
-//! never re-exports.
+//! the transaction's connection through the PostgreSQL provider, which the
+//! seam never re-exports.
 
 mod attempt;
 mod maintenance;
@@ -21,7 +20,9 @@ use std::time::Duration;
 use infra_postgres::{Isolation, TxOptions};
 use sqlx::postgres::PgPool;
 
-pub use attempt::{Attempted, Digest, ReadBack, Record, ScopeKey, Tx, WorkOutput, connection};
+pub use attempt::{
+    Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey, WorkOutput,
+};
 pub use maintenance::{CleanupError, StartupError};
 
 /// Every transaction that checks the writer: explicit read committed and no

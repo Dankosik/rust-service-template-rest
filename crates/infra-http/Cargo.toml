@@ -23,7 +23,9 @@ infra-bearerauthn = { workspace = true }
 # template:end authn:http-authn-dependency
 # template:begin http-idempotency:http-idempotency-dependencies
 infra-idempotency-store = { workspace = true }
+infra-postgres = { workspace = true }
 sha2 = { workspace = true }
+sfv = { workspace = true, features = ["parsed-types"] }
 # template:end http-idempotency:http-idempotency-dependencies
 http-body-util = { workspace = true }
 hyper-util = { workspace = true, features = ["server", "server-auto", "server-graceful", "service", "tokio", "http1", "http2"] }
@@ -33,7 +35,7 @@ serde_json = { workspace = true, features = ["std"] }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
-tokio-util = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
 tower = { workspace = true, features = ["util", "limit", "load-shed", "timeout"] }
 tower-http = { workspace = true, features = ["request-id", "set-header", "catch-panic", "limit", "trace"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
@@ -41,14 +43,6 @@ utoipa = { workspace = true, features = ["macros"] }
 utoipa-axum = { workspace = true }
 
 [dev-dependencies]
-# template:begin oidc-introspection:http-authn-test-dependencies
-infra-bearerauthn = { workspace = true, features = ["test-support"] }
-infra-egress-dns = { workspace = true, features = ["test-support"] }
-tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
-# template:end oidc-introspection:http-authn-test-dependencies
-# template:begin oidc-introspection:http-introspection-test-secret
-secrecy = { workspace = true }
-# template:end oidc-introspection:http-introspection-test-secret
 uuid = { workspace = true, features = ["std"] }
 itertools = { workspace = true, features = ["use_std"] }
 axum-test = { workspace = true }

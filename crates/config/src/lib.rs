@@ -48,11 +48,11 @@ pub use observability::{
     MetricsConfig, ObservabilityConfig, OtelConfig, OtelExporterConfig, TracesSampler,
 };
 // template:begin authn:config-export
-pub use authn::{AuthnConfig, AuthnMode};
+pub use authn::{Audiences, AuthnConfig};
 // template:end authn:config-export
-// template:begin oidc-jwt:config-token-profile-export
-pub use authn::TokenProfile;
-// template:end oidc-jwt:config-token-profile-export
+// template:begin oidc-jwt:config-jwt-input-exports
+pub use authn::{JwtAlgorithm, TokenProfile};
+// template:end oidc-jwt:config-jwt-input-exports
 // template:begin postgres:config-export
 pub use postgres::PostgresConfig;
 // template:end postgres:config-export

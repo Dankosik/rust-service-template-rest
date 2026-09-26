@@ -40,7 +40,7 @@ impl JobsConfig {
     }
 
     /// One connection per concurrent attempt plus at most two for the
-    /// worker's claiming, claim upkeep, outcome recording, maintenance, and
+    /// worker's claiming, outcome recording, maintenance, and
     /// readiness probe. Called only by the worker.
     ///
     /// # Errors

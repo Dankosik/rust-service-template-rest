@@ -17,11 +17,11 @@ test-support = []
 
 [dependencies]
 base64 = { workspace = true, features = ["alloc"] }
-infra-egress-dns = { workspace = true }
 # template:begin oidc-jwt:authn-jwt-dependency
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
-metrics = { workspace = true }
+aws-lc-rs = { workspace = true, features = ["alloc", "aws-lc-sys", "prebuilt-nasm"] }
 # template:end oidc-jwt:authn-jwt-dependency
+metrics = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
 # template:begin oidc-introspection:authn-secret-dependency
 secrecy = { workspace = true }
@@ -29,13 +29,11 @@ secrecy = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
+tracing = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros", "io-util"] }
-# template:begin oidc-jwt:authn-jwt-runtime-dependency
 tokio-util = { workspace = true, features = ["rt"] }
-# template:end oidc-jwt:authn-jwt-runtime-dependency
 url = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
-infra-egress-dns = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }

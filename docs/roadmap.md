@@ -167,18 +167,18 @@ Delivered:
 
 - Code-first generation with `utoipa` 5.5 and `utoipa-axum` 0.2: the probe
   handlers in `crates/infra-http` carry `#[utoipa::path]` with
-  `operationId`, `summary`, `x-security-decision`, `security: []`, and every
+  `operationId`, `summary`, explicit public `security: []` where a root bearer
+  default exists, and every
   response; `Problem` and `InvalidParam` derive their schemas from the
   serializer (`deny_unknown_fields` → `additionalProperties: false`); the
   shared problem responses are `ToResponse` components; the readiness
   handler returns an `IntoResponses` enum with one variant per status.
 - `crates/service` gained a library (`api`) that merges every
-  `OpenApiRouter` into one value whose halves are the served router and the
-  document, an `openapi` binary that renders it, and contract tests: the
-  committed file equals the generator output byte for byte, every operation
-  declares its security decision, `public` means `security: []`,
-  `protected` means the bearer scheme alone plus `400`/`401`/`403`/`431`/
-  `503`/`504` problem responses, and the problem schemas are closed. The
+  `ContractRouter` into one tracked contract, finalizes the served router from
+  it, renders its document through an `openapi` binary, and has contract tests:
+  committed file equals the generator output byte for byte, root and operation
+  security produce an unambiguous effective policy, explicit public means
+  `security: []`, and the problem schemas are closed. The
   `infra-http` router tests compare served media types with the declared
   ones for `200`, `503`, and `413`.
 - `api/openapi/service.yaml` (OpenAPI 3.1, health-only), `.redocly.yaml`
@@ -623,11 +623,14 @@ markers, tests, and initializer support. Order by expected demand:
    **Merged via PR #51 at
    `48e565af7c2875832996816b975a2e2b01457d4f`**;
    [adoption guide](background-jobs.md).
-5. Outbound webhooks (Standard Webhooks signing, retry, public-address
-   predicate) and inbound webhooks (verification, receipt deduplication,
-   durable dispatch).
+5. Outbound and inbound webhooks: Standard Webhooks signing, retry,
+   public-address predicate, verification, receipt deduplication, and durable
+   dispatch. Reuse `infra-jobs` scheduling, attempts, and fenced completion;
+   this stage does not add a second queue or a generic lifecycle crate.
 6. NATS JetStream messaging with typed domain events and a `worker` binary;
-   transactional outbox with an `outbox-relay` binary.
+   transactional outbox with an `outbox-relay` binary. Reuse `infra-jobs` for
+   durable local scheduling and completion where that boundary applies; the
+   messaging/outbox design owns its distinct delivery semantics.
 7. gRPC with `tonic`: server policy, interceptors, health, bounded drain,
    shared client connections, buf lint and breaking checks.
 8. OAuth 2.0 client-credentials outbound authentication.
@@ -635,7 +638,7 @@ markers, tests, and initializer support. Order by expected demand:
 10. `examples/reference-service`: one isolated vertical slice.
 
 Stage 10.1 local evidence includes workspace build/tests, the generated
-contract, real local TLS/DNS and mounted HTTP authentication cases, dependency
+contract, real local TLS and mounted HTTP authentication cases, dependency
 policy and existing initializer safety/sync proof. All six DATABASE × AUTHN
 runtime graphs passed initialized build/full checks; those scoped results were
 reused after exact input-equivalence checks during a validation-only refactor.
@@ -656,8 +659,9 @@ owner. The auth client keeps its own JWT/introspection HTTP policy, deadlines,
 body rules and count-only header limit. The shared public-address predicate
 also refuses ambiguous 6to4, reserved IPv6 and private IPv4 embedded in the
 well-known NAT64 prefix. The selected pack is inert until a provider constructs
-it; the default initializer removes it and shared code is retained when auth
-still needs it. The [guide](outbound-http.md) owns the usable API and limits.
+it; the default initializer removes it unless outbound HTTP retains it.
+Authentication has its own trusted-provider transport and TLS fixtures. The
+[guide](outbound-http.md) owns the usable API and limits.
 
 Stage-10.2 local acceptance covered a workspace build, 261 unique source tests,
 formatting, documentation, scoped shell checks, dependency and secret gates,
@@ -678,6 +682,17 @@ with four catalog codes, the `http_idempotency.retention` setting, bootstrap
 activation before readiness admission, one forward-only migration, and the
 [guide](http-idempotency.md). It stays inert until an operation declares
 `x-idempotent: true`; `none` removes it.
+
+The accepted request-owned simplification supersedes the stage-10.3 contract:
+identity now comes from the complete bounded HTTP request and decoded key, not
+an operation namespace or caller fingerprint; `execute(work)` uses the shared
+`infra-postgres` transaction capability; durable replay retains seven
+byte-preserving headers and trusted caller metadata; and the guarded forward
+migration refuses live legacy rows. The current [guide](http-idempotency.md)
+and architecture documents are authoritative for that replacement. The
+following receipt is historical evidence for the earlier PR #49 implementation;
+it does not prove the simplification, its migration, generated contract, or
+current tests.
 
 Stage-10.3 local acceptance ran every local step of the `make plan` route:
 formatting, the workspace lint including the integration feature, build, 403
@@ -708,8 +723,8 @@ The selected pack holds the `infra-jobs` crate (enqueue inside the caller's
 transaction, the job-kind contracts, and the engine over one
 `background_jobs` table: fenced claims, persisted backoff, lost-worker
 recovery, and retention), the `jobs-worker` library and binary shipped as
-the image's `/jobs-worker` entrypoint, the `jobs.max_workers` setting, one
-forward-only migration, the [guide](background-jobs.md), and
+the image's `/jobs-worker` entrypoint, the `jobs.max_workers` setting, the
+creation and simplification forward-only migrations, the [guide](background-jobs.md), and
 [Async Architecture](architecture/async.md). It stays inert: the service
 makes no jobs query, and nothing starts a worker until an operator deploys
 `/jobs-worker`; `none` removes it.
@@ -740,6 +755,15 @@ build step grew from 293 s to 406 s with the third release binary. The
 slowest initializer part took 278 s, inside the image job, so the
 initializer stayed off the critical path. Publication and deployment are not
 claimed.
+
+The subsequent jobs simplification retains that profile boundary while
+replacing lease upkeep and outcome attribution with a fixed lease and
+supervisor-owned outcome. It converts payloads to JSONB and unique keys to
+C-collated text through a stopped-producer/worker forward migration. Future
+stage 10.5 (webhooks) and 10.6 (messaging/outbox) reuse the jobs scheduling,
+attempt, and fenced-completion mechanisms. Process lifecycle ownership stays
+separate until a shared signal, deadline, or tracked-task teardown change
+justifies extraction; another binary alone does not.
 
 ### Stage 11: Benchmarking and performance evidence
 

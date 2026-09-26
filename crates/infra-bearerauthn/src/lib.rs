@@ -1,4 +1,4 @@
-//! Bearer-token authentication verification.
+//! Bounded bearer authentication verification.
 //!
 //! This crate owns the sealed transition from an inbound bearer envelope to a
 //! verified identity. HTTP routing, configuration loading, and authorization
@@ -18,9 +18,12 @@ mod refresh;
 // template:end oidc-jwt:authn-refresh-module
 
 use std::fmt;
-// template:begin oidc-jwt:authn-jwt-refresh-task-imports
+// template:begin oidc-jwt:authn-jwt-task-imports
 use std::{future::Future, pin::Pin};
-// template:end oidc-jwt:authn-jwt-refresh-task-imports
+// template:end oidc-jwt:authn-jwt-task-imports
+// template:begin oidc-introspection:authn-concurrency-import
+use std::num::NonZeroUsize;
+// template:end oidc-introspection:authn-concurrency-import
 
 use tokio::time::Instant;
 
@@ -31,11 +34,9 @@ pub use introspection::prepare_introspection;
 // template:begin oidc-jwt:authn-jwt-prepare-export
 pub use jwt::prepare_jwt;
 // template:end oidc-jwt:authn-jwt-prepare-export
+pub use provider::ProviderUrl;
 
-/// The only authentication outcomes exposed to the HTTP adapter.
-///
-/// The variants intentionally do not retain dependency, token, provider, or
-/// endpoint details: those values are not safe to put in a response or log.
+/// The fixed authentication outcomes exposed to the HTTP adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Failure {
     #[error("bearer authentication is required")]
@@ -48,6 +49,262 @@ pub enum Failure {
     Invalid,
     #[error("bearer authentication is unavailable")]
     Unavailable,
+    #[error("bearer authentication exceeded the request deadline")]
+    Timeout,
+}
+
+/// A safe preparation phase for operator diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparationPhase {
+    Options,
+    Client,
+    Discovery,
+    Jwks,
+}
+
+/// A closed preparation reason. These variants never retain dependency errors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparationReason {
+    InvalidUrl,
+    Client,
+    Fetch,
+    Parse,
+    IssuerMismatch,
+    NoUsableKeys,
+}
+
+/// A safe preparation error for bootstrap's startup diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("authentication preparation failed during {phase:?}: {reason:?}{context}")]
+pub struct PreparationError {
+    phase: PreparationPhase,
+    reason: PreparationReason,
+    context: PreparationContext,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PreparationContext(Option<Box<SafeContext>>);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SafeContext {
+    issuer: String,
+    audiences: Vec<String>,
+    endpoint: Option<String>,
+    discovered_issuer: Option<String>,
+}
+
+impl fmt::Display for PreparationContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(context) = &self.0 {
+            write!(
+                formatter,
+                "; issuer={:?}; audiences={:?}; endpoint={:?}; discovered_issuer={:?}",
+                context.issuer, context.audiences, context.endpoint, context.discovered_issuer
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl PreparationError {
+    pub(crate) const fn new(phase: PreparationPhase, reason: PreparationReason) -> Self {
+        Self {
+            phase,
+            reason,
+            context: PreparationContext(None),
+        }
+    }
+
+    pub(crate) fn with_context(
+        mut self,
+        issuer: &ProviderUrl,
+        audiences: &[String],
+        endpoint: Option<&str>,
+    ) -> Self {
+        let discovered_issuer = self.context.0.and_then(|context| context.discovered_issuer);
+        let mut safe_audiences = audiences
+            .iter()
+            .take(8)
+            .map(|value| {
+                if !value.is_empty()
+                    && value.len() <= 128
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"-._:/".contains(&byte))
+                {
+                    value.clone()
+                } else {
+                    "<unsafe_or_overlong>".to_owned()
+                }
+            })
+            .collect::<Vec<_>>();
+        if audiences.len() > 8 {
+            safe_audiences.push("<additional_audiences>".to_owned());
+        }
+        self.context = PreparationContext(Some(Box::new(SafeContext {
+            issuer: safe_url_context(issuer.as_str()),
+            audiences: safe_audiences,
+            endpoint: endpoint.map(safe_url_context),
+            discovered_issuer,
+        })));
+        self
+    }
+
+    // template:begin oidc-jwt:authn-discovered-issuer-context
+    pub(crate) fn with_discovered_issuer(mut self, issuer: &str) -> Self {
+        if let Some(context) = &mut self.context.0 {
+            context.discovered_issuer = Some(safe_url_context(issuer));
+        }
+        self
+    }
+    // template:end oidc-jwt:authn-discovered-issuer-context
+
+    /// The failed bounded preparation stage.
+    #[must_use]
+    pub const fn phase(&self) -> PreparationPhase {
+        self.phase
+    }
+
+    /// The safe closed reason for the failed stage.
+    #[must_use]
+    pub const fn reason(&self) -> PreparationReason {
+        self.reason
+    }
+
+    /// The bounded configured issuer, when preparation had admitted options.
+    #[must_use]
+    pub fn issuer(&self) -> Option<&str> {
+        self.context
+            .0
+            .as_ref()
+            .map(|context| context.issuer.as_str())
+    }
+
+    /// Bounded configured audience context; unsafe values are replaced by a reason.
+    #[must_use]
+    pub fn audiences(&self) -> &[String] {
+        self.context
+            .0
+            .as_ref()
+            .map_or(&[], |context| context.audiences.as_slice())
+    }
+
+    /// The bounded endpoint associated with the failed phase.
+    #[must_use]
+    pub fn endpoint(&self) -> Option<&str> {
+        self.context
+            .0
+            .as_ref()
+            .and_then(|context| context.endpoint.as_deref())
+    }
+
+    /// Safe discovered issuer evidence for an issuer mismatch.
+    #[must_use]
+    pub fn discovered_issuer(&self) -> Option<&str> {
+        self.context
+            .0
+            .as_ref()
+            .and_then(|context| context.discovered_issuer.as_deref())
+    }
+}
+
+fn safe_url_context(value: &str) -> String {
+    if value.len() <= 256 && value.is_ascii() && ProviderUrl::parse(value).is_ok() {
+        value.to_owned()
+    } else {
+        "<unsafe_or_overlong_url>".to_owned()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VerificationReason {
+    MissingClaim,
+    MalformedClaims,
+    Issuer,
+    Audience,
+    Expired,
+    NotYetValid,
+    Identity,
+    Scope,
+    RequestTimeout,
+    // template:begin oidc-jwt:authn-jwt-reasons
+    Header,
+    Algorithm,
+    Profile,
+    Signature,
+    UnknownKey,
+    AmbiguousKey,
+    Refresh,
+    // template:end oidc-jwt:authn-jwt-reasons
+    // template:begin oidc-introspection:authn-introspection-reasons
+    Provider,
+    Inactive,
+    Capacity,
+    // template:end oidc-introspection:authn-introspection-reasons
+}
+
+impl VerificationReason {
+    fn label(self) -> &'static str {
+        match self {
+            Self::MissingClaim => "missing_claim",
+            Self::MalformedClaims => "malformed_claims",
+            Self::Issuer => "issuer",
+            Self::Audience => "audience",
+            Self::Expired => "expired",
+            Self::NotYetValid => "not_yet_valid",
+            Self::Identity => "identity",
+            Self::Scope => "scope",
+            Self::RequestTimeout => "request_timeout",
+            // template:begin oidc-jwt:authn-jwt-reason-labels
+            Self::Header => "header",
+            Self::Algorithm => "algorithm",
+            Self::Profile => "profile",
+            Self::Signature => "signature",
+            Self::UnknownKey => "unknown_key",
+            Self::AmbiguousKey => "ambiguous_key",
+            Self::Refresh => "refresh",
+            // template:end oidc-jwt:authn-jwt-reason-labels
+            // template:begin oidc-introspection:authn-introspection-reason-labels
+            Self::Provider => "provider",
+            Self::Inactive => "inactive",
+            Self::Capacity => "capacity",
+            // template:end oidc-introspection:authn-introspection-reason-labels
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct VerificationError {
+    pub(crate) failure: Failure,
+    pub(crate) reason: VerificationReason,
+}
+
+impl VerificationError {
+    pub(crate) const fn new(failure: Failure, reason: VerificationReason) -> Self {
+        Self { failure, reason }
+    }
+    pub(crate) const fn invalid(reason: VerificationReason) -> Self {
+        Self::new(Failure::Invalid, reason)
+    }
+}
+
+pub(crate) fn record_verification(
+    mode: &'static str,
+    result: Result<Principal, VerificationError>,
+) -> Result<Principal, Failure> {
+    let reason = result
+        .as_ref()
+        .map_or_else(|error| error.reason.label(), |_| "verified");
+    let outcome = if result.is_ok() { "success" } else { "failure" };
+    metrics::describe_counter!(
+        "authn_token_verifications_total",
+        "Token verification decisions by engine and closed reason"
+    );
+    metrics::counter!("authn_token_verifications_total", "mode" => mode, "outcome" => outcome, "reason" => reason).increment(1);
+    if result.is_err() {
+        tracing::debug!(mode, reason, "authn_verification_failed");
+    }
+    result.map_err(|error| error.failure)
 }
 
 /// A verified identity. Construction remains crate-private so callers cannot
@@ -57,10 +314,7 @@ pub struct Principal {
     issuer: String,
     subject: Option<String>,
     client_id: Option<String>,
-    #[allow(
-        dead_code,
-        reason = "retains verified expiry as sealed evidence; no downstream expiry policy exists"
-    )]
+    scopes: Vec<String>,
     expiry_epoch_seconds: u64,
 }
 
@@ -69,12 +323,14 @@ impl Principal {
         issuer: String,
         subject: Option<String>,
         client_id: Option<String>,
+        scopes: Vec<String>,
         expiry_epoch_seconds: u64,
     ) -> Self {
         Self {
             issuer,
             subject,
             client_id,
+            scopes,
             expiry_epoch_seconds,
         }
     }
@@ -96,6 +352,18 @@ impl Principal {
     pub fn client_id(&self) -> Option<&str> {
         self.client_id.as_deref()
     }
+
+    /// The normalized, exact-case scopes from verified token evidence.
+    #[must_use]
+    pub fn scopes(&self) -> &[String] {
+        &self.scopes
+    }
+
+    /// The verified `exp` claim in unsigned epoch seconds.
+    #[must_use]
+    pub const fn expires_at(&self) -> u64 {
+        self.expiry_epoch_seconds
+    }
 }
 
 impl fmt::Debug for Principal {
@@ -112,21 +380,25 @@ pub enum TokenProfile {
     ResourceServer,
     Rfc9068,
 }
+
+/// The closed JWT algorithms accepted by authentication configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum JwtAlgorithm {
+    Rs256,
+    Es256,
+    Ps256,
+    EdDsa,
+}
 // template:end oidc-jwt:authn-token-profile
 
 // template:begin oidc-jwt:authn-jwt-options
 /// Bootstrap input for OIDC discovery and JWT verification.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JwtOptions {
-    pub issuer: String,
-    pub audience: String,
+    pub issuer: ProviderUrl,
+    pub audiences: Vec<String>,
     pub token_profile: TokenProfile,
-}
-
-impl fmt::Debug for JwtOptions {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("JwtOptions([REDACTED])")
-    }
+    pub algorithms: Vec<JwtAlgorithm>,
 }
 // template:end oidc-jwt:authn-jwt-options
 
@@ -134,11 +406,40 @@ impl fmt::Debug for JwtOptions {
 /// Bootstrap input for RFC 7662 token introspection.
 #[derive(Clone)]
 pub struct IntrospectionOptions {
-    pub issuer: String,
-    pub audience: String,
-    pub endpoint: String,
+    pub issuer: ProviderUrl,
+    pub audiences: Vec<String>,
+    pub endpoint: ProviderUrl,
     pub client_id: String,
     pub client_secret: secrecy::SecretString,
+    pub provider_concurrency: NonZeroUsize,
+    pub cache: Option<IntrospectionCacheOptions>,
+}
+
+/// Optional positive-result retention for one prepared introspection verifier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IntrospectionCacheOptions {
+    /// Maximum retained entries, from 1 through 1024.
+    pub capacity: usize,
+    /// Fixed maximum lifetime, from one second through five minutes.
+    pub ttl: std::time::Duration,
+}
+
+impl Principal {
+    fn retained_bytes(&self) -> Option<usize> {
+        let bytes = self
+            .issuer
+            .capacity()
+            .checked_add(self.subject.as_ref().map_or(0, String::capacity))?
+            .checked_add(self.client_id.as_ref().map_or(0, String::capacity))?
+            .checked_add(
+                self.scopes
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<String>())?,
+            )?;
+        self.scopes
+            .iter()
+            .try_fold(bytes, |bytes, scope| bytes.checked_add(scope.capacity()))
+    }
 }
 
 impl fmt::Debug for IntrospectionOptions {
@@ -154,18 +455,18 @@ pub type RefreshTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 // template:end oidc-jwt:authn-refresh-task
 
 /// Fixture-only transport custody for tests that exercise a real verifier.
-/// It is compiled only by this crate's tests or its default-off test-support
-/// feature, and cannot construct a principal or bypass verification.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
+    use tokio_util::sync::CancellationToken;
+
     use super::{Failure, fmt, provider};
 
     // template:begin oidc-introspection:authn-test-support-introspection-prepare
     pub use crate::introspection::prepare_introspection_with_fixture;
     // template:end oidc-introspection:authn-test-support-introspection-prepare
 
-    /// Fixture-only custody for a real verifier transport. It is unavailable
-    /// from ordinary builds and has no principal-construction or bypass API.
+    /// Fixture-only custody for a real verifier transport. It cannot construct
+    /// a principal or bypass verification.
     pub struct FixtureTransport {
         provider: provider::ProviderClient,
     }
@@ -175,14 +476,15 @@ pub mod test_support {
         ///
         /// # Errors
         ///
-        /// Returns [`Failure::Unavailable`] for an invalid fixture root, host,
-        /// address, or fixture transport setup.
+        /// Returns [`Failure::Unavailable`] for an invalid mapping or certificate,
+        /// or when client preparation fails.
         pub fn new(
             fixture_host: &str,
             fixture_addr: std::net::SocketAddr,
             fixture_root_der: &[u8],
+            cancel: CancellationToken,
         ) -> Result<Self, Failure> {
-            provider::new_fixture_client(fixture_host, fixture_addr, fixture_root_der)
+            provider::new_fixture_client(fixture_host, fixture_addr, fixture_root_der, cancel)
                 .map(|provider| Self { provider })
         }
 
@@ -211,20 +513,23 @@ pub enum Verifier {
 }
 
 impl Verifier {
-    /// Returns the deliberately unavailable verifier used by disabled profiles
-    /// and pure OpenAPI document assembly.
     #[must_use]
     pub const fn disabled() -> Self {
         Self::Disabled
     }
 
-    /// Verifies a syntactically accepted bearer token before the enclosing
-    /// request deadline.
+    /// Whether this verifier was prepared with an authentication engine.
+    #[must_use]
+    pub const fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    /// Verifies a syntactically accepted bearer token before its absolute deadline.
     ///
     /// # Errors
     ///
-    /// Returns the fixed authentication failure class without retaining token,
-    /// claim, credential, key, or provider details.
+    /// Returns [`Failure`] for invalid token evidence, an unavailable or disabled
+    /// engine, or an exhausted request deadline.
     pub async fn verify(
         &self,
         token: &BearerToken<'_>,

@@ -38,11 +38,12 @@ it against the built binary.
 
 <!-- template:begin authn:docs-lifecycle-authn -->
 With authentication retained, bootstrap prepares the selected verifier before
-binding the server. Disabled runtime mode is inert. Introspection construction
-does no provider I/O; JWT startup discovers metadata and installs a usable JWKS
-inside its bounded startup budget. A JWT refresh future joins the existing
-`TaskTracker` with a child cancellation token. Authentication neither adds a
-readiness probe nor changes public health behavior.
+finalizing the complete contract and binding the server. Disabled runtime mode
+is inert only for a public-only contract; protected policy refuses startup.
+Introspection construction does no provider I/O; JWT startup discovers metadata
+and installs a usable JWKS inside its bounded startup budget. A JWT refresh
+future joins the existing `TaskTracker` with a child cancellation token.
+Authentication neither adds a readiness probe nor changes public health behavior.
 <!-- template:end authn:docs-lifecycle-authn -->
 <!-- template:begin outbound-http:docs-lifecycle-outbound -->
 A retained [outbound client](../outbound-http.md) is inert until a concrete
@@ -164,7 +165,7 @@ for the shipped binary, and the test-only `jobs-worker-fixture` suite in
 | 3 | `service_config::load` (same sources, precedence, unknown-key and secret rules as the service) | `configuration is invalid: ...` |
 | 4 | `postgres.enabled` | `postgres.enabled must be true to run the jobs worker` |
 | 5 | `config.jobs.required_connections(&config.postgres)` | `configuration is invalid: postgres.max_connections: must be at least jobs.max_workers + 2 (N) for the jobs worker` |
-| 6 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 17s jobs worker teardown tail (release, listeners, background join, dependency close, telemetry flush)` |
+| 6 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)` |
 | 7 | Build the multi-thread runtime | `build tokio runtime: ...` |
 | 8 | Install `Signals` (SIGINT, then SIGTERM) | `install stop signal handlers: ...` |
 | 9 | Tracer provider with the worker identity, subscriber, recorder with the jobs buckets | the telemetry errors, as in the service |
@@ -172,7 +173,7 @@ for the shipped binary, and the test-only `jobs-worker-fixture` suite in
 | 11 | `jobs_worker_starting` record | |
 | 12 | Metrics upkeep and Tokio runtime metrics tasks join the tracker | |
 | 13 | `Dsn::admit`, `infra_postgres::connect` with the derived `application_name`; `postgres_pool_opened`; pool gauge task | `configuration is invalid: postgres.dsn: ...`; `postgres connect: ...` |
-| 14 | `Engine::check_startup` | `jobs startup check: the jobs schema is missing` / `the PostgreSQL session is not writable` / `the jobs store is unavailable` |
+| 14 | `Engine::check_startup` (UTF-8 server, JSONB/text columns, and trace-state included) | `jobs startup check: the jobs schema is missing` / `the PostgreSQL session is not writable` / `the jobs store is unavailable` |
 | 15 | Bind the health listener (`http.addr`), then the diagnostics listener (`observability.metrics.addr`, when set); `http listener bound`, `diagnostics listener bound` | `bind http listener ...` |
 | 16 | If a stop signal is already pending (`Signals::pending()`), start no engine and run the shutdown plan with no engine. Otherwise `Engine::start` (claiming begins); `jobs_claiming_started` | |
 | 17 | Readiness admission (`refresh`, then `verdict` over `[PostgresProbe]`), raced against the stop signals: a signal abandons admission, and the shutdown plan runs with the started engine | `startup admission: ...` |
@@ -186,7 +187,7 @@ streams exist from step 8, so a stop during steps 9-15 stays pending. A stop
 pending before claiming starts no engine, and a signal during admission ends
 startup at once. Before admission, `/health/ready` answers `503 not ready`
 (not evaluated). Every refusal after the runtime started goes through the
-one teardown, `abort_startup`: release within 2 s when the engine started,
+one teardown, `abort_startup`: finish attempts within 2 s when the engine started,
 close bound listeners within 2 s, join background tasks within 3 s, and
 close the pool within 5 s. It flushes no telemetry.
 
@@ -212,21 +213,21 @@ that votes degraded makes the exit code `3`.
 | --- | --- | --- | --- |
 | Readiness off, claiming stopped | immediate | `shutdown_started`, `readiness_disabled`, `claiming_stopped` (in-flight count) | never |
 | Drain in-flight attempts until `Started::drained()`; a second signal ends it | `http.drain_timeout` (25 s); no propagation delay | `drain_started`, then `drain_completed` or `drain_forced` (in-flight attempts, reason `budget` or `second_signal`) | the drain ends before `drained()` resolved (forced) |
-| Only after a forced drain: `Started::cancel_and_release` | 2 s | `attempts_released` (cancelled, released, written, superseded, lost) | `DrainEnd::timed_out` |
+| Only after a forced drain: `Started::cancel_and_finish` | 2 s | `attempts_finished` (known results, cancelled handlers, acknowledged releases, uncertainty) | `DrainEnd::timed_out` |
 | Close the health listener and the diagnostics listener concurrently | 2 s | `listeners_stopped`; `diagnostics_forced` for a scrape overrun | the health listener overruns (a diagnostics overrun is forced closed without a vote, as in the service) |
-| Cancel and join background tasks (claim loop, upkeep, retention, gauges, metrics, refresher) | 3 s | `background_joined` | the join overruns |
+| Cancel and join background tasks (claim loop, retention, sampler, metrics, refresher) | 3 s | `background_joined` | the join overruns |
 | Close the pool | 5 s | `postgres_pool_closed` | the close overruns |
 | Flush telemetry | 5 s | `telemetry_flushed`, `shutdown_completed` | the flush is incomplete |
 
 When a stop signal ended startup before claiming, the plan has no engine, so
-the drain and release stages are skipped. The tail after the drain is
+the drain and cleanup stages are skipped. The tail after the drain is
 2 + 2 + 3 + 5 + 5 = 17 s. `validate_grace_budget` refuses a grace period
 below `http.drain_timeout` plus 17 s. The default worst case is
 25 s + 17 s = 42 s inside 45 s, leaving the same 3 s the service leaves for
 `Runtime::shutdown_timeout(1s)` and the tracer join slack. The worker has no
 readiness propagation delay: it stops claiming at once. The background join
-is 3 s (the service's is 5 s) because attempts are drained and released
-before that stage and every joined task stops at its next await.
+is 3 s (the service's is 5 s) because attempts are drained and their outcomes
+are finished before that stage and every joined task stops at its next await.
 
 **Exit codes.** `exit_code` is the one mapping. `process::exit` is never
 called.

@@ -4,8 +4,8 @@
 //! frames the frontend's messages, the untyped startup message first and then
 //! a type byte and a big-endian `i32` length that counts itself, and it frames
 //! the backend's only once it has fired. Armed, it acts once on the first
-//! simple-query `COMMIT` of any connection, which is how `sqlx-postgres`
-//! 0.9.0 commits:
+//! simple-query `COMMIT` of any connection, optionally restricted to a
+//! transaction containing matching SQL. `sqlx-postgres` 0.9.0 commits this way:
 //!
 //! - [`Fault::ForwardThenDrop`] forwards it, waits for the server's
 //!   `ReadyForQuery`, and closes both sockets without relaying the answer: a
@@ -17,6 +17,7 @@
 //! through. It frames the plaintext protocol only, so the pool's DSN uses
 //! `sslmode=disable`.
 
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -43,11 +44,36 @@ pub(crate) enum Fault {
     DropBeforeForward,
 }
 
+/// A fault with an optional SQL substring selecting its transaction.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Armed {
+    fault: Fault,
+    statement: Option<&'static str>,
+}
+
+impl From<Fault> for Armed {
+    fn from(fault: Fault) -> Self {
+        Self {
+            fault,
+            statement: None,
+        }
+    }
+}
+
+impl From<(Fault, &'static str)> for Armed {
+    fn from((fault, statement): (Fault, &'static str)) -> Self {
+        Self {
+            fault,
+            statement: Some(statement),
+        }
+    }
+}
+
 /// The one-shot fault, shared by every relayed connection.
 #[derive(Clone, Copy, Debug)]
 enum Arming {
     Idle,
-    Armed(Fault),
+    Armed(Armed),
     Fired(Fault),
 }
 
@@ -92,9 +118,10 @@ impl CommitProxy {
         self.address
     }
 
-    /// Act once, with `fault`, on the next `COMMIT` any connection sends.
-    pub(crate) fn arm(&self, fault: Fault) {
-        *lock(&self.arming) = Arming::Armed(fault);
+    /// Act once on the next `COMMIT`. A bare [`Fault`] matches any connection;
+    /// `(fault, sql_substring)` selects a transaction sending that SQL after arming.
+    pub(crate) fn arm(&self, fault: impl Into<Armed>) {
+        *lock(&self.arming) = Arming::Armed(fault.into());
     }
 
     /// The fault the proxy acted on, once it has.
@@ -171,7 +198,7 @@ async fn relay(
                     let Ok(message) = message else {
                         return;
                     };
-                    match commit_fault(&message, &arming) {
+                    match frontend.commit_fault(&message, &arming) {
                         Some(Fault::DropBeforeForward) => return,
                         Some(Fault::ForwardThenDrop) => committing = true,
                         None => {}
@@ -211,6 +238,10 @@ struct Frontend {
     pending: Vec<u8>,
     /// The untyped startup message has passed; every later one is typed.
     started: bool,
+    /// Prepared statements may be reused without another Parse message.
+    statements: HashMap<Vec<u8>, Vec<u8>>,
+    portals: HashMap<Vec<u8>, Vec<u8>>,
+    matched: bool,
 }
 
 impl Frontend {
@@ -221,6 +252,55 @@ impl Frontend {
             self.started = true;
             self.pending.drain(..length).collect()
         }))
+    }
+
+    /// Track SQL per connection, then consume only the matching transaction's commit.
+    fn commit_fault(&mut self, message: &[u8], arming: &Mutex<Arming>) -> Option<Fault> {
+        if message.first() == Some(&b'P') {
+            let mut fields = message.get(5..)?.split(|byte| *byte == 0);
+            let name = fields.next()?;
+            let sql = fields.next()?;
+            self.statements.insert(name.to_vec(), sql.to_vec());
+        }
+        if message.first() == Some(&b'B') {
+            let mut fields = message.get(5..)?.split(|byte| *byte == 0);
+            let portal = fields.next()?;
+            let statement = fields.next()?;
+            self.portals.insert(portal.to_vec(), statement.to_vec());
+        }
+        let sql = match message.first() {
+            Some(b'Q') => message.get(5..)?.strip_suffix(&[0])?,
+            Some(b'E') => {
+                let portal = message.get(5..)?.split(|byte| *byte == 0).next()?;
+                self.statements.get(self.portals.get(portal)?)?.as_slice()
+            }
+            _ => return None,
+        };
+        if sql.starts_with(b"BEGIN") || sql == b"ROLLBACK" {
+            self.matched = false;
+            return None;
+        }
+        let commit = message.first() == Some(&b'Q') && message.get(5..) == Some(COMMIT);
+        let mut arming = lock(arming);
+        let Arming::Armed(armed) = *arming else {
+            if commit {
+                self.matched = false;
+            }
+            return None;
+        };
+        if let Some(statement) = armed.statement {
+            self.matched |= std::str::from_utf8(sql).is_ok_and(|sql| sql.contains(statement));
+        }
+        if !commit {
+            return None;
+        }
+        let matches = armed.statement.is_none() || self.matched;
+        self.matched = false;
+        if !matches {
+            return None;
+        }
+        *arming = Arming::Fired(armed.fault);
+        Some(armed.fault)
     }
 }
 
@@ -255,19 +335,6 @@ fn holds_ready_for_query(mut bytes: &[u8]) -> Result<bool, Malformed> {
         bytes = &bytes[length..];
     }
     Ok(false)
-}
-
-/// The armed fault, taken once, when `message` is the simple-query `COMMIT`.
-fn commit_fault(message: &[u8], arming: &Mutex<Arming>) -> Option<Fault> {
-    if message.first() != Some(&b'Q') || message.get(5..) != Some(COMMIT) {
-        return None;
-    }
-    let mut arming = lock(arming);
-    let Arming::Armed(fault) = *arming else {
-        return None;
-    };
-    *arming = Arming::Fired(fault);
-    Some(fault)
 }
 
 /// The arming state; a relay that panicked cannot leave it inconsistent.

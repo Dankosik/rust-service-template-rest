@@ -3,10 +3,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use infra_idempotency_store::{
-    Attempted, Digest, Record, ScopeKey, Store, Tx, WorkOutput, connection,
+    Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey, Store, WorkOutput,
 };
 use infra_jobs::{EnqueueOptions, Enqueued, JobKind, enqueue};
-use infra_postgres::{Dsn, PgPool};
+use infra_postgres::{Dsn, PgPool, Tx};
 use integration_tests::dsn_for;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -73,14 +73,22 @@ impl Hold {
     }
 }
 
+fn caller() -> CallerIdentity {
+    CallerIdentity {
+        issuer: "https://issuer.example".to_owned(),
+        kind: CallerKind::Subject,
+        value: "fixture-subject".to_owned(),
+    }
+}
+
 fn success(fingerprint: Digest, body: &str) -> Record {
-    let mut headers = vec![1, 0, 16];
-    headers.extend_from_slice(b"application/json");
     Record {
         fingerprint,
-        format: 1,
         status: 201,
-        headers,
+        headers: vec![HeaderPair {
+            name: "content-type".to_owned(),
+            value: b"application/json".to_vec(),
+        }],
         body: body.as_bytes().to_vec(),
     }
 }
@@ -93,7 +101,7 @@ async fn replicas(pool: &PgPool) -> (Replica, Replica) {
 async fn enqueue_widget(tx: &mut Tx<'_>, widget: u64) -> Enqueued {
     let key = widget.to_string();
     enqueue(
-        connection(tx),
+        tx,
         &WidgetWelcome { widget },
         EnqueueOptions {
             delay: Duration::ZERO,
@@ -116,8 +124,8 @@ async fn row_is(pool: &PgPool, id: &str, widget: u64) -> bool {
     sqlx::query_scalar(
         "SELECT id::text = $1 \
          AND kind = $2 \
-         AND convert_from(payload, 'UTF8') = $3 \
-         AND convert_from(unique_key, 'UTF8') = $4 \
+         AND payload = $3::jsonb \
+         AND unique_key = $4 \
          AND state = 'pending' \
          FROM background_jobs",
     )
@@ -146,7 +154,8 @@ async fn e1_e3_a_committed_attempt_enqueues_once(pool: PgPool) {
         .store
         .attempt(
             &ScopeKey::from_digest(SCOPE),
-            &[INPUT],
+            &caller(),
+            &INPUT,
             async |tx: &mut Tx<'_>| -> WorkOutput<()> {
                 let enqueued = enqueue_widget(tx, WIDGET).await;
                 *seen.lock().expect("seen") = Some(enqueued);
@@ -170,7 +179,8 @@ async fn e3_a_replayed_attempt_enqueues_nothing(pool: PgPool) {
         .store
         .attempt(
             &ScopeKey::from_digest(SCOPE),
-            &[INPUT],
+            &caller(),
+            &INPUT,
             async |tx: &mut Tx<'_>| -> WorkOutput<()> {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let enqueued = enqueue_widget(tx, WIDGET).await;
@@ -185,7 +195,8 @@ async fn e3_a_replayed_attempt_enqueues_nothing(pool: PgPool) {
         .store
         .attempt(
             &ScopeKey::from_digest(SCOPE),
-            &[INPUT],
+            &caller(),
+            &INPUT,
             async |tx: &mut Tx<'_>| -> WorkOutput<()> {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let _enqueued = enqueue_widget(tx, WIDGET).await;
@@ -216,7 +227,8 @@ async fn e3_a_rolled_back_attempt_enqueues_nothing(pool: PgPool) {
         .store
         .attempt(
             &ScopeKey::from_digest(SCOPE),
-            &[INPUT],
+            &caller(),
+            &INPUT,
             async |tx: &mut Tx<'_>| -> WorkOutput<()> {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let enqueued = enqueue_widget(tx, WIDGET).await;
@@ -239,11 +251,14 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
     let seen = Mutex::new(None);
     let hold = Hold::new();
     let scope = ScopeKey::from_digest(SCOPE);
+    let first_caller = caller();
+    let second_caller = caller();
     hold.arm();
     let (held, ()) = tokio::join!(
         first.store.attempt(
             &scope,
-            &[INPUT],
+            &first_caller,
+            &INPUT,
             async |tx: &mut Tx<'_>| -> WorkOutput<()> {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let enqueued = enqueue_widget(tx, WIDGET).await;
@@ -258,7 +273,8 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
                 .store
                 .attempt(
                     &scope,
-                    &[INPUT],
+                    &second_caller,
+                    &INPUT,
                     async |tx: &mut Tx<'_>| -> WorkOutput<()> {
                         runs.fetch_add(1, Ordering::SeqCst);
                         let _enqueued = enqueue_widget(tx, WIDGET).await;
@@ -289,7 +305,8 @@ async fn e6_another_scope_gets_duplicate_and_still_commits(pool: PgPool) {
         .store
         .attempt(
             &ScopeKey::from_digest(SCOPE),
-            &[INPUT],
+            &caller(),
+            &INPUT,
             async |tx: &mut Tx<'_>| -> WorkOutput<()> {
                 let enqueued = enqueue_widget(tx, WIDGET).await;
                 assert!(matches!(enqueued, Enqueued::Created(_)));
@@ -304,7 +321,8 @@ async fn e6_another_scope_gets_duplicate_and_still_commits(pool: PgPool) {
         .store
         .attempt(
             &ScopeKey::from_digest(OTHER),
-            &[INPUT],
+            &caller(),
+            &INPUT,
             async |tx: &mut Tx<'_>| -> WorkOutput<()> {
                 let enqueued = enqueue_widget(tx, WIDGET).await;
                 *seen.lock().expect("seen") = Some(enqueued);
@@ -343,7 +361,8 @@ async fn e6_a_concurrent_enqueue_waits_then_duplicate_and_both_commit(pool: PgPo
             .store
             .attempt(
                 &ScopeKey::from_digest(SCOPE),
-                &[INPUT],
+                &caller(),
+                &INPUT,
                 async |tx: &mut Tx<'_>| -> WorkOutput<()> {
                     let enqueued = enqueue_widget(tx, WIDGET).await;
                     *first_seen.lock().expect("seen") = Some(enqueued);
@@ -362,7 +381,8 @@ async fn e6_a_concurrent_enqueue_waits_then_duplicate_and_both_commit(pool: PgPo
             .store
             .attempt(
                 &ScopeKey::from_digest(OTHER),
-                &[INPUT],
+                &caller(),
+                &INPUT,
                 async |tx: &mut Tx<'_>| -> WorkOutput<()> {
                     let enqueued = enqueue_widget(tx, WIDGET).await;
                     *second_seen.lock().expect("seen") = Some(enqueued);

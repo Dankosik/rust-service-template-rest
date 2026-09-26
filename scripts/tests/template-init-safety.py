@@ -25,11 +25,11 @@ _AUTH_ONLY_PROFILE_KEYS = (
 )
 _OUTBOUND_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection",
-    "outbound-http", "egress-dns", "request-budget", "identity", "cargo_lock",
+    "outbound-http", "egress-dns", "tls-fixtures", "request-budget", "identity", "cargo_lock",
 )
 _HTTP_IDEMPOTENCY_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection",
-    "outbound-http", "egress-dns", "request-budget", "http-idempotency", "http-idempotency-mounted",
+    "outbound-http", "egress-dns", "tls-fixtures", "request-budget", "http-idempotency", "http-idempotency-mounted",
     "identity", "cargo_lock",
 )
 _NEW_PROJECTION_CHECKER = "scripts/tests/template-profile-projections.py"
@@ -91,6 +91,8 @@ def legacy_profile_inventory_bytes(source: Path) -> bytes:
     if not isinstance(source_only, list) or source_only.count(_NEW_PROJECTION_CHECKER) != 1:
         raise AssertionError("current profile inventory lacks exactly one projection checker entry")
     legacy["source_only"] = [item for item in source_only if item != _NEW_PROJECTION_CHECKER]
+    # The shared PostgreSQL proxy did not exist in the pinned b206 inventory.
+    legacy["postgres"]["remove_when_none"].remove("test/tests/support/commit_proxy.rs")
     rendered = (json.dumps(legacy, indent=2) + "\n").encode("utf-8")
     if hashlib.sha256(rendered).hexdigest() != _LEGACY_B206_PROFILE_SHA256:
         raise AssertionError("legacy b206 profile inventory bytes changed")
@@ -360,7 +362,8 @@ def assert_profile_packs(
     assert_profile_pack(source, target, "oidc-introspection", authn == "oidc-introspection")
     assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
     shared_selected = authn != "none" or outbound_http == "bounded"
-    assert_profile_pack(source, target, "egress-dns", shared_selected)
+    assert_profile_pack(source, target, "tls-fixtures", shared_selected)
+    assert_profile_pack(source, target, "egress-dns", outbound_http == "bounded")
     assert_profile_pack(source, target, "request-budget", shared_selected)
     assert_profile_pack(source, target, "http-idempotency", http_idempotency == "postgres")
     assert_profile_pack(

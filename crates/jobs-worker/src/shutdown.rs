@@ -1,6 +1,6 @@
 //! Staged teardown under one grace-period deadline, and the startup abort.
 //!
-//! Stage order: readiness off and claiming stopped, drain, release after a
+//! Stage order: readiness off and claiming stopped, drain, cleanup after a
 //! forced drain, listeners, background join, pool close, telemetry flush.
 //! Every stage takes the lesser of its ceiling and what is left of
 //! `http.grace_period`.
@@ -17,8 +17,8 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-/// Ceiling for releasing attempts after a forced drain.
-pub(crate) const RELEASE: Duration = Duration::from_secs(2);
+/// Ceiling for finishing attempts after a forced drain.
+pub(crate) const CLEANUP: Duration = Duration::from_secs(2);
 /// Ceiling for closing the health and diagnostics listeners.
 pub(crate) const LISTENERS: Duration = Duration::from_secs(2);
 /// Ceiling for cancelling and joining background tasks.
@@ -27,8 +27,8 @@ pub(crate) const BACKGROUND_JOIN: Duration = Duration::from_secs(3);
 pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
 /// Ceiling for flushing telemetry.
 pub(crate) const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
-/// Worst case after the drain: release, listeners, background join, dependency close, and telemetry flush.
-pub(crate) const SHUTDOWN_TAIL: Duration = RELEASE
+/// Worst case after the drain: cleanup, listeners, background join, dependency close, and telemetry flush.
+pub(crate) const SHUTDOWN_TAIL: Duration = CLEANUP
     .saturating_add(LISTENERS)
     .saturating_add(BACKGROUND_JOIN)
     .saturating_add(DEPENDENCY_CLOSE)
@@ -37,7 +37,7 @@ pub(crate) const SHUTDOWN_TAIL: Duration = RELEASE
 #[derive(Debug, thiserror::Error)]
 #[error(
     "http.grace_period ({grace:?}) must be >= http.drain_timeout ({drain_timeout:?}) plus the \
-     {tail:?} jobs worker teardown tail (release, listeners, background join, dependency close, telemetry flush)"
+     {tail:?} jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)"
 )]
 pub(crate) struct GraceBudgetError {
     grace: Duration,
@@ -200,7 +200,7 @@ pub(crate) struct Plan<'a> {
     pub(crate) http: &'a HttpConfig,
     pub(crate) readiness: &'a Readiness,
     /// `None` when a stop signal ended startup before claiming, so the drain
-    /// and release stages are skipped.
+    /// and cleanup stages are skipped.
     pub(crate) started: Option<&'a Started>,
     pub(crate) listeners: Listeners,
     pub(crate) cancel: CancellationToken,
@@ -231,7 +231,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         && drain(engine, http.drain_timeout, &budget, signals).await
     {
         degraded = true;
-        if release(engine, budget.remaining(RELEASE)).await {
+        if finish_attempts(engine, budget.remaining(CLEANUP)).await {
             degraded = true;
         }
     }
@@ -269,7 +269,7 @@ pub(crate) async fn abort_startup(
     pool: Option<&PgPool>,
 ) {
     if let Some(started) = started {
-        let _ = release(started, RELEASE).await;
+        let _ = finish_attempts(started, CLEANUP).await;
     }
     let _ = close_listeners(listeners, LISTENERS).await;
     let _ = join_background(cancel, tracker, BACKGROUND_JOIN).await;
@@ -318,27 +318,25 @@ async fn drain(
     }
 }
 
-async fn release(started: &Started, budget: Duration) -> bool {
-    let end = started.cancel_and_release(budget).await;
+async fn finish_attempts(started: &Started, budget: Duration) -> bool {
+    let end = started.cancel_and_finish(budget).await;
     if end.timed_out {
         tracing::warn!(
             cancelled = end.cancelled,
             released = end.released,
-            written = end.written,
-            superseded = end.superseded,
-            lost = end.lost,
+            known_results = end.known_results,
+            uncertain = end.uncertain,
             timed_out = end.timed_out,
-            "attempts_released"
+            "attempts_finished"
         );
     } else {
         tracing::info!(
             cancelled = end.cancelled,
             released = end.released,
-            written = end.written,
-            superseded = end.superseded,
-            lost = end.lost,
+            known_results = end.known_results,
+            uncertain = end.uncertain,
             timed_out = end.timed_out,
-            "attempts_released"
+            "attempts_finished"
         );
     }
     end.timed_out
@@ -482,7 +480,7 @@ mod tests {
         let err = validate_grace_budget(&http).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "http.grace_period (41s) must be >= http.drain_timeout (25s) plus the 17s jobs worker teardown tail (release, listeners, background join, dependency close, telemetry flush)"
+            "http.grace_period (41s) must be >= http.drain_timeout (25s) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)"
         );
     }
 

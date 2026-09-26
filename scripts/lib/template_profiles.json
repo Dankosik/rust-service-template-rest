@@ -19,6 +19,7 @@
       "migrations/",
       "crates/config/src/postgres.rs",
       "test/tests/postgres.rs",
+      "test/tests/support/commit_proxy.rs",
       "test/fixtures/migrations/",
       "test/src/lib.rs",
       "env/docker-compose.yml",
@@ -320,14 +321,15 @@
     ],
     "markers": [
       {"path": "Cargo.toml", "ids": ["workspace-authn-crate"]},
-      {"path": "crates/config/Cargo.toml", "ids": ["config-authn-url"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
+      {"path": "crates/config/src/load.rs", "ids": ["load-authn-config-import"]},
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-authn-dependency"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-authn-module", "infra-http-authn-exports"]},
+      {"path": "crates/infra-http/src/contract.rs", "ids": ["contract-authn-parts"]},
       {"path": "crates/infra-http/src/problem.rs", "ids": ["http-authentication-codes", "http-authentication-code-meta", "http-authentication-problem-responses", "http-authentication-problem-components"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-authn-dependency", "service-authn-test-dependencies"]},
       {"path": "crates/service/src/api.rs", "ids": ["service-api-authn-imports", "service-api-authn-document-security", "service-api-authn-security-scheme", "service-api-protected-test-route"]},
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-authn-imports", "bootstrap-authn-config-import", "bootstrap-authn-errors", "bootstrap-authn-prepare", "bootstrap-prepare-auth-prefix", "bootstrap-prepare-auth-suffix"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-authn-imports", "bootstrap-authn-config-import", "bootstrap-authn-errors", "bootstrap-authn-prepare", "bootstrap-prepare-auth-prefix", "bootstrap-prepare-auth-suffix", "bootstrap-auth-provider-url", "bootstrap-prepared-auth-enabled", "bootstrap-authn-finalize-enabled"]},
       {"path": "crates/service/tests/lifecycle.rs", "ids": ["service-lifecycle-disabled-authn"]},
       {"path": "crates/service/tests/openapi.rs", "ids": ["service-openapi-authn-contract"]},
       {"path": "env/config/local.toml", "ids": ["local-config-section"]},
@@ -348,17 +350,16 @@
       "crates/infra-bearerauthn/tests/fixtures/authn-jwt-signing-key.der"
     ],
     "markers": [
+      {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-jwt-import", "authn-claims-jwt-policy-accessors", "authn-claims-jwt-type", "authn-claims-jwt-validation", "authn-claims-jwt-test-imports", "authn-claims-jwt-normalization-test", "authn-claims-scope-jwt-assertion"]},
       {"path": "Cargo.toml", "ids": ["workspace-authn-jwt"]},
-      {"path": "crates/config/src/authn.rs", "ids": ["authn-mode-oidc-jwt", "authn-token-profile", "authn-token-profile-field", "authn-token-profile-default", "authn-token-profile-accessor", "authn-foreign-token-profile", "authn-jwt-validation", "authn-jwt-test-config", "authn-jwt-default-tests", "authn-jwt-tests"]},
-      {"path": "crates/config/src/lib.rs", "ids": ["config-token-profile-export"]},
+      {"path": "crates/config/src/authn.rs", "ids": ["authn-token-profile", "authn-algorithm", "authn-config-jwt-variant", "authn-default-algorithms", "authn-config-jwt-validation", "authn-config-jwt-tests"]},
+      {"path": "crates/config/src/lib.rs", "ids": ["config-jwt-input-exports"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-token-profile-import", "load-jwt-token-profile-environment", "load-jwt-token-profile-file"]},
       {"path": "crates/config/src/secret_policy.rs", "ids": ["secret-policy-token-profile-exception", "secret-policy-token-profile-vector", "secret-policy-token-profile-fixture"]},
-      {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-jwt-dependency", "authn-jwt-runtime-dependency"]},
-      {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-token-profile-import", "authn-validate-jwt-claims", "authn-claims-client-aliases", "authn-claim-shape-jwt", "authn-claim-shape-aliases-jwt", "authn-claim-shape-rfc9068", "authn-claims-alias-fields", "authn-claims-rfc9068-fields", "authn-claims-alias-visitor", "authn-claims-rfc9068-visitor", "authn-claims-jwt-test-imports", "authn-claims-resource-server-test", "authn-claims-jwt-rejection-test", "authn-claims-rfc9068-test"]},
-      {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-get-json", "authn-provider-raw-dns-test-imports", "authn-provider-cancellation-server-import", "authn-provider-tls-name-root-test", "authn-provider-literal-redirect-test", "authn-provider-redirect-server", "authn-provider-streaming-bound-test", "authn-provider-cancellation-server", "authn-provider-drop-request-test", "authn-provider-raw-dns-test-constructor", "authn-provider-raw-dns-test", "authn-provider-length-deadline-test", "authn-provider-expired-deadline-test"]},
-      {"path": "crates/infra-bearerauthn/src/provider/dns.rs", "ids": ["authn-dns-raw-answer-resolver"]},
-      {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-jwt-module", "authn-refresh-module", "authn-jwt-prepare-export", "authn-jwt-refresh-task-imports", "authn-token-profile", "authn-jwt-options", "authn-refresh-task", "authn-verifier-jwt-variant", "authn-verifier-jwt-dispatch", "authn-verifier-jwt-debug"]},
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-prepare-auth-jwt"]},
+      {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-jwt-dependency"]},
+      {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-get-json", "authn-provider-tls-bounds-test", "authn-provider-jwt-deadlines"]},
+      {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-jwt-module", "authn-refresh-module", "authn-jwt-prepare-export", "authn-token-profile", "authn-jwt-options", "authn-refresh-task", "authn-verifier-jwt-variant", "authn-verifier-jwt-dispatch", "authn-jwt-task-imports", "authn-discovered-issuer-context", "authn-jwt-reasons", "authn-jwt-reason-labels", "authn-verifier-jwt-debug"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-prepare-auth-jwt", "bootstrap-auth-jwt-algorithm-import", "bootstrap-auth-jwt-algorithm-converter"]},
       {"path": "docs/authentication.md", "ids": ["authentication-jwt"]},
       {"path": "docs/architecture/integration.md", "ids": ["docs-integration-jwt"]},
       {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-jwt-refresh"]},
@@ -370,15 +371,13 @@
       "crates/infra-bearerauthn/src/introspection.rs"
     ],
     "markers": [
-      {"path": "crates/config/src/authn.rs", "ids": ["authn-secrecy-import", "authn-mode-oidc-introspection", "authn-introspection-fields", "authn-introspection-defaults", "authn-foreign-introspection-inputs", "authn-dormant-introspection-syntax", "authn-introspection-validation", "authn-foreign-input-helper", "authn-secret-presence-helper", "authn-required-provider-url-helper", "authn-introspection-test-config", "authn-introspection-tests", "authn-dormant-introspection-tests"]},
-      {"path": "crates/config/src/load.rs", "ids": ["load-authn-mode-import", "load-introspection-environment", "load-introspection-secret-file"]},
+      {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-introspection-envelope", "authn-claims-optional-value", "authn-claims-audience-values", "authn-claims-introspection-validation", "authn-claims-introspection-test-import", "authn-claims-introspection-shape-test", "authn-claims-introspection-missing-test", "authn-claims-scope-introspection-assertion"]},
+      {"path": "crates/config/src/authn.rs", "ids": ["authn-nonzero-import", "authn-secrecy-import", "authn-occupied-secret-import", "authn-config-introspection-variant", "authn-default-provider-concurrency", "authn-config-introspection-validation", "authn-config-introspection-tests"]},
+      {"path": "crates/config/src/load.rs", "ids": ["load-introspection-environment", "load-introspection-secret-file"]},
       {"path": "crates/config/src/secret_policy.rs", "ids": ["secret-key-introspection-vector", "secret-policy-introspection-fixture"]},
-      {"path": "crates/infra-http/Cargo.toml", "ids": ["http-authn-test-dependencies", "http-introspection-test-secret"]},
-      {"path": "crates/infra-http/src/authn.rs", "ids": ["http-introspection-fixture-std-imports", "http-introspection-fixture-imports", "http-introspection-fixture-material", "http-introspection-fixture-server", "http-introspection-fixture-route-tests"]},
       {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-secret-dependency"]},
-      {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-btree-set-import", "authn-validate-introspection-claims", "authn-claim-shape-introspection", "authn-claim-shape-active", "authn-claims-active-fields", "authn-claims-all-member-duplicates", "authn-claims-all-member-duplicate-check", "authn-claims-active-visitor", "authn-parse-introspection-active", "authn-claims-introspection-test-import", "authn-claims-introspection-classification-test"]},
-      {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-form-header-import", "authn-provider-post-form-json", "authn-provider-dropped-post-server", "authn-provider-dropped-post-test", "authn-provider-post-form-tls-test"]},
-      {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-introspection-module", "authn-introspection-prepare-export", "authn-test-support-introspection-prepare", "authn-introspection-options", "authn-verifier-introspection-variant", "authn-verifier-introspection-dispatch", "authn-verifier-introspection-debug"]},
+      {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-post-form-json", "authn-provider-post-form-tls-test", "authn-provider-introspection-deadline"]},
+      {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-introspection-module", "authn-introspection-prepare-export", "authn-test-support-introspection-prepare", "authn-introspection-options", "authn-verifier-introspection-variant", "authn-verifier-introspection-dispatch", "authn-concurrency-import", "authn-introspection-reasons", "authn-introspection-reason-labels", "authn-verifier-introspection-debug"]},
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-prepare-auth-introspection"]},
       {"path": "env/config/local.toml", "ids": ["local-config-introspection-inputs"]},
       {"path": "docs/authentication.md", "ids": ["authentication-introspection"]},
@@ -653,6 +652,17 @@
       }
     ]
   },
+  "tls-fixtures": {
+    "remove_when_unselected": [],
+    "markers": [
+      {
+        "path": "Cargo.toml",
+        "ids": [
+          "workspace-tls-fixtures"
+        ]
+      }
+    ]
+  },
   "request-budget": {
     "remove_when_unselected": [],
     "markers": [
@@ -691,6 +701,7 @@
       "crates/infra-http/src/idempotency/",
       "crates/config/src/http_idempotency.rs",
       "migrations/20260923000001_create_http_idempotency_records.sql",
+      "migrations/20260926001448_simplify_http_idempotency_records.sql",
       "test/tests/http_idempotency/",
       "docs/http-idempotency.md"
     ],
@@ -698,12 +709,13 @@
       {"path": "Cargo.toml", "ids": ["workspace-http-idempotency-store", "workspace-http-idempotency-digest"]},
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-idempotency-dependencies"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-idempotency-module"]},
+      {"path": "crates/infra-http/src/contract.rs", "ids": ["contract-idempotency-route-methods"]},
       {"path": "crates/infra-http/src/problem.rs", "ids": ["http-idempotency-codes", "http-idempotency-code-meta"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-http-idempotency-module", "config-http-idempotency-export", "config-http-idempotency-field", "config-http-idempotency-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-http-idempotency-environment"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-http-idempotency-dependency"]},
       {"path": "crates/service/src/api.rs", "ids": ["service-api-http-idempotency-import", "service-api-contract-composer", "service-api-idempotency-components", "service-api-document-composer", "service-api-idempotent-test-route"]},
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-http-idempotency-imports", "bootstrap-http-idempotency-errors", "bootstrap-http-idempotency-verifier", "bootstrap-http-idempotency-composer", "bootstrap-http-idempotency-prepared-field", "bootstrap-http-idempotency-prepared-value", "bootstrap-http-idempotency-destructure", "bootstrap-http-idempotency-contract-composer", "bootstrap-http-idempotency-activation", "bootstrap-http-idempotency-functions", "bootstrap-http-idempotency-tests"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-http-idempotency-imports", "bootstrap-http-idempotency-errors", "bootstrap-http-idempotency-composer", "bootstrap-http-idempotency-prepared-field", "bootstrap-http-idempotency-prepared-value", "bootstrap-http-idempotency-destructure", "bootstrap-http-idempotency-contract-composer", "bootstrap-http-idempotency-document", "bootstrap-http-idempotency-activation", "bootstrap-http-idempotency-functions", "bootstrap-http-idempotency-tests"]},
       {"path": "crates/service/tests/openapi.rs", "ids": ["service-openapi-http-idempotency-contract"]},
       {"path": "test/Cargo.toml", "ids": ["test-http-idempotency-dependencies"]},
       {"path": "test/README.md", "ids": ["test-readme-http-idempotency"]},
@@ -736,6 +748,7 @@
       "crates/jobs-worker/",
       "crates/config/src/jobs.rs",
       "migrations/20260924000001_create_background_jobs.sql",
+      "migrations/20260925000001_simplify_background_jobs.sql",
       "test/src/jobs.rs",
       "test/src/bin/",
       "test/tests/jobs/",
@@ -777,8 +790,7 @@
     ],
     "markers": [
       {"path": "test/tests/jobs/main.rs", "ids": ["jobs-http-idempotency-module"]},
-      {"path": "docs/background-jobs.md", "ids": ["docs-background-jobs-idempotency"]},
-      {"path": "docs/architecture/async.md", "ids": ["docs-async-idempotency"]}
+      {"path": "docs/background-jobs.md", "ids": ["docs-background-jobs-idempotency"]}
     ]
   }
 }
