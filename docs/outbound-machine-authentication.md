@@ -82,7 +82,9 @@ Otherwise acquisition supplies exactly one sensitive Bearer header. The
 resource client's target, admission, body limit, transport policy, and original
 absolute caller deadline remain authoritative. Token wait consumes that deadline;
 it never resets it. Completed resource results, including 401 and 403, pass
-through without token invalidation or replay.
+through without replay. A 401 evicts the credential that request used, unless a
+newer one already replaced it, so the next operation acquires a fresh token; a
+403 keeps it.
 
 ## Acquisition and reuse
 

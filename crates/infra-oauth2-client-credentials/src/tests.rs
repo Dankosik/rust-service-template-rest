@@ -741,9 +741,9 @@ async fn caller_authorization_conflict_refuses_before_token_or_resource_io() {
 }
 
 #[tokio::test]
-async fn resource_401_and_403_pass_through_without_token_replay() {
+async fn resource_401_and_403_pass_through_and_only_401_evicts_the_token() {
     let fixture = Fixture::new().await;
-    for status in ["401 Unauthorized", "403 Forbidden"] {
+    for (status, follow_up_fetches) in [("401 Unauthorized", 1), ("403 Forbidden", 0)] {
         fixture.resource_status(status);
         let client = fixture
             .credentials(&[], None)
@@ -765,7 +765,10 @@ async fn resource_401_and_403_pass_through_without_token_replay() {
             .execute(request(), operation(Duration::from_secs(10)))
             .await
             .unwrap();
-        assert_eq!(fixture.token_requests().len(), before_tokens + 1);
+        assert_eq!(
+            fixture.token_requests().len(),
+            before_tokens + 1 + follow_up_fetches
+        );
         assert_eq!(fixture.resource_requests().len(), before_resources + 2);
     }
     fixture.finish().await;
