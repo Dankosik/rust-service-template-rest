@@ -56,6 +56,7 @@ jobs:
       publication_metadata: ${{ steps.surfaces.outputs.publication_metadata }}
       secret_scanning: ${{ steps.surfaces.outputs.secret_scanning }}
       db_integration: ${{ steps.surfaces.outputs.db_integration }}
+      messaging_integration: ${{ steps.surfaces.outputs.messaging_integration }}
       migrations: ${{ steps.surfaces.outputs.migrations }}
       agent_instructions: ${{ steps.surfaces.outputs.agent_instructions }}
       documentation: ${{ steps.surfaces.outputs.documentation }}
@@ -511,10 +512,12 @@ jobs:
         if: needs.changes.outputs.runtime_image == 'true'
         run: bash ./scripts/ci/measure.sh image-security -- make container-security
 
-  # template:begin postgres:ci-integration-job
+  # template:begin integration:ci-integration-job
   integration:
     needs: changes
-    if: needs.changes.outputs.db_integration == 'true'
+    if: >-
+      needs.changes.outputs.db_integration == 'true' ||
+      needs.changes.outputs.messaging_integration == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -537,10 +540,72 @@ jobs:
             target
           key: cargo-integration-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: cargo-integration-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-
+      - name: Start selected integration services
+        id: integration-services
+        env:
+          DATABASE_SELECTED: ${{ needs.changes.outputs.db_integration }}
+          MESSAGING_SELECTED: ${{ needs.changes.outputs.messaging_integration }}
+        run: |
+          set -euo pipefail
+          OUTBOX_SELECTED=$(python3 scripts/lib/template_state.py profile --repo . --field outbox)
+          if [[ "${DATABASE_SELECTED}" == true ]]; then
+            POSTGRES_PORT=5432 docker compose -f env/docker-compose.yml up -d --wait postgres
+          fi
+          if [[ "${MESSAGING_SELECTED}" == true || ( "${DATABASE_SELECTED}" == true && "${OUTBOX_SELECTED}" == postgres ) ]]; then
+            NATS_PORT=4222 docker compose -f env/docker-compose.yml up -d --wait nats
+          fi
+      - name: Integration startup diagnostics
+        if: failure() && steps.integration-services.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          docker compose -f env/docker-compose.yml ps --all
+          docker compose -f env/docker-compose.yml logs --no-color --tail 100
+          while IFS= read -r container_id; do
+            [[ -n "${container_id}" ]] || continue
+            docker inspect --format '{{.Name}} status={{.State.Status}} health={{json .State.Health}}' "${container_id}"
+          done < <(docker compose -f env/docker-compose.yml ps --all --quiet)
       - name: Database-backed proof
-        # PostgreSQL from env/docker-compose.yml; the runner has Docker, so a
-        # missing daemon is a failure here, never a refusal.
-        run: bash ./scripts/ci/measure.sh integration-db -- env REQUIRE_DOCKER=1 make test-integration-db
+        if: needs.changes.outputs.db_integration == 'true'
+        run: >-
+          bash ./scripts/ci/measure.sh integration-db --
+          env INTEGRATION_COMPOSE_MANAGED=1
+          DATABASE_URL='postgres://app:app@127.0.0.1:5432/app?sslmode=disable'
+          NATS_URL=nats://127.0.0.1:4222
+          make test-integration-db
+      - name: JetStream proof
+        if: needs.changes.outputs.messaging_integration == 'true'
+        run: >-
+          bash ./scripts/ci/measure.sh integration-messaging --
+          env REQUIRE_DOCKER=1 NATS_URL=nats://127.0.0.1:4222
+          make test-integration-messaging
+      - name: Install Go for wire compatibility
+        if: needs.changes.outputs.messaging_integration == 'true'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.27.0'
+          cache: false
+      - name: Generate actual Go wire records
+        if: needs.changes.outputs.messaging_integration == 'true'
+        run: bash ./scripts/messaging-go-compat.sh generate "${RUNNER_TEMP}/go-wire/records.json"
+      - name: Export actual Rust wire records
+        if: needs.changes.outputs.messaging_integration == 'true'
+        env:
+          GO_WIRE_FIXTURES: ${{ runner.temp }}/go-wire/records.json
+          GO_WIRE_RUST_EXPORT: ${{ runner.temp }}/go-wire/rust-export.json
+        run: cargo test --locked -p infra-messaging --test wire_compat -- --ignored --exact rust_production_wire_exports_for_go
+      - name: Verify actual Go and Rust wire records
+        if: needs.changes.outputs.messaging_integration == 'true'
+        run: |
+          set -euo pipefail
+          bash ./scripts/messaging-go-compat.sh verify-rust "${RUNNER_TEMP}/go-wire/records.json" "${RUNNER_TEMP}/go-wire/rust-export.json"
+          bash ./scripts/messaging-go-compat.sh check "${RUNNER_TEMP}/go-wire/records.json"
+      - name: Upload Go wire provenance
+        if: always() && needs.changes.outputs.messaging_integration == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: go-wire-provenance
+          path: ${{ runner.temp }}/go-wire/records.json
+          if-no-files-found: error
       - name: Save cargo caches
         if: >-
           github.event_name == 'push' &&
@@ -555,7 +620,7 @@ jobs:
             ~/.cargo/git/db
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
-  # template:end postgres:ci-integration-job
+  # template:end integration:ci-integration-job
 
   initializer:
     needs: changes
@@ -569,12 +634,13 @@ jobs:
       fail-fast: false
       matrix:
         # Together the parts are `make template-init-check`: the source
-        # suites with the canonical projections and the fifty runtime
-        # graphs. template-init-check.sh numbers DATABASE none 1-6, postgres
-        # 7-12, http-idempotency 13-16, jobs 17-22, and jobs with
-        # http-idempotency 23-26. Webhook graphs 27-46 extend the five
-        # jobs-compatible profile families without multiplying harnesses. OAuth
-        # graphs 47-49 are database-free; graph 50 is the maximal retained pack.
+        # suites with the canonical projections and fifty-six runtime graphs.
+        # Graphs 1-46 retain the established database, idempotency, jobs, and
+        # webhook representatives. Graphs 47-49 retain messaging and outbox;
+        # 50-53 retain OAuth; 54 proves messaging plus OAuth without PostgreSQL;
+        # and 55 proves the full outbox/OAuth neighboring pack. Graph 56 compiles
+        # the jobs/messaging integration fixture with outbox absent. Broker and
+        # Go-wire behavior stay in the selected integration job.
         # `source`, `database-none`, and
         # `database-postgres` keep their own warm target caches. Every part
         # with `cache` restores that part's cache (database-postgres) and
@@ -583,7 +649,7 @@ jobs:
         include:
           - part: source
           - part: database-none
-            graphs: 1,2,3,4,5,6,47,48,49
+            graphs: 1,2,3,4,5,6,47,50,51,52,54
           - part: database-postgres
             graphs: 7,8,9,10,11,12
           - part: http-idempotency
@@ -591,7 +657,7 @@ jobs:
             cache: database-postgres
             docker: true
           - part: jobs-1
-            graphs: 17,18,19,27,31,35,39,43
+            graphs: 17,18,19,27,31,35,39,43,48,56
             cache: database-postgres
             docker: true
           - part: jobs-2
@@ -603,7 +669,7 @@ jobs:
             cache: database-postgres
             docker: true
           - part: jobs-http-idempotency-2
-            graphs: 25,26,28,34,38,42,46,50
+            graphs: 25,26,28,34,38,42,46,49,53,55
             cache: database-postgres
             docker: true
     steps:
@@ -711,9 +777,9 @@ jobs:
       - secrets
       - delivery
       - image
-      # template:begin postgres:ci-required-integration-need
+      # template:begin integration:ci-required-integration-need
       - integration
-      # template:end postgres:ci-required-integration-need
+      # template:end integration:ci-required-integration-need
       - initializer
       - initializer-projections
       - docs

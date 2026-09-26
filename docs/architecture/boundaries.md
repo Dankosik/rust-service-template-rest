@@ -27,6 +27,13 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | `infra-jobs` (`crates/infra-jobs`) | The job table's statements, enqueue, the job-kind and handler contracts (`JobKind`, `Handler`, `Kinds`), and the engine ([guide](../background-jobs.md)). | Concrete kinds or handlers (they live in adapter crates), configuration, process lifecycle, or business rules. |
 | `jobs-worker` (`crates/jobs-worker`) | The worker's composition root and binary. | Engine mechanics, feature behavior. |
 <!-- template:end jobs:docs-boundaries-jobs-owners -->
+<!-- template:begin messaging:docs-boundaries-messaging-owner -->
+| `domain-events` (`crates/domain-events`) | Immutable typed event identity, type/version, occurrence time, and payload contract. | Subjects, broker metadata, ID minting, clocks, configuration, or tasks. |
+| `infra-messaging` (`crates/infra-messaging`) | Go-compatible wire admission, prepared publication, typed registry, bounded JetStream consumer, deterministic DLQ/restore, and connection/probe mapping ([guide](../durable-messaging.md)). | Business events, feature policy, queue SQL or commits, stream administration, configuration loading, signals, or a generic bus. |
+<!-- template:end messaging:docs-boundaries-messaging-owner -->
+<!-- template:begin outbox:docs-boundaries-outbox-owner -->
+| `infra-messaging::outbox` | The private versioned/base64 immutable publication intent, prepared enqueue, and publication handler ([guide](../postgres-transactional-outbox.md)). | The `background_jobs` SQL, caller transaction control, a second connection, business-closure retries, consumer effect deduplication, or stream administration. |
+<!-- template:end outbox:docs-boundaries-outbox-owner -->
 
 | `integration-tests` (`test/`) | Executable utility recipes and any selected profile proof. | Anything a binary runs; the service's process tests stay in `crates/service/tests/`. |
 | `crates/<feature>` (none yet) | Use cases, business types, invariants, domain errors, and the feature's `OpenApiRouter` registrations with its handlers. | Transport policy, provider drivers, runtime configuration, process lifecycle. |
@@ -57,6 +64,13 @@ process tests stay in `crates/jobs-worker/tests/`.
 
 <!-- template:end jobs:docs-boundaries-jobs-tests -->
 
+<!-- template:begin messaging:docs-boundaries-messaging-tests -->
+`infra-messaging` owns its protocol and actual-Go wire fixtures. Its real NATS
+integration proof has no PostgreSQL prerequisite. Worker and service process
+tests remain with their existing composition owners; their assertions observe
+readiness, bounded drain, and process result rather than broker internals.
+<!-- template:end messaging:docs-boundaries-messaging-tests -->
+
 ## Dependency Direction
 
 ```text
@@ -72,6 +86,15 @@ main binary (crates/service, composition root)
   -> infra-bearerauthn
 infra-http -> infra-bearerauthn
 <!-- template:end authn:docs-boundaries-authn-edges -->
+<!-- template:begin messaging:docs-boundaries-messaging-edges -->
+  -> domain-events
+  -> infra-messaging -> domain-events, async-nats, health, tokio, bytes
+jobs-worker -> infra-messaging only when the messaging profile is retained
+service -> infra-messaging only for optional producer/probe composition
+<!-- template:end messaging:docs-boundaries-messaging-edges -->
+<!-- template:begin outbox:docs-boundaries-outbox-edges -->
+infra-messaging::outbox -> domain-events, infra-jobs, infra-postgres, base64
+<!-- template:end outbox:docs-boundaries-outbox-edges -->
 <!-- template:begin outbound-http:docs-boundaries-outbound-edges -->
 infra-outbound-http -> reqwest, http, bytes, url, tokio, metrics, tracing
 <!-- template:end outbound-http:docs-boundaries-outbound-edges -->

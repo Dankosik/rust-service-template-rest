@@ -172,39 +172,40 @@ for the shipped binary, and the test-only `jobs-worker-fixture` suite in
 | Step | What | Refusal (exit 1) |
 | --- | --- | --- |
 | 1 | `FromArgs::from_argv` (`--help` exits `0`) | clap error |
-| 2 | `register` is `None` | `no job kind is registered: register this service's job kinds in crates/jobs-worker/src/main.rs` |
+| 2 | Registration function is `None` | `no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs` |
 | 3 | `service_config::load` (same sources, precedence, unknown-key and secret rules as the service) | `configuration is invalid: ...` |
-| 4 | `postgres.enabled` | `postgres.enabled must be true to run the jobs worker` |
-| 5 | `config.jobs.required_connections(&config.postgres)` | `configuration is invalid: postgres.max_connections: must be at least jobs.max_workers + 2 (N) for the jobs worker` |
-| 6 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)` |
-| 7 | Build the multi-thread runtime | `build tokio runtime: ...` |
-| 8 | Install `Signals` (SIGINT, then SIGTERM) | `install stop signal handlers: ...` |
-| 9 | Tracer provider with the worker identity, subscriber, recorder with the jobs buckets | the telemetry errors, as in the service |
-| 10 | `register(&mut kinds, &support)`, then `kinds.validate()` | `job kind registration failed: ...`; `job kinds are invalid: ...` (a set with no kind says `no job kind is registered`) |
-| 11 | `jobs_worker_starting` record | |
-| 12 | Metrics upkeep and Tokio runtime metrics tasks join the tracker | |
-| 13 | `Dsn::admit`, `infra_postgres::connect` with the derived `application_name` and `READ COMMITTED` default; `postgres_pool_opened`; pool gauge task | `configuration is invalid: postgres.dsn: ...`; `postgres connect: ...` |
-| 14 | `Engine::check_startup` (UTF-8 server, writable session, and `READ COMMITTED` default) | `jobs startup check: the jobs store requires READ COMMITTED session isolation` / `the PostgreSQL session is not writable` / `the jobs store is unavailable` |
-| 15 | Bind the health listener (`http.addr`), then the diagnostics listener (`observability.metrics.addr`, when set); `http listener bound`, `diagnostics listener bound` | `bind http listener ...` |
-| 16 | If a stop signal is already pending (`Signals::pending()`), start no engine and run the shutdown plan with no engine. Otherwise `Engine::start` (claiming begins); `jobs_claiming_started` | |
-| 17 | Readiness admission (`refresh`, then `verdict` over `[PostgresProbe]`), raced against the stop signals: a signal abandons admission, and the shutdown plan runs with the started engine | `startup admission: ...` |
-| 18 | Refresher task; `jobs_worker_ready` | |
-| 19 | Wait for a stop signal or `Started::failed()` | |
+| 4 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)` |
+| 5 | Build the multi-thread runtime | `build tokio runtime: ...` |
+| 6 | Install `Signals` (SIGINT, then SIGTERM) | `install stop signal handlers: ...` |
+| 7 | Tracer provider with the worker identity, subscriber, recorder, and the retained messaging panic hook | the telemetry errors, as in the service |
+| 8 | Register optional jobs and typed-message capabilities through `register(&mut kinds, &mut messages, &support)`; validate each nonempty registry | `job kind registration failed: ...`; `job kinds are invalid: ...`; `typed message handlers are invalid: ...`; no retained capability refuses with the step-2 message |
+| 9 | `jobs_worker_starting` record; metrics upkeep and Tokio runtime metrics join the tracker | |
+| 10 | After registration, determine whether retained capabilities need PostgreSQL; validate `postgres.enabled` and mode-aware pool capacity, then admit the DSN/pool and migration history | `postgres.enabled must be true to run the jobs worker`; capacity, DSN, pool, or history refusal |
+| 11 | When messaging or outbox is retained, validate producer/consumer configuration, connect NATS under its startup budget, and admit a consumer only for registered typed handlers | messaging configuration, connection, topology, bounds, or consumer refusal |
+| 12 | Construct every required ordinary and reserved publication `Engine`, then run each `Engine::check_startup` | `jobs startup check: ...` |
+| 13 | Bind the health listener (`http.addr`), then the diagnostics listener (`observability.metrics.addr`, when set); `http listener bound`, `diagnostics listener bound` | `bind http listener ...` |
+| 14 | Readiness admission (`refresh`, then cached verdict over retained PostgreSQL and messaging probes), raced against stop signals | `startup admission: ...` |
+| 15 | Only after admission, start every `Engine` and the admitted consumer; `jobs_claiming_started` and `messaging_consuming_started` | |
+| 16 | Refresher task; `jobs_worker_ready` | |
+| 17 | Wait for a stop signal, an engine failure, or a consumer failure | |
 
-Steps 1-10 do no database I/O. Step 2 (no registration) precedes
-configuration so the shipped binary refuses the same way everywhere, and a
-derived service's registration runs after the configuration checks. Signal
-streams exist from step 8, so a stop during steps 9-15 stays pending. A stop
-pending before claiming starts no engine, and a signal during admission ends
-startup at once. Before admission, `/health/ready` answers `503 not ready`
-(not evaluated). Every refusal after the runtime started goes through the
-one teardown, `abort_startup`: finish attempts within 2 s when the engine started,
-close bound listeners within 2 s, join background tasks within 3 s, and
-close the pool within 5 s. It flushes no telemetry.
+Steps 1-8 open no dependency. Step 2 precedes configuration so the shipped
+binary refuses the same way everywhere; registration itself follows
+configuration and constructs only local registries. Signal streams exist from
+step 6, so a stop during admission remains observable. A signal while NATS
+connects or admits a consumer, before readiness admission, or immediately
+before step 15 starts no engine and no consumer; the staged plan still closes
+any resource already opened. Before admission, `/health/ready` answers `503
+not ready` (not evaluated). Every refusal after the runtime started goes
+through one `abort_startup` teardown: it finishes all started engines and
+consumer work within 2 s, closes bound listeners within 2 s, joins background
+tasks within 3 s, and closes retained pool and messaging resources within 5 s.
+It flushes no telemetry.
 
 **Readiness.** `/health/ready` uses the service's cached-verdict semantics
-with the PostgreSQL probe. The worker is ready only after startup completed
-and claiming began. It is not ready at the first stop trigger. The health
+with the retained PostgreSQL and messaging probes. The worker is ready only
+after admission has started every required engine and consumer. It is not ready
+at the first stop trigger. The health
 listener keeps answering, not ready, through the drain, and closes with the
 listeners after it.
 
@@ -222,22 +223,22 @@ that votes degraded makes the exit code `3`.
 
 | Stage | Ceiling | Records | Votes degraded (exit 3) when |
 | --- | --- | --- | --- |
-| Readiness off, claiming stopped | immediate | `shutdown_started`, `readiness_disabled`, `claiming_stopped` (in-flight count) | never; a claim already dispatched may settle under its existing backstop |
-| Drain in-flight attempts until `Started::drained()`; a second signal ends it | `http.drain_timeout` (25 s); no propagation delay | `drain_started`, then `drain_completed` or `drain_forced` (in-flight attempts, reason `budget` or `second_signal`) | the drain ends before `drained()` resolved (forced) |
-| Only after a forced drain: `Started::cancel_and_finish` | 2 s | `attempts_finished` (known results, cancelled handlers, acknowledged releases, uncertainty) | `DrainEnd::timed_out` |
+| Readiness off; stop every jobs claim loop and messaging pull | immediate | `shutdown_started`, `readiness_disabled`, `claiming_stopped` (in-flight count), `messaging_pulls_stopped` | never; admitted work may settle under its existing backstop |
+| Drain all started engines and the consumer; a second signal ends it | `http.drain_timeout` (25 s); no propagation delay | `drain_started`, then `drain_completed` or `drain_forced` (in-flight attempts, reason `budget`, `second_signal`, or `messaging`) | any engine or consumer drain does not finish inside the shared budget |
+| Only after a forced drain: finish every engine attempt and abort/finish the consumer | 2 s | `attempts_finished` (known results, cancelled handlers, acknowledged releases, uncertainty) | cleanup overrun |
 | Close the health listener and the diagnostics listener concurrently | 2 s | `listeners_stopped`; `diagnostics_forced` for a scrape overrun | the health listener overruns (a diagnostics overrun is forced closed without a vote, as in the service) |
-| Cancel and join background tasks (claim loop, retention, sampler, metrics, refresher) | 3 s | `background_joined` | the join overruns |
-| Close the pool | 5 s | `postgres_pool_closed` | the close overruns |
+| Cancel and join background tasks (claim loops, retention, sampler, metrics, refresher) | 3 s | `background_joined` | the join overruns |
+| Close retained pool and messaging dependency | 5 s | `postgres_pool_closed` and messaging close outcome | either close overruns or messaging close is unobserved |
 | Flush telemetry | 5 s | `telemetry_flushed`, `shutdown_completed` | the flush is incomplete |
 
-When a stop signal ended startup before claiming, the plan has no engine, so
-the drain and cleanup stages are skipped. The tail after the drain is
+When a stop signal ends startup before step 15, no engine or consumer starts;
+the plan still closes resources already admitted. The tail after the drain is
 2 + 2 + 3 + 5 + 5 = 17 s. `validate_grace_budget` refuses a grace period
 below `http.drain_timeout` plus 17 s. The default worst case is
 25 s + 17 s = 42 s inside 45 s, leaving the same 3 s the service leaves for
 `Runtime::shutdown_timeout(1s)` and the tracer join slack. The worker has no
-readiness propagation delay: it stops claiming at once. The background join
-is 3 s (the service's is 5 s) because attempts are drained and their outcomes
+readiness propagation delay: it stops claims and pulls at once. The background
+join is 3 s (the service's is 5 s) because attempts are drained and their outcomes
 are finished before that stage and every joined task stops at its next await.
 
 **Exit codes.** `exit_code` is the one mapping. `process::exit` is never
@@ -247,11 +248,40 @@ called.
 | --- | --- |
 | `0` | A stop signal, and every stage completed inside its ceiling; the drain ended with `drained()`, so no attempt was cancelled at its end |
 | `3` | A stop signal, and any stage voted degraded, including a forced drain (budget or second signal), which is the only way an attempt is cancelled at the drain's end |
-| `1` | A startup refusal, or `Started::failed()` resolved without a stop signal. After the failure the same staged plan runs, with its deadline starting at the failure, and its outcome does not change the code |
+| `1` | A startup refusal, or a started engine or consumer fails without a stop signal. After the failure the same staged plan runs, with its deadline starting at the failure, and its outcome does not change the code |
 
 The [guide](../background-jobs.md#run-and-stop-the-worker) covers running and
 stopping the worker. [Async Architecture](async.md) records the mechanism.
 <!-- template:end jobs:docs-lifecycle-jobs-worker -->
+
+<!-- template:begin messaging:docs-lifecycle-messaging -->
+## JetStream lifecycle
+
+Messaging startup installs process signals before broker I/O, admits the NATS
+connection within the existing startup budget, requires JetStream and server
+version >=2.12.3, then checks operator-created source/DLQ topology and the
+named consumer. The API admits only a producer; the worker admits a consumer
+only after a handler registry exists. Readiness refreshes bounded client and
+topology state in the existing `health` owner, so HTTP and metrics read a
+cached verdict and connection loss cannot leave stale health indefinitely.
+
+At the first stop signal, readiness drains and no new NATS pull starts.
+Handlers, DLQ transfer, and source settlement share the worker's remaining
+drain deadline. At expiry, unfinished handler tasks are cancelled, aborted and
+joined, leaving their source records for redelivery. Dependency close submits
+NATS drain and waits for its native Closed notification within the existing
+close budget; an absent notification, unjoined application work, or forced
+drain yields the established degraded exit code rather than clean shutdown.
+<!-- template:end messaging:docs-lifecycle-messaging -->
+<!-- template:begin outbox:docs-lifecycle-outbox -->
+With the outbox profile retained, worker startup admits the mode-aware pool
+capacity before starting either engine: `N + 5` with ordinary jobs and outbox,
+or three for outbox-only. A stop signal halts both claim loops immediately;
+the publication engine drains, cancels, and closes within the same absolute
+process deadlines as ordinary jobs and NATS work. It gets no additional grace
+period, and a forced drain leaves unfenced work for the existing jobs recovery
+path.
+<!-- template:end outbox:docs-lifecycle-outbox -->
 
 ## Decisions Recorded Here
 

@@ -66,6 +66,11 @@ where
     V: Into<std::ffi::OsString>,
 {
     let namespace = collect_namespace(environment)?;
+    // template:begin messaging:load-messaging-list-namespace
+    let (list_namespace, namespace): (config::Map<_, _>, config::Map<_, _>) = namespace
+        .into_iter()
+        .partition(|(key, _)| key.eq_ignore_ascii_case("APP__MESSAGING__URLS"));
+    // template:end messaging:load-messaging-list-namespace
 
     let mut builder = config::Config::builder();
     for path in options.files() {
@@ -82,6 +87,18 @@ where
         // An empty value is still an explicit override; validation decides.
         .ignore_empty(false)
         .source(Some(namespace));
+    // template:begin messaging:load-messaging-list-source
+    // Enable config-rs's list parser only for URLs. Its try_parsing also
+    // coerces scalar numbers/booleans, so secrets stay in the unchanged source.
+    builder = builder.add_source(
+        env_source
+            .clone()
+            .source(Some(list_namespace))
+            .try_parsing(true)
+            .list_separator(",")
+            .with_list_parse_key("messaging.urls"),
+    );
+    // template:end messaging:load-messaging-list-source
     let merged = builder
         .add_source(env_source)
         .build()
@@ -394,6 +411,108 @@ mod tests {
         );
     }
     // template:end webhooks:load-webhooks-environment
+
+    // template:begin messaging:load-messaging-environment
+    #[test]
+    fn messaging_environment_decodes_lists_and_redacts_credentials() {
+        use secrecy::ExposeSecret as _;
+
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                (
+                    "APP__MESSAGING__URLS",
+                    "tls://nats-a.example:4222,tls://nats-b.example:4222",
+                ),
+                ("APP__MESSAGING__CREDENTIALS", "fixture-credentials"),
+                ("APP__MESSAGING__ROOT_CA_PATH", "/etc/nats/root-ca.pem"),
+                ("APP__MESSAGING__SOURCE_STREAM", "events"),
+                ("APP__MESSAGING__MAX_PAYLOAD_BYTES", "2 MiB"),
+                ("APP__MESSAGING__CONSUMER_DURABLE", "service-events"),
+                ("APP__MESSAGING__CONSUMER_FILTER_SUBJECT", "events.>"),
+                ("APP__MESSAGING__DLQ_SUBJECT", "events.dlq"),
+                ("APP__MESSAGING__CONSUMER_CONCURRENCY", "2"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.messaging.urls,
+            vec![
+                "tls://nats-a.example:4222".to_owned(),
+                "tls://nats-b.example:4222".to_owned(),
+            ]
+        );
+        assert_eq!(
+            cfg.messaging.credentials.as_ref().unwrap().expose_secret(),
+            "fixture-credentials"
+        );
+        assert_eq!(
+            cfg.messaging.root_ca_path.as_deref(),
+            Some(Path::new("/etc/nats/root-ca.pem"))
+        );
+        assert_eq!(cfg.messaging.max_payload_bytes, bytesize::ByteSize::mib(2));
+        assert_eq!(cfg.messaging.consumer_concurrency, 2);
+        assert!(!format!("{cfg:?}").contains("fixture-credentials"));
+    }
+
+    #[test]
+    fn messaging_url_list_parsing_preserves_scalar_secret_bytes() {
+        use secrecy::ExposeSecret as _;
+
+        for secret in ["00123", "TRUE"] {
+            let cfg = load_from(
+                &LoadOptions::default(),
+                BUILD,
+                env(&[
+                    ("APP__MESSAGING__URLS", "tls://nats.example:4222"),
+                    ("APP__MESSAGING__CREDENTIALS", secret),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(cfg.messaging.urls, ["tls://nats.example:4222"]);
+            assert_eq!(
+                cfg.messaging.credentials.as_ref().unwrap().expose_secret(),
+                secret
+            );
+        }
+    }
+
+    #[test]
+    fn messaging_credentials_in_a_file_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let leaked = write(
+            &dir,
+            "leaked.toml",
+            "[messaging]\ncredentials = \"fixture-credentials\"\n",
+        );
+        let err = load_from(
+            &LoadOptions {
+                config: Some(leaked),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::SecretInFile { key, .. } if key == "messaging.credentials"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn messaging_unknown_environment_key_fails_loading() {
+        assert!(matches!(
+            load_from(
+                &LoadOptions::default(),
+                BUILD,
+                env(&[("APP__MESSAGING__UNKNOWN", "x")]),
+            ),
+            Err(Error::Deserialize(_))
+        ));
+    }
+    // template:end messaging:load-messaging-environment
 
     // template:begin outbound-auth:load-integrations-environment
     #[test]

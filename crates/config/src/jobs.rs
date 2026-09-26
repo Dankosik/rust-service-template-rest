@@ -58,6 +58,35 @@ impl JobsConfig {
         Ok(())
     }
 
+    // template:begin outbox:jobs-outbox-capacity
+    /// Admit the shared pool for one reserved publisher plus any ordinary engine.
+    /// The publisher has one slot and two management connections; ordinary work
+    /// retains its existing `max_workers + 2` allowance.
+    ///
+    /// # Errors
+    ///
+    /// Returns `postgres.max_connections` below three for publication alone,
+    /// or below `jobs.max_workers + 5` when ordinary work is also registered.
+    pub fn required_connections_with_outbox(
+        &self,
+        postgres: &PostgresConfig,
+        ordinary_jobs: bool,
+    ) -> Result<(), ValidationError> {
+        let (required, mode) = if ordinary_jobs {
+            (u64::from(self.max_workers) + 5, "jobs.max_workers + 5")
+        } else {
+            (3, "3")
+        };
+        if u64::from(postgres.max_connections) < required {
+            return Err(ValidationError::new(
+                "postgres.max_connections",
+                format!("must be at least {mode} ({required}) for the outbox worker"),
+            ));
+        }
+        Ok(())
+    }
+    // template:end outbox:jobs-outbox-capacity
+
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
         int_range("jobs.max_workers", u64::from(self.max_workers), 1, 500)
     }
@@ -166,6 +195,26 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.key, "postgres.max_connections");
     }
+
+    // template:begin outbox:jobs-outbox-capacity-tests
+    #[rstest::rstest]
+    #[case::outbox_only(500, false, 3)]
+    #[case::combined_one(1, true, 6)]
+    #[case::combined_eight(8, true, 13)]
+    fn publisher_capacity_is_reserved_from_ordinary_slots(
+        #[case] max_workers: u32,
+        #[case] ordinary_jobs: bool,
+        #[case] required: u32,
+    ) {
+        let jobs = JobsConfig { max_workers };
+        let error = jobs
+            .required_connections_with_outbox(&postgres(required - 1), ordinary_jobs)
+            .unwrap_err();
+        assert_eq!(error.key, "postgres.max_connections");
+        jobs.required_connections_with_outbox(&postgres(required), ordinary_jobs)
+            .unwrap();
+    }
+    // template:end outbox:jobs-outbox-capacity-tests
 
     #[test]
     fn jobs_max_workers_is_not_secret_like() {

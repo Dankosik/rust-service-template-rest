@@ -59,6 +59,12 @@ def check(root: Path) -> None:
         "http-idempotency-mounted": "remove_when_unselected",
         "jobs": "remove_when_unselected",
         "jobs-http-idempotency": "remove_when_unselected",
+        "messaging": "remove_when_unselected",
+        "worker": "remove_when_unselected",
+        "service-secrets": "remove_when_unselected",
+        "outbox": "remove_when_unselected",
+        "config-url": "remove_when_unselected",
+        "integration": "remove_when_unselected",
         "webhooks-common": "remove_when_unselected",
         "webhooks": "remove_when_unselected",
         "inbound-webhooks": "remove_when_unselected",
@@ -71,7 +77,7 @@ def check(root: Path) -> None:
         markers = section["markers"]
         if not isinstance(removals, list) or not isinstance(markers, list) or not markers:
             raise AssertionError(f"profile inventory has an incomplete {name} projection")
-        if name not in {"request-budget", "tls-fixtures"} and not removals:
+        if name not in {"request-budget", "tls-fixtures", "service-secrets", "config-url"} and not removals:
             raise AssertionError(f"profile inventory has no removable {name} output")
         for relative in removals:
             plain = relative.rstrip("/")

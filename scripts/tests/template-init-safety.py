@@ -19,18 +19,20 @@ sys.dont_write_bytecode = True
 
 _LEGACY_B206_PROFILE_SHA256 = "75e68f9c7defd4031f5d7a0bc2866f337a6c79f69a69f56c79a268d48d8d6530"
 _LEGACY_B206_REVISION = "b2060279370713f05be81b1ad44a31e3e960bccc"
-_LEGACY_PROFILE_KEYS = ("schema_version", "source_only", "postgres", "identity", "cargo_lock")
+_HISTORICAL_OUTBOUND_REVISION = "43b7588edbdb1ebfbc478fb28e0e3d2e77417960"
+_HISTORICAL_HTTP_IDEMPOTENCY_REVISION = "4819113b21c110e69f3f1d4d26f3bf9337c83b72"
+_LEGACY_B206_PROFILE_PATH = "scripts/tests/fixtures/template-profiles-b206.json"
 _AUTH_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection", "identity", "cargo_lock",
 )
 _OUTBOUND_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection",
-    "outbound-http", "egress-dns", "tls-fixtures", "request-budget", "identity", "cargo_lock",
+    "identity", "cargo_lock", "outbound-http", "egress-dns", "request-budget",
 )
 _HTTP_IDEMPOTENCY_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection",
-    "outbound-http", "egress-dns", "tls-fixtures", "request-budget", "http-idempotency", "http-idempotency-mounted",
-    "identity", "cargo_lock",
+    "identity", "cargo_lock", "outbound-http", "egress-dns", "request-budget", "http-idempotency",
+    "http-idempotency-mounted",
 )
 # Historical DNS pack is replay input only; never part of current selection.
 _HISTORICAL_EGRESS_PACK = {
@@ -67,7 +69,6 @@ _HISTORICAL_EGRESS_PACK = {
         }
     ]
 }
-_NEW_PROJECTION_CHECKER = "scripts/tests/template-profile-projections.py"
 
 
 def run(args: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -120,15 +121,8 @@ def init(
 
 
 def legacy_profile_inventory_bytes(source: Path) -> bytes:
-    profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
-    legacy = {key: profile[key] for key in _LEGACY_PROFILE_KEYS}
-    source_only = legacy["source_only"]
-    if not isinstance(source_only, list) or source_only.count(_NEW_PROJECTION_CHECKER) != 1:
-        raise AssertionError("current profile inventory lacks exactly one projection checker entry")
-    legacy["source_only"] = [item for item in source_only if item != _NEW_PROJECTION_CHECKER]
-    # The shared PostgreSQL proxy did not exist in the pinned b206 inventory.
-    legacy["postgres"]["remove_when_none"].remove("test/tests/support/commit_proxy.rs")
-    rendered = (json.dumps(legacy, indent=2) + "\n").encode("utf-8")
+    # Frozen bytes from _LEGACY_B206_REVISION, independent of current profiles.
+    rendered = (source / _LEGACY_B206_PROFILE_PATH).read_bytes()
     if hashlib.sha256(rendered).hexdigest() != _LEGACY_B206_PROFILE_SHA256:
         raise AssertionError("legacy b206 profile inventory bytes changed")
     return rendered
@@ -143,6 +137,8 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("grpc", None)
     lock["profiles"].pop("http_idempotency", None)
     lock["profiles"].pop("jobs", None)
+    lock["profiles"].pop("messaging", None)
+    lock["profiles"].pop("outbox", None)
     lock["profiles"].pop("webhooks", None)
     lock["profiles"].pop("inbound_webhooks", None)
     lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
@@ -161,6 +157,8 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("grpc", None)
     lock["profiles"].pop("http_idempotency", None)
     lock["profiles"].pop("jobs", None)
+    lock["profiles"].pop("messaging", None)
+    lock["profiles"].pop("outbox", None)
     lock["profiles"].pop("webhooks", None)
     lock["profiles"].pop("inbound_webhooks", None)
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
@@ -174,8 +172,8 @@ def install_derived_outbound_only_none(source: Path, target: Path) -> None:
         json.dumps(outbound_only, indent=2) + "\n", encoding="utf-8"
     )
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
-    # The outbound generation's four-field shape, whatever an earlier
-    # fixture left in the lock: a missing selection there means `none`.
+    # The DNS-bearing outbound generation's four-field shape: a missing
+    # later selection means `none` during replay.
     profiles = lock["profiles"]
     lock["profiles"] = {
         "database": profiles["database"],
@@ -183,6 +181,7 @@ def install_derived_outbound_only_none(source: Path, target: Path) -> None:
         "outbound_http": profiles.get("outbound_http", "none"),
         "agent_harness": profiles["agent_harness"],
     }
+    lock["source"]["checkout_revision"] = _HISTORICAL_OUTBOUND_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -204,6 +203,7 @@ def install_derived_http_idempotency_only_none(source: Path, target: Path) -> No
         "http_idempotency": profiles.get("http_idempotency", "none"),
         "agent_harness": profiles["agent_harness"],
     }
+    lock["source"]["checkout_revision"] = _HISTORICAL_HTTP_IDEMPOTENCY_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -259,6 +259,8 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
         grpc="none",
         http_idempotency="none",
         jobs="none",
+        messaging="none",
+        outbox="none",
         webhooks="none",
         inbound_webhooks="none",
         agent_harness="core",
@@ -307,6 +309,8 @@ def assert_preflight_extraction(source: Path, work: Path) -> None:
             grpc="none",
             http_idempotency="none",
             jobs="none",
+            messaging="none",
+            outbox="none",
             webhooks="none",
             inbound_webhooks="none",
             agent_harness="core",
@@ -362,9 +366,10 @@ def must_refuse(
         raise AssertionError(f"{label}: initializer unexpectedly succeeded")
     if (
         label not in {
-            "duplicate-db", "duplicate-authn", "duplicate-outbound-http", "duplicate-outbound-auth", "duplicate-http-idempotency",
-            "duplicate-jobs", "jobs-flag-and-environment", "duplicate-webhooks", "webhooks-flag-and-environment",
-            "duplicate-inbound-webhooks",
+            "duplicate-db", "duplicate-authn", "duplicate-outbound-http", "duplicate-outbound-auth",
+            "duplicate-http-idempotency", "duplicate-jobs", "jobs-flag-and-environment", "duplicate-messaging",
+            "messaging-flag-and-environment", "duplicate-outbox", "outbox-flag-and-environment",
+            "duplicate-webhooks", "webhooks-flag-and-environment", "duplicate-inbound-webhooks",
         }
         and "may be supplied once" in result.stderr
     ):
@@ -409,7 +414,8 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
 
 def assert_profile_packs(
     source: Path, target: Path, *, database: str, authn: str, outbound_http: str, http_idempotency: str,
-    jobs: str, webhooks: str = "none", inbound_webhooks: str = "none", outbound_auth: str = "none", grpc: str = "none",
+    jobs: str, outbound_auth: str = "none", grpc: str = "none", messaging: str = "none", outbox: str = "none",
+    webhooks: str = "none", inbound_webhooks: str = "none",
 ) -> None:
     assert_profile_pack(source, target, "postgres", database == "postgres")
     assert_profile_pack(source, target, "authn", authn != "none")
@@ -421,6 +427,7 @@ def assert_profile_packs(
     assert_profile_pack(
         source, target, "outbound-auth-grpc", grpc == "enabled" and outbound_auth == "oauth2-client-credentials"
     )
+    assert_profile_pack(source, target, "config-url", messaging == "nats-jetstream" or outbound_auth == "oauth2-client-credentials")
     shared_selected = authn != "none" or outbound_http == "bounded" or grpc == "enabled"
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
     assert_profile_pack(
@@ -434,6 +441,12 @@ def assert_profile_packs(
     assert_profile_pack(
         source, target, "jobs-http-idempotency", jobs == "postgres" and http_idempotency == "postgres"
     )
+    assert_profile_pack(source, target, "outbox", outbox == "postgres")
+    assert_profile_pack(source, target, "messaging", messaging == "nats-jetstream")
+    assert_profile_pack(source, target, "worker", jobs == "postgres" or messaging == "nats-jetstream")
+    assert_profile_pack(source, target, "service-secrets", database == "postgres" or messaging == "nats-jetstream")
+    assert_profile_pack(source, target, "integration", database == "postgres" or messaging == "nats-jetstream")
+    assert_profile_pack(source, target, "jobs-messaging", jobs == "postgres" and messaging == "nats-jetstream")
     assert_profile_pack(source, target, "webhooks-common", webhooks == "durable" or inbound_webhooks == "standard-webhooks")
     assert_profile_pack(source, target, "webhooks", webhooks == "durable")
     assert_profile_pack(source, target, "inbound-webhooks", inbound_webhooks == "standard-webhooks")
@@ -473,6 +486,12 @@ def assert_lock_jobs(target: Path, expected: str) -> None:
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     if lock["profiles"].get("jobs") != expected:
         raise AssertionError(f"template.lock did not record jobs={expected}")
+
+
+def assert_lock_outbox(target: Path, expected: str) -> None:
+    lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
+    if lock["profiles"].get("outbox") != expected:
+        raise AssertionError(f"template.lock did not record outbox={expected}")
 
 
 def assert_lock_webhooks(target: Path, webhooks: str, inbound_webhooks: str) -> None:
@@ -584,6 +603,30 @@ def assert_jobs_lock_refusals(source: Path, target: Path) -> None:
         lock_path.write_bytes(original)
 
 
+def assert_outbox_lock_refusals(source: Path, target: Path) -> None:
+    lock_path = target / "template.lock"
+    original = lock_path.read_bytes()
+    cases = (
+        ("outbox-without-database", lambda profiles: profiles.update(outbox="postgres")),
+        ("outbox-without-jobs", lambda profiles: profiles.update(outbox="postgres", database="postgres")),
+        (
+            "outbox-without-messaging",
+            lambda profiles: profiles.update(outbox="postgres", database="postgres", jobs="postgres"),
+        ),
+        ("unknown-outbox-value", lambda profiles: profiles.update(outbox="sqlite")),
+    )
+    for label, mutate in cases:
+        lock = json.loads(original)
+        profiles = lock["profiles"]
+        mutate(profiles)
+        lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+        before = state(target)
+        result = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
+        if result.returncode == 0 or state(target) != before:
+            raise AssertionError(f"{label} outbox lock shape was not a preserving refusal")
+        lock_path.write_bytes(original)
+
+
 def assert_webhook_lock_refusals(source: Path, target: Path) -> None:
     lock_path = target / "template.lock"
     original = lock_path.read_bytes()
@@ -644,6 +687,36 @@ def check(source: Path) -> None:
         must_refuse(
             source, work, "jobs-requires-database", "--database", "none", "--jobs", "postgres",
             expected="JOBS=postgres requires DATABASE=postgres",
+        )
+        must_refuse(source, work, "unknown-messaging", "--messaging", "amqp", expected="MESSAGING is unsupported")
+        must_refuse(
+            source, work, "duplicate-messaging", "--messaging", "none", "--messaging", "nats-jetstream",
+            expected="--messaging may be supplied once",
+        )
+        must_refuse(
+            source, work, "messaging-flag-and-environment", "--messaging", "none",
+            environment={"MESSAGING": "none"}, expected="MESSAGING may be supplied once, by flag or environment",
+        )
+        must_refuse(source, work, "unknown-outbox", "--outbox", "sqlite", expected="OUTBOX is unsupported")
+        must_refuse(
+            source, work, "duplicate-outbox", "--outbox", "none", "--outbox", "postgres",
+            expected="--outbox may be supplied once",
+        )
+        must_refuse(
+            source, work, "outbox-flag-and-environment", "--outbox", "none",
+            environment={"OUTBOX": "none"}, expected="OUTBOX may be supplied once, by flag or environment",
+        )
+        must_refuse(
+            source, work, "outbox-requires-database", "--outbox", "postgres",
+            expected="OUTBOX=postgres requires DATABASE=postgres",
+        )
+        must_refuse(
+            source, work, "outbox-requires-jobs", "--database", "postgres", "--outbox", "postgres",
+            expected="OUTBOX=postgres requires JOBS=postgres",
+        )
+        must_refuse(
+            source, work, "outbox-requires-messaging", "--database", "postgres", "--jobs", "postgres",
+            "--outbox", "postgres", expected="OUTBOX=postgres requires MESSAGING=nats-jetstream",
         )
         must_refuse(source, work, "unknown-webhooks", "--webhooks", "ephemeral", expected="WEBHOOKS is unsupported")
         must_refuse(
@@ -706,6 +779,7 @@ def check(source: Path) -> None:
         assert_lock_grpc(target, "none")
         assert_lock_http_idempotency(target, "none")
         assert_lock_jobs(target, "none")
+        assert_lock_outbox(target, "none")
         assert_lock_webhooks(target, "none", "none")
         for removed in [
             "make/source.mk", "scripts/ci/template-init-check.sh", "scripts/tests/template-init-safety.py",
@@ -752,17 +826,18 @@ def check(source: Path) -> None:
         repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
         if repeat.returncode or state(target) != after:
             raise AssertionError("matching complete-lock initialization was not a byte-preserving no-op")
-        # A complete previous-generation inventory is accepted only for no-op
+        # A complete DNS-generation inventory is accepted only for no-op
         # replay. Current projection must never select or emit its DNS pack.
         inventory_path = target / "scripts/lib/template_profiles.json"
+        lock_path = target / "template.lock"
         current_inventory = inventory_path.read_bytes()
-        historical_inventory = json.loads(current_inventory)
-        historical_inventory["egress-dns"] = _HISTORICAL_EGRESS_PACK
-        inventory_path.write_text(json.dumps(historical_inventory, indent=2) + "\n", encoding="utf-8")
+        current_lock = lock_path.read_bytes()
+        install_derived_outbound_only_none(source, target)
         historical_before = state(target)
         historical_repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
         if historical_repeat.returncode or state(target) != historical_before:
             raise AssertionError("previous DNS inventory replay was not byte-preserving")
+        historical_inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
         historical_inventory["unknown-pack"] = {"remove_when_unselected": [], "markers": []}
         inventory_path.write_text(json.dumps(historical_inventory, indent=2) + "\n", encoding="utf-8")
         unknown_before = state(target)
@@ -770,11 +845,13 @@ def check(source: Path) -> None:
         if unknown_repeat.returncode == 0 or state(target) != unknown_before:
             raise AssertionError("unknown historical inventory was accepted or mutated")
         inventory_path.write_bytes(current_inventory)
+        lock_path.write_bytes(current_lock)
         assert_outbound_lock_refusals(source, target)
         assert_outbound_auth_lock_refusals(source, target)
         assert_grpc_lock_refusals(source, target)
         assert_http_idempotency_lock_refusals(source, target)
         assert_jobs_lock_refusals(source, target)
+        assert_outbox_lock_refusals(source, target)
         assert_webhook_lock_refusals(source, target)
         install_derived_auth_only_none(source, target)
         auth_only_before = state(target)
@@ -996,6 +1073,53 @@ def check(source: Path) -> None:
                 "'template initialization choices differ from the complete template.lock': "
                 f"{jobs_revert_mismatch.stderr}"
             )
+        messaging_target = work / "messaging-replay"
+        clone(source, messaging_target)
+        messaging_result = init(
+            source, messaging_target, "--database", "none", "--jobs", "none",
+            "--messaging", "nats-jetstream", "--agent-harness", "core",
+        )
+        if messaging_result.returncode:
+            raise AssertionError(f"messaging-only initialization failed: {messaging_result.stderr}")
+        assert_profile_pack(source, messaging_target, "messaging", True)
+        assert_profile_pack(source, messaging_target, "worker", True)
+        assert_profile_pack(source, messaging_target, "integration", True)
+        lock = json.loads((messaging_target / "template.lock").read_text(encoding="utf-8"))
+        if lock["profiles"].get("messaging") != "nats-jetstream":
+            raise AssertionError("template.lock did not record messaging=nats-jetstream")
+        messaging_before = state(messaging_target)
+        messaging_replay = init(
+            source, messaging_target, "--database", "none", "--jobs", "none",
+            "--messaging", "nats-jetstream", "--agent-harness", "core",
+        )
+        if messaging_replay.returncode or state(messaging_target) != messaging_before:
+            raise AssertionError("complete messaging lock replay changed target bytes")
+        outbox_target = work / "outbox-replay"
+        clone(source, outbox_target)
+        outbox_result = init(
+            source, outbox_target, "--database", "postgres", "--jobs", "postgres",
+            "--messaging", "nats-jetstream", "--outbox", "postgres", "--agent-harness", "core",
+        )
+        if outbox_result.returncode:
+            raise AssertionError(f"outbox initialization failed: {outbox_result.stderr}")
+        assert_profile_packs(
+            source, outbox_target, database="postgres", authn="none", outbound_http="none",
+            http_idempotency="none", jobs="postgres", outbox="postgres",
+        )
+        assert_lock_outbox(outbox_target, "postgres")
+        outbox_before = state(outbox_target)
+        outbox_replay = init(
+            source, outbox_target, "--database", "postgres", "--jobs", "postgres",
+            "--messaging", "nats-jetstream", "--outbox", "postgres", "--agent-harness", "core",
+        )
+        if outbox_replay.returncode or state(outbox_target) != outbox_before:
+            raise AssertionError("complete outbox lock replay changed target bytes")
+        outbox_revert_mismatch = init(
+            source, outbox_target, "--database", "postgres", "--jobs", "postgres",
+            "--messaging", "nats-jetstream", "--outbox", "none", "--agent-harness", "core",
+        )
+        if outbox_revert_mismatch.returncode == 0 or state(outbox_target) != outbox_before:
+            raise AssertionError("complete outbox lock accepted a profile migration back to none")
         webhooks_target = work / "webhooks-replay"
         clone(source, webhooks_target)
         webhooks_result = init(

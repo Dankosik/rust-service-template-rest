@@ -32,6 +32,9 @@ infra-http = { workspace = true }
 # template:begin grpc:service-grpc-dependencies
 infra-grpc = { workspace = true }
 # template:end grpc:service-grpc-dependencies
+# template:begin messaging:service-messaging-dependency
+infra-messaging = { workspace = true }
+# template:end messaging:service-messaging-dependency
 # template:begin inbound-webhooks:service-webhooks-dependency
 infra-webhooks = { workspace = true }
 # template:end inbound-webhooks:service-webhooks-dependency
@@ -41,13 +44,15 @@ infra-bearerauthn = { workspace = true }
 # template:begin postgres:service-postgres-dependency
 infra-postgres = { workspace = true }
 migrate = { workspace = true }
-secrecy = { workspace = true }
 # template:end postgres:service-postgres-dependency
 # template:begin http-idempotency:service-http-idempotency-dependency
 infra-idempotency-store = { workspace = true }
 # template:end http-idempotency:service-http-idempotency-dependency
 infra-telemetry = { workspace = true }
 service-config = { workspace = true }
+# template:begin service-secrets:service-secrecy-dependency
+secrecy = { workspace = true }
+# template:end service-secrets:service-secrecy-dependency
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
 tokio-util = { workspace = true, features = ["rt"] }
