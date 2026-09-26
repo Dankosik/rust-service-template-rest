@@ -97,8 +97,8 @@ pub(crate) enum BootstrapError {
     // template:end authn:bootstrap-authn-errors
     #[error(transparent)]
     HttpContract(#[from] infra_http::FinalizeError),
-    #[error("http idempotency composition: {0}")]
-    HttpIdempotencyComposition(#[source] Box<dyn Error + Send + Sync>),
+    #[error("http contract composition: {0}")]
+    HttpComposition(#[source] Box<dyn Error + Send + Sync>),
     // template:begin postgres:bootstrap-errors
     #[error("configuration is invalid: postgres.dsn: {0}")]
     PostgresDsn(#[from] infra_postgres::DsnError),
@@ -608,7 +608,7 @@ struct Prepared<'a> {
     postgres_pool: Option<PgPool>,
     // template:end postgres:bootstrap-prepared-field
     // template:begin http-idempotency:bootstrap-http-idempotency-prepared-field
-    /// A unique move: agreement consumes it before admission.
+    /// A unique move: activation consumes it after route assembly.
     composer: Composer,
     // template:end http-idempotency:bootstrap-http-idempotency-prepared-field
     // template:begin inbound-webhooks:bootstrap-webhooks-prepared-field
@@ -644,7 +644,7 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         &mut composer,
         // template:end http-idempotency:bootstrap-http-idempotency-contract-composer
     )
-    .map_err(BootstrapError::HttpIdempotencyComposition)?;
+    .map_err(BootstrapError::HttpComposition)?;
     let routes = match auth {
         PreparedAuth::None => contract.finalize_public()?,
         // template:begin authn:bootstrap-authn-finalize-enabled

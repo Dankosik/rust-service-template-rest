@@ -35,9 +35,14 @@ pub fn commit_definitely_failed(code: &str) -> bool {
     code.starts_with("23") || (code.starts_with("40") && code != "40003")
 }
 
-/// Whether the idempotency store treats a database code as unavailable.
+/// Whether a SQLSTATE reports a transient condition that a later attempt may
+/// not meet: a lost connection (class `08`), exhausted resources (class
+/// `53`), a serialization failure, deadlock, or uncertain statement completion
+/// (`40001`, `40P01`, `40003`), a server shutting down or starting (`57P01`,
+/// `57P02`, `57P03`), a cancelled statement (`57014`), or a read-only session
+/// (`25006`).
 #[must_use]
-pub fn idempotency_transient(code: &str) -> bool {
+pub fn transient(code: &str) -> bool {
     code.starts_with("08")
         || code.starts_with("53")
         || matches!(
@@ -74,9 +79,9 @@ mod tests {
         assert!(commit_definitely_failed("23505"));
         assert!(commit_definitely_failed("40P01"));
         assert!(!commit_definitely_failed("40003"));
-        assert!(idempotency_transient("08006"));
-        assert!(idempotency_transient("57014"));
-        assert!(!idempotency_transient("25P02"));
+        assert!(transient("08006"));
+        assert!(transient("57014"));
+        assert!(!transient("25P02"));
     }
 
     #[test]
