@@ -1152,7 +1152,9 @@ def _validate_staged_runtime(snapshot: Path, inputs: InitInputs, tools_root: Pat
     except OSError as error:
         raise ToolFailure("staged OpenAPI generator is unavailable") from error
     if generated.returncode:
-        raise Refusal(f"staged OpenAPI generation failed (exit {generated.returncode})")
+        diagnostic = generated.stderr.decode("utf-8", errors="replace").strip()
+        failure = f"staged OpenAPI generation failed (exit {generated.returncode})"
+        raise Refusal(f"{failure}\n{diagnostic}" if diagnostic else failure)
     (snapshot / "api/openapi/service.yaml").write_bytes(generated.stdout)
 
 

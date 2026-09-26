@@ -96,6 +96,14 @@ library behavior, not a detached application retry. Bound all active callers
 by the existing inbound/job admission and their deadlines; the only cache key
 is unit, so cache cardinality cannot grow with caller input.
 
+The private owner boxes the concrete Moka lookup future before `timeout_at`.
+This type boundary addresses Rust's [higher-ranked async auto-trait inference
+limitation](https://github.com/rust-lang/rust/issues/64552#issuecomment-669728225)
+when acquisition is carried by a `Send` transport future. It adds one local
+future allocation, not a task, cache or token source; dropping the caller still
+drops that lookup. Keep the cancellation/deadline proof when simplifying this
+boundary on a later compiler.
+
 `CachedCredential` has private sensitive header and optional Tokio monotonic
 hard expiry. Representable positive expiry is `acquisition_start + expires_in`.
 Its cache cutoff is `hard_expiry - 10s`; if the cutoff is already reached,

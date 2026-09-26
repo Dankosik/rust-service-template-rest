@@ -669,10 +669,11 @@ async fn accept_loop(
                 tasks.spawn(tracker.clone().track_future(async move {
                     let _permit = permit;
                     match tls {
-                        Some(acceptor) => match tokio::time::timeout(INITIAL_CONNECTION_TIMEOUT, acceptor.accept(stream)).await {
-                            Ok(Ok(stream)) => serve_connection(stream, service, cancel, tracker).await,
-                            Err(_) | Ok(Err(_)) => {}
-                        },
+                        Some(acceptor) => {
+                            if let Ok(Ok(stream)) = tokio::time::timeout(INITIAL_CONNECTION_TIMEOUT, acceptor.accept(stream)).await {
+                                serve_connection(stream, service, cancel, tracker).await;
+                            }
+                        }
                         None => {
                             if wait_for_first_byte(&stream).await {
                                 serve_connection(stream, service, cancel, tracker).await;
