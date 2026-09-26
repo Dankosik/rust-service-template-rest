@@ -939,7 +939,7 @@ fn transactional_gate_registry(gate: Arc<TransactionGateState>) -> infra_jobs::R
                     gate.complete.notified().await;
                     job.complete_in_tx(tx).await.map_err(|error| match error {
                         infra_jobs::CompleteError::Database(error) => Step::Query(error),
-                        _ => Step::Rejected,
+                        infra_jobs::CompleteError::StaleClaim => Step::Rejected,
                     })
                 })
                 .await;

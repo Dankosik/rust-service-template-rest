@@ -99,16 +99,9 @@ paths:
         schema:
           type: string
       requestBody:
-        description: signed raw delivery bytes
+        description: Original signed binary body, at most 128 KiB. No JSON decoding or payload schema is required.
         content:
-          '*/*':
-            schema:
-              type: array
-              items:
-                type: integer
-                format: int32
-                minimum: 0
-        required: true
+          '*/*': {}
       responses:
         '204':
           description: webhook receipt is durable
