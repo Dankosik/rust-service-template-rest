@@ -890,16 +890,8 @@ def _contains_profile_marker(contents: bytes) -> bool:
     )
 
 
-def parse_manifest(
-    snapshot_root: Path, *, harness: str = "all", target_repository: str | None = None,
-    initializing: bool = False,
-) -> tuple[str, ...]:
-    """Validate ownership; selected outputs may omit unselected adapter inputs.
-
-    Committed template sources use the default all-adapter closure. A derived
-    repository keeps that same portable manifest, with its lock selecting which
-    adapter inputs must physically exist.
-    """
+def manifest_entries(snapshot_root: Path) -> tuple[str, ...]:
+    """Read safe ownership paths before validating their materialized bytes."""
 
     manifest = Path(snapshot_root) / "template-owned.paths"
     _regular_file(manifest, "template-owned.paths")
@@ -920,6 +912,21 @@ def parse_manifest(
         for other_index, other in enumerate(plain):
             if index != other_index and other.startswith(f"{current}/"):
                 raise Refusal("template-owned.paths has overlapping owners")
+    return tuple(entries)
+
+
+def parse_manifest(
+    snapshot_root: Path, *, harness: str = "all", target_repository: str | None = None,
+    initializing: bool = False,
+) -> tuple[str, ...]:
+    """Validate ownership; selected outputs may omit unselected adapter inputs.
+
+    Committed template sources use the default all-adapter closure. A derived
+    repository keeps that same portable manifest, with its lock selecting which
+    adapter inputs must physically exist.
+    """
+
+    entries = manifest_entries(snapshot_root)
     if target_repository is not None and not isinstance(target_repository, str):
         raise Refusal("target repository identity is invalid")
     selected = set(selected_adapters(harness))

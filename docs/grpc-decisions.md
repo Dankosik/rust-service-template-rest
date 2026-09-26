@@ -157,8 +157,9 @@ deadline or cancellation still wins. The existing observation owner records
 the same closed fallback code; tonic's `infer_grpc_status` helper is private,
 so this small HTTP-code mapping follows the locked
 [status implementation](https://docs.rs/tonic/0.14.6/src/tonic/status.rs.html).
-It does not synthesize fallback trailers or reinterpret body errors as a peer
-authentication rejection.
+It does not synthesize fallback trailers or reinterpret a transport body error
+as a peer authentication rejection. Observation covers this body boundary;
+typed-message decoding downstream can produce a different native result.
 
 <!-- template:begin outbound-auth-grpc:docs-grpc-oauth-eviction -->
 The private OAuth bridge reuses `Credentials::invalidate` and Moka's
@@ -174,13 +175,22 @@ errors and consumer drop bypass or cancel the hook. The hook returns no new
 trailers, preserving the original frame.
 
 Explicit status, including malformed status becoming `UNKNOWN`, wins over
-HTTP fallback. Only an observed `UNAUTHENTICATED` or absent-status HTTP 401
-conditionally evicts the exact used credential. `PERMISSION_DENIED` retains it.
+HTTP fallback. An observed `UNAUTHENTICATED` or a completed HTTP 401 without
+`grpc-status` conditionally evicts the exact used credential. As with the HTTP
+owner, a completed 401 remains rejection evidence if downstream protobuf or
+framing decoding fails. For example, HTTP 401 with a truncated gRPC frame and
+clean EOF evicts conditionally while tonic still returns native `INTERNAL`.
+Transport `Body::Error`, reset, deadline, cancellation or consumer drop before
+completion supplies no such completed-response evidence. No result is rewritten
+and no framing parser is added. `PERMISSION_DENIED` retains the credential.
 Eviction is awaited within the original remaining deadline; exhausted cleanup
 does not alter the response or create background work. This adds only optional
 use of the already locked body utility and Tokio sync feature, with no new
 crate version, custom body state machine, token getter, cache, or replay.
-Reopen if a supported library hook replaces these response-lifetime combinators.
+Reopen if an accepted requirement needs eviction or observation to depend on the
+final typed-decoder result and a supported hook becomes available, or a larger
+client wrapper is explicitly justified. A payload-dependent empty-body heuristic
+would miss ordinary gateway 401 bodies and is not the selected HTTP policy.
 <!-- template:end outbound-auth-grpc:docs-grpc-oauth-eviction -->
 
 Existing rustls/tokio-rustls configs explicitly select TLS 1.3, normal hostname
@@ -189,6 +199,14 @@ Tonic `ServerTlsConfig` has no protocol-floor setter; relying on absence of a
 Cargo `tls12` feature is unsound when another retained dependency enables it.
 Operator-selected plaintext remains valid with bearer authentication behind
 the deployment's trust boundary.
+
+The TLS client keeps a transport-only HTTP routing URI in tonic and preserves
+the HTTPS request origin with `Endpoint::origin`. Tower's `map_request` pins the
+custom connector to the original HTTPS destination, so hyper-rustls remains the
+sole TLS owner with the same hostname, trust, identity and TLS 1.3 checks. In
+tonic 0.14.6, `transport/channel/service/connector.rs` applies an additional TLS
+gate to HTTPS routing URIs whenever another package enables `_tls-any`; the
+routing/origin separation keeps the client correct under workspace feature union.
 
 The listener retains connection permits through TLS handshakes and connection
 drop. Hyper enforces the header/stream limits. An initial five-second admission

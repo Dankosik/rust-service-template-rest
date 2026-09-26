@@ -203,6 +203,16 @@ Manifest files are replaced as whole files; directory entries end in `/` and
 own their descendants, including deletion of target-only owned content. Removing
 an entry from the source manifest relinquishes ownership of that target path.
 Standalone scripts are individual entries, so service siblings remain local.
+Profile-marked sections in portable owners are materialized by the committed
+source initializer's marker renderer using the target lock before purity checks,
+copying, and parity comparison. The manifest still owns each complete output
+file, so a dirty portable Makefile or CI helper refuses full sync. When projection is needed, its source
+helper and profile-inventory dirt also refuses; the reported source revision remains
+the captured Git revision, not a hash of the selected output. Legacy locks use
+the same normalized selections as initialization. An already initialized source
+has no removable markers and must match the target's capability selections.
+Marker-free older or initialized sources need no one-shot initializer helper;
+they follow the same strict purity and copy path.
 Generated adapters are rendered by the committed source helpers. Full sync
 prunes only the declared paths of unselected adapters and cannot restore an
 absent database pack.

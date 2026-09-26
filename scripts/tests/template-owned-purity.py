@@ -7,7 +7,9 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -30,11 +32,11 @@ REQUIRED_SYNC_HELPERS = {
 }
 
 
-def load_state(root: Path):
-    module_path = root / "scripts/lib/template_state.py"
-    spec = importlib.util.spec_from_file_location("template_state", module_path)
+def load_module(root: Path, name: str):
+    module_path = root / f"scripts/lib/{name}.py"
+    spec = importlib.util.spec_from_file_location(name, module_path)
     if spec is None or spec.loader is None:
-        raise AssertionError("template_state.py cannot be imported")
+        raise AssertionError(f"{name}.py cannot be imported")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -42,8 +44,10 @@ def load_state(root: Path):
 
 
 def check(root: Path) -> None:
-    state = load_state(root)
-    entries = state.parse_manifest(root)
+    state = load_module(root, "template_state")
+    initializer = load_module(root, "template_init")
+    synchronizer = load_module(root, "template_sync")
+    entries = state.manifest_entries(root)
     owned = set(entries)
     profile = json.loads((root / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
     expected_profiles = {
@@ -105,13 +109,66 @@ def check(root: Path) -> None:
             contents = file.read_bytes()
             if not contents:
                 raise AssertionError(f"manifest owner is empty: {file.relative_to(root)}")
-            if state._contains_profile_marker(contents):
-                raise AssertionError(f"manifest-owned file contains a profile marker: {file.relative_to(root)}")
             if (
                 state.TEMPLATE_REPOSITORY.encode("utf-8") in contents
                 and file.relative_to(root).as_posix() not in state._TEMPLATE_PROVENANCE_OWNERS
             ):
                 raise AssertionError(f"manifest-owned file contains template identity: {file.relative_to(root)}")
+    # Purity is a contract of materialized portable bytes. Both selections use
+    # the same initializer renderer as sync; unknown or malformed markers still
+    # refuse, and parse_manifest still rejects every marker in the output.
+    for grpc in ("none", "enabled"):
+        with tempfile.TemporaryDirectory(prefix="template-owned-purity-") as temporary:
+            projected = Path(temporary)
+            for entry in entries:
+                owner = root / entry.rstrip("/")
+                if owner.is_symlink() or entry.endswith("/") != owner.is_dir():
+                    raise AssertionError(f"unsafe manifest owner: {entry}")
+                for file in state._manifest_files(root, entry):
+                    state._regular_file(file, file.relative_to(root).as_posix())
+                    destination = projected / file.relative_to(root)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(file, destination)
+            inventory = "scripts/lib/template_profiles.json"
+            shutil.copy2(root / inventory, projected / inventory)
+            profiles = state.validate_profiles({"database": "none", "agent_harness": "all"})
+            profiles["grpc"] = grpc
+            lock = {
+                "identity": {
+                    "service_name": "purity-api", "repository": "https://github.com/example/purity-api",
+                    "description": "Purity API", "codeowner": "@example/platform",
+                },
+                "profiles": profiles,
+            }
+            initializer.project_portable(projected, lock)
+            state.parse_manifest(projected, target_repository=lock["identity"]["repository"])
+            makefile = (projected / "make/template.mk").read_text(encoding="utf-8")
+            if ("grpc-check:" in makefile) != (grpc == "enabled"):
+                raise AssertionError(f"portable Make targets do not match grpc={grpc}")
+            # Pure older/derived sources do not need one-shot initializer
+            # inputs. Reuse this materialized tree without its inventory.
+            (projected / inventory).unlink()
+            baseline = {
+                file.relative_to(projected): file.read_bytes()
+                for entry in entries for file in state._manifest_files(projected, entry)
+            }
+            complete_lock = initializer._lock(
+                initializer.InitInputs(**lock["identity"], **profiles), "0" * 40, "complete",
+            )
+            synchronizer._project_portable(projected, complete_lock)
+            (projected / "template.lock").write_text(json.dumps(complete_lock), encoding="utf-8")
+            synchronizer._project_portable(projected, complete_lock)
+            state.parse_manifest(projected, target_repository=lock["identity"]["repository"])
+            if any((projected / path).read_bytes() != contents for path, contents in baseline.items()):
+                raise AssertionError("marker-free source projection changed portable bytes")
+            different = {**complete_lock, "profiles": {**profiles, "grpc": "enabled" if grpc == "none" else "none"}}
+            try:
+                synchronizer._project_portable(projected, different)
+            except state.Refusal as error:
+                if "different capability profiles" not in str(error):
+                    raise
+            else:
+                raise AssertionError("initialized source accepted different capability profiles")
     for path in SOURCE_ONLY_REQUIRED_PATHS:
         candidate = root / path
         if not candidate.exists():

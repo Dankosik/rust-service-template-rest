@@ -189,9 +189,17 @@ One sensitive bearer value is injected at opening. A stream does not refresh it
 mid-call. An observed resource `UNAUTHENTICATED` conditionally removes only the
 exact credential used by that call while it is still cached; a newer replacement
 survives. This covers native status in initial headers or terminal trailers, and
-HTTP 401 fallback only when no `grpc-status` is present. `PERMISSION_DENIED`,
+HTTP 401 whose clean transport completion is observed without `grpc-status`.
+`PERMISSION_DENIED`,
 including native HTTP 403 fallback, keeps the credential. Explicit `grpc-status`
 takes precedence over HTTP status, including malformed values mapping to `UNKNOWN`.
+
+A completed HTTP 401 is rejection evidence independently of later protobuf or
+gRPC framing decoding. A truncated payload can therefore yield native `INTERNAL`
+after conditional eviction. Transport body errors or cancellation before
+completion do not trigger this fallback; a decoder that stops consumption early
+also supplies no completed-response evidence. The decoder result is never
+rewritten.
 
 Cleanup spends only the original remaining deadline and never changes the
 response or replays the RPC. Eviction is not guaranteed after budget exhaustion
@@ -218,8 +226,13 @@ second-signal handling and exit meanings remain: 0 clean, 3 overrun, 1 startup
 failure. Partial startup resources enter the same bounded cleanup path.
 
 Tracing uses the existing providers and W3C propagation. Known generated methods
-have one full-call outcome and duration through final stream status or drop;
-routine health polling and unknown peer paths create no method series. Counters
+have one outcome and duration through final stream status or drop. Server
+outcomes cover the governed RPC path. Client outcomes cover initial wire status,
+trailers or observed HTTP fallback, transport failure, deadline and cancellation
+at the governed body boundary; they do not classify every downstream typed
+decoder result. Thus a completed HTTP 401 can be observed as authentication
+rejection while a malformed payload produces native `INTERNAL` for the caller.
+Routine health polling and unknown peer paths create no method series. Counters
 and histograms are `grpc_calls_total` and `grpc_call_duration_seconds`, with
 finite method/direction/outcome labels. Payloads, metadata values, bearer tokens,
 identities and raw errors are never transport attributes.

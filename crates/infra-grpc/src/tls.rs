@@ -4,6 +4,7 @@ use hyper_rustls::HttpsConnectorBuilder;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tonic::transport::{Channel, Endpoint};
+use tower::ServiceExt as _;
 
 use crate::Error;
 use crate::client::ClientTlsMaterial;
@@ -61,7 +62,17 @@ pub(crate) fn client_channel(
         .https_only()
         .enable_http2()
         .build();
-    Ok(endpoint.connect_with_connector_lazy(connector))
+    let secure_uri = endpoint.uri().clone();
+    let mut transport_parts = secure_uri.clone().into_parts();
+    transport_parts.scheme = Some(http::uri::Scheme::HTTP);
+    let transport_uri =
+        http::Uri::from_parts(transport_parts).map_err(|_| Error::InvalidConfiguration)?;
+    // The custom connector owns TLS. An HTTPS routing URI makes tonic add its
+    // own TLS gate when another package enables `_tls-any`. Keep the wire
+    // origin HTTPS and pin every real connection to the original secure URI.
+    let transport = Endpoint::from(transport_uri).origin(secure_uri.clone());
+    let connector = connector.map_request(move |_: http::Uri| secure_uri.clone());
+    Ok(transport.connect_with_connector_lazy(connector))
 }
 
 fn client_config(material: ClientTlsMaterial) -> Result<ClientConfig, Error> {

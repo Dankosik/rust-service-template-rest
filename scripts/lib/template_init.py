@@ -51,6 +51,8 @@ from template_state import (
     lock_has_explicit_jobs,
     lock_has_explicit_outbound_http,
     load_lock,
+    manifest_entries,
+    _manifest_files,
     OUTBOUND_HTTP_CHOICES,
     OUTBOUND_AUTH_CHOICES,
     parse_manifest,
@@ -314,6 +316,7 @@ _GRPC_PROFILE_INVENTORY_KEYS = _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS | {
     "grpc",
     "grpc-none",
     "grpc-authn",
+    "grpc-transport-tests",
     "grpc-jwt",
     "outbound-auth-grpc",
     "client-integrations",
@@ -537,7 +540,7 @@ def _profile_data(
         )
         markers.extend(_markers("client-integrations", section["markers"]))
     if include_grpc:
-        for profile in ("grpc", "grpc-none", "grpc-authn", "grpc-jwt", "outbound-auth-grpc"):
+        for profile in ("grpc", "grpc-none", "grpc-authn", "grpc-transport-tests", "grpc-jwt", "outbound-auth-grpc"):
             section = raw[profile]
             if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
@@ -751,6 +754,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("grpc")
         if inputs.authn != "none":
             selected.add("grpc-authn")
+        if inputs.authn in {"none", "oidc-introspection"}:
+            selected.add("grpc-transport-tests")
         if inputs.authn == "oidc-jwt":
             selected.add("grpc-jwt")
         if inputs.outbound_auth == "oauth2-client-credentials":
@@ -802,11 +807,14 @@ def _marker_files(root: Path) -> tuple[tuple[str, Path], ...]:
     return tuple(sorted(files))
 
 
-def _apply_markers(snapshot: Path, profiles: ProfileData, inputs: InitInputs) -> None:
+def _apply_markers(
+    snapshot: Path, profiles: ProfileData, inputs: InitInputs,
+    *, files: Sequence[tuple[str, Path]] | None = None,
+) -> None:
     expected = set(profiles.markers)
     selected = _selected_marker_profiles(inputs)
     seen: set[tuple[str, str, str]] = set()
-    for relative, path in _marker_files(snapshot):
+    for relative, path in _marker_files(snapshot) if files is None else files:
         try:
             lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         except UnicodeDecodeError:
@@ -845,6 +853,23 @@ def _apply_markers(snapshot: Path, profiles: ProfileData, inputs: InitInputs) ->
             path.write_text("".join(transformed), encoding="utf-8")
     if seen != expected:
         raise Refusal("template profile marker inventory does not match source")
+
+
+def project_portable(snapshot: Path, target_lock: dict[str, Any]) -> None:
+    """Materialize manifest bytes with the initializer's marker policy only."""
+
+    files = tuple(
+        (path.relative_to(snapshot).as_posix(), path)
+        for entry in manifest_entries(snapshot)
+        for path in _manifest_files(snapshot, entry)
+    )
+    paths = {relative for relative, _path in files}
+    profiles = _profile_data(snapshot)
+    portable = ProfileData(
+        (), {}, tuple(marker for marker in profiles.markers if marker[1] in paths), (), {},
+    )
+    inputs = InitInputs(**target_lock["identity"], **target_lock["profiles"])
+    _apply_markers(snapshot, portable, inputs, files=files)
 
 
 def _project_grpc_none(snapshot: Path, inputs: InitInputs) -> None:

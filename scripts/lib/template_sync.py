@@ -33,6 +33,9 @@ from template_state import (
     git_head,
     git_root,
     load_lock,
+    manifest_entries,
+    _contains_profile_marker,
+    _manifest_files,
     parse_json_bytes,
     parse_manifest,
     safe_relative,
@@ -62,6 +65,7 @@ SOURCE_HELPERS = (
     "scripts/harness-skills-sync.sh",
     "scripts/lib/sync-cli.sh",
 )
+PROFILE_PROJECTION_HELPERS = ("scripts/lib/template_init.py", "scripts/lib/template_profiles.json")
 _INSTRUCTION_PREFIXES = ("docs/",)
 _SETTING_LEAVES = {
     "claude": (".claude/settings.json", "env", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"),
@@ -391,6 +395,50 @@ def _run_helper(snapshot: Path, arguments: Sequence[str]) -> None:
         raise ToolFailure("required snapshot helper is unavailable") from error
     if result.returncode:
         raise Refusal(f"snapshot helper refused selected projection: {arguments[0]}")
+
+
+def _project_portable(snapshot: Path, target_lock: dict) -> bool:
+    source_lock = load_lock(snapshot)
+    if source_lock is not None:
+        # Initialized sources cannot recover sections removed by their profile.
+        if any(
+            source_lock["profiles"][name] != value
+            for name, value in target_lock["profiles"].items()
+            if name != "agent_harness"
+        ):
+            raise Refusal("initialized sync source has different capability profiles")
+        return False
+    if not any(
+        _contains_profile_marker(path.read_bytes())
+        for entry in manifest_entries(snapshot)
+        for path in _manifest_files(snapshot, entry)
+    ):
+        # Older portable sources were already pure and have no renderer API.
+        return False
+    for helper in PROFILE_PROJECTION_HELPERS:
+        _regular(snapshot / helper, helper)
+    # Load the admitted source's initializer and state together, never a derived
+    # target's stale one-shot helper. No Cargo, identity rewrite, or pack removal
+    # belongs to this portable projection.
+    script = (
+        "import sys; from pathlib import Path; "
+        "from template_init import project_portable; "
+        "from template_state import parse_json_bytes, validate_lock; "
+        "project_portable(Path(sys.argv[1]), "
+        "validate_lock(parse_json_bytes(sys.stdin.buffer.read(), 'target lock')))"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", script, os.fspath(snapshot)],
+            cwd=snapshot / "scripts/lib",
+            input=json.dumps(target_lock).encode("utf-8"),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+    except OSError as error:
+        raise ToolFailure("committed profile projection helper is unavailable") from error
+    if result.returncode:
+        raise Refusal("committed profile projection refused portable source")
+    return True
 
 
 def _projection_commands(snapshot: Path, root: Path, harness: str, mode: str) -> None:
@@ -777,7 +825,9 @@ def _render(snapshot: Path, target: Path, stage: Path, manifest: Sequence[Scope]
     _projection_commands(snapshot, stage, harness, "check")
 
 
-def _source_scopes(manifest: Sequence[Scope], selected: set[str]) -> tuple[Scope, ...]:
+def _source_scopes(
+    manifest: Sequence[Scope], selected: set[str], *, profile_projection: bool = False,
+) -> tuple[Scope, ...]:
     scopes = list(manifest)
     # The source snapshot verifies every committed generator projection before
     # it renders the selected target shape, so none of those inputs may be a
@@ -785,6 +835,9 @@ def _source_scopes(manifest: Sequence[Scope], selected: set[str]) -> tuple[Scope
     scopes.extend(_adapter_scopes(ADAPTERS, "generated"))
     scopes.extend(_adapter_scopes(selected, "settings"))
     scopes.extend(Scope(path, False) for path in SOURCE_HELPERS)
+    if profile_projection:
+        scopes.extend(Scope(path, False) for path in PROFILE_PROJECTION_HELPERS)
+    scopes.append(Scope("template.lock", False))
     return tuple(scopes)
 
 
@@ -828,6 +881,7 @@ def _run(arguments: argparse.Namespace) -> int:
         selected_webhooks(target)
         selected_inbound_webhooks(target)
         selected = set(selected_adapters(harness))
+        profile_projection = _project_portable(snapshot, target_lock)
         manifest = parse_manifest(
             snapshot,
             harness=harness,
@@ -836,7 +890,7 @@ def _run(arguments: argparse.Namespace) -> int:
         chosen_manifest = _selected_manifest(snapshot, manifest, selected, arguments.instructions_only)
         _validate_source_inputs(snapshot, selected, manifest)
         _projection_commands(snapshot, snapshot, "all", "check")
-        source_scopes = _source_scopes(chosen_manifest, selected)
+        source_scopes = _source_scopes(chosen_manifest, selected, profile_projection=profile_projection)
         _source_dirty(source, source_scopes)
         if git_head(source) != revision:
             raise Refusal("source HEAD changed during sync admission")

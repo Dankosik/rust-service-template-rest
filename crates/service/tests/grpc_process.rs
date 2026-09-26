@@ -427,6 +427,10 @@ fn listener_addresses(example: &Example) -> (String, String) {
 #[test]
 #[cfg(target_os = "linux")]
 fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
+    // The example build can cold-compile the whole selected feature graph.
+    // Finish it before starting the bounded OIDC fixture that waits for the
+    // child process's discovery request.
+    let _ = example_binary();
     let oidc = OidcFixture::new(2);
     let (certificate, private_key) = tls_material();
 

@@ -789,6 +789,12 @@
       }
     ]
   },
+  "grpc-transport-tests": {
+    "remove_when_unselected": [
+      "crates/infra-grpc/tests/transport.rs"
+    ],
+    "markers": []
+  },
   "grpc-jwt": {
     "remove_when_unselected": [
       "crates/service/tests/grpc_process.rs"

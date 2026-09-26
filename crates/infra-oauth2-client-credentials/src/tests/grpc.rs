@@ -308,6 +308,11 @@ async fn route_peer(
                         Some(Err(Status::unavailable("fixture body failure")))
                     }),
             )
+        } else if request
+            .headers()
+            .contains_key("x-fixture-truncated-message")
+        {
+            Body::new(Full::new(bytes::Bytes::from_static(&[0])))
         } else if request.headers().contains_key("x-fixture-trailers") {
             let mut trailers = http::HeaderMap::new();
             trailers.insert("peer-proof", http::HeaderValue::from_static("preserved"));
@@ -857,6 +862,48 @@ async fn grpc_http_fallback_requires_absent_status_and_completes_without_hanging
         );
         assert_eq!(resource.calls(), before_calls + 2);
     }
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
+async fn grpc_completed_http_401_evicts_even_when_native_message_decoding_fails() {
+    let tokens = Fixture::new().await;
+    let resource = ResourceFixture::new().await;
+    let credentials = tokens.credentials(&[], None);
+    let mut request = rpc(UnaryRequest::default(), Duration::from_secs(10));
+    request
+        .metadata_mut()
+        .insert("x-fixture-http-status", MetadataValue::from_static("401"));
+    request.metadata_mut().insert(
+        "x-fixture-truncated-message",
+        MetadataValue::from_static("yes"),
+    );
+    let error = tokio::time::timeout(
+        Duration::from_secs(2),
+        resource.client(&credentials).unary(request),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(error.code(), Code::Internal);
+    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(resource.calls(), 1);
+
+    let response = resource
+        .client(&credentials)
+        .unary(rpc(
+            UnaryRequest {
+                message: "success".to_owned(),
+            },
+            Duration::from_secs(10),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(response.message, "success");
+    assert_eq!(tokens.token_requests().len(), 2);
+    assert_eq!(resource.calls(), 2);
     resource.finish().await;
     tokens.finish().await;
 }
