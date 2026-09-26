@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use infra_postgres::{Closed, PgPool};
 // template:begin inbound-webhooks:test-webhooks-inbound-postgres
-use infra_postgres::{Dsn, PoolOptions};
+use infra_postgres::{Dsn, Isolation, PoolOptions};
 // template:end inbound-webhooks:test-webhooks-inbound-postgres
 
 // template:begin inbound-webhooks:test-webhooks-inbound-constants
@@ -40,6 +40,7 @@ pub(crate) async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
         &PoolOptions {
             max_connections: NonZeroU32::new(max_connections).expect("a pool size"),
             application_name: APP,
+            default_isolation: Isolation::ServerDefault,
         },
     )
     .await

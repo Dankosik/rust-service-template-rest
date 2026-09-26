@@ -33,7 +33,7 @@ use infra_idempotency_store::{
     Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey, StartupError,
     Store, WorkOutput,
 };
-use infra_postgres::{Closed, Dsn, PgPool, PoolOptions, Tx, connection};
+use infra_postgres::{Closed, Dsn, Isolation, PgPool, PoolOptions, Tx, connection};
 use integration_tests::dsn_for;
 use sqlx::Executor as _;
 use tokio::sync::Notify;
@@ -92,6 +92,7 @@ async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
         &PoolOptions {
             max_connections: NonZeroU32::new(max_connections).expect("a pool size"),
             application_name: APP,
+            default_isolation: Isolation::ServerDefault,
         },
     )
     .await
