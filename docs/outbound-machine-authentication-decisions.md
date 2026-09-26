@@ -96,17 +96,18 @@ library behavior, not a detached application retry. Bound all active callers
 by the existing inbound/job admission and their deadlines; the only cache key
 is unit, so cache cardinality cannot grow with caller input.
 
-The private OAuth HTTP hook returns a boxed `Send` future, matching the future
-shape in oauth2's [supported async adapter](https://github.com/ramosbugs/oauth2-rs/blob/5.0.0/src/reqwest_client.rs).
-This exposes `Send` at the hook's `AsyncHttpClient` associated-future boundary
-before `request_async` composes it with acquisition. Acquisition separately
-boxes the borrowed initializer as `Send` before passing it to Moka, so the
-cache's generic future receives an explicit `Send` input type. Moka's lookup
-future itself is awaited directly under `timeout_at`. Both local allocations
-preserve lazy execution: only the elected initializer polls the exchange, and
-dropping the caller drops its pending work under the original deadline. Reopen
-these type boundaries only with compiler evidence and the existing
-cancellation/deadline proof; they add no task, cache, token source, or replay.
+The private per-exchange `TokenHttpClient` owns a clone of the fixed endpoint,
+a clone of the shared outbound HTTP client, and the absolute attempt deadline.
+It implements `oauth2::AsyncHttpClient` directly for every call lifetime,
+exposing a boxed `Send` associated future as in oauth2's
+[supported async adapter](https://github.com/ramosbugs/oauth2-rs/blob/5.0.0/src/reqwest_client.rs).
+Its concrete type carries no borrowed owner lifetime. Acquisition passes the
+lazy `fetch(deadline)` future directly to Moka's `try_get_with` and awaits the
+lookup under the caller's `timeout_at`. Only the elected initializer creates
+and polls the exchange; dropping the caller drops its pending work under the
+original deadline. Credentials and the cache stay with the existing private
+owner. Reopen this type boundary only with compiler evidence and the existing
+cancellation/deadline proof; it adds no task, cache, token source, or replay.
 
 `CachedCredential` has private sensitive header and optional Tokio monotonic
 hard expiry. Representable positive expiry is `acquisition_start + expires_in`.

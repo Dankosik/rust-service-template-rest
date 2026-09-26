@@ -161,14 +161,12 @@ impl Credentials {
         if Instant::now() >= deadline {
             return Err(AcquisitionError::Timeout);
         }
-        // Give Moka a Send initializer without propagating nested opaque futures.
-        // It borrows this owner and remains lazy until elected by the cache.
-        let init: Pin<
-            Box<dyn Future<Output = Result<Arc<CachedCredential>, FillError>> + Send + '_>,
-        > = Box::pin(self.0.fetch(deadline));
-        let result = tokio::time::timeout_at(deadline, self.0.cache.try_get_with((), init))
-            .await
-            .map_err(|_| AcquisitionError::Timeout)?;
+        let result = tokio::time::timeout_at(
+            deadline,
+            self.0.cache.try_get_with((), self.0.fetch(deadline)),
+        )
+        .await
+        .map_err(|_| AcquisitionError::Timeout)?;
         match result {
             Ok(value) => Ok(value),
             Err(error) => match error.as_ref() {
@@ -261,7 +259,11 @@ impl Owner {
         if let Some(audience) = &self.audience {
             exchange = exchange.add_extra_param("audience", audience.as_str());
         }
-        let hook = |request| self.exchange(request, deadline);
+        let hook = TokenHttpClient {
+            endpoint: self.endpoint.clone(),
+            transport: self.transport.clone(),
+            deadline,
+        };
         let response = tokio::time::timeout_at(deadline, exchange.request_async(&hook))
             .await
             .map_err(|_| AcquisitionError::Timeout)?
@@ -307,14 +309,21 @@ impl Owner {
             reuse_until,
         })
     }
+}
 
-    fn exchange(
-        &self,
-        request: oauth2::HttpRequest,
-        deadline: Instant,
-    ) -> Pin<Box<dyn Future<Output = Result<oauth2::HttpResponse, AcquisitionError>> + Send + '_>>
-    {
-        // Expose Send before oauth2 projects the closure's AsyncHttpClient future.
+struct TokenHttpClient {
+    endpoint: Url,
+    transport: Client,
+    deadline: Instant,
+}
+
+impl<'client> oauth2::AsyncHttpClient<'client> for TokenHttpClient {
+    type Error = AcquisitionError;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<oauth2::HttpResponse, Self::Error>> + Send + 'client>>;
+
+    fn call(&'client self, request: oauth2::HttpRequest) -> Self::Future {
+        let deadline = self.deadline;
         Box::pin(async move {
             if request.uri() != self.endpoint.as_str() {
                 return Err(AcquisitionError::InvalidResponse);

@@ -570,7 +570,6 @@
       "crates/infra-grpc/",
       "crates/service/examples/grpc.rs",
       "crates/service/src/grpc.rs",
-      "crates/service/tests/grpc_process.rs",
       "docs/grpc.md",
       "docs/grpc-decisions.md",
       "scripts/ci/grpc-check.sh",
