@@ -1081,6 +1081,66 @@ def _project_feature_edge(
 def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInputs) -> None:
     """Remove only source-anchored feature edges made unreachable by a profile."""
 
+    if inputs.jobs == "none":
+        # infra-jobs is the only selected package that enables sqlx's uuid
+        # feature. That feature reaches each driver through sqlx-macros-core,
+        # including the otherwise-unselected MySQL and SQLite drivers.
+        for name, version, expected, dropped in (
+            (
+                "sqlx-core",
+                "0.9.0",
+                [
+                    "base64 0.22.1", "bytes", "cfg-if", "crc", "crossbeam-queue", "either", "event-listener",
+                    "futures-core", "futures-intrusive", "futures-io", "futures-util", "hashbrown 0.16.1", "hashlink",
+                    "indexmap 2.14.2", "log", "memchr", "percent-encoding", "rustls", "serde", "serde_json",
+                    "sha2 0.10.9", "smallvec", "thiserror", "tokio", "tokio-stream", "tracing", "url", "uuid",
+                    "webpki-roots",
+                ],
+                ("uuid",),
+            ),
+            (
+                "sqlx-macros-core",
+                "0.9.0",
+                [
+                    "cfg-if", "dotenvy", "either", "heck", "hex", "proc-macro2", "quote", "serde", "serde_json",
+                    "sha2 0.10.9", "sqlx-core", "sqlx-mysql", "sqlx-postgres", "sqlx-sqlite", "syn 2.0.119",
+                    "thiserror", "tokio", "url",
+                ],
+                ("sqlx-mysql", "sqlx-sqlite"),
+            ),
+            (
+                "sqlx-mysql",
+                "0.9.0",
+                [
+                    "bitflags 2.13.2", "byteorder", "bytes", "crc", "digest 0.11.3", "dotenvy", "either",
+                    "futures-core", "futures-util", "generic-array", "log", "percent-encoding", "serde", "sha1 0.11.0",
+                    "sha2 0.11.0", "sqlx-core", "thiserror", "tracing", "uuid",
+                ],
+                ("uuid",),
+            ),
+            (
+                "sqlx-postgres",
+                "0.9.0",
+                [
+                    "atoi", "base64 0.22.1", "bitflags 2.13.2", "byteorder", "crc", "dotenvy", "etcetera",
+                    "futures-channel", "futures-core", "futures-util", "hex", "hkdf", "hmac", "itoa", "log", "md-5",
+                    "memchr", "rand 0.10.2", "serde", "serde_json", "sha2 0.11.0", "smallvec", "sqlx-core",
+                    "stringprep", "thiserror", "tracing", "uuid", "whoami",
+                ],
+                ("uuid",),
+            ),
+            (
+                "sqlx-sqlite",
+                "0.9.0",
+                [
+                    "atoi", "flume", "form_urlencoded", "futures-channel", "futures-core", "futures-executor",
+                    "futures-intrusive", "futures-util", "libsqlite3-sys", "log", "percent-encoding", "serde",
+                    "sqlx-core", "thiserror", "tracing", "url", "uuid",
+                ],
+                ("uuid",),
+            ),
+        ):
+            _project_feature_edge(records, name, version, expected, [edge for edge in expected if edge not in dropped])
     if inputs.database == "none":
         for name, version, expected, retained in (
             ("bitflags", "2.13.2", ["serde_core"], []),

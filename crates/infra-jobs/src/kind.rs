@@ -707,7 +707,9 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_prepare_runs_the_handler_and_rejects_a_bad_payload() {
-        let id = JobId::from_uuid(uuid::Uuid::from_u128(0x0123456789abcdeffedcba9876543210));
+        let id = JobId::from_uuid(uuid::Uuid::from_u128(
+            0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
+        ));
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut kinds = Kinds::new();
         kinds.register(Policy::default(), move |job: Job<Sample>| async move {
@@ -757,7 +759,9 @@ mod tests {
     #[tokio::test]
     async fn job_debug_omits_payload() {
         let job = Job {
-            id: JobId::from_uuid(uuid::Uuid::from_u128(0x0123456789abcdeffedcba9876543210)),
+            id: JobId::from_uuid(uuid::Uuid::from_u128(
+                0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
+            )),
             attempt: 4,
             generation: 99,
             payload: Sample {

@@ -109,7 +109,7 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
         STATEMENT_TIMEOUT,
         IDLE_IN_TRANSACTION_TIMEOUT,
         None,
-        &extra,
+        extra,
         Some(SLOW_STATEMENT_THRESHOLD),
     );
     PgPoolOptions::new()

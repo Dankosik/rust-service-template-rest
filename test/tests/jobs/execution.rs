@@ -1833,7 +1833,7 @@ async fn x12_future_not_before_is_not_claimed_until_it_passes(pool: PgPool) {
 async fn w4_x7_cancel_and_finish_returns_the_budget_unit(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     prepare(&jobs).await;
-    let id = enqueue_one(&jobs, ProbeAction::WaitForCancellation).await;
+    let id = enqueue_one(&jobs, ProbeAction::Sleep { millis: 60_000 }).await;
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
     let claimed = until("the claim is in flight", super::WAIT, async || {
         let view = load(&jobs, &id).await;
