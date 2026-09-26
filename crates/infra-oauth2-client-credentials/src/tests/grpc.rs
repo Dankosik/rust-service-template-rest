@@ -298,13 +298,17 @@ async fn grpc_token_wait_spends_the_original_deadline_and_never_dispatches() {
     let resource = ResourceFixture::new().await;
     let credentials = tokens.credentials(&[], None);
     let gate = tokens.block_tokens();
-    let mut call = Box::pin(resource.client(&credentials).unary(rpc(
+    let mut client = resource.client(&credentials);
+    let mut call = Box::pin(client.unary(rpc(
         UnaryRequest {
             message: "deadline".to_owned(),
         },
         Duration::from_secs(1),
     )));
-    tokens.token_received().await;
+    tokio::select! {
+        () = tokens.token_received() => {},
+        result = &mut call => panic!("deadline call completed before token release: {result:?}"),
+    }
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(2)).await;
     assert_eq!(
@@ -382,13 +386,17 @@ async fn grpc_hard_expiry_before_dispatch_refuses_the_resource_call() {
     let resource = ResourceFixture::new().await;
     let credentials = tokens.credentials(&[], None);
     let gate = tokens.block_tokens();
-    let mut call = Box::pin(resource.client(&credentials).unary(rpc(
+    let mut client = resource.client(&credentials);
+    let mut call = Box::pin(client.unary(rpc(
         UnaryRequest {
             message: "expiry".to_owned(),
         },
         Duration::from_secs(10),
     )));
-    tokens.token_received().await;
+    tokio::select! {
+        () = tokens.token_received() => {},
+        result = &mut call => panic!("expiry call completed before token release: {result:?}"),
+    }
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(2)).await;
     tokio::time::resume();

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-readonly root_dir="$(cd -- "${script_dir}/.." && pwd)"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
+root_dir="$(cd -- "${script_dir}/.." && pwd)"
+readonly root_dir
 
 # shellcheck source=tools/versions.env
 source "${root_dir}/tools/versions.env"

@@ -108,7 +108,7 @@ the same shared identity into its existing status, title, URI and payload.
 | Already exists | `ALREADY_EXISTS` |
 | Conflict | `ABORTED` |
 | Unsupported method | `UNIMPLEMENTED` |
-| Metadata/message/capacity exhaustion | `RESOURCE_EXHAUSTED` |
+| Classified limits and admission capacity | `RESOURCE_EXHAUSTED` |
 | Unavailable dependency, trust or draining service | `UNAVAILABLE` |
 | Expired request budget | `DEADLINE_EXCEEDED` |
 | Unexpected error or recovered panic | `INTERNAL` |
@@ -127,9 +127,13 @@ status or cancellation. A deadline takes and drops the actual suspended body
 before releasing that permit, even when the peer stops reading.
 
 The failure table describes classified service and admission failures.
+Native tonic receive-size rejection uses `OUT_OF_RANGE`; native streaming
+framing errors forwarded through a feature's raw `Status` still pass through
+the handler privacy guard and can become sanitized `INTERNAL`. Semantic
+Protovalidate rejection is independently sticky and cannot be swallowed.
 Client-local encoding overflow follows tonic 0.14.6: the stateless codec rejects
 the oversized message before serialization, while the native send path reports
-`INTERNAL` with a fixed safe description. Server-side resource/admission mapping
+`INTERNAL` with a fixed safe description. Classified resource/admission mapping
 remains `RESOURCE_EXHAUSTED`. The bound applies to each unary or streaming
 message and never enables retry or replay.
 

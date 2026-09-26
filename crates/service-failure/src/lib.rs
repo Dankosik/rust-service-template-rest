@@ -172,6 +172,10 @@ impl Code {
     }
 
     #[must_use]
+    #[allow(
+        clippy::match_same_arms,
+        reason = "Optional profiles remove complete match arms independently."
+    )]
     pub const fn meaning(self) -> Meaning {
         match self {
             Self::BadRequest | Self::UnprocessableContent => Meaning::BadRequest,

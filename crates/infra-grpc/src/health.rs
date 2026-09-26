@@ -36,7 +36,7 @@ pub(crate) fn server(
 }
 
 #[derive(Clone)]
-struct Adapter {
+pub(crate) struct Adapter {
     readiness: ReadinessReader,
     services: Arc<BTreeSet<&'static str>>,
     startup: Arc<HealthState>,
@@ -90,11 +90,17 @@ impl Health for Adapter {
             } else {
                 ServingStatus::ServiceUnknown
             };
-            if sender.send(Ok(response(initial))).await.is_err() {
-                return;
+            tokio::select! {
+                () = cancel.cancelled() => return,
+                sent = sender.send(Ok(response(initial))) => {
+                    if sent.is_err() { return; }
+                }
             }
             if !known {
-                cancel.cancelled().await;
+                tokio::select! {
+                    () = cancel.cancelled() => {},
+                    () = sender.closed() => {},
+                }
                 return;
             }
 
@@ -102,6 +108,7 @@ impl Health for Adapter {
             loop {
                 tokio::select! {
                     () = cancel.cancelled() => return,
+                    () = sender.closed() => return,
                     changed = readiness.changed_verdict() => {
                         if changed.is_err() {
                             return;
@@ -116,8 +123,11 @@ impl Health for Adapter {
                 let next = serving(&readiness, &startup);
                 if next != previous {
                     previous = next;
-                    if sender.send(Ok(response(next))).await.is_err() {
-                        return;
+                    tokio::select! {
+                        () = cancel.cancelled() => return,
+                        sent = sender.send(Ok(response(next))) => {
+                            if sent.is_err() { return; }
+                        }
                     }
                 }
             }

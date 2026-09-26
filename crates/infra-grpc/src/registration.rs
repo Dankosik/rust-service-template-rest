@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 
-use http::{Request, Response};
+use http::Request;
 use tonic::body::Body;
 use tonic::server::NamedService;
 use tonic::service::Routes;
@@ -133,10 +133,6 @@ impl Registry {
             .map(|entry| std::sync::Arc::clone(&entry.validation))
     }
 
-    pub(crate) fn has_services(&self) -> bool {
-        !self.services.is_empty()
-    }
-
     pub(crate) fn services(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.services.iter().copied()
     }
@@ -153,6 +149,12 @@ struct RegisteredMethod {
 pub struct Services {
     routes: Routes,
     registry: Registry,
+}
+
+impl std::fmt::Debug for Services {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Services").finish_non_exhaustive()
+    }
 }
 
 impl Services {

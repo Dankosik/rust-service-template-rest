@@ -28,19 +28,9 @@ docs/subagent-brief-template.md
 docs/universal-disciplines/
 docs/validation-routing.md
 docs/validation/instructions.md
-docs/validation/generated.md
 docs/validation/rust.md
 docs/validation/security.md
 Makefile
-make/template.mk
-tools/versions.env
-# template:begin grpc:grpc-portable-tool-owners
-.cargo/config.toml
-tools/grpc-codegen/
-scripts/grpc-protoc.py
-scripts/grpc-generate.sh
-scripts/ci/grpc-check.sh
-# template:end grpc:grpc-portable-tool-owners
 scripts/template-sync.sh
 scripts/lib/template_sync.py
 scripts/lib/template_state.py
@@ -50,12 +40,9 @@ scripts/codex-agents-sync.sh
 scripts/harness-skills-sync.sh
 scripts/check-skills.py
 scripts/ci/affected-crates.sh
-scripts/ci/changed-surfaces.sh
 scripts/ci/git-changed-paths.sh
 scripts/ci/measure.sh
 scripts/ci/publish-image-metadata.sh
 scripts/ci/runtime-image-build.sh
 scripts/ci/runtime-image-check.sh
-scripts/ci/tools-check.sh
 scripts/ci/validation-lock.sh
-scripts/ci/verify.sh

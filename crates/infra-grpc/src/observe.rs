@@ -1,4 +1,3 @@
-use std::str::FromStr as _;
 use std::sync::Once;
 
 use http::HeaderMap;
@@ -28,7 +27,8 @@ impl Observation {
     pub(crate) fn server(method: Method, headers: &HeaderMap) -> Self {
         let observation = Self::new(method, "server");
         global::get_text_map_propagator(|propagator| {
-            observation
+            // No OTel layer is a supported disabled-telemetry configuration.
+            let _ = observation
                 .span
                 .set_parent(propagator.extract(&HeaderExtractor(headers)));
         });
@@ -37,6 +37,10 @@ impl Observation {
 
     pub(crate) fn client(method: Method) -> Self {
         Self::new(method, "client")
+    }
+
+    pub(crate) fn span(&self) -> Span {
+        self.span.clone()
     }
 
     fn new(method: Method, direction: &'static str) -> Self {

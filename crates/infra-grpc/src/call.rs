@@ -13,6 +13,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tonic::{Response, Status};
+use tracing::Instrument as _;
 
 use crate::status::{panic_status, sanitize_handler_status};
 use crate::validation::Validation;
@@ -132,7 +133,8 @@ impl CallState {
     where
         F: Future<Output = T>,
     {
-        CURRENT.scope(state, future).await
+        let span = state.span();
+        CURRENT.scope(state, future.instrument(span)).await
     }
 
     pub(crate) fn current() -> Option<Arc<Self>> {
@@ -144,7 +146,16 @@ impl CallState {
     }
 
     pub(crate) fn scope_poll<T>(state: Arc<Self>, operation: impl FnOnce() -> T) -> T {
-        CURRENT.sync_scope(state, operation)
+        let span = state.span();
+        CURRENT.sync_scope(state, || span.in_scope(operation))
+    }
+
+    fn span(&self) -> tracing::Span {
+        self.observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map_or_else(tracing::Span::none, crate::observe::Observation::span)
     }
 
     pub(crate) fn cancellation(&self) -> CancellationToken {

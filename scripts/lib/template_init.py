@@ -313,6 +313,7 @@ _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS = _OUTBOX_OUTBOUND_AUTH_PROFILE_INVENT
 _GRPC_PROFILE_INVENTORY_KEYS = _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS | {
     "grpc",
     "grpc-none",
+    "grpc-authn",
     "grpc-jwt",
     "outbound-auth-grpc",
 }
@@ -527,7 +528,7 @@ def _profile_data(
         )
         markers.extend(_markers("outbound-auth", section["markers"]))
     if include_grpc:
-        for profile in ("grpc", "grpc-none", "grpc-jwt", "outbound-auth-grpc"):
+        for profile in ("grpc", "grpc-none", "grpc-authn", "grpc-jwt", "outbound-auth-grpc"):
             section = raw[profile]
             if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
@@ -737,6 +738,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("outbound-auth")
     if inputs.grpc == "enabled":
         selected.add("grpc")
+        if inputs.authn != "none":
+            selected.add("grpc-authn")
         if inputs.authn == "oidc-jwt":
             selected.add("grpc-jwt")
         if inputs.outbound_auth == "oauth2-client-credentials":
@@ -859,19 +862,6 @@ def _project_grpc_none(snapshot: Path, inputs: InitInputs) -> None:
             "crates/service/src/bootstrap/mod.rs",
             "pub(crate) fn run<I>(args: I, grpc_registration: Option<crate::GrpcRegistration>) -> ExitCode\n",
             "pub(crate) fn run<I>(args: I) -> ExitCode\n",
-        ),
-        (
-            "crates/service/src/bootstrap/mod.rs",
-            "    let outcome = runtime.block_on(serve(config, grpc_registration));\n",
-            "    let outcome = runtime.block_on(serve(config));\n",
-        ),
-        (
-            "crates/service/src/bootstrap/mod.rs",
-            "async fn serve(\n"
-            "    config: Config,\n"
-            "    grpc_registration: Option<crate::GrpcRegistration>,\n"
-            ") -> Result<Outcome, BootstrapError> {\n",
-            "async fn serve(config: Config) -> Result<Outcome, BootstrapError> {\n",
         ),
         (
             "crates/service/src/bootstrap/shutdown.rs",
@@ -1427,17 +1417,50 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
             ("either", "1.18.0", ["serde"], []),
             # PostgreSQL HMAC enables digest/mac; introspection SHA-256 alone does not.
             ("digest", "0.11.3", ["block-buffer 0.12.1", "crypto-common 0.2.2", "ctutils"], ["block-buffer 0.12.1", "crypto-common 0.2.2"]),
-            ("hashbrown", "0.16.1", ["allocator-api2", "equivalent", "foldhash"], ["foldhash"]),
+            ("hashbrown", "0.16.1", ["allocator-api2", "equivalent", "foldhash 0.2.0"], ["foldhash 0.2.0"]),
             ("smallvec", "1.16.1", ["serde"], []),
         ):
             _project_feature_edge(records, name, version, expected, retained)
     if inputs.authn != "oidc-jwt":
         _project_feature_edge(records, "zeroize", "1.9.0", ["zeroize_derive"], [])
-    if inputs.authn == "none" and inputs.outbound_http == "none" and inputs.messaging == "none":
-        # Generated TLS fixtures retained by either authentication or outbound
-        # test support enable rcgen/aws_lc_rs and its weak x509-parser/verify-aws
-        # edge; NATS also enables aws-lc-rs defaults directly. Either owner
-        # retains untrusted even without JWT.
+    if inputs.grpc == "none":
+        _project_feature_edge(
+            records,
+            "hyper-rustls",
+            "0.27.9",
+            ["http", "hyper", "hyper-util", "rustls", "rustls-native-certs", "tokio", "tokio-rustls", "tower-service"],
+            ["http", "hyper", "hyper-util", "rustls", "tokio", "tokio-rustls", "tower-service"],
+        )
+        _project_feature_edge(
+            records,
+            "tokio-stream",
+            "0.1.19",
+            ["futures-core", "pin-project-lite", "tokio", "tokio-util"],
+            ["futures-core", "pin-project-lite", "tokio"],
+        )
+        _project_feature_edge(
+            records,
+            "tower",
+            "0.5.3",
+            ["futures-core", "futures-util", "indexmap 2.14.2", "pin-project-lite", "slab", "sync_wrapper", "tokio", "tokio-util", "tower-layer", "tower-service", "tracing"],
+            ["futures-core", "futures-util", "pin-project-lite", "sync_wrapper", "tokio", "tokio-util", "tower-layer", "tower-service", "tracing"],
+        )
+        _project_feature_edge(
+            records,
+            "rustls",
+            "0.23.45",
+            ["aws-lc-rs", "log", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
+            ["aws-lc-rs", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
+        )
+    if (
+        inputs.authn == "none"
+        and inputs.outbound_http == "none"
+        and inputs.messaging == "none"
+        and inputs.grpc == "none"
+    ):
+        # TLS fixtures retained by authentication, outbound HTTP, or gRPC test
+        # support enable rcgen/aws_lc_rs and its weak x509-parser/verify-aws
+        # edge; NATS also enables aws-lc-rs defaults directly.
         _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
     if inputs.outbound_auth == "none":
         # oauth2 enables url's serde feature; the source still uses url through
@@ -1449,6 +1472,27 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
             ["form_urlencoded", "idna", "percent-encoding", "serde", "serde_derive"],
             ["form_urlencoded", "idna", "percent-encoding", "serde"],
         )
+
+
+def _canonicalize_lock_dependencies(records: list[_LockRecord]) -> None:
+    """Match Cargo's unambiguous dependency labels after profile reachability."""
+
+    for record in records:
+        current = list(record.data.get("dependencies", []))
+        normalized: list[str] = []
+        for dependency in current:
+            key = _dependency_key(dependency, records)
+            name, version, _source = key
+            normalized.append(name if sum(candidate.data["name"] == name for candidate in records) == 1 else f"{name} {version}")
+        if normalized != current:
+            _replace_lock_dependencies(record, current, normalized)
+
+
+def _lock_sort_key(record: _LockRecord) -> tuple[str, tuple[int, ...], str, str]:
+    version = record.data["version"]
+    core = re.split(r"[-+]", version, maxsplit=1)[0]
+    pieces = tuple(int(piece) for piece in core.split(".") if piece.isdigit())
+    return (record.data["name"], pieces, version, record.data.get("source", ""))
 
 
 def _project_cargo_lock(snapshot: Path, inventory: dict[str, Any], inputs: InitInputs) -> None:
@@ -1478,6 +1522,8 @@ def _project_cargo_lock(snapshot: Path, inventory: dict[str, Any], inputs: InitI
         for dependency in record.data.get("dependencies", []):
             pending.append(_dependency_key(dependency, records))
     retained = [record for record in records if record.key in reachable]
+    _canonicalize_lock_dependencies(retained)
+    retained.sort(key=_lock_sort_key)
     lock.write_text(header + "".join("[[package]]\n" + record.body for record in retained), encoding="utf-8")
 
 

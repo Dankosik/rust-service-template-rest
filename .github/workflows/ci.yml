@@ -217,7 +217,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${EVENT_NAME}" != pull_request && "${EVENT_NAME}" != merge_group ]] || [[ "${CARGO_DEPENDENCIES}" == true || "${FALLBACK}" == true ]]; then
-            bash ./scripts/ci/measure.sh quality-workspace -- make lint build test
+            bash ./scripts/ci/measure.sh quality-workspace -- make --keep-going lint build test
             exit 0
           fi
           if [[ "${LINT_CONFIG}" == true ]]; then

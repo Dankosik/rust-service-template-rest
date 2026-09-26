@@ -73,7 +73,18 @@ pub struct PreparedServer {
     tracker: TaskTracker,
 }
 
+impl std::fmt::Debug for PreparedServer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedServer")
+            .field("registered_services", &self.registry.services().count())
+            .field("options", &self.options)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A bound listener whose startup admission is still closed.
+#[derive(Debug)]
 pub struct BoundServer {
     prepared: PreparedServer,
     listener: TcpListener,
@@ -89,6 +100,20 @@ pub struct RunningServer {
     business: Arc<Semaphore>,
     tracker: TaskTracker,
     accept_task: Option<JoinHandle<()>>,
+}
+
+impl std::fmt::Debug for RunningServer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RunningServer")
+            .field("local_addr", &self.local_addr)
+            .field(
+                "admission_open",
+                &self.business_open.load(Ordering::Acquire),
+            )
+            .field("tracked_tasks", &self.tracker.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Server {
@@ -177,7 +202,7 @@ impl BoundServer {
             cancel: self.prepared.cancel.child_token(),
             tracker: self.prepared.tracker.clone(),
         };
-        let accept_task = tokio::spawn(accept_loop(
+        let accept_task = self.prepared.tracker.spawn(accept_loop(
             self.listener,
             service,
             self.prepared.options.security,
@@ -222,23 +247,46 @@ impl RunningServer {
 
     /// Finishes admitted business bodies or cancels them at the shared process
     /// deadline, then closes listener/connection/H2 task ownership.
-    pub async fn drain(mut self, deadline: Instant) -> Result<(), Error> {
+    pub async fn drain(&mut self, deadline: Instant) -> Result<(), Error> {
         self.begin_drain();
         while self.business.available_permits() != BUSINESS_LIMIT && Instant::now() < deadline {
             tokio::task::yield_now().await;
         }
+        let forced = self.business.available_permits() != BUSINESS_LIMIT;
+        let joined = self.join_shutdown(deadline).await;
+        if forced {
+            Err(Error::DrainTimedOut)
+        } else {
+            joined
+        }
+    }
+
+    /// Cancel and join transport tasks within an existing cleanup budget.
+    /// A timeout retains task custody in this server for the caller's next
+    /// cleanup stage or final runtime shutdown; it never detaches a handle.
+    pub async fn join_shutdown(&mut self, deadline: Instant) -> Result<(), Error> {
         self.cancel.cancel();
         self.tracker.close();
-        if let Some(task) = self.accept_task.take() {
-            tokio::time::timeout_at(deadline, task)
-                .await
-                .map_err(|_| Error::DrainTimedOut)
-                .and_then(|result| result.map_err(|_| Error::Transport))?;
+        let mut failed = false;
+        if let Some(task) = self.accept_task.as_mut() {
+            match tokio::time::timeout_at(deadline, &mut *task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => failed = !error.is_cancelled(),
+                Err(_) => {
+                    task.abort();
+                    return Err(Error::DrainTimedOut);
+                }
+            }
+            self.accept_task.take();
         }
         tokio::time::timeout_at(deadline, self.tracker.wait())
             .await
             .map_err(|_| Error::DrainTimedOut)?;
-        Ok(())
+        if failed {
+            Err(Error::Transport)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -247,6 +295,10 @@ impl Drop for RunningServer {
         self.business_open.store(false, Ordering::Release);
         self.startup.set_open(false);
         self.cancel.cancel();
+        self.tracker.close();
+        if let Some(task) = self.accept_task.as_ref() {
+            task.abort();
+        }
     }
 }
 
@@ -298,9 +350,22 @@ where
         let observation =
             known.map(|method| crate::observe::Observation::server(method, request.headers()));
         let permit = if known.is_some() {
-            self.business.clone().try_acquire_owned()
+            if !self.startup.is_open() || !self.business_open.load(Ordering::Acquire) {
+                Err(Error::Stopping)
+            } else {
+                self.business
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|error| match error {
+                        tokio::sync::TryAcquireError::Closed => Error::Stopping,
+                        tokio::sync::TryAcquireError::NoPermits => Error::AtCapacity,
+                    })
+            }
         } else {
-            self.health.clone().try_acquire_owned()
+            self.health
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| Error::AtCapacity)
         };
         let routes = self.routes.clone();
         // template:begin authn:grpc-server-authn-verifier-clone
@@ -314,10 +379,10 @@ where
         Box::pin(async move {
             let permit = match permit {
                 Ok(permit) => permit,
-                Err(_) => {
+                Err(error) => {
                     return Ok(status_response_state(
                         CallState::new(None, deadline, validation, observation),
-                        Error::AtCapacity.status(),
+                        error.status(),
                     ));
                 }
             };
@@ -364,12 +429,7 @@ where
                     }
                     // template:end authn:grpc-server-authn-verify
                     request.headers_mut().remove(AUTHORIZATION);
-                    match crate::call::recover(CallState::scope(
-                        Arc::clone(&state),
-                        routes.oneshot(request),
-                    ))
-                    .await
-                    {
+                    match crate::call::recover(routes.oneshot(request)).await {
                         Ok(Ok(response)) => Ok(response),
                         Ok(Err(never)) => match never {},
                         Err(()) => Err(crate::status::panic_status()),
@@ -379,7 +439,7 @@ where
                     biased;
                     () = cancellation.cancelled() => Err(tonic::Status::cancelled("request cancelled")),
                     () = wait_deadline(deadline) => Err(tonic::Status::deadline_exceeded("request deadline exceeded")),
-                    response = exchange => response,
+                    response = CallState::scope(Arc::clone(&state), exchange) => response,
                 }
             };
             // The losing initial future is gone. Move the actual body into the
@@ -579,7 +639,7 @@ async fn accept_loop(
                 let cancel = cancel.child_token();
                 let tracker = tracker.clone();
                 let tls = tls.clone();
-                tasks.spawn(async move {
+                tasks.spawn(tracker.clone().track_future(async move {
                     let _permit = permit;
                     match tls {
                         Some(acceptor) => match tokio::time::timeout(INITIAL_CONNECTION_TIMEOUT, acceptor.accept(stream)).await {
@@ -593,7 +653,7 @@ async fn accept_loop(
                             }
                         }
                     }
-                });
+                }));
             }
         }
     }
@@ -630,5 +690,74 @@ async fn serve_connection<IO>(
     tokio::select! {
         () = cancel.cancelled() => {},
         _ = connection => {},
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "native health fixture failures carry setup context"
+)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt as _;
+    use prost::Message as _;
+    use tonic_health::pb::HealthCheckRequest;
+
+    #[tokio::test]
+    async fn dropping_known_or_unknown_watch_joins_its_task_without_process_cancellation() {
+        for service in ["", "unknown"] {
+            let readiness = ::health::Readiness::new(Vec::new());
+            let cancel = CancellationToken::new();
+            let tracker = TaskTracker::new();
+            let server = health::server(
+                readiness.reader(),
+                &Registry::default(),
+                Arc::new(HealthState::new()),
+                cancel.child_token(),
+                tracker.clone(),
+            );
+            let message = HealthCheckRequest {
+                service: service.to_owned(),
+            }
+            .encode_to_vec();
+            let mut encoded = vec![0];
+            encoded.extend_from_slice(
+                &u32::try_from(message.len())
+                    .expect("small health message")
+                    .to_be_bytes(),
+            );
+            encoded.extend_from_slice(&message);
+            let request = Request::builder()
+                .uri("/grpc.health.v1.Health/Watch")
+                .header("content-type", "application/grpc")
+                .body(Body::new(http_body_util::Full::new(Bytes::from(encoded))))
+                .expect("valid health request");
+            let mut response = server
+                .oneshot(request)
+                .await
+                .expect("native health dispatch");
+            let frame = tokio::time::timeout(Duration::from_secs(1), response.body_mut().frame())
+                .await
+                .expect("initial watch response")
+                .expect("watch produces an initial message")
+                .expect("watch message encodes");
+            assert!(frame.is_data());
+            assert_eq!(tracker.len(), 1);
+            drop(response);
+            tracker.close();
+            let joined = tokio::time::timeout(Duration::from_secs(1), tracker.wait())
+                .await
+                .is_ok();
+            // Also clean up against the defective implementation before the assertion.
+            cancel.cancel();
+            tokio::time::timeout(Duration::from_secs(1), tracker.wait())
+                .await
+                .expect("watch cleanup joins");
+            assert!(
+                joined,
+                "dropping Watch must end its task independently of process shutdown"
+            );
+        }
     }
 }

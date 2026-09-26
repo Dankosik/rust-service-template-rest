@@ -95,7 +95,9 @@ enum Seen {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SeenCall {
     cardinality: Seen,
+    // template:begin authn:grpc-transport-test-seen-identity-field
     had_identity: bool,
+    // template:end authn:grpc-transport-test-seen-identity-field
     had_authorization: bool,
 }
 
@@ -115,10 +117,12 @@ impl Echo {
             .expect("test observations remain unlocked")
             .push(SeenCall {
                 cardinality: seen,
+                // template:begin authn:grpc-transport-test-seen-principal
                 had_identity: request
                     .extensions()
                     .get::<infra_bearerauthn::Principal>()
                     .is_some(),
+                // template:end authn:grpc-transport-test-seen-principal
                 had_authorization: request.metadata().get("authorization").is_some(),
             });
     }
@@ -375,7 +379,7 @@ impl Fixture {
         EchoServiceClient::new(channel)
     }
 
-    async fn stop(self) {
+    async fn stop(mut self) {
         self.echo.release.cancel();
         self.running
             .drain(Instant::now() + DEADLINE)
@@ -752,6 +756,24 @@ async fn health_reports_readiness_unknown_watch_and_monotone_drain() {
     );
     fixture.readiness.start_drain();
     fixture.running.begin_drain();
+    // template:begin authn:grpc-transport-test-drain-provider-before
+    let provider_requests = fixture.provider.requests.load(Ordering::Acquire);
+    // template:end authn:grpc-transport-test-drain-provider-before
+    let rejected = fixture
+        .client()
+        .unary(request(UnaryRequest {
+            message: "after-drain".to_owned(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(rejected.code(), Code::Unavailable);
+    assert!(fixture.echo.calls.lock().unwrap().is_empty());
+    // template:begin authn:grpc-transport-test-drain-provider-after
+    assert_eq!(
+        fixture.provider.requests.load(Ordering::Acquire),
+        provider_requests
+    );
+    // template:end authn:grpc-transport-test-drain-provider-after
     assert_eq!(
         watch.message().await.unwrap().unwrap().status,
         ServingStatus::NotServing as i32
@@ -765,6 +787,38 @@ async fn health_reports_readiness_unknown_watch_and_monotone_drain() {
     assert_eq!(
         stopped.into_inner().status,
         ServingStatus::NotServing as i32
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn expired_drain_retains_transport_tasks_for_the_existing_cleanup_stage() {
+    let mut fixture = Fixture::plaintext().await;
+    let mut client = fixture.native_client().await;
+    let call = tokio::spawn(async move {
+        client
+            .unary(request(UnaryRequest {
+                message: "hold".to_owned(),
+            }))
+            .await
+    });
+    fixture.echo.wait_for_entries(1).await;
+    assert_eq!(
+        fixture.running.drain(Instant::now()).await,
+        Err(infra_grpc::Error::DrainTimedOut)
+    );
+    fixture
+        .running
+        .join_shutdown(Instant::now() + DEADLINE)
+        .await
+        .expect("forced transport work joins in cleanup");
+    assert_eq!(fixture.echo.dropped.load(Ordering::Acquire), 1);
+    assert!(
+        timeout(DEADLINE, call)
+            .await
+            .expect("client observes closure")
+            .expect("client task joins")
+            .is_err()
     );
     fixture.stop().await;
 }

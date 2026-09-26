@@ -21,6 +21,14 @@ pub struct BoundedClientCodec<Encode, Decode> {
     marker: PhantomData<(Encode, Decode)>,
 }
 
+impl<Encode, Decode> std::fmt::Debug for BoundedClientCodec<Encode, Decode> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BoundedClientCodec")
+            .finish_non_exhaustive()
+    }
+}
+
 impl<Encode, Decode> Codec for BoundedClientCodec<Encode, Decode>
 where
     Encode: Message + Send + 'static,
@@ -48,6 +56,14 @@ pub struct BoundedEncoder<T> {
     inner: tonic_prost::ProstEncoder<T>,
 }
 
+impl<T> std::fmt::Debug for BoundedEncoder<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BoundedEncoder")
+            .finish_non_exhaustive()
+    }
+}
+
 impl<T: Message> Encoder for BoundedEncoder<T> {
     type Item = T;
     type Error = Status;
@@ -70,6 +86,14 @@ impl<T: Message> Encoder for BoundedEncoder<T> {
 
 pub struct BoundedDecoder<T> {
     inner: tonic_prost::ProstDecoder<T>,
+}
+
+impl<T> std::fmt::Debug for BoundedDecoder<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BoundedDecoder")
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T: Message + Default> Decoder for BoundedDecoder<T> {
@@ -96,6 +120,14 @@ impl<T: Message + Default> Decoder for BoundedDecoder<T> {
 pub struct ValidatedCodec<Encode, Decode> {
     state: Option<Arc<CallState>>,
     marker: PhantomData<(Encode, Decode)>,
+}
+
+impl<Encode, Decode> std::fmt::Debug for ValidatedCodec<Encode, Decode> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ValidatedCodec")
+            .finish_non_exhaustive()
+    }
 }
 
 impl<Encode, Decode> Default for ValidatedCodec<Encode, Decode> {
@@ -132,6 +164,14 @@ where
 pub struct ValidatingDecoder<T> {
     inner: tonic_prost::ProstDecoder<T>,
     state: Option<Arc<CallState>>,
+}
+
+impl<T> std::fmt::Debug for ValidatingDecoder<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ValidatingDecoder")
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T> Decoder for ValidatingDecoder<T>

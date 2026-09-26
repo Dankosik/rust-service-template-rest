@@ -49,8 +49,8 @@ generator has its own lock and is excluded from the runtime workspace.
 Server dispatch uses `ValidatedCodec`: native Prost decoding followed by
 semantic validation before the feature receives a message. Its decoder captures
 the private per-call state at codec construction and carries it with a moved
-`Streaming` value. First validation failure is sticky, so swallowing a stream
-error cannot later return success or another response item.
+`Streaming` value. First semantic validation failure is sticky, so swallowing
+that validation error cannot later return success or another response item.
 
 Client dispatch uses a separate stateless `BoundedClientCodec`, delegating to
 the public Prost encoder/decoder. It checks `Message::encoded_len()` before
@@ -106,8 +106,12 @@ a supported no-codegen package feature.
 
 Generated policy invokes feature methods inside the typed boundary. Shared
 failures use tonic's private Rust `Status::source`; arbitrary handler statuses
-cannot forge that source through metadata. Unknown method and protocol/decode
-statuses arise outside feature code and retain framework semantics. Classified
+cannot forge that source through metadata. Unknown methods and framing errors
+that remain outside feature code use tonic's native statuses, including
+`OUT_OF_RANGE` for its receive-size guard. A native streaming error returned by
+feature code as raw `Status` is sanitized like other raw handler statuses; the
+transport does not add a framing parser or claim sticky handling for all native
+framing errors. Semantic validation has its separate sticky owner. Classified
 details contain a stable `ErrorInfo`; policy-owned retry delay uses `RetryInfo`.
 Validation detail identifiers come from the descriptor-owned validation path,
 not arbitrary feature-provided strings. Rich details share the metadata bound.
