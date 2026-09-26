@@ -392,13 +392,26 @@ async fn the_embedded_set_runs_on_an_empty_database(pool: PgPool) {
     assert_eq!(repeated.applied, 0);
     assert_eq!(repeated.outcome().as_str(), "no_change");
     assert_eq!(migrate::verify_history(&pool).await, Ok(()));
+
+    // A later release that already migrated this database keeps an older
+    // binary admissible: its version lies above the newest embedded one.
+    let newer = result.target.unwrap_or(0) + 1;
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+         VALUES ($1, 'later release', true, '\\x00'::bytea, 0)",
+    )
+    .bind(newer)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(migrate::verify_history(&pool).await, Ok(()));
 }
 
 #[sqlx::test(migrations = false)]
 async fn history_admission_refuses_missing_bookkeeping_without_creating_it(pool: PgPool) {
     assert_eq!(
         migrate::verify_history(&pool).await,
-        Err(HistoryError::Unavailable)
+        Err(HistoryError::Pending)
     );
     let exists: bool = sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
         .fetch_one(&pool)

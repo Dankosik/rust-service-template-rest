@@ -379,7 +379,7 @@ async fn missing_migration_history_exits_1_before_jobs_admission(pool: PgPool) {
     let worker = Worker::spawn(&database_url, &[]);
     assert_refused(
         worker,
-        "postgres migration history: the migration history is unavailable",
+        "postgres migration history: embedded migrations are pending",
     );
 }
 
