@@ -196,7 +196,7 @@ classify() {
 		template-owned.paths | \
 		scripts/ci/template-init-check.sh | scripts/tests/template-* | \
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
-		crates/infra-bearerauthn/* | crates/infra-egress-dns/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
+		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
 		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | \
 		test/* | migrations/*)
 			mark module_initializer initializer_runtime
@@ -211,7 +211,7 @@ classify() {
 		docs/first-production-feature.md | docs/project-structure-and-module-organization.md | \
 		docs/backend-library-selection.md | docs/backend-utility-recipes.md | \
 		docs/build-test-and-development-commands.md | docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | \
-		docs/validation/* | docs/template-sync.md | docs/authentication.md | docs/outbound-http.md | docs/http-idempotency.md | docs/background-jobs.md)
+		docs/validation/* | docs/template-sync.md | docs/authentication.md | docs/outbound-http.md | docs/outbound-http-decisions.md | docs/http-idempotency.md | docs/background-jobs.md)
 			mark module_initializer
 			;;
 		esac; fi
@@ -355,12 +355,10 @@ EOF
 		"rust_source module_initializer initializer_runtime db_integration" \
 		"cargo_dependencies documentation"
 	rm -rf "${classifier_root}/test/tests/http_idempotency"
-	for file in crates/infra-egress-dns/src/lib.rs crates/infra-outbound-http/src/lib.rs; do
-		assert_case "${file}" \
-			"rust_source module_initializer initializer_runtime" \
-			"cargo_dependencies documentation"
-	done
-	for file in crates/config/Cargo.toml crates/service/Cargo.toml crates/infra-http/Cargo.toml crates/infra-egress-dns/Cargo.toml crates/infra-outbound-http/Cargo.toml; do
+	assert_case crates/infra-outbound-http/src/lib.rs \
+		"rust_source module_initializer initializer_runtime" \
+		"cargo_dependencies documentation"
+	for file in crates/config/Cargo.toml crates/service/Cargo.toml crates/infra-http/Cargo.toml crates/infra-outbound-http/Cargo.toml; do
 		assert_case "${file}" \
 			"cargo_dependencies module_initializer initializer_runtime" \
 			"rust_source documentation"
@@ -371,6 +369,12 @@ EOF
 	assert_case docs/outbound-http.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
+	assert_case docs/outbound-http-decisions.md \
+		"documentation module_initializer" \
+		"rust_source cargo_dependencies initializer_runtime"
+	assert_case test/fixtures/tls.rs \
+		"rust_source module_initializer initializer_runtime db_integration" \
+		"cargo_dependencies documentation"
 	assert_case docs/http-idempotency.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"

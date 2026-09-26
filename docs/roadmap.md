@@ -610,11 +610,11 @@ markers, tests, and initializer support. Order by expected demand:
    failure taxonomy in `crates/infra-bearerauthn`. **Merged via PR #41 at
    `098b4ab18dd5b2d158a94e126798d8cc429ad735`**;
    [adoption and durable decisions](authentication.md).
-2. Bounded outbound HTTP: fixed-authority `reqwest` client with post-DNS
-   public-address admission, header and body ceilings, correlation stripping,
-   no proxy. **Merged via PR #42 at
-   `43b7588edbdb1ebfbc478fb28e0e3d2e77417960`**;
-   [adoption guide](outbound-http.md).
+2. Bounded outbound HTTP: fixed trusted-origin `reqwest` client with normal
+   TLS/system resolution, finite header-count and encoded-body limits,
+   correlation stripping, no proxy, and bounded telemetry. Its current
+   [adoption guide](outbound-http.md) and [decision record](outbound-http-decisions.md)
+   define the profile.
 3. HTTP idempotency on PostgreSQL: composed operations, replay evidence and
    business effect in one transaction. **Merged via PR #49 at
    `4819113b21c110e69f3f1d4d26f3bf9337c83b72`**;
@@ -672,26 +672,18 @@ under `.git/codex/authn-delivery/`, including source `c24c3b3ccfaf0af06f3bd40427
 and the final closeout bundle. No main-checkout commit, CI success, publication
 or deployment is claimed by that local acceptance.
 
-Stage 10.2 adds `infra-outbound-http` and a shared `infra-egress-dns` admission
-owner. The auth client keeps its own JWT/introspection HTTP policy, deadlines,
-body rules and count-only header limit. The shared public-address predicate
-also refuses ambiguous 6to4, reserved IPv6 and private IPv4 embedded in the
-well-known NAT64 prefix. The selected pack is inert until a provider constructs
-it; the default initializer removes it unless outbound HTTP retains it.
-Authentication has its own trusted-provider transport and TLS fixtures. The
-[guide](outbound-http.md) owns the usable API and limits.
-
-Stage-10.2 local acceptance covered a workspace build, 261 unique source tests,
-formatting, documentation, scoped shell checks, dependency and secret gates,
-and independent final review. All 96 canonical profile/harness projections
-passed. Twelve unique runtime graphs have public-initializer/build/test
-evidence: eight fresh runs after a test-fixture repair plus four earlier runs
-reused only after exact equality of their 32 corresponding projected trees.
-The first full attempt remains recorded as failed at graph 11; the scoped
-recovery does not turn it into an aggregate PASS. Local custody is under
-`.git/codex/outbound-http/delivery/`. No remote CI, PR, publication, deployment,
-live-provider or PostgreSQL-runtime result is claimed. Other stage-10
-capabilities remain planned.
+Stage 10.2 retains `infra-outbound-http` for an operator-selected trusted HTTPS
+origin. It uses normal system resolution and normal TLS verification, including
+private or loopback providers whose configuration, certificate, and deployment
+network establish trust. It is not an SSRF boundary and must never be
+constructed from a caller-controlled URL. The auth client keeps its independent
+JWT/introspection transport policy. The selected pack is inert until a provider
+constructs it; the default initializer removes it unless outbound HTTP retains
+it. The [guide](outbound-http.md) owns use and limits, while the
+[decision record](outbound-http-decisions.md) retains version evidence and
+reopen conditions. The previous public-address/DNS admission evidence applied
+to a superseded contract and is not evidence for this delta. No remote CI, PR,
+publication, deployment, live-provider, or PostgreSQL-runtime result is claimed.
 
 Stage 10.3 adds `HTTP_IDEMPOTENCY=none|postgres`, which requires
 `DATABASE=postgres` and an authentication engine. The selected pack holds the

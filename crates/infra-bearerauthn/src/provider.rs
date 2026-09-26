@@ -319,11 +319,9 @@ mod tests {
     use url::Url;
 
     use super::{Failure, ProviderClient, ProviderDeadline, ProviderUrl, new_fixture_client};
+    use crate::tls::TlsMaterial;
 
     const FIXTURE_HOST: &str = "authn.fixture.test";
-    const CERT_DER: &[u8] = include_bytes!("../tests/fixtures/authn-fixture-cert.der");
-    const KEY_DER: &[u8] = include_bytes!("../tests/fixtures/authn-fixture-key.der");
-    const ROOT_DER: &[u8] = include_bytes!("../tests/fixtures/authn-fixture-root.der");
 
     #[test]
     fn provider_url_retains_exact_spelling_and_rejects_unsafe_destinations() {
@@ -341,7 +339,10 @@ mod tests {
         }
     }
 
-    async fn tls_server(response: Vec<u8>) -> (std::net::SocketAddr, JoinHandle<Vec<u8>>) {
+    async fn tls_server(
+        material: &TlsMaterial,
+        response: Vec<u8>,
+    ) -> (std::net::SocketAddr, JoinHandle<Vec<u8>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let config = ServerConfig::builder_with_provider(Arc::new(
@@ -351,8 +352,8 @@ mod tests {
         .unwrap()
         .with_no_client_auth()
         .with_single_cert(
-            vec![CertificateDer::from(CERT_DER.to_vec())],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KEY_DER.to_vec())),
+            vec![CertificateDer::from(material.cert.clone())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
         )
         .unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -384,8 +385,14 @@ mod tests {
         (address, server)
     }
 
-    fn fixture_client(address: std::net::SocketAddr) -> ProviderClient {
-        new_fixture_client(FIXTURE_HOST, address, ROOT_DER, CancellationToken::new()).unwrap()
+    fn fixture_client(address: std::net::SocketAddr, material: &TlsMaterial) -> ProviderClient {
+        new_fixture_client(
+            FIXTURE_HOST,
+            address,
+            &material.root,
+            CancellationToken::new(),
+        )
+        .unwrap()
     }
 
     fn fixture_url(address: std::net::SocketAddr) -> Url {
@@ -399,9 +406,10 @@ mod tests {
     // template:begin oidc-jwt:authn-provider-tls-bounds-test
     #[tokio::test]
     async fn jwt_fixture_transport_uses_trusted_private_tls_and_enforces_body_and_time_bounds() {
+        let material = TlsMaterial::new(FIXTURE_HOST);
         let response = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 16\r\n\r\n{\"active\":false}".to_vec();
-        let (address, server) = tls_server(response).await;
-        let provider = fixture_client(address);
+        let (address, server) = tls_server(&material, response).await;
+        let provider = fixture_client(address, &material);
         let body = provider
             .get_json(
                 &fixture_url(address),
@@ -419,9 +427,9 @@ mod tests {
         let mut oversized = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n100000\r\n".to_vec();
         oversized.extend(std::iter::repeat_n(b'x', 1_048_576));
         oversized.extend_from_slice(b"\r\n1\r\ny\r\n0\r\n\r\n");
-        let (address, server) = tls_server(oversized).await;
+        let (address, server) = tls_server(&material, oversized).await;
         assert_eq!(
-            fixture_client(address)
+            fixture_client(address, &material)
                 .get_json(
                     &fixture_url(address),
                     ProviderDeadline::independent(Instant::now())
@@ -431,9 +439,9 @@ mod tests {
         );
         let _ = server.await;
 
-        let (address, server) = tls_server(Vec::new()).await;
+        let (address, server) = tls_server(&material, Vec::new()).await;
         assert_eq!(
-            fixture_client(address)
+            fixture_client(address, &material)
                 .get_json(
                     &fixture_url(address),
                     ProviderDeadline {
@@ -451,9 +459,10 @@ mod tests {
     // template:begin oidc-introspection:authn-provider-post-form-tls-test
     #[tokio::test]
     async fn introspection_fixture_transport_uses_trusted_private_tls_for_form_posts() {
+        let material = TlsMaterial::new(FIXTURE_HOST);
         let response = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 16\r\n\r\n{\"active\":false}".to_vec();
-        let (address, server) = tls_server(response).await;
-        let body = fixture_client(address)
+        let (address, server) = tls_server(&material, response).await;
+        let body = fixture_client(address, &material)
             .post_form_json(
                 &fixture_url(address),
                 b"Basic Zml4dHVyZQ==",

@@ -32,7 +32,6 @@ const RETRY_AFTER_CAP: Duration = Duration::from_hours(24);
 const MISSING_SECRET_DELAY: Duration = Duration::from_secs(60);
 const DEFAULT_CONTENT_TYPE: &str = "application/json";
 const RESPONSE_HEADER_COUNT: usize = 64;
-const RESPONSE_HEADER_BYTES: usize = 16 * 1024;
 const RESPONSE_BODY_BYTES: usize = 64 * 1024;
 
 /// Jobs policy for one outbound delivery attempt.
@@ -278,7 +277,6 @@ impl Dispatcher {
                 request,
                 Operation {
                     deadline: job.deadline(),
-                    timeout: Some(DELIVERY_POLICY.timeout),
                     response_body_bytes: Some(RESPONSE_BODY_BYTES),
                 },
             )
@@ -446,7 +444,6 @@ fn limits(max_workers: NonZeroU32) -> Result<Limits, OutboundError> {
         max_active,
         operation_timeout: DELIVERY_POLICY.timeout,
         response_header_count: RESPONSE_HEADER_COUNT,
-        response_header_bytes: RESPONSE_HEADER_BYTES,
         response_body_bytes: RESPONSE_BODY_BYTES,
     })
 }
@@ -614,11 +611,7 @@ fn unix_timestamp(now: SystemTime) -> Option<i64> {
 fn is_permanent_transport_error(error: &HttpError) -> bool {
     matches!(
         error,
-        HttpError::InvalidConfiguration
-            | HttpError::InvalidTarget
-            | HttpError::Denied
-            | HttpError::ResolverConfiguration { .. }
-            | HttpError::ClientBuild { .. }
+        HttpError::InvalidConfiguration | HttpError::InvalidTarget | HttpError::ClientBuild { .. }
     )
 }
 
@@ -834,13 +827,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_credentials_fragments_and_nonpublic_or_nonhttps_static_destinations() {
+    fn rejects_credentials_fragments_and_non_https_static_destinations() {
         for destination in [
             "https://user@partner.example/events",
             "https://partner.example/events#fragment",
             "http://partner.example/events",
-            "https://127.0.0.1/events",
-            "https://169.254.169.254/latest/meta-data",
         ] {
             assert!(
                 Outbound::new(
@@ -853,6 +844,26 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn admits_operator_configured_private_https_destinations() {
+        // Endpoint URLs are trusted operator configuration; the outbound client
+        // is not an SSRF boundary and does not classify addresses.
+        assert!(
+            Outbound::new(
+                BTreeMap::from([(
+                    "partner".to_owned(),
+                    Endpoint::new(
+                        "https://10.0.0.5/events".to_owned(),
+                        "partner_v2".to_owned(),
+                        None
+                    ),
+                )]),
+                NonZeroU32::new(1).unwrap(),
+            )
+            .is_ok()
+        );
     }
 
     #[test]

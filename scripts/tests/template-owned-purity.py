@@ -52,7 +52,6 @@ def check(root: Path) -> None:
         "oidc-jwt": "remove_when_unselected",
         "oidc-introspection": "remove_when_unselected",
         "outbound-http": "remove_when_unselected",
-        "egress-dns": "remove_when_unselected",
         "tls-fixtures": "remove_when_unselected",
         "request-budget": "remove_when_unselected",
         "http-idempotency": "remove_when_unselected",

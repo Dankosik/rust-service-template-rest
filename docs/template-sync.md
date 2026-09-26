@@ -53,11 +53,11 @@ The introspection profile retains its complete optional positive-cache configura
 <!-- template:begin outbound-http:docs-template-init-outbound -->
 `OUTBOUND_HTTP` defaults to `none` and accepts `none` or `bounded`; the direct
 entry takes `--outbound-http`. `bounded` retains the [client guide](outbound-http.md),
-crate and tests independently of authentication. `none` removes that pack.
-The readonly request budget stays when auth or outbound needs it. DNS and
-public-address admission stay only with outbound HTTP; authentication retains
-its independent TLS fixtures without retaining the DNS pack. Selection supplies
-no provider configuration or automatic request.
+[decision record](outbound-http-decisions.md), crate, tests, and shared TLS
+fixtures independently of authentication. `none` removes that pack. The readonly
+request budget stays when auth or outbound needs it. The retained client uses a
+trusted operator-selected HTTPS origin and normal system resolution; selection
+supplies no provider configuration or automatic request.
 <!-- template:end outbound-http:docs-template-init-outbound -->
 <!-- template:begin http-idempotency:docs-template-init-http-idempotency -->
 `HTTP_IDEMPOTENCY` defaults to `none` and accepts `none` or `postgres`; the
@@ -173,8 +173,8 @@ absent database pack.
 Portable sync never restores a pruned authentication engine, runtime configuration, or profile-marked adopter documentation; the target lock and profile policy remain authoritative.
 <!-- template:end authn:docs-template-init-authn-sync -->
 <!-- template:begin outbound-http:docs-template-init-outbound-sync -->
-Portable sync cannot restore a pruned outbound pack, shared DNS runtime, or
-profile-marked guide. The target lock remains authoritative.
+Portable sync cannot restore a pruned outbound pack, its shared test fixtures,
+or profile-marked guide and decision record. The target lock remains authoritative.
 <!-- template:end outbound-http:docs-template-init-outbound-sync -->
 <!-- template:begin http-idempotency:docs-template-init-http-idempotency-sync -->
 Portable sync cannot restore a pruned idempotency pack, its schema

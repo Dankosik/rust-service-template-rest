@@ -5,19 +5,12 @@
     reason = "bounded local TLS fixtures make setup failures test failures"
 )]
 
-use std::{
-    error::Error as _,
-    fmt::Write as _,
-    io,
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::BTreeMap, sync::Mutex};
+use std::{error::Error as _, fmt::Write as _, net::SocketAddr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use http::{Request, Version, header};
-use infra_egress_dns::{admit_answers, test_support::TlsMaterial};
-use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -33,46 +26,73 @@ use tokio_rustls::{
     },
 };
 
-use crate::{Client, Error, Limits, Operation, build_fixture_client, policy};
+use crate::{Client, Error, Limits, Operation, build_fixture_client, policy, tls::TlsMaterial};
 
 const FIXTURE_HOST: &str = "authn.fixture.test";
 
-#[derive(Clone)]
-struct FixtureResolver {
-    host: String,
-    address: SocketAddr,
-}
+type SpanFields = BTreeMap<&'static str, String>;
 
-#[derive(Clone)]
-struct RawAnswerResolver {
-    answers: Vec<IpAddr>,
-    admitted_fixture: SocketAddr,
-}
+#[derive(Clone, Default)]
+struct SpanDiagnostics(Arc<Mutex<Vec<SpanFields>>>);
 
-impl Resolve for RawAnswerResolver {
-    fn resolve(&self, _name: Name) -> Resolving {
-        let answers = self.answers.clone();
-        let admitted_fixture = self.admitted_fixture;
-        Box::pin(async move {
-            let admitted = admit_answers(answers)?;
-            // The raw-answer facade exercises shared admission before mapping
-            // a safe synthetic answer to the in-process TLS peer.
-            Ok(Box::new(admitted.into_iter().map(move |_| admitted_fixture)) as Addrs)
-        })
+struct FieldVisitor(SpanFields);
+
+impl tracing::field::Visit for FieldVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.insert(field.name(), format!("{value:?}"));
     }
 }
 
-impl Resolve for FixtureResolver {
-    fn resolve(&self, name: Name) -> Resolving {
-        let host = self.host.clone();
-        let address = self.address;
-        Box::pin(async move {
-            if !name.as_str().eq_ignore_ascii_case(&host) {
-                return Err(io::Error::other("fixture DNS denied").into());
-            }
-            Ok(Box::new(std::iter::once(address)) as Addrs)
-        })
+impl tracing::Subscriber for SpanDiagnostics {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.name() == "outbound_http"
     }
+
+    fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        let mut fields = FieldVisitor(SpanFields::new());
+        attributes.record(&mut fields);
+        let mut spans = self.0.lock().expect("span diagnostic lock");
+        spans.push(fields.0);
+        tracing::span::Id::from_u64(spans.len() as u64)
+    }
+
+    fn record(&self, id: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+        let mut fields = FieldVisitor(SpanFields::new());
+        values.record(&mut fields);
+        self.0
+            .lock()
+            .expect("span diagnostic lock")
+            .get_mut(usize::try_from(id.into_u64() - 1).expect("span index"))
+            .expect("outbound span exists")
+            .extend(fields.0);
+    }
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, _: &tracing::Event<'_>) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
+    PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            Matcher::Full("http_client_request_duration_seconds".to_owned()),
+            &[0.005, 0.01, 0.025, 0.05, 0.1, 1.0],
+        )
+        .expect("observation buckets are valid")
+        .build_recorder()
+}
+
+fn recorded_count(scrape: &str, required_labels: &[&str]) -> usize {
+    scrape
+        .lines()
+        .filter(|line| {
+            line.starts_with("http_client_request_duration_seconds_count")
+                && required_labels.iter().all(|label| line.contains(label))
+                && line.ends_with(" 1")
+        })
+        .count()
 }
 
 fn limits() -> Limits {
@@ -80,7 +100,6 @@ fn limits() -> Limits {
         max_active: 1,
         operation_timeout: Duration::from_secs(1),
         response_header_count: 8,
-        response_header_bytes: 512,
         response_body_bytes: 128,
     }
 }
@@ -97,15 +116,8 @@ fn fixture_client_with_limits(
     let base = policy::admit_base(&format!("https://{FIXTURE_HOST}/")).expect("fixture URL");
     let certificate =
         reqwest::Certificate::from_der(&material.root).expect("fixture root certificate");
-    let transport = build_fixture_client(
-        FixtureResolver {
-            host: FIXTURE_HOST.to_owned(),
-            address,
-        },
-        &limits,
-        certificate,
-    )
-    .expect("fixture client");
+    let transport =
+        build_fixture_client(FIXTURE_HOST, address, &limits, certificate).expect("fixture client");
     Client {
         base,
         limits,
@@ -115,32 +127,9 @@ fn fixture_client_with_limits(
     }
 }
 
-fn denied_client(material: &TlsMaterial, address: SocketAddr) -> Client {
-    let limits = limits();
-    let base = policy::admit_base(&format!("https://{FIXTURE_HOST}/")).expect("fixture URL");
-    let certificate = reqwest::Certificate::from_der(&material.root).expect("fixture root");
-    let transport = build_fixture_client(
-        RawAnswerResolver {
-            answers: vec!["8.8.8.8".parse().expect("public answer"), address.ip()],
-            admitted_fixture: address,
-        },
-        &limits,
-        certificate,
-    )
-    .expect("fixture client");
-    Client {
-        base,
-        limits,
-        transport,
-        admission: Arc::new(tokio::sync::Semaphore::new(1)),
-        response_head_observed: None,
-    }
-}
-
 fn operation() -> Operation {
     Operation {
         deadline: Instant::now() + Duration::from_secs(1),
-        timeout: None,
         response_body_bytes: None,
     }
 }
@@ -348,10 +337,8 @@ async fn tls_trust_and_hostname_failures_remain_transport_errors() {
     let mut client = fixture_client(address, &material);
     client.base = policy::admit_base("https://different.fixture.test/").expect("different base");
     client.transport = build_fixture_client(
-        FixtureResolver {
-            host: "different.fixture.test".to_owned(),
-            address,
-        },
+        "different.fixture.test",
+        address,
         &client.limits,
         reqwest::Certificate::from_der(&material.root).expect("fixture root"),
     )
@@ -401,6 +388,279 @@ async fn framed_and_streamed_bodies_obey_the_response_ceiling() {
 }
 
 #[tokio::test]
+async fn parser_header_count_overflow_is_a_transport_error() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let mut parser_limit = limits();
+    parser_limit.response_header_count = 1;
+    let (address, server) = tls_server(
+        &material,
+        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Overflow: one\r\n\r\n",
+    )
+    .await;
+    assert!(matches!(
+        fixture_client_with_limits(address, &material, parser_limit)
+            .execute(request(), operation())
+            .await,
+        Err(Error::Transport { .. })
+    ));
+    server.await.expect("parser header fixture joins");
+}
+
+const REQUEST_SENTINELS: [&str; 6] = [
+    "sentinel-path",
+    "sentinel-query",
+    "sentinel-header",
+    "sentinel-body",
+    "sentinel-value",
+    "SENTINEL-METHOD",
+];
+
+async fn exercise_completed_attempts() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let client = fixture_client_with_limits(
+        "127.0.0.1:0".parse().expect("unused address"),
+        &material,
+        Limits {
+            response_body_bytes: 2,
+            ..limits()
+        },
+    );
+    let unpolled = client.execute(request(), operation());
+    drop(unpolled);
+
+    let (address, server) = tls_server(
+        &material,
+        b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
+    let success = fixture_client(address, &material)
+        .execute(request(), operation())
+        .await;
+    assert!(success.is_ok());
+    server.await.expect("success fixture joins");
+
+    let (address, server) = tls_server(
+        &material,
+        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
+    let not_found = fixture_client(address, &material)
+        .execute(request(), operation())
+        .await
+        .expect("HTTP error statuses remain responses");
+    assert_eq!(not_found.status(), http::StatusCode::NOT_FOUND);
+    server.await.expect("not-found fixture joins");
+
+    assert!(matches!(
+        client
+            .execute(
+                Request::get("https://other.fixture.test/items")
+                    .body(Bytes::new())
+                    .expect("absolute URI request"),
+                operation(),
+            )
+            .await,
+        Err(Error::InvalidTarget)
+    ));
+
+    let (address, server) = tls_server(
+        &material,
+        b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 3\r\n\r\nno!",
+    )
+    .await;
+    let mut request = Request::builder()
+        .method(http::Method::from_bytes(b"SENTINEL-METHOD").expect("method"))
+        .uri("/sentinel-path?token=sentinel-query")
+        .header(header::AUTHORIZATION, "Bearer sentinel-header")
+        .body(Bytes::from_static(b"sentinel-body"))
+        .expect("sensitive fixture request");
+    request
+        .headers_mut()
+        .insert("x-sentinel", "sentinel-value".parse().expect("header"));
+    assert!(matches!(
+        fixture_client_with_limits(
+            address,
+            &material,
+            Limits {
+                response_body_bytes: 2,
+                ..limits()
+            },
+        )
+        .execute(request, operation())
+        .await,
+        Err(Error::ResponseBodyTooLarge)
+    ));
+    server.await.expect("body-limit fixture joins");
+}
+
+#[test]
+fn observation_records_polled_attempts_once_without_request_data() {
+    let recorder = observation_recorder();
+    let diagnostics = SpanDiagnostics::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    metrics::with_local_recorder(&recorder, || {
+        tracing::subscriber::with_default(diagnostics.clone(), || {
+            runtime.block_on(exercise_completed_attempts());
+        });
+    });
+
+    let scrape = recorder.handle().render();
+    assert_eq!(
+        recorded_count(
+            &scrape,
+            &[
+                "outbound_outcome=\"response\"",
+                "http_request_method=\"GET\""
+            ],
+        ),
+        2
+    );
+    assert_eq!(
+        recorded_count(
+            &scrape,
+            &[
+                "outbound_outcome=\"response\"",
+                "error_type=\"404\"",
+                "http_response_status_code=\"404\"",
+            ],
+        ),
+        1
+    );
+    assert_eq!(
+        recorded_count(
+            &scrape,
+            &[
+                "outbound_outcome=\"error\"",
+                "error_type=\"invalid_target\"",
+            ],
+        ),
+        1
+    );
+    assert_eq!(
+        recorded_count(
+            &scrape,
+            &[
+                "outbound_outcome=\"error\"",
+                "error_type=\"response_body_too_large\"",
+                "http_request_method=\"_OTHER\"",
+                "http_response_status_code=\"502\"",
+            ],
+        ),
+        1
+    );
+    for secret in REQUEST_SENTINELS {
+        assert!(!scrape.contains(secret), "metric disclosed request data");
+    }
+
+    let spans = diagnostics.0.lock().expect("span diagnostic lock");
+    assert_eq!(spans.len(), 4, "unpolled futures are not attempts");
+    let body_failure = spans
+        .iter()
+        .find(|fields| {
+            fields
+                .get("error.type")
+                .is_some_and(|value| value.contains("response_body_too_large"))
+        })
+        .expect("body-limit attempt span");
+    assert!(
+        body_failure
+            .get("http.response.status_code")
+            .is_some_and(|value| value.contains("502"))
+    );
+    assert!(
+        body_failure
+            .get("http.request.method")
+            .is_some_and(|value| value.contains("_OTHER"))
+    );
+    assert!(
+        body_failure
+            .get("otel.status_code")
+            .is_some_and(|value| value.contains("ERROR"))
+    );
+    for fields in spans.iter() {
+        let fields = format!("{fields:?}");
+        for secret in REQUEST_SENTINELS {
+            assert!(!fields.contains(secret), "span disclosed request data");
+        }
+    }
+}
+
+#[test]
+fn observation_records_timeout_and_polled_drop_once() {
+    let recorder = observation_recorder();
+    let diagnostics = SpanDiagnostics::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    metrics::with_local_recorder(&recorder, || {
+        tracing::subscriber::with_default(diagnostics.clone(), || {
+            runtime.block_on(async {
+                let material = TlsMaterial::new(FIXTURE_HOST);
+                let (address, server) = tls_server_stall_after_headers(&material).await;
+                let timeout_observed = Arc::new(tokio::sync::Notify::new());
+                let mut timeout_client = fixture_client(address, &material);
+                timeout_client.response_head_observed = Some(timeout_observed.clone());
+                let mut timed_exchange = Box::pin(timeout_client.execute(request(), operation()));
+                tokio::select! {
+                    () = timeout_observed.notified() => {}
+                    result = &mut timed_exchange => panic!("stalled exchange completed unexpectedly: {result:?}"),
+                }
+                // Start virtual time only after the real TLS handshake and headers.
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(2)).await;
+                assert!(matches!(timed_exchange.await, Err(Error::Timeout { .. })));
+                tokio::time::resume();
+                server.abort();
+                assert!(server.await.expect_err("timeout fixture aborts").is_cancelled());
+
+                let (address, server) = tls_server_stall_after_headers(&material).await;
+                let observed = Arc::new(tokio::sync::Notify::new());
+                let mut client = fixture_client(address, &material);
+                client.response_head_observed = Some(observed.clone());
+                let mut exchange = Box::pin(client.execute(request(), operation()));
+                tokio::select! {
+                    () = observed.notified() => {}
+                    result = &mut exchange => panic!("stalled exchange completed unexpectedly: {result:?}"),
+                }
+                drop(exchange);
+                assert_eq!(client.admission.available_permits(), 1);
+                server.abort();
+                assert!(server.await.expect_err("drop fixture aborts").is_cancelled());
+            });
+        });
+    });
+
+    let scrape = recorder.handle().render();
+    assert_eq!(
+        recorded_count(
+            &scrape,
+            &[
+                "outbound_outcome=\"error\"",
+                "error_type=\"timeout\"",
+                "http_response_status_code=\"200\"",
+            ],
+        ),
+        1
+    );
+    assert_eq!(
+        recorded_count(&scrape, &["outbound_outcome=\"cancelled\""]),
+        1
+    );
+    let spans = diagnostics.0.lock().expect("span diagnostic lock");
+    assert_eq!(spans.len(), 2);
+    assert!(spans.iter().any(|fields| {
+        fields
+            .get("outbound.outcome")
+            .is_some_and(|value| value.contains("cancelled"))
+            && !fields.contains_key("error.type")
+    }));
+}
+
+#[tokio::test]
 async fn advertised_overflow_and_missing_exact_cap_eof_do_not_return_a_body() {
     let material = TlsMaterial::new(FIXTURE_HOST);
     let mut ceiling = limits();
@@ -437,7 +697,6 @@ async fn advertised_overflow_and_missing_exact_cap_eof_do_not_return_a_body() {
                 request(),
                 Operation {
                     deadline: Instant::now() + Duration::from_secs(1),
-                    timeout: None,
                     response_body_bytes: Some(1),
                 },
             )
@@ -448,51 +707,7 @@ async fn advertised_overflow_and_missing_exact_cap_eof_do_not_return_a_body() {
 }
 
 #[tokio::test]
-async fn response_header_count_and_aggregate_bytes_have_distinct_bounds() {
-    let material = TlsMaterial::new(FIXTURE_HOST);
-    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Large: abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\r\n\r\n";
-    let mut byte_ceiling = limits();
-    byte_ceiling.response_header_bytes = 32;
-    let (address, server) = tls_server(&material, response).await;
-    assert!(matches!(
-        fixture_client_with_limits(address, &material, byte_ceiling)
-            .execute(request(), operation())
-            .await,
-        Err(Error::ResponseHeadersTooLarge)
-    ));
-    server.await.expect("aggregate header fixture joins");
-
-    let mut count_ceiling = limits();
-    count_ceiling.response_header_count = 1;
-    let (address, server) = tls_server(&material, response).await;
-    assert!(matches!(
-        fixture_client_with_limits(address, &material, count_ceiling)
-            .execute(request(), operation())
-            .await,
-        Err(Error::Transport { .. })
-    ));
-    server.await.expect("parser header fixture joins");
-}
-
-#[tokio::test]
-async fn denied_answer_set_refuses_before_any_connection() {
-    let material = TlsMaterial::new(FIXTURE_HOST);
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("no-connect listener");
-    let result = denied_client(&material, listener.local_addr().expect("listener address"))
-        .execute(request(), operation())
-        .await;
-    assert!(matches!(result, Err(Error::Denied)));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), listener.accept())
-            .await
-            .is_err()
-    );
-}
-
-#[tokio::test]
-async fn expired_or_wider_operation_limits_refuse_before_network_work() {
+async fn expired_or_invalid_operation_limits_refuse_before_network_work() {
     let material = TlsMaterial::new(FIXTURE_HOST);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -503,40 +718,16 @@ async fn expired_or_wider_operation_limits_refuse_before_network_work() {
             request(),
             Operation {
                 deadline: Instant::now() - Duration::from_millis(1),
-                timeout: None,
                 response_body_bytes: None,
             },
         )
         .await;
     assert!(matches!(expired, Err(Error::Timeout { source: None })));
-    let wider = client
-        .execute(
-            request(),
-            Operation {
-                deadline: Instant::now() + Duration::from_secs(1),
-                timeout: Some(Duration::from_secs(2)),
-                response_body_bytes: None,
-            },
-        )
-        .await;
-    assert!(matches!(wider, Err(Error::InvalidConfiguration)));
-    let zero_timeout = client
-        .execute(
-            request(),
-            Operation {
-                deadline: Instant::now() + Duration::from_secs(1),
-                timeout: Some(Duration::ZERO),
-                response_body_bytes: None,
-            },
-        )
-        .await;
-    assert!(matches!(zero_timeout, Err(Error::InvalidConfiguration)));
     let zero_body = client
         .execute(
             request(),
             Operation {
                 deadline: Instant::now() + Duration::from_secs(1),
-                timeout: None,
                 response_body_bytes: Some(0),
             },
         )
@@ -547,7 +738,6 @@ async fn expired_or_wider_operation_limits_refuse_before_network_work() {
             request(),
             Operation {
                 deadline: Instant::now() + Duration::from_secs(1),
-                timeout: None,
                 response_body_bytes: Some(limits().response_body_bytes + 1),
             },
         )
@@ -635,18 +825,16 @@ async fn header_stripping_and_fixed_authority_apply_on_the_wire() {
         .expect("captured request response");
     let wire = String::from_utf8(captured.await.expect("captured request")).expect("ASCII request");
     assert!(wire.starts_with("GET //other.fixture.test/items%23safe?q=%23 HTTP/1.1\r\n"));
-    for removed in [
-        "traceparent:",
-        "tracestate:",
-        "baggage:",
-        "x-request-id:",
-        "accept-encoding:",
-    ] {
+    for removed in ["traceparent:", "tracestate:", "baggage:", "x-request-id:"] {
         assert!(
             !wire.to_ascii_lowercase().contains(removed),
             "{removed} leaked to the wire"
         );
     }
+    assert!(
+        wire.to_ascii_lowercase().contains("accept-encoding: gzip"),
+        "caller compression negotiation must reach the provider"
+    );
     server.await.expect("capture fixture server succeeds");
 }
 
@@ -685,31 +873,23 @@ async fn future_drop_releases_admission_after_response_headers() {
 }
 
 #[tokio::test]
-async fn narrower_timeout_covers_stalled_body_and_releases_admission() {
+async fn client_timeout_covers_stalled_body_and_releases_admission() {
     let material = TlsMaterial::new(FIXTURE_HOST);
     let (address, server) = tls_server_stall_after_headers(&material).await;
     let head_observed = Arc::new(tokio::sync::Notify::new());
-    let mut client = fixture_client(address, &material);
+    let mut timeout_limits = limits();
+    timeout_limits.operation_timeout = Duration::from_millis(50);
+    let mut client = fixture_client_with_limits(address, &material, timeout_limits);
     client.response_head_observed = Some(head_observed.clone());
     let exchange_client = client.clone();
-    let exchange = tokio::spawn(async move {
-        exchange_client
-            .execute(
-                request(),
-                Operation {
-                    deadline: Instant::now() + Duration::from_secs(1),
-                    timeout: Some(Duration::from_millis(50)),
-                    response_body_bytes: None,
-                },
-            )
-            .await
-    });
+    let exchange =
+        tokio::spawn(async move { exchange_client.execute(request(), operation()).await });
     tokio::time::timeout(Duration::from_secs(2), head_observed.notified())
         .await
         .expect("client admits response headers before stalled body");
     assert!(matches!(
         exchange.await.expect("timed exchange joins"),
-        Err(Error::Timeout { source: None })
+        Err(Error::Timeout { .. })
     ));
     assert_eq!(client.admission.available_permits(), 1);
     server.abort();
@@ -722,7 +902,7 @@ async fn narrower_timeout_covers_stalled_body_and_releases_admission() {
 }
 
 #[test]
-fn base_url_names_one_public_https_origin() {
+fn base_url_names_one_trusted_https_origin() {
     for base in [
         "https://provider.example",
         "https://provider.example/",
@@ -731,7 +911,6 @@ fn base_url_names_one_public_https_origin() {
     ] {
         assert!(policy::admit_base(base).is_ok(), "{base} must be admitted");
     }
-    // A literal host never reaches the resolver, so this is its only admission.
     for base in [
         "https://127.0.0.1/",
         "https://[::ffff:127.0.0.1]/",
@@ -739,8 +918,8 @@ fn base_url_names_one_public_https_origin() {
         "https://[fd00:ec2::254]/",
     ] {
         assert!(
-            matches!(Client::new(base, limits()), Err(Error::Denied)),
-            "{base} must be denied"
+            Client::new(base, limits()).is_ok(),
+            "{base} must be admitted"
         );
     }
     // The request path replaces any base path, so a base path is refused
@@ -748,9 +927,11 @@ fn base_url_names_one_public_https_origin() {
     for base in [
         "http://provider.example/",
         "https://user:secret@provider.example/",
+        "https://@provider.example/",
         "https://provider.example/?q=1",
         "https://provider.example/#fragment",
         " https://provider.example/",
+        "https://provider .example/",
         "https://provider.example/\u{0085}",
         "https://provider.example/v1",
         "https://provider.example/v1/",
@@ -801,13 +982,12 @@ fn fixed_authority_policy_rejects_host_and_invalid_limits() {
     );
     assert!(matches!(
         policy::admit_request_headers(headers),
-        Err(Error::Denied)
+        Err(Error::InvalidTarget)
     ));
-    let mutations: [fn(&mut Limits); 5] = [
+    let mutations: [fn(&mut Limits); 4] = [
         |limits: &mut Limits| limits.max_active = 0,
         |limits: &mut Limits| limits.operation_timeout = Duration::ZERO,
         |limits: &mut Limits| limits.response_header_count = 0,
-        |limits: &mut Limits| limits.response_header_bytes = 0,
         |limits: &mut Limits| limits.response_body_bytes = 0,
     ];
     for mutate in mutations {
