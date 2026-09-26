@@ -40,6 +40,26 @@ rehearsal in place of plain lifecycle: `/migrate` against a fresh database,
 `no_change` replay, then lifecycle with the pool open.
 <!-- template:end postgres:docs-ci-postgres-gates -->
 
+<!-- template:begin messaging:docs-ci-messaging-gates -->
+With JetStream retained, `messaging_integration` selects one real-NATS suite
+and the actual Go compatibility bridge when adapter, profile, Compose, or
+bridge inputs change. It has a messaging-only representative with no PostgreSQL
+or jobs and a combined representative only when another retained profile needs
+it. CI also checks locked offline Cargo metadata after initialization, the
+resolved NATS image digest, and dependency policy. These are selected surfaces,
+not a Cartesian multiplication of every profile, database, and harness.
+<!-- template:end messaging:docs-ci-messaging-gates -->
+<!-- template:begin outbox:docs-ci-outbox-gates -->
+With the outbox profile retained, the database-and-NATS integration selection
+covers transactional commit/rollback, live-key same/conflict/lost outcomes,
+outage snooze/recovery, uncertain completion, durable consumer effect dedupe,
+and publication despite occupied webhook slots. The initializer retains
+meaningful outbox-only and combined representatives and verifies the initialized
+locked graph with `cargo metadata --locked --offline`. These checks join the
+assembled candidate's final CI route; a documentation change does not create a
+separate acceptance gate.
+<!-- template:end outbox:docs-ci-outbox-gates -->
+
 The source template additionally selects the initializer matrix on
 `initializer_runtime`, the paths that can change an initialized service's
 build and tests or the initializer itself. Eight parallel parts together run

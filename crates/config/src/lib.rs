@@ -18,6 +18,9 @@ pub mod health;
 pub mod http;
 pub mod log;
 pub mod observability;
+// template:begin messaging:config-module
+pub mod messaging;
+// template:end messaging:config-module
 // template:begin authn:config-module
 pub mod authn;
 // template:end authn:config-module
@@ -56,6 +59,9 @@ pub use log::{LogConfig, LogFormat};
 pub use observability::{
     MetricsConfig, ObservabilityConfig, OtelConfig, OtelExporterConfig, TracesSampler,
 };
+// template:begin messaging:config-export
+pub use messaging::MessagingConfig;
+// template:end messaging:config-export
 // template:begin authn:config-export
 pub use authn::{Audiences, AuthnConfig};
 // template:end authn:config-export
@@ -89,6 +95,9 @@ pub struct Config {
     pub health: HealthConfig,
     pub log: LogConfig,
     pub observability: ObservabilityConfig,
+    // template:begin messaging:config-field
+    pub messaging: MessagingConfig,
+    // template:end messaging:config-field
     // template:begin authn:config-field
     pub authn: AuthnConfig,
     // template:end authn:config-field
@@ -122,6 +131,9 @@ impl Config {
         self.health.validate()?;
         self.log.validate()?;
         self.observability.validate()?;
+        // template:begin messaging:config-validate
+        self.messaging.validate(&self.app.env)?;
+        // template:end messaging:config-validate
         // template:begin authn:config-validate
         self.authn.validate()?;
         // template:end authn:config-validate

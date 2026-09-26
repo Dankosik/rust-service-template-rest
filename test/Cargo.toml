@@ -37,6 +37,12 @@ jobs-worker = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 tokio = { workspace = true, features = ["time"] }
 # template:end jobs:test-jobs-dependencies
+# template:begin outbox:test-messaging-outbox-dependencies
+async-nats = { workspace = true, features = ["jetstream"] }
+domain-events = { workspace = true }
+infra-messaging = { workspace = true }
+sha2 = { workspace = true }
+# template:end outbox:test-messaging-outbox-dependencies
 
 [dev-dependencies]
 # template:begin outbound-http:test-outbound-http-dependencies

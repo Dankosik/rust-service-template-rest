@@ -9,6 +9,9 @@ use std::time::Duration;
 
 use health::Readiness;
 use infra_http::{Drained, Server};
+// template:begin messaging:service-shutdown-messaging-imports
+use infra_messaging::{CloseOutcome, Messaging};
+// template:end messaging:service-shutdown-messaging-imports
 // template:begin postgres:shutdown-imports
 use infra_postgres::{Closed, PgPool};
 // template:end postgres:shutdown-imports
@@ -83,12 +86,96 @@ async fn join_background_then_close(
         .is_ok()
 }
 
-// template:begin postgres:shutdown-startup-pool-close
-/// Close a pool after tracked background work has joined during startup failure.
-pub(crate) async fn close_opened_postgres(pool: &PgPool) {
-    let _ = infra_postgres::close(pool, DEPENDENCY_CLOSE).await;
+/// Close every opened dependency under one deadline, including partial startup.
+pub(crate) async fn close_dependencies(
+    // template:begin postgres:shutdown-startup-pool-close
+    pool: Option<&PgPool>,
+    // template:end postgres:shutdown-startup-pool-close
+    // template:begin messaging:service-shutdown-startup-messaging-close
+    messaging: Option<Messaging>,
+    // template:end messaging:service-shutdown-startup-messaging-close
+    #[allow(unused_variables, reason = "dependency-free profiles perform no close")]
+    deadline: Instant,
+) -> bool {
+    let postgres_close = async {
+        // template:begin postgres:shutdown-dependency-pool-close
+        if let Some(pool) = pool {
+            return match infra_postgres::close(
+                pool,
+                deadline.saturating_duration_since(Instant::now()),
+            )
+            .await
+            {
+                Closed::Complete => {
+                    tracing::info!("postgres_pool_closed");
+                    false
+                }
+                Closed::TimedOut => {
+                    tracing::warn!("postgres pool outlived its close budget");
+                    true
+                }
+            };
+        }
+        // template:end postgres:shutdown-dependency-pool-close
+        false
+    };
+    let messaging_close = async {
+        // template:begin messaging:service-shutdown-dependency-messaging-close
+        if let Some(messaging) = messaging {
+            return match messaging.close(deadline, &CancellationToken::new()).await {
+                CloseOutcome::Complete => {
+                    tracing::info!("messaging_closed");
+                    false
+                }
+                CloseOutcome::TimedOut | CloseOutcome::UnobservedClose => {
+                    tracing::warn!("messaging resource outlived its close budget");
+                    true
+                }
+            };
+        }
+        // template:end messaging:service-shutdown-dependency-messaging-close
+        false
+    };
+    let (postgres_overran, messaging_overran) = tokio::join!(postgres_close, messaging_close);
+    postgres_overran || messaging_overran
 }
-// template:end postgres:shutdown-startup-pool-close
+
+/// A startup stop has no admitted listener, but owns the usual bounded tail.
+pub(crate) async fn finish_stopped_startup(
+    cancel: &CancellationToken,
+    tracker: &TaskTracker,
+    // template:begin postgres:shutdown-stopped-startup-pool-parameter
+    pool: Option<&PgPool>,
+    // template:end postgres:shutdown-stopped-startup-pool-parameter
+    // template:begin messaging:service-shutdown-stopped-startup-messaging-parameter
+    messaging: Option<Messaging>,
+    // template:end messaging:service-shutdown-stopped-startup-messaging-parameter
+    provider: TracerProviderHandle,
+    deadline: Instant,
+) -> Outcome {
+    let budget = Budget { deadline };
+    let joined =
+        join_background_then_close(cancel, tracker, budget.remaining(BACKGROUND_JOIN)).await;
+    let close_overran = close_dependencies(
+        // template:begin postgres:shutdown-stopped-startup-pool-argument
+        pool,
+        // template:end postgres:shutdown-stopped-startup-pool-argument
+        // template:begin messaging:service-shutdown-stopped-startup-messaging-argument
+        messaging,
+        // template:end messaging:service-shutdown-stopped-startup-messaging-argument
+        Instant::now() + budget.remaining(DEPENDENCY_CLOSE),
+    )
+    .await;
+    let flushed = matches!(
+        provider.shutdown(budget.remaining(TELEMETRY_FLUSH)).await,
+        ProviderShutdown::Flushed
+    );
+    if joined && !close_overran && flushed {
+        Outcome::Graceful
+    } else {
+        Outcome::Degraded
+    }
+}
 
 /// How the teardown ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +280,9 @@ pub(crate) struct Plan<'a> {
     // template:begin postgres:shutdown-plan-pool
     pub(crate) postgres_pool: Option<PgPool>,
     // template:end postgres:shutdown-plan-pool
+    // template:begin messaging:service-shutdown-plan-messaging
+    pub(crate) messaging: Option<Messaging>,
+    // template:end messaging:service-shutdown-plan-messaging
     pub(crate) tracer_provider: TracerProviderHandle,
     pub(crate) signals: &'a mut Signals,
 }
@@ -273,26 +363,16 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         tracing::warn!("background tasks outlived their join budget");
         true
     };
-    let pool_overran =
-    // template:begin postgres:shutdown-pool-close-prefix
-    if let Some(pool) = plan.postgres_pool.as_ref() {
-        match infra_postgres::close(pool, budget.remaining(DEPENDENCY_CLOSE)).await {
-            Closed::Complete => {
-                tracing::info!("postgres_pool_closed");
-                false
-            }
-            Closed::TimedOut => {
-                tracing::warn!("postgres pool outlived its close budget");
-                true
-            }
-        }
-    } else {
-    // template:end postgres:shutdown-pool-close-prefix
-        false
-    // template:begin postgres:shutdown-pool-close-suffix
-    }
-    // template:end postgres:shutdown-pool-close-suffix
-    ;
+    let dependency_overran = close_dependencies(
+        // template:begin postgres:shutdown-pool-close-prefix
+        plan.postgres_pool.as_ref(),
+        // template:end postgres:shutdown-pool-close-prefix
+        // template:begin messaging:service-shutdown-close-messaging-argument
+        plan.messaging,
+        // template:end messaging:service-shutdown-close-messaging-argument
+        Instant::now() + budget.remaining(DEPENDENCY_CLOSE),
+    )
+    .await;
 
     let telemetry_overran = match plan
         .tracer_provider
@@ -306,7 +386,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         ProviderShutdown::Incomplete => true,
     };
 
-    let outcome = if drain_overran || join_overran || pool_overran || telemetry_overran {
+    let outcome = if drain_overran || join_overran || dependency_overran || telemetry_overran {
         Outcome::Degraded
     } else {
         Outcome::Graceful

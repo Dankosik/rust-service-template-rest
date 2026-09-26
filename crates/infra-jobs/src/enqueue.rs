@@ -25,6 +25,14 @@ const ENQUEUE: &str = "INSERT INTO background_jobs (kind, payload, unique_key, n
      DO NOTHING \
      RETURNING id::text AS id";
 
+/// Compare one live job's stored payload while retaining its row lock.
+const COMPARE_LIVE_PAYLOAD: &str = "SELECT payload = $3::jsonb \
+     FROM background_jobs \
+     WHERE kind = $1 \
+       AND unique_key = $2::text COLLATE \"C\" \
+       AND state IN ('pending', 'running') \
+     FOR UPDATE";
+
 /// Delay and uniqueness for one enqueue.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EnqueueOptions<'a> {
@@ -43,6 +51,18 @@ pub enum Enqueued {
     Created(JobId),
     /// A live job already holds this kind and unique key.
     Duplicate,
+}
+
+/// The result of comparing a proposed payload with the live holder of a key.
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LivePayloadComparison {
+    /// The live holder has the same JSONB payload.
+    Same,
+    /// The live holder has a different JSONB payload.
+    Different,
+    /// No matching live holder remained when the comparison locked the row.
+    NoLongerLive,
 }
 
 /// A delay outside the queue's supported range.
@@ -123,6 +143,43 @@ pub async fn enqueue<K: JobKind>(
         )));
     };
     Ok(Enqueued::Created(id))
+}
+
+/// Compare a proposed payload with the live holder of `unique_key`.
+///
+/// Call only after [`enqueue`] returns [`Enqueued::Duplicate`] for the same
+/// kind, key, and payload. The selected row stays locked until the caller
+/// commits or rolls back `tx`; [`LivePayloadComparison::NoLongerLive`] means
+/// the caller must not treat the duplicate as accepted.
+///
+/// # Errors
+///
+/// [`EnqueueError`] when the kind, key, or payload is refused, or when the
+/// locking statement fails.
+pub async fn compare_live_payload<K: JobKind>(
+    tx: &mut Tx<'_>,
+    unique_key: &str,
+    payload: &K,
+) -> Result<LivePayloadComparison, EnqueueError> {
+    let prepared = prepare(
+        payload,
+        EnqueueOptions {
+            delay: Duration::ZERO,
+            unique_key: Some(unique_key),
+        },
+    )?;
+    let same = sqlx::query_scalar(COMPARE_LIVE_PAYLOAD)
+        .bind(K::NAME)
+        .bind(prepared.unique_key)
+        .bind(prepared.payload)
+        .fetch_optional(&mut *connection(tx))
+        .await
+        .map_err(EnqueueError::Database)?;
+    Ok(match same {
+        Some(true) => LivePayloadComparison::Same,
+        Some(false) => LivePayloadComparison::Different,
+        None => LivePayloadComparison::NoLongerLive,
+    })
 }
 
 #[derive(Debug)]

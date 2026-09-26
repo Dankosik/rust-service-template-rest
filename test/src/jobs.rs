@@ -122,7 +122,13 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
 /// # Errors
 ///
 /// Never fails today. The signature is the worker's registration contract.
-pub fn register(kinds: &mut Kinds, _support: &Support<'_>) -> Result<(), BuildError> {
+pub fn register(
+    kinds: &mut Kinds,
+    // template:begin messaging:integration-jobs-register-messaging-parameter
+    _messages: &mut infra_messaging::Registry,
+    // template:end messaging:integration-jobs-register-messaging-parameter
+    _support: &Support<'_>,
+) -> Result<(), BuildError> {
     kinds.register(Policy::default(), handle);
     Ok(())
 }

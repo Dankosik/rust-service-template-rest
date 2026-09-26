@@ -111,17 +111,17 @@ exit_code=$(docker inspect -f '{{.State.ExitCode}}' "${container}")
 }
 echo "runtime image stopped cleanly in ${stop_seconds}s (budget 45s)"
 
-# The /jobs-worker entrypoint. The repository decides what the image
-# must hold. Where the jobs pack is retained, the image carries /jobs-worker, and
-# the binary refuses before any database I/O under the hardened flags, with the
-# default configuration and no network. Retained webhook profiles register
-# their kinds, so the template then refuses because PostgreSQL is disabled;
-# without them the source has no registered kind. A derived service may add its
-# own registration and can reach either refusal. Where the jobs pack is not
-# retained, the image must not carry the entrypoint.
+# The worker entrypoint is retained when either jobs or messaging survives.
+# It must refuse before dependency I/O with the default configuration and no
+# network, so the image check observes the retained binary without requiring a
+# broker or database.
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 jobs=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field jobs) || {
 	echo "cannot resolve the selected jobs profile" >&2
+	exit 2
+}
+messaging=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field messaging) || {
+	echo "cannot resolve the selected messaging profile" >&2
 	exit 2
 }
 worker="${container}-jobs-worker"
@@ -136,22 +136,29 @@ has_worker=false
 if docker cp "${worker}:/jobs-worker" - >/dev/null 2>&1; then
 	has_worker=true
 fi
-case "${jobs}:${has_worker}" in
-none:false)
-	echo "jobs pack not retained; the image has no /jobs-worker entrypoint"
-	;;
-none:true)
-	echo "the jobs pack is not retained, but the image carries /jobs-worker" >&2
-	exit 1
-	;;
-postgres:false)
-	echo "the jobs pack is retained, but the image has no /jobs-worker entrypoint" >&2
-	exit 1
-	;;
-postgres:true)
-	expected='no job kind is registered'
-	if [[ -f "${root}/template.lock" ]]; then
-		expected='no job kind is registered|postgres\.enabled must be true to run the jobs worker'
+worker_needed=false
+if [[ ${jobs} == postgres || ${messaging} == nats-jetstream ]]; then worker_needed=true; fi
+case "${worker_needed}:${has_worker}" in
+false:false)
+		echo "no worker profile is retained; the image has no /jobs-worker entrypoint"
+		;;
+false:true)
+		echo "no worker profile is retained, but the image carries /jobs-worker" >&2
+		exit 1
+		;;
+true:false)
+		echo "a worker profile is retained, but the image has no /jobs-worker entrypoint" >&2
+		exit 1
+		;;
+true:true)
+		expected='no job kind or typed message handler is registered: register this service.s retained capabilities in crates/jobs-worker/src/main.rs'
+		if [[ ${jobs} == postgres && ${messaging} == none ]]; then
+			expected='no job kind is registered'
+		fi
+		if [[ -f "${root}/template.lock" ]]; then
+			if [[ ${jobs} == postgres && ${messaging} == none ]]; then
+				expected='no job kind is registered|postgres\.enabled must be true to run the jobs worker'
+			fi
 	else
 		webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field webhooks)
 		inbound_webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field inbound_webhooks)
@@ -167,10 +174,10 @@ postgres:true)
 		printf '%s\n' "${worker_output}" >&2
 		exit 1
 	fi
-	echo "jobs-worker refused before database I/O: ${refusal}"
-	;;
-*)
-	echo "unexpected jobs selection: ${jobs}" >&2
+		echo "jobs-worker refused before dependency I/O: ${refusal}"
+		;;
+	*)
+		echo "unexpected worker selection: jobs=${jobs} messaging=${messaging}" >&2
 	exit 1
 	;;
 esac

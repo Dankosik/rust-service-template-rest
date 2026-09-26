@@ -69,6 +69,24 @@ real owner here when implemented. New executable surfaces
 use their own binary in `crates/service/src/bin` only when they share the
 service's composition, otherwise their own crate with its own lifecycle.
 
+<!-- template:begin messaging:docs-integration-messaging -->
+## JetStream messaging boundary
+
+NATS is an operator-fixed neighbour, not a caller-selected destination.
+`infra-messaging` accepts only validated configuration and owns the Go wire,
+bounded native-client calls, expected-stream ACK classification, and consumer
+settlement. Bootstrap owns connection admission, cached readiness, and close;
+features supply only registered typed payloads and handlers. Streams, replicas,
+retention, storage, capacity, and consumer names remain operator topology.
+The adapter can reconcile only delivery-coupled fields of its named consumer;
+it never creates streams or deletes/recreates a cursor to hide incompatibility.
+
+The integration proof uses an actual NATS server plus actual Go source in both
+wire directions. It proves an ACK, rejection, and ambiguity are distinct;
+source is retained until a confirmed settlement; DLQ arrives before source ACK;
+and the durable logical-ID effect owner, rather than NATS, absorbs replay.
+<!-- template:end messaging:docs-integration-messaging -->
+
 <!-- template:begin authn:docs-integration-authn-provider -->
 Inbound authentication's provider destination is fixed by configuration or an
 exact-issuer discovery response, never by the caller. The adapter's

@@ -1,14 +1,21 @@
 //! Process proof of the jobs worker on the test-only fixture binary against
-//! real PostgreSQL: refusals exit 1, a ready worker runs a committed job and
-//! exits 0 on SIGTERM with its attempt metrics on the diagnostics listener,
-//! and an attempt that outlives a short drain exits 3 with its job released
-//! for an immediate claim. Each case gets its own database from `#[sqlx::test]`.
+//! real PostgreSQL and, in retained outbox profiles, a real JetStream source
+//! stream. Refusals exit 1, a ready worker runs a committed job and exits 0 on
+//! SIGTERM with its attempt metrics on the diagnostics listener, and an attempt
+//! that outlives a short drain exits 3 with its job released for an immediate
+//! claim. Each case gets its own database from `#[sqlx::test]`.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
+// template:begin outbox:test-jobs-process-nats-imports
+use std::sync::atomic::{AtomicU64, Ordering};
+// template:end outbox:test-jobs-process-nats-imports
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+// template:begin outbox:test-jobs-process-nats-imports
+use async_nats::jetstream::{self, stream};
+// template:end outbox:test-jobs-process-nats-imports
 use infra_jobs::{EnqueueOptions, Enqueued, JobKind, enqueue};
 use infra_postgres::{PgPool, TxError, in_tx};
 use integration_tests::jobs::{CREATE_PROBE_ATTEMPTS, Probe, ProbeAction};
@@ -25,13 +32,72 @@ const JOB_BOUND: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(20);
 const DB_POLL: Duration = Duration::from_millis(50);
 
+// template:begin outbox:test-jobs-process-nats-fixture
+static NEXT_NATS_FIXTURE: AtomicU64 = AtomicU64::new(1);
+
+struct NatsFixture {
+    jetstream: jetstream::Context,
+    stream: String,
+    url: String,
+}
+
+impl NatsFixture {
+    async fn create() -> Self {
+        let id = NEXT_NATS_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let suffix = format!("{}_{}", std::process::id(), id);
+        let stream = format!("TEST_OUTBOX_PROCESS_{suffix}");
+        let subject = format!("test.outbox.process.{suffix}.>");
+        let url = nats_url();
+        let client = async_nats::connect(&url)
+            .await
+            .expect("NATS_URL must point to the JetStream broker selected for this suite");
+        let jetstream = jetstream::new(client);
+        jetstream
+            .create_stream(stream::Config {
+                name: stream.clone(),
+                subjects: vec![subject],
+                max_messages: 10,
+                max_message_size: 1024 + 8 * 1024,
+                discard: stream::DiscardPolicy::New,
+                ..Default::default()
+            })
+            .await
+            .expect("test fixture source stream must be created by the NATS test administrator");
+        Self {
+            jetstream,
+            stream,
+            url,
+        }
+    }
+
+    async fn cleanup(self) {
+        self.jetstream
+            .delete_stream(&self.stream)
+            .await
+            .expect("test fixture source stream must be removable");
+    }
+}
+
+fn nats_url() -> String {
+    std::env::var("NATS_URL").expect(
+        "NATS_URL is required; run this suite through the selected messaging integration runner",
+    )
+}
+// template:end outbox:test-jobs-process-nats-fixture
+
 struct Worker {
     child: Child,
     lines: mpsc::Receiver<String>,
 }
 
 impl Worker {
-    fn spawn(database_url: &str, env: &[(&str, &str)]) -> Self {
+    fn spawn(
+        database_url: &str,
+        // template:begin outbox:test-jobs-process-nats-fixture-parameter
+        nats: &NatsFixture,
+        // template:end outbox:test-jobs-process-nats-fixture-parameter
+        env: &[(&str, &str)],
+    ) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_jobs-worker-fixture"));
         command
             .env_clear()
@@ -41,6 +107,15 @@ impl Worker {
             .env("APP__LOG__FORMAT", "json")
             .env("APP__POSTGRES__ENABLED", "true")
             .env("APP__POSTGRES__DSN", database_url)
+            // template:begin outbox:test-jobs-process-nats-environment
+            .env("APP__POSTGRES__MAX_CONNECTIONS", "6")
+            .env("APP__APP__ENV", "local")
+            .env("APP__MESSAGING__URLS", format!("[\"{}\"]", nats.url))
+            .env("APP__MESSAGING__SOURCE_STREAM", &nats.stream)
+            .env("APP__MESSAGING__MAX_PAYLOAD_BYTES", "1 KiB")
+            .env("APP__MESSAGING__ALLOW_PLAINTEXT", "true")
+            .env("APP__MESSAGING__ALLOW_UNAUTHENTICATED", "true")
+            // template:end outbox:test-jobs-process-nats-environment
             .envs(env.iter().copied())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -58,6 +133,14 @@ impl Worker {
     }
 
     fn await_record(&self, message: &str) -> serde_json::Value {
+        self.await_record_matching(message, |_| true)
+    }
+
+    fn await_record_matching(
+        &self,
+        message: &str,
+        matches: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
         let deadline = Instant::now() + RECORD_BOUND;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -67,7 +150,7 @@ impl Worker {
             let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
                 panic!("stdout must be one JSON object per line, got {line:?}");
             };
-            if record["message"] == message {
+            if record["message"] == message && matches(&record) {
                 return record;
             }
         }
@@ -392,29 +475,80 @@ fn assert_refused(worker: Worker, needle: &str) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn postgres_disabled_exits_1(pool: PgPool) {
     let database_url = child_database_url(&pool).await;
-    let worker = Worker::spawn(&database_url, &[("APP__POSTGRES__ENABLED", "false")]);
+    // template:begin outbox:test-jobs-process-nats-fixture-use
+    let nats = NatsFixture::create().await;
+    // template:end outbox:test-jobs-process-nats-fixture-use
+    let worker = Worker::spawn(
+        &database_url,
+        // template:begin outbox:test-jobs-process-nats-fixture-argument
+        &nats,
+        // template:end outbox:test-jobs-process-nats-fixture-argument
+        &[("APP__POSTGRES__ENABLED", "false")],
+    );
     assert_refused(
         worker,
         "postgres.enabled must be true to run the jobs worker",
     );
+    // template:begin outbox:test-jobs-process-nats-fixture-cleanup
+    nats.cleanup().await;
+    // template:end outbox:test-jobs-process-nats-fixture-cleanup
 }
 
 #[sqlx::test(migrations = false)]
 async fn missing_migration_history_exits_1_before_jobs_admission(pool: PgPool) {
     let database_url = child_database_url(&pool).await;
-    let worker = Worker::spawn(&database_url, &[]);
+    // template:begin outbox:test-jobs-process-nats-fixture-use
+    let nats = NatsFixture::create().await;
+    // template:end outbox:test-jobs-process-nats-fixture-use
+    let worker = Worker::spawn(
+        &database_url,
+        // template:begin outbox:test-jobs-process-nats-fixture-argument
+        &nats,
+        // template:end outbox:test-jobs-process-nats-fixture-argument
+        &[],
+    );
     assert_refused(
         worker,
         "postgres migration history: embedded migrations are pending",
     );
+    // template:begin outbox:test-jobs-process-nats-fixture-cleanup
+    nats.cleanup().await;
+    // template:end outbox:test-jobs-process-nats-fixture-cleanup
 }
+
+// template:begin outbox:test-jobs-process-outbox-capacity
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn ordinary_jobs_and_outbox_require_n_plus_five_connections(pool: PgPool) {
+    let database_url = child_database_url(&pool).await;
+    let nats = NatsFixture::create().await;
+    let worker = Worker::spawn(
+        &database_url,
+        &nats,
+        &[("APP__POSTGRES__MAX_CONNECTIONS", "5")],
+    );
+    assert_refused(
+        worker,
+        "must be at least jobs.max_workers + 5 (6) for the outbox worker",
+    );
+    nats.cleanup().await;
+}
+// template:end outbox:test-jobs-process-outbox-capacity
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     prepare(&pool).await;
     let id = enqueue_committed(&pool, ProbeAction::Succeed).await;
     let database_url = child_database_url(&pool).await;
-    let worker = Worker::spawn(&database_url, &[]);
+    // template:begin outbox:test-jobs-process-nats-fixture-use
+    let nats = NatsFixture::create().await;
+    // template:end outbox:test-jobs-process-nats-fixture-use
+    let worker = Worker::spawn(
+        &database_url,
+        // template:begin outbox:test-jobs-process-nats-fixture-argument
+        &nats,
+        // template:end outbox:test-jobs-process-nats-fixture-argument
+        &[],
+    );
     let api = listener_addr(&worker, "http listener bound");
     let diagnostics = listener_addr(&worker, "diagnostics listener bound");
     worker.await_record("jobs_worker_ready");
@@ -435,6 +569,9 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     worker.terminate();
     let (code, stderr) = worker.wait();
     assert_eq!(code, Some(0), "stderr: {stderr}");
+    // template:begin outbox:test-jobs-process-nats-fixture-cleanup
+    nats.cleanup().await;
+    // template:end outbox:test-jobs-process-nats-fixture-cleanup
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -451,7 +588,16 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     .expect("the scheduled jobs");
     assert_eq!(inserted.rows_affected(), 1_001);
     let database_url = child_database_url(&pool).await;
-    let worker = Worker::spawn(&database_url, &[]);
+    // template:begin outbox:test-jobs-process-nats-fixture-use
+    let nats = NatsFixture::create().await;
+    // template:end outbox:test-jobs-process-nats-fixture-use
+    let worker = Worker::spawn(
+        &database_url,
+        // template:begin outbox:test-jobs-process-nats-fixture-argument
+        &nats,
+        // template:end outbox:test-jobs-process-nats-fixture-argument
+        &[],
+    );
     let diagnostics = listener_addr(&worker, "diagnostics listener bound");
     worker.await_record("jobs_worker_ready");
     let metrics = format!("http://{diagnostics}/metrics");
@@ -473,6 +619,9 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     worker.terminate();
     let (code, stderr) = worker.wait();
     assert_eq!(code, Some(0), "stderr: {stderr}");
+    // template:begin outbox:test-jobs-process-nats-fixture-cleanup
+    nats.cleanup().await;
+    // template:end outbox:test-jobs-process-nats-fixture-cleanup
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -480,24 +629,39 @@ async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPo
     prepare(&pool).await;
     let id = enqueue_committed(&pool, ProbeAction::Sleep { millis: 60_000 }).await;
     let database_url = child_database_url(&pool).await;
+    // template:begin outbox:test-jobs-process-nats-fixture-use
+    let nats = NatsFixture::create().await;
+    // template:end outbox:test-jobs-process-nats-fixture-use
     let worker = Worker::spawn(
         &database_url,
+        // template:begin outbox:test-jobs-process-nats-fixture-argument
+        &nats,
+        // template:end outbox:test-jobs-process-nats-fixture-argument
         &[
             ("APP__HTTP__DRAIN_TIMEOUT", "1s"),
             ("APP__HTTP__READINESS_PROPAGATION_DELAY", "0s"),
             ("APP__HTTP__REQUEST_TIMEOUT", "500ms"),
         ],
     );
+    // template:begin outbox:test-jobs-process-shared-engines
+    let started = worker.await_record("jobs_claiming_started");
+    assert_eq!(started["engines"], 2, "{started}");
+    // template:end outbox:test-jobs-process-shared-engines
     worker.await_record("jobs_worker_ready");
     wait_running(&pool, &id).await;
     worker.terminate();
     let forced = worker.await_record("drain_forced");
     assert_eq!(forced["reason"], "budget", "{forced}");
-    let released = worker.await_record("attempts_finished");
+    let released = worker.await_record_matching("attempts_finished", |record| {
+        record["cancelled"] == 1 && record["released"] == 1
+    });
     assert_eq!(released["cancelled"], 1, "{released}");
     assert_eq!(released["released"], 1, "{released}");
     assert_eq!(released["timed_out"], false, "{released}");
     let (code, stderr) = worker.wait();
     assert_eq!(code, Some(3), "stderr: {stderr}");
     assert_claimable(&pool, &id).await;
+    // template:begin outbox:test-jobs-process-nats-fixture-cleanup
+    nats.cleanup().await;
+    // template:end outbox:test-jobs-process-nats-fixture-cleanup
 }

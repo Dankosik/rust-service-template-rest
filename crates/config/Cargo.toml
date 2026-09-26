@@ -22,6 +22,9 @@ secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["std", "derive"] }
 thiserror = { workspace = true }
 toml = { workspace = true, features = ["parse"] }
+# template:begin messaging:config-messaging-url-dependency
+url = { workspace = true, features = ["std"] }
+# template:end messaging:config-messaging-url-dependency
 
 [build-dependencies]
 vergen-gitcl = { workspace = true }

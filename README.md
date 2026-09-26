@@ -67,6 +67,21 @@ outbound HTTP. Retention is inert until static environment-backed endpoints and,
 for inbound processing, explicit service/worker consumer bindings exist. See
 the selected direction guide.
 <!-- template:end webhooks-common:readme-webhooks-profiles -->
+<!-- template:begin messaging:docs-readme-messaging-profile -->
+`MESSAGING=nats-jetstream` retains typed JetStream publication and consumption
+without PostgreSQL or jobs. It is inert until configured and reuses the retained
+`jobs-worker`; it does not add a sample event or HTTP route. The [durable
+messaging guide](docs/durable-messaging.md) owns Go interoperability, operator
+topology, handler idempotency, and the selected worker's limits. `OUTBOX` is a
+separate later PostgreSQL/jobs extension and is unavailable in a messaging-only
+selection.
+<!-- template:end messaging:docs-readme-messaging-profile -->
+<!-- template:begin outbox:docs-readme-outbox-profile -->
+`OUTBOX=postgres` requires `DATABASE=postgres`, `JOBS=postgres`, and
+`MESSAGING=nats-jetstream`. It records publication intent in the business
+transaction and gives it reserved worker capacity. Its recovery and rollback
+rules are in the [transactional outbox guide](docs/postgres-transactional-outbox.md).
+<!-- template:end outbox:docs-readme-outbox-profile -->
 
 <!-- template:begin webhooks:readme-webhooks-outbound-guide -->
 The outbound direction is documented in

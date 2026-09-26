@@ -25,12 +25,18 @@ workspace = true
 gethostname = { workspace = true }
 health = { workspace = true }
 infra-http = { workspace = true }
+# template:begin jobs:worker-jobs-dependencies
 infra-jobs = { workspace = true }
+infra-postgres = { workspace = true }
+migrate = { workspace = true }
+futures-util = { workspace = true, features = ["std", "async-await"] }
+# template:end jobs:worker-jobs-dependencies
+# template:begin messaging:worker-messaging-dependency
+infra-messaging = { workspace = true }
+# template:end messaging:worker-messaging-dependency
 # template:begin webhooks-common:worker-webhooks-dependency
 infra-webhooks = { workspace = true }
 # template:end webhooks-common:worker-webhooks-dependency
-infra-postgres = { workspace = true }
-migrate = { workspace = true }
 infra-telemetry = { workspace = true }
 secrecy = { workspace = true }
 service-config = { workspace = true }

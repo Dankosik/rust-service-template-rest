@@ -645,10 +645,15 @@ markers, tests, and initializer support. Order by expected demand:
    processing, and retention limits. Raw-byte verification atomically creates a
    PostgreSQL receipt and processing job with duplicate/conflict arbitration.
 <!-- template:end inbound-webhooks:roadmap-stage-10-5-inbound-guide -->
-6. NATS JetStream messaging with typed domain events and a `worker` binary;
-   transactional outbox with an `outbox-relay` binary. Reuse `infra-jobs` for
-   durable local scheduling and completion where that boundary applies; the
-   messaging/outbox design owns its distinct delivery semantics.
+6. NATS JetStream messaging with `domain-events` and `infra-messaging`, plus
+   optional `OUTBOX=postgres`. The retained `jobs-worker` composes consumer
+   work and the outbox's separate one-slot publisher engine; it adds neither a
+   `worker` nor an `outbox-relay` binary. The outbox reuses `infra-jobs` for
+   durable scheduling and completion while preserving its distinct immutable
+   publication semantics. [Durable messaging](durable-messaging.md) and the
+   [PostgreSQL transactional outbox](postgres-transactional-outbox.md) own the
+   adopted contracts. Final assembled validation and exact-head CI evidence remain
+   pending; no delivery result is claimed.
 7. gRPC with `tonic`: server policy, interceptors, health, bounded drain,
    shared client connections, buf lint and breaking checks.
 8. OAuth 2.0 client-credentials outbound authentication.
@@ -769,6 +774,18 @@ C-collated text unique keys. Future stage 10.5 (webhooks) and 10.6
 mechanisms. Process lifecycle ownership stays separate until a shared signal,
 deadline, or tracked-task teardown change justifies extraction; another binary
 alone does not.
+
+Stage 10.6 adds JetStream messaging and `OUTBOX=postgres`. Messaging remains
+independently runnable without PostgreSQL; the outbox requires PostgreSQL and
+jobs, records versioned base64 immutable intent in the caller transaction, and
+uses a separately reserved one-slot publisher engine. It retains finite
+live-key comparison for idempotent enqueue and durable logical-ID consumer
+deduplication beyond that horizon. Long broker outages snooze and refund pending
+intent; recovery and rollback retain rather than delete it. The implementation
+is complete in this candidate, but final assembled validation, exact-head CI,
+initializer representatives, real PostgreSQL+NATS proof, integrated review,
+and any delivery decision remain pending until actual receipts exist. No
+publication or deployment is claimed.
 
 ### Stage 11: Benchmarking and performance evidence
 

@@ -85,6 +85,17 @@ value such as `JOBS=8` makes `make template-init` refuse with
 `JOBS is unsupported`, so it must be unset or a valid choice. Selection
 starts no worker; `/jobs-worker` runs only where it is deployed.
 <!-- template:end jobs:docs-template-init-jobs -->
+<!-- template:begin messaging:docs-template-init-messaging -->
+`MESSAGING` defaults to `none` and accepts `none` or `nats-jetstream`; the
+direct entry takes `--messaging`. `nats-jetstream` retains the typed event and
+adapter crates, the existing worker where needed, configuration, NATS proof,
+digest-pinned Compose input, CI ownership, and the [durable messaging
+guide](durable-messaging.md). It is independently valid with `DATABASE=none`
+and `JOBS=none`. Selection starts no client or worker; a configured deployment
+supplies the operator-created topology. `none` removes the complete messaging
+closure. `OUTBOX` is intentionally not an initializer selection until its
+separate PostgreSQL/jobs extension exists.
+<!-- template:end messaging:docs-template-init-messaging -->
 
 
 Service names are lowercase ASCII, start with a letter, use single hyphens
@@ -126,6 +137,11 @@ historical profile shapes are `database` + `agent_harness`, `database` +
 `http_idempotency` + `agent_harness`; missing selections in those shapes mean
 `none`. Matching historical replay preserves the original lock bytes. Partial
 or unknown shapes refuse.
+
+<!-- template:begin messaging:docs-template-init-messaging-lock -->
+The lock records the selected `messaging` value. Historical records without it
+mean `none`; changing it after initialization is a refused profile migration.
+<!-- template:end messaging:docs-template-init-messaging-lock -->
 
 
 <!-- template:begin authn:docs-template-init-authn-lock -->
@@ -254,7 +270,8 @@ Use the service's [command policy](build-test-and-development-commands.md) and
 [validation router](validation-routing.md) for ordinary development.
 The source template additionally owns `make template-owned-purity-check` and
 `ALLOW_FULL=1 make template-init-check`. It checks 368 cheap canonical
-profile/harness projections, then initializes and validates 46 runtime graphs.
+profile/harness projections, then initializes and validates the runtime graphs
+enumerated by `scripts/ci/template-init-check.sh`.
 Graphs 1--26 are the existing baseline. Graphs 27--46 add five auth/idempotency
 blocks, each ordered as inbound-only without bounded outbound HTTP, inbound-only
 with it, outbound-only with it, and both directions with it: graphs 27--30 use

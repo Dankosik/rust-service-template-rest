@@ -22,7 +22,6 @@
       "test/tests/support/commit_proxy.rs",
       "test/fixtures/migrations/",
       "test/src/lib.rs",
-      "env/docker-compose.yml",
       "scripts/lib/compose-postgres.sh",
       "scripts/ci/test-integration-db.sh",
       "scripts/ci/migration-validate.sh",
@@ -176,8 +175,10 @@
       },
       {
         "path": "crates/service/src/bootstrap/shutdown.rs",
-        "id": "shutdown-pool-close-suffix"
+        "id": "shutdown-dependency-pool-close"
       },
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-stopped-startup-pool"]},
+      {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["shutdown-stopped-startup-pool-argument", "shutdown-stopped-startup-pool-parameter"]},
       {
         "path": ".github/workflows/ci.yml",
         "id": "ci-quality-migrations"
@@ -191,12 +192,8 @@
         "id": "ci-image-migration-rehearsal"
       },
       {
-        "path": ".github/workflows/ci.yml",
-        "id": "ci-integration-job"
-      },
-      {
-        "path": ".github/dependabot.yml",
-        "id": "dependabot-compose"
+        "path": "env/docker-compose.yml",
+        "ids": ["compose-postgres-header", "compose-postgres-service"]
       },
       {
         "path": "CONTRIBUTING.md",
@@ -297,14 +294,6 @@
       {
         "path": "docs/ci-cd-production-ready.md",
         "id": "docs-ci-migrator-image"
-      },
-      {
-        "path": ".github/workflows/ci.yml",
-        "id": "ci-required-integration-need"
-      },
-      {
-        "path": "crates/service/src/bootstrap/mod.rs",
-        "id": "bootstrap-postgres-secret-import"
       },
       {
         "path": "test/Cargo.toml",
@@ -712,7 +701,6 @@
   "jobs": {
     "remove_when_unselected": [
       "crates/infra-jobs/",
-      "crates/jobs-worker/",
       "crates/config/src/jobs.rs",
       "migrations/20260924000001_create_background_jobs.sql",
       "test/src/jobs.rs",
@@ -723,11 +711,17 @@
     ],
     "markers": [
       {"path": "Cargo.toml", "ids": ["workspace-jobs-crates"]},
+      {"path": "crates/jobs-worker/Cargo.toml", "ids": ["worker-jobs-dependencies"]},
+      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-jobs-imports", "worker-bootstrap-postgres-imports", "worker-bootstrap-job-errors", "worker-bootstrap-postgres-errors", "worker-bootstrap-postgres-disabled-error", "worker-bootstrap-opened-jobs", "worker-bootstrap-jobs-startup", "worker-bootstrap-open-pool", "worker-bootstrap-listener-jobs-probe", "worker-bootstrap-listener-jobs-probe-argument", "worker-bootstrap-listener-jobs-parameter", "worker-bootstrap-registrations-jobs", "worker-bootstrap-register-jobs", "worker-bootstrap-register-jobs-argument", "worker-bootstrap-registrations-jobs-value", "worker-bootstrap-validate-jobs", "worker-bootstrap-prepared-jobs", "worker-bootstrap-prepared-jobs-value", "worker-bootstrap-application-name", "worker-bootstrap-error-abort-pool", "worker-bootstrap-error-abort-started", "worker-bootstrap-error-started", "worker-bootstrap-jobs-histograms", "worker-bootstrap-log-jobs-argument", "worker-bootstrap-log-jobs-fields", "worker-bootstrap-log-jobs-kinds", "worker-bootstrap-log-jobs-parameter", "worker-bootstrap-opened-started", "worker-bootstrap-ordinary-engine", "worker-bootstrap-start-admitted-jobs", "worker-bootstrap-shutdown-plan-pool", "worker-bootstrap-shutdown-plan-started", "worker-bootstrap-shutdown-pool", "worker-bootstrap-shutdown-started", "worker-bootstrap-signal-abort-pool", "worker-bootstrap-signal-abort-started", "worker-bootstrap-test-application-name", "worker-bootstrap-test-jobs-imports", "worker-bootstrap-test-jobs-refusals", "worker-bootstrap-test-postgres-refusal", "worker-bootstrap-wait-jobs-failure", "worker-bootstrap-wait-started-argument", "worker-bootstrap-wait-started-parameter"]},
+      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-pool-admission", "worker-bootstrap-pool-capacity", "worker-bootstrap-pool-open"]},
+      {"path": "crates/jobs-worker/src/lib.rs", "ids": ["worker-register-jobs-parameter", "worker-register-test-jobs-parameter", "worker-lib-test-postgres-refusal"]},
+      {"path": "crates/jobs-worker/src/main.rs", "ids": ["worker-main-register-jobs-parameter"]},
+      {"path": "crates/jobs-worker/src/shutdown.rs", "ids": ["worker-shutdown-jobs-imports", "worker-shutdown-postgres-imports", "worker-shutdown-plan-jobs", "worker-shutdown-plan-jobs-pool", "worker-shutdown-abort-jobs-started", "worker-shutdown-abort-jobs-pool", "worker-shutdown-abort-jobs-finish", "worker-shutdown-destructure-started", "worker-shutdown-destructure-pool", "worker-shutdown-stop-jobs", "worker-shutdown-stop-jobs-parameter", "worker-shutdown-stop-jobs-argument", "worker-shutdown-drain-jobs", "worker-shutdown-drain-jobs-parameter", "worker-shutdown-drain-jobs-argument", "worker-shutdown-drain-start-log", "worker-shutdown-drain-forced-log", "worker-shutdown-finish-jobs", "worker-shutdown-finish-jobs-parameter", "worker-shutdown-finish-jobs-argument", "worker-shutdown-close-jobs", "worker-shutdown-close-jobs-parameter", "worker-shutdown-close-jobs-argument", "worker-shutdown-close-pool", "worker-shutdown-abort-close-jobs-argument", "worker-shutdown-finish-attempts", "worker-shutdown-test-started-argument", "worker-shutdown-test-pool-argument"]},
+      {"path": "crates/jobs-worker/tests/process.rs", "ids": ["worker-process-jobs-expectation"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-jobs-module", "config-jobs-export", "config-jobs-field", "config-jobs-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-jobs-environment"]},
       {"path": "crates/config/src/observability.rs", "ids": ["otel-jobs-worker-identity-doc"]},
       {"path": "crates/infra-telemetry/src/metrics.rs", "ids": ["telemetry-jobs-histograms"]},
-      {"path": "build/docker/Dockerfile", "ids": ["docker-jobs-worker-build", "docker-jobs-worker-output", "docker-jobs-worker-runtime"]},
       {"path": "test/Cargo.toml", "ids": ["test-jobs-dependencies", "test-jobs-dev-dependencies", "test-jobs-worker-fixture"]},
       {"path": "test/src/lib.rs", "ids": ["test-lib-jobs-module"]},
       {"path": "test/README.md", "ids": ["test-readme-jobs"]},
@@ -759,6 +753,102 @@
       {"path": "docs/background-jobs.md", "ids": ["docs-background-jobs-idempotency"]}
     ]
   },
+  "messaging": {
+    "remove_when_unselected": [
+      "crates/domain-events/",
+      "crates/infra-messaging/",
+      "crates/config/src/messaging.rs",
+      "env/nats/nats-server.conf",
+      "scripts/ci/test-integration-messaging.sh",
+      "scripts/messaging-go-compat.sh",
+      "docs/durable-messaging.md"
+    ],
+    "markers": [
+      {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client"]},
+      {"path": "crates/config/Cargo.toml", "ids": ["config-messaging-url-dependency"]},
+      {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
+      {"path": "crates/config/src/load.rs", "ids": ["load-messaging-environment"]},
+      {"path": "crates/service/Cargo.toml", "ids": ["service-messaging-dependency"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["service-bootstrap-messaging-imports", "service-bootstrap-messaging-errors", "service-bootstrap-messaging-startup-budget", "service-bootstrap-messaging-options", "service-bootstrap-prepared-messaging-field", "service-bootstrap-messaging-startup", "service-bootstrap-messaging-startup-close", "service-bootstrap-messaging-opened", "service-bootstrap-prepared-messaging-value", "service-bootstrap-destructure-messaging", "service-bootstrap-shutdown-messaging", "service-bootstrap-messaging-functions", "service-bootstrap-stopped-startup-messaging"]},
+      {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["service-shutdown-messaging-imports", "service-shutdown-plan-messaging", "service-shutdown-startup-messaging-close", "service-shutdown-close-messaging-argument", "service-shutdown-dependency-messaging-close", "service-shutdown-stopped-startup-messaging-argument", "service-shutdown-stopped-startup-messaging-parameter"]},
+      {"path": "crates/service/tests/lifecycle.rs", "ids": ["service-messaging-lifecycle-admission"]},
+      {"path": "crates/jobs-worker/Cargo.toml", "ids": ["worker-messaging-dependency"]},
+      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-messaging-imports", "worker-bootstrap-messaging-startup-budget", "worker-bootstrap-messaging-errors", "worker-bootstrap-opened-messaging", "worker-bootstrap-messaging-startup", "worker-bootstrap-messaging-options", "worker-bootstrap-listener-messaging-probe", "worker-bootstrap-messaging-probe-value", "worker-bootstrap-listener-messaging-probe-argument", "worker-bootstrap-listener-messaging-parameter", "worker-bootstrap-registrations-messaging", "worker-bootstrap-register-messaging", "worker-bootstrap-register-messaging-argument", "worker-bootstrap-validate-messaging", "worker-bootstrap-registrations-messaging-value", "worker-bootstrap-wait-messaging-failure", "worker-bootstrap-sanitized-panic-hook", "worker-bootstrap-sanitized-panic-hook-call", "worker-bootstrap-error-abort-consumer", "worker-bootstrap-error-abort-messaging", "worker-bootstrap-shutdown-plan-messaging", "worker-bootstrap-signal-abort-consumer", "worker-bootstrap-signal-abort-messaging", "worker-bootstrap-start-admitted-consumer", "worker-bootstrap-wait-consumer-argument", "worker-bootstrap-wait-consumer-parameter"]},
+      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-messaging-connect"]},
+      {"path": "crates/jobs-worker/src/lib.rs", "ids": ["worker-register-messaging-parameter", "worker-register-test-messaging-parameter"]},
+      {"path": "crates/jobs-worker/src/main.rs", "ids": ["worker-main-register-messaging-parameter"]},
+      {"path": "crates/jobs-worker/src/shutdown.rs", "ids": ["worker-shutdown-messaging-imports", "worker-shutdown-plan-messaging", "worker-shutdown-abort-messaging-consumer", "worker-shutdown-abort-messaging-resource", "worker-shutdown-abort-messaging-drain", "worker-shutdown-destructure-messaging", "worker-shutdown-stop-messaging", "worker-shutdown-stop-messaging-parameter", "worker-shutdown-stop-messaging-argument", "worker-shutdown-drain-messaging", "worker-shutdown-drain-messaging-parameter", "worker-shutdown-drain-messaging-argument", "worker-shutdown-finish-messaging", "worker-shutdown-finish-messaging-parameter", "worker-shutdown-finish-messaging-argument", "worker-shutdown-close-messaging", "worker-shutdown-close-messaging-parameter", "worker-shutdown-close-messaging-argument", "worker-shutdown-abort-close-messaging-argument", "worker-shutdown-test-consumer-argument", "worker-shutdown-test-messaging-argument", "worker-shutdown-drop-consumer", "worker-shutdown-abort-drop-consumer"]},
+      {"path": "test/src/jobs.rs", "ids": ["integration-jobs-register-messaging-parameter"]},
+      {"path": "env/config/local.toml", "ids": ["local-config"]},
+      {"path": "env/docker-compose.yml", "ids": ["compose-nats-service"]},
+      {"path": "README.md", "ids": ["docs-readme-messaging-profile"]},
+      {"path": "CONTRIBUTING.md", "ids": ["contributing-messaging-prerequisites", "contributing-messaging-proof"]},
+      {"path": "docs/durable-messaging.md", "ids": ["docs-durable-messaging"]},
+      {"path": "docs/template-sync.md", "ids": ["docs-template-init-messaging", "docs-template-init-messaging-lock"]},
+      {"path": "docs/repo-architecture.md", "ids": ["docs-architecture-messaging-leaf"]},
+      {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-messaging-owner", "docs-boundaries-messaging-tests", "docs-boundaries-messaging-edges"]},
+      {"path": "docs/architecture/async.md", "ids": ["docs-async-messaging"]},
+      {"path": "docs/architecture/integration.md", "ids": ["docs-integration-messaging"]},
+      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-messaging"]},
+      {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-messaging", "docs-library-selection-messaging-rejection"]},
+      {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-messaging"]},
+      {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-messaging-gates"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-messaging-source"]},
+      {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-messaging-placement"]}
+    ]
+  },
+  "worker": {
+    "remove_when_unselected": [
+      "crates/jobs-worker/"
+    ],
+    "markers": [
+      {"path": "Cargo.toml", "ids": ["workspace-worker-crate"]},
+      {"path": "build/docker/Dockerfile", "ids": ["docker-jobs-worker-build", "docker-jobs-worker-output", "docker-jobs-worker-runtime"]},
+      {"path": "docs/architecture/async.md", "ids": ["docs-async-worker-lifetime"]}
+    ]
+  },
+  "service-secrets": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "crates/service/Cargo.toml", "ids": ["service-secrecy-dependency"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-postgres-secret-import"]}
+    ]
+  },
+  "integration": {
+    "remove_when_unselected": [
+      "env/docker-compose.yml"
+    ],
+    "markers": [
+      {"path": "env/docker-compose.yml", "ids": ["compose-file"]},
+      {"path": ".github/dependabot.yml", "ids": ["dependabot-compose"]},
+      {"path": ".github/workflows/ci.yml", "ids": ["ci-integration-job", "ci-required-integration-need"]}
+    ]
+  },
+  "outbox": {
+    "remove_when_unselected": [
+      "crates/infra-messaging/src/outbox.rs",
+      "test/tests/messaging_outbox.rs",
+      "docs/postgres-transactional-outbox.md"
+    ],
+    "markers": [
+      {"path": "crates/infra-messaging/Cargo.toml", "ids": ["messaging-outbox-dependencies"]},
+      {"path": "crates/infra-messaging/src/lib.rs", "ids": ["messaging-outbox-module"]},
+      {"path": "crates/config/src/jobs.rs", "ids": ["jobs-outbox-capacity", "jobs-outbox-capacity-tests"]},
+      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-outbox-pool", "worker-bootstrap-outbox-capacity", "worker-bootstrap-outbox-config", "worker-bootstrap-outbox-messaging", "worker-bootstrap-outbox-engine", "worker-bootstrap-outbox-registration", "worker-bootstrap-outbox-kind-error", "worker-bootstrap-append-publisher"]},
+      {"path": "crates/jobs-worker/src/main.rs", "ids": ["worker-outbox-registration"]},
+      {"path": "crates/jobs-worker/tests/process.rs", "ids": ["worker-process-outbox-capacity"]},
+      {"path": "test/tests/jobs/process.rs", "ids": ["test-jobs-process-nats-imports", "test-jobs-process-nats-fixture", "test-jobs-process-nats-fixture-argument", "test-jobs-process-nats-fixture-cleanup", "test-jobs-process-nats-fixture-parameter", "test-jobs-process-nats-fixture-use", "test-jobs-process-nats-environment", "test-jobs-process-outbox-capacity", "test-jobs-process-shared-engines"]},
+      {"path": "test/Cargo.toml", "ids": ["test-messaging-outbox-dependencies"]},
+      {"path": "README.md", "ids": ["docs-readme-outbox-profile"]},
+      {"path": "docs/postgres-transactional-outbox.md", "ids": ["docs-postgres-transactional-outbox"]},
+      {"path": "docs/durable-messaging.md", "ids": ["docs-durable-messaging-outbox"]},
+      {"path": "docs/architecture/async.md", "ids": ["docs-async-outbox"]},
+      {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-outbox-owner", "docs-boundaries-outbox-edges"]},
+      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-outbox"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-outbox-source"]},
+      {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-outbox-gates"]}
+    ]
+  },
   "webhooks-common": {
     "remove_when_unselected": [
       "crates/infra-webhooks/",
@@ -780,15 +870,7 @@
       {
         "path": "crates/jobs-worker/src/main.rs",
         "ids": [
-          "worker-webhooks-register-prefix",
-          "worker-webhooks-register-suffix",
           "worker-webhooks-registration"
-        ]
-      },
-      {
-        "path": "crates/jobs-worker/tests/process.rs",
-        "ids": [
-          "worker-webhooks-process-expectation"
         ]
       },
       {
@@ -1071,6 +1153,14 @@
         "path": "test/Cargo.toml",
         "ids": [
           "test-inbound-webhooks-dependencies"
+        ]
+      },
+      {
+        "path": "test/tests/messaging_outbox.rs",
+        "ids": [
+          "outbox-test-messaging-outbox-inbound-imports",
+          "outbox-test-messaging-outbox-inbound-fixture",
+          "outbox-test-messaging-outbox-webhook-capacity"
         ]
       },
       {

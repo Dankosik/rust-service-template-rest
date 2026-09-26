@@ -1,0 +1,40 @@
+[package]
+name = "infra-messaging"
+description = "Bounded JetStream publication and typed Go-compatible event delivery."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-nats = { workspace = true, features = ["jetstream", "aws-lc-rs", "nkeys"] }
+async-trait = { workspace = true }
+# template:begin outbox:messaging-outbox-dependencies
+base64 = { workspace = true, features = ["std"] }
+# The outbox adapter prepares jobs through the canonical jobs transaction and
+# deliberately has no direct queue SQL or pool ownership.
+infra-jobs = { workspace = true }
+infra-postgres = { workspace = true }
+# template:end outbox:messaging-outbox-dependencies
+bytes = { workspace = true, features = ["std"] }
+domain-events = { workspace = true }
+futures-util = { workspace = true, features = ["std"] }
+health = { workspace = true }
+metrics = { workspace = true }
+serde = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true, features = ["std", "formatting", "parsing", "large-dates"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+base64 = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "net", "io-util"] }

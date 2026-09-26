@@ -64,3 +64,18 @@ max_connections = 4
 # [jobs]
 # max_workers = 1
 # template:end jobs:local-config-jobs
+
+# template:begin messaging:local-config
+# Messaging is inert until URLs are selected. Credentials are environment-only.
+# A local unauthenticated plaintext broker may be selected explicitly:
+# [messaging]
+# urls = ["nats://127.0.0.1:4222"]
+# allow_plaintext = true
+# allow_unauthenticated = true
+# source_stream = "events"
+# max_payload_bytes = "1 MiB"
+# consumer_durable = "service-events"
+# consumer_filter_subject = "events.>"
+# dlq_subject = "dead.events"
+# consumer_concurrency = 1
+# template:end messaging:local-config

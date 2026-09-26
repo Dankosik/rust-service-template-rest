@@ -40,7 +40,7 @@ pub fn is_secret_like_key(key: &str) -> bool {
         .iter()
         .enumerate()
         .any(|(i, segment)| match *segment {
-            "password" | "secret" | "secrets" | "authorization" | "dsn" => true,
+            "password" | "secret" | "secrets" | "credentials" | "authorization" | "dsn" => true,
             "token" => !matches!(segments.get(i + 1), Some(&"url")),
             "key" => matches!(segments.get(i.wrapping_sub(1)), Some(&"api" | &"private")),
             "headers" => matches!(segments.get(i.wrapping_sub(1)), Some(&"otlp")),
@@ -103,6 +103,7 @@ mod tests {
             "signing.private-key",
             "auth.token",
             "http.authorization",
+            "messaging.credentials",
         ] {
             assert!(is_secret_like_key(key), "{key} should be secret-like");
         }

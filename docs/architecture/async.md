@@ -211,3 +211,30 @@ The durable decisions are the static lease, supervisor-owned outcome,
 lock-while-scanning claims, JSONB/text conversion, capped fresh samples, and
 the deferred lifecycle extraction recorded above. They remain active after the
 planning bundle is removed.
+
+<!-- template:begin messaging:docs-async-messaging -->
+## JetStream alongside jobs
+
+JetStream is independently runnable and is not a PostgreSQL queue. When both
+profiles are retained, `jobs-worker` composes the two engines but gives them
+separate admitted capacity so busy job handlers cannot prevent due messaging
+work. The messaging adapter owns broker pull, handler settlement and DLQ; jobs
+owns only its existing claims, attempts, and terminal history.
+<!-- template:end messaging:docs-async-messaging -->
+
+<!-- template:begin outbox:docs-async-outbox -->
+The transactional outbox reuses that jobs authority without adding a table,
+queue loop, or transaction owner. A second one-slot engine registers only the
+private publication kind. Combined ordinary jobs plus outbox need `N + 5` pool
+connections; outbox-only needs three. Its claim loop, jobs maintenance, and
+all engines share the worker's existing shutdown deadlines. See
+[PostgreSQL transactional outbox](../postgres-transactional-outbox.md).
+<!-- template:end outbox:docs-async-outbox -->
+
+<!-- template:begin worker:docs-async-worker-lifetime -->
+The retained worker process has one signal, readiness, grace, task-tracking,
+and dependency-close lifecycle even when it composes jobs and messaging. It
+stops both admission loops at drain, shares one absolute drain/cleanup budget,
+joins application-owned work, and does not grant either engine a second full
+grace period.
+<!-- template:end worker:docs-async-worker-lifetime -->
