@@ -141,7 +141,7 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
-        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2.87.14
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
         with:
           tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Format
@@ -315,7 +315,7 @@ jobs:
           rustup toolchain install
           rustup show active-toolchain
       - name: Install pinned Cargo tools
-        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2.87.14
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
         with:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Dependency policy
@@ -417,7 +417,7 @@ jobs:
           fi
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.tool_manifest == 'true'
-        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2.87.14
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
         with:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Tool manifest
@@ -545,7 +545,7 @@ jobs:
           make test-integration-messaging
       - name: Install Go for wire compatibility
         if: needs.changes.outputs.messaging_integration == 'true'
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
           cache: false
