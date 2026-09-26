@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use utoipa::openapi::header::{Header, HeaderBuilder};
 use utoipa::openapi::path::{Parameter, ParameterIn};
 use utoipa::openapi::response::Response;
 use utoipa::openapi::schema::{ObjectBuilder, Type};
@@ -16,20 +17,14 @@ use crate::problem::Problem;
 
 /// The key's header parameter name.
 pub(super) const KEY_HEADER: &str = "Idempotency-Key";
+/// The response-only marker generated from sealed replay provenance.
+pub(super) const REPLAYED_HEADER: &str = "Idempotent-Replayed";
 
 /// Response component names the family registers.
 pub(super) const BAD_REQUEST_COMPONENT: &str = "IdempotencyBadRequest";
 pub(super) const REQUEST_IN_PROGRESS_COMPONENT: &str = "IdempotencyRequestInProgress";
 pub(super) const KEY_MISMATCH_COMPONENT: &str = "IdempotencyKeyMismatch";
 pub(super) const UNAVAILABLE_COMPONENT: &str = "IdempotencyUnavailable";
-/// Every component the family registers; the document must contain them.
-pub(super) const RESPONSE_COMPONENTS: [&str; 4] = [
-    BAD_REQUEST_COMPONENT,
-    REQUEST_IN_PROGRESS_COMPONENT,
-    KEY_MISMATCH_COMPONENT,
-    UNAVAILABLE_COMPONENT,
-];
-
 const KEY_DESCRIPTION: &str = "One key for one intended effect. Supply exactly one header field. An unquoted value is visible ASCII; a value beginning with `\"` is an IETF Structured Field string. After decoding, the key must contain 1 to 255 bytes. Retry the same request with the same decoded key.";
 const KEY_SCHEMA_DESCRIPTION: &str = "A visible-ASCII value or an IETF Structured Field string. The decoded value must contain 1 to 255 bytes; quoted values can have a longer wire representation because of quotes and escapes.";
 const UNQUOTED_KEY_EXAMPLE: &str = "retry-key/with=visible-ascii";
@@ -52,6 +47,21 @@ pub(super) fn key_parameter() -> Parameter {
                 .schema_type(Type::String)
                 .description(Some(KEY_SCHEMA_DESCRIPTION))
                 .examples([UNQUOTED_KEY_EXAMPLE, QUOTED_KEY_EXAMPLE]),
+        ))
+        .build()
+}
+
+/// Construct the one generated replay response header. It is optional: only a
+/// decoded stored success carries the string value `true` on the wire.
+pub(super) fn replay_header() -> Header {
+    HeaderBuilder::new()
+        .schema(
+            ObjectBuilder::new()
+                .schema_type(Type::String)
+                .enum_values(Some(["true"])),
+        )
+        .description(Some(
+            "present with the string `true` only when this response replays a stored idempotent success",
         ))
         .build()
 }

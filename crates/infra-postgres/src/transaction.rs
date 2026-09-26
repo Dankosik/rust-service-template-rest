@@ -10,10 +10,14 @@
 //! retried; a commit whose outcome is unknown must be reconciled against the
 //! operation's own identity instead.
 
+use std::cell::Cell;
 use std::time::Duration;
 
+use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnection, PgPool};
 use sqlx::{Connection, Postgres, Transaction};
+
+use crate::{commit_definitely_failed, failure_cause, raw_sqlstate, sqlstate};
 
 /// Bound on the rollback issued after the closure failed. The connection is
 /// returned to the pool either way; `sqlx` rolls a dropped transaction back
@@ -43,6 +47,32 @@ pub enum TxError {
 #[derive(Debug)]
 pub struct Tx<'c> {
     conn: &'c mut PgConnection,
+}
+
+/// A connection that must not return to the pool while a `BEGIN` future is
+/// pending. sqlx cannot know whether a cancelled `BEGIN` reached PostgreSQL,
+/// so cancellation discards this physical connection. Once a transaction is
+/// returned, sqlx owns its existing drop/rollback behavior again.
+struct PendingBegin {
+    connection: PoolConnection<Postgres>,
+    armed: Cell<bool>,
+}
+
+impl PendingBegin {
+    fn new(connection: PoolConnection<Postgres>) -> Self {
+        Self {
+            connection,
+            armed: Cell::new(true),
+        }
+    }
+}
+
+impl Drop for PendingBegin {
+    fn drop(&mut self) {
+        if self.armed.get() {
+            self.connection.close_on_drop();
+        }
+    }
 }
 
 /// The connection borrowed by `tx` for a provider adapter's statement.
@@ -114,12 +144,13 @@ where
     F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
     E: From<TxError>,
 {
-    let mut conn = pool.acquire().await.map_err(TxError::Acquire)?;
+    let mut pending = PendingBegin::new(pool.acquire().await.map_err(TxError::Acquire)?);
     let mut tx: Transaction<'_, Postgres> = match options.begin_statement() {
-        None => conn.begin().await,
-        Some(statement) => conn.begin_with(statement).await,
+        None => pending.connection.begin().await,
+        Some(statement) => pending.connection.begin_with(statement).await,
     }
     .map_err(TxError::Begin)?;
+    pending.armed.set(false);
 
     let result = {
         let mut handle = Tx { conn: &mut tx };
@@ -147,12 +178,7 @@ where
 }
 
 fn log_rollback_failure(err: &sqlx::Error) {
-    let code = sqlstate(err).filter(|code| {
-        code.len() == 5
-            && code
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-    });
+    let code = sqlstate(err);
     if let Some(code) = code {
         tracing::warn!(
             event = "postgres_transaction_failure",
@@ -161,15 +187,7 @@ fn log_rollback_failure(err: &sqlx::Error) {
             sqlstate = code.as_ref()
         );
     } else {
-        let cause = match err {
-            sqlx::Error::Database(_) => "database",
-            sqlx::Error::PoolTimedOut => "pool_timeout",
-            sqlx::Error::PoolClosed => "pool_closed",
-            sqlx::Error::Io(_) => "io",
-            sqlx::Error::Tls(_) => "tls",
-            sqlx::Error::Protocol(_) => "protocol",
-            _ => "driver",
-        };
+        let cause = failure_cause(err);
         tracing::warn!(
             event = "postgres_transaction_failure",
             phase = "rollback",
@@ -179,22 +197,10 @@ fn log_rollback_failure(err: &sqlx::Error) {
     }
 }
 
-/// Whether `err` is a failure the same request could succeed at if it ran
-/// again: a serialization failure or a deadlock.
-///
-/// There is deliberately no retry loop here. Whether a retry is safe depends
-/// on what the caller already did: a serialization failure in a read-only
-/// query is free to retry, the same failure after an outbound side effect is
-/// not.
-#[must_use]
-pub fn retryable(err: &sqlx::Error) -> bool {
-    sqlstate(err).is_some_and(|code| code == "40001" || code == "40P01")
-}
-
 /// Preserve failures known to have rejected the commit and mark every other
 /// commit response as an unknown durable outcome.
 fn classify_commit(err: sqlx::Error) -> TxError {
-    if sqlstate(&err)
+    if raw_sqlstate(&err)
         .as_deref()
         .is_some_and(commit_definitely_failed)
     {
@@ -202,18 +208,6 @@ fn classify_commit(err: sqlx::Error) -> TxError {
     } else {
         TxError::CommitUnknown(err)
     }
-}
-
-/// SQLSTATE class 23 (integrity constraint violation, which a deferred
-/// constraint raises at commit) and class 40 (transaction rollback), except
-/// `40003` statement completion unknown, which is the server saying it does
-/// not know either.
-fn commit_definitely_failed(code: &str) -> bool {
-    code.starts_with("23") || (code.starts_with("40") && code != "40003")
-}
-
-fn sqlstate(err: &sqlx::Error) -> Option<std::borrow::Cow<'_, str>> {
-    err.as_database_error()?.code()
 }
 
 #[cfg(test)]
@@ -275,7 +269,7 @@ mod tests {
     fn non_database_commit_errors_are_unknown_outcomes() {
         let err = classify_commit(sqlx::Error::Io(std::io::Error::other("reset")));
         assert!(matches!(err, TxError::CommitUnknown(_)), "{err}");
-        assert!(!retryable(&sqlx::Error::PoolTimedOut));
+        assert!(!crate::retryable(&sqlx::Error::PoolTimedOut));
     }
 
     struct RollbackDiagnostic(Arc<AtomicBool>);

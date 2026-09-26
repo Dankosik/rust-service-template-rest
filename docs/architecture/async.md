@@ -11,7 +11,7 @@ contract is the [Background jobs](../background-jobs.md) guide.
 | `infra-jobs` | All `background_jobs` statements, enqueue and kind contracts, claim and attempt supervision, maintenance, and the `trace_context` carrier. |
 | `jobs-worker` | Worker composition, registration, startup and process shutdown. |
 | `service-config` | `jobs.max_workers`; it does not own queue policy. |
-| `migrations/` | The original table migration and `20260925000001_simplify_background_jobs.sql`; neither service nor worker changes schema at runtime. |
+| `migrations/` | The canonical table migration; neither service nor worker changes schema at runtime. |
 | `crates/infra-<provider>` | Concrete kinds, handlers, and producer calls. Features never depend on `infra-jobs`. |
 
 The pack keeps PostgreSQL, `sqlx` 0.9, Tokio/TaskTracker, `serde_json`, and
@@ -30,11 +30,10 @@ competing queue machinery.
 ## Storage and enqueue
 
 `background_jobs` retains its identity, state, attempt count, generation,
-timing, terminal history, and live unique-key constraint. The simplification
-migration requires a UTF-8 server, changes `payload` to `jsonb`, changes
-`unique_key` to `text COLLATE "C"`, adds nullable `trace_state`, and replaces
-the running index with `(kind, claim_expires_at, not_before, id) WHERE state =
-'running'`. JSON values are the payload contract: PostgreSQL may normalize
+timing, terminal history, and live unique-key constraint. Its canonical
+migration requires a UTF-8 server and stores `payload` as `jsonb`, `unique_key`
+as `text COLLATE "C"`, nullable `trace_state`, and the running index
+`(kind, claim_expires_at, not_before, id) WHERE state = 'running'`. JSON values are the payload contract: PostgreSQL may normalize
 formatting, duplicate keys, and numeric spelling. `C` collation preserves
 exact UTF-8 key equality independent of the database default.
 
@@ -43,10 +42,9 @@ and decoded NUL. It serializes once with `serde_json`; the validation detects
 unescaped `\\u0000` without a lossy value round trip. Valid JSON and keys bind
 as text with explicit casts, and the insert is enqueue's only statement.
 UTF-8 is a schema precondition, not a per-call query: a database's
-`server_encoding` is fixed at creation, the simplification migration refuses
-a non-UTF-8 database, and worker startup verifies UTF-8, both converted column
-types, and `trace_state`. The migration repeats UTF-8 validation, so an
-incompatible row is refused, never silently sanitized.
+`server_encoding` is fixed at creation, the canonical migration requires UTF-8,
+and worker startup verifies UTF-8. Migration history admission replaces
+table-shape probes; it does not silently repair incompatible databases.
 
 `enqueue` remains the only insert. It takes the shared opaque
 `&mut infra_postgres::Tx` that the caller's `in_tx` closure receives, obtains
@@ -145,21 +143,12 @@ and a stopped observer. The two-second statement timeout is a time backstop,
 not a scan-size proof. Retention remains bounded terminal deletion; it never
 deletes live rows. Terminal retention is independent of registered kinds.
 
-## Rollout and proof boundary
-
-Stop all producers and workers before applying
-`20260925000001_simplify_background_jobs.sql`; bytea binaries cannot overlap
-JSONB/text binaries. The existing migrator applies it atomically. On a known
-failure it rolls the file and history entry back; on an unknown runner result,
-inspect migration history and schema before choosing a compatible binary.
-After conversion, old binaries and down-migration are not recovery. The
-forward file preserves every job's identity, timing, attempts, generation,
-state, and terminal history.
+## Proof boundary
 
 Relevant proof must exercise stale transactional completion, both sides of an
 unknown commit, repeat snooze/refund, result-ready forced drain, disjoint
-claims with locked candidates, migration from old compatible and refused rows,
-trace-state and legacy parents, and every observation freshness state. Query
+claims with locked candidates, canonical-migration admission, trace-state and
+legacy parents, and every observation freshness state. Query
 plans and lock observations support only the bounded-indexed claims above; no
 performance percentage is promised.
 

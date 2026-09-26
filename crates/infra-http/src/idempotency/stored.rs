@@ -10,6 +10,8 @@ use axum::response::Response;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use infra_idempotency_store::{Digest, HeaderPair, Record};
 
+use super::openapi::REPLAYED_HEADER;
+
 /// The largest success body the boundary stores and replays (1 MiB).
 pub const MAX_STORED_BODY_BYTES: usize = 1_048_576;
 
@@ -65,7 +67,10 @@ impl Unstorable {
 pub(super) struct Undecodable;
 
 /// Buffer a 2xx response and retain only the declared replayable headers.
-pub(super) async fn capture(response: Response) -> Result<Stored, Unstorable> {
+pub(super) async fn capture(mut response: Response) -> Result<Stored, Unstorable> {
+    // The replay marker derives from the sealed outcome after the handler
+    // returns. It is never an adopter-provided stored header.
+    response.headers_mut().remove(REPLAYED_HEADER);
     let (parts, body) = response.into_parts();
     if !parts.status.is_success() {
         return Err(Unstorable::Status);
@@ -166,7 +171,14 @@ pub(super) fn decode(record: Record) -> Result<Stored, Undecodable> {
 }
 
 fn is_replayable(name: &HeaderName) -> bool {
-    REPLAYABLE.iter().any(|candidate| candidate == name)
+    is_replayable_header_name(name.as_str())
+}
+
+/// Whether a documented success header can be retained and replayed.
+pub(super) fn is_replayable_header_name(name: &str) -> bool {
+    REPLAYABLE
+        .iter()
+        .any(|candidate| candidate.as_str().eq_ignore_ascii_case(name))
 }
 
 fn header_bytes(headers: &[(HeaderName, HeaderValue)]) -> Option<usize> {

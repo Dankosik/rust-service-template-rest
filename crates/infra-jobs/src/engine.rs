@@ -69,9 +69,6 @@ pub struct DrainEnd {
 /// Why the jobs store cannot start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StartupError {
-    /// The table or one of its columns is missing.
-    #[error("the jobs schema is missing")]
-    SchemaMissing,
     /// PostgreSQL does not use UTF8 server encoding.
     #[error("the jobs store requires UTF8 server encoding")]
     UnsupportedEncoding,
@@ -142,11 +139,10 @@ impl Engine {
         }
     }
 
-    /// Check the jobs schema and a writable session, bounded to 5 s.
+    /// Check UTF8 server encoding and a writable session, bounded to 5 s.
     ///
     /// # Errors
     ///
-    /// [`StartupError::SchemaMissing`] when the table or a column is missing,
     /// [`StartupError::NotWritable`] when the session is read-only or recovering,
     /// and [`StartupError::Unavailable`] for anything else, including the bound.
     pub async fn check_startup(&self) -> Result<(), StartupError> {

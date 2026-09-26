@@ -11,12 +11,14 @@
 //! source rules the resolver does not enforce are proven by a test over the
 //! embedded set; [`run`] still rejects a migrator that breaks them.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
-use infra_postgres::{ACQUIRE_TIMEOUT, Dsn, SessionOptions, connect_session};
+use infra_postgres::{ACQUIRE_TIMEOUT, Dsn, SessionOptions, connect_session, raw_sqlstate};
 use sqlx::Connection;
 use sqlx::migrate::{Migrate, MigrateError, MigrationType, Migrator};
-use sqlx::postgres::PgConnection;
+use sqlx::postgres::{PgConnection, PgPool};
+use sqlx::{Row, postgres::PgRow};
 
 /// The repository's migration set.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
@@ -37,6 +39,138 @@ pub const MIGRATION_IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(
 /// Session `lock_timeout`, which also bounds the wait for the advisory
 /// session lock another migrator may hold.
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bound on startup history admission, including pool acquire and its one
+/// read-only snapshot query.
+pub const HISTORY_VERIFY_BUDGET: Duration = Duration::from_secs(5);
+
+/// A sanitized reason startup cannot admit the embedded migration history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum HistoryError {
+    /// The embedded migration source breaks the template's source rules.
+    #[error("the embedded migration source is invalid")]
+    Source,
+    /// At least one embedded migration is not applied yet, including an
+    /// absent history table: the migrator has not run for this release.
+    #[error("embedded migrations are pending")]
+    Pending,
+    /// An applied migration failed or has a different checksum, or the
+    /// history holds a version inside the embedded range that the embedded
+    /// set does not contain.
+    #[error("the migration history does not match the embedded migrations")]
+    Mismatch,
+    /// Pool, statement, decoding, or deadline failures stay private.
+    #[error("the migration history is unavailable")]
+    Unavailable,
+}
+
+#[derive(Clone, Debug)]
+struct HistoryRow {
+    version: i64,
+    success: bool,
+    checksum: Vec<u8>,
+}
+
+const HISTORY_QUERY: &str = "SELECT version, success, checksum FROM _sqlx_migrations";
+
+/// Verify that the database applied every embedded migration with its
+/// checksum, without creating bookkeeping or applying SQL.
+///
+/// Versions newer than the newest embedded migration belong to a later
+/// release and are admitted, so a rolled-back binary or a replica restarted
+/// during a rollout still starts; [`HistoryError`] names every refusal.
+///
+/// The single statement gives one read-committed snapshot. It deliberately
+/// does not use `Migrator::run`, locks, or migration bookkeeping because this
+/// is startup admission rather than schema mutation.
+///
+/// # Errors
+///
+/// A bounded, sanitized [`HistoryError`].
+pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
+    verify_history_with(&MIGRATOR, pool).await
+}
+
+async fn verify_history_with(migrator: &Migrator, pool: &PgPool) -> Result<(), HistoryError> {
+    validate_source(migrator).map_err(|_| HistoryError::Source)?;
+    let result = tokio::time::timeout(
+        HISTORY_VERIFY_BUDGET,
+        sqlx::query(HISTORY_QUERY).fetch_all(pool),
+    )
+    .await;
+    let rows = match result {
+        Ok(Ok(rows)) => rows
+            .iter()
+            .map(history_row)
+            .collect::<Result<Vec<_>, _>>()?,
+        // An absent history table means nothing is applied yet: an empty
+        // embedded set needs no bookkeeping, a nonempty one is pending.
+        Ok(Err(err)) if raw_sqlstate(&err).as_deref() == Some("42P01") => {
+            return if migrator.iter().next().is_none() {
+                Ok(())
+            } else {
+                Err(HistoryError::Pending)
+            };
+        }
+        Ok(Err(_)) | Err(_) => return Err(HistoryError::Unavailable),
+    };
+    compare_history(migrator, &rows)
+}
+
+fn history_row(row: &PgRow) -> Result<HistoryRow, HistoryError> {
+    Ok(HistoryRow {
+        version: row
+            .try_get("version")
+            .map_err(|_| HistoryError::Unavailable)?,
+        success: row
+            .try_get("success")
+            .map_err(|_| HistoryError::Unavailable)?,
+        checksum: row
+            .try_get("checksum")
+            .map_err(|_| HistoryError::Unavailable)?,
+    })
+}
+
+/// Admit a history that applied every embedded migration with its checksum.
+///
+/// A version above the newest embedded migration belongs to a later release
+/// that already migrated this database, so an older binary still starts. A
+/// failed row, a checksum mismatch, or an unknown version inside the embedded
+/// range is divergent history, which outranks pending migrations.
+fn compare_history(migrator: &Migrator, rows: &[HistoryRow]) -> Result<(), HistoryError> {
+    let mut applied = BTreeMap::new();
+    for row in rows {
+        if !row.success
+            || applied
+                .insert(row.version, row.checksum.as_slice())
+                .is_some()
+        {
+            return Err(HistoryError::Mismatch);
+        }
+    }
+    let embedded = migrator
+        .iter()
+        .map(|migration| (migration.version, migration.checksum.as_ref()))
+        .collect::<BTreeMap<_, _>>();
+    let newest = embedded.keys().next_back().copied();
+    let unknown_in_range = applied.keys().any(|version| {
+        !embedded.contains_key(version) && newest.is_some_and(|newest| *version <= newest)
+    });
+    let changed = embedded.iter().any(|(version, checksum)| {
+        applied
+            .get(version)
+            .is_some_and(|applied| applied != checksum)
+    });
+    if unknown_in_range || changed {
+        return Err(HistoryError::Mismatch);
+    }
+    if embedded
+        .keys()
+        .any(|version| !applied.contains_key(version))
+    {
+        return Err(HistoryError::Pending);
+    }
+    Ok(())
+}
 
 /// Where a run failed. One word per stage, for the terminal record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -518,6 +652,68 @@ mod tests {
         );
         assert_eq!(ApplyOutcome::NoChange.as_str(), "no_change");
         assert_eq!(ApplyOutcome::Success.as_str(), "success");
+    }
+
+    #[test]
+    fn history_admits_a_later_release_and_refuses_pending_or_divergent_history() {
+        let (first, second, newer) = (20_260_926_120_000, 20_260_926_130_000, 20_260_926_140_000);
+        let migrator = Migrator::with_migrations(vec![
+            migration(first, "create widget", MigrationType::Simple, false),
+            migration(second, "create gadget", MigrationType::Simple, false),
+        ]);
+        let checksum = migrator
+            .iter()
+            .next()
+            .expect("an embedded migration")
+            .checksum
+            .to_vec();
+        let applied = |version: i64| HistoryRow {
+            version,
+            success: true,
+            checksum: checksum.clone(),
+        };
+
+        for rows in [
+            vec![applied(first), applied(second)],
+            vec![applied(first), applied(second), applied(newer)],
+        ] {
+            assert_eq!(compare_history(&migrator, &rows), Ok(()));
+        }
+        for rows in [vec![], vec![applied(first)], vec![applied(newer)]] {
+            assert_eq!(
+                compare_history(&migrator, &rows),
+                Err(HistoryError::Pending)
+            );
+        }
+        for rows in [
+            vec![applied(first), applied(20_260_926_125_000), applied(second)],
+            vec![
+                HistoryRow {
+                    success: false,
+                    ..applied(first)
+                },
+                applied(second),
+            ],
+            vec![
+                HistoryRow {
+                    checksum: vec![0],
+                    ..applied(first)
+                },
+                applied(second),
+            ],
+            vec![HistoryRow {
+                checksum: vec![0],
+                ..applied(first)
+            }],
+        ] {
+            assert_eq!(
+                compare_history(&migrator, &rows),
+                Err(HistoryError::Mismatch)
+            );
+        }
+
+        let empty = Migrator::with_migrations(Vec::new());
+        assert_eq!(compare_history(&empty, &[applied(newer)]), Ok(()));
     }
 
     #[test]

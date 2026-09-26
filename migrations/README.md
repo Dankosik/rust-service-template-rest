@@ -7,35 +7,23 @@ arrive with its first durable feature; with an empty set, the runner proves
 the empty-history path. Rationale: [Persistence Architecture](../docs/architecture/persistence.md).
 
 <!-- template:begin http-idempotency:migrations-readme-http-idempotency -->
-The HTTP idempotency pack first creates `http_idempotency_records` in
-`20260923000001_create_http_idempotency_records.sql`. Its guarded replacement,
-`20260926001448_simplify_http_idempotency_records.sql`, takes an ACCESS
-EXCLUSIVE table lock before refusing any row whose `expires_at` is still live.
-It deletes only expired rows, replaces the legacy binary-header format with the
-`http_idempotency_header_pair[]` composite array, and adds verified caller
-metadata. This is maintenance-only forward recovery: quiesce idempotent
-traffic, drain old replicas, retain live legacy rows through expiry, run the
-migration, start new replicas, then reopen traffic. Never run old and new
-implementations together. The service never creates or alters schema at
-runtime, and only `infra-idempotency-store` names the table.
-
-There is no down migration after the guard has admitted the new schema. If the
-new application must be rolled back before cutover completes, stop it and
-restore a compatible pre-migration deployment only while the forward migration
-has not been applied; after application, roll forward with a new reviewed
-migration or restore from an operator-managed backup. Applied migration files
-remain byte-for-byte history.
+The HTTP idempotency pack creates `http_idempotency_records` in
+`20260923000001_create_http_idempotency_records.sql`. The canonical schema
+stores digest-backed identity, the request fingerprint, accepted 2xx response
+bytes and headers, expiry, and trusted caller metadata. It intentionally omits
+a caller-identity index: unrestricted verified caller values cannot be safely
+represented by a literal btree key, and no runtime query needs that access
+path. Trusted operators can still use the heap metadata with bound queries.
+Only `infra-idempotency-store` names the table; the service never creates or
+alters it at runtime.
 <!-- template:end http-idempotency:migrations-readme-http-idempotency -->
 <!-- template:begin jobs:migrations-readme-jobs -->
-The background jobs pack ships two forward-only migrations:
-`20260924000001_create_background_jobs.sql` creates the `background_jobs`
-table and its claim-generation sequence, and
-`20260925000001_simplify_background_jobs.sql` converts payload to JSONB,
-unique keys to C-collated text, adds trace-state, and replaces the running
-index. The existing `migrate` binary applies both with the rest of the set.
-The conversion requires all old producers and workers to be stopped; neither
-the service nor worker creates or alters schema at runtime, and only
-`crates/infra-jobs` names the table.
+The background jobs pack creates `background_jobs` and its claim-generation
+sequence in `20260924000001_create_background_jobs.sql`. That canonical schema
+uses JSONB payloads, C-collated text unique keys, trace state, and the current
+partial indexes. The existing `migrate` binary applies it with the rest of the
+set. Neither the service nor worker creates or alters schema at runtime, and
+only `crates/infra-jobs` names the table.
 <!-- template:end jobs:migrations-readme-jobs -->
 
 Rules, proven by `cargo test -p migrate` over the embedded set:
@@ -48,8 +36,13 @@ Rules, proven by `cargo test -p migrate` over the embedded set:
   own decision recorded in the persistence document first.
 - No `.up.sql`/`.down.sql` pairs. A rollback is a new forward migration.
 - An applied file is never edited or deleted: the runner compares checksums
-  and refuses a history that disagrees with the source
-  (`make migration-check` also refuses a pull request that touches one).
+  and refuses a history that disagrees with the source. `make migration-check`
+  also refuses a pull request that touches one, except for the one reviewed
+  pre-adoption rewrite that replaces the two idempotency/jobs create blobs and
+  deletes their two superseded simplify blobs as one exact four-file change.
+  That source-only exception does not make runtime history compatible with the
+  former migrations; a database made from the former history must be explicitly
+  recreated outside startup.
 
 Files that are not `<version>_<name>.sql` (this README) are ignored by the
 resolver.

@@ -30,6 +30,7 @@ infra-jobs = { workspace = true }
 infra-webhooks = { workspace = true }
 # template:end webhooks-common:worker-webhooks-dependency
 infra-postgres = { workspace = true }
+migrate = { workspace = true }
 infra-telemetry = { workspace = true }
 secrecy = { workspace = true }
 service-config = { workspace = true }

@@ -615,8 +615,8 @@ markers, tests, and initializer support. Order by expected demand:
    correlation stripping, no proxy, and bounded telemetry. Its current
    [adoption guide](outbound-http.md) and [decision record](outbound-http-decisions.md)
    define the profile.
-3. HTTP idempotency on PostgreSQL: `x-idempotent: true` operations, replay
-   evidence and business effect in one transaction. **Merged via PR #49 at
+3. HTTP idempotency on PostgreSQL: composed operations, replay evidence and
+   business effect in one transaction. **Merged via PR #49 at
    `4819113b21c110e69f3f1d4d26f3bf9337c83b72`**;
    [adoption guide](http-idempotency.md).
 4. Durable background jobs on PostgreSQL and the `jobs-worker` binary.
@@ -689,20 +689,15 @@ Stage 10.3 adds `HTTP_IDEMPOTENCY=none|postgres`, which requires
 `DATABASE=postgres` and an authentication engine. The selected pack holds the
 `infra-idempotency-store` record store, the `infra_http::idempotency` seam
 with four catalog codes, the `http_idempotency.retention` setting, bootstrap
-activation before readiness admission, one forward-only migration, and the
-[guide](http-idempotency.md). It stays inert until an operation declares
-`x-idempotent: true`; `none` removes it.
-
-The accepted request-owned simplification supersedes the stage-10.3 contract:
-identity now comes from the complete bounded HTTP request and decoded key, not
-an operation namespace or caller fingerprint; `execute(work)` uses the shared
-`infra-postgres` transaction capability; durable replay retains seven
-byte-preserving headers and trusted caller metadata; and the guarded forward
-migration refuses live legacy rows. The current [guide](http-idempotency.md)
-and architecture documents are authoritative for that replacement. The
-following receipt is historical evidence for the earlier PR #49 implementation;
-it does not prove the simplification, its migration, generated contract, or
-current tests.
+activation before readiness admission, and canonical forward migrations. It
+stays inert until an operation composes through `Composer::route`; `none`
+removes it. Identity comes from the complete bounded HTTP request and decoded
+key, `execute(work)` uses the shared `infra-postgres` transaction capability,
+and durable replay retains seven byte-preserving headers plus trusted caller
+metadata. The current [guide](http-idempotency.md) and architecture documents
+are authoritative. The following receipt is historical evidence for the
+earlier PR #49 implementation; it does not prove the current implementation
+or its tests.
 
 Stage-10.3 local acceptance ran every local step of the `make plan` route:
 formatting, the workspace lint including the integration feature, build, 403
@@ -734,7 +729,7 @@ transaction, the job-kind contracts, and the engine over one
 `background_jobs` table: fenced claims, persisted backoff, lost-worker
 recovery, and retention), the `jobs-worker` library and binary shipped as
 the image's `/jobs-worker` entrypoint, the `jobs.max_workers` setting, the
-creation and simplification forward-only migrations, the [guide](background-jobs.md), and
+canonical forward-only migrations, the [guide](background-jobs.md), and
 [Async Architecture](architecture/async.md). It stays inert: the service
 makes no jobs query, and nothing starts a worker until an operator deploys
 `/jobs-worker`; `none` removes it.
@@ -768,12 +763,12 @@ claimed.
 
 The subsequent jobs simplification retains that profile boundary while
 replacing lease upkeep and outcome attribution with a fixed lease and
-supervisor-owned outcome. It converts payloads to JSONB and unique keys to
-C-collated text through a stopped-producer/worker forward migration. Future
-stage 10.5 (webhooks) and 10.6 (messaging/outbox) reuse the jobs scheduling,
-attempt, and fenced-completion mechanisms. Process lifecycle ownership stays
-separate until a shared signal, deadline, or tracked-task teardown change
-justifies extraction; another binary alone does not.
+supervisor-owned outcome. Its canonical migration stores JSONB payloads and
+C-collated text unique keys. Future stage 10.5 (webhooks) and 10.6
+(messaging/outbox) reuse the jobs scheduling, attempt, and fenced-completion
+mechanisms. Process lifecycle ownership stays separate until a shared signal,
+deadline, or tracked-task teardown change justifies extraction; another binary
+alone does not.
 
 ### Stage 11: Benchmarking and performance evidence
 

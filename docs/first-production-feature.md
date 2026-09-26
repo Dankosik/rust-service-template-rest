@@ -33,10 +33,9 @@ tracker or cancellation token to this library-owned resolver/pool work.
 For an operation that must commit its business effect at most once per
 caller and key, the retained [HTTP idempotency profile](http-idempotency.md)
 composes replay and arbitration around it. Keep the operation's ordinary
-protected annotation and compose the route through `Composer::route` rather
-than the plain `routes!` merge: the composer generates `x-idempotent`, the
-`Idempotency-Key` parameter, and the idempotency responses, so do not declare
-them by hand.
+protected annotation and compose the route through fallible `Composer::route`:
+the composer generates the `Idempotency-Key` parameter and idempotency
+responses, so do not declare them by hand.
 <!-- template:end http-idempotency:docs-first-feature-http-idempotency -->
 
 
@@ -259,8 +258,9 @@ With the idempotency pack retained, `contract` also takes the idempotency
 composer: `pub fn contract(idempotency: &mut infra_http::idempotency::Composer) -> ContractRouter<ReadinessReader>`,
 merging `idempotency.components()` through `merge_document` and composing an
 idempotent operation's routes through
-`idempotency.route(infra_http::routes!(handler))` instead of a plain
-`.merge`.
+`idempotency.route(infra_http::routes!(handler))?` instead of a plain `.merge`.
+Propagate `CompositionError` through the existing assembly error path and call
+`finish` once after every route is composed.
 <!-- template:end http-idempotency:docs-first-feature-http-idempotency-contract -->
 
 Nothing else in `service` changes: the hardened chain, the listeners, and

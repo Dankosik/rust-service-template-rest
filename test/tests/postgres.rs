@@ -10,18 +10,27 @@
 // for unwrap/expect/panic do not apply to them.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+#[allow(
+    dead_code,
+    reason = "the shared transport also supplies commit-ack faults to the jobs integration target"
+)]
+#[path = "support/commit_proxy.rs"]
+mod commit_proxy;
+
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+use commit_proxy::CommitProxy;
 use health::Probe;
 use infra_postgres::{
     ACQUIRE_TIMEOUT, Dsn, Isolation, PgPool, PoolOptions, PostgresProbe, TxError, TxOptions,
     connection, in_tx, in_tx_with, retryable,
 };
-use integration_tests::{dsn_for, fixture_dir};
-use migrate::{MIGRATOR, RunError, RunOptions, Stage};
+use integration_tests::{DATABASE_URL, dsn_for, fixture_dir};
+use migrate::{HistoryError, MIGRATOR, RunError, RunOptions, Stage};
 use sqlx::Executor;
 use sqlx::migrate::{Migrate, MigrateError, Migrator};
+use url::Url;
 
 const APP: &str = "integration-tests";
 
@@ -35,6 +44,31 @@ async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
     )
     .await
     .expect("pool connects")
+}
+
+async fn proxied_pool(pool: &PgPool, max_connections: u32) -> (CommitProxy, PgPool) {
+    let dsn = dsn_for(pool).await;
+    assert_eq!(
+        dsn.ssl_mode_name(),
+        "disable",
+        "the test proxy frames the plaintext protocol"
+    );
+    let host = dsn.host().trim_start_matches('[').trim_end_matches(']');
+    let server = tokio::net::lookup_host((host, dsn.port()))
+        .await
+        .expect("the server address resolves")
+        .next()
+        .expect("the server has an address");
+    let proxy = CommitProxy::start(server).await;
+    let raw = std::env::var(DATABASE_URL).expect("DATABASE_URL is set");
+    let mut url = Url::parse(&raw).expect("DATABASE_URL is a URL");
+    url.set_path(dsn.database());
+    url.set_ip_host(proxy.address().ip())
+        .expect("the proxy address is a host");
+    url.set_port(Some(proxy.address().port()))
+        .expect("the proxy URL accepts a port");
+    let proxied = Dsn::admit(url.as_str()).expect("the proxied DSN is admitted");
+    (proxy, template_pool(&proxied, max_connections).await)
 }
 
 async fn show(pool: &PgPool, setting: &'static str) -> String {
@@ -239,6 +273,84 @@ async fn a_read_only_transaction_refuses_writes(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = false)]
+async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_options(pool: PgPool) {
+    pool.execute("CREATE TABLE pending_begin_visibility (id int PRIMARY KEY)")
+        .await
+        .unwrap();
+    // One pool connection makes the negative control discriminating: without
+    // the pending-BEGIN guard, the next statement reuses a server session that
+    // has entered the held transaction but has not delivered ReadyForQuery.
+    let (proxy, proxied) = proxied_pool(&pool, 1).await;
+    proxy.arm_begin_ready_hold();
+    let mut pending = Box::pin(in_tx_with(
+        &proxied,
+        TxOptions {
+            isolation: Isolation::RepeatableRead,
+            read_only: false,
+        },
+        async |_tx| -> Result<(), AppError> { Ok(()) },
+    ));
+    tokio::select! {
+        outcome = &mut pending => panic!("BEGIN completed before its acknowledgement was held: {outcome:?}"),
+        () = proxy.begin_ready_held() => {}
+    }
+    drop(pending);
+    proxy.release_begin_ready();
+
+    sqlx::query("INSERT INTO pending_begin_visibility VALUES (1)")
+        .execute(&proxied)
+        .await
+        .unwrap();
+    let committed: i64 = sqlx::query_scalar("SELECT count(*) FROM pending_begin_visibility")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        committed, 1,
+        "the statement after a cancelled BEGIN must run in ordinary autocommit"
+    );
+
+    let session_before: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&proxied)
+        .await
+        .unwrap();
+    let options: Result<(String, String), AppError> = in_tx_with(
+        &proxied,
+        TxOptions {
+            isolation: Isolation::Serializable,
+            read_only: true,
+        },
+        async |tx| {
+            let isolation = sqlx::query_scalar("SHOW transaction_isolation")
+                .fetch_one(&mut *connection(tx))
+                .await?;
+            let read_only = sqlx::query_scalar("SHOW transaction_read_only")
+                .fetch_one(&mut *connection(tx))
+                .await?;
+            Ok((isolation, read_only))
+        },
+    )
+    .await;
+    assert_eq!(
+        options.unwrap(),
+        ("serializable".to_owned(), "on".to_owned())
+    );
+    let session_after: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&proxied)
+        .await
+        .unwrap();
+    assert_eq!(
+        session_before, session_after,
+        "completed transactions retain normal pool reuse"
+    );
+    assert_eq!(
+        infra_postgres::close(&proxied, Duration::from_secs(5)).await,
+        infra_postgres::Closed::Complete
+    );
+    proxy.shutdown().await;
+}
+
+#[sqlx::test(migrations = false)]
 async fn migrations_apply_once_and_then_report_no_change(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     let widgets = fixture("widgets").await;
@@ -271,6 +383,43 @@ async fn the_embedded_set_runs_on_an_empty_database(pool: PgPool) {
     assert_eq!(
         applied_count(&pool).await,
         i64::try_from(result.applied).unwrap()
+    );
+
+    let repeated = migrate::run(&MIGRATOR, &options(&dsn)).await.unwrap();
+    assert_eq!(repeated.before, result.target);
+    assert_eq!(repeated.target, result.target);
+    assert_eq!(repeated.after, result.target);
+    assert_eq!(repeated.applied, 0);
+    assert_eq!(repeated.outcome().as_str(), "no_change");
+    assert_eq!(migrate::verify_history(&pool).await, Ok(()));
+
+    // A later release that already migrated this database keeps an older
+    // binary admissible: its version lies above the newest embedded one.
+    let newer = result.target.unwrap_or(0) + 1;
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+         VALUES ($1, 'later release', true, '\\x00'::bytea, 0)",
+    )
+    .bind(newer)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(migrate::verify_history(&pool).await, Ok(()));
+}
+
+#[sqlx::test(migrations = false)]
+async fn history_admission_refuses_missing_bookkeeping_without_creating_it(pool: PgPool) {
+    assert_eq!(
+        migrate::verify_history(&pool).await,
+        Err(HistoryError::Pending)
+    );
+    let exists: bool = sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        !exists,
+        "history admission must not create migration bookkeeping"
     );
 }
 

@@ -69,16 +69,21 @@ impl Modify for BearerAuth {
 /// [`ContractRouter`] whose [`ReadinessReader`] state is still unapplied.
 /// Bootstrap finalizes it, supplies the state, and hardens the routes;
 /// [`document`] consumes the document-only path.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns a local idempotency composition error when a participating route
+/// cannot carry the required served contract.
 pub fn contract(
     // template:begin http-idempotency:service-api-contract-composer
     idempotency: &mut Composer,
     // template:end http-idempotency:service-api-contract-composer
-) -> ContractRouter<ReadinessReader> {
-    assemble()
-        // template:begin http-idempotency:service-api-idempotency-components
-        .merge_document(idempotency.components())
+) -> Result<ContractRouter<ReadinessReader>, Box<dyn Error + Send + Sync>> {
+    let contract = assemble();
+    // template:begin http-idempotency:service-api-idempotency-components
+    let contract = contract.merge_document(idempotency.components());
     // template:end http-idempotency:service-api-idempotency-components
+    Ok(contract)
 }
 
 fn assemble() -> ContractRouter<ReadinessReader> {
@@ -90,14 +95,18 @@ fn assemble() -> ContractRouter<ReadinessReader> {
 }
 
 /// The OpenAPI document of [`contract`].
-#[must_use]
-pub fn document() -> Document {
+///
+/// # Errors
+///
+/// Returns a local idempotency composition error when a participating route
+/// cannot carry the required served contract.
+pub fn document() -> Result<Document, Box<dyn Error + Send + Sync>> {
     contract(
         // template:begin http-idempotency:service-api-document-composer
         &mut Composer::inert(),
         // template:end http-idempotency:service-api-document-composer
     )
-    .into_document()
+    .map(ContractRouter::into_document)
 }
 
 /// The committed form of [`document`]: the generated-file header followed
@@ -105,10 +114,9 @@ pub fn document() -> Document {
 ///
 /// # Errors
 ///
-/// Returns the serializer's error; a type-constructed document has no
-/// known way to trigger one.
+/// Returns a local idempotency composition error or YAML serialization error.
 pub fn render() -> Result<String, Box<dyn Error + Send + Sync>> {
-    let yaml = document().to_yaml()?;
+    let yaml = document()?.to_yaml()?;
     Ok(format!("{GENERATED_HEADER}\n{}\n", yaml.trim_end()))
 }
 
@@ -216,20 +224,22 @@ mod idempotency_tests {
 
     /// The production contract with the test route composed through the
     /// same composer.
-    fn with_test_route(idempotency: &mut Composer) -> ContractRouter<ReadinessReader> {
-        contract(idempotency).routes(idempotency.route(infra_http::routes!(idempotent)))
+    fn with_test_route(
+        idempotency: &mut Composer,
+    ) -> Result<ContractRouter<ReadinessReader>, Box<dyn Error + Send + Sync>> {
+        Ok(contract(idempotency)?.routes(idempotency.route(infra_http::routes!(idempotent))?))
     }
 
-    /// Agreement of the contract `compose` builds through a fresh inert
-    /// composer.
-    fn agreed(
-        compose: impl FnOnce(&mut Composer) -> ContractRouter<ReadinessReader>,
+    /// Activation counts only routes that composed successfully.
+    fn finished(
+        compose: impl FnOnce(
+            &mut Composer,
+        )
+            -> Result<ContractRouter<ReadinessReader>, Box<dyn Error + Send + Sync>>,
     ) -> Activation {
         let mut composer = Composer::inert();
-        let contract = compose(&mut composer);
-        composer
-            .agree(contract.document())
-            .expect("the contract agrees with the routes composed through it")
+        let _contract = compose(&mut composer).expect("the route composes");
+        composer.finish()
     }
 
     /// Idempotent operations the boundary serves; none while inactive.
@@ -243,14 +253,11 @@ mod idempotency_tests {
     #[test]
     fn test_only_idempotent_route_generates_the_served_contract() {
         let mut composer = Composer::inert();
-        let contract = with_test_route(&mut composer);
-        assert!(matches!(
-            composer.agree(contract.document()).unwrap(),
-            Activation::Active { .. }
-        ));
+        let contract = with_test_route(&mut composer).expect("test route composes");
+        assert!(matches!(composer.finish(), Activation::Active { .. }));
         let document = serde_json::to_value(contract.document()).unwrap();
         let operation = &document["paths"]["/_test/idempotent"]["post"];
-        assert_eq!(operation["x-idempotent"], true);
+        assert!(operation.get("x-idempotent").is_none());
         let parameters = operation["parameters"].as_array().unwrap();
         let key = parameters
             .iter()
@@ -277,6 +284,10 @@ mod idempotency_tests {
             );
         }
         assert_eq!(operation["responses"]["201"]["description"], "created");
+        assert_eq!(
+            operation["responses"]["201"]["headers"]["Idempotent-Replayed"]["schema"],
+            serde_json::json!({ "type": "string", "enum": ["true"] })
+        );
     }
 
     #[test]
@@ -284,8 +295,8 @@ mod idempotency_tests {
         // The plain contract serves only what is composed into it: nothing,
         // so the boundary stays inactive, until an operation opts in.
         assert_eq!(
-            served(&agreed(contract)) + 1,
-            served(&agreed(with_test_route))
+            served(&finished(contract)) + 1,
+            served(&finished(with_test_route))
         );
     }
 }
