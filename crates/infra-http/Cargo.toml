@@ -23,7 +23,9 @@ infra-bearerauthn = { workspace = true }
 # template:end authn:http-authn-dependency
 # template:begin http-idempotency:http-idempotency-dependencies
 infra-idempotency-store = { workspace = true }
+infra-postgres = { workspace = true }
 sha2 = { workspace = true }
+sfv = { workspace = true, features = ["parsed-types"] }
 # template:end http-idempotency:http-idempotency-dependencies
 http-body-util = { workspace = true }
 hyper-util = { workspace = true, features = ["server", "server-auto", "server-graceful", "service", "tokio", "http1", "http2"] }

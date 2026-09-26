@@ -185,17 +185,12 @@ mod tests {
 // template:begin http-idempotency:service-api-idempotent-test-route
 #[cfg(test)]
 mod idempotency_tests {
-    use std::num::NonZeroU32;
-
     use axum::http::StatusCode;
     use axum::response::Response;
-    use infra_http::idempotency::{Activation, Fingerprint, Idempotency, Tx};
+    use infra_http::idempotency::{Activation, Idempotency, Tx};
     use utoipa_axum::routes;
 
     use super::*;
-
-    /// Version of the test operation's semantic input.
-    const TEST_INPUT_V1: NonZeroU32 = NonZeroU32::MIN;
 
     #[utoipa::path(
         post,
@@ -203,26 +198,21 @@ mod idempotency_tests {
         tag = "system",
         operation_id = "testIdempotent",
         summary = "Test-only idempotent composition seam",
-        params(infra_http::idempotency::IdempotencyKey),
         security(("bearerAuth" = [])),
         extensions(
             ("x-security-decision" = json!({
                 "exposure": "protected",
                 "rationale": "test-only route proving the production idempotency composition seam"
-            })),
-            ("x-idempotent" = json!(true))
+            }))
         ),
         responses(
             (status = 201, description = "created", content_type = "text/plain", body = String),
-            infra_http::idempotency::IdempotentOperationProblemResponses,
+            infra_http::problem::responses::ProtectedOperationProblemResponses,
         )
     )]
     async fn idempotent(idempotency: Idempotency) -> Response {
         idempotency
-            .execute(
-                Fingerprint::new(TEST_INPUT_V1, &()),
-                async |_: &mut Tx<'_>| (StatusCode::CREATED, "created"),
-            )
+            .execute(async |_: &mut Tx<'_>| (StatusCode::CREATED, "created"))
             .await
     }
 
@@ -251,8 +241,42 @@ mod idempotency_tests {
     }
 
     #[test]
-    fn test_only_idempotent_route_activates_the_boundary() {
-        assert!(matches!(agreed(with_test_route), Activation::Active { .. }));
+    fn test_only_idempotent_route_generates_the_served_contract() {
+        let mut composer = Composer::inert();
+        let contract = with_test_route(&mut composer);
+        assert!(matches!(
+            composer.agree(contract.get_openapi()).unwrap(),
+            Activation::Active { .. }
+        ));
+        let document = serde_json::to_value(contract.get_openapi()).unwrap();
+        let operation = &document["paths"]["/_test/idempotent"]["post"];
+        assert_eq!(operation["x-idempotent"], true);
+        let parameters = operation["parameters"].as_array().unwrap();
+        let key = parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "Idempotency-Key")
+            .expect("composition adds the key parameter");
+        assert_eq!(key["in"], "header");
+        assert_eq!(key["required"], true);
+        assert_eq!(key["schema"]["type"], "string");
+        assert!(key["schema"].get("maxLength").is_none());
+        assert!(key["schema"].get("pattern").is_none());
+        for (status, component) in [
+            ("400", "IdempotencyBadRequest"),
+            ("401", "AuthenticationUnauthorized"),
+            ("403", "AuthenticationForbidden"),
+            ("409", "IdempotencyRequestInProgress"),
+            ("413", "RequestEntityTooLarge"),
+            ("422", "IdempotencyKeyMismatch"),
+            ("500", "InternalServerError"),
+            ("503", "IdempotencyUnavailable"),
+        ] {
+            assert_eq!(
+                operation["responses"][status]["$ref"],
+                format!("#/components/responses/{component}")
+            );
+        }
+        assert_eq!(operation["responses"]["201"]["description"], "created");
     }
 
     #[test]

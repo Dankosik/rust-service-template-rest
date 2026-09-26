@@ -34,12 +34,14 @@ Runtime registration and enqueue still reject invalid reachable names with a
 typed error. Renaming a kind strands its live rows until a worker registers its
 old name.
 
-`infra_jobs::enqueue(conn, &payload, options)` uses the caller's open
-`&mut PgConnection`. It opens no connection and issues no `COMMIT`, `ROLLBACK`,
-or savepoint. A created row therefore commits or rolls back with the caller's
-business write. `EnqueueOptions::delay` is zero by default, has a maximum of
-36,500 days, and drops sub-microseconds. `unique_key` is an optional 1–255 byte
-UTF-8 string with no control characters. A live unique key returns
+`infra_jobs::enqueue(tx, &payload, options)` takes the shared opaque
+`&mut infra_postgres::Tx` that an `in_tx` or `in_tx_with` closure receives,
+including a handler's own transaction; the jobs adapter obtains the scoped
+connection internally. It opens no connection and issues no `COMMIT`,
+`ROLLBACK`, or savepoint. A created row therefore commits or rolls back with
+the caller's business write. `EnqueueOptions::delay` is zero by default, has a
+maximum of 36,500 days, and drops sub-microseconds. `unique_key` is an optional
+1–255 byte UTF-8 string with no control characters. A live unique key returns
 `Enqueued::Duplicate` and leaves the transaction usable.
 
 Before sending SQL, enqueue validates kind, key, delay, JSON size (256 KiB),
@@ -58,10 +60,10 @@ stored as queryable JSONB, kept with terminal history (24 hours, or seven
 days after a failure), and readable by anyone who can read the table.
 
 ```rust,ignore
-infra_postgres::in_tx(pool, async |conn| {
-    let widget_id = insert_widget(conn).await?;
+infra_postgres::in_tx(pool, async |tx| {
+    let widget_id = insert_widget(infra_postgres::connection(tx)).await?;
     let key = widget_id.to_string();
-    match infra_jobs::enqueue(conn, &Welcome { widget_id }, infra_jobs::EnqueueOptions {
+    match infra_jobs::enqueue(tx, &Welcome { widget_id }, infra_jobs::EnqueueOptions {
         unique_key: Some(&key),
         ..Default::default()
     }).await? {
@@ -81,7 +83,8 @@ business operation rather than blindly rerunning it.
 
 ## Enqueue from an idempotent operation
 
-An idempotent adapter uses `infra_jobs::enqueue(connection(tx), ...)` inside
+An idempotent adapter passes the shared `infra_postgres::Tx` that
+`infra_http::idempotency` re-exports to `infra_jobs::enqueue(tx, ...)` inside
 the store's explicit `READ COMMITTED` transaction. The business write, success
 record, and job commit together or not at all. A replay, refusal, or in-progress
 request enqueues nothing; a duplicate unique key remains a successful adapter
@@ -113,7 +116,7 @@ limit for its own transaction only, with `SET LOCAL statement_timeout = '...'`
 as that transaction's first statement.
 
 For an effect wholly inside a supplied PostgreSQL transaction, call
-`job.complete_in_tx(conn).await?` inside that same transaction closure. The
+`job.complete_in_tx(infra_postgres::connection(tx)).await?` inside that same transaction closure. The
 method requires a tracked transaction, writes the same fenced COMPLETE
 transition, and never controls the transaction. Its `CompleteError` must
 propagate: a stale claim rolls back the preceding business writes.
@@ -130,9 +133,9 @@ enum WelcomeError {
 }
 
 async fn welcome(job: infra_jobs::Job<Welcome>) -> Result<(), infra_jobs::JobError> {
-    let result = infra_postgres::in_tx(job.pool(), async |conn| {
-        write_effect(conn, job.payload().widget_id).await?;
-        job.complete_in_tx(conn).await?;
+    let result = infra_postgres::in_tx(job.pool(), async |tx| {
+        write_effect(infra_postgres::connection(tx), job.payload().widget_id).await?;
+        job.complete_in_tx(infra_postgres::connection(tx)).await?;
         Ok::<_, WelcomeError>(())
     }).await;
 

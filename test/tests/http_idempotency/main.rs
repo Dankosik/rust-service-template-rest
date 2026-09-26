@@ -3,22 +3,19 @@
 //! Every test gets its own database from `#[sqlx::test]`, migrated with the
 //! embedded set where the profile table is needed. Two independent template
 //! pools on it stand for two replicas. Scopes and fingerprints are fixed raw
-//! digests, because the store knows no callers. The work's effect is a row in
-//! a test-owned table written through `infra_idempotency_store::connection`,
+//! digests; the caller is persisted as separately inspectable metadata. The
+//! work's effect is a row in a test-owned table written through the provider
+//! transaction capability,
 //! and the tests count effects and work runs themselves. Every wait is bounded
 //! and every spawned task is joined.
 //!
-//! The HTTP status and outcome of each store result are proven by the seam's
-//! pure mapping and, end to end, by the mounted proof where the introspection
-//! engine is retained.
+//! while the mounted proof exercises request identity and HTTP responses.
 
 #![cfg(feature = "integration")]
 // Integration tests are test code; the workspace's production lint levels
 // for unwrap/expect/panic do not apply to them.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-#[path = "../support/commit_proxy.rs"]
-mod commit_proxy;
 // template:begin http-idempotency-mounted:http-idempotency-mounted-module
 mod mounted;
 // template:end http-idempotency-mounted:http-idempotency-mounted-module
@@ -32,17 +29,15 @@ use std::time::Duration;
 use futures_util::FutureExt as _;
 use futures_util::future::join_all;
 use infra_idempotency_store::{
-    Attempted, Digest, ReadBack, Record, ScopeKey, StartupError, Store, Tx, WorkOutput, connection,
+    Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey, StartupError,
+    Store, WorkOutput,
 };
-use infra_postgres::{Closed, Dsn, PgPool, PoolOptions};
-use integration_tests::{DATABASE_URL, dsn_for};
+use infra_postgres::{Closed, Dsn, PgPool, PoolOptions, Tx, connection};
+use integration_tests::dsn_for;
 use sqlx::Executor as _;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use url::Url;
-
-use commit_proxy::{CommitProxy, Fault};
 
 const APP: &str = "integration-tests-idempotency";
 /// How long the replicas' records stay live.
@@ -60,7 +55,7 @@ const CANCEL_BUDGET: Duration = Duration::from_secs(1);
 // every scope differs there.
 const SCOPE: Digest = [0x11; 32];
 const OTHER_CALLER: Digest = [0x12; 32];
-const OTHER_OPERATION: Digest = [0x13; 32];
+const OTHER_SCOPE: Digest = [0x13; 32];
 // Fingerprint digests.
 const INPUT: Digest = [0xa1; 32];
 const OTHER_INPUT: Digest = [0xa2; 32];
@@ -74,12 +69,16 @@ const EFFECTS: &str = "SELECT count(*) FROM effects";
 const EXPIRED: &str = "SELECT count(*) FROM http_idempotency_records WHERE expires_at <= now()";
 const LIVE_RECORDS: &str = "SELECT count(*) FROM http_idempotency_records WHERE expires_at > now()";
 const SEED_EXPIRED: &str = "INSERT INTO http_idempotency_records \
-    (scope_key, fingerprint, format, status, headers, body, expires_at) \
-    SELECT sha256(int8send(n)), sha256(int8send(n)), 1, 201, '', '{}', now() - interval '1 hour' \
+    (scope_key, fingerprint, status, headers, body, issuer, caller_kind, caller_value, expires_at) \
+    SELECT sha256(int8send(n)), sha256(int8send(n)), 201, \
+    ARRAY[ROW('content-type', convert_to('application/json', 'UTF8'))::http_idempotency_header_pair], \
+    '{}', 'https://issuer.example', 'subject', 'fixture-subject', now() - interval '1 hour' \
     FROM generate_series(1, $1::bigint) AS n";
 const SEED_LIVE: &str = "INSERT INTO http_idempotency_records \
-    (scope_key, fingerprint, format, status, headers, body, expires_at) \
-    SELECT sha256(int8send(n)), sha256(int8send(n)), 1, 201, '', '{}', now() + interval '1 hour' \
+    (scope_key, fingerprint, status, headers, body, issuer, caller_kind, caller_value, expires_at) \
+    SELECT sha256(int8send(n)), sha256(int8send(n)), 201, \
+    ARRAY[ROW('content-type', convert_to('application/json', 'UTF8'))::http_idempotency_header_pair], \
+    '{}', 'https://issuer.example', 'subject', 'fixture-subject', now() + interval '1 hour' \
     FROM generate_series(1000001, 1000000 + $1::bigint) AS n";
 /// Locks the row of the first seeded expired record.
 const LOCK_SEEDED_ROW: &str = "SELECT 1 FROM http_idempotency_records \
@@ -103,33 +102,6 @@ async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
 async fn replica(dsn: &Dsn) -> (PgPool, Store) {
     let pool = template_pool(dsn, 3).await;
     (pool.clone(), Store::new(pool, RETENTION))
-}
-
-/// A template pool on the per-test database whose connections pass through a
-/// new commit proxy.
-async fn proxied_pool(pool: &PgPool, max_connections: u32) -> (CommitProxy, PgPool) {
-    let dsn = dsn_for(pool).await;
-    assert_eq!(
-        dsn.ssl_mode_name(),
-        "disable",
-        "the commit proxy frames the plaintext protocol"
-    );
-    let host = dsn.host().trim_start_matches('[').trim_end_matches(']');
-    let server = tokio::net::lookup_host((host, dsn.port()))
-        .await
-        .expect("the server address resolves")
-        .next()
-        .expect("the server has an address");
-    let proxy = CommitProxy::start(server).await;
-    let raw = std::env::var(DATABASE_URL).expect("DATABASE_URL is set");
-    let mut url = Url::parse(&raw).expect("DATABASE_URL is a URL");
-    url.set_path(dsn.database());
-    url.set_ip_host(proxy.address().ip())
-        .expect("the proxy's address is a host");
-    url.set_port(Some(proxy.address().port()))
-        .expect("the URL takes a port");
-    let proxied = Dsn::admit(url.as_str()).expect("the proxied DSN is admitted");
-    (proxy, template_pool(&proxied, max_connections).await)
 }
 
 /// Close each pool within its budget.
@@ -198,18 +170,55 @@ async fn seed(pool: &PgPool, sql: &'static str, records: i64) {
     assert_eq!(i64::try_from(seeded.rows_affected()), Ok(records));
 }
 
-/// A stored success as the seam encodes it: format 1, status 201,
-/// `Content-Type: application/json`, and `body`.
+/// A stored success as the seam encodes it: status 201, all replayable
+/// headers, and `body`.
 fn success(fingerprint: Digest, body: &str) -> Record {
-    // Name id 1 is Content-Type, then the value's length as a big-endian u16.
-    let mut headers = vec![1, 0, 16];
-    headers.extend_from_slice(b"application/json");
     Record {
         fingerprint,
-        format: 1,
         status: 201,
-        headers,
+        headers: vec![
+            HeaderPair {
+                name: "content-type".to_owned(),
+                value: b"application/json".to_vec(),
+            },
+            HeaderPair {
+                name: "content-encoding".to_owned(),
+                value: b"br".to_vec(),
+            },
+            HeaderPair {
+                name: "content-language".to_owned(),
+                value: b"en".to_vec(),
+            },
+            HeaderPair {
+                name: "content-language".to_owned(),
+                value: b"fr".to_vec(),
+            },
+            HeaderPair {
+                name: "content-disposition".to_owned(),
+                value: b"attachment; filename=widget.json".to_vec(),
+            },
+            HeaderPair {
+                name: "location".to_owned(),
+                value: b"/widgets/1".to_vec(),
+            },
+            HeaderPair {
+                name: "etag".to_owned(),
+                value: vec![b'\"', 0x80, b'\"'],
+            },
+            HeaderPair {
+                name: "last-modified".to_owned(),
+                value: b"Sun, 06 Nov 1994 08:49:37 GMT".to_vec(),
+            },
+        ],
         body: body.as_bytes().to_vec(),
+    }
+}
+
+fn caller(value: &str) -> CallerIdentity {
+    CallerIdentity {
+        issuer: "https://issuer.example".to_owned(),
+        kind: CallerKind::Subject,
+        value: value.to_owned(),
     }
 }
 
@@ -277,19 +286,21 @@ enum Refusal {
     Unstorable,
 }
 
-/// One attempt at `scope` accepting `accepted`, whose work, if it runs,
+/// One attempt at `scope` and `fingerprint`, whose work, if it runs,
 /// writes an effect and commits `record`.
 async fn execute(
     store: &Store,
     scope: Digest,
-    accepted: &[Digest],
+    fingerprint: Digest,
     record: &Record,
     work: &Work,
 ) -> Attempted<Refusal> {
+    let caller = caller("fixture-subject");
     store
         .attempt(
             &ScopeKey::from_digest(scope),
-            accepted,
+            &caller,
+            &fingerprint,
             async |tx: &mut Tx<'_>| {
                 work.run(tx).await;
                 WorkOutput::Commit(record.clone())
@@ -308,7 +319,7 @@ async fn once_free(
 ) -> Attempted<Refusal> {
     let deadline = Instant::now() + WAIT;
     loop {
-        let outcome = execute(store, scope, &[record.fingerprint], record, work).await;
+        let outcome = execute(store, scope, record.fingerprint, record, work).await;
         if !matches!(outcome, Attempted::InProgress) {
             return outcome;
         }
@@ -353,32 +364,29 @@ async fn p1_a_held_key_refuses_duplicates_and_commits_one_effect(pool: PgPool) {
     // replica, with the same or another input, are in progress at once and
     // never run the work.
     work.hold.arm();
-    let (held, ()) = tokio::join!(
-        execute(&replica_1, SCOPE, &[INPUT], &record, &work),
-        async {
-            work.hold.entered().await;
-            for replica in [&replica_1, &replica_2] {
-                for accepted in [INPUT, OTHER_INPUT] {
-                    let duplicate = execute(replica, SCOPE, &[accepted], &record, &work).await;
-                    assert!(matches!(duplicate, Attempted::InProgress), "{duplicate:?}");
-                }
+    let (held, ()) = tokio::join!(execute(&replica_1, SCOPE, INPUT, &record, &work), async {
+        work.hold.entered().await;
+        for replica in [&replica_1, &replica_2] {
+            for fingerprint in [INPUT, OTHER_INPUT] {
+                let duplicate = execute(replica, SCOPE, fingerprint, &record, &work).await;
+                assert!(matches!(duplicate, Attempted::InProgress), "{duplicate:?}");
             }
-            assert_eq!(work.runs(), 1, "no duplicate ran its work");
-            work.hold.release();
-        },
-    );
+        }
+        assert_eq!(work.runs(), 1, "no duplicate ran its work");
+        work.hold.release();
+    },);
     assert_eq!(committed(held), record);
 
     // After the commit, retries replay on both replicas, one after another
     // and all at once, and none runs the work.
     for replica in [&replica_1, &replica_2] {
-        let retry = execute(replica, SCOPE, &[INPUT], &record, &work).await;
+        let retry = execute(replica, SCOPE, INPUT, &record, &work).await;
         assert_eq!(live(retry), (true, record.clone()));
     }
     let concurrent = [
         &replica_1, &replica_2, &replica_1, &replica_2, &replica_1, &replica_2,
     ]
-    .map(|replica| execute(replica, SCOPE, &[INPUT], &record, &work));
+    .map(|replica| execute(replica, SCOPE, INPUT, &record, &work));
     for retry in join_all(concurrent).await {
         assert_eq!(live(retry), (true, record.clone()));
     }
@@ -396,6 +404,7 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
     let record = success(INPUT, r#"{"id":1}"#);
     let work = Work::default();
 
+    let caller = caller("fixture-subject");
     // A non-2xx response and an unstorable success both ask for rollback
     // after the work wrote its effect.
     for (scope, refusal) in [
@@ -405,7 +414,8 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
         let outcome = replica_1
             .attempt(
                 &ScopeKey::from_digest(scope),
-                &[INPUT],
+                &caller,
+                &INPUT,
                 async |tx: &mut Tx<'_>| {
                     work.run(tx).await;
                     WorkOutput::Rollback(refusal)
@@ -420,8 +430,9 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
     // A panic in the work unwinds out of the attempt and drops its
     // transaction.
     let panicked = AssertUnwindSafe(replica_1.attempt(
-        &ScopeKey::from_digest(OTHER_OPERATION),
-        &[INPUT],
+        &ScopeKey::from_digest(OTHER_SCOPE),
+        &caller,
+        &INPUT,
         async |tx: &mut Tx<'_>| -> WorkOutput<Refusal> {
             work.run(tx).await;
             panic!("the work panics after writing its effect");
@@ -434,7 +445,7 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
     assert_eq!(count(&pool, EFFECTS).await, 0);
 
     // Nothing was stored, so each retry executes, here on the other replica.
-    for scope in [SCOPE, OTHER_CALLER, OTHER_OPERATION] {
+    for scope in [SCOPE, OTHER_CALLER, OTHER_SCOPE] {
         assert_eq!(records(&pool, scope).await, 0);
         let retry = once_free(&replica_2, scope, &record, &work).await;
         assert_eq!(committed(retry), record);
@@ -453,38 +464,40 @@ async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(p
     let record = success(INPUT, r#"{"id":1,"name":"first"}"#);
     let other = success(OTHER_INPUT, r#"{"id":2,"name":"other"}"#);
     let work = Work::default();
-    let first = execute(&replica_1, SCOPE, &[INPUT], &record, &work).await;
+    let first = execute(&replica_1, SCOPE, INPUT, &record, &work).await;
     assert_eq!(committed(first), record);
 
     // The same fingerprint gets the stored status, headers, and body bytes on
     // the other replica, not what its own work would have produced.
-    let replayed = execute(&replica_2, SCOPE, &[INPUT], &other, &work).await;
+    let replayed = execute(&replica_2, SCOPE, INPUT, &other, &work).await;
     assert_eq!(live(replayed), (true, record.clone()));
     // Another fingerprint is refused by the live record, which stays.
-    let mismatched = execute(&replica_2, SCOPE, &[OTHER_INPUT], &other, &work).await;
+    let mismatched = execute(&replica_2, SCOPE, OTHER_INPUT, &other, &work).await;
     assert_eq!(live(mismatched), (false, record.clone()));
-    // An equivalent encoding accepted beside the current one matches.
-    let equivalent = execute(&replica_1, SCOPE, &[OTHER_INPUT, INPUT], &other, &work).await;
-    assert_eq!(live(equivalent), (true, record.clone()));
     assert_eq!(work.runs(), 1);
 
-    // Another caller and another operation hold keys of their own.
-    for scope in [OTHER_CALLER, OTHER_OPERATION] {
-        let independent = execute(&replica_2, scope, &[INPUT], &other, &work).await;
+    // Other scopes hold keys of their own.
+    for scope in [OTHER_CALLER, OTHER_SCOPE] {
+        let independent = execute(&replica_2, scope, INPUT, &other, &work).await;
         assert_eq!(committed(independent), other);
     }
     assert_eq!(work.runs(), 3);
     assert_eq!(count(&pool, EFFECTS).await, 3);
-    match replica_1
-        .read_back(&ScopeKey::from_digest(SCOPE), &[INPUT])
-        .await
-    {
-        ReadBack::Found {
-            matched,
-            record: found,
-        } => assert_eq!((matched, found), (true, record)),
-        unexpected => panic!("expected the stored record, got {unexpected:?}"),
-    }
+    let metadata: (String, String, String) = sqlx::query_as(
+        "SELECT issuer, caller_kind, caller_value FROM http_idempotency_records WHERE scope_key = $1",
+    )
+    .bind(SCOPE)
+    .fetch_one(&pool)
+    .await
+    .expect("the stored caller metadata");
+    assert_eq!(
+        metadata,
+        (
+            "https://issuer.example".to_owned(),
+            "subject".to_owned(),
+            "fixture-subject".to_owned()
+        )
+    );
     close(&[&pool_1, &pool_2]).await;
 }
 
@@ -497,20 +510,15 @@ async fn p4_an_expired_record_is_not_replayed_and_is_replaced(pool: PgPool) {
     let record = success(INPUT, r#"{"id":1}"#);
     let replacement = success(OTHER_INPUT, r#"{"id":2}"#);
     let work = Work::default();
-    let first = execute(&replica_1, SCOPE, &[INPUT], &record, &work).await;
+    let first = execute(&replica_1, SCOPE, INPUT, &record, &work).await;
     assert_eq!(committed(first), record);
     expire(&pool, SCOPE).await;
 
-    // An expired record counts as absent while cleanup has not deleted it.
-    let read_back = replica_2
-        .read_back(&ScopeKey::from_digest(SCOPE), &[INPUT])
-        .await;
-    assert!(matches!(read_back, ReadBack::Absent), "{read_back:?}");
     // The key executes afresh, whatever the input, and the new record
     // replaces the expired one.
-    let afresh = execute(&replica_2, SCOPE, &[OTHER_INPUT], &replacement, &work).await;
+    let afresh = execute(&replica_2, SCOPE, OTHER_INPUT, &replacement, &work).await;
     assert_eq!(committed(afresh), replacement);
-    let decided = execute(&replica_1, SCOPE, &[INPUT], &record, &work).await;
+    let decided = execute(&replica_1, SCOPE, INPUT, &record, &work).await;
     assert_eq!(live(decided), (false, replacement.clone()));
     assert_eq!(records(&pool, SCOPE).await, 1);
     assert_eq!(work.runs(), 2);
@@ -526,7 +534,7 @@ async fn p4_a_retention_with_a_sub_microsecond_part_writes_its_record(pool: PgPo
     // in whole microseconds.
     let store = Store::new(store_pool.clone(), Duration::new(3_600, 123_456_789));
     let record = success(INPUT, r#"{"id":1}"#);
-    let written = execute(&store, SCOPE, &[INPUT], &record, &Work::default()).await;
+    let written = execute(&store, SCOPE, INPUT, &record, &Work::default()).await;
     assert_eq!(committed(written), record);
     let on_time: bool = sqlx::query_scalar(
         "SELECT expires_at BETWEEN now() + interval '3599 seconds' \
@@ -550,7 +558,7 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
     let record = success(INPUT, r#"{"id":1}"#);
     let work = Work::default();
     // The attempt that executes below replaces an expired record of its own.
-    let first = execute(&replica_1, SCOPE, &[INPUT], &record, &work).await;
+    let first = execute(&replica_1, SCOPE, INPUT, &record, &work).await;
     assert_eq!(committed(first), record);
     expire(&pool, SCOPE).await;
     seed(&pool, SEED_EXPIRED, BACKLOG).await;
@@ -564,18 +572,16 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
         .expect("the row lock");
 
     work.hold.arm();
-    let (executed, removed) = tokio::join!(
-        execute(&replica_1, SCOPE, &[INPUT], &record, &work),
-        async {
+    let (executed, removed) =
+        tokio::join!(execute(&replica_1, SCOPE, INPUT, &record, &work), async {
             work.hold.entered().await;
             let removed = bounded("a cleanup run", replica_2.remove_expired()).await;
             // The executing attempt still holds its key.
-            let duplicate = execute(&replica_2, SCOPE, &[INPUT], &record, &work).await;
+            let duplicate = execute(&replica_2, SCOPE, INPUT, &record, &work).await;
             assert!(matches!(duplicate, Attempted::InProgress), "{duplicate:?}");
             work.hold.release();
             removed
-        },
-    );
+        },);
     // Every expired record went, in more than one batch: the backlog less its
     // locked row, which was skipped without waiting, plus the executing
     // attempt's own expired record.
@@ -624,90 +630,60 @@ async fn p5_a_read_only_session_is_unavailable_even_with_a_live_record(pool: PgP
     let (writer_pool, writer) = replica(&dsn).await;
     let record = success(INPUT, r#"{"id":1}"#);
     let work = Work::default();
-    let first = execute(&writer, SCOPE, &[INPUT], &record, &work).await;
+    let first = execute(&writer, SCOPE, INPUT, &record, &work).await;
     assert_eq!(committed(first), record);
 
     // Sessions opened from now on are read-only.
     make_read_only(&pool).await;
     let (reader_pool, reader) = replica(&dsn).await;
     for scope in [SCOPE, OTHER_CALLER] {
-        let refused = execute(&reader, scope, &[INPUT], &record, &work).await;
+        let refused = execute(&reader, scope, INPUT, &record, &work).await;
         assert!(matches!(refused, Attempted::Unavailable), "{refused:?}");
     }
-    let read_back = reader
-        .read_back(&ScopeKey::from_digest(SCOPE), &[INPUT])
-        .await;
-    assert!(matches!(read_back, ReadBack::NotWritable), "{read_back:?}");
     assert_eq!(work.runs(), 1);
     assert_eq!(count(&pool, EFFECTS).await, 1);
     close(&[&writer_pool, &reader_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn p6_a_lost_acknowledgement_of_a_real_commit_reads_back_the_record(pool: PgPool) {
+async fn p6_an_aborted_statement_is_internal_and_the_same_key_can_retry(pool: PgPool) {
     create_effects(&pool).await;
-    let (proxy, proxied) = proxied_pool(&pool, 2).await;
-    let replica = Store::new(proxied.clone(), RETENTION);
+    let (store_pool, store) = replica(&dsn_for(&pool).await).await;
     let record = success(INPUT, r#"{"id":1}"#);
-    let work = Work::default();
+    let caller = caller("fixture-subject");
 
-    // The server commits; the proxy closes both sockets before the
-    // acknowledgement reaches the pool.
-    proxy.arm(Fault::ForwardThenDrop);
-    let outcome = execute(&replica, SCOPE, &[INPUT], &record, &work).await;
-    assert!(matches!(outcome, Attempted::CommitUnknown), "{outcome:?}");
-    assert_eq!(proxy.fired(), Some(Fault::ForwardThenDrop));
-
-    // The readback's fresh connection finds the committed record.
-    match replica
-        .read_back(&ScopeKey::from_digest(SCOPE), &[INPUT])
-        .await
-    {
-        ReadBack::Found {
-            matched,
-            record: found,
-        } => {
-            assert_eq!((matched, found), (true, record.clone()));
-        }
-        unexpected => panic!("expected the committed record, got {unexpected:?}"),
-    }
-    assert_eq!(count(&pool, EFFECTS).await, 1);
-    // A retry replays it: the work never runs a second time.
-    let retry = execute(&replica, SCOPE, &[INPUT], &record, &work).await;
-    assert_eq!(live(retry), (true, record));
-    assert_eq!(work.runs(), 1);
-    close(&[&proxied]).await;
-    proxy.shutdown().await;
-}
-
-#[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn p6_a_lost_acknowledgement_without_a_commit_reads_back_nothing_and_the_retry_executes_once(
-    pool: PgPool,
-) {
-    create_effects(&pool).await;
-    let (proxy, proxied) = proxied_pool(&pool, 2).await;
-    let replica = Store::new(proxied.clone(), RETENTION);
-    let record = success(INPUT, r#"{"id":1}"#);
-    let work = Work::default();
-
-    // The proxy closes both sockets before `COMMIT` reaches the server.
-    proxy.arm(Fault::DropBeforeForward);
-    let outcome = execute(&replica, SCOPE, &[INPUT], &record, &work).await;
-    assert!(matches!(outcome, Attempted::CommitUnknown), "{outcome:?}");
-    assert_eq!(proxy.fired(), Some(Fault::DropBeforeForward));
-    let read_back = replica
-        .read_back(&ScopeKey::from_digest(SCOPE), &[INPUT])
+    // PostgreSQL marks the transaction failed after division by zero. The
+    // store's normal record write then observes SQLSTATE 25P02 and classifies
+    // it as an internal fault, not transient unavailability.
+    let aborted: Attempted<()> = store
+        .attempt(
+            &ScopeKey::from_digest(SCOPE),
+            &caller,
+            &INPUT,
+            async |tx: &mut Tx<'_>| {
+                sqlx::query("INSERT INTO effects DEFAULT VALUES")
+                    .execute(connection(tx))
+                    .await
+                    .expect("the effect starts inside the transaction");
+                assert!(
+                    sqlx::query("SELECT 1 / 0")
+                        .execute(connection(tx))
+                        .await
+                        .is_err(),
+                    "the first statement aborts the transaction"
+                );
+                WorkOutput::Commit(record.clone())
+            },
+        )
         .await;
-    assert!(matches!(read_back, ReadBack::Absent), "{read_back:?}");
+    assert!(matches!(aborted, Attempted::Internal), "{aborted:?}");
     assert_eq!(count(&pool, EFFECTS).await, 0);
+    assert_eq!(records(&pool, SCOPE).await, 0);
 
-    // A later retry executes once the server has ended the cut session.
-    let retry = once_free(&replica, SCOPE, &record, &work).await;
+    let retry = execute(&store, SCOPE, INPUT, &record, &Work::default()).await;
     assert_eq!(committed(retry), record);
-    assert_eq!(work.runs(), 2);
     assert_eq!(count(&pool, EFFECTS).await, 1);
-    close(&[&proxied]).await;
-    proxy.shutdown().await;
+    close(&[&store_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -722,7 +698,7 @@ async fn p7_a_dropped_attempt_leaves_no_effect_and_frees_its_key(pool: PgPool) {
     // Drive one attempt until its work has written its effect and waits, then
     // drop it, as an expired request budget or a disconnect does.
     work.hold.arm();
-    let mut attempt = Box::pin(execute(&replica_1, SCOPE, &[INPUT], &record, &work));
+    let mut attempt = Box::pin(execute(&replica_1, SCOPE, INPUT, &record, &work));
     tokio::select! {
         outcome = &mut attempt => panic!("the held attempt finished: {outcome:?}"),
         () = work.hold.entered() => {}
@@ -751,6 +727,52 @@ async fn p8_startup_refuses_a_missing_schema(pool: PgPool) {
     pool.execute("CREATE TABLE http_idempotency_records (scope_key bytea PRIMARY KEY)")
         .await
         .expect("a partial table");
+    assert_eq!(
+        store.check_startup().await,
+        Err(StartupError::SchemaMissing)
+    );
+    close(&[&store_pool]).await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn p8_a_live_legacy_row_refuses_the_transition_and_is_preserved(pool: PgPool) {
+    pool.execute(include_str!(
+        "../../../migrations/20260923000001_create_http_idempotency_records.sql"
+    ))
+    .await
+    .expect("the legacy schema");
+    migrate::MIGRATOR
+        .skip(&pool, Some(20_260_923_000_001))
+        .await
+        .expect("the legacy migration is marked applied");
+    sqlx::query(
+        "INSERT INTO http_idempotency_records \
+         (scope_key, fingerprint, format, status, headers, body, expires_at) \
+         VALUES ($1, $2, 1, 201, '', 'legacy-response', clock_timestamp() + interval '1 hour')",
+    )
+    .bind(SCOPE)
+    .bind(INPUT)
+    .execute(&pool)
+    .await
+    .expect("the live legacy row");
+
+    let refused = migrate::MIGRATOR.run(&pool).await;
+    assert!(refused.is_err(), "a live legacy row refuses the transition");
+    assert_eq!(records(&pool, SCOPE).await, 1, "the guarded row survives");
+    let legacy_format: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+         WHERE table_name = 'http_idempotency_records' AND column_name = 'format')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("the pre-transition schema remains");
+    assert!(
+        legacy_format,
+        "the transition rolled its schema change back"
+    );
+
+    // The new store refuses the legacy schema before readiness admission.
+    let (store_pool, store) = replica(&dsn_for(&pool).await).await;
     assert_eq!(
         store.check_startup().await,
         Err(StartupError::SchemaMissing)

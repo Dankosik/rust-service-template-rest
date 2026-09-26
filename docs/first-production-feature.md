@@ -30,10 +30,11 @@ fresh request budget. Bootstrap supplies the existing tracker/root token.
 <!-- template:begin http-idempotency:docs-first-feature-http-idempotency -->
 For an operation that must commit its business effect at most once per
 caller and key, the retained [HTTP idempotency profile](http-idempotency.md)
-composes replay and arbitration around it. Declare `x-idempotent: true`, one
-`Idempotency-Key` header parameter, and the closed response family the guide
-names; compose the route through the pack's seam rather than the plain
-`routes!` merge.
+composes replay and arbitration around it. Keep the operation's ordinary
+protected annotation and compose the route through `Composer::route` rather
+than the plain `routes!` merge: the composer generates `x-idempotent`, the
+`Idempotency-Key` parameter, and the idempotency responses, so do not declare
+them by hand.
 <!-- template:end http-idempotency:docs-first-feature-http-idempotency -->
 
 

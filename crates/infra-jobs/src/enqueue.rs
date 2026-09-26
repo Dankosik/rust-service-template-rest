@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
+use infra_postgres::{Tx, connection};
 use sqlx::Row;
-use sqlx::postgres::PgConnection;
 
 use crate::kind::{self, JobId, JobKind};
 use crate::trace_context;
@@ -97,7 +97,7 @@ pub enum EnqueueError {
 /// [`EnqueueError`] when the kind name, unique key, delay, or payload is
 /// refused, or when the statement fails.
 pub async fn enqueue<K: JobKind>(
-    conn: &mut PgConnection,
+    tx: &mut Tx<'_>,
     payload: &K,
     options: EnqueueOptions<'_>,
 ) -> Result<Enqueued, EnqueueError> {
@@ -110,7 +110,7 @@ pub async fn enqueue<K: JobKind>(
         .bind(prepared.delay_micros)
         .bind(traceparent.as_deref())
         .bind(tracestate.as_deref())
-        .fetch_optional(&mut *conn)
+        .fetch_optional(&mut *connection(tx))
         .await
         .map_err(EnqueueError::Database)?;
     let Some(row) = row else {

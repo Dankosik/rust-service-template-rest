@@ -7,9 +7,10 @@ use infra_jobs::{
     DEFAULT_TIMEOUT, DrainEnd, Engine, EnqueueError, EnqueueOptions, Enqueued, Job, JobError,
     JobKind, Kinds, LEASE_RESERVE, MIN_TIMEOUT, POLL_INTERVAL, Policy, StartupError, enqueue,
 };
-use infra_postgres::{Dsn, PgPool, TxError, in_tx};
+use infra_postgres::{Dsn, PgPool, TxError, connection, in_tx};
+use integration_tests::DATABASE_URL;
+use integration_tests::dsn_for;
 use integration_tests::jobs::{self, Probe, ProbeAction};
-use integration_tests::{DATABASE_URL, dsn_for};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use tokio::sync::Notify;
@@ -249,9 +250,9 @@ async fn absent_for(bound: Duration, mut check: impl AsyncFnMut()) {
 
 async fn enqueue_one(pool: &PgPool, action: ProbeAction) -> String {
     let id = must(
-        in_tx(pool, async |conn| -> Result<_, Step> {
+        in_tx(pool, async |tx| -> Result<_, Step> {
             Ok(created(
-                enqueue(conn, &Probe { action }, EnqueueOptions::default()).await?,
+                enqueue(tx, &Probe { action }, EnqueueOptions::default()).await?,
             ))
         })
         .await,
@@ -262,11 +263,11 @@ async fn enqueue_one(pool: &PgPool, action: ProbeAction) -> String {
 
 async fn enqueue_many(pool: &PgPool, action: ProbeAction, count: i64) -> Vec<String> {
     must(
-        in_tx(pool, async |conn| -> Result<Vec<String>, Step> {
+        in_tx(pool, async |tx| -> Result<Vec<String>, Step> {
             let mut ids = Vec::new();
             for _ in 0..count {
                 ids.push(
-                    created(enqueue(conn, &Probe { action }, EnqueueOptions::default()).await?)
+                    created(enqueue(tx, &Probe { action }, EnqueueOptions::default()).await?)
                         .to_string(),
                 );
             }
@@ -489,8 +490,8 @@ async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) 
     set_not_before(&jobs, &locked, 10).await;
     for token in [1, 2] {
         must(
-            in_tx(&jobs, async |conn| -> Result<(), Step> {
-                let _ = enqueue(conn, &Stranded { token }, EnqueueOptions::default()).await?;
+            in_tx(&jobs, async |tx| -> Result<(), Step> {
+                let _ = enqueue(tx, &Stranded { token }, EnqueueOptions::default()).await?;
                 Ok(())
             })
             .await,
@@ -581,9 +582,9 @@ async fn x1_unregistered_kind_stays_pending(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     prepare(&jobs).await;
     let stranded = must(
-        in_tx(&jobs, async |conn| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, Step> {
             Ok(
-                created(enqueue(conn, &Stranded { token: 1 }, EnqueueOptions::default()).await?)
+                created(enqueue(tx, &Stranded { token: 1 }, EnqueueOptions::default()).await?)
                     .to_string(),
             )
         })
@@ -711,10 +712,10 @@ async fn e2_uncommitted_enqueue_is_not_run(pool: PgPool) {
         let id_slot = Arc::clone(&id_slot);
         let caller = caller.clone();
         tokio::spawn(async move {
-            in_tx(&caller, async move |conn| -> Result<(), Step> {
+            in_tx(&caller, async move |tx| -> Result<(), Step> {
                 let id = created(
                     enqueue(
-                        conn,
+                        tx,
                         &Probe {
                             action: ProbeAction::Succeed,
                         },
@@ -836,9 +837,9 @@ async fn x5_superseded_attempt_does_not_change_the_row(pool: PgPool) {
     });
     let registry = gate_registry(Arc::clone(&gate));
     let id = must(
-        in_tx(&jobs, async |conn| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, Step> {
             Ok(
-                created(enqueue(conn, &Gate { token: 1 }, EnqueueOptions::default()).await?)
+                created(enqueue(tx, &Gate { token: 1 }, EnqueueOptions::default()).await?)
                     .to_string(),
             )
         })
@@ -938,18 +939,20 @@ fn transactional_gate_registry(gate: Arc<TransactionGateState>) -> infra_jobs::R
                     ));
                 }
                 drop(direct);
-                let completed = in_tx(job.pool(), async |conn| -> Result<(), Step> {
+                let completed = in_tx(job.pool(), async |tx| -> Result<(), Step> {
                     sqlx::query("INSERT INTO job_effects (job_id) VALUES ($1::uuid)")
                         .bind(job.id().to_string())
-                        .execute(&mut *conn)
+                        .execute(&mut *connection(tx))
                         .await
                         .map_err(Step::Query)?;
                     gate.business_written.notify_one();
                     gate.complete.notified().await;
-                    job.complete_in_tx(conn).await.map_err(|error| match error {
-                        infra_jobs::CompleteError::Database(error) => Step::Query(error),
-                        _ => Step::Rejected,
-                    })
+                    job.complete_in_tx(connection(tx))
+                        .await
+                        .map_err(|error| match error {
+                            infra_jobs::CompleteError::Database(error) => Step::Query(error),
+                            _ => Step::Rejected,
+                        })
                 })
                 .await;
                 completed.map_err(|error| match error {
@@ -987,9 +990,9 @@ async fn x3_unknown_outcome_retries_its_fenced_write_without_rerunning_the_handl
         runs: AtomicUsize::new(0),
     });
     let id = must(
-        in_tx(&jobs, async |conn| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, Step> {
             Ok(
-                created(enqueue(conn, &Gate { token: 1 }, EnqueueOptions::default()).await?)
+                created(enqueue(tx, &Gate { token: 1 }, EnqueueOptions::default()).await?)
                     .to_string(),
             )
         })
@@ -1025,14 +1028,9 @@ async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool
         complete: Notify::new(),
     });
     let id = must(
-        in_tx(&jobs, async |conn| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, Step> {
             Ok(created(
-                enqueue(
-                    conn,
-                    &TransactionGate { token: 1 },
-                    EnqueueOptions::default(),
-                )
-                .await?,
+                enqueue(tx, &TransactionGate { token: 1 }, EnqueueOptions::default()).await?,
             )
             .to_string())
         })
@@ -1093,14 +1091,9 @@ async fn transaction_unknown_leaves_only_the_commit_side_effect(
         complete: Notify::new(),
     });
     let id = must(
-        in_tx(&jobs, async |conn| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, Step> {
             Ok(created(
-                enqueue(
-                    conn,
-                    &TransactionGate { token: 1 },
-                    EnqueueOptions::default(),
-                )
-                .await?,
+                enqueue(tx, &TransactionGate { token: 1 }, EnqueueOptions::default()).await?,
             )
             .to_string())
         })
@@ -1168,9 +1161,9 @@ async fn w4_known_result_beats_forced_release_while_its_write_waits(pool: PgPool
         open: Notify::new(),
     });
     let id = must(
-        in_tx(&jobs, async |conn| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, Step> {
             Ok(
-                created(enqueue(conn, &Gate { token: 1 }, EnqueueOptions::default()).await?)
+                created(enqueue(tx, &Gate { token: 1 }, EnqueueOptions::default()).await?)
                     .to_string(),
             )
         })
@@ -1226,9 +1219,9 @@ async fn x5_rolled_back_generation_never_returns(pool: PgPool) {
     prepare(&jobs).await;
     let drawn = Arc::new(Mutex::new(0_i64));
     let slot = Arc::clone(&drawn);
-    let rolled = in_tx(&jobs, async move |conn| -> Result<(), Step> {
+    let rolled = in_tx(&jobs, async move |tx| -> Result<(), Step> {
         let value: i64 = sqlx::query_scalar("SELECT nextval('background_jobs_claim_generation')")
-            .fetch_one(&mut *conn)
+            .fetch_one(&mut *connection(tx))
             .await?;
         *slot.lock().expect("generation") = value;
         Err(Step::Rejected)
@@ -1708,10 +1701,10 @@ async fn x12_future_not_before_is_not_claimed_until_it_passes(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     prepare(&jobs).await;
     let id = must(
-        in_tx(&jobs, async |conn| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, Step> {
             Ok(created(
                 enqueue(
-                    conn,
+                    tx,
                     &Probe {
                         action: ProbeAction::Succeed,
                     },

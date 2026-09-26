@@ -80,11 +80,13 @@ failure class (`no connection available inside the acquire budget`,
 
 ## Transactions
 
-`in_tx(&pool, async |conn| ...)` opens a transaction, runs the async closure
-with the connection (not the transaction, so the closure cannot commit or
-roll back on its own), commits on `Ok`, and rolls back on `Err` inside the
-rollback budget, returning the closure's error; a rollback failure is logged.
-`in_tx_with(TxOptions { isolation, read_only })` renders the `BEGIN`
+`in_tx(&pool, async |tx| ...)` opens a transaction and lends the closure an
+opaque `&mut Tx`. The provider adapter obtains a scoped connection through
+`infra_postgres::connection(tx)`; the handle exposes no constructor or
+transaction-control methods. The boundary commits on `Ok` and rolls back on
+`Err` inside the rollback budget, returning the closure's error. Rollback
+failure logs contain only a bounded cause category and sanitized SQLSTATE.
+`in_tx_with(&pool, TxOptions { isolation, read_only }, work)` renders the `BEGIN`
 statement for `Connection::begin_with`. `Isolation::ServerDefault` omits the
 isolation clause (server `default_transaction_isolation`);
 `Isolation::ReadCommitted` always sends `BEGIN ISOLATION LEVEL READ COMMITTED`.
@@ -153,18 +155,30 @@ replay is `no_change`, then the lifecycle check with the profile enabled.
 
 With the HTTP idempotency profile retained, `crates/infra-idempotency-store`
 owns one profile table, `http_idempotency_records`, and every statement
-against it; no other crate names the table. An idempotent operation's
-repository adapter joins the boundary's transaction through the opaque `Tx`
-handle the store passes to the operation's work. The store opens that one
-transaction with `in_tx_with` under `READ COMMITTED`, so the adapter's writes
-and the success record commit together under the commit-outcome policy this
-document already records (`CommitFailed`, `CommitUnknown`, `retryable`). The
-adapter reaches the connection only through the store's
-`connection(&mut Tx<'_>)` free function, never through a method or
-conversion on `Tx`; it never ends the transaction with transaction-control
-SQL and never names the profile table. The schema is the profile's one
-migration in `migrations/`, and the statements are constants in the store
-crate; the [guide](../http-idempotency.md) covers the rollout sequence.
+against it; no other crate names the table. `infra-postgres` owns the opaque
+`Tx`, transaction lifecycle, and provider-only `connection(&mut Tx)` access.
+`infra_http::idempotency` re-exports the same type, so a feature's port can
+name it without a provider dependency, and the feature's provider adapter
+reaches the connection through `infra_postgres::connection`. The store
+arbitrates and persists within that one explicit READ COMMITTED transaction;
+a storable 2xx effect and record commit together.
+Adapters never issue transaction-control SQL or name the profile table.
+
+New records use native `http_idempotency_header_pair[]` values (`name text`,
+`value bytea`) for the seven byte-safe replay headers and retain trusted caller
+identity metadata plus scope digest. SQLx 0.9.0's narrow `derive` feature
+provides the composite `Type`/`Encode`/`Decode` and array support. Native
+`bytea` preserves every header value byte without a binary format or the
+extra byte-encoding policy that `jsonb` would require. No query macros or
+offline metadata are introduced for these constant statements.
+The startup admission check verifies the
+exact catalog identity of that composite array and required metadata columns;
+it does not merely select column names. It fails readiness on the legacy schema.
+The new forward migration takes ACCESS EXCLUSIVE lock before the live-row guard,
+refuses rows with `expires_at > clock_timestamp()`, and rolls back both schema
+and history on refusal. It may replace expired/empty legacy state and never
+alters applied migrations. The [guide](../http-idempotency.md) owns the
+maintenance sequence; it is not a zero-downtime compatibility bridge.
 
 This retargets three persistence deferrals: `query!` with offline `.sqlx`
 metadata and `sqlx-cli`, and per-query tracing spans, move from "the first
@@ -179,7 +193,7 @@ ordinary forward-only history from the moment it merges.
 
 `crates/infra-jobs` owns one table, `background_jobs`, and every statement
 against it; no other crate names the table. Enqueue (`infra_jobs::enqueue`)
-runs on the caller's `&mut PgConnection` inside the caller's transaction,
+accepts the caller's `&mut Tx` inside the caller's transaction,
 under the caller's isolation level, with no transaction-control SQL; the job
 commits or rolls back with the caller's write under the commit-outcome
 policy this document records. The insert is its only statement: UTF-8 is a
@@ -243,7 +257,7 @@ scratch project against `postgres:18.4`):
   with `55P03`, `statement_timeout` cancels with `57014`.
   `test_before_acquire` stays at the `sqlx` default (`true`).
 - **`in_tx` takes an `AsyncFnOnce`** (edition 2024): the closure borrows the
-  connection, the future is `Send` when the closure's is, and callers pass
+  opaque provider-owned `Tx`, the future is `Send` when the closure's is, and callers pass
   their own error type through `E: From<TxError>`. The Go template joined
   the callback error with the rollback error; Rust returns the callback
   error and logs the rollback failure.

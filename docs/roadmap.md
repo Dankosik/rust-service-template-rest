@@ -682,6 +682,17 @@ activation before readiness admission, one forward-only migration, and the
 [guide](http-idempotency.md). It stays inert until an operation declares
 `x-idempotent: true`; `none` removes it.
 
+The accepted request-owned simplification supersedes the stage-10.3 contract:
+identity now comes from the complete bounded HTTP request and decoded key, not
+an operation namespace or caller fingerprint; `execute(work)` uses the shared
+`infra-postgres` transaction capability; durable replay retains seven
+byte-preserving headers and trusted caller metadata; and the guarded forward
+migration refuses live legacy rows. The current [guide](http-idempotency.md)
+and architecture documents are authoritative for that replacement. The
+following receipt is historical evidence for the earlier PR #49 implementation;
+it does not prove the simplification, its migration, generated contract, or
+current tests.
+
 Stage-10.3 local acceptance ran every local step of the `make plan` route:
 formatting, the workspace lint including the integration feature, build, 403
 workspace tests, the contract check, dependency and secret gates, workflow

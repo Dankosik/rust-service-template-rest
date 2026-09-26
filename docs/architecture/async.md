@@ -47,8 +47,10 @@ a non-UTF-8 database, and worker startup verifies UTF-8, both converted column
 types, and `trace_state`. The migration repeats UTF-8 validation, so an
 incompatible row is refused, never silently sanitized.
 
-`enqueue` remains the only insert and uses the caller's open
-`&mut PgConnection` without transaction-control SQL or another connection.
+`enqueue` remains the only insert. It takes the shared opaque
+`&mut infra_postgres::Tx` that the caller's `in_tx` closure receives, obtains
+its connection inside the jobs adapter, and issues no transaction-control SQL
+or second connection.
 It preserves caller isolation and commit fate. A database failure aborts that
 transaction; validation and duplicate do not. The normal typed validation set
 includes `InvalidDelay`; its maximum is 36,500 days and sub-microseconds are

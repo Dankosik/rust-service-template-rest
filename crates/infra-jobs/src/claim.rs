@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use infra_postgres::in_tx_with;
+use infra_postgres::{connection, in_tx_with};
 use sqlx::Row;
 use tokio::sync::{OwnedSemaphorePermit, SemaphorePermit};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -187,7 +187,8 @@ async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
         in_tx_with(
             &shared.pool,
             READ_COMMITTED,
-            async |conn| -> Result<(Instant, Vec<Drawn>), OpFailed> {
+            async |tx| -> Result<(Instant, Vec<Drawn>), OpFailed> {
+                let conn = connection(tx);
                 let sent = Instant::now();
                 let rows = sqlx::query(CLAIM)
                     .bind(&names)

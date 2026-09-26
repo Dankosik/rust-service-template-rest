@@ -1,8 +1,8 @@
 //! The transaction seam and the commit-outcome policy.
 //!
 //! A feature chooses the atomic boundary by calling [`in_tx`] with an async
-//! closure; the closure gets the connection, not the transaction, so it
-//! cannot commit or roll back on its own. `Ok` commits, `Err` rolls back.
+//! closure; the closure gets an opaque transaction capability, so it cannot
+//! commit or roll back on its own. `Ok` commits, `Err` rolls back.
 //!
 //! The one thing a driver cannot hide is that `COMMIT` may have succeeded
 //! on the server after the client stopped hearing from it. [`TxError`]
@@ -34,6 +34,22 @@ pub enum TxError {
     /// operation identity instead of retrying blindly.
     #[error("postgres commit outcome unknown: {0}")]
     CommitUnknown(#[source] sqlx::Error),
+}
+
+/// An opaque capability for work inside a provider-owned transaction.
+///
+/// Only [`connection`] exposes the borrowed connection to provider adapters.
+/// The transaction boundary retains commit and rollback ownership.
+#[derive(Debug)]
+pub struct Tx<'c> {
+    conn: &'c mut PgConnection,
+}
+
+/// The connection borrowed by `tx` for a provider adapter's statement.
+///
+/// Do not issue transaction-control SQL through this connection.
+pub fn connection<'a>(tx: &'a mut Tx<'_>) -> &'a mut PgConnection {
+    tx.conn
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -81,7 +97,7 @@ impl TxOptions {
 /// into it.
 pub async fn in_tx<T, E, F>(pool: &PgPool, f: F) -> Result<T, E>
 where
-    F: AsyncFnOnce(&mut PgConnection) -> Result<T, E>,
+    F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
     E: From<TxError>,
 {
     in_tx_with(pool, TxOptions::default(), f).await
@@ -95,7 +111,7 @@ where
 /// into it.
 pub async fn in_tx_with<T, E, F>(pool: &PgPool, options: TxOptions, f: F) -> Result<T, E>
 where
-    F: AsyncFnOnce(&mut PgConnection) -> Result<T, E>,
+    F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
     E: From<TxError>,
 {
     let mut conn = pool.acquire().await.map_err(TxError::Acquire)?;
@@ -105,7 +121,11 @@ where
     }
     .map_err(TxError::Begin)?;
 
-    match f(&mut tx).await {
+    let result = {
+        let mut handle = Tx { conn: &mut tx };
+        f(&mut handle).await
+    };
+    match result {
         Ok(value) => {
             tx.commit().await.map_err(classify_commit)?;
             Ok(value)
@@ -113,16 +133,49 @@ where
         Err(err) => {
             match tokio::time::timeout(ROLLBACK_TIMEOUT, tx.rollback()).await {
                 Ok(Ok(())) => {}
-                Ok(Err(rollback)) => {
-                    tracing::warn!(error = %rollback, "postgres rollback failed");
-                }
+                Ok(Err(rollback)) => log_rollback_failure(&rollback),
                 Err(_) => tracing::warn!(
-                    budget = ?ROLLBACK_TIMEOUT,
-                    "postgres rollback exceeded its budget"
+                    event = "postgres_transaction_failure",
+                    phase = "rollback",
+                    failure_class = "rollback_timeout",
+                    cause = "deadline"
                 ),
             }
             Err(err)
         }
+    }
+}
+
+fn log_rollback_failure(err: &sqlx::Error) {
+    let code = sqlstate(err).filter(|code| {
+        code.len() == 5
+            && code
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    });
+    if let Some(code) = code {
+        tracing::warn!(
+            event = "postgres_transaction_failure",
+            phase = "rollback",
+            failure_class = "rollback_failed",
+            sqlstate = code.as_ref()
+        );
+    } else {
+        let cause = match err {
+            sqlx::Error::Database(_) => "database",
+            sqlx::Error::PoolTimedOut => "pool_timeout",
+            sqlx::Error::PoolClosed => "pool_closed",
+            sqlx::Error::Io(_) => "io",
+            sqlx::Error::Tls(_) => "tls",
+            sqlx::Error::Protocol(_) => "protocol",
+            _ => "driver",
+        };
+        tracing::warn!(
+            event = "postgres_transaction_failure",
+            phase = "rollback",
+            failure_class = "rollback_failed",
+            cause
+        );
     }
 }
 
@@ -165,6 +218,10 @@ fn sqlstate(err: &sqlx::Error) -> Option<std::borrow::Cow<'_, str>> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
 
     #[test]
@@ -219,5 +276,47 @@ mod tests {
         let err = classify_commit(sqlx::Error::Io(std::io::Error::other("reset")));
         assert!(matches!(err, TxError::CommitUnknown(_)), "{err}");
         assert!(!retryable(&sqlx::Error::PoolTimedOut));
+    }
+
+    struct RollbackDiagnostic(Arc<AtomicBool>);
+
+    impl tracing::Subscriber for RollbackDiagnostic {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = BTreeMap::new();
+            event.record(
+                &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+                    fields.insert(field.name(), format!("{value:?}"));
+                },
+            );
+            assert_eq!(
+                fields,
+                BTreeMap::from([
+                    ("event", "\"postgres_transaction_failure\"".to_owned()),
+                    ("phase", "\"rollback\"".to_owned()),
+                    ("failure_class", "\"rollback_failed\"".to_owned()),
+                    ("cause", "\"protocol\"".to_owned()),
+                ])
+            );
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn rollback_failure_diagnostic_does_not_render_driver_text() {
+        let emitted = Arc::new(AtomicBool::new(false));
+        tracing::subscriber::with_default(RollbackDiagnostic(Arc::clone(&emitted)), || {
+            log_rollback_failure(&sqlx::Error::Protocol("sensitive bound value".to_owned()));
+        });
+        assert!(emitted.load(Ordering::Relaxed));
     }
 }

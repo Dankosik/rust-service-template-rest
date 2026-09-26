@@ -7,11 +7,24 @@ arrive with its first durable feature; with an empty set, the runner proves
 the empty-history path. Rationale: [Persistence Architecture](../docs/architecture/persistence.md).
 
 <!-- template:begin http-idempotency:migrations-readme-http-idempotency -->
-The HTTP idempotency pack ships one forward-only migration,
-`20260923000001_create_http_idempotency_records.sql`, which creates the
-`http_idempotency_records` table; the existing `migrate` binary applies it
-with the rest of the set. The service never creates or alters schema at
+The HTTP idempotency pack first creates `http_idempotency_records` in
+`20260923000001_create_http_idempotency_records.sql`. Its guarded replacement,
+`20260926001448_simplify_http_idempotency_records.sql`, takes an ACCESS
+EXCLUSIVE table lock before refusing any row whose `expires_at` is still live.
+It deletes only expired rows, replaces the legacy binary-header format with the
+`http_idempotency_header_pair[]` composite array, and adds verified caller
+metadata. This is maintenance-only forward recovery: quiesce idempotent
+traffic, drain old replicas, retain live legacy rows through expiry, run the
+migration, start new replicas, then reopen traffic. Never run old and new
+implementations together. The service never creates or alters schema at
 runtime, and only `infra-idempotency-store` names the table.
+
+There is no down migration after the guard has admitted the new schema. If the
+new application must be rolled back before cutover completes, stop it and
+restore a compatible pre-migration deployment only while the forward migration
+has not been applied; after application, roll forward with a new reviewed
+migration or restore from an operator-managed backup. Applied migration files
+remain byte-for-byte history.
 <!-- template:end http-idempotency:migrations-readme-http-idempotency -->
 <!-- template:begin jobs:migrations-readme-jobs -->
 The background jobs pack ships two forward-only migrations:
