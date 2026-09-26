@@ -23,8 +23,9 @@ Signals, deadline clamping, and task teardown remain separate service and
 worker lifecycle owners. Extract a shared lifecycle crate only when a shared
 change to signal semantics, deadline arithmetic, or tracked-task teardown
 offsets the public API and profile cost; a third binary alone is insufficient.
-Stages 10.5 and 10.6 reuse this pack's scheduling, attempts, and fenced
-completion rather than creating competing queue machinery.
+The retained webhook provider and a future messaging/outbox capability reuse this
+pack's scheduling, attempts, and fenced completion rather than creating
+competing queue machinery.
 
 ## Storage and enqueue
 
@@ -108,11 +109,10 @@ durable outcome. A retry delay is captured once: `attempt^4 * (0.9 + 0.2 *
 draw)` seconds, with the PostgreSQL claim's `random()` draw and microsecond
 round-down.
 
-`Job::complete_in_tx(&mut PgConnection)` performs the same fenced COMPLETE
-inside the caller's transaction. It returns `CompleteError::NoTransaction`,
-`CompleteError::StaleClaim`, or its SQL cause; it neither obtains a connection
-nor controls the transaction. Callers must propagate it from their transaction
-closure so stale ownership rolls back preceding business writes. On a
+`Job::complete_in_tx(&mut infra_postgres::Tx)` performs the same fenced COMPLETE
+inside the caller's transaction. It returns `CompleteError::StaleClaim` or its
+SQL cause and does not control the transaction. Callers must propagate it from
+their transaction closure so stale ownership rolls back preceding business writes. On a
 `CommitUnknown`, map the transaction result to
 `JobError::transaction_unknown(error)`: record uncertainty and issue no
 retry, failure, or release transition. Do not blindly replay the closure.
@@ -174,6 +174,30 @@ online dual-format conversion, or lifecycle extraction needs its own accepted
 design.
 
 ## Decisions recorded here
+
+<!-- template:begin webhooks-common:docs-async-webhooks -->
+## Durable webhook work
+
+The optional webhook directions reuse this queue; they do not add a second queue,
+worker loop, lifecycle owner, delay engine, or attempt observer. The jobs worker
+owns claims, deadlines, jitter, retries, terminal retention, and shutdown.
+
+`Job::complete_in_tx` accepts the opaque `&mut infra_postgres::Tx` and keeps its
+generation-fenced update. The same captured attempt deadline is visible to the
+handler, so webhook signing/HTTP or consumer work cannot extend the supervisor's
+budget.
+<!-- template:end webhooks-common:docs-async-webhooks -->
+
+<!-- template:begin webhooks:docs-async-webhooks-outbound -->
+Outbound work inserts `webhooks.deliver` in the caller's `&mut Tx`; the worker
+uses the retained 20-attempt, 30-second policy. Receiver `Retry-After` advice is
+only a capped floor; jobs combines it with normal backoff.
+<!-- template:end webhooks:docs-async-webhooks-outbound -->
+
+<!-- template:begin inbound-webhooks:docs-async-webhooks-inbound -->
+An inbound receipt inserts `webhooks.process` in its receiver transaction; the
+worker uses the existing 25-attempt, 60-second policy.
+<!-- template:end inbound-webhooks:docs-async-webhooks-inbound -->
 
 The durable decisions are the static lease, supervisor-owned outcome,
 lock-while-scanning claims, JSONB/text conversion, capped fresh samples, and

@@ -116,7 +116,7 @@ limit for its own transaction only, with `SET LOCAL statement_timeout = '...'`
 as that transaction's first statement.
 
 For an effect wholly inside a supplied PostgreSQL transaction, call
-`job.complete_in_tx(infra_postgres::connection(tx)).await?` inside that same transaction closure. The
+`job.complete_in_tx(tx).await?` inside that same transaction closure. The
 method requires a tracked transaction, writes the same fenced COMPLETE
 transition, and never controls the transaction. Its `CompleteError` must
 propagate: a stale claim rolls back the preceding business writes.
@@ -135,7 +135,7 @@ enum WelcomeError {
 async fn welcome(job: infra_jobs::Job<Welcome>) -> Result<(), infra_jobs::JobError> {
     let result = infra_postgres::in_tx(job.pool(), async |tx| {
         write_effect(infra_postgres::connection(tx), job.payload().widget_id).await?;
-        job.complete_in_tx(infra_postgres::connection(tx)).await?;
+        job.complete_in_tx(tx).await?;
         Ok::<_, WelcomeError>(())
     }).await;
 
@@ -294,6 +294,27 @@ is an elapsed-time limit, not a scan-size claim.
 
 ## Roll out the conversion
 
+<!-- template:begin webhooks-common:docs-background-jobs-webhooks -->
+## Webhook kinds
+
+The optional provider uses the retained jobs worker and adds no worker binary,
+queue, or scheduling loop. A handler receives the dispatch deadline and must
+include all of its work inside that budget. `complete_in_tx(&mut Tx)` keeps
+fenced completion in the consumer's database transaction. Transaction-unknown
+stays a jobs outcome; no handler writes a competing failure/release transition.
+<!-- template:end webhooks-common:docs-background-jobs-webhooks -->
+
+<!-- template:begin webhooks:docs-background-jobs-webhooks-outbound -->
+`webhooks.deliver` uses 20 attempts and a 30-second timeout. Its valid
+`Retry-After` value is only a capped floor beneath jobs-owned retry scheduling.
+A missing historical key snoozes for 60 seconds without consuming an attempt.
+<!-- template:end webhooks:docs-background-jobs-webhooks-outbound -->
+
+<!-- template:begin inbound-webhooks:docs-background-jobs-webhooks-inbound -->
+`webhooks.process` uses the existing 25-attempt, 60-second policy. A missing
+consumer binding snoozes for 60 seconds without consuming an attempt.
+<!-- template:end inbound-webhooks:docs-background-jobs-webhooks-inbound -->
+
 Before the maintenance window, use an approved database session with a finite
 statement timeout to force conversion of every old row without exposing data:
 
@@ -318,7 +339,7 @@ schema before selecting a binary. After a successful conversion, old binaries
 and a down migration are not recovery; use a compatible forward repair.
 
 The pack still has no operator pause, cancel, redrive, priority, queue,
-workflow, or generic business-closure replay API. Future stages 10.5 and 10.6
-reuse its scheduling, attempt, and completion mechanics. A lifecycle-crate
-extraction remains deliberately deferred under the condition in
+workflow, or generic business-closure replay API. The retained webhook provider
+and a future messaging/outbox capability reuse its scheduling, attempt, and
+completion mechanics. A lifecycle-crate extraction remains deliberately deferred under the condition in
 [Async Architecture](architecture/async.md#ownership-and-retained-decisions).

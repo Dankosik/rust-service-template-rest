@@ -175,6 +175,50 @@ fn invalid_configuration_exits_one_with_the_key_named() {
     assert!(stderr.contains("request_timeout"), "stderr: {stderr}");
 }
 
+// template:begin inbound-webhooks:service-webhooks-lifecycle-tests
+#[test]
+fn active_inbound_webhook_endpoint_refuses_without_postgres_before_listener_admission() {
+    let (code, stderr) = Service::spawn(&[
+        (
+            "APP__INBOUND_WEBHOOKS__ENDPOINTS__PARTNER__ACTIVE_KEY",
+            "partner_v1",
+        ),
+        (
+            "APP__INBOUND_WEBHOOKS__SECRETS__PARTNER_V1",
+            "whsec_d2ViaG9va19zZWNyZXQ=",
+        ),
+    ])
+    .wait();
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("postgres.enabled"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("d2ViaG9va19zZWNyZXQ="),
+        "a webhook secret must not reach startup diagnostics: {stderr}"
+    );
+}
+
+#[test]
+fn inert_inbound_webhook_route_rejects_unknown_endpoint_without_signature_work() {
+    let service = Service::spawn(&[]);
+    let api = service.await_record("http listener bound")["addr"]
+        .as_str()
+        .expect("addr field")
+        .to_owned();
+    service.await_record("service_ready");
+
+    let status = match ureq::post(&format!("http://{api}/webhooks/unknown")).send_empty() {
+        Ok(response) => response.status().as_u16(),
+        Err(ureq::Error::StatusCode(status)) => status,
+        Err(error) => panic!("webhook response: {error}"),
+    };
+    assert_eq!(status, 404);
+
+    service.terminate();
+    let (code, stderr) = service.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+}
+// template:end inbound-webhooks:service-webhooks-lifecycle-tests
+
 #[test]
 fn unknown_key_and_malformed_env_exit_one() {
     let (code, stderr) = Service::spawn(&[("APP__HTTP__BOGUS", "1")]).wait();

@@ -929,16 +929,6 @@ fn transactional_gate_registry(gate: Arc<TransactionGateState>) -> infra_jobs::R
         move |job: Job<TransactionGate>| {
             let gate = Arc::clone(&gate);
             async move {
-                let mut direct = job.pool().acquire().await?;
-                if !matches!(
-                    job.complete_in_tx(&mut direct).await,
-                    Err(infra_jobs::CompleteError::NoTransaction)
-                ) {
-                    return Err(JobError::permanent(
-                        "complete_in_tx accepted a connection without a transaction",
-                    ));
-                }
-                drop(direct);
                 let completed = in_tx(job.pool(), async |tx| -> Result<(), Step> {
                     sqlx::query("INSERT INTO job_effects (job_id) VALUES ($1::uuid)")
                         .bind(job.id().to_string())
@@ -947,12 +937,10 @@ fn transactional_gate_registry(gate: Arc<TransactionGateState>) -> infra_jobs::R
                         .map_err(Step::Query)?;
                     gate.business_written.notify_one();
                     gate.complete.notified().await;
-                    job.complete_in_tx(connection(tx))
-                        .await
-                        .map_err(|error| match error {
-                            infra_jobs::CompleteError::Database(error) => Step::Query(error),
-                            _ => Step::Rejected,
-                        })
+                    job.complete_in_tx(tx).await.map_err(|error| match error {
+                        infra_jobs::CompleteError::Database(error) => Step::Query(error),
+                        _ => Step::Rejected,
+                    })
                 })
                 .await;
                 completed.map_err(|error| match error {

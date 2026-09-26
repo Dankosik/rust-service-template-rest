@@ -66,6 +66,63 @@ paths:
       x-security-decision:
         exposure: public
         rationale: platform readiness endpoint exposing only generic ready state
+  /webhooks/{endpoint_id}:
+    post:
+      tags:
+      - webhooks
+      summary: Accept a signed Standard Webhooks delivery
+      description: The required Standard Webhooks signature headers authenticate this public endpoint. A successful response acknowledges durable asynchronous ownership only.
+      operationId: receiveWebhook
+      parameters:
+      - name: endpoint_id
+        in: path
+        description: operator-configured receiving endpoint ID
+        required: true
+        schema:
+          type: string
+      - name: webhook-id
+        in: header
+        description: required Standard Webhooks message ID
+        required: true
+        schema:
+          type: string
+      - name: webhook-timestamp
+        in: header
+        description: required Standard Webhooks timestamp
+        required: true
+        schema:
+          type: string
+      - name: webhook-signature
+        in: header
+        description: required Standard Webhooks signature candidates
+        required: true
+        schema:
+          type: string
+      requestBody:
+        description: signed raw delivery bytes
+        content:
+          '*/*':
+            schema:
+              type: array
+              items:
+                type: integer
+                format: int32
+                minimum: 0
+        required: true
+      responses:
+        '204':
+          description: webhook receipt is durable
+        '400':
+          $ref: '#/components/responses/WebhookRejected'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/WebhookConflict'
+        '413':
+          $ref: '#/components/responses/RequestEntityTooLarge'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      security: []
 components:
   schemas:
     InvalidParam:
@@ -234,8 +291,32 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: webhook endpoint is unknown
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
     RequestEntityTooLarge:
       description: request body exceeds configured limit
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ServiceUnavailable:
+      description: durable webhook receipt storage is unavailable
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    WebhookConflict:
+      description: a repeated webhook identity supplied different bytes
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    WebhookRejected:
+      description: webhook signature evidence is missing, malformed, stale, or invalid
       content:
         application/problem+json:
           schema:
@@ -249,3 +330,5 @@ security:
 tags:
 - name: system
   description: Operational endpoints for liveness and readiness.
+- name: webhooks
+  description: Authenticated inbound webhook admission.

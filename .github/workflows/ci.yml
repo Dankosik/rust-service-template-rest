@@ -202,6 +202,23 @@ jobs:
         # tests. Node.js is preinstalled on the runner.
         if: needs.changes.outputs.openapi == 'true'
         run: bash ./scripts/ci/measure.sh quality-openapi -- make openapi-check
+      - name: Generate handler OpenAPI diagnostic
+        # The committed-file drift check remains above. This always-run step
+        # preserves the assembled handler output when it reports stale bytes.
+        if: always() && needs.changes.outputs.openapi == 'true'
+        id: generated-openapi
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/generated-openapi
+          bash ./scripts/ci/measure.sh quality-openapi-generate -- make openapi-generate OPENAPI_FILE=.ci/generated-openapi/service.yaml
+          test -s .ci/generated-openapi/service.yaml
+      - name: Upload generated OpenAPI diagnostic
+        if: always() && steps.generated-openapi.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: generated-openapi-${{ github.sha }}
+          path: .ci/generated-openapi/service.yaml
+          if-no-files-found: error
       - name: OpenAPI compatibility
         # oasdiff against the pull-request base. Go is preinstalled on the runner.
         if: github.event_name == 'pull_request' && needs.changes.outputs.openapi == 'true'
@@ -517,10 +534,12 @@ jobs:
       fail-fast: false
       matrix:
         # Together the parts are `make template-init-check`: the source
-        # suites with the canonical projections and the twenty-six runtime
+        # suites with the canonical projections and the forty-six runtime
         # graphs. template-init-check.sh numbers DATABASE none 1-6, postgres
         # 7-12, http-idempotency 13-16, jobs 17-22, and jobs with
-        # http-idempotency 23-26. `source`, `database-none`, and
+        # http-idempotency 23-26. Webhook graphs 27-46 extend the five
+        # jobs-compatible profile families without multiplying harnesses.
+        # `source`, `database-none`, and
         # `database-postgres` keep their own warm target caches. Every part
         # with `cache` restores that part's cache (database-postgres) and
         # saves none, so the Actions cache does not grow. Every part with
@@ -536,19 +555,19 @@ jobs:
             cache: database-postgres
             docker: true
           - part: jobs-1
-            graphs: 17,18,19
+            graphs: 17,18,19,27,31,35,39,43
             cache: database-postgres
             docker: true
           - part: jobs-2
-            graphs: 20,21,22
+            graphs: 20,21,22,29,32,36,40,44
             cache: database-postgres
             docker: true
           - part: jobs-http-idempotency-1
-            graphs: 23,24
+            graphs: 23,24,30,33,37,41,45
             cache: database-postgres
             docker: true
           - part: jobs-http-idempotency-2
-            graphs: 25,26
+            graphs: 25,26,28,34,38,42,46
             cache: database-postgres
             docker: true
     steps:
@@ -590,7 +609,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           PART: ${{ matrix.part }}
           GRAPHS: ${{ matrix.graphs }}
-          # Graphs 13-26 run their retained database suites.
+          # Graphs 13-26 and full webhook shapes 27,29,30 run retained database suites.
           REQUIRE_DOCKER: ${{ matrix.docker && '1' || '' }}
         run: bash ./scripts/ci/measure.sh "template-initializer-${PART}" -- bash ./scripts/ci/template-init-check.sh --runtime-graphs "${GRAPHS}"
       - name: Save cargo caches

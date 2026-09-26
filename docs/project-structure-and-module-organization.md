@@ -81,6 +81,30 @@ cache, queue, store, or shared crate needs its accepted architecture force.
 
 ## Placement algorithm
 
+<!-- template:begin webhooks-common:docs-structure-webhooks-common -->
+## Webhook placement
+
+`crates/infra-webhooks` is the shared optional provider because service and
+worker require protocol/provider behavior while `infra-http` must not become a
+worker dependency. Its `protocol.rs` owns bounded wire framing; direction modules
+remain separate for independent profile removal. Do not pre-create a crypto,
+receipt-store, DTO, cache, or lifecycle crate.
+<!-- template:end webhooks-common:docs-structure-webhooks-common -->
+
+<!-- template:begin webhooks:docs-structure-webhooks-outbound -->
+`crates/infra-webhooks/src/outbound.rs` owns prepared delivery, durable payload,
+and private per-origin cache. It is the only webhook consumer of
+`infra-outbound-http`; business feature modules stay outside this dependency path.
+<!-- template:end webhooks:docs-structure-webhooks-outbound -->
+
+<!-- template:begin inbound-webhooks:docs-structure-webhooks-inbound -->
+`crates/infra-webhooks/src/inbound.rs` owns receipt/processor SQL and the
+consumer seam. `crates/infra-http/src/webhooks.rs` owns only route/state/
+annotation. Removable black-box database tests live under
+`test/tests/webhooks/{main,inbound}.rs`; OpenAPI and lifecycle proof stays in
+the existing service test owners.
+<!-- template:end inbound-webhooks:docs-structure-webhooks-inbound -->
+
 1. Does an owner already exist for the responsibility? Extend it. A parallel
    path beside an existing owner is the wrong default.
 2. Is it business behavior? `crates/<feature>`; the feature's HTTP surface is

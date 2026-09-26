@@ -1,9 +1,6 @@
 //! Process-level proof of the shipped binary with no configuration and no
-//! database. It exits 1. Where the workspace root has no `template.lock`
-//! (the template source), stderr is exactly the no-kind refusal, so a
-//! template change that registers a kind fails this test. A derived service
-//! may register kinds and then refuse because PostgreSQL is disabled; either
-//! refusal passes there. `--help` exits 0 and prints usage.
+//! database. It exits 1 after its retained job registrations because
+//! PostgreSQL is disabled. `--help` exits 0 and prints usage.
 
 // Integration tests are test code; the workspace's production lint levels
 // for unwrap/expect/panic do not apply to them.
@@ -35,11 +32,15 @@ fn shipped_binary_refuses_without_a_database() {
             "stderr: {stderr}"
         );
     } else {
-        assert_eq!(
-            stderr,
-            "no job kind is registered: register this service's job kinds in crates/jobs-worker/src/main.rs",
-            "stderr: {stderr}"
-        );
+        #[allow(
+            unused_variables,
+            reason = "retained profiles replace the source expectation"
+        )]
+        let expected = "no job kind is registered: register this service's job kinds in crates/jobs-worker/src/main.rs";
+        // template:begin webhooks-common:worker-webhooks-process-expectation
+        let expected = "postgres.enabled must be true to run the jobs worker";
+        // template:end webhooks-common:worker-webhooks-process-expectation
+        assert!(stderr.contains(expected), "stderr: {stderr}");
     }
 }
 
