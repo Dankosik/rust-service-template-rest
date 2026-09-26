@@ -15,13 +15,15 @@ workspace = true
 default = []
 
 [dependencies]
+http = { workspace = true }
+bytes = { workspace = true, features = ["std"] }
 infra-egress-dns = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "sync", "time"] }
-tokio-util = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 url = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+infra-egress-dns = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }

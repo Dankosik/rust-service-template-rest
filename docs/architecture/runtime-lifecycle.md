@@ -47,11 +47,12 @@ Authentication neither adds a readiness probe nor changes public health behavior
 <!-- template:end authn:docs-lifecycle-authn -->
 <!-- template:begin outbound-http:docs-lifecycle-outbound -->
 A retained [outbound client](../outbound-http.md) is inert until a concrete
-provider is wired. Bootstrap passes its existing tracker and a child root token
-to the client. Operations are caller-owned futures; each lookup has a child
-cancellation scope and every DNS task stays visible to the tracker. The
-existing cancel/close/wait shutdown stage joins them; the client never closes
-the shared tracker or adds a teardown stage.
+provider is wired. Operations are caller-owned futures and future drop releases
+their admission permit. Resolver, connection-pool, and HTTP library tasks are
+library-owned; bootstrap neither gives them a tracker/token nor joins them in a
+shutdown stage. The client adds no readiness probe or teardown stage. JWT refresh
+remains the separate process-owned task that the existing tracker cancels and
+joins.
 <!-- template:end outbound-http:docs-lifecycle-outbound -->
 
 

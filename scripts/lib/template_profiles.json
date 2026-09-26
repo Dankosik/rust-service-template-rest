@@ -571,6 +571,7 @@
       "docs/outbound-http.md"
     ],
     "markers": [
+      {"path": "Cargo.toml", "ids": ["workspace-outbound-http-types"]},
       {
         "path": "docs/architecture/boundaries.md",
         "ids": [
@@ -626,7 +627,8 @@
         "path": "Cargo.toml",
         "ids": [
           "workspace-egress-dns-crate",
-          "workspace-egress-dns"
+          "workspace-egress-dns",
+          "workspace-egress-tls-fixtures"
         ]
       },
       {

@@ -33,8 +33,9 @@ With `OUTBOUND_HTTP=bounded`, `infra-outbound-http` is available to
 owns construction and operation policy.
 <!-- template:end outbound-http:docs-commands-outbound -->
 <!-- template:begin egress-dns:docs-commands-egress -->
-`make test-package PKG=infra-egress-dns` exercises the shared public-address
-and tracked resolver owner.
+`make test-package PKG=infra-egress-dns` exercises the shared public-address,
+resolver, and HTTPS-builder owner. Its default-off `test-support` feature
+supplies generated TLS material to the consumers' tests.
 <!-- template:end egress-dns:docs-commands-egress -->
 
 

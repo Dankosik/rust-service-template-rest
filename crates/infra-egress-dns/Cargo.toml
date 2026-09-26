@@ -1,6 +1,6 @@
 [package]
 name = "infra-egress-dns"
-description = "Public-address DNS admission with tracked cancellation."
+description = "Public-address DNS admission and shared hardened HTTPS construction."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,12 +13,13 @@ workspace = true
 
 [features]
 default = []
+# Generated TLS material for the consumers' real-TLS tests; never enable it in
+# a production dependency.
+test-support = ["dep:rcgen"]
 
 [dependencies]
+thiserror = { workspace = true }
 hickory-resolver = { workspace = true, features = ["tokio", "system-config"] }
-reqwest = { workspace = true }
-tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
-tokio-util = { workspace = true, features = ["rt"] }
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+reqwest = { workspace = true, features = ["rustls"] }
+ipnet = { workspace = true, features = ["std"] }
+rcgen = { workspace = true, optional = true, features = ["aws_lc_rs"] }
