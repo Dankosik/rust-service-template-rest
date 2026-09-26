@@ -1030,16 +1030,18 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
         for name, version, expected, retained in (
             ("bitflags", "2.13.2", ["serde_core"], []),
             ("either", "1.18.0", ["serde"], []),
+            # PostgreSQL HMAC enables digest/mac; introspection SHA-256 alone does not.
+            ("digest", "0.11.3", ["block-buffer 0.12.1", "crypto-common 0.2.2", "ctutils"], ["block-buffer 0.12.1", "crypto-common 0.2.2"]),
             ("hashbrown", "0.16.1", ["allocator-api2", "equivalent", "foldhash"], ["foldhash"]),
             ("smallvec", "1.16.1", ["serde"], []),
         ):
             _project_feature_edge(records, name, version, expected, retained)
     if inputs.authn != "oidc-jwt":
         _project_feature_edge(records, "zeroize", "1.9.0", ["zeroize_derive"], [])
-    if inputs.authn != "oidc-jwt" and inputs.outbound_http == "none":
-        # rcgen/aws_lc_rs (outbound test support) retains the weak
-        # x509-parser/verify-aws lock edge, whose aws-lc-rs defaults also
-        # retain untrusted without JWT.
+    if inputs.authn == "none" and inputs.outbound_http == "none":
+        # Generated TLS fixtures retained by either authentication or outbound
+        # test support enable rcgen/aws_lc_rs and its weak x509-parser/verify-aws
+        # edge; those aws-lc-rs defaults retain untrusted even without JWT.
         _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
     if inputs.outbound_http == "none":
         _project_feature_edge(records, "ipnet", "2.12.2", ["serde"], [])

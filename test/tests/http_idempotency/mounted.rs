@@ -525,6 +525,37 @@ struct Mounted {
     store_pool: PgPool,
 }
 
+fn widget_contract(composer: &mut Composer) -> OpenApiRouter<health::ReadinessReader> {
+    // As `service::api::contract` assembles it: the transport router
+    // registers the shared problem responses the family references (the
+    // 403 among them must resolve), and the composer adds its own.
+    let contract = OpenApiRouter::with_openapi(bearer_document()).merge(infra_http::router());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
+    )]
+    let create = routes!(create_widget);
+    let contract = contract.routes(composer.route(create));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
+    )]
+    let replace = routes!(replace_widget);
+    contract
+        .routes(composer.route(replace))
+        .merge(OpenApiRouter::with_openapi(composer.components()))
+}
+
+#[test]
+fn widget_contract_declares_supported_protected_security() {
+    let mut composer = Composer::inert();
+    let contract = widget_contract(&mut composer);
+    assert_eq!(
+        infra_http::finalize_public(contract).unwrap_err(),
+        infra_http::FinalizeError::NonPublicOperation,
+    );
+}
+
 impl Mounted {
     /// Create the widget table and compose over a new template pool on the
     /// per-test database.
@@ -543,24 +574,7 @@ impl Mounted {
             hold: Arc::clone(&hold),
         });
         let mut composer = Composer::new(Store::new(store_pool.clone(), RETENTION));
-        // As `service::api::contract` assembles it: the transport router
-        // registers the shared problem responses the family references (the
-        // 403 among them must resolve), and the composer adds its own.
-        let contract = infra_http::router();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-        )]
-        let create = routes!(create_widget);
-        let contract = contract.routes(composer.route(create));
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
-        )]
-        let replace = routes!(replace_widget);
-        let contract = contract
-            .routes(composer.route(replace))
-            .merge(OpenApiRouter::with_openapi(composer.components()));
+        let contract = widget_contract(&mut composer);
         let document = contract.get_openapi().clone();
         let activation = composer
             .agree(&document)
