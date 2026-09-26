@@ -1,14 +1,14 @@
 //! Durable Standard Webhooks delivery through the existing jobs and HTTPS owners.
 //!
-//! Producers prepare immutable bytes and endpoint references before their
-//! business transaction. The jobs handler resolves those retained references,
-//! signs the stable job identity afresh, and performs one bounded exchange.
+//! Producers retain immutable bytes and endpoint identity before their business
+//! transaction. Each attempt uses the worker startup snapshot for routing and
+//! signing, then performs one bounded exchange.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     fmt,
     num::NonZeroU32,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -23,13 +23,11 @@ use infra_postgres::Tx;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::protocol::{KeyRing, MAX_BODY_BYTES, SigningKey};
+use crate::protocol::{KeyRing, MAX_BODY_BYTES};
 
 const DELIVERY_KIND: &str = "webhooks.deliver";
-const DELIVERY_VERSION: u8 = 1;
-const CACHE_CAPACITY: usize = 64;
+const DELIVERY_VERSION: u8 = 2;
 const RETRY_AFTER_CAP: Duration = Duration::from_hours(24);
-const MISSING_SECRET_DELAY: Duration = Duration::from_secs(60);
 const DEFAULT_CONTENT_TYPE: &str = "application/json";
 const RESPONSE_HEADER_COUNT: usize = 64;
 const RESPONSE_BODY_BYTES: usize = 64 * 1024;
@@ -44,19 +42,13 @@ pub const DELIVERY_POLICY: Policy = Policy {
 #[derive(Clone)]
 pub struct Endpoint {
     destination: String,
-    active_key: String,
-    previous_key: Option<String>,
 }
 
 impl Endpoint {
     /// Build one static endpoint binding.
     #[must_use]
-    pub fn new(destination: String, active_key: String, previous_key: Option<String>) -> Self {
-        Self {
-            destination,
-            active_key,
-            previous_key,
-        }
+    pub fn new(destination: String) -> Self {
+        Self { destination }
     }
 }
 
@@ -69,8 +61,7 @@ impl fmt::Debug for Endpoint {
 /// Producer-side bindings for configured outbound webhook endpoints.
 #[derive(Clone)]
 pub struct Outbound {
-    endpoints: BTreeMap<String, Endpoint>,
-    limits: Limits,
+    endpoints: BTreeMap<String, Url>,
 }
 
 impl fmt::Debug for Outbound {
@@ -82,33 +73,23 @@ impl fmt::Debug for Outbound {
 impl Outbound {
     /// Admit the static endpoint bindings without performing network I/O.
     ///
-    /// `max_workers` is the jobs worker capacity, reused as the existing
-    /// bounded client's active-exchange limit.
-    ///
     /// # Errors
     ///
-    /// Returns a closed configuration error for an unusable endpoint identity,
-    /// key reference, destination, or outbound-client limits.
-    pub fn new(
-        endpoints: BTreeMap<String, Endpoint>,
-        max_workers: NonZeroU32,
-    ) -> Result<Self, OutboundError> {
-        let limits = limits(max_workers)?;
-        for (endpoint_id, endpoint) in &endpoints {
-            validate_endpoint_id(endpoint_id)?;
-            validate_key_ref(&endpoint.active_key)?;
-            if let Some(previous) = &endpoint.previous_key {
-                validate_key_ref(previous)?;
-                if previous == &endpoint.active_key {
-                    return Err(OutboundError::InvalidEndpoint);
-                }
-            }
-            let destination = parse_destination(&endpoint.destination)?;
-            // Client construction performs existing fixed-authority admission
-            // but does not resolve or contact a receiver.
-            Client::new(&origin(&destination)?, limits).map_err(OutboundError::Client)?;
-        }
-        Ok(Self { endpoints, limits })
+    /// Returns a closed configuration error for an unusable endpoint identity
+    /// or destination.
+    pub fn new(endpoints: BTreeMap<String, Endpoint>) -> Result<Self, OutboundError> {
+        let endpoints = endpoints
+            .into_iter()
+            .map(|(endpoint_id, endpoint)| {
+                validate_endpoint_id(&endpoint_id)?;
+                let destination = parse_destination(&endpoint.destination)?;
+                // Admission never resolves or contacts a receiver.
+                Client::new(&origin(&destination)?, limits(NonZeroU32::MIN)?)
+                    .map_err(OutboundError::Client)?;
+                Ok((endpoint_id, destination))
+            })
+            .collect::<Result<_, OutboundError>>()?;
+        Ok(Self { endpoints })
     }
 
     /// Prepare immutable work for one configured endpoint before a transaction.
@@ -130,11 +111,9 @@ impl Outbound {
         if body.len() > MAX_BODY_BYTES {
             return Err(OutboundError::BodyTooLarge);
         }
-        let endpoint = self
-            .endpoints
-            .get(endpoint_id)
-            .ok_or(OutboundError::UnknownEndpoint)?;
-        let destination = parse_destination(&endpoint.destination)?;
+        if !self.endpoints.contains_key(endpoint_id) {
+            return Err(OutboundError::UnknownEndpoint);
+        }
         let content_type = content_type.unwrap_or_else(|| DEFAULT_CONTENT_TYPE.to_owned());
         let content_type = HeaderValue::from_str(&content_type)
             .ok()
@@ -143,9 +122,6 @@ impl Outbound {
         let delivery = Delivery {
             version: DELIVERY_VERSION,
             endpoint_id: endpoint_id.to_owned(),
-            destination: destination.to_string(),
-            active_key: endpoint.active_key.clone(),
-            previous_key: endpoint.previous_key.clone(),
             content_type,
             body,
         };
@@ -158,14 +134,75 @@ impl Outbound {
         Ok(PreparedDelivery { delivery })
     }
 
-    /// Construct the jobs registration adapter with immutable decoded keys.
-    #[must_use]
-    pub fn dispatcher(&self, keys: BTreeMap<String, SigningKey>) -> Dispatcher {
-        Dispatcher {
-            keys,
-            limits: self.limits,
-            clients: Arc::new(Mutex::new(ClientCache::default())),
-        }
+    /// Construct a fixed endpoint/client/key snapshot before claiming jobs.
+    ///
+    /// `max_workers` is the jobs worker capacity. Each endpoint client admits
+    /// that many exchanges, so a local attempt never fails for capacity; the
+    /// jobs slots are the only in-process concurrency bound.
+    ///
+    /// # Errors
+    ///
+    /// Every configured endpoint must have a decoded signing ring and an
+    /// admitted transport client.
+    pub fn dispatcher(
+        &self,
+        keys: BTreeMap<String, KeyRing>,
+        max_workers: NonZeroU32,
+    ) -> Result<Dispatcher, OutboundError> {
+        let limits = limits(max_workers)?;
+        self.build_dispatcher(keys, |destination| {
+            Client::new(&origin(destination)?, limits).map_err(OutboundError::Client)
+        })
+    }
+
+    /// Construct the same dispatcher for the fixed metadata fixture and local HTTP peer.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing rings, non-fixture destinations or non-loopback HTTP peers.
+    #[cfg(feature = "test-support")]
+    pub fn dispatcher_for_test_http(
+        &self,
+        keys: BTreeMap<String, KeyRing>,
+        max_workers: NonZeroU32,
+        socket: std::net::SocketAddr,
+    ) -> Result<Dispatcher, OutboundError> {
+        let limits = limits(max_workers)?;
+        self.build_dispatcher(keys, |destination| {
+            if destination.host_str() != Some("authn.fixture.test")
+                || destination.port_or_known_default() != Some(443)
+            {
+                return Err(OutboundError::InvalidEndpoint);
+            }
+            Client::new_for_test_http(&format!("http://{socket}/"), limits)
+                .map_err(OutboundError::Client)
+        })
+    }
+
+    fn build_dispatcher(
+        &self,
+        mut keys: BTreeMap<String, KeyRing>,
+        make_client: impl Fn(&Url) -> Result<Client, OutboundError>,
+    ) -> Result<Dispatcher, OutboundError> {
+        let endpoints = self
+            .endpoints
+            .iter()
+            .map(|(endpoint_id, destination)| {
+                let keys = keys
+                    .remove(endpoint_id)
+                    .ok_or(OutboundError::MissingKeyRing)?;
+                let client = make_client(destination)?;
+                Ok((
+                    endpoint_id.clone(),
+                    Binding {
+                        destination: destination.clone(),
+                        client,
+                        keys,
+                    },
+                ))
+            })
+            .collect::<Result<_, OutboundError>>()?;
+        Ok(Dispatcher { endpoints })
     }
 }
 
@@ -204,12 +241,17 @@ impl PreparedDelivery {
     }
 }
 
-/// Immutable-secret dispatcher and bounded per-origin client cache.
+/// Immutable current endpoint destinations, clients and signing keys.
 #[derive(Clone)]
 pub struct Dispatcher {
-    keys: BTreeMap<String, SigningKey>,
-    limits: Limits,
-    clients: Arc<Mutex<ClientCache>>,
+    endpoints: BTreeMap<String, Binding>,
+}
+
+#[derive(Clone)]
+struct Binding {
+    destination: Url,
+    client: Client,
+    keys: KeyRing,
 }
 
 impl Dispatcher {
@@ -225,54 +267,49 @@ impl Dispatcher {
         })
     }
 
-    async fn dispatch(&self, job: Job<Delivery>) -> Result<(), JobError> {
-        let delivery = job.payload();
-        if delivery.version != DELIVERY_VERSION || delivery.body.len() > MAX_BODY_BYTES {
+    async fn dispatch(&self, job: Job<QueuedDelivery>) -> Result<(), JobError> {
+        let QueuedDelivery::Valid(delivery) = job.payload() else {
+            return Err(JobError::permanent(DeliveryOutcome::InvalidPayload));
+        };
+        if !matches!(delivery.version, 1 | DELIVERY_VERSION)
+            || validate_endpoint_id(&delivery.endpoint_id).is_err()
+            || delivery.body.len() > MAX_BODY_BYTES
+            || !HeaderValue::from_str(&delivery.content_type)
+                .is_ok_and(|value| value.to_str().is_ok())
+        {
             return Err(JobError::permanent(DeliveryOutcome::InvalidPayload));
         }
-        let Some(keys) = self.key_ring(delivery) else {
-            tracing::info!(
-                webhook.outcome = "missing_secret",
-                "webhook_delivery_deferred"
+        if delivery.version == 1 {
+            tracing::debug!(
+                webhook.reason = "legacy_payload",
+                "webhook_delivery_legacy_payload"
             );
-            return Err(JobError::snooze(MISSING_SECRET_DELAY)?);
-        };
-        let Ok(destination) = parse_destination(&delivery.destination) else {
-            tracing::warn!(
-                webhook.outcome = "permanent",
-                webhook.reason = "invalid_destination",
+        }
+        let Some(binding) = self.endpoints.get(&delivery.endpoint_id) else {
+            tracing::info!(
+                webhook.outcome = "retryable",
+                webhook.reason = "missing_endpoint",
                 "webhook_delivery_finished"
             );
-            return Err(JobError::permanent(DeliveryOutcome::InvalidDestination));
+            return Err(JobError::retryable(DeliveryOutcome::MissingEndpoint));
         };
         let timestamp = unix_timestamp(SystemTime::now())
             .ok_or_else(|| JobError::retryable(DeliveryOutcome::ClockUnavailable))?;
         let message_id = job.id().to_string();
-        let signature = keys
+        let signature = binding
+            .keys
             .signatures(message_id.as_bytes(), timestamp, &delivery.body)
             .map_err(|_| JobError::permanent(DeliveryOutcome::InvalidPayload))?;
-        let request = request(delivery, &destination, &message_id, timestamp, &signature)
-            .map_err(|_| JobError::permanent(DeliveryOutcome::InvalidPayload))?;
-        let client = match self.client(&destination) {
-            Ok(client) => client,
-            Err(OutboundError::CacheUnavailable) => {
-                tracing::info!(
-                    webhook.outcome = "retryable",
-                    webhook.reason = "cache_unavailable",
-                    "webhook_delivery_finished"
-                );
-                return Err(JobError::retryable(DeliveryOutcome::CacheUnavailable));
-            }
-            Err(_) => {
-                tracing::warn!(
-                    webhook.outcome = "permanent",
-                    webhook.reason = "invalid_destination",
-                    "webhook_delivery_finished"
-                );
-                return Err(JobError::permanent(DeliveryOutcome::InvalidDestination));
-            }
-        };
-        let response = client
+        let request = request(
+            delivery,
+            &binding.destination,
+            &message_id,
+            timestamp,
+            &signature,
+        )
+        .map_err(|_| JobError::permanent(DeliveryOutcome::InvalidPayload))?;
+        let response = binding
+            .client
             .execute(
                 request,
                 Operation {
@@ -283,54 +320,6 @@ impl Dispatcher {
             .await;
         classify_response(response, SystemTime::now())
     }
-
-    fn key_ring(&self, delivery: &Delivery) -> Option<KeyRing> {
-        let active = self.keys.get(&delivery.active_key).cloned()?;
-        let previous = match &delivery.previous_key {
-            Some(reference) => Some(self.keys.get(reference).cloned()?),
-            None => None,
-        };
-        Some(KeyRing::new(active, previous))
-    }
-
-    fn client(&self, destination: &Url) -> Result<Client, OutboundError> {
-        let origin = origin(destination)?;
-        if let Some(client) = self.cached_client(&origin)? {
-            return Ok(client);
-        }
-        let candidate = Client::new(&origin, self.limits).map_err(OutboundError::Client)?;
-        let mut cache = self
-            .clients
-            .lock()
-            .map_err(|_| OutboundError::CacheUnavailable)?;
-        if let Some(position) = cache
-            .entries
-            .iter()
-            .position(|entry| entry.origin == origin)
-        {
-            return Ok(cache.entries[position].client.clone());
-        }
-        if cache.entries.len() == CACHE_CAPACITY {
-            let _ = cache.entries.pop_front();
-        }
-        cache.entries.push_back(CachedClient {
-            origin,
-            client: candidate.clone(),
-        });
-        Ok(candidate)
-    }
-
-    fn cached_client(&self, origin: &str) -> Result<Option<Client>, OutboundError> {
-        let cache = self
-            .clients
-            .lock()
-            .map_err(|_| OutboundError::CacheUnavailable)?;
-        Ok(cache
-            .entries
-            .iter()
-            .find(|entry| entry.origin == origin)
-            .map(|entry| entry.client.clone()))
-    }
 }
 
 impl fmt::Debug for Dispatcher {
@@ -339,29 +328,31 @@ impl fmt::Debug for Dispatcher {
     }
 }
 
-#[derive(Default)]
-struct ClientCache {
-    entries: VecDeque<CachedClient>,
-}
-
-struct CachedClient {
-    origin: String,
-    client: Client,
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 struct Delivery {
     version: u8,
     endpoint_id: String,
-    destination: String,
-    active_key: String,
-    previous_key: Option<String>,
     content_type: String,
     #[serde(with = "base64_body")]
     body: Vec<u8>,
 }
 
 impl JobKind for Delivery {
+    const NAME: &'static str = DELIVERY_KIND;
+}
+
+// The jobs engine retries typed-deserialization errors. Decode malformed common
+// fields here as an explicit variant so the webhook owner can reject them
+// permanently; obsolete v1 routing fields remain ignored by Delivery.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+enum QueuedDelivery {
+    Valid(Delivery),
+    #[serde(skip_serializing)]
+    Invalid(serde::de::IgnoredAny),
+}
+
+impl JobKind for QueuedDelivery {
     const NAME: &'static str = DELIVERY_KIND;
 }
 
@@ -379,7 +370,7 @@ pub enum OutboundError {
     /// The producer selected no configured endpoint.
     #[error("outbound webhook endpoint is not configured")]
     UnknownEndpoint,
-    /// An endpoint identity, key reference, URL, or transport construction is invalid.
+    /// An endpoint identity, URL, or transport construction is invalid.
     #[error("outbound webhook endpoint configuration is invalid")]
     InvalidEndpoint,
     /// The producer body is larger than the wire capability permits.
@@ -403,9 +394,9 @@ pub enum OutboundError {
     /// A no-unique-key delivery unexpectedly received a duplicate result.
     #[error("outbound webhook enqueue unexpectedly deduplicated")]
     UnexpectedDuplicate,
-    /// The process-local cache lock is unavailable after a panic.
-    #[error("outbound webhook client cache is unavailable")]
-    CacheUnavailable,
+    /// A configured endpoint has no current signing ring.
+    #[error("outbound webhook endpoint signing ring is missing")]
+    MissingKeyRing,
     /// Existing fixed-authority client construction failed.
     #[error("outbound webhook client configuration is invalid")]
     Client(#[source] HttpError),
@@ -414,11 +405,10 @@ pub enum OutboundError {
 #[derive(Clone, Copy)]
 enum DeliveryOutcome {
     InvalidPayload,
-    InvalidDestination,
+    MissingEndpoint,
     ClockUnavailable,
-    CacheUnavailable,
     Retryable,
-    PermanentResponse,
+    EndpointGone,
     TransportUncertain,
 }
 
@@ -426,11 +416,10 @@ impl fmt::Display for DeliveryOutcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let outcome = match self {
             Self::InvalidPayload => "invalid_payload",
-            Self::InvalidDestination => "invalid_destination",
+            Self::MissingEndpoint => "missing_endpoint",
             Self::ClockUnavailable => "clock_unavailable",
-            Self::CacheUnavailable => "cache_unavailable",
             Self::Retryable => "retryable_response",
-            Self::PermanentResponse => "permanent_response",
+            Self::EndpointGone => "endpoint_gone",
             Self::TransportUncertain => "transport_uncertain",
         };
         formatter.write_str(outcome)
@@ -450,13 +439,6 @@ fn limits(max_workers: NonZeroU32) -> Result<Limits, OutboundError> {
 
 fn validate_endpoint_id(endpoint_id: &str) -> Result<(), OutboundError> {
     if endpoint_id.is_empty() || endpoint_id.contains('\0') {
-        return Err(OutboundError::InvalidEndpoint);
-    }
-    Ok(())
-}
-
-fn validate_key_ref(reference: &str) -> Result<(), OutboundError> {
-    if reference.is_empty() || reference.contains('\0') {
         return Err(OutboundError::InvalidEndpoint);
     }
     Ok(())
@@ -533,7 +515,15 @@ fn classify_response(
             );
             Ok(())
         }
-        Ok(response) if retryable_status(response.status()) => {
+        Ok(response) if response.status() == StatusCode::GONE => {
+            tracing::warn!(
+                webhook.outcome = "permanent",
+                webhook.reason = "endpoint_gone",
+                "webhook endpoint returned 410; disable or remove its static binding and restart workers"
+            );
+            Err(JobError::permanent(DeliveryOutcome::EndpointGone))
+        }
+        Ok(response) => {
             tracing::info!(
                 webhook.outcome = "retryable",
                 http.status = response.status().as_u16(),
@@ -547,22 +537,6 @@ fn classify_response(
             }
             Err(JobError::retryable(DeliveryOutcome::Retryable))
         }
-        Ok(response) => {
-            tracing::warn!(
-                webhook.outcome = "permanent",
-                http.status = response.status().as_u16(),
-                "webhook_delivery_finished"
-            );
-            Err(JobError::permanent(DeliveryOutcome::PermanentResponse))
-        }
-        Err(error) if is_permanent_transport_error(&error) => {
-            tracing::warn!(
-                webhook.outcome = "permanent",
-                webhook.reason = "invalid_destination",
-                "webhook_delivery_finished"
-            );
-            Err(JobError::permanent(DeliveryOutcome::InvalidDestination))
-        }
         Err(_) => {
             tracing::info!(
                 webhook.outcome = "retryable",
@@ -572,14 +546,6 @@ fn classify_response(
             Err(JobError::retryable(DeliveryOutcome::TransportUncertain))
         }
     }
-}
-
-fn retryable_status(status: StatusCode) -> bool {
-    status.is_server_error()
-        || matches!(
-            status,
-            StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_EARLY | StatusCode::TOO_MANY_REQUESTS
-        )
 }
 
 fn retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
@@ -606,13 +572,6 @@ fn retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
 
 fn unix_timestamp(now: SystemTime) -> Option<i64> {
     i64::try_from(now.duration_since(UNIX_EPOCH).ok()?.as_secs()).ok()
-}
-
-fn is_permanent_transport_error(error: &HttpError) -> bool {
-    matches!(
-        error,
-        HttpError::InvalidConfiguration | HttpError::InvalidTarget | HttpError::ClientBuild { .. }
-    )
 }
 
 mod base64_body {
@@ -643,37 +602,23 @@ mod tests {
         time::{Duration, UNIX_EPOCH},
     };
 
-    use http::{HeaderMap, HeaderValue, StatusCode, header};
+    use http::{HeaderMap, HeaderValue, header};
     use infra_jobs::MAX_PAYLOAD_BYTES;
-    use url::Url;
 
     use super::{
-        CACHE_CAPACITY, DEFAULT_CONTENT_TYPE, DELIVERY_VERSION, Endpoint, Outbound, OutboundError,
-        RETRY_AFTER_CAP, parse_destination, request, retry_after, retryable_status,
+        DEFAULT_CONTENT_TYPE, Endpoint, Outbound, OutboundError, RETRY_AFTER_CAP, retry_after,
     };
-    use crate::protocol::{KeyRing, MAX_BODY_BYTES, SigningKey};
+    use crate::protocol::{KeyRing, MAX_BODY_BYTES};
 
     fn outbound(destination: &str) -> Outbound {
-        outbound_with("partner", destination, "partner_v2", None)
+        outbound_with("partner", destination)
     }
 
-    fn outbound_with(
-        endpoint_id: &str,
-        destination: &str,
-        active_key: &str,
-        previous_key: Option<&str>,
-    ) -> Outbound {
-        Outbound::new(
-            BTreeMap::from([(
-                endpoint_id.to_owned(),
-                Endpoint::new(
-                    destination.to_owned(),
-                    active_key.to_owned(),
-                    previous_key.map(str::to_owned),
-                ),
-            )]),
-            NonZeroU32::new(1).unwrap(),
-        )
+    fn outbound_with(endpoint_id: &str, destination: &str) -> Outbound {
+        Outbound::new(BTreeMap::from([(
+            endpoint_id.to_owned(),
+            Endpoint::new(destination.to_owned()),
+        )]))
         .unwrap()
     }
 
@@ -683,138 +628,35 @@ mod tests {
             .prepare("partner", b"raw\0bytes".to_vec(), None)
             .unwrap();
 
-        assert_eq!(prepared.delivery.version, DELIVERY_VERSION);
         assert_eq!(prepared.delivery.body, b"raw\0bytes");
         assert_eq!(prepared.delivery.content_type, DEFAULT_CONTENT_TYPE);
         assert_eq!(
-            prepared.delivery.destination,
-            "https://partner.example/events?source=template"
+            serde_json::to_value(&prepared.delivery).unwrap(),
+            serde_json::json!({
+                "version": 2,
+                "endpoint_id": "partner",
+                "content_type": "application/json",
+                "body": "cmF3AGJ5dGVz"
+            })
         );
     }
 
     #[test]
-    fn production_request_preserves_raw_body_and_stable_id_while_timestamp_refreshes_signature() {
-        let body = vec![0, b'{', b'\"', b'x', b'\"', b':', b'1', b'}', 255];
-        let prepared = outbound("https://partner.example/events?source=template")
-            .prepare(
-                "partner",
-                body.clone(),
-                Some("application/webhook+json".to_owned()),
-            )
-            .unwrap();
-        let destination = parse_destination(&prepared.delivery.destination).unwrap();
-        let keys =
+    fn dispatcher_requires_a_current_ring_for_every_configured_endpoint() {
+        let outbound = outbound("https://partner.example/events");
+        assert!(matches!(
+            outbound.dispatcher(BTreeMap::new(), NonZeroU32::MIN),
+            Err(OutboundError::MissingKeyRing)
+        ));
+        let ring =
             KeyRing::from_encoded("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", None).unwrap();
-        let message_id = "2ef5ca91-8d1b-495c-95eb-ecb3b7334718";
-        let first = keys
-            .signatures(message_id.as_bytes(), 1_700_000_000, &body)
-            .unwrap();
-        let second = keys
-            .signatures(message_id.as_bytes(), 1_700_000_001, &body)
-            .unwrap();
-        let request = request(
-            &prepared.delivery,
-            &destination,
-            message_id,
-            1_700_000_000,
-            &first,
-        )
-        .unwrap();
-
-        assert_eq!(request.method(), http::Method::POST);
-        assert_eq!(request.uri().to_string(), "/events?source=template");
-        assert_eq!(request.body().as_ref(), body.as_slice());
-        assert_eq!(
-            request.headers()["webhook-id"].to_str().unwrap(),
-            message_id
-        );
-        assert_eq!(
-            request.headers()["webhook-timestamp"].to_str().unwrap(),
-            "1700000000"
-        );
-        assert_eq!(
-            request.headers()["webhook-signature"].to_str().unwrap(),
-            first
-        );
-        assert_ne!(
-            first, second,
-            "each retry receives a fresh signature timestamp"
-        );
         assert!(
-            keys.verify(
-                request.headers(),
-                request.body().as_ref(),
-                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn dispatcher_uses_historical_payload_destination_and_key_references_after_config_changes() {
-        let historical = outbound_with(
-            "partner",
-            "https://historical.example/hooks/first?revision=1",
-            "partner_v1",
-            Some("partner_v0"),
-        );
-        let prepared = historical
-            .prepare("partner", b"historical".to_vec(), None)
-            .unwrap();
-        let current = outbound_with(
-            "partner",
-            "https://current.example/hooks/current",
-            "partner_v2",
-            None,
-        );
-        let dispatcher = current.dispatcher(BTreeMap::from([
-            (
-                "partner_v1".to_owned(),
-                SigningKey::from_encoded("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=").unwrap(),
-            ),
-            (
-                "partner_v0".to_owned(),
-                SigningKey::from_encoded("whsec_C2FVsBQIhrscChlQIMV+b5sSYspob7oD").unwrap(),
-            ),
-        ]));
-        let destination = parse_destination(&prepared.delivery.destination).unwrap();
-
-        let _client = dispatcher.client(&destination).unwrap();
-        let cache = dispatcher.clients.lock().unwrap();
-        assert_eq!(prepared.delivery.active_key, "partner_v1");
-        assert_eq!(
-            prepared.delivery.previous_key.as_deref(),
-            Some("partner_v0")
-        );
-        assert!(dispatcher.key_ring(&prepared.delivery).is_some());
-        assert_eq!(cache.entries.len(), 1);
-        assert_eq!(cache.entries[0].origin, "https://historical.example/");
-    }
-
-    #[test]
-    fn client_cache_normalizes_origins_and_evicts_fifo_after_sixty_four_entries() {
-        let normalized = outbound("https://current.example/hooks").dispatcher(BTreeMap::new());
-        let first = Url::parse("https://partner.example/a").unwrap();
-        let second = Url::parse("https://partner.example/b?request=2").unwrap();
-        let _first = normalized.client(&first).unwrap();
-        let _second = normalized.client(&second).unwrap();
-        assert_eq!(normalized.clients.lock().unwrap().entries.len(), 1);
-
-        let fifo = outbound("https://current.example/hooks").dispatcher(BTreeMap::new());
-        for index in 0..=CACHE_CAPACITY {
-            let destination =
-                Url::parse(&format!("https://history-{index}.example/hooks")).unwrap();
-            let _client = fifo.client(&destination).unwrap();
-        }
-        let cache = fifo.clients.lock().unwrap();
-        assert_eq!(cache.entries.len(), CACHE_CAPACITY);
-        assert_eq!(
-            cache.entries.front().unwrap().origin,
-            "https://history-1.example/"
-        );
-        assert_eq!(
-            cache.entries.back().unwrap().origin,
-            "https://history-64.example/"
+            outbound
+                .dispatcher(
+                    BTreeMap::from([("partner".to_owned(), ring)]),
+                    NonZeroU32::MIN
+                )
+                .is_ok()
         );
     }
 
@@ -834,13 +676,10 @@ mod tests {
             "http://partner.example/events",
         ] {
             assert!(
-                Outbound::new(
-                    BTreeMap::from([(
-                        "partner".to_owned(),
-                        Endpoint::new(destination.to_owned(), "partner_v2".to_owned(), None),
-                    )]),
-                    NonZeroU32::new(1).unwrap(),
-                )
+                Outbound::new(BTreeMap::from([(
+                    "partner".to_owned(),
+                    Endpoint::new(destination.to_owned()),
+                )]),)
                 .is_err()
             );
         }
@@ -851,17 +690,10 @@ mod tests {
         // Endpoint URLs are trusted operator configuration; the outbound client
         // is not an SSRF boundary and does not classify addresses.
         assert!(
-            Outbound::new(
-                BTreeMap::from([(
-                    "partner".to_owned(),
-                    Endpoint::new(
-                        "https://10.0.0.5/events".to_owned(),
-                        "partner_v2".to_owned(),
-                        None
-                    ),
-                )]),
-                NonZeroU32::new(1).unwrap(),
-            )
+            Outbound::new(BTreeMap::from([(
+                "partner".to_owned(),
+                Endpoint::new("https://10.0.0.5/events".to_owned()),
+            )]),)
             .is_ok()
         );
     }
@@ -869,12 +701,7 @@ mod tests {
     #[test]
     fn refuses_a_prepared_delivery_that_exceeds_the_existing_jobs_payload_limit() {
         let endpoint_id = "e".repeat(90_000);
-        let outbound = outbound_with(
-            &endpoint_id,
-            "https://partner.example/events",
-            "partner_v2",
-            None,
-        );
+        let outbound = outbound_with(&endpoint_id, "https://partner.example/events");
         let error = outbound
             .prepare(&endpoint_id, vec![0; MAX_BODY_BYTES], None)
             .unwrap_err();
@@ -883,25 +710,6 @@ mod tests {
             matches!(error, OutboundError::PayloadTooLarge { bytes } if bytes > MAX_PAYLOAD_BYTES),
             "{error:?}"
         );
-    }
-
-    #[test]
-    fn maps_only_the_selected_statuses_to_retries() {
-        for status in [
-            StatusCode::REQUEST_TIMEOUT,
-            StatusCode::TOO_EARLY,
-            StatusCode::TOO_MANY_REQUESTS,
-            StatusCode::INTERNAL_SERVER_ERROR,
-        ] {
-            assert!(retryable_status(status), "{status}");
-        }
-        for status in [
-            StatusCode::MOVED_PERMANENTLY,
-            StatusCode::BAD_REQUEST,
-            StatusCode::GONE,
-        ] {
-            assert!(!retryable_status(status), "{status}");
-        }
     }
 
     #[test]

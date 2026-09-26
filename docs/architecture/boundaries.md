@@ -159,8 +159,10 @@ second queue or receipt-store owner.
 <!-- template:end webhooks-common:docs-boundaries-webhooks-provider -->
 
 <!-- template:begin webhooks:docs-boundaries-webhooks-outbound -->
-The outbound module owns prepared immutable destination/key references, the
-`webhooks.deliver` handler, and its private per-origin client cache. It may use
+The outbound module owns prepared endpoint metadata, the
+`webhooks.deliver` handler, and a fixed startup map of endpoint clients and key
+rings. Queued work stores endpoint identity and body; each attempt resolves the
+current snapshot. It may use
 jobs, PostgreSQL, the existing bounded outbound HTTP client, and protocol glue;
 it does not own business acceptance, endpoint management, DNS policy, or retry
 scheduling.
@@ -172,6 +174,14 @@ consumer registry/processor. It may use protocol, jobs, PostgreSQL, and SQLx;
 it does not own router middleware, endpoint configuration precedence, or a
 business event schema. `infra-http::webhooks` owns route annotation and problem
 mapping, not receipt SQL or signature implementation.
+
+`webhook-consumers` is the shared adopter composition crate retained only with
+inbound webhooks. Its `consumers()` constructor is the one registration edit
+point used by both service and worker; both roots reject unbound configured
+endpoints before serving or claiming. It initially depends only on
+`infra-webhooks`; adopter adapters keep business behavior in feature owners.
+The worker passes the same registry into the processor. Neither root depends
+on the other, and the provider does not own adopter registrations.
 <!-- template:end inbound-webhooks:docs-boundaries-webhooks-inbound -->
 
 Ownership choices made in stages 1 to 3 and 8 that a later change should not

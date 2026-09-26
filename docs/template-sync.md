@@ -264,7 +264,9 @@ the existing compatible historical shapes; changing an established choice remain
 a refused profile migration. The initializer removes absent shared protocol,
 directional crate/dependency, docs, migration, route, test, and marker edges.
 Outbound-only removes ingress/receipt material; inbound-only does not retain
-outbound HTTP or DNS solely for webhooks.
+outbound HTTP or DNS solely for webhooks. The shared adopter registration crate
+`crates/webhook-consumers` and both roots' dependencies remain only with inbound
+webhooks; outbound-only removes that crate as well as ingress/receipt material.
 <!-- template:end webhooks-common:docs-template-sync-webhooks -->
 
 Use the service's [command policy](build-test-and-development-commands.md) and

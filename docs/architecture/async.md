@@ -199,12 +199,21 @@ budget.
 <!-- template:begin webhooks:docs-async-webhooks-outbound -->
 Outbound work inserts `webhooks.deliver` in the caller's `&mut Tx`; the worker
 uses the retained 20-attempt, 30-second policy. Receiver `Retry-After` advice is
-only a capped floor; jobs combines it with normal backoff.
+only a capped floor; jobs combines it with normal backoff. A completed 2xx
+succeeds, 410 terminates with operator guidance to disable the configured
+endpoint, and every other HTTP response retries. Missing endpoints consume
+attempts. Only endpoint capacity uses a one-second snooze with an attempt
+refund: each worker process permits one active exchange per endpoint, keeping
+another slot available when the worker has at least two slots. This is neither
+cross-process suppression nor queue fairness.
 <!-- template:end webhooks:docs-async-webhooks-outbound -->
 
 <!-- template:begin inbound-webhooks:docs-async-webhooks-inbound -->
 An inbound receipt inserts `webhooks.process` in its receiver transaction; the
-worker uses the existing 25-attempt, 60-second policy.
+worker uses the existing 25-attempt, 60-second policy. Both process roots
+construct the shared adopter registry once and reject unbound configured
+endpoints at startup; a historical job whose binding disappeared retries and
+exhausts normally. Consumer work and fenced completion remain one transaction.
 <!-- template:end inbound-webhooks:docs-async-webhooks-inbound -->
 
 The durable decisions are the static lease, supervisor-owned outcome,

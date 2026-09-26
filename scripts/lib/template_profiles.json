@@ -950,6 +950,7 @@
       "docs/outbound-webhooks.md"
     ],
     "markers": [
+      {"path": "test/Cargo.toml", "ids": ["test-webhooks-fixture-feature"]},
       {
         "path": "Cargo.toml",
         "ids": [
@@ -974,7 +975,8 @@
       {
         "path": "crates/infra-webhooks/Cargo.toml",
         "ids": [
-          "webhooks-outbound-dependencies"
+          "webhooks-outbound-dependencies",
+          "webhooks-outbound-test-feature"
         ]
       },
       {
@@ -1055,14 +1057,18 @@
   },
   "inbound-webhooks": {
     "remove_when_unselected": [
+      "crates/webhook-consumers/",
       "crates/config/src/inbound_webhooks.rs",
       "crates/infra-http/src/webhooks.rs",
       "crates/infra-webhooks/src/inbound.rs",
       "migrations/20260926022945_create_webhook_receipts.sql",
+      "migrations/20260926130000_native_webhook_receipts.sql",
       "test/tests/webhooks/inbound.rs",
       "docs/inbound-webhooks.md"
     ],
     "markers": [
+      {"path": "Cargo.toml", "ids": ["workspace-webhook-consumers-crate"]},
+      {"path": "crates/jobs-worker/Cargo.toml", "ids": ["worker-webhook-consumers-dependency"]},
       {
         "path": "crates/config/src/lib.rs",
         "ids": [
@@ -1134,7 +1140,8 @@
           "bootstrap-webhooks-prepare",
           "bootstrap-webhooks-prepared-field",
           "bootstrap-webhooks-prepared-value",
-          "bootstrap-webhooks-route-state"
+          "bootstrap-webhooks-route-state",
+          "bootstrap-webhooks-tests"
         ]
       },
       {
@@ -1154,6 +1161,12 @@
         "ids": [
           "worker-webhooks-register-inbound",
           "worker-webhooks-inbound-imports"
+        ]
+      },
+      {
+        "path": "crates/jobs-worker/tests/process.rs",
+        "ids": [
+          "worker-webhooks-inbound-process-tests"
         ]
       },
       {
@@ -1229,8 +1242,7 @@
           "test-webhooks-inbound-std",
           "test-webhooks-inbound-postgres",
           "test-webhooks-inbound-constants",
-          "test-webhooks-inbound-pool",
-          "test-webhooks-inbound-bounded"
+          "test-webhooks-inbound-pool"
         ]
       }
     ]

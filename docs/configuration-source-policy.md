@@ -248,22 +248,26 @@ registry to maintain.
 
 Webhook configuration follows normal typed TOML/environment layering and is an
 immutable startup snapshot: configuration or secret rotation takes effect only
-after restart. Secret map values are `SecretString` values and must be supplied
-through `APP__...__SECRETS__...`, never a file. The recursive secret-file guard
-covers dynamic map entries. Endpoint IDs and key references are non-secret.
-There is no environment-variable indirection, JSON-in-environment manifest, or
-remote secret provider.
+after restart. Secret values are `SecretString` values, supplied only through
+the corresponding `APP__...` environment paths and never a file. The recursive
+secret-file guard covers endpoint fields and dynamic maps. There is no
+environment-variable indirection, JSON-in-environment manifest, or remote secret
+provider.
 
-Endpoint IDs and key references need only be nonempty and NUL-free.
+Endpoint IDs and non-secret key references need only be nonempty and NUL-free.
 <!-- template:end webhooks-common:docs-config-webhooks-snapshot -->
 
 <!-- template:begin webhooks:docs-config-webhooks-outbound -->
-`webhooks.endpoints` maps endpoint IDs to destination URL plus active/optional
-previous key references; `webhooks.secrets` maps the immutable references to
-secret values. Configuration validates representation and reference uniqueness;
-provider construction owns URL/base64/nonempty-key admission. Outgoing producers
-receive only prepared non-secret endpoint metadata and final bytes, while workers
-resolve signing keys. Keep historical references until their jobs are terminal.
+`webhooks.endpoints` maps endpoint IDs to destination URL, required `secret`,
+and optional `previous_secret`. There is no outbound `webhooks.secrets` map or
+reference field. Those values are supplied through
+`APP__WEBHOOKS__ENDPOINTS__<ID>__SECRET` and `...__PREVIOUS_SECRET`; the
+required secret and an explicit predecessor cannot be blank. Provider
+construction owns URL and decoded Standard Webhooks key admission. Outgoing
+producers receive only prepared non-secret endpoint metadata and final bytes;
+workers decode the current startup snapshot before claiming jobs. A restart with
+changed URL or keys applies to pending work. Keep the predecessor secret through
+the rotation cutover, then remove it and restart.
 <!-- template:end webhooks:docs-config-webhooks-outbound -->
 
 <!-- template:begin inbound-webhooks:docs-config-webhooks-inbound -->

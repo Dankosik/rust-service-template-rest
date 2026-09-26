@@ -11,6 +11,7 @@ crates/infra-bearerauthn/
 crates/infra-outbound-http/
 crates/infra-oauth2-client-credentials/
 crates/infra-webhooks/
+crates/webhook-consumers/
 crates/infra-idempotency-store/
 crates/infra-jobs/
 crates/jobs-worker/
@@ -26,6 +27,7 @@ crates/infra-http/src/idempotency/
 migrations/20260923000001_create_http_idempotency_records.sql
 migrations/20260924000001_create_background_jobs.sql
 migrations/20260926022945_create_webhook_receipts.sql
+migrations/20260926130000_native_webhook_receipts.sql
 docs/authentication.md
 docs/outbound-http.md
 docs/outbound-http-decisions.md
