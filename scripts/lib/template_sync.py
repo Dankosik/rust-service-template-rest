@@ -42,6 +42,7 @@ from template_state import (
     selected_jobs,
     selected_outbound_auth,
     selected_outbound_http,
+    selected_grpc,
     selected_profiles,
     selected_webhooks,
     snapshot_tree,
@@ -813,6 +814,7 @@ def _run(arguments: argparse.Namespace) -> int:
         _database, harness = selected_profiles(target)
         selected_outbound_http(target)
         selected_outbound_auth(target)
+        selected_grpc(target)
         selected_http_idempotency(target)
         selected_jobs(target)
         selected_webhooks(target)

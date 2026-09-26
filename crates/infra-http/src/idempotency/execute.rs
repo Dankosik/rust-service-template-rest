@@ -14,6 +14,8 @@ use tokio::time::Instant;
 use super::Tx;
 use super::stored::{self, Stored};
 use crate::problem::{Code, Problem, SANITIZED_DETAIL};
+#[cfg(test)]
+use crate::problem::http_status;
 use crate::request_id;
 
 /// Idempotent request outcomes at the HTTP idempotency boundary.
@@ -373,7 +375,7 @@ mod tests {
     async fn assert_problem(answer: Answer, outcome: Outcome, code: Code, retry_after: bool) {
         assert_eq!(answer.outcome, outcome);
         assert!(answer.problem);
-        assert_eq!(answer.response.status(), code.status());
+        assert_eq!(answer.response.status(), http_status(code));
         assert_eq!(
             answer.response.headers().get(CONTENT_TYPE),
             Some(&HeaderValue::from_static("application/problem+json"))

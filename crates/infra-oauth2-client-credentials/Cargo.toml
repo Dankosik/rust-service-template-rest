@@ -11,7 +11,18 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# template:begin outbound-auth-grpc:oauth-grpc-feature
+[features]
+default = ["grpc"]
+grpc = ["dep:infra-grpc", "dep:tonic", "dep:tower"]
+# template:end outbound-auth-grpc:oauth-grpc-feature
+
 [dependencies]
+# template:begin outbound-auth-grpc:oauth-grpc-dependencies
+infra-grpc = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true, features = ["codegen"] }
+tower = { workspace = true, optional = true }
+# template:end outbound-auth-grpc:oauth-grpc-dependencies
 bytes = { workspace = true, features = ["std"] }
 http = { workspace = true }
 infra-outbound-http = { workspace = true }

@@ -22,6 +22,7 @@ from template_state import (
     ADAPTERS,
     AUTHN_CHOICES,
     DATABASE_CHOICES,
+    GRPC_CHOICES,
     HARNESS_CHOICES,
     HTTP_IDEMPOTENCY_CHOICES,
     INBOUND_WEBHOOKS_CHOICES,
@@ -88,6 +89,7 @@ class InitInputs:
     authn: str
     outbound_http: str
     outbound_auth: str
+    grpc: str
     http_idempotency: str
     jobs: str
     webhooks: str
@@ -108,6 +110,7 @@ class InitInputs:
             "authn": self.authn,
             "outbound_http": self.outbound_http,
             "outbound_auth": self.outbound_auth,
+            "grpc": self.grpc,
             "http_idempotency": self.http_idempotency,
             "jobs": self.jobs,
             "webhooks": self.webhooks,
@@ -149,6 +152,7 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         authn=_argument_value(arguments, "authn", default="none"),
         outbound_http=_argument_value(arguments, "outbound_http", default="none"),
         outbound_auth=_argument_value(arguments, "outbound_auth", default="none"),
+        grpc=_argument_value(arguments, "grpc", default="none"),
         http_idempotency=_argument_value(arguments, "http_idempotency", default="none"),
         jobs=_argument_value(arguments, "jobs", default="none"),
         webhooks=_argument_value(arguments, "webhooks", default="none"),
@@ -163,6 +167,8 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         raise Refusal("OUTBOUND_HTTP is unsupported")
     if inputs.outbound_auth not in OUTBOUND_AUTH_CHOICES:
         raise Refusal("OUTBOUND_AUTH is unsupported")
+    if inputs.grpc not in GRPC_CHOICES:
+        raise Refusal("GRPC is unsupported")
     if inputs.outbound_auth == "oauth2-client-credentials":
         inputs = InitInputs(
             service_name=inputs.service_name,
@@ -173,6 +179,7 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
             authn=inputs.authn,
             outbound_http="bounded",
             outbound_auth=inputs.outbound_auth,
+            grpc=inputs.grpc,
             http_idempotency=inputs.http_idempotency,
             jobs=inputs.jobs,
             webhooks=inputs.webhooks,
@@ -266,6 +273,7 @@ _WEBHOOKS_PROFILE_INVENTORY_KEYS = frozenset(
 # The DNS-bearing key sets above are supported historical replay input only.
 _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS = _WEBHOOKS_PROFILE_INVENTORY_KEYS - {"egress-dns"}
 _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS = _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS | {"outbound-auth"}
+_GRPC_PROFILE_INVENTORY_KEYS = _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS | {"grpc", "grpc-none", "outbound-auth-grpc"}
 
 
 def _profile_data(
@@ -285,12 +293,22 @@ def _profile_data(
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
         raise Refusal("template profile inventory has an unsupported schema")
     keys = frozenset(raw)
-    if keys == _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS or (
+    if keys == _GRPC_PROFILE_INVENTORY_KEYS:
+        include_authn = True
+        include_outbound = True
+        include_outbound_auth = True
+        include_grpc = True
+        include_tls_fixtures = True
+        include_http_idempotency = True
+        include_jobs = True
+        include_webhooks = True
+    elif keys == _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS or (
         historical_egress and keys == (_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS | {"egress-dns"})
     ):
         include_authn = True
         include_outbound = True
         include_outbound_auth = True
+        include_grpc = False
         include_tls_fixtures = True
         include_http_idempotency = True
         include_jobs = True
@@ -301,6 +319,7 @@ def _profile_data(
         include_authn = True
         include_outbound = True
         include_outbound_auth = False
+        include_grpc = False
         include_tls_fixtures = True
         include_http_idempotency = True
         include_jobs = True
@@ -309,6 +328,7 @@ def _profile_data(
         include_authn = True
         include_outbound = True
         include_outbound_auth = False
+        include_grpc = False
         include_tls_fixtures = True
         include_http_idempotency = True
         include_jobs = True
@@ -317,6 +337,7 @@ def _profile_data(
         include_authn = True
         include_outbound = True
         include_outbound_auth = False
+        include_grpc = False
         include_tls_fixtures = True
         include_http_idempotency = True
         include_jobs = False
@@ -325,6 +346,7 @@ def _profile_data(
         include_authn = True
         include_outbound = True
         include_outbound_auth = False
+        include_grpc = False
         include_tls_fixtures = True
         include_http_idempotency = False
         include_jobs = False
@@ -333,6 +355,7 @@ def _profile_data(
         include_authn = True
         include_outbound = False
         include_outbound_auth = False
+        include_grpc = False
         include_tls_fixtures = False
         include_http_idempotency = False
         include_jobs = False
@@ -341,6 +364,7 @@ def _profile_data(
         include_authn = False
         include_outbound = False
         include_outbound_auth = False
+        include_grpc = False
         include_tls_fixtures = False
         include_http_idempotency = False
         include_jobs = False
@@ -379,6 +403,13 @@ def _profile_data(
             _path_list(section["remove_when_unselected"], "outbound-auth remove_when_unselected")
         )
         markers.extend(_markers("outbound-auth", section["markers"]))
+    if include_grpc:
+        for profile in ("grpc", "grpc-none", "outbound-auth-grpc"):
+            section = raw[profile]
+            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+                raise Refusal(f"template {profile} inventory has an unsupported shape")
+            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
+            markers.extend(_markers(profile, section["markers"]))
     if include_tls_fixtures:
         section = raw["tls-fixtures"]
         if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
@@ -557,7 +588,13 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("outbound-http")
     if inputs.outbound_auth == "oauth2-client-credentials":
         selected.add("outbound-auth")
-    if inputs.authn != "none" or inputs.outbound_http == "bounded":
+    if inputs.grpc == "enabled":
+        selected.add("grpc")
+        if inputs.outbound_auth == "oauth2-client-credentials":
+            selected.add("outbound-auth-grpc")
+    else:
+        selected.add("grpc-none")
+    if inputs.authn != "none" or inputs.outbound_http == "bounded" or inputs.grpc == "enabled":
         selected.add("tls-fixtures")
     if inputs.outbound_http == "bounded":
         selected.add("request-budget")
@@ -1329,6 +1366,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--authn", action=SingleValue)
     parser.add_argument("--outbound-http", action=SingleValue)
     parser.add_argument("--outbound-auth", action=SingleValue)
+    parser.add_argument("--grpc", action=SingleValue)
     parser.add_argument("--http-idempotency", action=SingleValue)
     parser.add_argument("--jobs", action=SingleValue)
     parser.add_argument("--webhooks", action=SingleValue)

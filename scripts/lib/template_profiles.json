@@ -564,6 +564,129 @@
   "cargo_lock": {
     "schema_version": 1
   },
+  "grpc": {
+    "remove_when_unselected": [
+      "api/proto/",
+      "buf.yaml",
+      "crates/config/src/grpc.rs",
+      "crates/grpc-contracts/",
+      "crates/infra-grpc/",
+      "crates/service/examples/grpc.rs",
+      "crates/service/src/grpc.rs",
+      "crates/service/tests/grpc_process.rs",
+      "scripts/grpc-generate.sh",
+      "tools/grpc-codegen/"
+    ],
+    "markers": [
+      {
+        "path": "Cargo.toml",
+        "ids": [
+          "workspace-grpc-generator",
+          "workspace-grpc-crates",
+          "workspace-grpc-dependencies"
+        ]
+      },
+      {
+        "path": "crates/service/src/lib.rs",
+        "id": "service-registration-module"
+      },
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "ids": [
+          "bootstrap-registration",
+          "bootstrap-prepared-registration",
+          "bootstrap-destructure-registration"
+        ]
+      },
+      {
+        "path": "crates/config/src/lib.rs",
+        "ids": [
+          "config-module",
+          "config-export",
+          "config-field",
+          "config-validate",
+          "config-integration-grpc-export"
+        ]
+      },
+      {
+        "path": "crates/config/src/integrations.rs",
+        "ids": [
+          "config-integration-grpc-field",
+          "config-integration-grpc-type",
+          "config-integration-grpc-decode",
+          "config-integration-grpc-value",
+          "config-integration-grpc-parser",
+          "config-integration-grpc-material-parser",
+          "config-integration-grpc-validate",
+          "config-integration-grpc-validation"
+        ]
+      },
+      {
+        "path": "crates/config/src/load.rs",
+        "ids": [
+          "load-listener-environment",
+          "load-integration-grpc-environment"
+        ]
+      },
+      {
+        "path": "crates/health/src/lib.rs",
+        "ids": [
+          "health-changed-verdict",
+          "health-changed-verdict-test"
+        ]
+      },
+      {
+        "path": "crates/service/Cargo.toml",
+        "ids": [
+          "service-grpc-dependencies",
+          "service-grpc-example-dependencies"
+        ]
+      },
+      {
+        "path": "make/template.mk",
+        "id": "make-grpc-targets"
+      },
+      {
+        "path": "scripts/ci/changed-surfaces.sh",
+        "ids": [
+          "classifier-grpc-surface",
+          "classifier-grpc-schema",
+          "classifier-grpc-initializer",
+          "classifier-grpc-tests"
+        ]
+      },
+      {
+        "path": "scripts/ci/verify.sh",
+        "id": "verify-grpc-schema"
+      },
+      {
+        "path": "tools/versions.env",
+        "id": "tools-buf-version"
+      }
+    ]
+  },
+  "grpc-none": {
+    "remove_when_unselected": [],
+    "markers": []
+  },
+  "outbound-auth-grpc": {
+    "remove_when_unselected": [
+      "crates/infra-oauth2-client-credentials/src/grpc.rs"
+    ],
+    "markers": [
+      {
+        "path": "crates/infra-oauth2-client-credentials/Cargo.toml",
+        "ids": [
+          "oauth-grpc-feature",
+          "oauth-grpc-dependencies"
+        ]
+      },
+      {
+        "path": "crates/infra-oauth2-client-credentials/src/lib.rs",
+        "id": "oauth-grpc-module"
+      }
+    ]
+  },
   "outbound-auth": {
     "remove_when_unselected": [
       "crates/infra-oauth2-client-credentials/",

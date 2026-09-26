@@ -20,6 +20,11 @@ use url::Url;
 #[cfg(test)]
 mod tests;
 
+// template:begin outbound-auth-grpc:oauth-grpc-module
+#[cfg(feature = "grpc")]
+pub mod grpc;
+// template:end outbound-auth-grpc:oauth-grpc-module
+
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const REUSE_MARGIN: Duration = Duration::from_secs(10);
 const TOKEN_LIMITS: Limits = Limits {

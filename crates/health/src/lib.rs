@@ -358,6 +358,42 @@ impl ReadinessReader {
     pub async fn changed(&mut self) -> Result<(), OwnerDropped> {
         self.rx.changed().await.map_err(|_| OwnerDropped)
     }
+
+    // template:begin grpc:health-changed-verdict
+    /// Resolve when a published snapshot changes or the current verdict reaches
+    /// its stale boundary.
+    ///
+    /// This observes the cached snapshot only; it never evaluates a probe. A
+    /// caller must re-read [`Self::verdict`] after this future resolves, which
+    /// makes a publication race use the current monotone drain state.
+    ///
+    /// # Errors
+    ///
+    /// [`OwnerDropped`] when the last [`Readiness`] sender is gone.
+    pub async fn changed_verdict(&mut self) -> Result<(), OwnerDropped> {
+        let snapshot = self.rx.borrow().clone();
+        if snapshot.draining {
+            return Ok(());
+        }
+        let stale_at = snapshot
+            .evaluation
+            .as_ref()
+            .zip(snapshot.stale_after)
+            .map(|(evaluation, stale_after)| {
+                // `verdict` refuses only an age strictly above `stale_after`,
+                // so one nanosecond is the earliest representable stale instant.
+                evaluation.evaluated_at() + stale_after + Duration::from_nanos(1)
+            });
+        if let Some(stale_at) = stale_at {
+            tokio::select! {
+                changed = self.rx.changed() => changed.map_err(|_| OwnerDropped),
+                () = tokio::time::sleep_until(stale_at) => Ok(()),
+            }
+        } else {
+            self.changed().await
+        }
+    }
+    // template:end grpc:health-changed-verdict
 }
 
 #[cfg(test)]
@@ -615,4 +651,21 @@ mod tests {
         drop(readiness);
         assert_eq!(reader.changed().await, Err(OwnerDropped));
     }
+
+    // template:begin grpc:health-changed-verdict-test
+    #[tokio::test(start_paused = true)]
+    async fn changed_verdict_wakes_at_the_stale_boundary_without_a_probe() {
+        let (readiness, _, calls) = flaky(true);
+        readiness.refresh(policy()).await;
+        readiness.tx.send_modify(|snapshot| {
+            snapshot.stale_after = Some(policy().stale_after());
+        });
+        let mut reader = readiness.reader();
+        let waiter = tokio::spawn(async move { reader.changed_verdict().await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
+        assert_eq!(waiter.await.unwrap(), Ok(()));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+    // template:end grpc:health-changed-verdict-test
 }

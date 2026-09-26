@@ -296,6 +296,16 @@ container-sbom: ## Write a CycloneDX SBOM of CONTAINER_IMAGE to SBOM_OUTPUT with
 publish-image-metadata-check: ## Self-test of the publication naming and tag promotion
 	bash scripts/ci/publish-image-metadata.sh self-test
 
+# template:begin grpc:make-grpc-targets
+.PHONY: grpc-generate grpc-check
+grpc-generate: ## Generate committed protobuf Rust from pinned Buf descriptors
+	$(VALIDATION_LOCK) bash scripts/grpc-generate.sh
+
+grpc-check: ## Check protobuf format, lint, generation drift and PR-base compatibility; ALLOW_HEAVY=1
+	$(HEAVY_GUARD)
+	$(VALIDATION_LOCK) bash scripts/ci/grpc-check.sh
+# template:end grpc:make-grpc-targets
+
 openapi-generate: ## Regenerate api/openapi/service.yaml from the Rust contract
 	@tmp="$$(mktemp)" && $(CARGO) run -q -p $(SERVICE_BIN) --bin openapi $(CARGO_FLAGS) > "$$tmp" && mv "$$tmp" $(OPENAPI_FILE)
 

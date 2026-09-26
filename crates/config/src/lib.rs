@@ -18,6 +18,9 @@ use std::collections::BTreeMap;
 pub mod app;
 pub mod health;
 pub mod http;
+// template:begin grpc:config-module
+pub mod grpc;
+// template:end grpc:config-module
 pub mod log;
 pub mod observability;
 // template:begin outbound-auth:config-module
@@ -53,9 +56,15 @@ pub use app::{AppConfig, BuildInfo};
 pub use cli::{FromArgs, LoadOptions, process_failure};
 pub use health::HealthConfig;
 pub use http::HttpConfig;
+// template:begin grpc:config-export
+pub use grpc::{GrpcConfig, GrpcSecurity};
+// template:end grpc:config-export
 // template:begin outbound-auth:config-export
 pub use integrations::{IntegrationConfig, OAuthConfig, Scopes};
 // template:end outbound-auth:config-export
+// template:begin grpc:config-integration-grpc-export
+pub use integrations::GrpcClientConfig;
+// template:end grpc:config-integration-grpc-export
 // template:begin inbound-webhooks:config-inbound-webhooks-export
 pub use inbound_webhooks::{InboundWebhookEndpointConfig, InboundWebhooksConfig};
 // template:end inbound-webhooks:config-inbound-webhooks-export
@@ -91,6 +100,9 @@ pub use validate::ValidationError;
 pub struct Config {
     pub app: AppConfig,
     pub http: HttpConfig,
+    // template:begin grpc:config-field
+    pub grpc: GrpcConfig,
+    // template:end grpc:config-field
     // template:begin inbound-webhooks:config-inbound-webhooks-field
     pub inbound_webhooks: InboundWebhooksConfig,
     // template:end inbound-webhooks:config-inbound-webhooks-field
@@ -128,6 +140,9 @@ impl Config {
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.app.validate()?;
         self.http.validate()?;
+        // template:begin grpc:config-validate
+        self.grpc.validate()?;
+        // template:end grpc:config-validate
         // template:begin inbound-webhooks:config-inbound-webhooks-validate
         self.inbound_webhooks.validate()?;
         // template:end inbound-webhooks:config-inbound-webhooks-validate

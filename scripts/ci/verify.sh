@@ -611,6 +611,12 @@ elif is_true module_initializer; then
 	add_command make template-init-projections "projected text changed and no runtime input did" "make template-init-projections" cpu false false
 fi
 
+# template:begin grpc:verify-grpc-schema
+if is_true grpc_schema; then
+	add_command make grpc-check "protobuf schema, generator, or committed output changed" "make grpc-check" cpu true false
+fi
+# template:end grpc:verify-grpc-schema
+
 workspace_rust=false
 if is_true cargo_dependencies; then workspace_rust=true; fi
 affected_lint=''

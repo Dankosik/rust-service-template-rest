@@ -29,6 +29,9 @@ workspace = true
 gethostname = { workspace = true }
 health = { workspace = true }
 infra-http = { workspace = true }
+# template:begin grpc:service-grpc-dependencies
+infra-grpc = { workspace = true }
+# template:end grpc:service-grpc-dependencies
 # template:begin inbound-webhooks:service-webhooks-dependency
 infra-webhooks = { workspace = true }
 # template:end inbound-webhooks:service-webhooks-dependency
@@ -53,6 +56,14 @@ utoipa = { workspace = true, features = ["macros", "yaml"] }
 utoipa-axum = { workspace = true }
 
 [dev-dependencies]
+# template:begin grpc:service-grpc-example-dependencies
+grpc-contracts = { workspace = true }
+tonic = { workspace = true, features = ["codegen"] }
+tonic-health = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
+futures-util = { workspace = true, features = ["std"] }
+rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
+# template:end grpc:service-grpc-example-dependencies
 # template:begin authn:service-authn-test-dependencies
 axum = { workspace = true }
 # template:end authn:service-authn-test-dependencies

@@ -45,6 +45,9 @@ jobs:
       dependency_policy: ${{ steps.surfaces.outputs.dependency_policy }}
       lint_config: ${{ steps.surfaces.outputs.lint_config }}
       openapi: ${{ steps.surfaces.outputs.openapi }}
+      # template:begin grpc:ci-grpc-output
+      grpc_schema: ${{ steps.surfaces.outputs.grpc_schema }}
+      # template:end grpc:ci-grpc-output
       tool_manifest: ${{ steps.surfaces.outputs.tool_manifest }}
       github_workflows: ${{ steps.surfaces.outputs.github_workflows }}
       dependency_automation: ${{ steps.surfaces.outputs.dependency_automation }}
@@ -91,6 +94,38 @@ jobs:
           else
             bash ./scripts/ci/changed-surfaces.sh --all | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
           fi
+
+  # template:begin grpc:ci-grpc-job
+  grpc:
+    needs: changes
+    if: needs.changes.outputs.grpc_schema == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - name: Restore generator cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/grpc-codegen
+          key: grpc-codegen-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'tools/grpc-codegen/Cargo.lock') }}
+      - name: Check schema and committed generation
+        env:
+          GRPC_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || github.sha }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/grpc-codegen
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${GRPC_BASE_REF}"
+          bash ./scripts/ci/measure.sh grpc-schema -- make grpc-check
+  # template:end grpc:ci-grpc-job
 
   quality:
     needs: changes
@@ -669,6 +704,9 @@ jobs:
     needs:
       - changes
       - quality
+      # template:begin grpc:ci-required-grpc-need
+      - grpc
+      # template:end grpc:ci-required-grpc-need
       - security
       - secrets
       - delivery

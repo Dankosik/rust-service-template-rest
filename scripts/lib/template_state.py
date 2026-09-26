@@ -32,6 +32,7 @@ DATABASE_CHOICES = ("none", "postgres")
 AUTHN_CHOICES = ("none", "oidc-jwt", "oidc-introspection")
 OUTBOUND_HTTP_CHOICES = ("none", "bounded")
 OUTBOUND_AUTH_CHOICES = ("none", "oauth2-client-credentials")
+GRPC_CHOICES = ("none", "enabled")
 HTTP_IDEMPOTENCY_CHOICES = ("none", "postgres")
 JOBS_CHOICES = ("none", "postgres")
 WEBHOOKS_CHOICES = ("none", "durable")
@@ -304,12 +305,17 @@ def validate_profiles(value: object) -> dict[str, str]:
             "database", "authn", "outbound_http", "outbound_auth", "http_idempotency", "jobs", "webhooks",
             "inbound_webhooks", "agent_harness",
         },
+        {
+            "database", "authn", "outbound_http", "outbound_auth", "grpc", "http_idempotency", "jobs",
+            "webhooks", "inbound_webhooks", "agent_harness",
+        },
     ):
         raise Refusal("profiles has an unsupported shape")
     database = value["database"]
     authn = value.get("authn", "none")
     outbound_http = value.get("outbound_http", "none")
     outbound_auth = value.get("outbound_auth", "none")
+    grpc = value.get("grpc", "none")
     http_idempotency = value.get("http_idempotency", "none")
     jobs = value.get("jobs", "none")
     webhooks = value.get("webhooks", "none")
@@ -325,6 +331,8 @@ def validate_profiles(value: object) -> dict[str, str]:
         raise Refusal("profiles.outbound_auth is unsupported")
     if outbound_auth == "oauth2-client-credentials" and outbound_http != "bounded":
         raise Refusal("profiles.outbound_auth=oauth2-client-credentials requires profiles.outbound_http=bounded")
+    if not isinstance(grpc, str) or grpc not in GRPC_CHOICES:
+        raise Refusal("profiles.grpc is unsupported")
     if not isinstance(http_idempotency, str) or http_idempotency not in HTTP_IDEMPOTENCY_CHOICES:
         raise Refusal("profiles.http_idempotency is unsupported")
     if http_idempotency == "postgres":
@@ -365,6 +373,7 @@ def validate_profiles(value: object) -> dict[str, str]:
         "authn": authn,
         "outbound_http": outbound_http,
         "outbound_auth": outbound_auth,
+        "grpc": grpc,
         "http_idempotency": http_idempotency,
         "jobs": jobs,
         "webhooks": webhooks,
@@ -593,6 +602,18 @@ def selected_outbound_auth(root: Path) -> str:
     if lock["state"] != "complete":
         raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
     return lock["profiles"]["outbound_auth"]
+
+
+def selected_grpc(root: Path) -> str:
+    """Return the native gRPC selection, or the source capability."""
+
+    root = Path(root)
+    lock = load_lock(root)
+    if lock is None:
+        return "enabled" if (root / "crates/infra-grpc").is_dir() else "none"
+    if lock["state"] != "complete":
+        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
+    return lock["profiles"]["grpc"]
 
 
 def selected_http_idempotency(root: Path) -> str:
@@ -1212,6 +1233,7 @@ def _profile_command(arguments: argparse.Namespace) -> int:
             "authn": selected_authn(root),
             "outbound_http": selected_outbound_http(root),
             "outbound_auth": selected_outbound_auth(root),
+            "grpc": selected_grpc(root),
             "http_idempotency": selected_http_idempotency(root),
             "jobs": selected_jobs(root),
             "webhooks": selected_webhooks(root),
@@ -1233,7 +1255,7 @@ def build_parser() -> argparse.ArgumentParser:
     profile.add_argument(
         "--field", required=True,
         choices=(
-            "database", "authn", "outbound_http", "outbound_auth", "http_idempotency", "jobs", "webhooks",
+            "database", "authn", "outbound_http", "outbound_auth", "grpc", "http_idempotency", "jobs", "webhooks",
             "inbound_webhooks", "agent_harness",
         ),
     )

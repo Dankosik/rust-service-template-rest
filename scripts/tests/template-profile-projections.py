@@ -332,7 +332,7 @@ def _compare_lock(reference: bytes, actual: bytes, harness: str, initializer) ->
 
 def _inputs(
     initializer, database: str, authn: str, outbound_http: str, http_idempotency: str,
-    jobs: str, webhooks: str, inbound_webhooks: str, harness: str, outbound_auth: str = "none",
+    jobs: str, webhooks: str, inbound_webhooks: str, harness: str, outbound_auth: str = "none", grpc: str = "none",
 ):
     # Matches the CI runner's identity convention. The `JOBS=none` identity is
     # unchanged from before the jobs pack.
@@ -361,6 +361,7 @@ def _inputs(
         authn=authn,
         outbound_http=outbound_http,
         outbound_auth=outbound_auth,
+        grpc=grpc,
         http_idempotency=http_idempotency,
         jobs=jobs,
         webhooks=webhooks,
@@ -393,6 +394,7 @@ def _refused_namespace(
         authn=authn,
         outbound_http=outbound_http,
         outbound_auth="none",
+        grpc="none",
         http_idempotency=http_idempotency,
         jobs=jobs,
         webhooks=webhooks,
@@ -462,6 +464,12 @@ def _assert_no_profile_output(initializer, nodes: dict[str, Node], profile: str,
             raise initializer.Refusal(f"{profile} selection retained profile output: {relative}")
 
 
+def _assert_profile_output(initializer, nodes: dict[str, Node], profile: str, paths: Iterable[str]) -> None:
+    for relative in paths:
+        if relative not in nodes and not any(entry.startswith(f"{relative}/") for entry in nodes):
+            raise initializer.Refusal(f"{profile} selection omitted profile output: {relative}")
+
+
 def _assert_introspection_cache_output(initializer, nodes: dict[str, Node], authn: str) -> None:
     # The projected public configuration and adapter API must exist only for
     # introspection. These are profile contracts, not private implementation names.
@@ -512,6 +520,53 @@ def _check_oauth_projections(source: Path, candidate: str, initializer, work: Pa
             initializer, database, authn, "bounded", http_idempotency, jobs, webhooks, inbound_webhooks, "core",
             outbound_auth="oauth2-client-credentials",
         )
+
+
+def _check_grpc_projections(source: Path, candidate: str, initializer, work: Path) -> None:
+    """Exercise the five gRPC graphs that add independent profile reachability."""
+
+    profile_data = initializer._profile_data(source)
+    grpc_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["grpc"])
+    combined_paths = frozenset(
+        relative.rstrip("/") for relative in profile_data.removals["outbound-auth-grpc"]
+    )
+    scenarios = (
+        ("none", "none", "none", "none", "none", "none", "none", "none"),
+        ("none", "oidc-jwt", "none", "none", "none", "none", "none", "none"),
+        ("none", "oidc-introspection", "none", "none", "none", "none", "none", "none"),
+        ("none", "none", "bounded", "oauth2-client-credentials", "none", "none", "none", "none"),
+        ("postgres", "oidc-introspection", "bounded", "oauth2-client-credentials", "postgres", "postgres", "durable", "standard-webhooks"),
+    )
+    for index, (database, authn, outbound_http, outbound_auth, http_idempotency, jobs, webhooks, inbound_webhooks) in enumerate(scenarios, 1):
+        inputs = _inputs(
+            initializer, database, authn, outbound_http, http_idempotency, jobs, webhooks, inbound_webhooks,
+            "core", outbound_auth=outbound_auth, grpc="enabled",
+        )
+        with tempfile.TemporaryDirectory(prefix=f"grpc-{index}-", dir=work) as selection:
+            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+        _assert_profile_output(initializer, nodes, "grpc", grpc_paths)
+        if outbound_auth == "oauth2-client-credentials":
+            _assert_profile_output(initializer, nodes, "outbound-auth-grpc", combined_paths)
+        else:
+            _assert_no_profile_output(initializer, nodes, "outbound-auth-grpc", combined_paths)
+        profiles = inputs.profiles()
+        if profiles["grpc"] != "enabled":
+            raise initializer.Refusal("gRPC projection did not retain its enabled selection")
+        _emit(
+            "grpc-selection",
+            scenario=index,
+            database=database,
+            authn=authn,
+            outbound_http=outbound_http,
+            outbound_auth=outbound_auth,
+            http_idempotency=http_idempotency,
+            jobs=jobs,
+            webhooks=webhooks,
+            inbound_webhooks=inbound_webhooks,
+            profiles=profiles,
+            tree_sha256=_tree_digest(nodes),
+            lock_sha256=hashlib.sha256(initializer._lock_bytes(inputs, candidate, "complete")).hexdigest(),
+        )
         with tempfile.TemporaryDirectory(prefix=f"oauth-{index}-", dir=work) as selection:
             nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
         for relative in outbound_paths:
@@ -544,6 +599,11 @@ def check(source: Path) -> None:
     idempotency_paths = _http_idempotency_output_paths(source, initializer)
     jobs_paths = _jobs_output_paths(source, initializer)
     webhook_paths = _webhook_output_paths(source, initializer)
+    profile_data = initializer._profile_data(source)
+    grpc_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["grpc"])
+    combined_grpc_paths = frozenset(
+        relative.rstrip("/") for relative in profile_data.removals["outbound-auth-grpc"]
+    )
     raw_combinations = (
         len(DATABASES) * len(AUTHN) * len(OUTBOUND_HTTP) * len(HTTP_IDEMPOTENCY) * len(JOBS)
         * len(WEBHOOKS) * len(INBOUND_WEBHOOKS)
@@ -654,6 +714,10 @@ def check(source: Path) -> None:
                                             _assert_no_profile_output(
                                                 initializer, nodes, "inbound-webhooks", webhook_paths["inbound-webhooks"]
                                             )
+                                        _assert_no_profile_output(initializer, nodes, "grpc", grpc_paths)
+                                        _assert_no_profile_output(
+                                            initializer, nodes, "outbound-auth-grpc", combined_grpc_paths
+                                        )
                                         _assert_introspection_cache_output(initializer, nodes, authn)
                                         digest = _tree_digest(nodes)
                                         lock = initializer._lock_bytes(inputs, candidate, "complete")
@@ -709,6 +773,7 @@ def check(source: Path) -> None:
                                             lock_result="agent_harness_only",
                                         )
         _check_oauth_projections(source, candidate, initializer, work)
+        _check_grpc_projections(source, candidate, initializer, work)
 
 
 def _expect_refusal(initializer, action, label: str) -> None:

@@ -135,7 +135,7 @@ pub(crate) enum BootstrapError {
 /// Parse flags, load configuration, run the service, and map the result to
 /// an exit code. Never calls `process::exit`, so destructors run. `--help`
 /// exits 0; other clap errors exit 1. Version is not a loader flag.
-pub(crate) fn run<I>(args: I) -> ExitCode
+pub(crate) fn run<I>(args: I, grpc_registration: Option<crate::GrpcRegistration>) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
@@ -158,7 +158,7 @@ where
         Err(err) => return process_failure(&format!("build tokio runtime: {err}")),
     };
 
-    let outcome = runtime.block_on(serve(config));
+    let outcome = runtime.block_on(serve(config, grpc_registration));
     // Drops connection tasks that outlived the drain and any blocking work.
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
 
@@ -173,7 +173,10 @@ where
     }
 }
 
-async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
+async fn serve(
+    config: Config,
+    grpc_registration: Option<crate::GrpcRegistration>,
+) -> Result<Outcome, BootstrapError> {
     // Before this point SIGTERM has its default disposition and kills the
     // process; install the handlers first and keep them for the lifetime.
     let mut signals = Signals::install().map_err(BootstrapError::Signals)?;
@@ -260,6 +263,9 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             readiness,
             policy,
             auth,
+            // template:begin grpc:bootstrap-registration
+            grpc_registration,
+            // template:end grpc:bootstrap-registration
             // template:begin postgres:bootstrap-prepared-pool
             postgres_pool: postgres_pool.clone(),
             // template:end postgres:bootstrap-prepared-pool
@@ -609,6 +615,9 @@ struct Prepared<'a> {
     readiness: Readiness,
     policy: RefreshPolicy,
     auth: PreparedAuth,
+    // template:begin grpc:bootstrap-prepared-registration
+    grpc_registration: Option<crate::GrpcRegistration>,
+    // template:end grpc:bootstrap-prepared-registration
     // template:begin postgres:bootstrap-prepared-field
     postgres_pool: Option<PgPool>,
     // template:end postgres:bootstrap-prepared-field
@@ -632,6 +641,9 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         readiness,
         policy,
         auth,
+        // template:begin grpc:bootstrap-destructure-registration
+        grpc_registration,
+        // template:end grpc:bootstrap-destructure-registration
         // template:begin postgres:bootstrap-destructure-pool
         postgres_pool,
         // template:end postgres:bootstrap-destructure-pool
