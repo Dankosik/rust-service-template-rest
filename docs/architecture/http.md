@@ -23,12 +23,12 @@ alternatives they beat, are recorded at the end of this document.
    limit (`413`). Every layer is applied with `Router::layer`, so the `404`
    and `405` fallbacks travel through the same chain. There is no CORS
    layer: browser cross-origin requests are fail-closed by omission.
-4. The route tree is one `infra_http::ContractRouter`.
+4. The route tree is one `utoipa_axum::router::OpenApiRouter`.
    `infra_http::router()` contributes the platform probes and the problem
    components; feature routers merge with it in `service::api::contract()`.
-   One finalizer consumes the carrier into the served axum `Router`; the
-   document-only path is separate, so the two cannot describe different
-   services.
+   The finalizer derives policy from its assembled document, splits it into
+   the served axum `Router` and OpenAPI, and applies policy to served methods.
+   The document-only path renders the same composition.
 5. Handlers return the typed responses their contract declares (an
    `IntoResponses` enum with one variant per status, or a `Problem`).
    Failures are `Problem` values from the closed catalog in
@@ -80,12 +80,22 @@ regenerated fails everywhere tests run.
    lives with that pack's seam and is registered through the pack's own
    composer. Request and response types derive `ToSchema`;
    `#[serde(deny_unknown_fields)]` closes an object.
-4. Merge the feature's `ContractRouter` in `service::api::contract()`; the
-   hardened chain is not edited for an operation.
+4. Register the handler as `OpenApiRouter::routes(utoipa_axum::routes!(handler))`
+   in the feature's `OpenApiRouter`, and merge that router in
+   `service::api::contract()`; the hardened chain is unchanged.
 5. Run `make openapi-generate`, review the YAML diff as the contract change,
    then `make openapi-check`.
 6. Test the mounted router with a one-shot call asserting status, content
    type, problem code, and headers.
+
+`routes!` registers exactly the annotated methods, so the served routes and
+the document share one source. The final policy layer answers a sanitized
+`500` for a served method the document lacks, and HEAD follows GET unless the
+annotation documents HEAD. Clippy's `disallowed-methods` (`clippy.toml`)
+rejects the remaining escape hatches in application code: raw
+`OpenApiRouter`/`Router` routes and services, fallbacks, and separately
+registered HEAD or any-method handlers. Multi-handler macro calls group only
+annotated methods on the same path.
 
 The first operation that accepts parameters or a body also adds the mapping
 from extractor rejections to `400`/`415`/`422` problems with `invalid_params`
@@ -100,13 +110,19 @@ fixed failure family; an author adds only operation-specific responses.
 
 <!-- template:begin authn:docs-http-protected-composition -->
 With a retained authentication profile, feature routers register documented
-handlers through `infra_http::routes!` and service merges their
-`ContractRouter` carriers. Bootstrap passes the complete carrier, prepared
-verifier, and effective token bound to `infra_http::authn::finalize`. The one
-outer layer derives policy from the final document and actual registrations,
-without changing unknown-path `404` or wrong-method `405` behavior. Its
-`VerifiedPrincipal` extractor contains only a sealed verified principal;
-handlers never receive a raw token or unverified claims. Health probes remain
+handlers through `utoipa_axum::routes!` and service merges their
+`OpenApiRouter` values. Bootstrap passes the complete router and prepared
+verifier to `infra_http::authn::finalize`; disabled mode uses `finalize_public`.
+The final document alone supplies policy. A route layer preserves native
+unknown-path `404` and wrong-method `405`; explicit HEAD policy wins, otherwise
+HEAD uses GET. A served method without policy produces sanitized `500`.
+`VerifiedPrincipal` exposes sealed identity and immutable typed `claims<T>()`
+from the same verified evidence, with sanitized access errors. Handlers never
+receive raw tokens or unverified claims. The normal Clippy gate rejects raw
+routes, fallbacks and separate HEAD handlers; supported authoring uses
+annotated routes, OpenAPI merge and nest.
+Response completeness and optional `x-security-decision` consistency belong
+to the OpenAPI gate; startup checks effective security. Health probes remain
 explicitly public, so supplied Authorization does not cause provider work.
 The [authentication guide](../authentication.md) owns retained-profile trust,
 failure, provider-budget and lifecycle decisions.
@@ -114,20 +130,20 @@ failure, provider-budget and lifecycle decisions.
 <!-- template:begin request-budget:docs-http-request-budget -->
 The hardened chain stamps `infra_http::RequestDeadline` immediately before
 the existing request timer. Its `at()` accessor exposes the same absolute
-instant without allowing a reset. A request-owned provider must observe it,
-subtract its own response reserve, and refuse a missing stamp; the outer timer
-remains the final inbound timeout authority.
+instant without allowing a reset. Idempotency uses it for its request-owned work. Authentication has independent
+provider bounds and accepts no deadline stamp or response reserve; the outer
+timer alone owns `504 request_timeout`.
 <!-- template:end request-budget:docs-http-request-budget -->
 <!-- template:begin http-idempotency:docs-http-idempotent-composition -->
 With a retained idempotency profile, compose an idempotent operation through
-`Composer::route(RegisteredRoutes)?`. The fallible local composition validates
-the route carrier before it can be served; `Composer::finish(self) -> Activation`
-then activates the count of successfully composed operations without reading
-the assembled document. Key handling retains the registered-route carrier;
-final authentication remains outside it, so at request time authentication
-decides before key validation, and both precede any handler extractor. The
-[HTTP idempotency guide](../http-idempotency.md) owns activation, retry, and
-data-custody decisions.
+`Composer::route(routes)?` using the macro-only binding above. The fallible
+local composition validates the route carrier before it can be served;
+`Composer::finish(self) -> Activation` then activates the count of successfully
+composed operations without reading the assembled document. Key handling wraps
+the upstream `UtoipaMethodRouter` tuple; final authentication remains outside
+it, so at request time authentication decides before key validation, and both
+precede any handler extractor. The [HTTP idempotency guide](../http-idempotency.md)
+owns activation, retry, and data-custody decisions.
 
 The composed seam captures the bounded original URI, received Content-Type
 values, and raw body once, restores the body for extraction, then lets normal
@@ -216,7 +232,7 @@ exists. Public operations, including probes, explicitly override it with
 <!-- template:begin inbound-webhooks:docs-http-inbound-webhooks -->
 ## Signed webhook ingress
 
-When retained, `POST /webhooks/{endpoint_id}` is an annotated ContractRouter
+When retained, `POST /webhooks/{endpoint_id}` is an annotated `OpenApiRouter`
 operation. It deliberately uses the existing zero-group `security()` annotation
 to generate explicit `security: []`, overriding root bearer authentication. That
 OpenAPI expression means bearer is not required; it does not waive the required
@@ -237,8 +253,8 @@ generated OpenAPI document remains handler-derived and must not be hand-edited.
 4. utoipa overwrites a schema silently when two types share a name
    (juhaku/utoipa#1154); use `#[schema(as = ...)]`. The drift test shows the
    result without naming the cause.
-5. Start from `ContractRouter::with_openapi(ApiDoc::openapi())`; it retains
-   service-level metadata while tracking each actual registered method.
+5. Start from `OpenApiRouter::with_openapi(ApiDoc::openapi())`; it retains
+   service-level metadata while annotations supply served operations.
 6. `IntoResponses` and `ToResponse` derive documentation only; the runtime
    `IntoResponse` is hand-written and the contract tests assert both agree.
 7. oasdiff treats a removed non-success status as non-breaking under

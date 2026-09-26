@@ -1,25 +1,83 @@
 //! RFC 7662 opaque-token introspection.
 
 use std::{
-    borrow::Borrow,
-    collections::{HashMap, hash_map::Entry},
     fmt,
-    hash::{Hash, Hasher},
-    sync::{Arc, Mutex},
+    future::Future,
+    num::NonZeroUsize,
+    pin::Pin,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use base64::{Engine, engine::general_purpose::STANDARD};
-use secrecy::{ExposeSecret, SecretString};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use moka::{Expiry, future::Cache};
+use secrecy::ExposeSecret;
+use sha2::{Digest, Sha256};
 use tokio::{sync::Semaphore, time::Instant};
 
 use crate::{
-    BearerToken, Failure, IntrospectionCacheOptions, IntrospectionOptions, PreparationError,
-    Principal, VerificationError, VerificationReason, Verifier,
+    BearerToken, Engine, Failure, PreparationError, Principal, VerificationError,
+    VerificationReason, Verifier,
     claims::{ClaimPolicy, VerifiedIntrospection, validate_introspection_claims},
-    provider::{ProviderClient, ProviderDeadline, reserve_request_deadline},
+    provider::{ProviderClient, ProviderDeadline},
     record_verification,
 };
+
+/// Bootstrap input for RFC 7662 token introspection.
+#[derive(Clone)]
+pub struct IntrospectionOptions {
+    pub issuer: crate::ProviderUrl,
+    pub audiences: Vec<String>,
+    pub endpoint: crate::ProviderUrl,
+    pub client_id: String,
+    pub client_secret: secrecy::SecretString,
+    pub provider_concurrency: NonZeroUsize,
+    pub cache: Option<IntrospectionCacheOptions>,
+}
+
+impl fmt::Debug for IntrospectionOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("IntrospectionOptions([REDACTED])")
+    }
+}
+
+/// Validated positive-result retention for one prepared introspection verifier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IntrospectionCacheOptions {
+    capacity: usize,
+    ttl: Duration,
+}
+
+impl IntrospectionCacheOptions {
+    /// Selects a best-effort capacity of 1–1024 entries and a fixed TTL of 1–300 seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PreparationError`] when either retention bound is invalid.
+    pub fn new(capacity: usize, ttl: Duration) -> Result<Self, PreparationError> {
+        if !(1..=1024).contains(&capacity)
+            || !(Duration::from_secs(1)..=Duration::from_secs(300)).contains(&ttl)
+        {
+            return Err(PreparationError::new(
+                crate::PreparationPhase::Options,
+                crate::PreparationReason::Parse,
+            ));
+        }
+        Ok(Self { capacity, ttl })
+    }
+
+    /// The best-effort maximum number of retained entries.
+    #[must_use]
+    pub const fn capacity(self) -> usize {
+        self.capacity
+    }
+
+    /// The fixed maximum lifetime of a retained entry.
+    #[must_use]
+    pub const fn ttl(self) -> Duration {
+        self.ttl
+    }
+}
 
 /// Builds the opaque-token verifier without performing provider I/O.
 ///
@@ -27,14 +85,7 @@ use crate::{
 ///
 /// Returns [`PreparationError`] for invalid options or client preparation failure.
 pub fn prepare_introspection(options: IntrospectionOptions) -> Result<Verifier, PreparationError> {
-    let provider = ProviderClient::new().map_err(|error| {
-        error.with_context(
-            &options.issuer,
-            &options.audiences,
-            Some(options.endpoint.as_str()),
-        )
-    })?;
-    prepare_with_provider(options, provider)
+    prepare_with_provider(options, ProviderClient::new()?)
 }
 
 /// Prepares a verifier through fixture-only local TLS transport.
@@ -54,40 +105,14 @@ fn prepare_with_provider(
     options: IntrospectionOptions,
     provider: ProviderClient,
 ) -> Result<Verifier, PreparationError> {
-    if options.audiences.is_empty()
-        || options.audiences.iter().any(String::is_empty)
-        || options.cache.is_some_and(|cache| {
-            !(1..=1024).contains(&cache.capacity)
-                || !(Duration::from_secs(1)..=Duration::from_secs(300)).contains(&cache.ttl)
-        })
-    {
-        return Err(PreparationError::new(
-            crate::PreparationPhase::Options,
-            crate::PreparationReason::Parse,
-        )
-        .with_context(
-            &options.issuer,
-            &options.audiences,
-            Some(options.endpoint.as_str()),
-        ));
-    }
-    Ok(Verifier::Introspection(IntrospectionVerifier {
-        endpoint: options.endpoint,
-        client_id: options.client_id,
-        client_secret: options.client_secret,
-        policy: Arc::new(ClaimPolicy::new(
-            options.issuer.as_str().to_owned(),
-            options.audiences,
-        )),
-        provider,
-        permits: Arc::new(Semaphore::new(options.provider_concurrency.get())),
-        cache: options.cache.map(IntrospectionCache::new),
-    }))
+    Ok(Verifier::new(IntrospectionVerifier::new(
+        options, provider,
+    )?))
 }
 
 /// A bounded client with optional positive retention for one immutable trust context.
 #[derive(Clone)]
-pub struct IntrospectionVerifier {
+struct IntrospectionVerifier {
     endpoint: crate::ProviderUrl,
     client_id: String,
     client_secret: secrecy::SecretString,
@@ -103,31 +128,92 @@ impl fmt::Debug for IntrospectionVerifier {
     }
 }
 
+impl Engine for IntrospectionVerifier {
+    fn verify<'a>(
+        &'a self,
+        token: &'a BearerToken<'_>,
+    ) -> Pin<Box<dyn Future<Output = Result<Principal, Failure>> + Send + 'a>> {
+        Box::pin(
+            async move { record_verification("introspection", self.verify_evidence(token).await) },
+        )
+    }
+}
+
 impl IntrospectionVerifier {
-    pub(crate) async fn verify(
-        &self,
-        token: &BearerToken<'_>,
-        deadline: Instant,
-    ) -> Result<Principal, Failure> {
-        record_verification("introspection", self.verify_evidence(token, deadline).await)
+    fn new(
+        options: IntrospectionOptions,
+        provider: ProviderClient,
+    ) -> Result<Self, PreparationError> {
+        crate::ProviderUrl::parse(options.issuer.as_str())?;
+        if options.audiences.is_empty() || options.audiences.iter().any(String::is_empty) {
+            return Err(PreparationError::new(
+                crate::PreparationPhase::Options,
+                crate::PreparationReason::Parse,
+            ));
+        }
+        crate::describe_verification();
+        Ok(Self {
+            endpoint: options.endpoint,
+            client_id: options.client_id,
+            client_secret: options.client_secret,
+            policy: Arc::new(ClaimPolicy::new(
+                options.issuer.as_str().to_owned(),
+                options.audiences,
+            )),
+            provider,
+            permits: Arc::new(Semaphore::new(options.provider_concurrency.get())),
+            cache: options.cache.map(IntrospectionCache::new),
+        })
     }
 
     async fn verify_evidence(
         &self,
         token: &BearerToken<'_>,
-        deadline: Instant,
     ) -> Result<Principal, VerificationError> {
-        check_request_reserve(Instant::now(), deadline)?;
-        let token_value =
-            std::str::from_utf8(token.as_bytes()).map_err(|_| provider_error(Failure::Invalid))?;
-        if let Some(cache) = &self.cache
-            && let Some(candidate) = cache.lookup(token_value, Instant::now(), SystemTime::now())
-            && let Some(principal) = candidate.admit(deadline, Instant::now(), SystemTime::now())?
-        {
-            return Ok(principal);
+        let Some(cache) = &self.cache else {
+            return self
+                .fetch(token)
+                .await
+                .map(VerifiedIntrospection::into_principal);
+        };
+        let key: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        loop {
+            let result = cache
+                .entries
+                .try_get_with(key, async {
+                    let evidence = self.fetch(token).await.map_err(FillError::Verification)?;
+                    CachedIntrospection::new(
+                        evidence,
+                        cache.options.ttl,
+                        Instant::now(),
+                        SystemTime::now(),
+                    )
+                    .map(Arc::new)
+                })
+                .await;
+            match result {
+                Ok(candidate) => {
+                    if candidate.is_live(Instant::now(), SystemTime::now()) {
+                        return Ok(candidate.evidence.clone().into_principal());
+                    }
+                    cache.entries.invalidate(&key).await;
+                }
+                Err(error) => {
+                    return match error.as_ref() {
+                        FillError::Verification(error) => Err(*error),
+                        FillError::NotRetained(evidence) => {
+                            Ok(evidence.as_ref().clone().into_principal())
+                        }
+                    };
+                }
+            }
         }
-        let provider_deadline = ProviderDeadline::request(Instant::now(), deadline)
-            .ok_or_else(|| provider_error(Failure::Timeout))?;
+    }
+
+    async fn fetch(
+        &self,
+        token: &BearerToken<'_>,
+    ) -> Result<VerifiedIntrospection, VerificationError> {
         let _permit = self.permits.clone().try_acquire_owned().map_err(|_| {
             VerificationError::new(Failure::Unavailable, VerificationReason::Capacity)
         })?;
@@ -140,52 +226,23 @@ impl IntrospectionVerifier {
                 self.endpoint.url(),
                 &authorization,
                 body.as_bytes(),
-                provider_deadline,
+                ProviderDeadline::independent(Instant::now()),
             )
             .await
             .map_err(provider_error)?;
-        let evidence = validate_introspection_claims(
+        validate_introspection_claims(
             &response,
             &self.policy,
             now_epoch_seconds().map_err(provider_error)?,
-        )?;
-        if let Some(cache) = &self.cache {
-            cache.complete(token_value, evidence, deadline)
-        } else {
-            check_request_reserve(Instant::now(), deadline)?;
-            Ok(evidence.into_principal())
-        }
+        )
     }
 }
 
 const MAX_ENTRY_BYTES: usize = 64 * 1024;
 
-struct TokenKey(SecretString);
-
-impl Borrow<str> for TokenKey {
-    fn borrow(&self) -> &str {
-        self.0.expose_secret()
-    }
-}
-
-impl PartialEq for TokenKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.expose_secret() == other.0.expose_secret()
-    }
-}
-
-impl Eq for TokenKey {}
-
-impl Hash for TokenKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.expose_secret().hash(state);
-    }
-}
-
-impl fmt::Debug for TokenKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("TokenKey([REDACTED])")
-    }
+enum FillError {
+    Verification(VerificationError),
+    NotRetained(Arc<VerifiedIntrospection>),
 }
 
 #[derive(Clone)]
@@ -197,46 +254,42 @@ struct CachedIntrospection {
 
 impl CachedIntrospection {
     fn new(
-        evidence: &VerifiedIntrospection,
+        evidence: VerifiedIntrospection,
         ttl: Duration,
         now: Instant,
         wall: SystemTime,
-    ) -> Option<Self> {
-        wall.duration_since(UNIX_EPOCH).ok()?;
-        let token_expires_at =
-            UNIX_EPOCH.checked_add(Duration::from_secs(evidence.principal().expires_at()))?;
-        let remaining = token_expires_at.duration_since(wall).ok()?;
-        if remaining.is_zero() {
-            return None;
+    ) -> Result<Self, FillError> {
+        let expiry = UNIX_EPOCH
+            .checked_add(Duration::from_secs(evidence.principal().expires_at()))
+            .and_then(|token_expires_at| {
+                let remaining = token_expires_at.duration_since(wall).ok()?;
+                if remaining.is_zero() {
+                    return None;
+                }
+                Some((now.checked_add(ttl.min(remaining))?, token_expires_at))
+            });
+        if let Some((expires_at, token_expires_at)) = expiry
+            && evidence
+                .principal()
+                .retained_bytes()
+                .is_some_and(|bytes| bytes <= MAX_ENTRY_BYTES)
+        {
+            Ok(Self {
+                evidence,
+                expires_at,
+                token_expires_at,
+            })
+        } else {
+            Err(FillError::NotRetained(Arc::new(evidence)))
         }
-        let expires_at = now.checked_add(ttl.min(remaining))?;
-        Some(Self {
-            evidence: evidence.clone(),
-            expires_at,
-            token_expires_at,
-        })
     }
 
     fn is_live(&self, now: Instant, wall: SystemTime) -> bool {
-        now < self.expires_at && wall < self.token_expires_at
-    }
-
-    fn admit(
-        self,
-        deadline: Instant,
-        now: Instant,
-        wall: SystemTime,
-    ) -> Result<Option<Principal>, VerificationError> {
-        check_request_reserve(now, deadline)?;
-        let wall_seconds = wall
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| provider_error(Failure::Unavailable))?
-            .as_secs();
-        if !self.is_live(now, wall) {
-            return Ok(None);
-        }
-        self.evidence.validate_time(wall_seconds)?;
-        Ok(Some(self.evidence.into_principal()))
+        now < self.expires_at
+            && wall < self.token_expires_at
+            && wall
+                .duration_since(UNIX_EPOCH)
+                .is_ok_and(|elapsed| self.evidence.validate_time(elapsed.as_secs()).is_ok())
     }
 }
 
@@ -246,73 +299,45 @@ impl fmt::Debug for CachedIntrospection {
     }
 }
 
+struct CompletionExpiry;
+
+impl Expiry<[u8; 32], Arc<CachedIntrospection>> for CompletionExpiry {
+    fn expire_after_create(
+        &self,
+        _: &[u8; 32],
+        value: &Arc<CachedIntrospection>,
+        _: std::time::Instant,
+    ) -> Option<Duration> {
+        Some(value.expires_at.saturating_duration_since(Instant::now()))
+    }
+
+    fn expire_after_update(
+        &self,
+        _: &[u8; 32],
+        value: &Arc<CachedIntrospection>,
+        _: std::time::Instant,
+        _: Option<Duration>,
+    ) -> Option<Duration> {
+        Some(value.expires_at.saturating_duration_since(Instant::now()))
+    }
+    // Moka's default read callback preserves the remaining duration.
+}
+
 #[derive(Clone)]
 struct IntrospectionCache {
-    entries: Arc<Mutex<HashMap<TokenKey, CachedIntrospection>>>,
+    entries: Cache<[u8; 32], Arc<CachedIntrospection>>,
     options: IntrospectionCacheOptions,
 }
 
 impl IntrospectionCache {
     fn new(options: IntrospectionCacheOptions) -> Self {
         Self {
-            entries: Arc::new(Mutex::new(HashMap::with_capacity(options.capacity))),
+            entries: Cache::builder()
+                .max_capacity(options.capacity as u64)
+                .expire_after(CompletionExpiry)
+                .build(),
             options,
         }
-    }
-
-    fn lookup(&self, token: &str, now: Instant, wall: SystemTime) -> Option<CachedIntrospection> {
-        let mut entries = self.entries.try_lock().ok()?;
-        if entries.get(token)?.is_live(now, wall) {
-            entries.get(token).cloned()
-        } else {
-            entries.remove(token);
-            None
-        }
-    }
-
-    fn complete(
-        &self,
-        token: &str,
-        evidence: VerifiedIntrospection,
-        deadline: Instant,
-    ) -> Result<Principal, VerificationError> {
-        // Build and size the retained copy before locking. The completion clocks
-        // remain fixed even if cloning or cache admission takes time.
-        let candidate = CachedIntrospection::new(
-            &evidence,
-            self.options.ttl,
-            Instant::now(),
-            SystemTime::now(),
-        )
-        .filter(|candidate| {
-            candidate
-                .evidence
-                .principal()
-                .retained_bytes()
-                .and_then(|bytes| bytes.checked_add(token.len()))
-                .is_some_and(|bytes| bytes <= MAX_ENTRY_BYTES)
-        });
-        let mut entries = self.entries.try_lock().ok();
-        let mut inserted = false;
-        if let (Some(entries), Some(candidate)) = (entries.as_mut(), candidate) {
-            let now = Instant::now();
-            let wall = SystemTime::now();
-            entries.retain(|_, entry| entry.is_live(now, wall));
-            if entries.len() < self.options.capacity && candidate.is_live(now, wall) {
-                // A concurrent miss must not replace a live entry or renew it.
-                if let Entry::Vacant(entry) = entries.entry(TokenKey(SecretString::from(token))) {
-                    entry.insert(candidate);
-                    inserted = true;
-                }
-            }
-        }
-        if let Err(error) = check_request_reserve(Instant::now(), deadline) {
-            if inserted && let Some(entries) = &mut entries {
-                entries.remove(token);
-            }
-            return Err(error);
-        }
-        Ok(evidence.into_principal())
     }
 }
 
@@ -322,21 +347,8 @@ impl fmt::Debug for IntrospectionCache {
     }
 }
 
-fn check_request_reserve(now: Instant, deadline: Instant) -> Result<(), VerificationError> {
-    reserve_request_deadline(now, deadline)
-        .map(|_| ())
-        .ok_or_else(|| provider_error(Failure::Timeout))
-}
-
 fn provider_error(failure: Failure) -> VerificationError {
-    VerificationError::new(
-        failure,
-        if failure == Failure::Timeout {
-            VerificationReason::RequestTimeout
-        } else {
-            VerificationReason::Provider
-        },
-    )
+    VerificationError::new(failure, VerificationReason::Provider)
 }
 
 fn now_epoch_seconds() -> Result<u64, Failure> {
@@ -355,38 +367,35 @@ fn form_body(token: &BearerToken<'_>) -> Result<String, Failure> {
 }
 
 fn basic_authorization(client_id: &str, client_secret: &str) -> Vec<u8> {
-    let mut credential = form_component(client_id);
-    credential.push(':');
-    credential.push_str(&form_component(client_secret));
+    let credential = format!(
+        "{}:{}",
+        url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect::<String>(),
+        url::form_urlencoded::byte_serialize(client_secret.as_bytes()).collect::<String>()
+    );
     let encoded = STANDARD.encode(credential);
     let mut authorization = b"Basic ".to_vec();
     authorization.extend_from_slice(encoded.as_bytes());
     authorization
 }
 
-fn form_component(value: &str) -> String {
-    let encoded = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair(value, "")
-        .finish();
-    encoded[..encoded.len().saturating_sub(1)].to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
+        future::{Future, poll_fn},
         num::NonZeroUsize,
+        pin::Pin,
         sync::{
             Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
+        task::Poll,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
-
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
         sync::Semaphore,
-        task::JoinHandle,
+        task::{JoinHandle, JoinSet},
         time::Instant,
     };
     use tokio_rustls::{
@@ -399,25 +408,26 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        CachedIntrospection, ClaimPolicy, IntrospectionCache, IntrospectionVerifier,
-        basic_authorization, form_body, prepare_with_provider,
+        CachedIntrospection, FillError, IntrospectionCacheOptions, IntrospectionOptions,
+        IntrospectionVerifier, basic_authorization, form_body, prepare_with_provider,
     };
-    use crate::tls::TlsMaterial;
     use crate::{
-        Failure, IntrospectionCacheOptions, IntrospectionOptions, ProviderUrl, VerificationReason,
-        Verifier,
-        claims::validate_introspection_claims,
+        Engine, Failure, ProviderUrl,
+        claims::{ClaimPolicy, validate_introspection_claims},
         parse_bearer,
         provider::{ProviderClient, new_fixture_client},
+        tls::TlsMaterial,
     };
 
-    const FIXTURE_HOST: &str = "authn.fixture.test";
+    const FIXTURE_HOST: &str = "provider.test";
 
     struct Fixture {
         endpoint: ProviderUrl,
         provider: ProviderClient,
         calls: Arc<AtomicUsize>,
+        received: Arc<Semaphore>,
         response: Arc<Mutex<Vec<u8>>>,
+        gate: Arc<Mutex<Option<Arc<Semaphore>>>>,
         cancel: CancellationToken,
         task: JoinHandle<()>,
     }
@@ -434,49 +444,74 @@ mod tests {
             .unwrap()
             .with_no_client_auth()
             .with_single_cert(
-                vec![CertificateDer::from(material.cert.clone())],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
+                vec![CertificateDer::from(material.cert)],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key)),
             )
             .unwrap();
             let acceptor = TlsAcceptor::from(Arc::new(config));
             let calls = Arc::new(AtomicUsize::new(0));
-            let response = Arc::new(Mutex::new(Vec::new()));
+            let received = Arc::new(Semaphore::new(0));
+            let response = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let gate = Arc::new(Mutex::new(None::<Arc<Semaphore>>));
             let cancel = CancellationToken::new();
             let task = tokio::spawn({
                 let cancel = cancel.clone();
                 let calls = calls.clone();
+                let received = received.clone();
                 let response = response.clone();
+                let gate = gate.clone();
                 async move {
+                    let mut connections = JoinSet::new();
                     loop {
                         let stream = tokio::select! {
                             () = cancel.cancelled() => break,
+                            Some(result) = connections.join_next(), if !connections.is_empty() => { result.unwrap(); continue; },
                             accepted = listener.accept() => accepted.unwrap().0,
                         };
-                        tokio::time::timeout(Duration::from_secs(5), async {
-                            let mut stream = acceptor.accept(stream).await.unwrap();
-                            let mut request = Vec::new();
-                            let mut chunk = [0_u8; 4096];
-                            loop {
-                                let read = stream.read(&mut chunk).await.unwrap();
-                                assert_ne!(read, 0);
-                                request.extend_from_slice(&chunk[..read]);
-                                assert!(request.len() <= 128 * 1024);
-                                if request.windows(4).any(|part| part == b"\r\n\r\n") {
-                                    break;
+                        let acceptor = acceptor.clone();
+                        let calls = calls.clone();
+                        let received = received.clone();
+                        let response = response.clone();
+                        let gate = gate.clone();
+                        connections.spawn(async move {
+                            tokio::time::timeout(Duration::from_secs(5), async {
+                                let mut stream = acceptor.accept(stream).await.unwrap();
+                                let mut request = Vec::new();
+                                let mut chunk = [0_u8; 4096];
+                                loop {
+                                    let read = stream.read(&mut chunk).await.unwrap();
+                                    assert_ne!(read, 0);
+                                    request.extend_from_slice(&chunk[..read]);
+                                    assert!(request.len() <= 128 * 1024);
+                                    if request.windows(4).any(|part| part == b"\r\n\r\n") {
+                                        break;
+                                    }
                                 }
-                            }
-                            calls.fetch_add(1, Ordering::SeqCst);
-                            let bytes = response.lock().unwrap().clone();
-                            stream.write_all(&bytes).await.unwrap();
-                            stream.shutdown().await.unwrap();
-                        })
-                        .await
-                        .unwrap();
+                                let bytes = response.lock().unwrap().clone();
+                                let gate = gate.lock().unwrap().clone();
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                received.add_permits(1);
+                                if let Some(gate) = gate {
+                                    gate.acquire().await.unwrap().forget();
+                                }
+                                // A cancelled caller can close its TLS stream before the response.
+                                let _ = stream.write_all(&bytes).await;
+                                let _ = stream.shutdown().await;
+                            })
+                            .await
+                            .unwrap();
+                        });
+                    }
+                    connections.abort_all();
+                    while let Some(result) = connections.join_next().await {
+                        if let Err(error) = result {
+                            assert!(error.is_cancelled());
+                        }
                     }
                 }
             });
             let fixture = Self {
-                endpoint: ProviderUrl::parse(&format!(
+                endpoint: ProviderUrl::parse_endpoint(&format!(
                     "https://{FIXTURE_HOST}:{}/introspect",
                     address.port()
                 ))
@@ -489,7 +524,9 @@ mod tests {
                 )
                 .unwrap(),
                 calls,
+                received,
                 response,
+                gate,
                 cancel,
                 task,
             };
@@ -501,6 +538,20 @@ mod tests {
             let mut response = format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()).into_bytes();
             response.extend_from_slice(body);
             *self.response.lock().unwrap() = response;
+        }
+
+        fn block_responses(&self) -> Arc<Semaphore> {
+            let gate = Arc::new(Semaphore::new(0));
+            *self.gate.lock().unwrap() = Some(gate.clone());
+            gate
+        }
+
+        async fn received(&self) {
+            tokio::time::timeout(Duration::from_secs(5), self.received.acquire())
+                .await
+                .unwrap()
+                .unwrap()
+                .forget();
         }
 
         fn options(&self, cache: Option<IntrospectionCacheOptions>) -> IntrospectionOptions {
@@ -516,12 +567,7 @@ mod tests {
         }
 
         fn verifier(&self, cache: Option<IntrospectionCacheOptions>) -> IntrospectionVerifier {
-            let Verifier::Introspection(verifier) =
-                prepare_with_provider(self.options(cache), self.provider.clone()).unwrap()
-            else {
-                panic!("introspection verifier required");
-            };
-            verifier
+            IntrospectionVerifier::new(self.options(cache), self.provider.clone()).unwrap()
         }
 
         fn calls(&self) -> usize {
@@ -543,28 +589,26 @@ mod tests {
             .unwrap()
             .as_secs()
     }
-
     fn active_response(subject: &str, expiry: u64) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":expiry,"sub":subject,"scope":"read write"})).unwrap()
     }
-
     fn cache_options(capacity: usize) -> IntrospectionCacheOptions {
-        IntrospectionCacheOptions {
-            capacity,
-            ttl: Duration::from_secs(30),
-        }
+        IntrospectionCacheOptions::new(capacity, Duration::from_secs(30)).unwrap()
     }
-
     async fn verify(
         verifier: &IntrospectionVerifier,
         value: &[u8],
     ) -> Result<crate::Principal, Failure> {
-        let token = parse_bearer([value], 32 * 1024).unwrap();
-        verifier
-            .verify(&token, Instant::now() + Duration::from_secs(4))
-            .await
+        let token = parse_bearer([value]).unwrap();
+        verifier.verify(&token).await
     }
-
+    async fn poll_pending<T>(mut future: Pin<&mut impl Future<Output = T>>) {
+        assert!(
+            poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+    }
     async fn advance_cache_time(duration: Duration) {
         tokio::time::pause();
         tokio::time::advance(duration).await;
@@ -578,33 +622,10 @@ mod tests {
 
     #[test]
     fn form_body_keeps_the_token_out_of_the_url() {
-        let token = parse_bearer([b"Bearer a+b/=".as_slice()], 32 * 1024).unwrap();
+        let token = parse_bearer([b"Bearer a+b/=".as_slice()]).unwrap();
         assert_eq!(
             form_body(&token).unwrap(),
             "token=a%2Bb%2F%3D&token_type_hint=access_token"
-        );
-    }
-
-    #[tokio::test]
-    async fn exhausted_configured_capacity_rejects_before_provider_io() {
-        let verifier = IntrospectionVerifier {
-            endpoint: ProviderUrl::parse("https://127.0.0.1/introspect").unwrap(),
-            client_id: "client".to_owned(),
-            client_secret: secrecy::SecretString::from("secret"),
-            policy: Arc::new(ClaimPolicy::new(
-                "https://issuer.example".to_owned(),
-                vec!["api".to_owned()],
-            )),
-            provider: ProviderClient::new().unwrap(),
-            permits: Arc::new(Semaphore::new(0)),
-            cache: None,
-        };
-        let token = parse_bearer([b"Bearer opaque".as_slice()], 32 * 1024).unwrap();
-        assert_eq!(
-            verifier
-                .verify(&token, Instant::now() + std::time::Duration::from_secs(1))
-                .await,
-            Err(Failure::Unavailable)
         );
     }
 
@@ -615,7 +636,6 @@ mod tests {
         verify(&uncached, b"Bearer first").await.unwrap();
         verify(&uncached, b"Bearer first").await.unwrap();
         assert_eq!(fixture.calls(), 2);
-
         let cached = fixture.verifier(Some(cache_options(2)));
         let principal = verify(&cached, b"Bearer first").await.unwrap();
         assert_eq!(principal.scopes(), ["read", "write"]);
@@ -625,7 +645,6 @@ mod tests {
             principal
         );
         assert_eq!(fixture.calls(), 3);
-        // A different token cannot use the hit to bypass provider admission.
         assert_eq!(
             verify(&cached, b"Bearer second").await,
             Err(Failure::Unavailable)
@@ -633,7 +652,6 @@ mod tests {
         drop(permit);
         verify(&cached, b"Bearer second").await.unwrap();
         assert_eq!(fixture.calls(), 4);
-
         let independent = fixture.verifier(Some(cache_options(2)));
         fixture.respond("200 OK", &active_response("new-subject", epoch_now() + 600));
         assert_eq!(
@@ -651,13 +669,8 @@ mod tests {
         let mut options = fixture.options(Some(cache_options(2)));
         options.audiences = vec!["other".to_owned()];
         let changed_context = prepare_with_provider(options, fixture.provider.clone()).unwrap();
-        let token = parse_bearer([b"Bearer first".as_slice()], 32 * 1024).unwrap();
-        assert_eq!(
-            changed_context
-                .verify(&token, Instant::now() + Duration::from_secs(4))
-                .await,
-            Err(Failure::Invalid)
-        );
+        let token = parse_bearer([b"Bearer first".as_slice()]).unwrap();
+        assert_eq!(changed_context.verify(&token).await, Err(Failure::Invalid));
         assert_eq!(fixture.calls(), 6);
         fixture.finish().await;
     }
@@ -672,15 +685,12 @@ mod tests {
         verify(&verifier, b"Bearer first").await.unwrap();
         assert_eq!(fixture.calls(), 1);
         advance_cache_time(Duration::from_secs(15)).await;
-        assert_eq!(
-            verify(&verifier, b"Bearer first").await,
-            Err(Failure::Unavailable)
-        );
-        assert_eq!(fixture.calls(), 2);
-        assert_eq!(
-            verify(&verifier, b"Bearer first").await,
-            Err(Failure::Unavailable)
-        );
+        for _ in 0..2 {
+            assert_eq!(
+                verify(&verifier, b"Bearer first").await,
+                Err(Failure::Unavailable)
+            );
+        }
         assert_eq!(fixture.calls(), 3);
         fixture.finish().await;
     }
@@ -706,210 +716,182 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(
-        clippy::await_holding_lock,
-        reason = "hold the cache lock deliberately to prove nonblocking provider fallback"
-    )]
-    async fn full_busy_poisoned_and_oversized_cache_bypasses_preserve_verification() {
+    async fn concurrent_misses_share_provider_capacity_including_nonretained_success_and_errors() {
         let fixture = Fixture::new().await;
-        let verifier = fixture.verifier(Some(cache_options(1)));
-        verify(&verifier, b"Bearer first").await.unwrap();
-        verify(&verifier, b"Bearer second").await.unwrap();
-        verify(&verifier, b"Bearer second").await.unwrap();
-        verify(&verifier, b"Bearer first").await.unwrap();
-        assert_eq!(fixture.calls(), 3);
-        {
-            let _guard = verifier.cache.as_ref().unwrap().entries.lock().unwrap();
-            verify(&verifier, b"Bearer first").await.unwrap();
-            assert_eq!(fixture.calls(), 4);
-        }
-        let entries = verifier.cache.as_ref().unwrap().entries.clone();
-        assert!(
-            std::thread::spawn(move || {
-                let _guard = entries.lock().unwrap();
-                panic!("fixture poisons cache state");
+        let oversized = serde_json::to_vec(&serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":epoch_now()+600,"sub":"subject","custom":"x".repeat(64*1024)})).unwrap();
+        for (response, expected, retained) in [
+            (active_response("subject", epoch_now() + 600), None, true),
+            (oversized, None, false),
+            (active_response("subject", epoch_now() - 1), None, false),
+            (
+                br#"{"active":false}"#.to_vec(),
+                Some(Failure::Invalid),
+                false,
+            ),
+        ] {
+            fixture.respond("200 OK", &response);
+            let verifier = fixture.verifier(Some(cache_options(1)));
+            let gate = fixture.block_responses();
+            let before = fixture.calls();
+            let mut first = Box::pin(verify(&verifier, b"Bearer shared"));
+            tokio::select! { () = fixture.received() => {}, result = &mut first => panic!("response must be gated: {result:?}"), }
+            let mut second = Box::pin(verify(&verifier, b"Bearer shared"));
+            poll_pending(second.as_mut()).await;
+            assert_eq!(
+                verify(&verifier, b"Bearer distinct").await,
+                Err(Failure::Unavailable)
+            );
+            gate.add_permits(1);
+            let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(first, second)
             })
-            .join()
-            .is_err()
-        );
-        verify(&verifier, b"Bearer first").await.unwrap();
-        verify(&verifier, b"Bearer first").await.unwrap();
-        assert_eq!(fixture.calls(), 6);
-
-        let oversized = fixture.verifier(Some(cache_options(1)));
-        fixture.respond(
-            "200 OK",
-            &active_response(&"x".repeat(64 * 1024), epoch_now() + 600),
-        );
-        assert_eq!(
-            verify(&oversized, b"Bearer first")
-                .await
-                .unwrap()
-                .subject()
-                .unwrap()
-                .len(),
-            64 * 1024
-        );
-        verify(&oversized, b"Bearer first").await.unwrap();
-        assert_eq!(fixture.calls(), 8);
+            .await
+            .unwrap();
+            assert_eq!(first.as_ref().err().copied(), expected);
+            assert_eq!(first, second);
+            assert_eq!(fixture.calls(), before + 1);
+            *fixture.gate.lock().unwrap() = None;
+            assert_eq!(verify(&verifier, b"Bearer shared").await.err(), expected);
+            assert_eq!(fixture.calls(), before + if retained { 1 } else { 2 });
+            // Drain the optional second exchange's arrival before the next case.
+            if !retained {
+                fixture.received().await;
+            }
+            if expected.is_some() {
+                fixture.respond("200 OK", &active_response("recovered", epoch_now() + 600));
+                assert_eq!(
+                    verify(&verifier, b"Bearer shared").await.unwrap().subject(),
+                    Some("recovered")
+                );
+                assert_eq!(fixture.calls(), before + 3);
+                fixture.received().await;
+            }
+        }
         fixture.finish().await;
     }
 
     #[tokio::test]
-    async fn direct_callers_cannot_prepare_unbounded_cache_options() {
+    async fn cancelling_initializer_does_not_strand_surviving_requests() {
         let fixture = Fixture::new().await;
-        for options in [
-            IntrospectionCacheOptions {
-                capacity: 0,
-                ttl: Duration::from_secs(30),
-            },
-            IntrospectionCacheOptions {
-                capacity: 1025,
-                ttl: Duration::from_secs(30),
-            },
-            IntrospectionCacheOptions {
-                capacity: 1,
-                ttl: Duration::from_millis(999),
-            },
-            IntrospectionCacheOptions {
-                capacity: 1,
-                ttl: Duration::from_millis(300_001),
-            },
+        let verifier = fixture.verifier(Some(cache_options(2)));
+        let gate = fixture.block_responses();
+        let mut leader = Box::pin(verify(&verifier, b"Bearer shared"));
+        tokio::select! { () = fixture.received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
+        let mut survivor = Box::pin(verify(&verifier, b"Bearer shared"));
+        poll_pending(survivor.as_mut()).await;
+        drop(leader);
+        tokio::select! { () = fixture.received() => {}, result = &mut survivor => panic!("replacement response must be gated: {result:?}"), }
+        assert_eq!(fixture.calls(), 2);
+        gate.add_permits(2);
+        tokio::time::timeout(Duration::from_secs(5), survivor)
+            .await
+            .unwrap()
+            .unwrap();
+        let permit = verifier.permits.clone().acquire_owned().await.unwrap();
+        verify(&verifier, b"Bearer shared").await.unwrap();
+        assert_eq!(fixture.calls(), 2);
+        drop(permit);
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_waiter_preserves_the_original_fill_and_its_live_hit() {
+        let fixture = Fixture::new().await;
+        let verifier = fixture.verifier(Some(cache_options(1)));
+        let gate = fixture.block_responses();
+        let mut leader = Box::pin(verify(&verifier, b"Bearer shared"));
+        tokio::select! { () = fixture.received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
+        let mut waiter = Box::pin(verify(&verifier, b"Bearer shared"));
+        poll_pending(waiter.as_mut()).await;
+        drop(waiter);
+        gate.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(5), leader)
+            .await
+            .unwrap()
+            .unwrap();
+        let permit = verifier.permits.clone().acquire_owned().await.unwrap();
+        verify(&verifier, b"Bearer shared").await.unwrap();
+        assert_eq!(fixture.calls(), 1);
+        drop(permit);
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn capacity_admission_never_refuses_successful_provider_evidence() {
+        let fixture = Fixture::new().await;
+        let verifier = fixture.verifier(Some(cache_options(1)));
+        for token in [
+            b"Bearer first".as_slice(),
+            b"Bearer second",
+            b"Bearer third",
         ] {
-            let error =
-                prepare_with_provider(fixture.options(Some(options)), fixture.provider.clone())
-                    .unwrap_err();
-            assert_eq!(error.phase(), crate::PreparationPhase::Options);
-        }
-        for options in [
-            IntrospectionCacheOptions {
-                capacity: 1,
-                ttl: Duration::from_secs(1),
-            },
-            IntrospectionCacheOptions {
-                capacity: 1024,
-                ttl: Duration::from_secs(300),
-            },
-        ] {
-            assert!(
-                prepare_with_provider(fixture.options(Some(options)), fixture.provider.clone())
-                    .is_ok()
+            assert_eq!(
+                verify(&verifier, token).await.unwrap().subject(),
+                Some("subject")
             );
         }
+        assert_eq!(fixture.calls(), 3);
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn endpoint_query_permission_cannot_weaken_issuer_preparation() {
+        let fixture = Fixture::new().await;
+        let mut options = fixture.options(None);
+        options.issuer =
+            ProviderUrl::parse_endpoint("https://issuer.example?tenant=secret").unwrap();
+        assert!(prepare_with_provider(options, fixture.provider.clone()).is_err());
         assert_eq!(fixture.calls(), 0);
         fixture.finish().await;
     }
 
     #[test]
-    fn cached_evidence_rechecks_strict_clocks_request_reserve_and_not_before() {
+    fn cache_options_have_one_validated_construction_boundary() {
+        for (capacity, ttl) in [
+            (0, Duration::from_secs(30)),
+            (1025, Duration::from_secs(30)),
+            (1, Duration::from_millis(999)),
+            (1, Duration::from_millis(300_001)),
+        ] {
+            assert_eq!(
+                IntrospectionCacheOptions::new(capacity, ttl)
+                    .unwrap_err()
+                    .phase(),
+                crate::PreparationPhase::Options
+            );
+        }
+        for (capacity, ttl) in [
+            (1, Duration::from_secs(1)),
+            (1024, Duration::from_secs(300)),
+        ] {
+            let options = IntrospectionCacheOptions::new(capacity, ttl).unwrap();
+            assert_eq!(options.capacity(), capacity);
+            assert_eq!(options.ttl(), ttl);
+        }
+    }
+
+    #[test]
+    fn cache_expiry_rechecks_subseconds_wall_clock_and_not_before() {
         let policy = ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()]);
-        let response = br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"nbf":120,"sub":"subject"}"#;
-        let evidence = validate_introspection_claims(response, &policy, 100).unwrap();
+        let evidence = validate_introspection_claims(br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"nbf":120,"sub":"subject"}"#, &policy, 100).unwrap();
         let now = Instant::now();
         let wall = UNIX_EPOCH + Duration::from_millis(100_500);
-        let entry =
-            CachedIntrospection::new(&evidence, Duration::from_secs(60), now, wall).unwrap();
-        let deadline = now + Duration::from_secs(120);
-        assert!(entry.clone().admit(deadline, now, wall).unwrap().is_some());
-        // Subsecond remaining token lifetime bounds monotonic retention too.
-        assert!(
-            entry
-                .clone()
-                .admit(deadline, now + Duration::from_millis(30_500), wall)
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            entry
-                .clone()
-                .admit(deadline, now, UNIX_EPOCH + Duration::from_secs(131))
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(
-            entry
-                .clone()
-                .admit(now + Duration::from_millis(100), now, wall)
-                .unwrap_err()
-                .failure,
-            Failure::Timeout
-        );
-        assert_eq!(
-            entry
-                .clone()
-                .admit(deadline, now, UNIX_EPOCH + Duration::from_secs(89))
-                .unwrap_err()
-                .reason,
-            VerificationReason::NotYetValid
-        );
-        assert_eq!(
-            entry
-                .clone()
-                .admit(deadline, now, UNIX_EPOCH - Duration::from_secs(1))
-                .unwrap_err()
-                .failure,
-            Failure::Unavailable
-        );
-        assert!(
+        let entry = CachedIntrospection::new(evidence.clone(), Duration::from_secs(60), now, wall)
+            .unwrap_or_else(|_| panic!("valid cache evidence"));
+        assert!(entry.is_live(now, wall));
+        assert!(!entry.is_live(now + Duration::from_millis(30_500), wall));
+        assert!(!entry.is_live(now, UNIX_EPOCH + Duration::from_secs(131)));
+        assert!(!entry.is_live(now, UNIX_EPOCH + Duration::from_secs(89)));
+        assert!(!entry.is_live(now, UNIX_EPOCH - Duration::from_secs(1)));
+        assert!(matches!(
             CachedIntrospection::new(
-                &evidence,
+                evidence,
                 Duration::from_secs(60),
                 now,
                 UNIX_EPOCH + Duration::from_secs(131)
-            )
-            .is_none()
-        );
-        let cache = IntrospectionCache::new(cache_options(1));
-        assert!(!format!("{entry:?} {cache:?}").contains("subject"));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn concurrent_completion_cannot_renew_a_live_entry_and_timed_out_results_are_removed() {
-        let policy = ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()]);
-        let evidence = validate_introspection_claims(
-            &active_response("subject", epoch_now() + 600),
-            &policy,
-            epoch_now(),
-        )
-        .unwrap();
-        let cache = IntrospectionCache::new(cache_options(1));
-        let started = Instant::now();
-        cache
-            .complete(
-                "first",
-                evidence.clone(),
-                started + Duration::from_secs(120),
-            )
-            .unwrap();
-        tokio::time::advance(Duration::from_secs(15)).await;
-        cache
-            .complete(
-                "first",
-                evidence.clone(),
-                started + Duration::from_secs(120),
-            )
-            .unwrap();
-        tokio::time::advance(Duration::from_secs(15)).await;
-        assert!(
-            cache
-                .lookup("first", Instant::now(), SystemTime::now())
-                .is_none()
-        );
-        assert_eq!(
-            cache
-                .complete(
-                    "second",
-                    evidence,
-                    Instant::now() + Duration::from_millis(100)
-                )
-                .unwrap_err()
-                .failure,
-            Failure::Timeout
-        );
-        assert!(
-            cache
-                .lookup("second", Instant::now(), SystemTime::now())
-                .is_none()
-        );
+            ),
+            Err(FillError::NotRetained(_))
+        ));
+        assert!(!format!("{entry:?}").contains("subject"));
     }
 }

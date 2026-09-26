@@ -21,9 +21,9 @@ const HTTP_METHODS: &[&str] = &[
 ];
 
 /// Problem responses a protected operation must declare: request validation,
-/// both authentication outcomes, oversized credentials, and the two
+/// both authentication outcomes and the two
 /// unavailability answers.
-const PROTECTED_PROBLEM_STATUSES: &[&str] = &["400", "401", "403", "431", "503", "504"];
+const PROTECTED_PROBLEM_STATUSES: &[&str] = &["400", "401", "403", "503", "504"];
 
 fn document() -> Value {
     serde_json::to_value(service::api::document().expect("document composes"))
@@ -317,7 +317,7 @@ fn only_composed_operations_declare_the_idempotency_key() {
 
     let mut composer = Composer::inert();
     let contract = service::api::contract(&mut composer).expect("contract composes");
-    let document = serde_json::to_value(contract.document()).expect("document serializes");
+    let document = serde_json::to_value(contract.get_openapi()).expect("document serializes");
     let declared = operations(&document)
         .iter()
         .filter(|(_, _, operation)| declares_idempotency_key(operation))

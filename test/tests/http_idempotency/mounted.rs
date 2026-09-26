@@ -7,7 +7,7 @@
 //! `Idempotency::execute`, where the port's adapter writes through
 //! `infra_postgres::connection`. `Composer::route` composes it with
 //! the real introspection verifier, which asks a TLS fixture provider on
-//! loopback; agreement is asserted active, and `axum-test` drives the
+//! loopback; activation is asserted active, and `axum-test` drives the
 //! hardened router. Each response is checked for status, content type,
 //! Problem code, and headers, and the outcome counter is read from a
 //! thread-local Prometheus recorder: `#[sqlx::test]` runs a current-thread
@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -32,15 +33,13 @@ use axum::{Extension, Json, Router};
 use axum_test::{TestRequest, TestResponse, TestServer};
 use health::Readiness;
 use infra_bearerauthn::test_support::{FixtureTransport, prepare_introspection_with_fixture};
-use infra_bearerauthn::{IntrospectionOptions, ProviderUrl, Verifier};
+use infra_bearerauthn::{IntrospectionCacheOptions, IntrospectionOptions, ProviderUrl, Verifier};
 use infra_http::idempotency::{
     Activation, Composer, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, Tx,
 };
 use infra_http::problem::SANITIZED_DETAIL;
 use infra_http::problem::responses::ProtectedOperationProblemResponses;
-use infra_http::{
-    Code, HardenOptions, Problem, REQUEST_ID_HEADER, VerifiedPrincipal, harden, routes,
-};
+use infra_http::{Code, HardenOptions, Problem, REQUEST_ID_HEADER, VerifiedPrincipal, harden};
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;
 use integration_tests::dsn_for;
@@ -59,6 +58,7 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use utoipa::ToSchema;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
     Hold, RETENTION, RETRY_PAUSE, WAIT, bounded, close, count, make_read_only, template_pool,
@@ -103,6 +103,7 @@ const BOB: &str = "bob-token";
 /// A verified caller with no scope required by this operation.
 const NO_SCOPE: &str = "no-scope-token";
 const INACTIVE: &str = "inactive-token";
+const HELD_PROVIDER: &str = "held-provider-token";
 const REVOKED_CLIENT: &str = "revoked-client";
 /// Bound on one introspection request.
 const MAX_INTROSPECTION_REQUEST: usize = 16 * 1024;
@@ -315,6 +316,8 @@ fn forbidden() -> Response {
 struct Provider {
     address: SocketAddr,
     material: TlsMaterial,
+    requests: Arc<AtomicUsize>,
+    held: Arc<tokio::sync::Notify>,
     cancel: CancellationToken,
     tasks: TaskTracker,
 }
@@ -329,10 +332,21 @@ impl Provider {
         let acceptor = TlsAcceptor::from(Arc::new(tls_config(&material)));
         let cancel = CancellationToken::new();
         let tasks = TaskTracker::new();
-        tasks.spawn(serve(listener, acceptor, cancel.clone(), tasks.clone()));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let held = Arc::new(tokio::sync::Notify::new());
+        tasks.spawn(serve(
+            listener,
+            acceptor,
+            cancel.clone(),
+            tasks.clone(),
+            requests.clone(),
+            held.clone(),
+        ));
         Self {
             address,
             material,
+            requests,
+            held,
             cancel,
             tasks,
         }
@@ -341,6 +355,10 @@ impl Provider {
     /// The real introspection verifier, reaching this provider through the
     /// fixture transport.
     fn verifier(&self) -> Verifier {
+        self.verifier_with_cache(None)
+    }
+
+    fn verifier_with_cache(&self, cache: Option<IntrospectionCacheOptions>) -> Verifier {
         let transport = FixtureTransport::new(
             FIXTURE_HOST,
             self.address,
@@ -357,7 +375,7 @@ impl Provider {
                 client_id: "fixture-client".to_owned(),
                 client_secret: SecretString::from("fixture-secret"),
                 provider_concurrency: NonZeroUsize::new(16).expect("fixture capacity"),
-                cache: None,
+                cache,
             },
             transport,
         )
@@ -391,6 +409,8 @@ async fn serve(
     acceptor: TlsAcceptor,
     cancel: CancellationToken,
     tasks: TaskTracker,
+    requests: Arc<AtomicUsize>,
+    held: Arc<tokio::sync::Notify>,
 ) {
     loop {
         let socket = tokio::select! {
@@ -402,20 +422,34 @@ async fn serve(
         };
         let acceptor = acceptor.clone();
         let cancel = cancel.clone();
+        let requests = requests.clone();
+        let held = held.clone();
         tasks.spawn(async move {
-            cancel.run_until_cancelled(answer(&acceptor, socket)).await;
+            cancel
+                .run_until_cancelled(answer(&acceptor, socket, &requests, &held))
+                .await;
         });
     }
 }
 
 /// Answer one introspection request by its token.
-async fn answer(acceptor: &TlsAcceptor, socket: TcpStream) {
+async fn answer(
+    acceptor: &TlsAcceptor,
+    socket: TcpStream,
+    requests: &AtomicUsize,
+    held: &tokio::sync::Notify,
+) {
     let Ok(mut stream) = acceptor.accept(socket).await else {
         return;
     };
     let Some(token) = read_token(&mut stream).await else {
         return;
     };
+    requests.fetch_add(1, Ordering::Relaxed);
+    if token == HELD_PROVIDER {
+        held.notify_one();
+        std::future::pending::<()>().await;
+    }
     let body = introspection(&token);
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
@@ -480,6 +514,8 @@ fn introspection(token: &str) -> String {
         "sub": subject,
         "client_id": client,
         "scope": scope,
+        "roles": ["widget-author"],
+        "tenant": {"id": "tenant-42"},
     })
     .to_string()
 }
@@ -491,6 +527,35 @@ struct Mounted {
     hold: Arc<Hold>,
     provider: Provider,
     store_pool: PgPool,
+}
+
+fn widget_contract(composer: &mut Composer) -> OpenApiRouter<health::ReadinessReader> {
+    // As `service::api::contract` assembles it: the transport router
+    // registers the shared problem responses the family references (the
+    // 403 among them must resolve), and the composer adds its own.
+    OpenApiRouter::with_openapi(bearer_document())
+        .merge(infra_http::router())
+        .routes(
+            composer
+                .route(routes!(create_widget))
+                .expect("the create route composes"),
+        )
+        .routes(
+            composer
+                .route(routes!(replace_widget))
+                .expect("the replace route composes"),
+        )
+        .merge(OpenApiRouter::with_openapi(composer.components()))
+}
+
+#[test]
+fn widget_contract_declares_supported_protected_security() {
+    let mut composer = Composer::inert();
+    let contract = widget_contract(&mut composer);
+    assert_eq!(
+        infra_http::finalize_public(contract).unwrap_err(),
+        infra_http::FinalizeError::NonPublicOperation,
+    );
 }
 
 impl Mounted {
@@ -511,27 +576,13 @@ impl Mounted {
             hold: Arc::clone(&hold),
         });
         let mut composer = Composer::new(Store::new(store_pool.clone(), RETENTION));
-        // As `service::api::contract` assembles it: the transport router
-        // registers the shared problem responses the family references (the
-        // 403 among them must resolve), and the composer adds its own.
-        let contract = infra_http::router()
-            .routes(
-                composer
-                    .route(routes!(create_widget))
-                    .expect("the create route composes"),
-            )
-            .routes(
-                composer
-                    .route(routes!(replace_widget))
-                    .expect("the replace route composes"),
-            )
-            .merge_document(composer.components());
+        let contract = widget_contract(&mut composer);
         let activation = composer.finish();
         assert!(
             matches!(activation, Activation::Active { .. }),
             "{activation:?}"
         );
-        let routes = infra_http::authn::finalize(contract, provider.verifier(), 32 * 1024)
+        let routes = infra_http::authn::finalize(contract, provider.verifier())
             .expect("the mounted auth contract finalizes");
         // The two outer mounts intentionally share the same inner routes. The
         // route layer must use OriginalUri so their request identities differ.
@@ -765,10 +816,24 @@ async fn authorized_without_idempotency(
     principal: VerifiedPrincipal,
     headers: axum::http::HeaderMap,
 ) -> Response {
+    #[derive(Deserialize)]
+    struct ApplicationClaims {
+        roles: Vec<String>,
+        tenant: Value,
+        scope: String,
+    }
     if let Err(response) = infra_http::require_scope(&principal, "widgets:write") {
         return response;
     }
     assert!(!headers.contains_key(axum::http::header::AUTHORIZATION));
+    let claims = principal
+        .claims::<ApplicationClaims>()
+        .expect("verified custom claims");
+    assert_eq!(claims.roles, ["widget-author"]);
+    assert_eq!(claims.tenant, json!({"id": "tenant-42"}));
+    assert_eq!(claims.scope, "widgets:write");
+    assert_eq!(principal.scopes(), ["widgets:write"]);
+    assert!(principal.claims::<BTreeMap<String, u64>>().is_err());
     (
         StatusCode::OK,
         principal.subject().unwrap_or_default().to_owned(),
@@ -776,25 +841,187 @@ async fn authorized_without_idempotency(
         .into_response()
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn repair_regression_authentication_and_scope_authorization_work_without_a_composer() {
-    // Keep the router and provider tasks on the test thread so this recorder
-    // cannot observe counters from concurrently running tests.
-    let recorder = PrometheusBuilder::new().build_recorder();
-    let _local = metrics::set_default_local_recorder(&recorder);
-    let provider = Provider::start().await;
-    let root_policy = serde_json::from_value(json!({
+fn bearer_document() -> utoipa::openapi::OpenApi {
+    serde_json::from_value(json!({
         "openapi": "3.1.0",
         "info": {"title": "authorization fixture", "version": "1"},
         "paths": {},
         "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}},
         "security": [{"bearerAuth": []}]
     }))
-    .expect("the inherited bearer policy");
-    let contract = infra_http::ContractRouter::with_openapi(root_policy)
+    .expect("the inherited bearer policy")
+}
+
+#[utoipa::path(head, path = "/_test/authorization", security(), responses((status = 204, description = "public HEAD")))]
+async fn public_head() -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
+#[utoipa::path(get, path = "/_test/inherited", responses((status = 200, description = "protected")))]
+async fn inherited_get() -> &'static str {
+    "protected"
+}
+
+#[tokio::test]
+async fn final_document_controls_head_policy_and_preserves_native_fallbacks() {
+    let provider = Provider::start().await;
+    let contract = OpenApiRouter::with_openapi(bearer_document())
+        .merge(infra_http::router())
+        .routes(routes!(authorized_without_idempotency, public_head))
+        .routes(routes!(inherited_get));
+    // The inherited operation deliberately has no failure-documentation family:
+    // runtime startup owns security, while the OpenAPI gate owns completeness.
+    let router = infra_http::authn::finalize(contract, provider.verifier())
+        .unwrap()
+        .with_state(Readiness::new(Vec::new()).reader());
+    let server = TestServer::new(harden(
+        router,
+        &HardenOptions {
+            max_body_bytes: MAX_BODY_BYTES,
+            request_timeout: BUDGET,
+            max_in_flight: NonZeroU32::new(16),
+            log_health_probes: false,
+        },
+    ));
+    let explicit = server
+        .method(axum::http::Method::HEAD, "/_test/authorization")
+        .authorization("Bearer broken token")
+        .await;
+    assert_eq!(explicit.status_code(), StatusCode::NO_CONTENT);
+    let implicit = server
+        .method(axum::http::Method::HEAD, "/_test/inherited")
+        .await;
+    assert_eq!(implicit.status_code(), StatusCode::UNAUTHORIZED);
+    assert_eq!(implicit.header(WWW_AUTHENTICATE), "Bearer");
+    assert_eq!(
+        implicit.header(axum::http::header::CONTENT_TYPE),
+        "application/problem+json"
+    );
+    let accepted = server
+        .method(axum::http::Method::HEAD, "/_test/inherited")
+        .authorization(format!("Bearer {ALICE}"))
+        .await;
+    assert_eq!(accepted.status_code(), StatusCode::OK);
+    let probe = server
+        .get("/health/live")
+        .authorization("Bearer broken token")
+        .await;
+    assert_eq!(probe.status_code(), StatusCode::OK);
+    for (uri, status, code) in [
+        ("/_test/absent", StatusCode::NOT_FOUND, "not_found"),
+        (
+            "/_test/inherited",
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+        ),
+    ] {
+        let response = server.post(uri).await;
+        problem_body(&response, status, code);
+        if status == StatusCode::METHOD_NOT_ALLOWED {
+            assert_eq!(response.header(axum::http::header::ALLOW), "GET,HEAD");
+        }
+    }
+    provider.stop().await;
+}
+
+fn timeout_router(verifier: Verifier, timeout: Duration, delay: Duration) -> Router {
+    let contract = OpenApiRouter::with_openapi(bearer_document()).routes(routes!(inherited_get));
+    let router = infra_http::authn::finalize(contract, verifier).unwrap();
+    let router = router.layer(axum::middleware::from_fn(
+        move |request, next: axum::middleware::Next| async move {
+            tokio::time::sleep(delay).await;
+            next.run(request).await
+        },
+    ));
+    harden(
+        router,
+        &HardenOptions {
+            max_body_bytes: MAX_BODY_BYTES,
+            request_timeout: timeout,
+            max_in_flight: NonZeroU32::new(16),
+            log_health_probes: false,
+        },
+    )
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cached_verification_succeeds_in_the_final_hundred_milliseconds() {
+    let provider = Provider::start().await;
+    let verifier = provider.verifier_with_cache(Some(
+        IntrospectionCacheOptions::new(16, Duration::from_secs(30)).unwrap(),
+    ));
+    let authorization = format!("Bearer {ALICE}");
+    let token = infra_bearerauthn::parse_bearer([authorization.as_bytes()]).unwrap();
+    verifier.verify(&token).await.unwrap();
+    assert_eq!(provider.requests.load(Ordering::Relaxed), 1);
+    tokio::time::pause();
+    let server = TestServer::new(timeout_router(
+        verifier,
+        Duration::from_millis(200),
+        Duration::from_millis(150),
+    ));
+    let response = server
+        .get("/_test/inherited")
+        .authorization(authorization)
+        .await;
+    assert_eq!(response.status_code(), StatusCode::OK);
+    assert_eq!(
+        provider.requests.load(Ordering::Relaxed),
+        1,
+        "the live hit bypasses provider work"
+    );
+    tokio::time::resume();
+    provider.stop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn outer_http_timeout_cancels_inflight_verification_and_owns_504() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let provider = Provider::start().await;
+    let router = timeout_router(provider.verifier(), Duration::from_secs(1), Duration::ZERO);
+    let server = TestServer::new(router);
+    let request = server
+        .get("/_test/inherited")
+        .authorization(format!("Bearer {HELD_PROVIDER}"))
+        .add_header(REQUEST_ID_HEADER, "outer-timeout");
+    let response = tokio::spawn(async move { request.await });
+    bounded("provider exchange started", provider.held.notified()).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let response = bounded("outer request completed", response).await.unwrap();
+    problem(
+        &response,
+        StatusCode::GATEWAY_TIMEOUT,
+        "request_timeout",
+        "outer-timeout",
+    );
+    assert!(response.maybe_header(WWW_AUTHENTICATE).is_none());
+    let scrape = recorder.handle().render();
+    assert!(
+        scrape
+            .lines()
+            .any(|line| line.starts_with("authn_verifications_total{")
+                && line.contains("result=\"cancelled\"")
+                && line.ends_with(" 1")),
+        "{scrape}"
+    );
+    tokio::time::resume();
+    provider.stop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn authentication_and_scope_authorization_work_without_a_composer() {
+    // Keep the router and provider tasks on the test thread so this recorder
+    // cannot observe counters from concurrently running tests.
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let provider = Provider::start().await;
+    let root_policy = bearer_document();
+    let contract = OpenApiRouter::with_openapi(root_policy)
         .merge(infra_http::router())
         .routes(routes!(authorized_without_idempotency));
-    let router = infra_http::authn::finalize(contract, provider.verifier(), 32 * 1024)
+    let router = infra_http::authn::finalize(contract, provider.verifier())
         .expect("the protected contract finalizes without an idempotency composer");
     let server = TestServer::new(harden(
         router.with_state(Readiness::new(Vec::new()).reader()),
@@ -888,7 +1115,6 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
     // Authentication answers first: a malformed quoted key behind a failed
     // authentication is never looked at.
     let malformed_key = "\"k-1";
-    let oversize = format!("Bearer {}", "a".repeat(32 * 1024 + 1));
     let inactive = format!("Bearer {INACTIVE}");
     for (authorization, status, code, challenge) in [
         (
@@ -908,12 +1134,6 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
             StatusCode::BAD_REQUEST,
             "authentication_malformed",
             Some("Bearer error=\"invalid_request\""),
-        ),
-        (
-            Some(oversize.as_str()),
-            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-            "authentication_oversize",
-            None,
         ),
         (
             Some(inactive.as_str()),

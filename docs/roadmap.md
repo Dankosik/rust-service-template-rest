@@ -174,8 +174,8 @@ Delivered:
   shared problem responses are `ToResponse` components; the readiness
   handler returns an `IntoResponses` enum with one variant per status.
 - `crates/service` gained a library (`api`) that merges every
-  `ContractRouter` into one tracked contract, finalizes the served router from
-  it, renders its document through an `openapi` binary, and has contract tests:
+  `OpenApiRouter` into one contract, finalizes the served router from its
+  document, renders that document through an `openapi` binary, and has contract tests:
   committed file equals the generator output byte for byte, root and operation
   security produce an unambiguous effective policy, explicit public means
   `security: []`, and the problem schemas are closed. The

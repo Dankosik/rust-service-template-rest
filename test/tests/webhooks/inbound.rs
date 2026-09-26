@@ -530,8 +530,7 @@ async fn missing_consumer_spends_attempts_and_exhausts_the_normal_budget(pool: P
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn mounted_percent_decoded_endpoint_reaches_signature_rejection(pool: PgPool) {
-    let router = infra_http::webhooks::router()
-        .finalize_public()
+    let router = infra_http::finalize_public(infra_http::webhooks::router())
         .expect("webhook operation is public");
     let app = infra_http::webhooks::with_webhook_state(
         router,
@@ -601,9 +600,7 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
     use tower::ServiceExt as _;
 
     let app = infra_http::webhooks::with_webhook_state(
-        infra_http::webhooks::router()
-            .finalize_public()
-            .expect("public contract"),
+        infra_http::finalize_public(infra_http::webhooks::router()).expect("public contract"),
         infra_http::webhooks::WebhookState::active(receiver(pool.clone())),
     )
     .with_state(Readiness::new(Vec::new()).reader());

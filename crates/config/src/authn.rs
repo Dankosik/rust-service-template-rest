@@ -112,7 +112,7 @@ pub enum JwtAlgorithm {
 // template:end oidc-jwt:authn-algorithm
 
 /// Static configuration for the optional inbound authentication profiles.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum AuthnConfig {
     /// No provider is configured. This is the omitted-section default.
@@ -166,6 +166,23 @@ pub enum AuthnConfig {
         cache_ttl: Duration,
     },
     // template:end oidc-introspection:authn-config-introspection-variant
+}
+
+impl std::fmt::Debug for AuthnConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mode = match self {
+            Self::None {} => "none",
+            // template:begin oidc-jwt:authn-config-jwt-debug
+            Self::OidcJwt { .. } => "oidc-jwt",
+            // template:end oidc-jwt:authn-config-jwt-debug
+            // template:begin oidc-introspection:authn-config-introspection-debug
+            Self::OidcIntrospection { .. } => "oidc-introspection",
+            // template:end oidc-introspection:authn-config-introspection-debug
+        };
+        f.debug_struct("AuthnConfig")
+            .field("mode", &mode)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for AuthnConfig {
@@ -246,8 +263,6 @@ impl AuthnConfig {
                 introspection_endpoint,
                 introspection_client_id,
                 introspection_client_secret,
-                cache_capacity,
-                cache_ttl,
                 ..
             } => {
                 require_nonblank("authn.issuer", issuer, "oidc-introspection")?;
@@ -266,18 +281,6 @@ impl AuthnConfig {
                     return Err(ValidationError::new(
                         "authn.introspection_client_secret",
                         "is required when authn.mode = oidc-introspection",
-                    ));
-                }
-                if !(1..=1024).contains(cache_capacity) {
-                    return Err(ValidationError::new(
-                        "authn.cache_capacity",
-                        "must be between 1 and 1024, even when caching is disabled",
-                    ));
-                }
-                if !(Duration::from_secs(1)..=Duration::from_secs(300)).contains(cache_ttl) {
-                    return Err(ValidationError::new(
-                        "authn.cache_ttl",
-                        "must be between 1s and 5m, even when caching is disabled",
                     ));
                 }
                 Ok(())
@@ -397,6 +400,22 @@ mod tests {
             assert!(parse(&source).is_err(), "{source}");
         }
     }
+
+    #[test]
+    fn jwt_debug_redacts_trust_inputs() {
+        let config = parse(
+            r#"
+            mode = "oidc-jwt"
+            issuer = "https://private-issuer.example"
+            audience = "private-audience"
+            "#,
+        )
+        .unwrap();
+        let diagnostic = format!("{config:?}");
+        assert!(diagnostic.contains("oidc-jwt"));
+        assert!(!diagnostic.contains("private-issuer"));
+        assert!(!diagnostic.contains("private-audience"));
+    }
     // template:end oidc-jwt:authn-config-jwt-tests
 
     // template:begin oidc-introspection:authn-config-introspection-tests
@@ -460,35 +479,29 @@ mod tests {
     }
 
     #[test]
-    fn introspection_validates_cache_bounds_even_when_disabled() {
-        let base = r#"
+    fn introspection_debug_redacts_trust_inputs_and_credentials() {
+        let config = parse(
+            r#"
             mode = "oidc-introspection"
-            issuer = "issuer"
-            audience = "service"
-            introspection_endpoint = "endpoint"
-            introspection_client_id = "client"
-            introspection_client_secret = "secret"
-        "#;
-        for enabled in [false, true] {
-            for (capacity, ttl) in [(1, "1s"), (1024, "5m")] {
-                let source = format!(
-                    "{base}\ncache_enabled = {enabled}\ncache_capacity = {capacity}\ncache_ttl = \"{ttl}\"\n"
-                );
-                parse(&source).unwrap().validate().unwrap();
-            }
-            for (field, value) in [
-                ("cache_capacity", "0"),
-                ("cache_capacity", "1025"),
-                ("cache_ttl", "\"999ms\""),
-                ("cache_ttl", "\"301s\""),
-            ] {
-                let source = format!("{base}\ncache_enabled = {enabled}\n{field} = {value}\n");
-                assert_eq!(
-                    parse(&source).unwrap().validate().unwrap_err().key,
-                    format!("authn.{field}"),
-                    "{source}"
-                );
-            }
+            issuer = "https://private-issuer.example"
+            audience = "private-audience"
+            introspection_endpoint = "https://private-endpoint.example/check?secret=query-value"
+            introspection_client_id = "private-client"
+            introspection_client_secret = "private-secret"
+            "#,
+        )
+        .unwrap();
+        let diagnostic = format!("{config:?}");
+        assert!(diagnostic.contains("oidc-introspection"));
+        for private_value in [
+            "private-issuer",
+            "private-audience",
+            "private-endpoint",
+            "query-value",
+            "private-client",
+            "private-secret",
+        ] {
+            assert!(!diagnostic.contains(private_value));
         }
     }
     // template:end oidc-introspection:authn-config-introspection-tests

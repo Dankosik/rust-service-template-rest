@@ -124,7 +124,8 @@ The `#[utoipa::path]` attribute is the contract; the committed document is
 generated from it ([HTTP Architecture](architecture/http.md#adding-an-operation)).
 
 ```rust
-// crates/greeting/src/http.rs (the operation; imports and the router follow)
+// crates/greeting/src/http.rs (operation and router; other imports omitted)
+use utoipa_axum::router::OpenApiRouter;
 const GREETING_PATH: &str = "/greetings/{name}";
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -181,12 +182,12 @@ async fn get_greeting(Path(name): Path<String>, parts: Parts) -> GreetingRespons
 }
 
 #[must_use]
-pub fn router<S>() -> ContractRouter<S>
+pub fn router<S>() -> OpenApiRouter<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    ContractRouter::with_openapi(utoipa::openapi::OpenApi::default())
-        .routes(infra_http::routes!(get_greeting))
+    OpenApiRouter::with_openapi(utoipa::openapi::OpenApi::default())
+        .routes(utoipa_axum::routes!(get_greeting))
 }
 ```
 
@@ -220,12 +221,12 @@ comment on a type becomes its schema description; write them as contract
 text.
 
 Test the operation as a caller sees it, with `tower::ServiceExt::oneshot`
-against `router::<()>().finalize_public().expect("documented public route")`: status, `Content-Type`, body,
+against `infra_http::finalize_public(router::<()>()).expect("documented public route")`: status, `Content-Type`, body,
 and for the failure the problem `code`. The walkthrough's two tests are
 `greets_with_json` and `reserved_name_is_a_not_found_problem`.
 
 For new ordinary router tests, the workspace now provides `axum-test` as a
-dev-dependency: `TestServer::new(router::<()>().finalize_public().expect("documented public route"))` uses the
+dev-dependency: `TestServer::new(infra_http::finalize_public(router::<()>()).expect("documented public route"))` uses the
 in-process transport. The hardened-chain tests demonstrate request, header,
 status and JSON assertions. Keep the direct `oneshot` form above where raw
 bodies, framing, concurrency or response extensions are the subject.
@@ -246,8 +247,8 @@ the document, and one `.merge`:
 )]
 struct ApiDoc;
 
-pub fn contract() -> ContractRouter<ReadinessReader> {
-    ContractRouter::with_openapi(ApiDoc::openapi())
+pub fn contract() -> OpenApiRouter<ReadinessReader> {
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(infra_http::router())
         .merge(greeting::http::router())
 }
@@ -255,11 +256,12 @@ pub fn contract() -> ContractRouter<ReadinessReader> {
 
 <!-- template:begin http-idempotency:docs-first-feature-http-idempotency-contract -->
 With the idempotency pack retained, `contract` also takes the idempotency
-composer: `pub fn contract(idempotency: &mut infra_http::idempotency::Composer) -> ContractRouter<ReadinessReader>`,
-merging `idempotency.components()` through `merge_document` and composing an
-idempotent operation's routes through
-`idempotency.route(infra_http::routes!(handler))?` instead of a plain `.merge`.
-Propagate `CompositionError` through the existing assembly error path and call
+composer: `pub fn contract(idempotency: &mut infra_http::idempotency::Composer) -> Result<OpenApiRouter<ReadinessReader>, Box<dyn Error + Send + Sync>>`,
+merging components with
+`.merge(OpenApiRouter::with_openapi(idempotency.components()))` and composing an
+idempotent operation with
+`.routes(idempotency.route(utoipa_axum::routes!(handler))?)` instead of a plain
+`.merge`. Propagate `CompositionError` through the existing assembly error path and call
 `finish` once after every route is composed.
 <!-- template:end http-idempotency:docs-first-feature-http-idempotency-contract -->
 

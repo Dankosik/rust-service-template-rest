@@ -509,9 +509,11 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
     if inputs.outbound_http == "bounded":
         selected.add("outbound-http")
     if inputs.authn != "none" or inputs.outbound_http == "bounded":
-        selected.update(("tls-fixtures", "request-budget"))
+        selected.add("tls-fixtures")
+    if inputs.outbound_http == "bounded":
+        selected.add("request-budget")
     if inputs.http_idempotency == "postgres":
-        selected.add("http-idempotency")
+        selected.update(("http-idempotency", "request-budget"))
         if inputs.authn == "oidc-introspection":
             selected.add("http-idempotency-mounted")
     if inputs.jobs == "postgres":
@@ -1099,6 +1101,8 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
         for name, version, expected, retained in (
             ("bitflags", "2.13.2", ["serde_core"], []),
             ("either", "1.18.0", ["serde"], []),
+            # PostgreSQL HMAC enables digest/mac; introspection SHA-256 alone does not.
+            ("digest", "0.11.3", ["block-buffer 0.12.1", "crypto-common 0.2.2", "ctutils"], ["block-buffer 0.12.1", "crypto-common 0.2.2"]),
             ("hashbrown", "0.16.1", ["allocator-api2", "equivalent", "foldhash"], ["foldhash"]),
             ("smallvec", "1.16.1", ["serde"], []),
         ):
@@ -1106,9 +1110,9 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
     if inputs.authn != "oidc-jwt":
         _project_feature_edge(records, "zeroize", "1.9.0", ["zeroize_derive"], [])
     if inputs.authn == "none" and inputs.outbound_http == "none":
-        # rcgen/aws_lc_rs (auth or outbound test support) retains the weak
-        # x509-parser/verify-aws lock edge, whose aws-lc-rs defaults also
-        # retain untrusted without JWT.
+        # Generated TLS fixtures retained by either authentication or outbound
+        # test support enable rcgen/aws_lc_rs and its weak x509-parser/verify-aws
+        # edge; those aws-lc-rs defaults retain untrusted even without JWT.
         _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
 
 

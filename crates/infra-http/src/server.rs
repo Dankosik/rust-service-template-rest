@@ -285,6 +285,10 @@ mod tests {
         }
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "connection-level fixture is outside application contract authoring"
+    )]
     fn app() -> Router {
         Router::new().route("/ok", get(|| async { "ok" })).route(
             "/slow",
