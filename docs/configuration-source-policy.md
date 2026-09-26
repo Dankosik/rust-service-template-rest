@@ -232,6 +232,40 @@ registry to maintain.
 
 ## Decisions Recorded Here
 
+<!-- template:begin webhooks-common:docs-config-webhooks-snapshot -->
+## Webhook configuration snapshot
+
+Webhook configuration follows normal typed TOML/environment layering and is an
+immutable startup snapshot: configuration or secret rotation takes effect only
+after restart. Secret map values are `SecretString` values and must be supplied
+through `APP__...__SECRETS__...`, never a file. The recursive secret-file guard
+covers dynamic map entries. Endpoint IDs and key references are non-secret.
+There is no environment-variable indirection, JSON-in-environment manifest, or
+remote secret provider.
+
+Endpoint IDs and key references need only be nonempty and NUL-free.
+<!-- template:end webhooks-common:docs-config-webhooks-snapshot -->
+
+<!-- template:begin webhooks:docs-config-webhooks-outbound -->
+`webhooks.endpoints` maps endpoint IDs to destination URL plus active/optional
+previous key references; `webhooks.secrets` maps the immutable references to
+secret values. Configuration validates representation and reference uniqueness;
+provider construction owns URL/base64/nonempty-key admission. Outgoing producers
+receive only prepared non-secret endpoint metadata and final bytes, while workers
+resolve signing keys. Keep historical references until their jobs are terminal.
+<!-- template:end webhooks:docs-config-webhooks-outbound -->
+
+<!-- template:begin inbound-webhooks:docs-config-webhooks-inbound -->
+`inbound_webhooks.endpoints` maps endpoint IDs to active/optional previous key
+references; `inbound_webhooks.secrets` maps references to verification keys. The
+receiving service resolves keys; a processing worker consumes verified durable
+work without them. Empty endpoint maps stay inert. Active endpoint binding or
+PostgreSQL failure is a causal startup error without secret values.
+
+Inbound route construction percent-encodes an endpoint ID as one path segment;
+configuration does not add a URL-slug grammar.
+<!-- template:end inbound-webhooks:docs-config-webhooks-inbound -->
+
 Made in stage 2 with the research behind them; a later change reopens one
 only with new evidence.
 

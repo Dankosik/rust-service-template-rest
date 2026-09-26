@@ -98,6 +98,7 @@ mod tests {
             "cache.token_profile",
             "observability.otel.exporter.otlp_headers",
             "webhooks.static_secrets",
+            "webhooks.secrets.partner_v2",
             "outbound.api_key",
             "signing.private-key",
             "auth.token",

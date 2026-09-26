@@ -24,6 +24,7 @@ from template_state import (
     DATABASE_CHOICES,
     HARNESS_CHOICES,
     HTTP_IDEMPOTENCY_CHOICES,
+    INBOUND_WEBHOOKS_CHOICES,
     JOBS_CHOICES,
     LOCK_NAME,
     LOCK_SCHEMA_VERSION,
@@ -39,6 +40,7 @@ from template_state import (
     git_head,
     git_root,
     http_idempotency_requirement,
+    inbound_webhooks_requirement,
     jobs_requirement,
     lock_has_explicit_authn,
     lock_has_explicit_http_idempotency,
@@ -55,6 +57,8 @@ from template_state import (
     validate_description,
     validate_repository,
     validate_service_name,
+    WEBHOOKS_CHOICES,
+    webhooks_requirement,
     write_plan,
 )
 
@@ -84,6 +88,8 @@ class InitInputs:
     outbound_http: str
     http_idempotency: str
     jobs: str
+    webhooks: str
+    inbound_webhooks: str
     agent_harness: str
 
     def identity(self) -> dict[str, str]:
@@ -101,6 +107,8 @@ class InitInputs:
             "outbound_http": self.outbound_http,
             "http_idempotency": self.http_idempotency,
             "jobs": self.jobs,
+            "webhooks": self.webhooks,
+            "inbound_webhooks": self.inbound_webhooks,
             "agent_harness": self.agent_harness,
         }
 
@@ -139,6 +147,8 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         outbound_http=_argument_value(arguments, "outbound_http", default="none"),
         http_idempotency=_argument_value(arguments, "http_idempotency", default="none"),
         jobs=_argument_value(arguments, "jobs", default="none"),
+        webhooks=_argument_value(arguments, "webhooks", default="none"),
+        inbound_webhooks=_argument_value(arguments, "inbound_webhooks", default="none"),
         agent_harness=_argument_value(arguments, "agent_harness", default="all"),
     )
     if inputs.database not in DATABASE_CHOICES:
@@ -153,6 +163,10 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         raise Refusal("AGENT_HARNESS is unsupported")
     if inputs.jobs not in JOBS_CHOICES:
         raise Refusal("JOBS is unsupported")
+    if inputs.webhooks not in WEBHOOKS_CHOICES:
+        raise Refusal("WEBHOOKS is unsupported")
+    if inputs.inbound_webhooks not in INBOUND_WEBHOOKS_CHOICES:
+        raise Refusal("INBOUND_WEBHOOKS is unsupported")
     if inputs.http_idempotency == "postgres":
         requirement = http_idempotency_requirement(inputs.database, inputs.authn)
         if requirement == "database":
@@ -161,6 +175,14 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
             raise Refusal("HTTP_IDEMPOTENCY=postgres requires AUTHN=oidc-jwt or oidc-introspection")
     if inputs.jobs == "postgres":
         requirement = jobs_requirement(inputs.database)
+        if requirement is not None:
+            raise Refusal(requirement)
+    if inputs.webhooks == "durable":
+        requirement = webhooks_requirement(inputs.database, inputs.jobs, inputs.outbound_http)
+        if requirement is not None:
+            raise Refusal(requirement)
+    if inputs.inbound_webhooks == "standard-webhooks":
+        requirement = inbound_webhooks_requirement(inputs.database, inputs.jobs)
         if requirement is not None:
             raise Refusal(requirement)
     return inputs
@@ -209,6 +231,14 @@ _JOBS_PROFILE_INVENTORY_KEYS = frozenset(
         "jobs-http-idempotency",
     }
 )
+_WEBHOOKS_PROFILE_INVENTORY_KEYS = frozenset(
+    {
+        *_JOBS_PROFILE_INVENTORY_KEYS,
+        "webhooks-common",
+        "webhooks",
+        "inbound-webhooks",
+    }
+)
 
 
 def _profile_data(
@@ -227,36 +257,48 @@ def _profile_data(
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
         raise Refusal("template profile inventory has an unsupported schema")
     keys = frozenset(raw)
-    if keys == _JOBS_PROFILE_INVENTORY_KEYS:
+    if keys == _WEBHOOKS_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
         include_tls_fixtures = True
         include_http_idempotency = True
         include_jobs = True
+        include_webhooks = True
+    elif keys == _JOBS_PROFILE_INVENTORY_KEYS:
+        include_authn = True
+        include_outbound = True
+        include_tls_fixtures = True
+        include_http_idempotency = True
+        include_jobs = True
+        include_webhooks = False
     elif historical_jobs and keys == _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
         include_tls_fixtures = True
         include_http_idempotency = True
         include_jobs = False
+        include_webhooks = False
     elif historical_http_idempotency and keys == _TLS_FIXTURE_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
         include_tls_fixtures = True
         include_http_idempotency = False
         include_jobs = False
+        include_webhooks = False
     elif historical_outbound and keys == _CURRENT_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = False
         include_tls_fixtures = False
         include_http_idempotency = False
         include_jobs = False
+        include_webhooks = False
     elif historical_authn and keys == _LEGACY_PROFILE_INVENTORY_KEYS:
         include_authn = False
         include_outbound = False
         include_tls_fixtures = False
         include_http_idempotency = False
         include_jobs = False
+        include_webhooks = False
     else:
         raise Refusal("template profile inventory has an unsupported schema")
     source_only = _path_list(raw["source_only"], "source_only")
@@ -296,6 +338,13 @@ def _profile_data(
             markers.extend(_markers(profile, section["markers"]))
     if include_jobs:
         for profile in ("jobs", "jobs-http-idempotency"):
+            section = raw[profile]
+            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+                raise Refusal(f"template {profile} inventory has an unsupported shape")
+            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
+            markers.extend(_markers(profile, section["markers"]))
+    if include_webhooks:
+        for profile in ("webhooks-common", "webhooks", "inbound-webhooks"):
             section = raw[profile]
             if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
@@ -460,6 +509,12 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("jobs")
         if inputs.http_idempotency == "postgres":
             selected.add("jobs-http-idempotency")
+    if inputs.webhooks == "durable" or inputs.inbound_webhooks == "standard-webhooks":
+        selected.add("webhooks-common")
+    if inputs.webhooks == "durable":
+        selected.add("webhooks")
+    if inputs.inbound_webhooks == "standard-webhooks":
+        selected.add("inbound-webhooks")
     return selected
 
 
@@ -1201,6 +1256,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--outbound-http", action=SingleValue)
     parser.add_argument("--http-idempotency", action=SingleValue)
     parser.add_argument("--jobs", action=SingleValue)
+    parser.add_argument("--webhooks", action=SingleValue)
+    parser.add_argument("--inbound-webhooks", action=SingleValue)
     parser.add_argument("--agent-harness", action=SingleValue)
     return parser
 

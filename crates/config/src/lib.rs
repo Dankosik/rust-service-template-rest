@@ -27,9 +27,15 @@ pub mod postgres;
 // template:begin http-idempotency:config-http-idempotency-module
 pub mod http_idempotency;
 // template:end http-idempotency:config-http-idempotency-module
+// template:begin inbound-webhooks:config-inbound-webhooks-module
+pub mod inbound_webhooks;
+// template:end inbound-webhooks:config-inbound-webhooks-module
 // template:begin jobs:config-jobs-module
 pub mod jobs;
 // template:end jobs:config-jobs-module
+// template:begin webhooks:config-webhooks-module
+pub mod webhooks;
+// template:end webhooks:config-webhooks-module
 
 mod cli;
 mod load;
@@ -42,6 +48,9 @@ pub use app::{AppConfig, BuildInfo};
 pub use cli::{FromArgs, LoadOptions, process_failure};
 pub use health::HealthConfig;
 pub use http::HttpConfig;
+// template:begin inbound-webhooks:config-inbound-webhooks-export
+pub use inbound_webhooks::{InboundWebhookEndpointConfig, InboundWebhooksConfig};
+// template:end inbound-webhooks:config-inbound-webhooks-export
 pub use load::{ENV_PREFIX, Error, MAX_FILE_BYTES, load};
 pub use log::{LogConfig, LogFormat};
 pub use observability::{
@@ -62,6 +71,9 @@ pub use http_idempotency::HttpIdempotencyConfig;
 // template:begin jobs:config-jobs-export
 pub use jobs::JobsConfig;
 // template:end jobs:config-jobs-export
+// template:begin webhooks:config-webhooks-export
+pub use webhooks::{WebhookEndpointConfig, WebhooksConfig};
+// template:end webhooks:config-webhooks-export
 pub use secret_policy::is_secret_like_key;
 pub use validate::ValidationError;
 
@@ -71,6 +83,9 @@ pub use validate::ValidationError;
 pub struct Config {
     pub app: AppConfig,
     pub http: HttpConfig,
+    // template:begin inbound-webhooks:config-inbound-webhooks-field
+    pub inbound_webhooks: InboundWebhooksConfig,
+    // template:end inbound-webhooks:config-inbound-webhooks-field
     pub health: HealthConfig,
     pub log: LogConfig,
     pub observability: ObservabilityConfig,
@@ -86,6 +101,9 @@ pub struct Config {
     // template:begin jobs:config-jobs-field
     pub jobs: JobsConfig,
     // template:end jobs:config-jobs-field
+    // template:begin webhooks:config-webhooks-field
+    pub webhooks: WebhooksConfig,
+    // template:end webhooks:config-webhooks-field
 }
 
 impl Config {
@@ -98,6 +116,9 @@ impl Config {
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.app.validate()?;
         self.http.validate()?;
+        // template:begin inbound-webhooks:config-inbound-webhooks-validate
+        self.inbound_webhooks.validate()?;
+        // template:end inbound-webhooks:config-inbound-webhooks-validate
         self.health.validate()?;
         self.log.validate()?;
         self.observability.validate()?;
@@ -113,6 +134,9 @@ impl Config {
         // template:begin jobs:config-jobs-validate
         self.jobs.validate()?;
         // template:end jobs:config-jobs-validate
+        // template:begin webhooks:config-webhooks-validate
+        self.webhooks.validate()?;
+        // template:end webhooks:config-webhooks-validate
         Ok(())
     }
 }

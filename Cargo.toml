@@ -23,6 +23,9 @@ infra-bearerauthn = { path = "crates/infra-bearerauthn" }
 # template:begin egress-dns:workspace-egress-dns-crate
 infra-egress-dns = { path = "crates/infra-egress-dns" }
 # template:end egress-dns:workspace-egress-dns-crate
+# template:begin outbound-http:workspace-outbound-http-crate
+infra-outbound-http = { path = "crates/infra-outbound-http" }
+# template:end outbound-http:workspace-outbound-http-crate
 # template:begin postgres:workspace-postgres-crates
 infra-postgres = { path = "crates/infra-postgres" }
 # template:end postgres:workspace-postgres-crates
@@ -37,6 +40,9 @@ infra-idempotency-store = { path = "crates/infra-idempotency-store" }
 infra-jobs = { path = "crates/infra-jobs" }
 jobs-worker = { path = "crates/jobs-worker" }
 # template:end jobs:workspace-jobs-crates
+# template:begin webhooks-common:workspace-webhooks-crate
+infra-webhooks = { path = "crates/infra-webhooks" }
+# template:end webhooks-common:workspace-webhooks-crate
 
 # template:begin postgres:workspace-postgres-dependencies
 # Persistence (docs/architecture/persistence.md). `macros` only where
@@ -56,9 +62,7 @@ futures-util = { version = "0.3", default-features = false }
 axum = { version = "0.8.9", default-features = false }
 hyper-util = { version = "0.1.20", default-features = false }
 http-body-util = "0.1.5"
-# template:begin outbound-http:workspace-outbound-http-types
 http = { version = "1.5.0", default-features = false }
-# template:end outbound-http:workspace-outbound-http-types
 tokio = { version = "1.53.1", default-features = false }
 tokio-util = { version = "0.7.19", default-features = false }
 tower = { version = "0.5.3", default-features = false }
@@ -141,8 +145,11 @@ hickory-resolver = { version = "0.26.3", default-features = false }
 # template:end egress-dns:workspace-egress-dns
 # template:begin oidc-jwt:workspace-authn-jwt
 jsonwebtoken = { version = "=11.1.0", default-features = false }
-aws-lc-rs = { version = "=1.18.1", default-features = false }
 # template:end oidc-jwt:workspace-authn-jwt
+aws-lc-rs = { version = "=1.18.1", default-features = false }
+# template:begin webhooks:workspace-webhooks-httpdate
+httpdate = { version = "1.0.3", default-features = false }
+# template:end webhooks:workspace-webhooks-httpdate
 
 # Build metadata
 vergen-gitcl = { version = "10.0.3", default-features = false }

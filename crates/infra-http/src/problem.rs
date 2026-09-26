@@ -51,6 +51,10 @@ pub enum Code {
     IdempotencyKeyMismatch,
     IdempotencyUnavailable,
     // template:end http-idempotency:http-idempotency-codes
+    // template:begin inbound-webhooks:http-webhook-codes
+    WebhookRejected,
+    WebhookConflict,
+    // template:end inbound-webhooks:http-webhook-codes
     Forbidden,
     NotFound,
     MethodNotAllowed,
@@ -174,6 +178,20 @@ impl Code {
                 type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4"),
             },
             // template:end http-idempotency:http-idempotency-code-meta
+            // template:begin inbound-webhooks:http-webhook-code-meta
+            Code::WebhookRejected => CodeMeta {
+                wire: "webhook_rejected",
+                status: StatusCode::BAD_REQUEST,
+                title: "webhook rejected",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.1"),
+            },
+            Code::WebhookConflict => CodeMeta {
+                wire: "webhook_conflict",
+                status: StatusCode::CONFLICT,
+                title: "webhook conflict",
+                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.10"),
+            },
+            // template:end inbound-webhooks:http-webhook-code-meta
             Code::Forbidden => CodeMeta {
                 wire: "forbidden",
                 status: StatusCode::FORBIDDEN,
@@ -439,6 +457,47 @@ pub mod responses {
     #[response(content_type = "application/problem+json")]
     pub struct InternalServerError(pub Problem);
 
+    // template:begin inbound-webhooks:http-webhook-problem-responses
+    /// webhook endpoint is unknown
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json")]
+    pub struct NotFound(pub Problem);
+
+    /// webhook signature evidence is missing, malformed, stale, or invalid
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json")]
+    pub struct WebhookRejected(pub Problem);
+
+    /// a repeated webhook identity supplied different bytes
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json")]
+    pub struct WebhookConflict(pub Problem);
+
+    /// durable webhook receipt storage is unavailable
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json")]
+    pub struct ServiceUnavailable(pub Problem);
+
+    /// The non-success webhook admission outcomes.  The route itself owns
+    /// the signature requirement; OpenAPI's empty security array means only
+    /// that bearer authentication is not the operation's authentication.
+    #[derive(Debug, IntoResponses)]
+    pub enum WebhookProblemResponses {
+        #[response(status = 400)]
+        Rejected(#[ref_response] WebhookRejected),
+        #[response(status = 404)]
+        NotFound(#[ref_response] NotFound),
+        #[response(status = 409)]
+        Conflict(#[ref_response] WebhookConflict),
+        #[response(status = 413)]
+        RequestEntityTooLarge(#[ref_response] RequestEntityTooLarge),
+        #[response(status = 500)]
+        InternalServerError(#[ref_response] InternalServerError),
+        #[response(status = 503)]
+        Unavailable(#[ref_response] ServiceUnavailable),
+    }
+    // template:end inbound-webhooks:http-webhook-problem-responses
+
     // template:begin authn:http-authentication-problem-responses
     /// bearer authentication is malformed
     #[derive(Debug, ToResponse)]
@@ -517,6 +576,9 @@ pub mod responses {
     #[openapi(components(
         schemas(Problem, InvalidParam),
         responses(BadRequest, RequestEntityTooLarge, InternalServerError
+            // template:begin inbound-webhooks:http-webhook-problem-components
+            , NotFound, WebhookRejected, WebhookConflict, ServiceUnavailable
+            // template:end inbound-webhooks:http-webhook-problem-components
             // template:begin authn:http-authentication-problem-components
             , AuthenticationMalformed, AuthenticationUnauthorized, AuthenticationForbidden,
             AuthenticationOversize, AuthenticationUnavailable, AuthenticationTimeout

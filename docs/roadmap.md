@@ -623,10 +623,28 @@ markers, tests, and initializer support. Order by expected demand:
    **Merged via PR #51 at
    `48e565af7c2875832996816b975a2e2b01457d4f`**;
    [adoption guide](background-jobs.md).
-5. Outbound and inbound webhooks: Standard Webhooks signing, retry,
-   public-address predicate, verification, receipt deduplication, and durable
-   dispatch. Reuse `infra-jobs` scheduling, attempts, and fenced completion;
-   this stage does not add a second queue or a generic lifecycle crate.
+<!-- template:begin webhooks-common:roadmap-stage-10-5-webhooks -->
+5. Outbound and inbound webhooks: `WEBHOOKS=durable` and
+   `INBOUND_WEBHOOKS=standard-webhooks` independently retain static,
+   environment-secret-backed Standard Webhooks v1 capability. Both require the
+   PostgreSQL jobs pack; outbound also requires bounded outbound HTTP. Reuse
+   `infra-jobs` scheduling, attempts, deadline, and fenced completion; do not
+   add a second queue, worker, lifecycle crate, acceptance ledger, or endpoint
+   management API. The initializer's target is 46 runtime graphs plus 368 cheap projections:
+   the 26 baseline graphs, three full capability shapes, and 17 focused
+   cross-profile combinations over the retained eight CI partitions. This
+   describes required proof design, not a completed CI or delivery receipt.
+<!-- template:end webhooks-common:roadmap-stage-10-5-webhooks -->
+<!-- template:begin webhooks:roadmap-stage-10-5-outbound-guide -->
+   The [outbound guide](outbound-webhooks.md) owns outbound adoption,
+   retention, and delivery limits. Outbound acceptance is caller-transactional
+   and preserves a stable retry identity.
+<!-- template:end webhooks:roadmap-stage-10-5-outbound-guide -->
+<!-- template:begin inbound-webhooks:roadmap-stage-10-5-inbound-guide -->
+   The [inbound guide](inbound-webhooks.md) owns receipt admission,
+   processing, and retention limits. Raw-byte verification atomically creates a
+   PostgreSQL receipt and processing job with duplicate/conflict arbitration.
+<!-- template:end inbound-webhooks:roadmap-stage-10-5-inbound-guide -->
 6. NATS JetStream messaging with typed domain events and a `worker` binary;
    transactional outbox with an `outbox-relay` binary. Reuse `infra-jobs` for
    durable local scheduling and completion where that boundary applies; the

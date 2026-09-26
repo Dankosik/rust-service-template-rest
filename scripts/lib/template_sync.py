@@ -38,9 +38,11 @@ from template_state import (
     safe_relative,
     selected_adapters,
     selected_http_idempotency,
+    selected_inbound_webhooks,
     selected_jobs,
     selected_outbound_http,
     selected_profiles,
+    selected_webhooks,
     snapshot_tree,
     verify_plan,
     write_plan,
@@ -811,6 +813,8 @@ def _run(arguments: argparse.Namespace) -> int:
         selected_outbound_http(target)
         selected_http_idempotency(target)
         selected_jobs(target)
+        selected_webhooks(target)
+        selected_inbound_webhooks(target)
         selected = set(selected_adapters(harness))
         manifest = parse_manifest(
             snapshot,
