@@ -20,15 +20,15 @@ use http_body_util::{BodyExt, Full, LengthLimitError};
 use infra_idempotency_store::Store;
 use utoipa::OpenApi as _;
 
-use super::declaration::{self, AgreementError, ComposedOperation, Rule};
+use super::declaration::{self, AgreementError, ComposedOperation};
 use super::execute::{Attempt, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, sanitized};
 use super::identity;
 use super::openapi::{IdempotencyComponents, KEY_HEADER};
 use crate::authn::VerifiedPrincipal;
-use crate::contract::RegisteredRoutes;
 use crate::harden::RequestDeadline;
 use crate::problem::{Code, Problem};
 use crate::request_id;
+use utoipa_axum::router::UtoipaMethodRouter;
 
 const INVALID_KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
 const INVALID_KEY_REASON: &str =
@@ -82,7 +82,7 @@ impl Composer {
     /// Key handling stays inside final authentication. A carrier that breaks a
     /// declaration rule remains fail-closed as sanitized 500 endpoints, and
     /// [`Composer::agree`] reports the declaration error before admission.
-    pub fn route<S>(&mut self, mut routes: RegisteredRoutes<S>) -> RegisteredRoutes<S>
+    pub fn route<S>(&mut self, mut routes: UtoipaMethodRouter<S>) -> UtoipaMethodRouter<S>
     where
         S: Clone + Send + Sync + 'static,
     {
@@ -91,10 +91,7 @@ impl Composer {
             metrics::Unit::Count,
             "Outcomes of requests to idempotent operations, by outcome."
         );
-        let operation = routes
-            .documented_paths_mut()
-            .ok_or_else(|| AgreementError::new("registered route", Rule::Shape))
-            .and_then(declaration::prepare);
+        let operation = declaration::prepare(&mut routes.1);
         let operation = match operation {
             Ok(operation) => operation,
             Err(failure) => {
@@ -107,10 +104,10 @@ impl Composer {
             operation: Arc::from(operation.operation_id.as_str()),
         };
         self.composed.insert(operation);
-        routes.map_method_routers(|method_router| {
-            let keys = keys.clone();
-            method_router.route_layer(middleware::from_fn_with_state(keys, handle_key))
-        })
+        routes.2 = routes
+            .2
+            .route_layer(middleware::from_fn_with_state(keys, handle_key));
+        routes
     }
 
     /// Register the generated idempotency Problem components for the contract
@@ -146,15 +143,16 @@ impl Composer {
 }
 
 /// The fail-closed form of a carrier that broke a declaration rule.
-fn refuse<S>(routes: RegisteredRoutes<S>) -> RegisteredRoutes<S>
+fn refuse<S>(mut routes: UtoipaMethodRouter<S>) -> UtoipaMethodRouter<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    routes.map_method_routers(|method_router| {
-        method_router.route_layer(middleware::from_fn(|request: Request, _: Next| {
+    routes.2 = routes
+        .2
+        .route_layer(middleware::from_fn(|request: Request, _: Next| {
             std::future::ready(sanitized(request_id::request_id(request.extensions())))
-        }))
-    })
+        }));
+    routes
 }
 
 #[derive(Clone)]

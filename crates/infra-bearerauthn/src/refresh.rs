@@ -10,7 +10,7 @@ use tracing::warn;
 use crate::{
     ProviderUrl,
     jwt::{KeySet, KeySetError, parse_key_set},
-    provider::{ProviderClient, ProviderDeadline, reserve_request_deadline},
+    provider::{ProviderClient, ProviderDeadline},
 };
 
 const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
@@ -23,7 +23,6 @@ pub(crate) enum UnknownKeyResult {
     RefreshFailed,
     CooldownSuccess,
     CooldownFailure,
-    DeadlineElapsed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,10 +50,12 @@ pub(crate) struct SharedRefresh {
     state: Mutex<RefreshState>,
     completed: watch::Sender<(u64, FetchOutcome)>,
     requested: Notify,
+    stopped: CancellationToken,
 }
 
 impl SharedRefresh {
     pub(crate) fn new(keys: Arc<KeySet>) -> Arc<Self> {
+        metrics::describe_counter!(REFRESH_METRIC, "JWKS refresh outcomes by closed reason");
         let (snapshot, snapshot_reader) = watch::channel(keys);
         let (completed, _) = watch::channel((0, FetchOutcome::Success));
         Arc::new(Self {
@@ -62,6 +63,7 @@ impl SharedRefresh {
             snapshot_reader,
             completed,
             requested: Notify::new(),
+            stopped: CancellationToken::new(),
             state: Mutex::new(RefreshState {
                 next_generation: 1,
                 in_flight: None,
@@ -76,26 +78,21 @@ impl SharedRefresh {
         self.snapshot_reader.borrow().clone()
     }
 
-    pub(crate) async fn refresh_unknown(&self, request_deadline: Instant) -> UnknownKeyResult {
+    pub(crate) async fn refresh_unknown(&self) -> UnknownKeyResult {
         enum Action {
-            Wait(u64, watch::Receiver<(u64, FetchOutcome)>, Instant),
+            Wait(u64, watch::Receiver<(u64, FetchOutcome)>),
             Cooldown(UnknownKeyResult),
         }
         let action = {
+            let mut state = tokio::select! {
+                biased;
+                () = self.stopped.cancelled() => return UnknownKeyResult::RefreshFailed,
+                state = self.state.lock() => state,
+            };
             let now = Instant::now();
-            let Some(wait_deadline) = reserve_request_deadline(now, request_deadline) else {
-                return UnknownKeyResult::DeadlineElapsed;
-            };
-            let Ok(mut state) = tokio::time::timeout_at(wait_deadline, self.state.lock()).await
-            else {
-                return UnknownKeyResult::DeadlineElapsed;
-            };
-            if Instant::now() >= wait_deadline {
-                return UnknownKeyResult::DeadlineElapsed;
-            }
             let receiver = self.completed.subscribe();
             if let Some(reservation) = state.in_flight {
-                Action::Wait(reservation.generation, receiver, wait_deadline)
+                Action::Wait(reservation.generation, receiver)
             } else if now.saturating_duration_since(state.last_started) < REFRESH_COOLDOWN {
                 Action::Cooldown(match state.last_outcome {
                     FetchOutcome::Success => UnknownKeyResult::CooldownSuccess,
@@ -109,12 +106,12 @@ impl SharedRefresh {
                 state.last_started = now;
                 state.in_flight = Some(reservation);
                 self.requested.notify_one();
-                Action::Wait(reservation.generation, receiver, wait_deadline)
+                Action::Wait(reservation.generation, receiver)
             }
         };
         match action {
-            Action::Wait(generation, receiver, deadline) => {
-                wait_for_generation(receiver, generation, deadline).await
+            Action::Wait(generation, receiver) => {
+                wait_for_generation(receiver, generation, &self.stopped).await
             }
             Action::Cooldown(result) => result,
         }
@@ -165,11 +162,11 @@ impl SharedRefresh {
         drop(state);
         self.completed
             .send_replace((reservation.generation, outcome));
-        metrics::describe_counter!(REFRESH_METRIC, "JWKS refresh outcomes by closed reason");
         metrics::counter!(REFRESH_METRIC, "result" => match outcome { FetchOutcome::Success => "success", FetchOutcome::Failure => "failure" }, "reason" => reason).increment(1);
     }
 
     async fn cancel_in_flight(&self) {
+        self.stopped.cancel();
         let reservation = self.state.lock().await.in_flight;
         if let Some(reservation) = reservation {
             self.complete(reservation, Err(RefreshFailure::Cancelled))
@@ -253,11 +250,11 @@ impl RefreshFailure {
 async fn wait_for_generation(
     mut receiver: watch::Receiver<(u64, FetchOutcome)>,
     generation: u64,
-    deadline: Instant,
+    stopped: &CancellationToken,
 ) -> UnknownKeyResult {
     loop {
-        if Instant::now() >= deadline {
-            return UnknownKeyResult::DeadlineElapsed;
+        if stopped.is_cancelled() {
+            return UnknownKeyResult::RefreshFailed;
         }
         let (completed, outcome) = *receiver.borrow_and_update();
         if completed >= generation {
@@ -266,10 +263,14 @@ async fn wait_for_generation(
                 FetchOutcome::Failure => UnknownKeyResult::RefreshFailed,
             };
         }
-        match tokio::time::timeout_at(deadline, receiver.changed()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => return UnknownKeyResult::RefreshFailed,
-            Err(_) => return UnknownKeyResult::DeadlineElapsed,
+        tokio::select! {
+            biased;
+            () = stopped.cancelled() => return UnknownKeyResult::RefreshFailed,
+            result = receiver.changed() => {
+                if result.is_err() {
+                    return UnknownKeyResult::RefreshFailed;
+                }
+            }
         }
     }
 }
@@ -280,7 +281,6 @@ mod tests {
     use crate::jwt::parse_key_set;
     use jsonwebtoken::{Algorithm, EncodingKey, crypto::aws_lc::DEFAULT_PROVIDER, jwk::Jwk};
     use std::sync::Arc;
-    use tokio::time::Instant;
 
     const JWT_SIGNING_DER: &[u8] = include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
 
@@ -307,11 +307,7 @@ mod tests {
         refresh.permit_unknown_refresh_for_test().await;
         let call = {
             let refresh = refresh.clone();
-            tokio::spawn(async move {
-                refresh
-                    .refresh_unknown(Instant::now() + std::time::Duration::from_secs(2))
-                    .await
-            })
+            tokio::spawn(async move { refresh.refresh_unknown().await })
         };
         tokio::task::yield_now().await;
         let reservation = refresh.state.lock().await.in_flight.unwrap();
@@ -321,44 +317,32 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn waiter_deadlines_are_independent_of_the_shared_generation() {
+    async fn dropping_a_waiter_does_not_cancel_the_shared_generation() {
         let refresh = SharedRefresh::new(key_set("old"));
         refresh.permit_unknown_refresh_for_test().await;
         let first = {
             let refresh = refresh.clone();
-            tokio::spawn(async move {
-                refresh
-                    .refresh_unknown(Instant::now() + std::time::Duration::from_secs(2))
-                    .await
-            })
+            tokio::spawn(async move { refresh.refresh_unknown().await })
         };
         tokio::task::yield_now().await;
         let reservation = refresh.state.lock().await.in_flight.unwrap();
         let second = {
             let refresh = refresh.clone();
-            tokio::spawn(async move {
-                refresh
-                    .refresh_unknown(Instant::now() + std::time::Duration::from_millis(150))
-                    .await
-            })
+            tokio::spawn(async move { refresh.refresh_unknown().await })
         };
         tokio::task::yield_now().await;
-        tokio::time::advance(std::time::Duration::from_millis(51)).await;
-        assert_eq!(second.await.unwrap(), UnknownKeyResult::DeadlineElapsed);
+        second.abort();
+        assert!(second.await.unwrap_err().is_cancelled());
         refresh.complete(reservation, Ok(key_set("new"))).await;
         assert_eq!(first.await.unwrap(), UnknownKeyResult::Refreshed);
     }
     #[tokio::test(start_paused = true)]
-    async fn repair_regression_waiter_uses_own_budget_beyond_provider_cap() {
+    async fn waiter_remains_until_shared_generation_completes() {
         let refresh = SharedRefresh::new(key_set("old"));
         refresh.permit_unknown_refresh_for_test().await;
         let call = {
             let refresh = refresh.clone();
-            tokio::spawn(async move {
-                refresh
-                    .refresh_unknown(Instant::now() + std::time::Duration::from_secs(10))
-                    .await
-            })
+            tokio::spawn(async move { refresh.refresh_unknown().await })
         };
         tokio::task::yield_now().await;
         let reservation = refresh.state.lock().await.in_flight.unwrap();
@@ -368,12 +352,20 @@ mod tests {
         assert_eq!(call.await.unwrap(), UnknownKeyResult::Refreshed);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn repair_regression_expired_waiter_rejects_already_completed_generation() {
-        let (_sender, receiver) = tokio::sync::watch::channel((1, super::FetchOutcome::Success));
+    #[tokio::test]
+    async fn worker_shutdown_releases_current_and_future_waiters() {
+        let refresh = SharedRefresh::new(key_set("old"));
+        refresh.permit_unknown_refresh_for_test().await;
+        let call = {
+            let refresh = refresh.clone();
+            tokio::spawn(async move { refresh.refresh_unknown().await })
+        };
+        tokio::task::yield_now().await;
+        refresh.cancel_in_flight().await;
+        assert_eq!(call.await.unwrap(), UnknownKeyResult::RefreshFailed);
         assert_eq!(
-            super::wait_for_generation(receiver, 1, Instant::now()).await,
-            UnknownKeyResult::DeadlineElapsed
+            refresh.refresh_unknown().await,
+            UnknownKeyResult::RefreshFailed
         );
     }
 }

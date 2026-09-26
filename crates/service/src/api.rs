@@ -2,7 +2,7 @@
 //!
 //! [`contract`] merges every carrier that contributes operations; the axum
 //! `Router` the service binds and the OpenAPI document written to
-//! `api/openapi/service.yaml` share the same tracked construction.
+//! `api/openapi/service.yaml` share the same annotated construction.
 //!
 //! The committed YAML is generated output: `make openapi-generate` rewrites
 //! it and the `openapi` integration test refuses a stale copy. Reviewers,
@@ -12,7 +12,7 @@
 use std::error::Error;
 
 use health::ReadinessReader;
-use infra_http::ContractRouter;
+use utoipa_axum::router::OpenApiRouter;
 // template:begin http-idempotency:service-api-http-idempotency-import
 use infra_http::idempotency::Composer;
 // template:end http-idempotency:service-api-http-idempotency-import
@@ -61,7 +61,7 @@ impl Modify for BearerAuth {
 // template:end authn:service-api-authn-security-scheme
 
 /// Every operation the service serves, with its contract, as one
-/// [`ContractRouter`] whose [`ReadinessReader`] state is still unapplied.
+/// [`OpenApiRouter`] whose [`ReadinessReader`] state is still unapplied.
 /// Bootstrap finalizes it, supplies the state, and hardens the routes;
 /// [`document`] consumes the document-only path.
 #[must_use]
@@ -69,15 +69,15 @@ pub fn contract(
     // template:begin http-idempotency:service-api-contract-composer
     idempotency: &mut Composer,
     // template:end http-idempotency:service-api-contract-composer
-) -> ContractRouter<ReadinessReader> {
+) -> OpenApiRouter<ReadinessReader> {
     assemble()
         // template:begin http-idempotency:service-api-idempotency-components
-        .merge_document(idempotency.components())
+        .merge(OpenApiRouter::with_openapi(idempotency.components()))
     // template:end http-idempotency:service-api-idempotency-components
 }
 
-fn assemble() -> ContractRouter<ReadinessReader> {
-    ContractRouter::with_openapi(ApiDoc::openapi()).merge(infra_http::router())
+fn assemble() -> OpenApiRouter<ReadinessReader> {
+    OpenApiRouter::with_openapi(ApiDoc::openapi()).merge(infra_http::router())
 }
 
 /// The OpenAPI document of [`contract`].
@@ -88,7 +88,7 @@ pub fn document() -> Document {
         &mut Composer::inert(),
         // template:end http-idempotency:service-api-document-composer
     )
-    .into_document()
+    .into_openapi()
 }
 
 /// The committed form of [`document`]: the generated-file header followed
@@ -142,33 +142,27 @@ mod tests {
         }
     }
 
-    fn protected_test_contract() -> ContractRouter<ReadinessReader> {
-        assemble().routes(infra_http::routes!(protected))
+    fn protected_test_contract() -> OpenApiRouter<ReadinessReader> {
+        let contract = assemble();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
+        )]
+        let route = utoipa_axum::routes!(protected);
+        contract.routes(route)
     }
 
     #[test]
-    fn repair_regression_protected_contract_refuses_disabled_authentication_without_a_composer() {
+    fn protected_contract_refuses_public_finalization_without_a_composer() {
         assert!(
-            infra_http::authn::finalize(
-                protected_test_contract(),
-                infra_bearerauthn::Verifier::disabled(),
-                32 * 1024,
-            )
-            .is_err(),
+            infra_http::finalize_public(protected_test_contract()).is_err(),
             "protected operations must refuse startup when authentication is disabled"
         );
     }
 
     #[test]
     fn public_probe_contract_does_not_depend_on_a_verifier() {
-        assert!(
-            infra_http::authn::finalize(
-                assemble(),
-                infra_bearerauthn::Verifier::disabled(),
-                32 * 1024,
-            )
-            .is_ok()
-        );
+        assert!(infra_http::finalize_public(assemble()).is_ok());
     }
 }
 // template:end authn:service-api-protected-test-route
@@ -207,19 +201,23 @@ mod idempotency_tests {
 
     /// The production contract with the test route composed through the
     /// same composer.
-    fn with_test_route(idempotency: &mut Composer) -> ContractRouter<ReadinessReader> {
-        contract(idempotency).routes(idempotency.route(infra_http::routes!(idempotent)))
+    fn with_test_route(idempotency: &mut Composer) -> OpenApiRouter<ReadinessReader> {
+        let contract = contract(idempotency);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
+        )]
+        let route = utoipa_axum::routes!(idempotent);
+        contract.routes(idempotency.route(route))
     }
 
     /// Agreement of the contract `compose` builds through a fresh inert
     /// composer.
-    fn agreed(
-        compose: impl FnOnce(&mut Composer) -> ContractRouter<ReadinessReader>,
-    ) -> Activation {
+    fn agreed(compose: impl FnOnce(&mut Composer) -> OpenApiRouter<ReadinessReader>) -> Activation {
         let mut composer = Composer::inert();
         let contract = compose(&mut composer);
         composer
-            .agree(contract.document())
+            .agree(contract.get_openapi())
             .expect("the contract agrees with the routes composed through it")
     }
 
@@ -236,10 +234,10 @@ mod idempotency_tests {
         let mut composer = Composer::inert();
         let contract = with_test_route(&mut composer);
         assert!(matches!(
-            composer.agree(contract.document()).unwrap(),
+            composer.agree(contract.get_openapi()).unwrap(),
             Activation::Active { .. }
         ));
-        let document = serde_json::to_value(contract.document()).unwrap();
+        let document = serde_json::to_value(contract.get_openapi()).unwrap();
         let operation = &document["paths"]["/_test/idempotent"]["post"];
         assert_eq!(operation["x-idempotent"], true);
         let parameters = operation["parameters"].as_array().unwrap();

@@ -169,7 +169,9 @@ def assert_profile_output(
     shared_selected = authn != "none" or outbound_http == "bounded"
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
     assert_profile_pack(source, target, "egress-dns", outbound_http == "bounded")
-    assert_profile_pack(source, target, "request-budget", shared_selected)
+    assert_profile_pack(
+        source, target, "request-budget", outbound_http == "bounded" or http_idempotency == "postgres"
+    )
     assert_profile_pack(source, target, "http-idempotency", http_idempotency == "postgres")
     assert_profile_pack(
         source, target, "http-idempotency-mounted", http_idempotency == "postgres" and authn == "oidc-introspection"

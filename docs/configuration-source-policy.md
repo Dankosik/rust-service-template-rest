@@ -59,14 +59,14 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   ([Persistence](architecture/persistence.md#connection-admission)).
 <!-- template:end postgres:docs-config-postgres-source -->
 <!-- template:begin authn:docs-config-authn-source -->
-- `authn.mode` defaults to `none`. A retained initialized profile admits only `none` plus its selected engine. The `none` variant accepts no provider fields; an active engine needs exact, nonblank `authn.issuer` and `authn.audience`. Issuer, audience, and identity values are not trimmed or case-folded.
+- `authn.mode` defaults to `none`. A retained initialized profile admits only `none` plus its selected engine. The `none` variant accepts no provider fields; an active engine needs exact, nonblank `authn.issuer` and `authn.audience`. Issuer, audience, and identity values are not trimmed or case-folded. `AuthnConfig` Debug exposes only mode; trust inputs, endpoints, queries and credentials remain redacted.
 <!-- template:end authn:docs-config-authn-source -->
 <!-- template:begin oidc-jwt:docs-config-jwt-source -->
 - JWT mode accepts `authn.token_profile = "resource-server"` or `"rfc9068"`, with `resource-server` as the omitted-value default; it accepts a nonempty `authn.algorithms` list of `RS256`, `ES256`, `PS256`, or `EdDSA`. `authn.audience` accepts one string or a nonempty exact-string list. JWT provider configuration does not accept introspection fields.
 <!-- template:end oidc-jwt:docs-config-jwt-source -->
 <!-- template:begin oidc-introspection:docs-config-introspection-source -->
 - Introspection mode requires `authn.introspection_endpoint`, `authn.introspection_client_id`, a nonzero `authn.provider_concurrency` (default 32), and a nonempty `APP__AUTHN__INTROSPECTION_CLIENT_SECRET`. Its client secret is `SecretString`, environment-only, and must never appear in TOML; the mode rejects JWT-only inputs.
-- Introspection alone accepts `authn.cache_enabled` (default `false`), `authn.cache_capacity` (default 256, inclusive 1–1024), and `authn.cache_ttl` (human duration, default `"30s"`, inclusive `"1s"`–`"5m"`). These non-secret values use normal file/environment precedence (`APP__AUTHN__CACHE_ENABLED`, `APP__AUTHN__CACHE_CAPACITY`, `APP__AUTHN__CACHE_TTL`). Invalid bounds fail startup even when caching is disabled. Enabled positive reuse ends at the earlier of the fixed TTL and token expiry, without expiry leeway; it can delay observing revocation or provider outages for that interval. See [Authentication](authentication.md#oidc-introspection) for storage bounds and miss behavior.
+- Introspection alone accepts `authn.cache_enabled` (default `false`), `authn.cache_capacity` (default 256, inclusive 1–1024), and `authn.cache_ttl` (human duration, default `"30s"`, inclusive `"1s"`–`"5m"`). These non-secret values use normal file/environment precedence (`APP__AUTHN__CACHE_ENABLED`, `APP__AUTHN__CACHE_CAPACITY`, `APP__AUTHN__CACHE_TTL`). Config owns typed input/defaults; the adapter cache-options constructor invoked by bootstrap owns numeric range validation. Invalid bounds fail startup before provider I/O or listeners even when caching is disabled. Enabled positive reuse ends at the earlier of the fixed TTL and token expiry, without expiry leeway; it can delay observing revocation or provider outages for that interval. See [Authentication](authentication.md#oidc-introspection) for storage bounds and miss behavior.
 <!-- template:end oidc-introspection:docs-config-introspection-source -->
 <!-- template:begin http-idempotency:docs-config-http-idempotency -->
 - `http_idempotency.retention` (environment `APP__HTTP_IDEMPOTENCY__RETENTION`)
@@ -207,7 +207,7 @@ every record inside a request) or `text` (local development).
   See the [guide](background-jobs.md#configure-and-size-the-worker).
 <!-- template:end jobs:docs-config-jobs -->
 <!-- template:begin authn:docs-config-authn-budgets -->
-- Authentication provider calls have a fixed three-second cap. Request-driven work receives at most the lesser of that cap and the remaining request budget less 100ms; exhausted request budget remains the existing `504` path. Introspection admits its configured number of simultaneous exchanges and rejects excess work as unavailable without queueing.
+- Authentication provider calls have an independent fixed three-second cap through body completion; discovery plus initial keys share a six-second startup cap. Authentication accepts no request deadline or response reserve. The outer hardened timer alone emits `504 request_timeout`; a completed provider timeout is `503 authentication_unavailable` while the request is live. Introspection admits its configured number of simultaneous exchanges and rejects excess distinct misses as unavailable without queueing; live cache hits and coalesced waiters need no extra permit.
 <!-- template:end authn:docs-config-authn-budgets -->
 
 ## Adding A Config Key

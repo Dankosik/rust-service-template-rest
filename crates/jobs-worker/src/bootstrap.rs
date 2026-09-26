@@ -318,9 +318,7 @@ async fn bind_listeners(
         failure_threshold: config.health.failure_threshold,
     };
     let options = server_options(config);
-    let routes = infra_http::router()
-        .finalize_public()?
-        .with_state(readiness.reader());
+    let routes = infra_http::finalize_public(infra_http::router())?.with_state(readiness.reader());
     let app = infra_http::harden(routes, &harden_options(config));
     let health = Server::bind(config.http.listen_addr()?, app, options).await?;
     tracing::info!(addr = %health.local_addr(), "http listener bound");

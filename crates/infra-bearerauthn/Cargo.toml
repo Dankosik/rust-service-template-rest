@@ -13,7 +13,7 @@ workspace = true
 
 [features]
 default = []
-test-support = []
+test-support = ["dep:rcgen", "dep:time"]
 
 [dependencies]
 base64 = { workspace = true, features = ["alloc"] }
@@ -25,9 +25,14 @@ metrics = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
 # template:begin oidc-introspection:authn-secret-dependency
 secrecy = { workspace = true }
+moka = { workspace = true, features = ["future"] }
+sha2 = { workspace = true }
 # template:end oidc-introspection:authn-secret-dependency
 serde = { workspace = true, features = ["std", "derive"] }
-serde_json = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std", "raw_value"] }
+serde_with = { workspace = true, features = ["std"] }
+rcgen = { workspace = true, optional = true, features = ["aws_lc_rs"] }
+time = { workspace = true, optional = true, features = ["std"] }
 thiserror = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros", "io-util"] }
@@ -35,5 +40,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 url = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+rcgen = { workspace = true, features = ["aws_lc_rs"] }
+time = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }

@@ -1,6 +1,6 @@
 //! Trusted provider URL admission and pooled HTTPS transport.
 
-use std::{sync::Arc, time::Duration};
+use std::{fmt, sync::Arc, time::Duration};
 
 use reqwest::{header, redirect::Policy};
 use tokio::time::Instant;
@@ -12,22 +12,35 @@ use crate::{Failure, PreparationError, PreparationPhase, PreparationReason};
 
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
-const RESPONSE_RESERVE: Duration = Duration::from_millis(100);
 
 /// One adapter-owned admitted provider destination.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ProviderUrl {
     exact: String,
     url: Url,
 }
 
 impl ProviderUrl {
-    /// Parses the one accepted configured/discovered provider URL grammar.
+    /// Parses a strict issuer URL without a query or fragment.
     ///
     /// # Errors
     ///
     /// Returns [`PreparationError`] when the URL violates the provider grammar.
     pub fn parse(raw: &str) -> Result<Self, PreparationError> {
+        Self::parse_url(raw, false)
+    }
+
+    /// Parses a provider endpoint, preserving its query ordering and escaping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PreparationError`] for a non-HTTPS URL, missing host, userinfo,
+    /// fragment, whitespace or control characters.
+    pub fn parse_endpoint(raw: &str) -> Result<Self, PreparationError> {
+        Self::parse_url(raw, true)
+    }
+
+    fn parse_url(raw: &str, allow_query: bool) -> Result<Self, PreparationError> {
         if raw
             .bytes()
             .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
@@ -49,7 +62,7 @@ impl ProviderUrl {
             || !url.username().is_empty()
             || url.password().is_some()
             || url.fragment().is_some()
-            || url.query().is_some()
+            || (!allow_query && url.query().is_some())
             || authority.contains('@')
         {
             return Err(PreparationError::new(
@@ -74,53 +87,31 @@ impl ProviderUrl {
     }
 }
 
-/// A provider attempt bound with the error class determined by the limiting budget.
+impl fmt::Debug for ProviderUrl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProviderUrl([REDACTED])")
+    }
+}
+
+/// An absolute bound covering one provider exchange, including its body.
 #[derive(Clone, Copy)]
 pub(crate) struct ProviderDeadline {
     deadline: Instant,
-    exhausted: Failure,
 }
 
 impl ProviderDeadline {
-    // template:begin oidc-jwt:authn-provider-jwt-deadlines
     pub(crate) fn independent(now: Instant) -> Self {
         Self {
             deadline: now + PROVIDER_TIMEOUT,
-            exhausted: Failure::Unavailable,
         }
     }
 
+    // template:begin oidc-jwt:authn-provider-jwt-deadlines
     pub(crate) fn startup(now: Instant, overall_deadline: Instant) -> Option<Self> {
         let deadline = (now + PROVIDER_TIMEOUT).min(overall_deadline);
-        (deadline > now).then_some(Self {
-            deadline,
-            exhausted: Failure::Unavailable,
-        })
+        (deadline > now).then_some(Self { deadline })
     }
-
     // template:end oidc-jwt:authn-provider-jwt-deadlines
-    // template:begin oidc-introspection:authn-provider-introspection-deadline
-    pub(crate) fn request(now: Instant, request_deadline: Instant) -> Option<Self> {
-        let reserved = reserve_request_deadline(now, request_deadline)?;
-        let provider_cap = now + PROVIDER_TIMEOUT;
-        let (deadline, exhausted) = if reserved <= provider_cap {
-            (reserved, Failure::Timeout)
-        } else {
-            (provider_cap, Failure::Unavailable)
-        };
-        (deadline > now).then_some(Self {
-            deadline,
-            exhausted,
-        })
-    }
-
-    // template:end oidc-introspection:authn-provider-introspection-deadline
-}
-
-pub(crate) fn reserve_request_deadline(now: Instant, request_deadline: Instant) -> Option<Instant> {
-    request_deadline
-        .checked_sub(RESPONSE_RESERVE)
-        .filter(|reserved| *reserved > now)
 }
 
 /// The only outbound client authentication engines may use.
@@ -144,7 +135,8 @@ impl ProviderClient {
         url: &Url,
         deadline: ProviderDeadline,
     ) -> Result<Vec<u8>, Failure> {
-        self.exchange(self.client.get(url.clone()), deadline).await
+        self.exchange(self.client.get(url.clone()), deadline, false)
+            .await
     }
     // template:end oidc-jwt:authn-provider-get-json
 
@@ -156,8 +148,9 @@ impl ProviderClient {
         form_body: &[u8],
         deadline: ProviderDeadline,
     ) -> Result<Vec<u8>, Failure> {
-        let authorization = header::HeaderValue::from_bytes(basic_authorization)
+        let mut authorization = header::HeaderValue::from_bytes(basic_authorization)
             .map_err(|_| Failure::Unavailable)?;
+        authorization.set_sensitive(true);
         self.exchange(
             self.client
                 .post(url.clone())
@@ -168,6 +161,7 @@ impl ProviderClient {
                 )
                 .body(form_body.to_vec()),
             deadline,
+            true,
         )
         .await
     }
@@ -177,15 +171,18 @@ impl ProviderClient {
         &self,
         request: reqwest::RequestBuilder,
         deadline: ProviderDeadline,
+        require_json_media_type: bool,
     ) -> Result<Vec<u8>, Failure> {
         if Instant::now() >= deadline.deadline {
-            return Err(deadline.exhausted);
+            return Err(Failure::Unavailable);
         }
         let response = tokio::time::timeout_at(deadline.deadline, request.send())
             .await
-            .map_err(|_| deadline.exhausted)?
+            .map_err(|_| Failure::Unavailable)?
             .map_err(|_| Failure::Unavailable)?;
-        if response.status() != reqwest::StatusCode::OK || !is_json_response(&response) {
+        if response.status() != reqwest::StatusCode::OK
+            || (require_json_media_type && !is_json_response(&response))
+        {
             return Err(Failure::Unavailable);
         }
         if response
@@ -207,7 +204,7 @@ impl ProviderClient {
         };
         tokio::time::timeout_at(deadline.deadline, read)
             .await
-            .map_err(|_| deadline.exhausted)?
+            .map_err(|_| Failure::Unavailable)?
     }
 }
 
@@ -321,9 +318,6 @@ mod tests {
     use super::{Failure, ProviderClient, ProviderDeadline, ProviderUrl, new_fixture_client};
 
     const FIXTURE_HOST: &str = "authn.fixture.test";
-    const CERT_DER: &[u8] = include_bytes!("../tests/fixtures/authn-fixture-cert.der");
-    const KEY_DER: &[u8] = include_bytes!("../tests/fixtures/authn-fixture-key.der");
-    const ROOT_DER: &[u8] = include_bytes!("../tests/fixtures/authn-fixture-root.der");
 
     #[test]
     fn provider_url_retains_exact_spelling_and_rejects_unsafe_destinations() {
@@ -341,7 +335,31 @@ mod tests {
         }
     }
 
-    async fn tls_server(response: Vec<u8>) -> (std::net::SocketAddr, JoinHandle<Vec<u8>>) {
+    #[test]
+    fn endpoint_queries_are_preserved_and_provider_debug_is_redacted() {
+        let raw = "https://provider.example/keys?token=private%2Fvalue&x=1&x=2";
+        let endpoint = ProviderUrl::parse_endpoint(raw).unwrap();
+        assert_eq!(endpoint.as_str(), raw);
+        assert_eq!(endpoint.url().as_str(), raw);
+        assert!(ProviderUrl::parse(raw).is_err());
+        assert!(!format!("{endpoint:?}").contains("private"));
+        for invalid in [
+            "http://provider.example?token=private",
+            "https://user@provider.example?token=private",
+            "https://provider.example?token=private#fragment",
+            "https://provider.example?token=private\n",
+        ] {
+            let error = ProviderUrl::parse_endpoint(invalid).unwrap_err();
+            assert!(!format!("{error:?}").contains("private"));
+            assert!(!error.to_string().contains("private"));
+        }
+    }
+
+    async fn tls_server(
+        response: Vec<u8>,
+        hold_open: bool,
+    ) -> (std::net::SocketAddr, Vec<u8>, JoinHandle<Vec<u8>>) {
+        let material = crate::test_support::tls_material(FIXTURE_HOST);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let config = ServerConfig::builder_with_provider(Arc::new(
@@ -351,8 +369,8 @@ mod tests {
         .unwrap()
         .with_no_client_auth()
         .with_single_cert(
-            vec![CertificateDer::from(CERT_DER.to_vec())],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KEY_DER.to_vec())),
+            vec![CertificateDer::from(material.certificate_der)],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.private_key_der)),
         )
         .unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -376,16 +394,19 @@ mod tests {
                     stream.write_all(&response).await.unwrap();
                     stream.flush().await.unwrap();
                 }
+                if hold_open {
+                    let _ = stream.read(&mut chunk).await;
+                }
                 request
             })
             .await
             .unwrap()
         });
-        (address, server)
+        (address, material.root_der, server)
     }
 
-    fn fixture_client(address: std::net::SocketAddr) -> ProviderClient {
-        new_fixture_client(FIXTURE_HOST, address, ROOT_DER, CancellationToken::new()).unwrap()
+    fn fixture_client(address: std::net::SocketAddr, root: &[u8]) -> ProviderClient {
+        new_fixture_client(FIXTURE_HOST, address, root, CancellationToken::new()).unwrap()
     }
 
     fn fixture_url(address: std::net::SocketAddr) -> Url {
@@ -399,29 +420,45 @@ mod tests {
     // template:begin oidc-jwt:authn-provider-tls-bounds-test
     #[tokio::test]
     async fn jwt_fixture_transport_uses_trusted_private_tls_and_enforces_body_and_time_bounds() {
-        let response = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 16\r\n\r\n{\"active\":false}".to_vec();
-        let (address, server) = tls_server(response).await;
-        let provider = fixture_client(address);
-        let body = provider
-            .get_json(
-                &fixture_url(address),
-                ProviderDeadline::independent(Instant::now()),
+        for content_type in [
+            "",
+            "content-type: text/plain\r\n",
+            "content-type: application/json\r\n",
+        ] {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{content_type}content-length: 11\r\n\r\n{{\"keys\":[]}}"
             )
-            .await
+            .into_bytes();
+            let (address, root, server) = tls_server(response, false).await;
+            let endpoint = ProviderUrl::parse_endpoint(&format!(
+                "https://{FIXTURE_HOST}:{}/keys?token=private%2Fvalue&x=1&x=2",
+                address.port(),
+            ))
             .unwrap();
-        assert_eq!(body, br#"{"active":false}"#);
-        assert!(
-            String::from_utf8(server.await.unwrap())
-                .unwrap()
-                .starts_with("GET /introspect HTTP/1.1\r\n")
-        );
+            let body = fixture_client(address, &root)
+                .get_json(
+                    endpoint.url(),
+                    ProviderDeadline::independent(Instant::now()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({"keys":[]})
+            );
+            assert!(
+                String::from_utf8(server.await.unwrap())
+                    .unwrap()
+                    .starts_with("GET /keys?token=private%2Fvalue&x=1&x=2 HTTP/1.1\r\n")
+            );
+        }
 
         let mut oversized = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n100000\r\n".to_vec();
         oversized.extend(std::iter::repeat_n(b'x', 1_048_576));
         oversized.extend_from_slice(b"\r\n1\r\ny\r\n0\r\n\r\n");
-        let (address, server) = tls_server(oversized).await;
+        let (address, root, server) = tls_server(oversized, false).await;
         assert_eq!(
-            fixture_client(address)
+            fixture_client(address, &root)
                 .get_json(
                     &fixture_url(address),
                     ProviderDeadline::independent(Instant::now())
@@ -431,20 +468,18 @@ mod tests {
         );
         let _ = server.await;
 
-        let (address, server) = tls_server(Vec::new()).await;
+        let response = b"HTTP/1.1 200 OK\r\ncontent-length: 11\r\n\r\n{".to_vec();
+        let (address, root, server) = tls_server(response, true).await;
         assert_eq!(
-            fixture_client(address)
+            fixture_client(address, &root)
                 .get_json(
                     &fixture_url(address),
-                    ProviderDeadline {
-                        deadline: Instant::now(),
-                        exhausted: Failure::Timeout
-                    }
+                    ProviderDeadline::independent(Instant::now()),
                 )
                 .await,
-            Err(Failure::Timeout)
+            Err(Failure::Unavailable),
         );
-        server.abort();
+        server.await.unwrap();
     }
     // template:end oidc-jwt:authn-provider-tls-bounds-test
 
@@ -452,14 +487,13 @@ mod tests {
     #[tokio::test]
     async fn introspection_fixture_transport_uses_trusted_private_tls_for_form_posts() {
         let response = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 16\r\n\r\n{\"active\":false}".to_vec();
-        let (address, server) = tls_server(response).await;
-        let body = fixture_client(address)
+        let (address, root, server) = tls_server(response, false).await;
+        let body = fixture_client(address, &root)
             .post_form_json(
                 &fixture_url(address),
                 b"Basic Zml4dHVyZQ==",
                 b"token=opaque",
-                ProviderDeadline::request(Instant::now(), Instant::now() + Duration::from_secs(4))
-                    .unwrap(),
+                ProviderDeadline::independent(Instant::now()),
             )
             .await
             .unwrap();
@@ -469,6 +503,26 @@ mod tests {
                 .unwrap()
                 .starts_with("POST /introspect HTTP/1.1\r\n")
         );
+
+        for content_type in ["", "content-type: text/plain\r\n"] {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{content_type}content-length: 16\r\n\r\n{{\"active\":false}}"
+            )
+            .into_bytes();
+            let (address, root, server) = tls_server(response, false).await;
+            assert_eq!(
+                fixture_client(address, &root)
+                    .post_form_json(
+                        &fixture_url(address),
+                        b"Basic Zml4dHVyZQ==",
+                        b"token=opaque",
+                        ProviderDeadline::independent(Instant::now()),
+                    )
+                    .await,
+                Err(Failure::Unavailable),
+            );
+            server.await.unwrap();
+        }
     }
     // template:end oidc-introspection:authn-provider-post-form-tls-test
 }

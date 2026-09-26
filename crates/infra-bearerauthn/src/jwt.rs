@@ -1,6 +1,6 @@
 //! OIDC discovery, library-backed JWT verification, and key admission.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use aws_lc_rs::signature::{self, ParsedPublicKey, RsaPublicKeyComponents};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -12,12 +12,11 @@ use jsonwebtoken::{
 };
 use serde::Deserialize;
 use tokio::time::Instant;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    BearerToken, Failure, JwtAlgorithm, JwtOptions, PreparationError, PreparationPhase,
-    PreparationReason, Principal, ProviderUrl, RefreshTask, TokenProfile, VerificationError,
-    VerificationReason, Verifier,
+    BearerToken, Engine, Failure, PreparationError, PreparationPhase, PreparationReason, Principal,
+    ProviderUrl, VerificationError, VerificationReason, Verifier,
     claims::{ClaimPolicy, JwtClaims, validate_jwt_claims},
     provider::{ProviderClient, ProviderDeadline},
     record_verification,
@@ -26,8 +25,43 @@ use crate::{
 
 const STARTUP_BUDGET: Duration = Duration::from_secs(6);
 
+/// JWT profile rules selected before verifier preparation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TokenProfile {
+    #[default]
+    ResourceServer,
+    Rfc9068,
+}
+
+/// The closed JWT algorithms accepted by authentication configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum JwtAlgorithm {
+    Rs256,
+    Es256,
+    Ps256,
+    EdDsa,
+}
+
+/// Bootstrap input for OIDC discovery and JWT verification.
+#[derive(Clone, Eq, PartialEq)]
+pub struct JwtOptions {
+    pub issuer: ProviderUrl,
+    pub audiences: Vec<String>,
+    pub token_profile: TokenProfile,
+    pub algorithms: Vec<JwtAlgorithm>,
+}
+
+impl fmt::Debug for JwtOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("JwtOptions([REDACTED])")
+    }
+}
+
+/// The process-owned task that keeps a JWT verifier's installed key set fresh.
+pub type RefreshTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
 #[derive(Clone)]
-pub struct JwtVerifier {
+struct JwtVerifier {
     claim_policy: ClaimPolicy,
     token_profile: TokenProfile,
     algorithms: Vec<JwtAlgorithm>,
@@ -40,19 +74,19 @@ impl fmt::Debug for JwtVerifier {
     }
 }
 
-impl JwtVerifier {
-    pub(crate) async fn verify(
-        &self,
-        token: &BearerToken<'_>,
-        deadline: Instant,
-    ) -> Result<Principal, Failure> {
-        record_verification("jwt", self.verify_evidence(token, deadline).await)
+impl Engine for JwtVerifier {
+    fn verify<'a>(
+        &'a self,
+        token: &'a BearerToken<'_>,
+    ) -> Pin<Box<dyn Future<Output = Result<Principal, Failure>> + Send + 'a>> {
+        Box::pin(async move { record_verification("jwt", self.verify_evidence(token).await) })
     }
+}
 
+impl JwtVerifier {
     async fn verify_evidence(
         &self,
         token: &BearerToken<'_>,
-        deadline: Instant,
     ) -> Result<Principal, VerificationError> {
         let header = decode_header(token.as_bytes())
             .map_err(|_| VerificationError::invalid(VerificationReason::Header))?;
@@ -67,21 +101,23 @@ impl JwtVerifier {
         {
             return Err(VerificationError::invalid(VerificationReason::Profile));
         }
-        let key = self
-            .select_key(header.kid.as_deref(), algorithm, deadline)
-            .await?;
-        let claims = decode::<JwtClaims>(
+        let (snapshot, index) = self.select_key(header.kid.as_deref(), algorithm).await?;
+        let key = &snapshot.keys[index];
+        let payload = decode::<Box<serde_json::value::RawValue>>(
             token.as_bytes(),
             &key.decoding_key,
             &validation_for(algorithm, &self.claim_policy),
         )
         .map_err(|error| jwt_validation_error(error.kind()))?
         .claims;
+        let claims: JwtClaims = serde_json::from_str(payload.get())
+            .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))?;
         validate_jwt_claims(
             &claims,
             &self.claim_policy,
             self.token_profile,
             jsonwebtoken::get_current_timestamp(),
+            Arc::from(payload.get()),
         )
     }
 
@@ -89,35 +125,35 @@ impl JwtVerifier {
         &self,
         kid: Option<&str>,
         algorithm: JwtAlgorithm,
-        deadline: Instant,
-    ) -> Result<JwtKey, VerificationError> {
+    ) -> Result<(Arc<KeySet>, usize), VerificationError> {
         let initial = self.refresh.keys();
         match initial.select(kid, algorithm) {
-            KeySelection::One(key) => Ok(key.clone()),
+            KeySelection::One(index) => return Ok((initial, index)),
             KeySelection::Ambiguous => {
-                Err(VerificationError::invalid(VerificationReason::AmbiguousKey))
+                return Err(VerificationError::invalid(VerificationReason::AmbiguousKey));
             }
-            KeySelection::Unknown => match self.refresh.refresh_unknown(deadline).await {
-                UnknownKeyResult::Refreshed => match self.refresh.keys().select(kid, algorithm) {
-                    KeySelection::One(key) => Ok(key.clone()),
+            KeySelection::Unknown => {}
+        }
+        drop(initial);
+        match self.refresh.refresh_unknown().await {
+            UnknownKeyResult::Refreshed => {
+                let snapshot = self.refresh.keys();
+                match snapshot.select(kid, algorithm) {
+                    KeySelection::One(index) => Ok((snapshot, index)),
                     KeySelection::Unknown => {
                         Err(VerificationError::invalid(VerificationReason::UnknownKey))
                     }
                     KeySelection::Ambiguous => {
                         Err(VerificationError::invalid(VerificationReason::AmbiguousKey))
                     }
-                },
-                UnknownKeyResult::CooldownSuccess => {
-                    Err(VerificationError::invalid(VerificationReason::UnknownKey))
                 }
-                UnknownKeyResult::RefreshFailed | UnknownKeyResult::CooldownFailure => Err(
-                    VerificationError::new(Failure::Unavailable, VerificationReason::Refresh),
-                ),
-                UnknownKeyResult::DeadlineElapsed => Err(VerificationError::new(
-                    Failure::Timeout,
-                    VerificationReason::RequestTimeout,
-                )),
-            },
+            }
+            UnknownKeyResult::CooldownSuccess => {
+                Err(VerificationError::invalid(VerificationReason::UnknownKey))
+            }
+            UnknownKeyResult::RefreshFailed | UnknownKeyResult::CooldownFailure => Err(
+                VerificationError::new(Failure::Unavailable, VerificationReason::Refresh),
+            ),
         }
     }
 }
@@ -150,13 +186,10 @@ fn jwt_validation_error(error: &jsonwebtoken::errors::ErrorKind) -> Verification
 /// issuer agreement, or initial key admission fail.
 pub async fn prepare_jwt(
     options: JwtOptions,
-    _tracker: TaskTracker,
     cancel: CancellationToken,
 ) -> Result<(Verifier, RefreshTask), PreparationError> {
-    ensure_crypto_provider()
-        .map_err(|error| error.with_context(&options.issuer, &options.audiences, None))?;
-    let provider = ProviderClient::new()
-        .map_err(|error| error.with_context(&options.issuer, &options.audiences, None))?;
+    ensure_crypto_provider()?;
+    let provider = ProviderClient::new()?;
     prepare_with_provider(options, provider, cancel).await
 }
 
@@ -165,62 +198,40 @@ async fn prepare_with_provider(
     provider: ProviderClient,
     cancel: CancellationToken,
 ) -> Result<(Verifier, RefreshTask), PreparationError> {
+    ProviderUrl::parse(options.issuer.as_str())?;
+    crate::describe_verification();
+    metrics::describe_counter!(
+        "authn_jwks_key_rejections_total",
+        "Rejected JWKS entries by closed reason"
+    );
     if options.audiences.is_empty()
         || options.audiences.iter().any(String::is_empty)
         || options.algorithms.is_empty()
     {
-        return Err(
-            PreparationError::new(PreparationPhase::Options, PreparationReason::Parse)
-                .with_context(&options.issuer, &options.audiences, None),
-        );
+        return Err(PreparationError::new(
+            PreparationPhase::Options,
+            PreparationReason::Parse,
+        ));
     }
     let startup_deadline = Instant::now() + STARTUP_BUDGET;
     let discovery_url = discovery_url(&options.issuer);
-    let discovery = fetch_discovery(&provider, &discovery_url, startup_deadline)
-        .await
-        .map_err(|error| {
-            error.with_context(
-                &options.issuer,
-                &options.audiences,
-                Some(discovery_url.as_str()),
-            )
-        })?;
+    let discovery = fetch_discovery(&provider, &discovery_url, startup_deadline).await?;
     if discovery.issuer != options.issuer.as_str() {
         return Err(PreparationError::new(
             PreparationPhase::Discovery,
             PreparationReason::IssuerMismatch,
-        )
-        .with_context(
-            &options.issuer,
-            &options.audiences,
-            Some(discovery_url.as_str()),
-        )
-        .with_discovered_issuer(&discovery.issuer));
+        ));
     }
-    let jwks_uri = ProviderUrl::parse(&discovery.jwks_uri).map_err(|_| {
+    let jwks_uri = ProviderUrl::parse_endpoint(&discovery.jwks_uri).map_err(|_| {
         PreparationError::new(PreparationPhase::Discovery, PreparationReason::InvalidUrl)
-            .with_context(
-                &options.issuer,
-                &options.audiences,
-                Some(&discovery.jwks_uri),
-            )
     })?;
     let bytes = provider
         .get_json(
             jwks_uri.url(),
-            startup_deadline_for(Instant::now(), startup_deadline, PreparationPhase::Jwks)
-                .map_err(|error| {
-                    error.with_context(&options.issuer, &options.audiences, Some(jwks_uri.as_str()))
-                })?,
+            startup_deadline_for(Instant::now(), startup_deadline, PreparationPhase::Jwks)?,
         )
         .await
-        .map_err(|_| {
-            PreparationError::new(PreparationPhase::Jwks, PreparationReason::Fetch).with_context(
-                &options.issuer,
-                &options.audiences,
-                Some(jwks_uri.as_str()),
-            )
-        })?;
+        .map_err(|_| PreparationError::new(PreparationPhase::Jwks, PreparationReason::Fetch))?;
     let keys = parse_key_set(&bytes, &options.algorithms).map_err(|error| {
         PreparationError::new(
             PreparationPhase::Jwks,
@@ -229,7 +240,6 @@ async fn prepare_with_provider(
                 KeySetError::NoUsableKeys => PreparationReason::NoUsableKeys,
             },
         )
-        .with_context(&options.issuer, &options.audiences, Some(jwks_uri.as_str()))
     })?;
     let refresh = SharedRefresh::new(Arc::new(keys));
     let verifier = JwtVerifier {
@@ -243,7 +253,7 @@ async fn prepare_with_provider(
     let refresh_task: RefreshTask = Box::pin(async move {
         run_refresh_worker(refresh, provider, jwks_uri, algorithms, refresh_cancel).await;
     });
-    Ok((Verifier::Jwt(verifier), refresh_task))
+    Ok((Verifier::new(verifier), refresh_task))
 }
 
 fn ensure_crypto_provider() -> Result<(), PreparationError> {
@@ -305,7 +315,6 @@ fn is_access_token_type(value: &str) -> bool {
     value.eq_ignore_ascii_case("at+jwt") || value.eq_ignore_ascii_case("application/at+jwt")
 }
 
-#[derive(Clone)]
 struct JwtKey {
     kid: Option<String>,
     algorithm: JwtAlgorithm,
@@ -317,17 +326,14 @@ pub(crate) struct KeySet {
 }
 
 impl KeySet {
-    fn select(&self, kid: Option<&str>, algorithm: JwtAlgorithm) -> KeySelection<'_> {
-        let matching = self
-            .keys
-            .iter()
-            .filter(|key| {
-                key.algorithm == algorithm && kid.is_none_or(|kid| key.kid.as_deref() == Some(kid))
-            })
-            .collect::<Vec<_>>();
-        match matching.as_slice() {
-            [key] => KeySelection::One(key),
-            [] => KeySelection::Unknown,
+    fn select(&self, kid: Option<&str>, algorithm: JwtAlgorithm) -> KeySelection {
+        let mut matching = self.keys.iter().enumerate().filter_map(|(index, key)| {
+            (key.algorithm == algorithm && kid.is_none_or(|kid| key.kid.as_deref() == Some(kid)))
+                .then_some(index)
+        });
+        match (matching.next(), matching.next()) {
+            (Some(index), None) => KeySelection::One(index),
+            (None, _) => KeySelection::Unknown,
             _ => KeySelection::Ambiguous,
         }
     }
@@ -338,8 +344,8 @@ impl KeySet {
     }
 }
 
-enum KeySelection<'a> {
-    One(&'a JwtKey),
+enum KeySelection {
+    One(usize),
     Unknown,
     Ambiguous,
 }
@@ -413,10 +419,6 @@ pub(crate) fn parse_key_set(
     }
     // Aggregate per-entry rejection evidence into one event per closed reason.
     // Neither provider-controlled entry count nor key identifiers multiply logs.
-    metrics::describe_counter!(
-        "authn_jwks_key_rejections_total",
-        "Rejected JWKS entries by closed reason"
-    );
     for (reason, count) in rejected {
         tracing::debug!(
             reason = reason.label(),
@@ -649,13 +651,12 @@ mod tests {
 
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
-    use tokio::time::Instant;
 
     use super::{
         ClaimPolicy, JwtAlgorithm, JwtVerifier, KeyFamily, SharedRefresh, TokenProfile,
         bind_algorithm, ensure_crypto_provider, parse_key_set,
     };
-    use crate::{Failure, parse_bearer};
+    use crate::{Engine, Failure, parse_bearer};
 
     const JWT_SIGNING_DER: &[u8] = include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
 
@@ -723,13 +724,8 @@ mod tests {
         };
         let token = signed_token("fixture", &serde_json::json!({"nbf": null}));
         let header = format!("Bearer {token}");
-        let token = parse_bearer([header.as_bytes()], 32 * 1024).unwrap();
-        assert_eq!(
-            verifier
-                .verify(&token, Instant::now() + std::time::Duration::from_secs(1))
-                .await,
-            Err(Failure::Invalid)
-        );
+        let token = parse_bearer([header.as_bytes()]).unwrap();
+        assert_eq!(verifier.verify(&token).await, Err(Failure::Invalid));
 
         let token = signed_token("fixture", &serde_json::json!({}));
         let mut bytes = token.into_bytes();
@@ -739,13 +735,48 @@ mod tests {
             b'A'
         };
         let header = format!("Bearer {}", String::from_utf8(bytes).unwrap());
-        let token = parse_bearer([header.as_bytes()], 32 * 1024).unwrap();
-        assert_eq!(
-            verifier
-                .verify(&token, Instant::now() + std::time::Duration::from_secs(1))
-                .await,
-            Err(Failure::Invalid)
+        let token = parse_bearer([header.as_bytes()]).unwrap();
+        assert_eq!(verifier.verify(&token).await, Err(Failure::Invalid));
+    }
+
+    #[tokio::test]
+    async fn signed_payload_supplies_typed_custom_claims_without_changing_identity() {
+        #[derive(serde::Deserialize)]
+        struct ApplicationClaims {
+            tenant: String,
+            permissions: Vec<String>,
+        }
+        let verifier = JwtVerifier {
+            claim_policy: ClaimPolicy::new(
+                "https://issuer.example".to_owned(),
+                vec!["api".to_owned()],
+            ),
+            token_profile: TokenProfile::ResourceServer,
+            algorithms: vec![JwtAlgorithm::Rs256],
+            refresh: SharedRefresh::new(key_set("fixture")),
+        };
+        let token = signed_token(
+            "fixture",
+            &serde_json::json!({
+                "tenant": "verified-tenant", "permissions": ["read", "write"],
+            }),
         );
+        let header = format!("Bearer {token}");
+        let token = parse_bearer([header.as_bytes()]).unwrap();
+        let principal = verifier.verify(&token).await.unwrap();
+        let claims = principal.claims::<ApplicationClaims>().unwrap();
+        assert_eq!(claims.tenant, "verified-tenant");
+        assert_eq!(claims.permissions, ["read", "write"]);
+        assert_eq!(principal.subject(), Some("subject"));
+        let error = principal.claims::<Vec<String>>().unwrap_err();
+        for rendered in [
+            error.to_string(),
+            format!("{error:?}"),
+            format!("{principal:?}"),
+        ] {
+            assert!(!rendered.contains("verified-tenant"));
+            assert!(!rendered.contains("permissions"));
+        }
     }
 
     #[test]
@@ -768,7 +799,7 @@ mod tests {
         assert!(!keys.has_kid("bad-point"));
     }
     #[tokio::test]
-    async fn repair_regression_alias_only_client_identity_is_verified() {
+    async fn alias_only_client_identity_is_verified() {
         let verifier = JwtVerifier {
             claim_policy: ClaimPolicy::new(
                 "https://issuer.example".to_owned(),
@@ -781,11 +812,8 @@ mod tests {
         for alias in ["azp", "appid", "cid"] {
             let token = signed_token("fixture", &serde_json::json!({"sub":null, alias:"client"}));
             let header = format!("Bearer {token}");
-            let token = parse_bearer([header.as_bytes()], 32 * 1024).unwrap();
-            let principal = verifier
-                .verify(&token, Instant::now() + std::time::Duration::from_secs(1))
-                .await
-                .unwrap();
+            let token = parse_bearer([header.as_bytes()]).unwrap();
+            let principal = verifier.verify(&token).await.unwrap();
             assert_eq!(principal.subject(), None);
             assert_eq!(principal.client_id(), Some("client"));
         }
@@ -794,17 +822,12 @@ mod tests {
             &serde_json::json!({"sub":null,"azp":"client","cid":"other"}),
         );
         let header = format!("Bearer {token}");
-        let token = parse_bearer([header.as_bytes()], 32 * 1024).unwrap();
-        assert_eq!(
-            verifier
-                .verify(&token, Instant::now() + std::time::Duration::from_secs(1))
-                .await,
-            Err(Failure::Invalid)
-        );
+        let token = parse_bearer([header.as_bytes()]).unwrap();
+        assert_eq!(verifier.verify(&token).await, Err(Failure::Invalid));
     }
 
     #[tokio::test(start_paused = true)]
-    async fn repair_regression_unconfigured_algorithm_does_not_wait_for_refresh() {
+    async fn unconfigured_algorithm_does_not_wait_for_refresh() {
         let refresh = SharedRefresh::new(key_set("fixture"));
         refresh.permit_unknown_refresh_for_test().await;
         let verifier = JwtVerifier {
@@ -818,39 +841,19 @@ mod tests {
         };
         let token = encode(&Header::new(Algorithm::PS256), &serde_json::json!({"iss":"https://issuer.example","aud":"api","exp":jsonwebtoken::get_current_timestamp()+60,"sub":"subject"}), &EncodingKey::from_rsa_der(JWT_SIGNING_DER)).unwrap();
         let header = format!("Bearer {token}");
-        let token = parse_bearer([header.as_bytes()], 32 * 1024).unwrap();
-        assert_eq!(
-            verifier
-                .verify(&token, Instant::now() + std::time::Duration::from_secs(10))
-                .await,
-            Err(Failure::Invalid)
-        );
+        let token = parse_bearer([header.as_bytes()]).unwrap();
+        assert_eq!(verifier.verify(&token).await, Err(Failure::Invalid));
     }
 
     #[test]
-    fn preparation_context_distinguishes_phases_and_sanitizes_discovery_evidence() {
-        use crate::{PreparationError, PreparationPhase, PreparationReason, ProviderUrl};
-        let issuer = ProviderUrl::parse("https://issuer.example").unwrap();
+    fn preparation_errors_expose_only_closed_phase_and_reason() {
+        use crate::{PreparationError, PreparationPhase, PreparationReason};
         let error = PreparationError::new(
             PreparationPhase::Discovery,
             PreparationReason::IssuerMismatch,
-        )
-        .with_context(
-            &issuer,
-            &["api".to_owned()],
-            Some("https://issuer.example/.well-known/openid-configuration"),
-        )
-        .with_discovered_issuer("https://other.example");
-        assert_eq!(error.issuer(), Some("https://issuer.example"));
-        assert_eq!(error.discovered_issuer(), Some("https://other.example"));
-        assert!(error.to_string().contains("https://other.example"));
-        let unsafe_error =
-            error.with_discovered_issuer("https://user:secret@other.example/?token=private");
-        for rendered in [unsafe_error.to_string(), format!("{unsafe_error:?}")] {
-            assert!(rendered.contains("unsafe_or_overlong_url"));
-            assert!(!rendered.contains("secret"));
-            assert!(!rendered.contains("private"));
-        }
+        );
+        assert_eq!(error.phase(), PreparationPhase::Discovery);
+        assert_eq!(error.reason(), PreparationReason::IssuerMismatch);
         assert!(matches!(
             parse_key_set(br#"{"keys":false}"#, &[JwtAlgorithm::Rs256]),
             Err(super::KeySetError::Parse)
@@ -976,7 +979,7 @@ mod tests {
             &serde_json::json!({"sub":null,"jti":"private-claim-value"}),
         );
         let header = format!("Bearer {token}");
-        let token = parse_bearer([header.as_bytes()], 32 * 1024).unwrap();
+        let token = parse_bearer([header.as_bytes()]).unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -984,9 +987,7 @@ mod tests {
         metrics::with_local_recorder(&diagnostics, || {
             tracing::dispatcher::with_default(&dispatch, || {
                 assert_eq!(
-                    runtime.block_on(
-                        verifier.verify(&token, Instant::now() + std::time::Duration::from_secs(1))
-                    ),
+                    runtime.block_on(verifier.verify(&token)),
                     Err(Failure::Invalid)
                 );
                 // Unknown key parameters fall back to the library's Other family.

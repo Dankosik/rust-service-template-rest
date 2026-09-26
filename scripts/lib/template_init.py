@@ -449,11 +449,11 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
     if inputs.outbound_http == "bounded":
         selected.add("outbound-http")
     if inputs.authn != "none" or inputs.outbound_http == "bounded":
-        selected.update(("tls-fixtures", "request-budget"))
+        selected.add("tls-fixtures")
     if inputs.outbound_http == "bounded":
-        selected.add("egress-dns")
+        selected.update(("egress-dns", "request-budget"))
     if inputs.http_idempotency == "postgres":
-        selected.add("http-idempotency")
+        selected.update(("http-idempotency", "request-budget"))
         if inputs.authn == "oidc-introspection":
             selected.add("http-idempotency-mounted")
     if inputs.jobs == "postgres":

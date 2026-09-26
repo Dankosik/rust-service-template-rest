@@ -166,10 +166,14 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         ))
         .layer(DefaultBodyLimit::max(options.max_body_bytes));
 
-    routes
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the hardened transport owns standardized 404 and 405 responses"
+    )]
+    let routes = routes
         .fallback(not_found)
-        .method_not_allowed_fallback(method_not_allowed)
-        .layer(chain)
+        .method_not_allowed_fallback(method_not_allowed);
+    routes.layer(chain)
 }
 
 /// Map the shedder and timeout errors to problem responses.
@@ -300,6 +304,10 @@ mod tests {
         }
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "transport fixture exercises the middleware independently of contract finalization"
+    )]
     fn app(options: &HardenOptions) -> Router {
         let routes = Router::new()
             .route("/ok", get(|| async { "ok" }))
@@ -337,6 +345,10 @@ mod tests {
 
     // template:begin request-budget:http-request-deadline-test
     #[tokio::test(start_paused = true)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "transport fixture exercises the middleware independently of contract finalization"
+    )]
     async fn request_deadline_is_observable_without_restarting_the_budget() {
         let options = options();
         let started = tokio::time::Instant::now();
@@ -493,6 +505,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "transport fixture exercises the middleware independently of contract finalization"
+    )]
     async fn shedding_answers_503_with_retry_after_without_queueing() {
         let started = Arc::new(AtomicUsize::new(0));
         let gate = Arc::new(tokio::sync::Notify::new());

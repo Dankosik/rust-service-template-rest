@@ -14,7 +14,8 @@ name is not part of that durable identity.
 
 ## Compose a protected operation
 
-`Composer::route(infra_http::routes!(handler))` is the sole opt-in. It adds
+`Composer::route(routes)` is the sole opt-in, using an annotated route tuple
+bound as shown below. It adds
 the required `Idempotency-Key` header and generated Problem responses to the
 route value that is served. Adopters retain their normal protected-operation
 security, success, and business-response declarations; they do not
@@ -55,8 +56,17 @@ precedes key handling without per-operation wrapping:
 
 ```rust,ignore
 // crates/service/src/api.rs, inside contract(idempotency: &mut Composer):
-.routes(idempotency.route(infra_http::routes!(widgets::http::create_widget)))
+#[expect(
+    clippy::disallowed_methods,
+    reason = "utoipa_axum::routes! generates annotated MethodRouter::on calls"
+)]
+let routes = utoipa_axum::routes!(widgets::http::create_widget);
+let router = router.routes(idempotency.route(routes));
 ```
+
+Keep the macro invocation as the entire attributed initializer. Composition,
+destructuring and tuple changes occur afterward; do not put a block, closure,
+helper or extra method call under that expectation.
 
 Regenerate and review the OpenAPI document after composition changes. The
 generated key description covers both wire encodings and decoded length; it

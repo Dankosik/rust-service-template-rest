@@ -152,18 +152,6 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
-    AuthenticationOversize:
-      description: bearer authentication exceeds the admitted header value size
-      content:
-        application/problem+json:
-          schema:
-            $ref: '#/components/schemas/Problem'
-    AuthenticationTimeout:
-      description: the enclosing request budget expired before a response committed
-      content:
-        application/problem+json:
-          schema:
-            $ref: '#/components/schemas/Problem'
     AuthenticationUnauthorized:
       description: bearer authentication is required or invalid
       content:
@@ -236,6 +224,12 @@ components:
             $ref: '#/components/schemas/Problem'
     RequestEntityTooLarge:
       description: request body exceeds configured limit
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    RequestTimeout:
+      description: the enclosing request budget expired before a response committed
       content:
         application/problem+json:
           schema:
