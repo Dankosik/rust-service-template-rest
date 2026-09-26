@@ -11,12 +11,14 @@
 //! source rules the resolver does not enforce are proven by a test over the
 //! embedded set; [`run`] still rejects a migrator that breaks them.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
-use infra_postgres::{ACQUIRE_TIMEOUT, Dsn, SessionOptions, connect_session};
+use infra_postgres::{ACQUIRE_TIMEOUT, Dsn, SessionOptions, connect_session, raw_sqlstate};
 use sqlx::Connection;
 use sqlx::migrate::{Migrate, MigrateError, MigrationType, Migrator};
-use sqlx::postgres::PgConnection;
+use sqlx::postgres::{PgConnection, PgPool};
+use sqlx::{Row, postgres::PgRow};
 
 /// The repository's migration set.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
@@ -37,6 +39,111 @@ pub const MIGRATION_IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(
 /// Session `lock_timeout`, which also bounds the wait for the advisory
 /// session lock another migrator may hold.
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bound on startup history admission, including pool acquire and its one
+/// read-only snapshot query.
+pub const HISTORY_VERIFY_BUDGET: Duration = Duration::from_secs(5);
+
+/// A sanitized reason startup cannot admit the embedded migration history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum HistoryError {
+    /// The embedded migration source breaks the template's source rules.
+    #[error("the embedded migration source is invalid")]
+    Source,
+    /// The recorded versions, success flags, or checksums do not exactly
+    /// match the embedded migration set.
+    #[error("the migration history does not match the embedded migrations")]
+    Mismatch,
+    /// Pool, table, statement, decoding, or deadline failures stay private.
+    #[error("the migration history is unavailable")]
+    Unavailable,
+}
+
+#[derive(Clone, Debug)]
+struct HistoryRow {
+    version: i64,
+    success: bool,
+    checksum: Vec<u8>,
+}
+
+const HISTORY_QUERY: &str = "SELECT version, success, checksum FROM _sqlx_migrations";
+
+/// Verify that the pool's recorded migration history exactly matches the
+/// embedded migration set without creating bookkeeping or applying SQL.
+///
+/// The single statement gives one read-committed snapshot. It deliberately
+/// does not use `Migrator::run`, locks, or migration bookkeeping because this
+/// is startup admission rather than schema mutation.
+///
+/// # Errors
+///
+/// A bounded, sanitized [`HistoryError`].
+pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
+    verify_history_with(&MIGRATOR, pool).await
+}
+
+async fn verify_history_with(migrator: &Migrator, pool: &PgPool) -> Result<(), HistoryError> {
+    validate_source(migrator).map_err(|_| HistoryError::Source)?;
+    let result = tokio::time::timeout(
+        HISTORY_VERIFY_BUDGET,
+        sqlx::query(HISTORY_QUERY).fetch_all(pool),
+    )
+    .await;
+    let rows = match result {
+        Ok(Ok(rows)) => rows
+            .iter()
+            .map(history_row)
+            .collect::<Result<Vec<_>, _>>()?,
+        // An empty embedded set needs no bookkeeping. A nonempty set (the
+        // current profile) refuses the same absent table as unavailable.
+        Ok(Err(err))
+            if migrator.iter().next().is_none()
+                && raw_sqlstate(&err).as_deref() == Some("42P01") =>
+        {
+            return Ok(());
+        }
+        Ok(Err(_)) | Err(_) => return Err(HistoryError::Unavailable),
+    };
+    compare_history(migrator, &rows)
+}
+
+fn history_row(row: &PgRow) -> Result<HistoryRow, HistoryError> {
+    Ok(HistoryRow {
+        version: row
+            .try_get("version")
+            .map_err(|_| HistoryError::Unavailable)?,
+        success: row
+            .try_get("success")
+            .map_err(|_| HistoryError::Unavailable)?,
+        checksum: row
+            .try_get("checksum")
+            .map_err(|_| HistoryError::Unavailable)?,
+    })
+}
+
+fn compare_history(migrator: &Migrator, rows: &[HistoryRow]) -> Result<(), HistoryError> {
+    let expected = migrator
+        .iter()
+        .map(|migration| (migration.version, migration.checksum.as_ref()))
+        .collect::<BTreeMap<_, _>>();
+    let mut actual = BTreeMap::new();
+    for row in rows {
+        if !row.success
+            || actual
+                .insert(row.version, row.checksum.as_slice())
+                .is_some()
+        {
+            return Err(HistoryError::Mismatch);
+        }
+    }
+    if expected.len() != actual.len()
+        || expected
+            .iter()
+            .any(|(version, checksum)| actual.get(version) != Some(checksum))
+    {
+        return Err(HistoryError::Mismatch);
+    }
+    Ok(())
+}
 
 /// Where a run failed. One word per stage, for the terminal record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -518,6 +625,43 @@ mod tests {
         );
         assert_eq!(ApplyOutcome::NoChange.as_str(), "no_change");
         assert_eq!(ApplyOutcome::Success.as_str(), "success");
+    }
+
+    #[test]
+    fn history_comparison_requires_exact_successful_versions_and_checksums() {
+        let migrator = Migrator::with_migrations(vec![migration(
+            20_260_926_120_000,
+            "create widget",
+            MigrationType::Simple,
+            false,
+        )]);
+        let migration = migrator.iter().next().expect("one migration");
+        let matching = [HistoryRow {
+            version: migration.version,
+            success: true,
+            checksum: migration.checksum.to_vec(),
+        }];
+        assert_eq!(compare_history(&migrator, &matching), Ok(()));
+        for rows in [
+            vec![],
+            vec![HistoryRow {
+                success: false,
+                ..matching[0].clone()
+            }],
+            vec![HistoryRow {
+                version: migration.version + 1,
+                ..matching[0].clone()
+            }],
+            vec![HistoryRow {
+                checksum: vec![0],
+                ..matching[0].clone()
+            }],
+        ] {
+            assert_eq!(
+                compare_history(&migrator, &rows),
+                Err(HistoryError::Mismatch)
+            );
+        }
     }
 
     #[test]

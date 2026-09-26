@@ -60,6 +60,8 @@ pub(crate) enum WorkerError {
     PostgresDsn(#[from] infra_postgres::DsnError),
     #[error(transparent)]
     Postgres(#[from] infra_postgres::ConnectError),
+    #[error("postgres migration history: {0}")]
+    PostgresHistory(#[from] migrate::HistoryError),
     #[error("jobs startup check: {0}")]
     JobsStartup(#[from] infra_jobs::StartupError),
     #[error(transparent)]
@@ -192,6 +194,7 @@ async fn prepare(
     );
     spawn_metrics_tasks(&metrics, cancel, tracker);
     let pool = open_pool(config, cancel, tracker, opened).await?;
+    migrate::verify_history(&pool).await?;
     let engine = Engine::new(pool.clone(), registry, config.jobs.max_workers()?);
     engine.check_startup().await?;
     let (readiness, policy) = bind_listeners(config, &pool, &metrics, opened).await?;
@@ -545,8 +548,8 @@ mod tests {
             "job kinds are invalid: no job kind is registered"
         );
         assert_eq!(
-            WorkerError::JobsStartup(StartupError::SchemaMissing).to_string(),
-            "jobs startup check: the jobs schema is missing"
+            WorkerError::JobsStartup(StartupError::Unavailable).to_string(),
+            "jobs startup check: the jobs store is unavailable"
         );
     }
 

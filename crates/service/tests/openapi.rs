@@ -26,7 +26,8 @@ const HTTP_METHODS: &[&str] = &[
 const PROTECTED_PROBLEM_STATUSES: &[&str] = &["400", "401", "403", "431", "503", "504"];
 
 fn document() -> Value {
-    serde_json::to_value(service::api::document()).expect("document serializes")
+    serde_json::to_value(service::api::document().expect("document composes"))
+        .expect("document serializes")
 }
 
 /// `(method, path, operation)` for every operation in `document`.
@@ -303,25 +304,15 @@ fn retained_idempotency_document_declares_the_family_components() {
     }
 }
 
-/// The composer serves exactly the operations the assembled document
-/// declares idempotent: none, and so inactive, until one opts in.
+/// An API without composed routes remains inactive without inspecting a
+/// completed document.
 #[test]
-fn assembled_contract_agrees_with_its_idempotent_declarations() {
+fn assembled_contract_finishes_inactive_without_document_reconciliation() {
     use infra_http::idempotency::{Activation, Composer};
 
-    let declared = operations(&document())
-        .iter()
-        .filter(|(_, _, operation)| operation.get("x-idempotent").is_some())
-        .count();
     let mut composer = Composer::inert();
-    let contract = service::api::contract(&mut composer);
-    match composer.agree(contract.document()) {
-        Ok(Activation::Inactive) => assert_eq!(declared, 0),
-        Ok(Activation::Active {
-            operations: served, ..
-        }) => assert_eq!(served.get(), declared),
-        Err(err) => panic!("the assembled contract disagrees: {err}"),
-    }
+    let _contract = service::api::contract(&mut composer).expect("contract composes");
+    assert!(matches!(composer.finish(), Activation::Inactive));
 }
 
 // template:end http-idempotency:service-openapi-http-idempotency-contract

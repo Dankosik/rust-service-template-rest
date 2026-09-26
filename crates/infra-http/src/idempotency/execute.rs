@@ -3,7 +3,6 @@
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::extract::FromRequestParts;
@@ -69,7 +68,15 @@ pub(super) struct Attempt {
     pub(super) operation: Arc<str>,
     pub(super) deadline: Instant,
     pub(super) request_id: Option<String>,
-    pub(super) seam_used: Arc<AtomicBool>,
+}
+
+/// Private provenance sealed onto the successful response returned from the
+/// idempotency seam. The outer route boundary turns it into wire metadata only
+/// after the handler has returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Provenance {
+    Executed,
+    Replayed,
 }
 
 /// The extractor on an idempotent composed handler.
@@ -126,9 +133,7 @@ impl Idempotency {
             operation,
             deadline,
             request_id,
-            seam_used,
         } = self.attempt;
-        seam_used.store(true, Ordering::Relaxed);
         let outcome = OutcomeGuard::new();
         let mut captured = None;
         let slot = &mut captured;
@@ -226,7 +231,10 @@ fn map_attempted(
             matched: true,
             record,
         } => match stored::decode(record) {
-            Ok(stored) => Answer::computed(stored.into_response(), Outcome::Replayed),
+            Ok(stored) => Answer::computed(
+                mark_provenance(stored.into_response(), Provenance::Replayed),
+                Outcome::Replayed,
+            ),
             Err(stored::Undecodable) => integrity_failure(request_id),
         },
         Attempted::InProgress => Answer::problem(
@@ -240,10 +248,18 @@ fn map_attempted(
             Answer::problem(sanitized(request_id), Outcome::NotStored)
         }
         Attempted::Committed(_) => match captured {
-            Some(stored) => Answer::computed(stored.into_response(), Outcome::Executed),
+            Some(stored) => Answer::computed(
+                mark_provenance(stored.into_response(), Provenance::Executed),
+                Outcome::Executed,
+            ),
             None => integrity_failure(request_id),
         },
     }
+}
+
+pub(super) fn mark_provenance(mut response: Response, provenance: Provenance) -> Response {
+    response.extensions_mut().insert(provenance);
+    response
 }
 
 fn integrity_failure(request_id: Option<String>) -> Answer {
@@ -452,6 +468,10 @@ mod tests {
         assert_eq!(replay.outcome, Outcome::Replayed);
         assert_eq!(replay.response.status(), StatusCode::CREATED);
         assert_eq!(
+            replay.response.extensions().get::<Provenance>(),
+            Some(&Provenance::Replayed)
+        );
+        assert_eq!(
             replay
                 .response
                 .into_body()
@@ -477,5 +497,21 @@ mod tests {
             false,
         )
         .await;
+    }
+
+    #[test]
+    fn committed_success_carries_executed_provenance() {
+        let answer = map_attempted(
+            Attempted::Committed(stored_record()),
+            Some(stored::decode(stored_record()).expect("stored success")),
+            Some(request_id()),
+            &scope(),
+            "test",
+        );
+        assert_eq!(answer.outcome, Outcome::Executed);
+        assert_eq!(
+            answer.response.extensions().get::<Provenance>(),
+            Some(&Provenance::Executed)
+        );
     }
 }
