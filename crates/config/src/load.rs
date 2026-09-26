@@ -371,6 +371,11 @@ mod tests {
                 matches!(&err, Error::Validate(validation) if validation.key == expected_key),
                 "{err}"
             );
+            assert_eq!(
+                err.to_string(),
+                format!("configuration is invalid: {expected_key}: cannot be empty")
+            );
+            assert!(!format!("{err:?}").contains("fixture-current-secret"));
         }
     }
     // template:end webhooks:load-webhooks-environment
