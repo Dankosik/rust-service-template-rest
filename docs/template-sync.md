@@ -1,7 +1,8 @@
 # Initialization and portable updates
 
 Initialization gives a clean template checkout its service identity and selects
-the existing database, authentication, outbound HTTP, HTTP idempotency,
+the existing database, authentication, outbound HTTP, outbound machine authentication,
+HTTP idempotency,
 background jobs, and agent-harness packs. Later synchronization adopts
 portable tooling and instructions from a committed source checkout. The
 [ownership manifest](../template-owned.paths) is the full-sync copy authority;
@@ -24,6 +25,7 @@ make template-init \
   DATABASE=none \
   AUTHN=none \
   OUTBOUND_HTTP=none \
+  OUTBOUND_AUTH=none \
   AGENT_HARNESS=claude
 ```
 
@@ -35,7 +37,7 @@ scripts/init-module.sh --repo . \
   --repository https://github.com/example/catalog-api \
   --description 'Catalog API' \
   --codeowner @example/platform \
-  --database none --authn none --outbound-http none --agent-harness claude
+  --database none --authn none --outbound-http none --outbound-auth none --agent-harness claude
 ```
 
 The four identity values are required. `DATABASE` defaults to `none` and accepts
@@ -59,6 +61,16 @@ request budget stays when auth or outbound needs it. The retained client uses a
 trusted operator-selected HTTPS origin and normal system resolution; selection
 supplies no provider configuration or automatic request.
 <!-- template:end outbound-http:docs-template-init-outbound -->
+<!-- template:begin outbound-auth:docs-template-init-outbound-auth -->
+`OUTBOUND_AUTH` defaults to `none` and accepts `none` or
+`oauth2-client-credentials`; the direct entry takes `--outbound-auth`.
+Selecting OAuth2 retains its [guide](outbound-machine-authentication.md),
+[decision record](outbound-machine-authentication-decisions.md), provider
+crate, configuration, tests, and bounded outbound HTTP prerequisite. It
+persists the effective `OUTBOUND_HTTP=bounded` choice even when its input was
+`none`. `none` removes the complete profile. Selection creates no provider,
+token call, task, listener, or readiness dependency.
+<!-- template:end outbound-auth:docs-template-init-outbound-auth -->
 <!-- template:begin http-idempotency:docs-template-init-http-idempotency -->
 `HTTP_IDEMPOTENCY` defaults to `none` and accepts `none` or `postgres`; the
 direct entry takes `--http-idempotency`. `postgres` retains the
@@ -176,6 +188,11 @@ Portable sync never restores a pruned authentication engine, runtime configurati
 Portable sync cannot restore a pruned outbound pack, its shared test fixtures,
 or profile-marked guide and decision record. The target lock remains authoritative.
 <!-- template:end outbound-http:docs-template-init-outbound-sync -->
+<!-- template:begin outbound-auth:docs-template-init-outbound-auth-sync -->
+Portable sync cannot restore a pruned OAuth2 machine-authentication profile,
+its configuration, provider crate, or profile-marked guide and decision record.
+The target lock remains authoritative.
+<!-- template:end outbound-auth:docs-template-init-outbound-auth-sync -->
 <!-- template:begin http-idempotency:docs-template-init-http-idempotency-sync -->
 Portable sync cannot restore a pruned idempotency pack, its schema
 migration, configuration section, or profile-marked guide. The target lock
@@ -253,8 +270,19 @@ outbound HTTP or DNS solely for webhooks.
 Use the service's [command policy](build-test-and-development-commands.md) and
 [validation router](validation-routing.md) for ordinary development.
 The source template additionally owns `make template-owned-purity-check` and
-`ALLOW_FULL=1 make template-init-check`. It checks 368 cheap canonical
+`ALLOW_FULL=1 make template-init-check`. Its baseline checks 368 cheap canonical
 profile/harness projections, then initializes and validates 46 runtime graphs.
+<!-- template:begin outbound-auth:docs-template-init-outbound-auth-proof -->
+OAuth adds four canonical projections and runtime graphs 47--50: OAuth alone,
+with JWT, with introspection (all without PostgreSQL), and the maximal
+PostgreSQL/introspection/idempotency/jobs/webhook graph. Graphs 47--49 join the
+existing database-none CI part; graph 50 joins jobs-http-idempotency-2. These
+compile retained production and test targets once per graph; only PostgreSQL
+selections request the integration-test feature. The workspace quality gate
+runs the OAuth adapter's behavior suite. OAuth does not multiply harness or
+database proof, and the existing eight CI parts cover all 50 runtime graphs.
+<!-- template:end outbound-auth:docs-template-init-outbound-auth-proof -->
+
 Graphs 1--26 are the existing baseline. Graphs 27--46 add five auth/idempotency
 blocks, each ordered as inbound-only without bounded outbound HTTP, inbound-only
 with it, outbound-only with it, and both directions with it: graphs 27--30 use

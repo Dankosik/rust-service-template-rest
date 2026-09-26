@@ -78,6 +78,16 @@ The inbound direction is documented in
 [Inbound webhooks](docs/inbound-webhooks.md).
 <!-- template:end inbound-webhooks:readme-webhooks-inbound-guide -->
 
+<!-- template:begin outbound-auth:readme-outbound-auth-profile -->
+The optional outbound machine-authentication profile is selected by
+`OUTBOUND_AUTH=none|oauth2-client-credentials`, defaulting to `none`.
+Selecting OAuth2 also retains bounded outbound HTTP, but starts no provider
+call, task, listener, or readiness dependency. Concrete integrations compose
+their own private authenticated client. See [Outbound machine
+authentication](docs/outbound-machine-authentication.md) and its [decision
+record](docs/outbound-machine-authentication-decisions.md).
+<!-- template:end outbound-auth:readme-outbound-auth-profile -->
+
 The database and installed adapters are selected by `template.lock`; the source
 checkout without a lock carries PostgreSQL and all six adapters. A retained
 PostgreSQL profile remains inert until configured. The

@@ -51,6 +51,7 @@ def check(root: Path) -> None:
         "authn": "remove_when_unselected",
         "oidc-jwt": "remove_when_unselected",
         "oidc-introspection": "remove_when_unselected",
+        "outbound-auth": "remove_when_unselected",
         "outbound-http": "remove_when_unselected",
         "tls-fixtures": "remove_when_unselected",
         "request-budget": "remove_when_unselected",
