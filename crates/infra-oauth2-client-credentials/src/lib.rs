@@ -161,14 +161,12 @@ impl Credentials {
         if Instant::now() >= deadline {
             return Err(AcquisitionError::Timeout);
         }
-        // Give Moka an owned, Send initializer independent of the cache borrow.
-        // It stays lazy and is dropped with this deadline-bounded acquisition.
-        let init: Pin<
-            Box<dyn Future<Output = Result<Arc<CachedCredential>, FillError>> + Send + 'static>,
-        > = Box::pin(Arc::clone(&self.0).fetch(deadline));
-        let result = tokio::time::timeout_at(deadline, self.0.cache.try_get_with((), init))
-            .await
-            .map_err(|_| AcquisitionError::Timeout)?;
+        let result = tokio::time::timeout_at(
+            deadline,
+            self.0.cache.try_get_with((), self.0.fetch(deadline)),
+        )
+        .await
+        .map_err(|_| AcquisitionError::Timeout)?;
         match result {
             Ok(value) => Ok(value),
             Err(error) => match error.as_ref() {
@@ -222,10 +220,7 @@ impl AuthenticatedClient {
 }
 
 impl Owner {
-    async fn fetch(
-        self: Arc<Self>,
-        caller_deadline: Instant,
-    ) -> Result<Arc<CachedCredential>, FillError> {
+    async fn fetch(&self, caller_deadline: Instant) -> Result<Arc<CachedCredential>, FillError> {
         let started = Instant::now();
         let deadline = caller_deadline.min(started + FETCH_TIMEOUT);
         let mut attempt = Attempt {
@@ -311,41 +306,47 @@ impl Owner {
         })
     }
 
-    async fn exchange(
+    fn exchange(
         &self,
         request: oauth2::HttpRequest,
         deadline: Instant,
-    ) -> Result<oauth2::HttpResponse, AcquisitionError> {
-        if request.uri() != self.endpoint.as_str() {
-            return Err(AcquisitionError::InvalidResponse);
-        }
-        let (mut parts, body) = request.into_parts();
-        parts.uri = self.endpoint[url::Position::BeforePath..]
-            .parse()
-            .map_err(|_| AcquisitionError::InvalidResponse)?;
-        if let Some(header) = parts.headers.get_mut(AUTHORIZATION) {
-            header.set_sensitive(true);
-        }
-        let response = self
-            .transport
-            .execute(
-                Request::from_parts(parts, Bytes::from(body)),
-                Operation {
-                    deadline,
-                    response_body_bytes: None,
-                },
-            )
-            .await
-            .map_err(|error| match error {
-                infra_outbound_http::Error::Timeout { .. } => AcquisitionError::Timeout,
-                infra_outbound_http::Error::ResponseBodyTooLarge => AcquisitionError::ResponseLimit,
-                _ => AcquisitionError::Transport,
-            })?;
-        if !response.status().is_success() {
-            return Err(AcquisitionError::Rejected);
-        }
-        let (parts, body) = response.into_parts();
-        Ok(Response::from_parts(parts, body.to_vec()))
+    ) -> Pin<Box<dyn Future<Output = Result<oauth2::HttpResponse, AcquisitionError>> + Send + '_>>
+    {
+        // Expose Send before oauth2 projects the closure's AsyncHttpClient future.
+        Box::pin(async move {
+            if request.uri() != self.endpoint.as_str() {
+                return Err(AcquisitionError::InvalidResponse);
+            }
+            let (mut parts, body) = request.into_parts();
+            parts.uri = self.endpoint[url::Position::BeforePath..]
+                .parse()
+                .map_err(|_| AcquisitionError::InvalidResponse)?;
+            if let Some(header) = parts.headers.get_mut(AUTHORIZATION) {
+                header.set_sensitive(true);
+            }
+            let response = self
+                .transport
+                .execute(
+                    Request::from_parts(parts, Bytes::from(body)),
+                    Operation {
+                        deadline,
+                        response_body_bytes: None,
+                    },
+                )
+                .await
+                .map_err(|error| match error {
+                    infra_outbound_http::Error::Timeout { .. } => AcquisitionError::Timeout,
+                    infra_outbound_http::Error::ResponseBodyTooLarge => {
+                        AcquisitionError::ResponseLimit
+                    }
+                    _ => AcquisitionError::Transport,
+                })?;
+            if !response.status().is_success() {
+                return Err(AcquisitionError::Rejected);
+            }
+            let (parts, body) = response.into_parts();
+            Ok(Response::from_parts(parts, body.to_vec()))
+        })
     }
 }
 

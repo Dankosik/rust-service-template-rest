@@ -96,13 +96,15 @@ library behavior, not a detached application retry. Bound all active callers
 by the existing inbound/job admission and their deadlines; the only cache key
 is unit, so cache cardinality cannot grow with caller input.
 
-The private owner boxes the concrete Moka lookup future before `timeout_at`.
-This type boundary addresses Rust's [higher-ranked async auto-trait inference
-limitation](https://github.com/rust-lang/rust/issues/64552#issuecomment-669728225)
-when acquisition is carried by a `Send` transport future. It adds one local
-future allocation, not a task, cache or token source; dropping the caller still
-drops that lookup. Keep the cancellation/deadline proof when simplifying this
-boundary on a later compiler.
+The private OAuth HTTP hook returns a boxed `Send` future, matching the future
+shape in oauth2's [supported async adapter](https://github.com/ramosbugs/oauth2-rs/blob/5.0.0/src/reqwest_client.rs).
+This exposes `Send` at the hook's `AsyncHttpClient` associated-future boundary
+before `request_async` composes it with acquisition. Acquisition awaits Moka's
+borrowed initializer directly. The hook's local future allocation preserves lazy
+execution: only the elected initializer polls the exchange, and dropping the
+caller drops its pending work under the original deadline. Reopen this type
+boundary only with compiler evidence and the existing cancellation/deadline
+proof; it adds no task, cache, token source, or replay.
 
 `CachedCredential` has private sensitive header and optional Tokio monotonic
 hard expiry. Representable positive expiry is `acquisition_start + expires_in`.

@@ -510,13 +510,15 @@ async fn later_invalid_stream_message_is_not_delivered_to_the_feature() {
         .await
         .unwrap_err();
     assert_eq!(error.code(), Code::InvalidArgument);
-    let calls = fixture.echo.calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].cardinality, Seen::ClientStream);
-    // template:begin authn:grpc-transport-test-auth-stream-identity
-    assert!(calls[0].had_identity);
-    assert!(!calls[0].had_authorization);
-    // template:end authn:grpc-transport-test-auth-stream-identity
+    {
+        let calls = fixture.echo.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].cardinality, Seen::ClientStream);
+        // template:begin authn:grpc-transport-test-auth-stream-identity
+        assert!(calls[0].had_identity);
+        assert!(!calls[0].had_authorization);
+        // template:end authn:grpc-transport-test-auth-stream-identity
+    }
     fixture.stop().await;
 }
 

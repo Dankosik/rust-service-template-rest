@@ -316,6 +316,7 @@ _GRPC_PROFILE_INVENTORY_KEYS = _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS | {
     "grpc-authn",
     "grpc-jwt",
     "outbound-auth-grpc",
+    "client-integrations",
 }
 
 
@@ -527,6 +528,14 @@ def _profile_data(
             _path_list(section["remove_when_unselected"], "outbound-auth remove_when_unselected")
         )
         markers.extend(_markers("outbound-auth", section["markers"]))
+    if "client-integrations" in keys:
+        section = raw["client-integrations"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template client-integrations inventory has an unsupported shape")
+        removals["client-integrations"] = tuple(
+            _path_list(section["remove_when_unselected"], "client-integrations remove_when_unselected")
+        )
+        markers.extend(_markers("client-integrations", section["markers"]))
     if include_grpc:
         for profile in ("grpc", "grpc-none", "grpc-authn", "grpc-jwt", "outbound-auth-grpc"):
             section = raw[profile]
@@ -736,6 +745,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("outbound-http")
     if inputs.outbound_auth == "oauth2-client-credentials":
         selected.add("outbound-auth")
+    if inputs.grpc == "enabled" or inputs.outbound_auth == "oauth2-client-credentials":
+        selected.add("client-integrations")
     if inputs.grpc == "enabled":
         selected.add("grpc")
         if inputs.authn != "none":

@@ -1,4 +1,4 @@
-//! Immutable named outbound machine-authentication configuration.
+//! Immutable named outbound integration configuration.
 //!
 //! This section validates static operator input only. It neither constructs a
 //! credential owner nor performs token or resource I/O.
@@ -6,21 +6,28 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use secrecy::{ExposeSecret as _, SecretString};
+use secrecy::SecretString;
+// template:begin outbound-auth:config-integration-oauth-imports
+use secrecy::ExposeSecret as _;
+// template:end outbound-auth:config-integration-oauth-imports
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
+// template:begin outbound-auth:config-integration-oauth-url-import
 use url::Url;
+// template:end outbound-auth:config-integration-oauth-url-import
 
 use crate::ValidationError;
 // template:begin grpc:config-integration-grpc-import
 use crate::GrpcSecurity;
 // template:end grpc:config-integration-grpc-import
 
-/// One named integration's optional authentication input.
+/// One named integration's optional client input.
 #[derive(Clone, Debug, Default)]
 pub struct IntegrationConfig {
+    // template:begin outbound-auth:config-integration-oauth-field
     /// OAuth client-credentials input. Absent entries do not create clients.
     pub oauth: Option<OAuthConfig>,
+    // template:end outbound-auth:config-integration-oauth-field
     // template:begin grpc:config-integration-grpc-field
     /// Native gRPC client input. Absent entries do not create a channel.
     pub grpc: Option<GrpcClientConfig>,
@@ -53,6 +60,7 @@ impl fmt::Debug for GrpcClientConfig {
 }
 // template:end grpc:config-integration-grpc-type
 
+// template:begin outbound-auth:config-integration-oauth-types
 /// One immutable OAuth client-credentials tuple.
 #[derive(Clone)]
 pub struct OAuthConfig {
@@ -125,6 +133,8 @@ impl<'de> Deserialize<'de> for Scopes {
     }
 }
 
+// template:end outbound-auth:config-integration-oauth-types
+
 /// Decode through config-rs's value representation so its rejected-value
 /// diagnostics never escape this sensitive section.
 pub(crate) fn deserialize_integrations<'de, D>(
@@ -145,10 +155,12 @@ fn decode_integrations(
     for (name, value) in into_table(value, "integrations")? {
         let prefix = format!("integrations.{name}");
         let mut fields = into_table(value, &prefix)?;
+        // template:begin outbound-auth:config-integration-oauth-decode
         let oauth = fields
             .remove("oauth")
             .map(|value| decode_oauth(value, &format!("{prefix}.oauth")))
             .transpose()?;
+        // template:end outbound-auth:config-integration-oauth-decode
         // template:begin grpc:config-integration-grpc-decode
         let grpc = fields
             .remove("grpc")
@@ -159,7 +171,9 @@ fn decode_integrations(
         integrations.insert(
             name,
             IntegrationConfig {
+                // template:begin outbound-auth:config-integration-oauth-value
                 oauth,
+                // template:end outbound-auth:config-integration-oauth-value
                 // template:begin grpc:config-integration-grpc-value
                 grpc,
                 // template:end grpc:config-integration-grpc-value
@@ -169,6 +183,7 @@ fn decode_integrations(
     Ok(integrations)
 }
 
+// template:begin outbound-auth:config-integration-oauth-parser
 fn decode_oauth(value: config::Value, prefix: &str) -> Result<OAuthConfig, String> {
     let mut fields = into_table(value, prefix)?;
     let token_url = take_text(&mut fields, "token_url", prefix)?.unwrap_or_default();
@@ -194,6 +209,7 @@ fn decode_oauth(value: config::Value, prefix: &str) -> Result<OAuthConfig, Strin
         audience,
     })
 }
+// template:end outbound-auth:config-integration-oauth-parser
 
 // template:begin grpc:config-integration-grpc-parser
 fn decode_grpc(value: config::Value, prefix: &str) -> Result<GrpcClientConfig, String> {
@@ -276,9 +292,11 @@ pub(crate) fn validate_integrations(
     integrations: &BTreeMap<String, IntegrationConfig>,
 ) -> Result<(), ValidationError> {
     for (name, integration) in integrations {
+        // template:begin outbound-auth:config-integration-oauth-validate
         if let Some(oauth) = &integration.oauth {
             oauth.validate(&format!("integrations.{name}.oauth"))?;
         }
+        // template:end outbound-auth:config-integration-oauth-validate
         // template:begin grpc:config-integration-grpc-validate
         if let Some(grpc) = &integration.grpc {
             grpc.validate(&format!("integrations.{name}.grpc"))?;
@@ -342,6 +360,7 @@ impl GrpcClientConfig {
 }
 // template:end grpc:config-integration-grpc-validation
 
+// template:begin outbound-auth:config-integration-oauth-validation
 impl OAuthConfig {
     fn validate(&self, prefix: &str) -> Result<(), ValidationError> {
         let token_url_key = format!("{prefix}.token_url");
@@ -420,3 +439,4 @@ fn is_scope_token(scope: &str) -> bool {
             .bytes()
             .all(|byte| matches!(byte, 0x21 | 0x23..=0x5b | 0x5d..=0x7e))
 }
+// template:end outbound-auth:config-integration-oauth-validation

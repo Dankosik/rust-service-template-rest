@@ -841,6 +841,22 @@
       }
     ]
   },
+  "client-integrations": {
+    "remove_when_unselected": [
+      "crates/config/src/integrations.rs"
+    ],
+    "markers": [
+      {
+        "path": "crates/config/src/lib.rs",
+        "ids": [
+          "config-module",
+          "config-field",
+          "config-validate",
+          "config-integration-export"
+        ]
+      }
+    ]
+  },
   "config-url": {
     "remove_when_unselected": [],
     "markers": [
@@ -850,7 +866,6 @@
   "outbound-auth": {
     "remove_when_unselected": [
       "crates/infra-oauth2-client-credentials/",
-      "crates/config/src/integrations.rs",
       "docs/outbound-machine-authentication.md",
       "docs/outbound-machine-authentication-decisions.md"
     ],
@@ -864,10 +879,21 @@
       {
         "path": "crates/config/src/lib.rs",
         "ids": [
-          "config-module",
-          "config-export",
-          "config-field",
-          "config-validate"
+          "config-export"
+        ]
+      },
+      {
+        "path": "crates/config/src/integrations.rs",
+        "ids": [
+          "config-integration-oauth-imports",
+          "config-integration-oauth-url-import",
+          "config-integration-oauth-field",
+          "config-integration-oauth-types",
+          "config-integration-oauth-decode",
+          "config-integration-oauth-value",
+          "config-integration-oauth-parser",
+          "config-integration-oauth-validate",
+          "config-integration-oauth-validation"
         ]
       },
       {

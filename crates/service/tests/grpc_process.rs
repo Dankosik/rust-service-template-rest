@@ -285,8 +285,7 @@ fn example_binary() -> PathBuf {
                 .expect("build gRPC example");
             assert!(status.success(), "gRPC example build failed: {status}");
             let target = std::env::var_os("CARGO_TARGET_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| root.join("target"));
+                .map_or_else(|| root.join("target"), PathBuf::from);
             target.join("debug/examples/grpc")
         })
         .clone()

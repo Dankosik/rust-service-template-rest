@@ -16,7 +16,10 @@ use grpc_contracts::generated::{
     echo_service_client_transport,
 };
 use hyper::{Request as HyperRequest, Response as HyperResponse, body::Incoming};
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    service::TowerToHyperService,
+};
 use infra_grpc::{Client, ClientSecurity, Operation};
 use tokio::{
     net::TcpListener,
@@ -97,14 +100,15 @@ impl tonic::server::ServerStreamingService<ServerStreamRequest> for StreamPeer {
         Box::pin(async move {
             calls.fetch_add(1, Ordering::SeqCst);
             let message = request.into_inner().message;
-            Ok(Response::new(Box::pin(tokio_stream::iter([
+            let response: Self::ResponseStream = Box::pin(tokio_stream::iter([
                 Ok(ServerStreamResponse {
                     message: format!("{message}-one"),
                 }),
                 Ok(ServerStreamResponse {
                     message: format!("{message}-two"),
                 }),
-            ]))))
+            ]));
+            Ok(Response::new(response))
         })
     }
 }
@@ -199,7 +203,7 @@ async fn serve_connection(stream: tokio::net::TcpStream, calls: Arc<AtomicUsize>
         async move { Ok::<_, Infallible>(route_peer(request, calls).await) }
     });
     let connection = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-        .serve_connection(TokioIo::new(stream), service);
+        .serve_connection(TokioIo::new(stream), TowerToHyperService::new(service));
     let _ = connection.await;
 }
 
