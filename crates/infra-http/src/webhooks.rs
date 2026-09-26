@@ -74,7 +74,6 @@ pub fn router() -> ContractRouter<ReadinessReader> {
 /// Attach the composition-root receiver state after contract finalization.
 /// This keeps the existing readiness state as the router's only `State`
 /// value, while avoiding a parallel router or a transport-to-root dependency.
-#[must_use]
 pub fn with_webhook_state(
     router: Router<ReadinessReader>,
     state: WebhookState,
@@ -100,7 +99,7 @@ pub fn with_webhook_state(
         ("webhook-timestamp" = String, Header, description = "required Standard Webhooks timestamp"),
         ("webhook-signature" = String, Header, description = "required Standard Webhooks signature candidates")
     ),
-    request_body(content = Vec<u8>, content_type = "*/*", description = "signed raw delivery bytes"),
+    request_body(content(("*/*")), description = "Original signed binary body, at most 128 KiB. No JSON decoding or payload schema is required."),
     security(),
     responses(
         (status = 204, description = "webhook receipt is durable"),
@@ -119,11 +118,10 @@ async fn receive(
         return outcome_problem(Code::NotFound, "unknown_endpoint");
     }
     let (parts, body) = request.into_parts();
-    let body = match to_bytes(body, MAX_BODY_BYTES).await {
-        Ok(body) => body,
-        Err(_) => return outcome_problem(Code::RequestEntityTooLarge, "rejected"),
+    let Ok(body) = to_bytes(body, MAX_BODY_BYTES).await else {
+        return outcome_problem(Code::RequestEntityTooLarge, "rejected");
     };
-    let response = match receiver
+    match receiver
         .receive(&endpoint_id, &parts.headers, &body, SystemTime::now())
         .await
     {
@@ -133,8 +131,7 @@ async fn receive(
         Err(ReceiveError::UnknownEndpoint) => outcome_problem(Code::NotFound, "unknown_endpoint"),
         Err(ReceiveError::Rejected) => outcome_problem(Code::WebhookRejected, "rejected"),
         Err(ReceiveError::Unavailable) => outcome_problem(Code::ServiceUnavailable, "unavailable"),
-    };
-    response
+    }
 }
 
 fn outcome_no_content(outcome: &'static str) -> Response {

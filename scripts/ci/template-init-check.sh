@@ -252,6 +252,8 @@ run_graph() {
 	printf 'template initializer runtime_graph=%s database=%s authn=%s outbound_http=%s http_idempotency=%s jobs=%s webhooks=%s inbound_webhooks=%s candidate=%s revision=%s\n' \
 		"${graph}" "${database}" "${authn}" "${outbound_http}" "${http_idempotency}" "${jobs}" "${webhooks}" "${inbound_webhooks}" "${candidate}" "${output_revision}"
 	if ((graph > 26)); then
+		# The child shell expands its manifest argument; the caller must preserve $1.
+		# shellcheck disable=SC2016
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-metadata.log" "runtime-${graph}-metadata" \
 			"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" bash -c \
 			'exec cargo metadata --locked --offline --format-version 1 --manifest-path "$1" >/dev/null' _ "${target}/Cargo.toml"

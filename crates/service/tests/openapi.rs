@@ -153,6 +153,12 @@ fn webhook_ingress_is_public_to_bearer_auth_but_declares_signature_and_problem_c
     let document = document();
     let operation = &document["paths"]["/webhooks/{endpoint_id}"]["post"];
     assert_eq!(operation["operationId"], "receiveWebhook");
+    let content = &operation["requestBody"]["content"]["*/*"];
+    assert!(content.is_object(), "raw webhook content must be declared");
+    assert!(
+        content.get("schema").is_none(),
+        "raw signed bytes must not acquire a JSON payload schema"
+    );
     assert!(
         is_public(&document, operation),
         "webhook ingress must override root bearer security"

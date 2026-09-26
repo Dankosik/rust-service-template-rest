@@ -48,6 +48,9 @@ The retained profile adds `POST /webhooks/{endpoint_id}`. It supplies OpenAPI
 Standard Webhooks headers describe a mandatory signature check. The route does
 not ask providers for an access token and disappears when the profile is absent.
 
+The OpenAPI request body declares raw `*/*` content without a JSON schema;
+clients must send the original bytes, not a JSON array of byte values.
+
 The receiver limits the original body to 128 KiB before verification or writes.
 It verifies raw bytes rather than application JSON. v1 HMAC-SHA256 signs the
 original message-ID bytes, ASCII dot, parsed timestamp rendered as canonical i64

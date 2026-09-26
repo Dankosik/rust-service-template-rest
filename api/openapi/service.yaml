@@ -120,6 +120,8 @@ paths:
           $ref: '#/components/responses/WebhookConflict'
         '413':
           $ref: '#/components/responses/RequestEntityTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
       security: []
