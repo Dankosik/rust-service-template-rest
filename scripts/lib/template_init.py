@@ -211,6 +211,10 @@ _JOBS_PROFILE_INVENTORY_KEYS = frozenset(
 )
 
 
+# The DNS-bearing key sets above are supported historical replay input only.
+_TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS = _JOBS_PROFILE_INVENTORY_KEYS - {"egress-dns"}
+
+
 def _profile_data(
     snapshot: Path,
     *,
@@ -218,6 +222,7 @@ def _profile_data(
     historical_outbound: bool = False,
     historical_http_idempotency: bool = False,
     historical_jobs: bool = False,
+    historical_egress: bool = False,
 ) -> ProfileData:
     profile_path = snapshot / _PROFILE_FILE
     try:
@@ -227,7 +232,9 @@ def _profile_data(
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
         raise Refusal("template profile inventory has an unsupported schema")
     keys = frozenset(raw)
-    if keys == _JOBS_PROFILE_INVENTORY_KEYS:
+    if keys == _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS or (
+        historical_egress and keys == _JOBS_PROFILE_INVENTORY_KEYS
+    ):
         include_authn = True
         include_outbound = True
         include_tls_fixtures = True
@@ -273,7 +280,11 @@ def _profile_data(
             removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
             markers.extend(_markers(profile, section["markers"]))
     if include_outbound:
-        for profile in ("outbound-http", "egress-dns", "request-budget"):
+        # Only replay can consume an exact older inventory containing DNS.
+        outbound_profiles = ("outbound-http", "request-budget")
+        if "egress-dns" in keys:
+            outbound_profiles += ("egress-dns",)
+        for profile in outbound_profiles:
             section = raw[profile]
             if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
@@ -450,8 +461,6 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("outbound-http")
     if inputs.authn != "none" or inputs.outbound_http == "bounded":
         selected.update(("tls-fixtures", "request-budget"))
-    if inputs.outbound_http == "bounded":
-        selected.add("egress-dns")
     if inputs.http_idempotency == "postgres":
         selected.add("http-idempotency")
         if inputs.authn == "oidc-introspection":
@@ -615,7 +624,11 @@ def _postconditions(root: Path, inputs: InitInputs, profiles: ProfileData, *, in
         for relative in profiles.source_only:
             if (root / relative.rstrip("/")).exists():
                 raise Refusal(f"source-only output remains: {relative}")
-    _validate_profile_packs(root, profiles, _selected_marker_profiles(inputs))
+    selected_profiles = _selected_marker_profiles(inputs)
+    # Complete older trees retain their DNS pack, but new projections never do.
+    if not initial and "egress-dns" in profiles.removals and inputs.outbound_http == "bounded":
+        selected_profiles.add("egress-dns")
+    _validate_profile_packs(root, profiles, selected_profiles)
     selected = set(selected_adapters(inputs.agent_harness))
     for adapter, pack in ADAPTERS.items():
         paths = (*pack.canonical, *pack.generated, *pack.settings)
@@ -709,6 +722,7 @@ def _replay(root: Path, inputs: InitInputs) -> int:
         historical_http_idempotency=lock_has_explicit_outbound_http(root, required=True)
         and not lock_has_explicit_http_idempotency(root, required=True),
         historical_jobs=not lock_has_explicit_jobs(root, required=True),
+        historical_egress=True,
     )
     _postconditions(root, inputs, profiles)
     print("template init: matching complete lock; no changes")
@@ -1036,14 +1050,11 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
             _project_feature_edge(records, name, version, expected, retained)
     if inputs.authn != "oidc-jwt":
         _project_feature_edge(records, "zeroize", "1.9.0", ["zeroize_derive"], [])
-    if inputs.authn != "oidc-jwt" and inputs.outbound_http == "none":
-        # rcgen/aws_lc_rs (outbound test support) retains the weak
+    if inputs.authn == "none" and inputs.outbound_http == "none":
+        # rcgen/aws_lc_rs (auth or outbound test support) retains the weak
         # x509-parser/verify-aws lock edge, whose aws-lc-rs defaults also
         # retain untrusted without JWT.
         _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
-    if inputs.outbound_http == "none":
-        _project_feature_edge(records, "ipnet", "2.12.2", ["serde"], [])
-        _project_feature_edge(records, "once_cell", "1.21.4", ["critical-section", "portable-atomic"], [])
 
 
 def _project_cargo_lock(snapshot: Path, inventory: dict[str, Any], inputs: InitInputs) -> None:

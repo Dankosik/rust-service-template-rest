@@ -402,6 +402,7 @@ mod tests {
         CachedIntrospection, ClaimPolicy, IntrospectionCache, IntrospectionVerifier,
         basic_authorization, form_body, prepare_with_provider,
     };
+    use crate::tls::TlsMaterial;
     use crate::{
         Failure, IntrospectionCacheOptions, IntrospectionOptions, ProviderUrl, VerificationReason,
         Verifier,
@@ -411,9 +412,6 @@ mod tests {
     };
 
     const FIXTURE_HOST: &str = "authn.fixture.test";
-    const CERT_DER: &[u8] = include_bytes!("../tests/fixtures/authn-fixture-cert.der");
-    const KEY_DER: &[u8] = include_bytes!("../tests/fixtures/authn-fixture-key.der");
-    const ROOT_DER: &[u8] = include_bytes!("../tests/fixtures/authn-fixture-root.der");
 
     struct Fixture {
         endpoint: ProviderUrl,
@@ -428,6 +426,7 @@ mod tests {
         async fn new() -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
+            let material = TlsMaterial::new(FIXTURE_HOST);
             let config = ServerConfig::builder_with_provider(Arc::new(
                 tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
             ))
@@ -435,8 +434,8 @@ mod tests {
             .unwrap()
             .with_no_client_auth()
             .with_single_cert(
-                vec![CertificateDer::from(CERT_DER.to_vec())],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KEY_DER.to_vec())),
+                vec![CertificateDer::from(material.cert.clone())],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
             )
             .unwrap();
             let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -485,7 +484,7 @@ mod tests {
                 provider: new_fixture_client(
                     FIXTURE_HOST,
                     address,
-                    ROOT_DER,
+                    &material.root,
                     CancellationToken::new(),
                 )
                 .unwrap(),

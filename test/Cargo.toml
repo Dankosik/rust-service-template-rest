@@ -32,6 +32,10 @@ tokio = { workspace = true, features = ["time"] }
 # template:end jobs:test-jobs-dependencies
 
 [dev-dependencies]
+# template:begin outbound-http:test-outbound-http-dependencies
+infra-outbound-http = { workspace = true, features = ["test-support"] }
+http = { workspace = true }
+# template:end outbound-http:test-outbound-http-dependencies
 url = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 wiremock = { workspace = true }
@@ -83,6 +87,7 @@ migrate = { workspace = true }
 infra-idempotency-store = { workspace = true }
 # template:end http-idempotency:test-http-idempotency-dependencies
 # template:begin http-idempotency-mounted:test-http-idempotency-mounted-dependencies
+rcgen = { workspace = true, features = ["aws_lc_rs"] }
 infra-bearerauthn = { workspace = true, features = ["test-support"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
 secrecy = { workspace = true }

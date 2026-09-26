@@ -64,6 +64,11 @@ use crate::{
     Hold, RETENTION, RETRY_PAUSE, WAIT, bounded, close, count, make_read_only, template_pool,
 };
 
+#[path = "../../fixtures/tls.rs"]
+mod tls;
+
+use tls::TlsMaterial;
+
 const WIDGETS: &str = "/widgets";
 const PRIMARY_PREFIX: &str = "/primary";
 const SECONDARY_PREFIX: &str = "/secondary";
@@ -88,12 +93,6 @@ const KEY_REASON: &str =
 
 // The fixture provider and the callers it knows.
 const FIXTURE_HOST: &str = "authn.fixture.test";
-const FIXTURE_ROOT_DER: &[u8] =
-    include_bytes!("../../../crates/infra-bearerauthn/tests/fixtures/authn-fixture-root.der");
-const FIXTURE_CERT_DER: &[u8] =
-    include_bytes!("../../../crates/infra-bearerauthn/tests/fixtures/authn-fixture-cert.der");
-const FIXTURE_KEY_DER: &[u8] =
-    include_bytes!("../../../crates/infra-bearerauthn/tests/fixtures/authn-fixture-key.der");
 const ISSUER: &str = "https://issuer.example";
 const AUDIENCE: &str = "service";
 const ALICE: &str = "alice-token";
@@ -311,6 +310,7 @@ fn forbidden() -> Response {
 /// token.
 struct Provider {
     address: SocketAddr,
+    material: TlsMaterial,
     cancel: CancellationToken,
     tasks: TaskTracker,
 }
@@ -321,12 +321,14 @@ impl Provider {
             .await
             .expect("the provider listens");
         let address = listener.local_addr().expect("the provider's address");
-        let acceptor = TlsAcceptor::from(Arc::new(tls_config()));
+        let material = TlsMaterial::new(FIXTURE_HOST);
+        let acceptor = TlsAcceptor::from(Arc::new(tls_config(&material)));
         let cancel = CancellationToken::new();
         let tasks = TaskTracker::new();
         tasks.spawn(serve(listener, acceptor, cancel.clone(), tasks.clone()));
         Self {
             address,
+            material,
             cancel,
             tasks,
         }
@@ -338,7 +340,7 @@ impl Provider {
         let transport = FixtureTransport::new(
             FIXTURE_HOST,
             self.address,
-            FIXTURE_ROOT_DER,
+            &self.material.root,
             self.cancel.child_token(),
         )
         .expect("the fixture transport");
@@ -367,14 +369,14 @@ impl Provider {
     }
 }
 
-fn tls_config() -> ServerConfig {
+fn tls_config(material: &TlsMaterial) -> ServerConfig {
     ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
         .with_safe_default_protocol_versions()
         .expect("fixture TLS protocol versions")
         .with_no_client_auth()
         .with_single_cert(
-            vec![CertificateDer::from(FIXTURE_CERT_DER)],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(FIXTURE_KEY_DER)),
+            vec![CertificateDer::from(material.cert.clone())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
         )
         .expect("the fixture certificate and key")
 }

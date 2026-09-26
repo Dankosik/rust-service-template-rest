@@ -180,15 +180,13 @@ provider attempt has a three-second cap, and request-driven work cannot exceed
 the remaining request deadline less its 100ms response reserve.
 
 The pooled `reqwest` client owns ordinary runtime connection resources. It adds
-no readiness probe or periodic connection check. Authentication deliberately
-does not use the outbound HTTP profile's post-resolution address admission or
-its DNS owner: that policy remains necessary for independent untrusted outbound
-destinations. Synthetic DER fixtures continue to prove ordinary TLS and name
+no readiness probe or periodic connection check. Authentication has its own
+trusted-provider transport and does not share an outbound resolver or builder.
+Shared generated test material continues to prove ordinary TLS and name
 validation without a production provider.
 
-The provider client limits header count but does not promise a separate
-application-selected aggregate outbound-header-byte cap. The service's inbound
-header limit and native `431` behavior remain separate. The default-off
+The provider client limits header count. The service's inbound header limit and
+native `431` behavior remain separate. The default-off
 `test-support` feature mounts the real verifier for consumer tests; it exposes
 no verification bypass or principal constructor. [Initializer validation](template-sync.md#validation-boundary)
 separates profile projection proof from runtime build and test evidence.

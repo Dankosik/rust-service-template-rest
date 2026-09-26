@@ -17,6 +17,10 @@ mod provider;
 mod refresh;
 // template:end oidc-jwt:authn-refresh-module
 
+#[cfg(test)]
+#[path = "../../../test/fixtures/tls.rs"]
+mod tls;
+
 use std::fmt;
 // template:begin oidc-jwt:authn-jwt-task-imports
 use std::{future::Future, pin::Pin};

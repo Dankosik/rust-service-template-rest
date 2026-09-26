@@ -22,6 +22,41 @@ _OUTBOUND_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection",
     "outbound-http", "egress-dns", "tls-fixtures", "request-budget", "identity", "cargo_lock",
 )
+# Historical DNS pack is replay input only; never part of current selection.
+_HISTORICAL_EGRESS_PACK = {
+    "remove_when_unselected": [
+        "crates/infra-egress-dns/"
+    ],
+    "markers": [
+        {
+            "path": "Cargo.toml",
+            "ids": [
+                "workspace-egress-dns-crate",
+                "workspace-egress-dns",
+                "workspace-egress-tls-fixtures"
+            ]
+        },
+        {
+            "path": "docs/architecture/boundaries.md",
+            "ids": [
+                "docs-boundaries-egress-owner",
+                "docs-boundaries-egress-edges"
+            ]
+        },
+        {
+            "path": "docs/project-structure-and-module-organization.md",
+            "ids": [
+                "docs-structure-egress-placement"
+            ]
+        },
+        {
+            "path": "docs/build-test-and-development-commands.md",
+            "ids": [
+                "docs-commands-egress"
+            ]
+        }
+    ]
+}
 _NEW_PROJECTION_CHECKER = "scripts/tests/template-profile-projections.py"
 
 
@@ -117,6 +152,7 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
 
 def install_derived_outbound_only_none(source: Path, target: Path) -> None:
     profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
+    profile["egress-dns"] = _HISTORICAL_EGRESS_PACK
     outbound_only = {key: profile[key] for key in _OUTBOUND_ONLY_PROFILE_KEYS}
     (target / "scripts/lib/template_profiles.json").write_text(
         json.dumps(outbound_only, indent=2) + "\n", encoding="utf-8"
@@ -168,7 +204,6 @@ def assert_profile_output(
     assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
     shared_selected = authn != "none" or outbound_http == "bounded"
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
-    assert_profile_pack(source, target, "egress-dns", outbound_http == "bounded")
     assert_profile_pack(source, target, "request-budget", shared_selected)
     assert_profile_pack(source, target, "http-idempotency", http_idempotency == "postgres")
     assert_profile_pack(

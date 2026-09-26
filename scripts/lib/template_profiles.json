@@ -568,10 +568,14 @@
   "outbound-http": {
     "remove_when_unselected": [
       "crates/infra-outbound-http/",
-      "docs/outbound-http.md"
+      "docs/outbound-http.md",
+      "docs/outbound-http-decisions.md",
+      "test/tests/outbound_http.rs"
     ],
     "markers": [
       {"path": "Cargo.toml", "ids": ["workspace-outbound-http-types"]},
+      {"path": "test/Cargo.toml", "ids": ["test-outbound-http-dependencies"]},
+      {"path": "crates/infra-telemetry/src/metrics.rs", "ids": ["telemetry-outbound-buckets-constants", "telemetry-outbound-buckets-install", "telemetry-outbound-buckets-helper", "telemetry-outbound-histogram-test"]},
       {
         "path": "docs/architecture/boundaries.md",
         "ids": [
@@ -618,42 +622,8 @@
       }
     ]
   },
-  "egress-dns": {
-    "remove_when_unselected": [
-      "crates/infra-egress-dns/"
-    ],
-    "markers": [
-      {
-        "path": "Cargo.toml",
-        "ids": [
-          "workspace-egress-dns-crate",
-          "workspace-egress-dns",
-          "workspace-egress-tls-fixtures"
-        ]
-      },
-      {
-        "path": "docs/architecture/boundaries.md",
-        "ids": [
-          "docs-boundaries-egress-owner",
-          "docs-boundaries-egress-edges"
-        ]
-      },
-      {
-        "path": "docs/project-structure-and-module-organization.md",
-        "ids": [
-          "docs-structure-egress-placement"
-        ]
-      },
-      {
-        "path": "docs/build-test-and-development-commands.md",
-        "ids": [
-          "docs-commands-egress"
-        ]
-      }
-    ]
-  },
   "tls-fixtures": {
-    "remove_when_unselected": [],
+    "remove_when_unselected": ["test/fixtures/tls.rs"],
     "markers": [
       {
         "path": "Cargo.toml",
