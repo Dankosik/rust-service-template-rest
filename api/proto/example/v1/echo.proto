@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package example.v1;
+
+import "buf/validate/validate.proto";
+
+// Echo is an intentionally small transport example. It exercises each native
+// gRPC cardinality without defining a production business API.
+service EchoService {
+  rpc Unary(UnaryRequest) returns (UnaryResponse);
+  rpc ClientStream(stream ClientStreamRequest) returns (ClientStreamResponse);
+  rpc ServerStream(ServerStreamRequest) returns (stream ServerStreamResponse);
+  rpc BidiStream(stream BidiStreamRequest) returns (stream BidiStreamResponse);
+}
+
+message UnaryRequest {
+  string message = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 1024
+  }];
+}
+
+message UnaryResponse {
+  string message = 1 [(buf.validate.field).string.max_len = 1024];
+}
+
+message ClientStreamRequest {
+  string message = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 1024
+  }];
+}
+
+message ClientStreamResponse {
+  string message = 1 [(buf.validate.field).string.max_len = 1024];
+}
+
+message ServerStreamRequest {
+  string message = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 1024
+  }];
+}
+
+message ServerStreamResponse {
+  string message = 1 [(buf.validate.field).string.max_len = 1024];
+}
+
+message BidiStreamRequest {
+  string message = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 1024
+  }];
+}
+
+message BidiStreamResponse {
+  string message = 1 [(buf.validate.field).string.max_len = 1024];
+}
