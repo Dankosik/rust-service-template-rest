@@ -52,3 +52,28 @@ fn help_exits_zero_and_prints_usage() {
     assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
     assert!(stdout.contains("Usage"), "stdout: {stdout}");
 }
+
+// template:begin inbound-webhooks:worker-webhooks-inbound-process-tests
+#[test]
+fn configured_inbound_endpoint_refuses_without_a_consumer_before_database_admission() {
+    let output = Command::new(env!("CARGO_BIN_EXE_jobs-worker"))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env(
+            "APP__INBOUND_WEBHOOKS__ENDPOINTS__PARTNER__ACTIVE_KEY",
+            "partner_v1",
+        )
+        .output()
+        .expect("spawn jobs-worker");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("inbound webhook endpoint partner has no consumer binding"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("worker_ready"),
+        "unbound endpoint must refuse before the worker starts"
+    );
+}
+// template:end inbound-webhooks:worker-webhooks-inbound-process-tests

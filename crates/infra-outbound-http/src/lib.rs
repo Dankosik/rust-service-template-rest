@@ -10,12 +10,22 @@ mod tests;
 
 use std::{error::Error as StdError, fmt, sync::Arc, time::Duration};
 
+#[cfg(any(test, feature = "test-support"))]
+use std::{io, net::SocketAddr};
+
 use infra_egress_dns::{PublicAddressResolver, ResolveError, https_client_builder};
 use tokio::{sync::Semaphore, time::Instant};
 use url::Url;
 
 pub use bytes::Bytes;
 pub use http::{HeaderMap, Method, Request, Response, StatusCode, Version, header};
+
+/// The only hostname admitted by [`Client::for_test_fixture`].
+///
+/// This fixture-only authority is deliberately separate from production DNS and
+/// trust configuration.
+#[cfg(any(test, feature = "test-support"))]
+pub const TEST_FIXTURE_HOST: &str = "authn.fixture.test";
 
 /// Fixed client ceilings. Every field is required and finite.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,6 +165,41 @@ impl Client {
         })
     }
 
+    /// Creates the fixed-host client used by deterministic local TLS fixtures.
+    ///
+    /// The peer must be a bound loopback socket and `roots` must encode its
+    /// generated root certificate. This constructor has no production DNS or
+    /// trust path and cannot select another hostname or resolver.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid configuration error for non-loopback fixture sockets
+    /// or invalid limits, and retains certificate or client setup causes.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test_fixture(
+        socket: SocketAddr,
+        roots: &[u8],
+        limits: Limits,
+    ) -> Result<Self, Error> {
+        if !socket.ip().is_loopback() || socket.port() == 0 {
+            return Err(Error::InvalidConfiguration);
+        }
+        policy::validate_limits(&limits)?;
+        let base = policy::admit_base(&format!("https://{TEST_FIXTURE_HOST}/"))?;
+        let root = reqwest::Certificate::from_der(roots).map_err(|source| Error::ClientBuild {
+            source: source.without_url(),
+        })?;
+        let transport = build_fixture_client(FixtureResolver { socket }, &limits, root)?;
+        Ok(Self {
+            base,
+            limits,
+            transport,
+            admission: Arc::new(Semaphore::new(limits.max_active)),
+            #[cfg(test)]
+            response_head_observed: None,
+        })
+    }
+
     /// Executes one complete buffered exchange inside the supplied custody.
     ///
     /// The request URI must be origin-form. The parent deadline and optional
@@ -278,7 +323,7 @@ where
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn build_fixture_client<R>(
     resolver: R,
     limits: &Limits,
@@ -300,6 +345,25 @@ where
     .map_err(|source| Error::ClientBuild {
         source: source.without_url(),
     })
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy)]
+struct FixtureResolver {
+    socket: SocketAddr,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl reqwest::dns::Resolve for FixtureResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let socket = self.socket;
+        Box::pin(async move {
+            if !name.as_str().eq_ignore_ascii_case(TEST_FIXTURE_HOST) {
+                return Err(io::Error::other("fixture DNS denied").into());
+            }
+            Ok(Box::new(std::iter::once(socket)) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 fn map_transport_error(error: reqwest::Error) -> Error {

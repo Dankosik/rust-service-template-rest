@@ -13,6 +13,7 @@ workspace = true
 
 [features]
 default = []
+test-support = ["infra-egress-dns/test-support"]
 
 [dependencies]
 http = { workspace = true }

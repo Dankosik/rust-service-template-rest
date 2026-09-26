@@ -43,6 +43,9 @@ jobs-worker = { path = "crates/jobs-worker" }
 # template:begin webhooks-common:workspace-webhooks-crate
 infra-webhooks = { path = "crates/infra-webhooks" }
 # template:end webhooks-common:workspace-webhooks-crate
+# template:begin inbound-webhooks:workspace-webhook-consumers-crate
+webhook-consumers = { path = "crates/webhook-consumers", default-features = false }
+# template:end inbound-webhooks:workspace-webhook-consumers-crate
 
 # template:begin postgres:workspace-postgres-dependencies
 # Persistence (docs/architecture/persistence.md). `macros` only where

@@ -33,7 +33,8 @@ fn receiver(pool: PgPool) -> Receiver {
     )
 }
 
-fn signed_headers(keys: &KeyRing, message_id: &str, body: &[u8]) -> HeaderMap {
+fn signed_headers(keys: &KeyRing, message_id: impl AsRef<[u8]>, body: &[u8]) -> HeaderMap {
+    let message_id = message_id.as_ref();
     let timestamp: i64 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock after epoch")
@@ -43,7 +44,7 @@ fn signed_headers(keys: &KeyRing, message_id: &str, body: &[u8]) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
         "webhook-id",
-        HeaderValue::from_str(message_id).expect("message id"),
+        HeaderValue::from_bytes(message_id).expect("message id"),
     );
     headers.insert(
         "webhook-timestamp",
@@ -53,7 +54,7 @@ fn signed_headers(keys: &KeyRing, message_id: &str, body: &[u8]) -> HeaderMap {
         "webhook-signature",
         HeaderValue::from_str(
             &keys
-                .signatures(message_id.as_bytes(), timestamp, body)
+                .signatures(message_id, timestamp, body)
                 .expect("signature"),
         )
         .expect("signature header"),
@@ -117,7 +118,7 @@ async fn until(what: &str, mut ready: impl AsyncFnMut() -> Option<()>) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn receiver_atomically_accepts_duplicates_and_conflicts(pool: PgPool) {
+async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool: PgPool) {
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
     let receiver = receiver(pool.clone());
     let body = b"\0{\"event\":\"created\"}\xff";
@@ -129,6 +130,10 @@ async fn receiver_atomically_accepts_duplicates_and_conflicts(pool: PgPool) {
             .await,
         Ok(ReceiptOutcome::Accepted)
     );
+    let first: String = sqlx::query_scalar("SELECT received_at::text FROM webhook_receipts")
+        .fetch_one(&pool)
+        .await
+        .expect("first admission time");
     assert_eq!(
         receiver
             .receive(ENDPOINT, &headers, body, SystemTime::now())
@@ -145,10 +150,40 @@ async fn receiver_atomically_accepts_duplicates_and_conflicts(pool: PgPool) {
                 SystemTime::now(),
             )
             .await,
-        Ok(ReceiptOutcome::Conflict)
+        Ok(ReceiptOutcome::Duplicate)
+    );
+    let mut replay_headers = signed_headers(&keys, "message-1", changed);
+    replay_headers.insert("content-type", HeaderValue::from_static("text/plain"));
+    assert_eq!(
+        receiver
+            .receive(ENDPOINT, &replay_headers, changed, SystemTime::now())
+            .await,
+        Ok(ReceiptOutcome::Duplicate)
+    );
+    replay_headers.insert("webhook-signature", HeaderValue::from_static("v1,invalid"));
+    assert_eq!(
+        receiver
+            .receive(ENDPOINT, &replay_headers, changed, SystemTime::now())
+            .await,
+        Err(ReceiveError::Rejected)
     );
     assert_eq!(receipt_count(&pool).await, 1);
     assert_eq!(job_count(&pool).await, 1);
+    let timestamp: String = sqlx::query_scalar("SELECT received_at::text FROM webhook_receipts")
+        .fetch_one(&pool)
+        .await
+        .expect("unchanged admission time");
+    assert_eq!(timestamp, first);
+    let payload: serde_json::Value = sqlx::query_scalar("SELECT payload FROM background_jobs")
+        .fetch_one(&pool)
+        .await
+        .expect("original processing job");
+    let incoming: Incoming = serde_json::from_value(payload).expect("incoming");
+    assert_eq!(incoming.body(), body);
+    assert_eq!(
+        incoming.content_type(),
+        Some(b"application/webhook\xff".as_slice())
+    );
     let row = sqlx::query("SELECT endpoint_id, message_id FROM webhook_receipts")
         .fetch_one(&pool)
         .await
@@ -389,7 +424,27 @@ async fn unknown_processor_commit_does_not_add_a_competing_retry(pool: PgPool) {
         .execute(&pool)
         .await
         .expect("consumer effects table");
-    accept_for_processing(&pool, "message-processor-unknown").await;
+    // Historical accepted jobs retain IDs above the new admission bound.
+    let legacy_message_id = vec![b'x'; 512];
+    let incoming: Incoming = serde_json::from_value(serde_json::json!({
+        "version": 1,
+        "endpoint_id": ENDPOINT,
+        "message_id": base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &legacy_message_id,
+        ),
+        "content_type": null,
+        "body": "bGVnYWN5"
+    }))
+    .expect("historical inbound payload");
+    infra_postgres::in_tx(&pool, async |tx| -> Result<(), infra_postgres::TxError> {
+        infra_jobs::enqueue(tx, &incoming, infra_jobs::EnqueueOptions::default())
+            .await
+            .expect("enqueue historical payload");
+        Ok(())
+    })
+    .await
+    .expect("historical accepted job");
     let (proxy, worker) = proxied_pool(&pool).await;
     let consumer = Arc::new(EffectConsumer::default());
     let running =
@@ -406,11 +461,11 @@ async fn unknown_processor_commit_does_not_add_a_competing_retry(pool: PgPool) {
     })
     .await;
     assert_eq!(proxy.fired(), Some(Fault::ForwardThenDrop));
-    let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM webhook_effects")
-        .fetch_one(&pool)
+    let effects: Vec<Vec<u8>> = sqlx::query_scalar("SELECT message_id FROM webhook_effects")
+        .fetch_all(&pool)
         .await
-        .expect("effects count");
-    assert_eq!(effects, 1);
+        .expect("committed consumer effects");
+    assert_eq!(effects, vec![legacy_message_id]);
     let row =
         sqlx::query("SELECT state, attempts FROM background_jobs WHERE kind = 'webhooks.process'")
             .fetch_one(&pool)
@@ -426,10 +481,15 @@ async fn unknown_processor_commit_does_not_add_a_competing_retry(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn missing_consumer_snoozes_without_spending_an_attempt(pool: PgPool) {
+async fn missing_consumer_spends_attempts_and_exhausts_the_normal_budget(pool: PgPool) {
     accept_for_processing(&pool, "message-missing-consumer").await;
+    // Resume historical work with two of the normal 25 attempts remaining.
+    sqlx::query("UPDATE background_jobs SET attempts = 23 WHERE kind = 'webhooks.process'")
+        .execute(&pool)
+        .await
+        .expect("historical attempt count");
     let running = RunningProcessor::start(&pool, Consumers::new());
-    until("the missing binding snoozes the job", async || {
+    until("the missing binding spends its retry attempt", async || {
         let row = sqlx::query(
             "SELECT state, attempts FROM background_jobs WHERE kind = 'webhooks.process'",
         )
@@ -437,10 +497,34 @@ async fn missing_consumer_snoozes_without_spending_an_attempt(pool: PgPool) {
         .await
         .expect("job row");
         (row.try_get::<String, _>("state").expect("state") == "pending"
-            && row.try_get::<i16, _>("attempts").expect("attempts") == 0)
+            && row.try_get::<i16, _>("attempts").expect("attempts") == 24)
             .then_some(())
     })
     .await;
+    sqlx::query(
+        "UPDATE background_jobs SET not_before = now() \
+         WHERE kind = 'webhooks.process' AND state = 'pending'",
+    )
+    .execute(&pool)
+    .await
+    .expect("make the final retry eligible without waiting for backoff");
+    let row = until("the missing binding exhausts its budget", async || {
+        let row = sqlx::query(
+            "SELECT state, attempts, failure_reason FROM background_jobs \
+             WHERE kind = 'webhooks.process'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("job row");
+        (row.try_get::<String, _>("state").expect("state") == "failed").then_some(row)
+    })
+    .await;
+    assert_eq!(row.try_get::<i16, _>("attempts").expect("attempts"), 25);
+    assert_eq!(
+        row.try_get::<String, _>("failure_reason")
+            .expect("failure reason"),
+        "exhausted"
+    );
     running.close(&[&pool]).await;
 }
 
@@ -464,4 +548,322 @@ async fn mounted_percent_decoded_endpoint_reaches_signature_rejection(pool: PgPo
     response.assert_status(StatusCode::BAD_REQUEST);
     assert_eq!(receipt_count(&pool).await, 0);
     super::close(&[&pool]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn receipt_identity_preserves_binary_ids_and_endpoint_scope(pool: PgPool) {
+    let keys = KeyRing::from_encoded(KEY, None).expect("key");
+    let receiver = Receiver::new(
+        pool.clone(),
+        [
+            ("partner".to_owned(), keys.clone()),
+            ("Partner".to_owned(), keys.clone()),
+        ],
+    );
+    for (endpoint, message) in [
+        ("partner", b"id\x80".as_slice()),
+        ("partner", b"id\xff".as_slice()),
+        ("Partner", b"id\x80".as_slice()),
+    ] {
+        assert_eq!(
+            receiver
+                .receive(
+                    endpoint,
+                    &signed_headers(&keys, message, b"{}"),
+                    b"{}",
+                    SystemTime::now()
+                )
+                .await,
+            Ok(ReceiptOutcome::Accepted)
+        );
+    }
+    let identities: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        "SELECT endpoint_id, message_id FROM webhook_receipts ORDER BY endpoint_id, message_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("exact identities");
+    assert_eq!(
+        identities,
+        vec![
+            ("Partner".to_owned(), b"id\x80".to_vec()),
+            ("partner".to_owned(), b"id\x80".to_vec()),
+            ("partner".to_owned(), b"id\xff".to_vec())
+        ]
+    );
+    assert_eq!(job_count(&pool).await, 3);
+    super::close(&[&pool]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool: PgPool) {
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt as _;
+
+    let app = infra_http::webhooks::with_webhook_state(
+        infra_http::webhooks::router()
+            .finalize_public()
+            .expect("public contract"),
+        infra_http::webhooks::WebhookState::active(receiver(pool.clone())),
+    )
+    .with_state(Readiness::new(Vec::new()).reader());
+    let keys = KeyRing::from_encoded(KEY, None).expect("key");
+    for (id, body, content_type, status) in [
+        (
+            vec![b'm'; 255],
+            b"first".as_slice(),
+            "text/plain",
+            StatusCode::NO_CONTENT,
+        ),
+        (
+            vec![b'm'; 255],
+            b"changed".as_slice(),
+            "application/json",
+            StatusCode::NO_CONTENT,
+        ),
+        (
+            vec![b'm'; 256],
+            b"too long".as_slice(),
+            "text/plain",
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let mut request = http::Request::post("/webhooks/partner%2Fa%3F%23")
+            .body(Body::from(body))
+            .expect("request");
+        *request.headers_mut() = signed_headers(&keys, &id, body);
+        request
+            .headers_mut()
+            .insert("content-type", HeaderValue::from_static(content_type));
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("mounted response");
+        assert_eq!(response.status(), status);
+        if status == StatusCode::NO_CONTENT {
+            assert!(
+                to_bytes(response.into_body(), 1024)
+                    .await
+                    .expect("body")
+                    .is_empty()
+            );
+        } else {
+            assert_eq!(
+                response.headers()["content-type"],
+                "application/problem+json"
+            );
+            let problem: serde_json::Value = serde_json::from_slice(
+                &to_bytes(response.into_body(), 4096).await.expect("problem"),
+            )
+            .expect("JSON");
+            assert_eq!(problem["code"], "webhook_rejected");
+        }
+    }
+    for (path, body, status, code) in [
+        (
+            "/webhooks/partner%2Fa%3F%23",
+            Body::from(vec![b'x'; infra_webhooks::protocol::MAX_BODY_BYTES + 1]),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request_entity_too_large",
+        ),
+        (
+            "/webhooks/partner%2Fa%3F%23",
+            Body::from_stream(futures_util::stream::once(async {
+                Err::<Bytes, _>(std::io::Error::other("private transport failure"))
+            })),
+            StatusCode::BAD_REQUEST,
+            "webhook_rejected",
+        ),
+        (
+            "/webhooks/unknown",
+            Body::from_stream(futures_util::stream::once(async {
+                panic!("unknown endpoints must not poll the body");
+                #[allow(unreachable_code)]
+                Ok::<Bytes, std::io::Error>(Bytes::new())
+            })),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(http::Request::post(path).body(body).expect("request"))
+            .await
+            .expect("mounted response");
+        assert_eq!(response.status(), status);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/problem+json"
+        );
+        let bytes = to_bytes(response.into_body(), 4096).await.expect("problem");
+        let problem: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+        assert_eq!(problem["code"], code);
+        assert!(!String::from_utf8_lossy(&bytes).contains("private transport failure"));
+    }
+    assert_eq!(receipt_count(&pool).await, 1);
+    assert_eq!(job_count(&pool).await, 1);
+    super::close(&[&pool]).await;
+}
+
+const NATIVE_RECEIPTS_VERSION: i64 = 20_260_926_130_000;
+
+async fn historical_schema(pool: &PgPool) {
+    let historical = sqlx::migrate::Migrator::with_migrations(
+        migrate::MIGRATOR
+            .iter()
+            .filter(|migration| migration.version < NATIVE_RECEIPTS_VERSION)
+            .cloned()
+            .collect(),
+    );
+    historical.run(pool).await.expect("historical migrations");
+}
+
+async fn historical_receipt(pool: &PgPool, hash: u8, endpoint: &str, message: &[u8]) {
+    sqlx::query("INSERT INTO webhook_receipts (identity_hash, endpoint_id, message_id, body_sha256) VALUES ($1, $2, $3, $4)")
+        .bind(vec![hash; 32]).bind(endpoint).bind(message).bind(vec![7_u8; 32])
+        .execute(pool).await.expect("historical receipt");
+}
+
+#[sqlx::test(migrations = false)]
+async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approximation(
+    pool: PgPool,
+) {
+    historical_schema(&pool).await;
+    let legacy = vec![b'x'; 512];
+    for (hash, endpoint, message) in [
+        (1, "Partner", b"id\x80".as_slice()),
+        (2, "partner", b"id\x80".as_slice()),
+        (3, ENDPOINT, legacy.as_slice()),
+    ] {
+        historical_receipt(&pool, hash, endpoint, message).await;
+    }
+    let incoming: Incoming = serde_json::from_value(serde_json::json!({
+        "version": 1, "endpoint_id": ENDPOINT,
+        "message_id": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &legacy),
+        "content_type": null, "body": "bGVnYWN5"
+    }))
+    .expect("legacy inbound payload");
+    infra_postgres::in_tx(&pool, async |tx| -> Result<(), infra_postgres::TxError> {
+        infra_jobs::enqueue(tx, &incoming, infra_jobs::EnqueueOptions::default())
+            .await
+            .expect("enqueue legacy fixture");
+        Ok(())
+    })
+    .await
+    .expect("legacy job");
+    let jobs_before: Vec<serde_json::Value> =
+        sqlx::query_scalar("SELECT to_jsonb(background_jobs) FROM background_jobs ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("jobs before");
+    let pairs_before: Vec<(String, Vec<u8>)> = sqlx::query_as("SELECT endpoint_id, message_id FROM webhook_receipts ORDER BY endpoint_id COLLATE \"C\", message_id")
+        .fetch_all(&pool).await.expect("pairs before");
+    let before: String = sqlx::query_scalar("SELECT now()::text")
+        .fetch_one(&pool)
+        .await
+        .expect("migration lower bound");
+    migrate::MIGRATOR
+        .run(&pool)
+        .await
+        .expect("forward migration");
+    let pairs_after: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        "SELECT endpoint_id, message_id FROM webhook_receipts ORDER BY endpoint_id, message_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("pairs after");
+    assert_eq!(pairs_after, pairs_before);
+    let jobs_after: Vec<serde_json::Value> =
+        sqlx::query_scalar("SELECT to_jsonb(background_jobs) FROM background_jobs ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("jobs after");
+    assert_eq!(jobs_after, jobs_before);
+    let approximation: bool = sqlx::query_scalar("SELECT count(DISTINCT received_at) = 1 AND bool_and(received_at >= $1::text::timestamptz AND received_at <= now()) FROM webhook_receipts")
+        .bind(before).fetch_one(&pool).await.expect("migration timestamp approximation");
+    assert!(approximation);
+    let keys = KeyRing::from_encoded(KEY, None).expect("key");
+    assert_eq!(
+        receiver(pool.clone())
+            .receive(
+                ENDPOINT,
+                &signed_headers(&keys, &legacy, b"legacy"),
+                b"legacy",
+                SystemTime::now()
+            )
+            .await,
+        Err(ReceiveError::Rejected)
+    );
+    assert_eq!(receipt_count(&pool).await, 3);
+    assert_eq!(job_count(&pool).await, 1);
+    super::close(&[&pool]).await;
+}
+
+async fn assert_receipt_migration_rollback(pool: &PgPool, expected_code: &str) {
+    let before: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(webhook_receipts) FROM webhook_receipts ORDER BY identity_hash",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("old receipts");
+    let error = migrate::MIGRATOR
+        .run(pool)
+        .await
+        .expect_err("incompatible history blocks migration");
+    let sqlx::migrate::MigrateError::ExecuteMigration(error, version) = error else {
+        panic!("unexpected migration error: {error}")
+    };
+    assert_eq!(version, NATIVE_RECEIPTS_VERSION);
+    let database = error.as_database_error().expect("database refusal");
+    assert_eq!(database.code().as_deref(), Some(expected_code));
+    if expected_code == "P0001" {
+        assert_eq!(
+            database.message(),
+            "webhook receipt migration refused duplicate exact identities"
+        );
+        assert!(
+            database
+                .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
+                .expect("postgres error")
+                .detail()
+                .is_none()
+        );
+    }
+    let after: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(webhook_receipts) FROM webhook_receipts ORDER BY identity_hash",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("old schema and receipts remain");
+    assert_eq!(after, before);
+    let applied: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version = $1)")
+            .bind(NATIVE_RECEIPTS_VERSION)
+            .fetch_one(pool)
+            .await
+            .expect("history unchanged");
+    assert!(!applied);
+    super::close(&[pool]).await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn receipt_migration_rejects_duplicate_exact_pairs_without_identity_diagnostics(
+    pool: PgPool,
+) {
+    historical_schema(&pool).await;
+    historical_receipt(&pool, 1, "private-endpoint", b"private-message").await;
+    historical_receipt(&pool, 2, "private-endpoint", b"private-message").await;
+    assert_receipt_migration_rollback(&pool, "P0001").await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn receipt_migration_uses_actual_index_admission_and_rolls_back_oversized_history(
+    pool: PgPool,
+) {
+    historical_schema(&pool).await;
+    let wide: Vec<u8> = sqlx::query_scalar("SELECT convert_to(string_agg(md5(n::text), '' ORDER BY n), 'UTF8') FROM generate_series(1, 400) n")
+        .fetch_one(&pool).await.expect("incompressible historical identity");
+    historical_receipt(&pool, 1, ENDPOINT, &wide).await;
+    assert_receipt_migration_rollback(&pool, "54000").await;
 }

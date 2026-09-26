@@ -280,7 +280,7 @@ mod tests {
 
     // template:begin webhooks:load-webhooks-environment
     #[test]
-    fn webhooks_environment_builds_nested_endpoint_and_secret_maps() {
+    fn webhooks_environment_builds_endpoint_local_signing_keys() {
         use secrecy::ExposeSecret as _;
 
         let cfg = load_from(
@@ -292,25 +292,25 @@ mod tests {
                     "https://partner.example/events",
                 ),
                 (
-                    "APP__WEBHOOKS__ENDPOINTS__PARTNER__ACTIVE_KEY",
-                    "partner_v2",
+                    "APP__WEBHOOKS__ENDPOINTS__PARTNER__SECRET",
+                    "fixture-current-secret",
                 ),
-                ("APP__WEBHOOKS__SECRETS__PARTNER_V2", "fixture-secret"),
+                (
+                    "APP__WEBHOOKS__ENDPOINTS__PARTNER__PREVIOUS_SECRET",
+                    "fixture-previous-secret",
+                ),
             ]),
         )
         .unwrap();
         let endpoint = cfg.webhooks.endpoints.get("partner").unwrap();
         assert_eq!(endpoint.url, "https://partner.example/events");
-        assert_eq!(endpoint.active_key, "partner_v2");
+        assert_eq!(endpoint.secret.expose_secret(), "fixture-current-secret");
         assert_eq!(
-            cfg.webhooks
-                .secrets
-                .get("partner_v2")
-                .unwrap()
-                .expose_secret(),
-            "fixture-secret"
+            endpoint.previous_secret.as_ref().unwrap().expose_secret(),
+            "fixture-previous-secret"
         );
-        assert!(!format!("{cfg:?}").contains("fixture-secret"));
+        assert!(!format!("{cfg:?}").contains("fixture-current-secret"));
+        assert!(!format!("{cfg:?}").contains("fixture-previous-secret"));
     }
 
     #[test]
@@ -319,7 +319,7 @@ mod tests {
         let leaked = write(
             &dir,
             "leaked.toml",
-            "[webhooks.secrets]\npartner_v2 = \"whsec_private\"\n",
+            "[webhooks.endpoints.partner]\nsecret = \"whsec_private\"\n",
         );
         let err = load_from(
             &LoadOptions {
@@ -331,9 +331,47 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(&err, Error::SecretInFile { key, .. } if key == "webhooks.secrets.partner_v2"),
+            matches!(&err, Error::SecretInFile { key, .. } if key == "webhooks.endpoints.partner.secret"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn webhooks_blank_environment_secrets_are_refused() {
+        let base = [
+            (
+                "APP__WEBHOOKS__ENDPOINTS__PARTNER__URL",
+                "https://partner.example/events",
+            ),
+            (
+                "APP__WEBHOOKS__ENDPOINTS__PARTNER__SECRET",
+                "fixture-current-secret",
+            ),
+        ];
+        for (name, value, expected_key) in [
+            (
+                "APP__WEBHOOKS__ENDPOINTS__PARTNER__SECRET",
+                "",
+                "webhooks.endpoints.partner.secret",
+            ),
+            (
+                "APP__WEBHOOKS__ENDPOINTS__PARTNER__PREVIOUS_SECRET",
+                "  ",
+                "webhooks.endpoints.partner.previous_secret",
+            ),
+        ] {
+            let mut variables = base.to_vec();
+            if name.ends_with("__SECRET") {
+                variables[1] = (name, value);
+            } else {
+                variables.push((name, value));
+            }
+            let err = load_from(&LoadOptions::default(), BUILD, env(&variables)).unwrap_err();
+            assert!(
+                matches!(&err, Error::Validate(validation) if validation.key == expected_key),
+                "{err}"
+            );
+        }
     }
     // template:end webhooks:load-webhooks-environment
 

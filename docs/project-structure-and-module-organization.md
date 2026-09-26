@@ -93,13 +93,17 @@ receipt-store, DTO, cache, or lifecycle crate.
 
 <!-- template:begin webhooks:docs-structure-webhooks-outbound -->
 `crates/infra-webhooks/src/outbound.rs` owns prepared delivery, durable payload,
-and private per-origin cache. It is the only webhook consumer of
+and a fixed startup map of endpoint clients and key rings. It is the only webhook consumer of
 `infra-outbound-http`; business feature modules stay outside this dependency path.
 <!-- template:end webhooks:docs-structure-webhooks-outbound -->
 
 <!-- template:begin inbound-webhooks:docs-structure-webhooks-inbound -->
 `crates/infra-webhooks/src/inbound.rs` owns receipt/processor SQL and the
-consumer seam. `crates/infra-http/src/webhooks.rs` owns only route/state/
+consumer seam. `crates/webhook-consumers/src/lib.rs` is the adopter-owned shared
+composition edit point: its `consumers()` supplies both roots' startup checks
+and the worker processor. This small crate is removed with inbound webhooks;
+real consumer adapters call feature behavior without moving it into the provider.
+`crates/infra-http/src/webhooks.rs` owns only route/state/
 annotation. Removable black-box database tests live under
 `test/tests/webhooks/{main,inbound}.rs`; OpenAPI and lifecycle proof stays in
 the existing service test owners.

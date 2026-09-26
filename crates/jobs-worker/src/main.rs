@@ -4,22 +4,25 @@
 use std::process::ExitCode;
 
 // template:begin inbound-webhooks:worker-webhooks-inbound-imports
-use infra_webhooks::inbound::{Consumers, Processor};
+use infra_webhooks::inbound::Processor;
+
+#[derive(Debug, thiserror::Error)]
+#[error("inbound webhook endpoint {endpoint} has no consumer binding")]
+struct MissingInboundConsumer {
+    endpoint: String,
+}
 // template:end inbound-webhooks:worker-webhooks-inbound-imports
 // template:begin webhooks:worker-webhooks-outbound-imports
 use infra_webhooks::outbound::{Endpoint, Outbound};
-use infra_webhooks::protocol::SigningKey;
+use infra_webhooks::protocol::KeyRing;
 use secrecy::ExposeSecret;
 // template:end webhooks:worker-webhooks-outbound-imports
 
 // template:begin webhooks:worker-webhooks-outbound-registration
 #[derive(Debug, thiserror::Error)]
 enum RegistrationError {
-    #[error("outbound webhook endpoint {endpoint} references unavailable key {key}")]
-    OutboundKeyReference { endpoint: String, key: String },
-    #[error("outbound webhook key {key} is invalid: {source}")]
+    #[error("outbound webhook signing key is invalid: {source}")]
     OutboundKey {
-        key: String,
         #[source]
         source: infra_webhooks::protocol::ProtocolError,
     },
@@ -37,40 +40,25 @@ fn register_outbound(
         .map(|(endpoint_id, endpoint)| {
             (
                 endpoint_id.clone(),
-                Endpoint::new(
-                    endpoint.url.clone(),
-                    endpoint.active_key.clone(),
-                    endpoint.previous_key.clone(),
-                ),
+                Endpoint::new(endpoint.url.clone()),
             )
         })
         .collect();
-    for (endpoint_id, endpoint) in &config.webhooks.endpoints {
-        for reference in std::iter::once(&endpoint.active_key).chain(endpoint.previous_key.iter()) {
-            if !config.webhooks.secrets.contains_key(reference) {
-                return Err(RegistrationError::OutboundKeyReference {
-                    endpoint: endpoint_id.clone(),
-                    key: reference.clone(),
-                }
-                .into());
-            }
-        }
-    }
-    let outbound = Outbound::new(endpoints, config.jobs.max_workers()?)?;
+    let outbound = Outbound::new(endpoints)?;
     let keys = config
         .webhooks
-        .secrets
+        .endpoints
         .iter()
-        .map(|(reference, secret)| {
-            SigningKey::from_encoded(secret.expose_secret())
-                .map(|key| (reference.clone(), key))
-                .map_err(|source| RegistrationError::OutboundKey {
-                    key: reference.clone(),
-                    source,
-                })
+        .map(|(endpoint_id, endpoint)| {
+            KeyRing::from_encoded(
+                endpoint.secret.expose_secret(),
+                endpoint.previous_secret.as_ref().map(ExposeSecret::expose_secret),
+            )
+                .map(|ring| (endpoint_id.clone(), ring))
+                .map_err(|source| RegistrationError::OutboundKey { source })
         })
         .collect::<Result<_, _>>()?;
-    outbound.dispatcher(keys).register(kinds);
+    outbound.dispatcher(keys)?.register(kinds);
 
     Ok(())
 }
@@ -91,10 +79,18 @@ fn register(
     register_outbound(kinds, support)?;
     // template:end webhooks:worker-webhooks-register-outbound
     // template:begin inbound-webhooks:worker-webhooks-register-inbound
-    // Adopters insert real consumer adapters in both service and worker roots.
+    let consumers = webhook_consumers::consumers();
+    for endpoint_id in support.config().inbound_webhooks.endpoints.keys() {
+        if !consumers.contains(endpoint_id) {
+            return Err(MissingInboundConsumer {
+                endpoint: endpoint_id.clone(),
+            }
+            .into());
+        }
+    }
     kinds.register(
         infra_jobs::Policy::default(),
-        Processor::new(Consumers::new()),
+        Processor::new(consumers),
     );
     // template:end inbound-webhooks:worker-webhooks-register-inbound
     // template:begin webhooks-common:worker-webhooks-register-suffix

@@ -2091,6 +2091,7 @@ dependencies = [
  "http",
  "indexmap 2.14.2",
  "infra-bearerauthn",
+ "infra-egress-dns",
  "infra-http",
  "infra-idempotency-store",
  "infra-jobs",
@@ -2122,6 +2123,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
+ "tower",
  "unicode-normalization",
  "unicode-segmentation",
  "ureq",
@@ -2318,6 +2320,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "webhook-consumers",
 ]
 
 [[package]]
@@ -3904,6 +3907,7 @@ dependencies = [
  "tracing",
  "ureq",
  "utoipa",
+ "webhook-consumers",
 ]
 
 [[package]]
@@ -5162,6 +5166,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "webhook-consumers"
+version = "0.1.0"
+dependencies = [
+ "infra-webhooks",
 ]
 
 [[package]]

@@ -8,7 +8,6 @@
 use std::{
     error::Error as _,
     fmt::Write as _,
-    io,
     net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Duration,
@@ -35,13 +34,7 @@ use tokio_rustls::{
 
 use crate::{Client, Error, Limits, Operation, build_fixture_client, policy};
 
-const FIXTURE_HOST: &str = "authn.fixture.test";
-
-#[derive(Clone)]
-struct FixtureResolver {
-    host: String,
-    address: SocketAddr,
-}
+const FIXTURE_HOST: &str = crate::TEST_FIXTURE_HOST;
 
 #[derive(Clone)]
 struct RawAnswerResolver {
@@ -58,19 +51,6 @@ impl Resolve for RawAnswerResolver {
             // The raw-answer facade exercises shared admission before mapping
             // a safe synthetic answer to the in-process TLS peer.
             Ok(Box::new(admitted.into_iter().map(move |_| admitted_fixture)) as Addrs)
-        })
-    }
-}
-
-impl Resolve for FixtureResolver {
-    fn resolve(&self, name: Name) -> Resolving {
-        let host = self.host.clone();
-        let address = self.address;
-        Box::pin(async move {
-            if !name.as_str().eq_ignore_ascii_case(&host) {
-                return Err(io::Error::other("fixture DNS denied").into());
-            }
-            Ok(Box::new(std::iter::once(address)) as Addrs)
         })
     }
 }
@@ -94,25 +74,7 @@ fn fixture_client_with_limits(
     material: &TlsMaterial,
     limits: Limits,
 ) -> Client {
-    let base = policy::admit_base(&format!("https://{FIXTURE_HOST}/")).expect("fixture URL");
-    let certificate =
-        reqwest::Certificate::from_der(&material.root).expect("fixture root certificate");
-    let transport = build_fixture_client(
-        FixtureResolver {
-            host: FIXTURE_HOST.to_owned(),
-            address,
-        },
-        &limits,
-        certificate,
-    )
-    .expect("fixture client");
-    Client {
-        base,
-        limits,
-        transport,
-        admission: Arc::new(tokio::sync::Semaphore::new(limits.max_active)),
-        response_head_observed: None,
-    }
+    Client::for_test_fixture(address, &material.root, limits).expect("fixture client")
 }
 
 fn denied_client(material: &TlsMaterial, address: SocketAddr) -> Client {

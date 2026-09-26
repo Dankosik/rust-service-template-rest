@@ -16,8 +16,8 @@ mod inbound;
 mod outbound;
 // template:end webhooks:test-webhooks-outbound-module
 
-// template:begin inbound-webhooks:test-webhooks-inbound-std
 use std::future::Future;
+// template:begin inbound-webhooks:test-webhooks-inbound-std
 use std::num::NonZeroU32;
 // template:end inbound-webhooks:test-webhooks-inbound-std
 use std::time::Duration;
@@ -29,8 +29,8 @@ use infra_postgres::{Dsn, PoolOptions};
 
 // template:begin inbound-webhooks:test-webhooks-inbound-constants
 const APP: &str = "integration-tests-webhooks";
-pub(crate) const WAIT: Duration = Duration::from_secs(10);
 // template:end inbound-webhooks:test-webhooks-inbound-constants
+pub(crate) const WAIT: Duration = Duration::from_secs(10);
 const CLOSE_BUDGET: Duration = Duration::from_secs(5);
 
 // template:begin inbound-webhooks:test-webhooks-inbound-pool
@@ -56,8 +56,6 @@ pub(crate) async fn close(pools: &[&PgPool]) {
     }
 }
 
-// template:begin inbound-webhooks:test-webhooks-inbound-bounded
 pub(crate) async fn bounded<F: Future>(what: &str, future: F) -> F::Output {
     tokio::time::timeout(WAIT, future).await.expect(what)
 }
-// template:end inbound-webhooks:test-webhooks-inbound-bounded

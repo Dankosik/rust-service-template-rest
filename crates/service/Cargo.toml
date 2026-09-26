@@ -31,6 +31,7 @@ health = { workspace = true }
 infra-http = { workspace = true }
 # template:begin inbound-webhooks:service-webhooks-dependency
 infra-webhooks = { workspace = true }
+webhook-consumers = { workspace = true }
 # template:end inbound-webhooks:service-webhooks-dependency
 # template:begin authn:service-authn-dependency
 infra-bearerauthn = { workspace = true }

@@ -18,7 +18,7 @@ use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
 // template:begin inbound-webhooks:bootstrap-webhooks-imports
 use infra_http::webhooks::WebhookState;
-use infra_webhooks::inbound::{Consumers, Receiver};
+use infra_webhooks::inbound::Receiver;
 use infra_webhooks::protocol::{KeyRing, SigningKey};
 // template:end inbound-webhooks:bootstrap-webhooks-imports
 // template:begin authn:bootstrap-authn-imports
@@ -300,10 +300,7 @@ fn prepare_inbound_webhooks(
         return Ok(WebhookState::inert());
     }
     let pool = postgres_pool.ok_or(BootstrapError::InboundWebhooksPostgresRequired)?;
-    // The template has no domain consumer.  A derived service adds its real
-    // adapter to this same registry constructor in both roots; serving an
-    // endpoint without that binding could durably accept work it cannot own.
-    let consumers = Consumers::new();
+    let consumers = webhook_consumers::consumers();
     for endpoint_id in config.inbound_webhooks.endpoints.keys() {
         if !consumers.contains(endpoint_id) {
             return Err(BootstrapError::InboundWebhookConsumerMissing {
@@ -796,6 +793,29 @@ fn log_startup_summary(config: &Config, exporter: &ExporterState) {
 mod tests {
     use super::*;
     use service_config::OtelConfig;
+
+    // template:begin inbound-webhooks:bootstrap-webhooks-tests
+    #[tokio::test]
+    async fn inbound_startup_rejects_an_endpoint_without_an_adopter_consumer() {
+        let mut config = Config::default();
+        config.inbound_webhooks.endpoints.insert(
+            "partner".into(),
+            service_config::InboundWebhookEndpointConfig {
+                active_key: "partner_v1".into(),
+                previous_key: None,
+            },
+        );
+        let pool = PgPool::connect_lazy("postgres://localhost/unused")
+            .expect("lazy pool does not connect");
+        let result = prepare_inbound_webhooks(&config, Some(&pool));
+        assert!(matches!(
+            result,
+            Err(BootstrapError::InboundWebhookConsumerMissing { endpoint })
+                if endpoint == "partner"
+        ));
+        pool.close().await;
+    }
+    // template:end inbound-webhooks:bootstrap-webhooks-tests
 
     #[test]
     fn tracing_options_attaches_the_ratio_only_to_ratio_variants() {

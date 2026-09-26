@@ -31,12 +31,27 @@ serde = { workspace = true, features = ["std", "derive"] }
 tokio = { workspace = true, features = ["time"] }
 # template:end jobs:test-jobs-dependencies
 
-[dev-dependencies]
 # template:begin webhooks-common:test-webhooks-dependencies
-infra-webhooks = { workspace = true }
+[dev-dependencies.infra-webhooks]
+workspace = true
+# template:begin webhooks:test-webhooks-fixture-feature
+features = ["test-support"]
+# template:end webhooks:test-webhooks-fixture-feature
+
 # template:end webhooks-common:test-webhooks-dependencies
-# template:begin inbound-webhooks:test-inbound-webhooks-dependencies
+
+[dev-dependencies]
+# template:begin webhooks:test-webhooks-fixture-dependencies
+infra-egress-dns = { workspace = true, features = ["test-support"] }
+# template:end webhooks:test-webhooks-fixture-dependencies
+# template:begin tls-fixtures:test-shared-tls-dependency
+tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
+# template:end tls-fixtures:test-shared-tls-dependency
+# template:begin webhooks-common:test-webhooks-http-dependency
 http = { workspace = true }
+# template:end webhooks-common:test-webhooks-http-dependency
+# template:begin inbound-webhooks:test-inbound-webhooks-dependencies
+tower = { workspace = true, features = ["util"] }
 # template:end inbound-webhooks:test-inbound-webhooks-dependencies
 url = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
@@ -90,7 +105,6 @@ infra-idempotency-store = { workspace = true }
 # template:end http-idempotency:test-http-idempotency-dependencies
 # template:begin http-idempotency-mounted:test-http-idempotency-mounted-dependencies
 infra-bearerauthn = { workspace = true, features = ["test-support"] }
-tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
 secrecy = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
