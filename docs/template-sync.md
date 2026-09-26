@@ -298,8 +298,12 @@ idempotency/jobs/webhook graph. Messaging retains graphs 47--49; OAuth uses
 compile retained production and test targets once per graph; only PostgreSQL
 selections request the integration-test feature. The workspace quality gate
 runs the OAuth adapter's behavior suite. OAuth does not multiply harness or
-database proof, and the existing eight CI parts cover all 55 runtime graphs.
+database proof, and the existing eight CI parts cover all 56 runtime graphs.
 <!-- template:end outbound-auth:docs-template-init-outbound-auth-proof -->
+Graph 56 retains PostgreSQL, jobs, and messaging with outbox absent. Its existing
+jobs-1 CI part runs locked offline metadata and compiles all targets with
+`integration-tests/integration`, including the fixture binary's registration
+callback. This graph adds no database or broker execution.
 Graphs 1--26 are the existing baseline. Graphs 27--46 add five auth/idempotency
 blocks, each ordered as inbound-only without bounded outbound HTTP, inbound-only
 with it, outbound-only with it, and both directions with it: graphs 27--30 use

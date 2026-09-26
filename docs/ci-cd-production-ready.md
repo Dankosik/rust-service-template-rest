@@ -96,6 +96,11 @@ outbox/OAuth pack. Each runs initialization, locked metadata and compilation
 of retained test targets; the workspace quality gate runs the OAuth behavior
 suite. Database-free graphs do not request the removed integration-test feature.
 <!-- template:end outbound-auth:docs-ci-outbound-auth-gates -->
+Graph 56 joins jobs-1 for PostgreSQL/jobs/messaging without outbox. It uses the
+focused locked offline metadata and all-target compile path with
+`integration-tests/integration`, so the fixture callback's optional registry
+argument is compiled. It adds no live PostgreSQL or NATS scenario; eight CI
+parts cover 56 runtime representatives.
 
 A change to projected text alone selects `module_initializer` without the
 runtime surface and runs the Cargo-free `initializer (projections)` job.

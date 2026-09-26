@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validate all canonical projections and fifty-five distinct runtime graphs
+# Validate all canonical projections and fifty-six distinct runtime graphs
 # from one private, fixed source candidate. The shared checkout is never
 # staged or committed.
 set -euo pipefail
@@ -12,7 +12,7 @@ runtime_graphs=all
 
 validate_runtime_graphs() {
 	local selection=$1 number seen=,
-	[[ ${selection} =~ ^([1-9]|[1-4][0-9]|5[0-5])(,([1-9]|[1-4][0-9]|5[0-5]))*$ ]] || return 1
+	[[ ${selection} =~ ^([1-9]|[1-4][0-9]|5[0-6])(,([1-9]|[1-4][0-9]|5[0-6]))*$ ]] || return 1
 	local -a numbers
 	IFS=, read -r -a numbers <<<"${selection}"
 	for number in "${numbers[@]}"; do
@@ -34,7 +34,7 @@ while (($#)); do
 		;;
 	--runtime-graphs)
 		[[ ${mode} == full ]] || { echo "validation modes cannot be combined" >&2; exit 2; }
-		validate_runtime_graphs "${2:-}" || { echo "--runtime-graphs requires distinct comma-separated graph IDs 1..55" >&2; exit 2; }
+		validate_runtime_graphs "${2:-}" || { echo "--runtime-graphs requires distinct comma-separated graph IDs 1..56" >&2; exit 2; }
 		mode=runtime-graphs
 		runtime_graphs=$2
 		shift 2
@@ -174,19 +174,19 @@ recorder_self_test() {
 	grep -q 'status=failed label=forced-failure exit_code=7 ' "${receipt}"
 	[[ ! -e ${later} ]] || { echo "recorder self-test executed a later stage" >&2; return 1; }
 	local mode=full runtime_graphs=all number invalid
-	for number in {1..55}; do
+	for number in {1..56}; do
 		runtime_graph_selected "${number}" || { echo "default full mode skipped graph ${number}" >&2; return 1; }
 	done
 	mode=runtime-graphs
-	runtime_graphs="3,4,5,6,$(seq -s, 9 55)"
+	runtime_graphs="3,4,5,6,$(seq -s, 9 56)"
 	validate_runtime_graphs "${runtime_graphs}"
-	for number in {1..55}; do
+	for number in {1..56}; do
 		case "${number}" in
 		1 | 2 | 7 | 8) if runtime_graph_selected "${number}"; then echo "subset selected graph ${number}" >&2; return 1; fi ;;
 		*) runtime_graph_selected "${number}" || { echo "subset skipped graph ${number}" >&2; return 1; } ;;
 		esac
 	done
-	for invalid in '' 0 56 01 '1,1' '2,,3' '1,'; do
+	for invalid in '' 0 57 01 '1,1' '2,,3' '1,'; do
 		if validate_runtime_graphs "${invalid}"; then echo "invalid graph selection accepted" >&2; return 1; fi
 	done
 	printf 'template initializer graph selection self-test: pass\n'
@@ -211,7 +211,7 @@ run_graph() {
 		description="Transactional outbox matrix ${database} ${authn} ${outbound_http} ${outbound_auth} ${http_idempotency} ${webhooks} ${inbound_webhooks}"
 	elif [[ ${messaging} == nats-jetstream ]]; then
 		identity="matrix-messaging-${graph}"
-		description="Messaging matrix ${database} ${authn} ${outbound_http} ${outbound_auth} without PostgreSQL or jobs"
+		description="Messaging matrix ${database} ${authn} ${outbound_http} ${outbound_auth} ${http_idempotency} ${jobs}"
 	elif [[ ${webhooks} != none || ${inbound_webhooks} != none ]]; then
 		identity="matrix-w${graph}"
 		description="Webhook matrix ${database} ${authn} ${outbound_http} ${outbound_auth} ${http_idempotency} ${webhooks} ${inbound_webhooks}"
@@ -290,7 +290,7 @@ run_graph() {
 	record_command "${receipt}" "${log_dir}/runtime-${graph}-check.log" "runtime-${graph}-check" \
 		"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" cargo check --workspace --all-targets \
 			"${check_features[@]}" --locked --offline --manifest-path "${target}/Cargo.toml"
-	if [[ ${outbound_auth} == none ]]; then
+	if [[ ${webhooks} != none || ${inbound_webhooks} != none ]]; then
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-provider.log" "runtime-${graph}-provider" \
 			"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" make -C "${target}" test-package PKG=infra-webhooks
 	fi
@@ -399,7 +399,9 @@ run_validation() {
 		graph=53; runtime_graph_selected "${graph}" && run_graph "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres none none durable standard-webhooks
 		graph=54; runtime_graph_selected "${graph}" && run_graph "${graph}" none none bounded oauth2-client-credentials none none nats-jetstream none none none
 		graph=55; runtime_graph_selected "${graph}" && run_graph "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks
-		[[ ${graph} == 55 ]] || { echo "profile graph inventory ended at ${graph}, expected 55" >&2; return 1; }
+		# Compile the integration fixture callback with jobs and messaging, without outbox.
+		graph=56; runtime_graph_selected "${graph}" && run_graph "${graph}" postgres none none none none postgres nats-jetstream none none none
+		[[ ${graph} == 56 ]] || { echo "profile graph inventory ended at ${graph}, expected 56" >&2; return 1; }
 	fi
 	printf 'state=passed\nduration_seconds=%s\n' "$((SECONDS - started))" >>"${receipt}"
 }

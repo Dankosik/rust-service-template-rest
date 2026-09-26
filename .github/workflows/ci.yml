@@ -599,12 +599,13 @@ jobs:
       fail-fast: false
       matrix:
         # Together the parts are `make template-init-check`: the source
-        # suites with the canonical projections and fifty-five runtime graphs.
+        # suites with the canonical projections and fifty-six runtime graphs.
         # Graphs 1-46 retain the established database, idempotency, jobs, and
         # webhook representatives. Graphs 47-49 retain messaging and outbox;
         # 50-53 retain OAuth; 54 proves messaging plus OAuth without PostgreSQL;
-        # and 55 proves the full outbox/OAuth neighboring pack. Broker and Go-wire
-        # behavior stay in the selected integration job.
+        # and 55 proves the full outbox/OAuth neighboring pack. Graph 56 compiles
+        # the jobs/messaging integration fixture with outbox absent. Broker and
+        # Go-wire behavior stay in the selected integration job.
         # `source`, `database-none`, and
         # `database-postgres` keep their own warm target caches. Every part
         # with `cache` restores that part's cache (database-postgres) and
@@ -621,7 +622,7 @@ jobs:
             cache: database-postgres
             docker: true
           - part: jobs-1
-            graphs: 17,18,19,27,31,35,39,43,48
+            graphs: 17,18,19,27,31,35,39,43,48,56
             cache: database-postgres
             docker: true
           - part: jobs-2
