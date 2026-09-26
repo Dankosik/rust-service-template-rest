@@ -292,6 +292,10 @@ fn created_response(widget: Widget) -> Response {
         LAST_MODIFIED,
         HeaderValue::from_static("Sun, 06 Nov 1994 08:49:37 GMT"),
     );
+    // The outer idempotency boundary owns this reserved response metadata.
+    // Supplying a conflicting handler value proves it cannot be captured or
+    // returned as a replay claim.
+    headers.insert("idempotent-replayed", HeaderValue::from_static("false"));
     response
 }
 
@@ -509,13 +513,18 @@ impl Mounted {
         // registers the shared problem responses the family references (the
         // 403 among them must resolve), and the composer adds its own.
         let contract = infra_http::router()
-            .routes(composer.route(routes!(create_widget)))
-            .routes(composer.route(routes!(replace_widget)))
+            .routes(
+                composer
+                    .route(routes!(create_widget))
+                    .expect("the create route composes"),
+            )
+            .routes(
+                composer
+                    .route(routes!(replace_widget))
+                    .expect("the replace route composes"),
+            )
             .merge_document(composer.components());
-        let document = contract.document().clone();
-        let activation = composer
-            .agree(&document)
-            .expect("the composed operation agrees with the document");
+        let activation = composer.finish();
         assert!(
             matches!(activation, Activation::Active { .. }),
             "{activation:?}"
@@ -1026,6 +1035,10 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
 
     let first = mounted.create(ALICE, "k-1", &input, "req-first").await;
     let widget = created(&first, "req-first");
+    assert!(
+        first.maybe_header("idempotent-replayed").is_none(),
+        "a fresh success must not carry handler-supplied replay metadata"
+    );
     assert_eq!(outcomes(&recorder), counts(&[("executed", 1)]));
 
     // Member order and whitespace are raw request identity: they do not
@@ -1055,6 +1068,11 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     // Exact method/path/query/content type/body bytes replay the response.
     let exact = mounted.create(ALICE, "k-1", &input, "req-exact").await;
     created(&exact, "req-exact");
+    assert_eq!(
+        exact.maybe_header("idempotent-replayed"),
+        Some(HeaderValue::from_static("true")),
+        "only the decoded stored response becomes a replay"
+    );
     assert_eq!(exact.as_bytes(), first.as_bytes());
 
     // Authorization runs on every attempt: the same caller through a revoked
@@ -1084,6 +1102,10 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     assert_ne!(created(&other, "req-bob")["id"], widget["id"]);
     let again = mounted.create(ALICE, "k-1", &input, "req-again").await;
     created(&again, "req-again");
+    assert_eq!(
+        again.maybe_header("idempotent-replayed"),
+        Some(HeaderValue::from_static("true"))
+    );
     assert_eq!(again.as_bytes(), first.as_bytes());
     assert_eq!(
         outcomes(&recorder),

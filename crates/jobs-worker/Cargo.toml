@@ -27,6 +27,7 @@ health = { workspace = true }
 infra-http = { workspace = true }
 infra-jobs = { workspace = true }
 infra-postgres = { workspace = true }
+migrate = { workspace = true }
 infra-telemetry = { workspace = true }
 secrecy = { workspace = true }
 service-config = { workspace = true }

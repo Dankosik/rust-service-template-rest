@@ -16,7 +16,7 @@ should weigh before reopening them.
 | Owner | Owns | Does not own |
 | --- | --- | --- |
 | `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`), the pool with the template's session budgets (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), pool gauges, the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`, `retryable`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
-| `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), the source rules beyond the resolver's, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
+| `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), read-only embedded-history verification (`verify_history`), the source rules beyond the resolver's, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
 | `migrations/` | Forward-only SQL files, one transaction each, `<version>_<snake_case>.sql` ([rules](../../migrations/README.md)). | Access code; a repository adapts to the schema, never the reverse. |
 | `service-config` (`postgres` section) | `postgres.enabled`, `postgres.dsn` (secret, environment only), `postgres.max_connections`. | DSN shape (the adapter refuses what the driver would accept). |
 | `service` bootstrap | Opening the pool before readiness admission when the profile is enabled, registering the probe and the gauge task, partial-startup cleanup, closing the pool in the dependency-close stage. | Pool mechanics, migration execution. |
@@ -64,6 +64,7 @@ different ones changes them in one reviewed place.
 | Migration `statement_timeout`, idle-in-transaction | 2 min | Session defaults of the one migration connection |
 | Migration `lock_timeout` | 15 s | Also bounds the wait for the advisory session lock |
 | Migration deadline | 5 min | `tokio::time::timeout` around the whole run |
+| Startup history admission | 5 s | One read-only embedded-history check, including pool acquire |
 
 `postgres.max_connections` (1..500, default 4) is the one operator-owned
 value: size it from the database's `max_connections` divided across every
@@ -171,21 +172,19 @@ provides the composite `Type`/`Encode`/`Decode` and array support. Native
 `bytea` preserves every header value byte without a binary format or the
 extra byte-encoding policy that `jsonb` would require. No query macros or
 offline metadata are introduced for these constant statements.
-The startup admission check verifies the
-exact catalog identity of that composite array and required metadata columns;
-it does not merely select column names. It fails readiness on the legacy schema.
-The new forward migration takes ACCESS EXCLUSIVE lock before the live-row guard,
-refuses rows with `expires_at > clock_timestamp()`, and rolls back both schema
-and history on refusal. It may replace expired/empty legacy state and never
-alters applied migrations. The [guide](../http-idempotency.md) owns the
-maintenance sequence; it is not a zero-downtime compatibility bridge.
+Startup admission verifies the exact embedded migration-version and checksum
+set through `migrate`; it does not probe profile tables, columns, or types.
+The check is read-only, bounded with its pool acquire to five seconds, and
+refuses missing, pending, failed, unknown, or checksum-mismatched history.
+It does not establish that an operator has not subsequently altered a schema.
 
 This retargets three persistence deferrals: `query!` with offline `.sqlx`
 metadata and `sqlx-cli`, and per-query tracing spans, move from "the first
 repository" to the first *feature-owned* repository, because the store's own
 statements are template-owned constants proven by the retained database
-suite. No migration-history exemption is adopted: the profile migration is
-ordinary forward-only history from the moment it merges.
+suite. The canonical profile migration is ordinary embedded history. The static
+source gate permits only the reviewed pre-adoption four-file rewrite; runtime
+history never recognizes the former migration set.
 <!-- template:end http-idempotency:docs-persistence-http-idempotency -->
 <!-- template:begin jobs:docs-persistence-jobs -->
 
@@ -197,7 +196,7 @@ accepts the caller's `&mut Tx` inside the caller's transaction,
 under the caller's isolation level, with no transaction-control SQL; the job
 commits or rolls back with the caller's write under the commit-outcome
 policy this document records. The insert is its only statement: UTF-8 is a
-schema precondition that the simplification migration enforces and the
+schema precondition that the canonical migration enforces and the
 worker's startup check verifies. Every worker statement runs in its own
 explicit `READ COMMITTED` transaction through `in_tx_with`, so a stricter
 server default cannot turn `SKIP LOCKED` claims into serialization failures.
@@ -210,11 +209,9 @@ least `jobs.max_workers + 2` (one connection per concurrent attempt plus the
 engine's statements and the readiness probe); the worker refuses less. The
 statements are template-owned constants proven by the jobs database suite,
 so they adopt no `query!` (the deferral stays at the first feature-owned
-repository). The schema includes the creation migration and
-`20260925000001_simplify_background_jobs.sql`, which converts payload to
-JSONB and unique keys to C-collated text, adds trace-state, and requires a
-stopped-producer/worker conversion. Both are ordinary forward-only history
-from the moment they merge. See the [guide](../background-jobs.md) and
+repository). The canonical migration includes JSONB payloads, C-collated text
+unique keys, and trace state. It is ordinary embedded history. See the
+[guide](../background-jobs.md) and
 [Async Architecture](async.md).
 <!-- template:end jobs:docs-persistence-jobs -->
 

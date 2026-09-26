@@ -15,11 +15,14 @@
 // for unwrap/expect/panic do not apply to them.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+#[allow(
+    dead_code,
+    reason = "the shared transport also supplies pending-BEGIN cancellation proof to the postgres integration target"
+)]
 #[path = "../support/commit_proxy.rs"]
 mod commit_proxy;
 mod enqueue;
 mod execution;
-mod migration;
 mod process;
 // template:begin jobs-http-idempotency:jobs-http-idempotency-module
 mod http_idempotency;

@@ -1,4 +1,4 @@
-//! A one-shot lost-acknowledgement proxy on the `PostgreSQL` wire protocol.
+//! One-shot `PostgreSQL` wire-protocol faults for transaction-boundary proof.
 //!
 //! It sits between one pool and the server and relays both directions. It
 //! frames the frontend's messages, the untyped startup message first and then
@@ -12,6 +12,11 @@
 //!   real commit whose acknowledgement is lost.
 //! - [`Fault::DropBeforeForward`] closes both sockets before forwarding it:
 //!   nothing commits.
+//!
+//! It can also hold the backend's `ReadyForQuery` after forwarding one
+//! `BEGIN`. Dropping the client future before release makes the transport
+//! boundary distinguish a provider that discards a pending physical connection
+//! from one that returns a potentially in-transaction connection to its pool.
 //!
 //! It fires only once, so a later connection, such as a readback's, passes
 //! through. It frames the plaintext protocol only, so the pool's DSN uses
@@ -33,6 +38,9 @@ const COMMIT: &[u8] = b"COMMIT\0";
 
 /// Bound on joining the proxy's tasks.
 const JOIN_BUDGET: Duration = Duration::from_secs(5);
+
+/// Bound on observing or releasing the one held `BEGIN` acknowledgement.
+const BEGIN_HOLD_BUDGET: Duration = Duration::from_secs(5);
 
 /// What an armed proxy does with the first `COMMIT`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,12 +85,75 @@ enum Arming {
     Fired(Fault),
 }
 
+/// One held `BEGIN` response. The relay signals only after PostgreSQL has
+/// answered with `ReadyForQuery`; releasing it lets the relay finish cleanly
+/// after the client-side cancellation has dropped its connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BeginHoldState {
+    Idle,
+    Armed,
+    Claimed,
+    Held,
+    Released,
+}
+
+#[derive(Debug)]
+struct BeginHold {
+    state: Mutex<BeginHoldState>,
+    held: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl BeginHold {
+    fn arm(&self) {
+        *lock(&self.state) = BeginHoldState::Armed;
+    }
+
+    fn claim(&self) -> bool {
+        let mut state = lock(&self.state);
+        if *state != BeginHoldState::Armed {
+            return false;
+        }
+        *state = BeginHoldState::Claimed;
+        true
+    }
+
+    fn hold(&self) {
+        let mut state = lock(&self.state);
+        assert_eq!(*state, BeginHoldState::Claimed);
+        *state = BeginHoldState::Held;
+        self.held.notify_one();
+    }
+
+    async fn held(&self) {
+        tokio::time::timeout(BEGIN_HOLD_BUDGET, self.held.notified())
+            .await
+            .expect("PostgreSQL answers the held BEGIN within its budget");
+        assert_eq!(*lock(&self.state), BeginHoldState::Held);
+    }
+
+    fn release(&self) {
+        assert_eq!(*lock(&self.state), BeginHoldState::Held);
+        *lock(&self.state) = BeginHoldState::Released;
+        self.release.notify_one();
+    }
+
+    async fn wait_for_release(&self, cancel: &CancellationToken) -> bool {
+        tokio::select! {
+            () = cancel.cancelled() => false,
+            () = tokio::time::sleep(BEGIN_HOLD_BUDGET) => false,
+            () = self.release.notified() => true,
+        }
+    }
+}
+
 /// The proxy. Its listener and relays run on its own tracker until
 /// [`CommitProxy::shutdown`] joins them; dropping it stops them.
 #[derive(Debug)]
 pub(crate) struct CommitProxy {
     address: SocketAddr,
     arming: Arc<Mutex<Arming>>,
+    begin_hold: Arc<BeginHold>,
     cancel: CancellationToken,
     tasks: TaskTracker,
 }
@@ -96,18 +167,25 @@ impl CommitProxy {
             .expect("the proxy listens");
         let address = listener.local_addr().expect("the proxy's address");
         let arming = Arc::new(Mutex::new(Arming::Idle));
+        let begin_hold = Arc::new(BeginHold {
+            state: Mutex::new(BeginHoldState::Idle),
+            held: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
         let cancel = CancellationToken::new();
         let tasks = TaskTracker::new();
         tasks.spawn(accept(
             listener,
             server,
             Arc::clone(&arming),
+            Arc::clone(&begin_hold),
             cancel.clone(),
             tasks.clone(),
         ));
         Self {
             address,
             arming,
+            begin_hold,
             cancel,
             tasks,
         }
@@ -132,6 +210,22 @@ impl CommitProxy {
         }
     }
 
+    /// Hold the backend acknowledgement of one forwarded `BEGIN`.
+    pub(crate) fn arm_begin_ready_hold(&self) {
+        self.begin_hold.arm();
+    }
+
+    /// Wait until PostgreSQL has accepted the armed `BEGIN` but its
+    /// `ReadyForQuery` is still withheld from the client.
+    pub(crate) async fn begin_ready_held(&self) {
+        self.begin_hold.held().await;
+    }
+
+    /// Release the held `BEGIN` response after the client future is dropped.
+    pub(crate) fn release_begin_ready(&self) {
+        self.begin_hold.release();
+    }
+
     /// Stop listening and relaying, and join every task within a bound.
     pub(crate) async fn shutdown(self) {
         self.cancel.cancel();
@@ -153,6 +247,7 @@ async fn accept(
     listener: TcpListener,
     server: SocketAddr,
     arming: Arc<Mutex<Arming>>,
+    begin_hold: Arc<BeginHold>,
     cancel: CancellationToken,
     tasks: TaskTracker,
 ) {
@@ -164,7 +259,13 @@ async fn accept(
                 Err(_) => return,
             },
         };
-        tasks.spawn(relay(client, server, Arc::clone(&arming), cancel.clone()));
+        tasks.spawn(relay(
+            client,
+            server,
+            Arc::clone(&arming),
+            Arc::clone(&begin_hold),
+            cancel.clone(),
+        ));
     }
 }
 
@@ -174,6 +275,7 @@ async fn relay(
     mut client: TcpStream,
     server: SocketAddr,
     arming: Arc<Mutex<Arming>>,
+    begin_hold: Arc<BeginHold>,
     cancel: CancellationToken,
 ) {
     let Ok(mut upstream) = TcpStream::connect(server).await else {
@@ -187,10 +289,11 @@ async fn relay(
     // Set once `COMMIT` is forwarded under `ForwardThenDrop`: from then on the
     // client is not read, and the server's answer is framed and swallowed.
     let mut committing = false;
+    let mut holding_begin = false;
     loop {
         tokio::select! {
             () = cancel.cancelled() => return,
-            read = client.read_buf(&mut frontend.pending), if !committing => {
+            read = client.read_buf(&mut frontend.pending), if !committing && !holding_begin => {
                 if !matches!(read, Ok(1..)) {
                     return;
                 }
@@ -198,6 +301,7 @@ async fn relay(
                     let Ok(message) = message else {
                         return;
                     };
+                    let hold_begin = Frontend::claim_begin(&message, &begin_hold);
                     match frontend.commit_fault(&message, &arming) {
                         Some(Fault::DropBeforeForward) => return,
                         Some(Fault::ForwardThenDrop) => committing = true,
@@ -205,6 +309,10 @@ async fn relay(
                     }
                     if upstream.write_all(&message).await.is_err() {
                         return;
+                    }
+                    if hold_begin {
+                        holding_begin = true;
+                        break;
                     }
                     if committing {
                         break;
@@ -222,6 +330,23 @@ async fn relay(
                     if !matches!(holds_ready_for_query(&backend), Ok(false)) {
                         return;
                     }
+                } else if holding_begin {
+                    // TCP may split either frame, or separate CommandComplete
+                    // from ReadyForQuery. Keep every held byte until the latter
+                    // is complete before publishing the cancellation point.
+                    match holds_ready_for_query(&backend) {
+                        Ok(false) => continue,
+                        Ok(true) => begin_hold.hold(),
+                        Err(_) => return,
+                    }
+                    if !begin_hold.wait_for_release(&cancel).await {
+                        return;
+                    }
+                    if client.write_all(&backend).await.is_err() {
+                        return;
+                    }
+                    backend.clear();
+                    holding_begin = false;
                 } else if client.write_all(&backend).await.is_err() {
                     return;
                 } else {
@@ -302,6 +427,18 @@ impl Frontend {
         *arming = Arming::Fired(armed.fault);
         Some(armed.fault)
     }
+
+    fn claim_begin(message: &[u8], hold: &BeginHold) -> bool {
+        let Some(sql) = message
+            .first()
+            .filter(|kind| **kind == b'Q')
+            .and_then(|_| message.get(5..))
+            .and_then(|sql| sql.strip_suffix(&[0]))
+        else {
+            return false;
+        };
+        sql.starts_with(b"BEGIN") && hold.claim()
+    }
 }
 
 /// A length field that cannot frame a message; the relay closes.
@@ -338,6 +475,6 @@ fn holds_ready_for_query(mut bytes: &[u8]) -> Result<bool, Malformed> {
 }
 
 /// The arming state; a relay that panicked cannot leave it inconsistent.
-fn lock(arming: &Mutex<Arming>) -> MutexGuard<'_, Arming> {
-    arming.lock().unwrap_or_else(PoisonError::into_inner)
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

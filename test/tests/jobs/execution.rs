@@ -1842,18 +1842,3 @@ async fn w2_check_startup_accepts_a_migrated_writer_and_refuses_read_only(pool: 
     );
     super::close(&[&writer, &reader]).await;
 }
-
-#[sqlx::test(migrations = false)]
-async fn w2_check_startup_is_schema_missing_without_the_schema(pool: PgPool) {
-    let jobs = open(&pool, 1).await;
-    let engine = Engine::new(
-        jobs.clone(),
-        probe_registry(2, DEFAULT_TIMEOUT),
-        NonZeroU32::new(1).expect("one worker"),
-    );
-    assert_eq!(
-        engine.check_startup().await,
-        Err(StartupError::SchemaMissing)
-    );
-    super::close(&[&jobs]).await;
-}

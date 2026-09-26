@@ -374,10 +374,13 @@ async fn postgres_disabled_exits_1(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = false)]
-async fn missing_jobs_schema_exits_1(pool: PgPool) {
+async fn missing_migration_history_exits_1_before_jobs_admission(pool: PgPool) {
     let database_url = child_database_url(&pool).await;
     let worker = Worker::spawn(&database_url, &[]);
-    assert_refused(worker, "jobs startup check: the jobs schema is missing");
+    assert_refused(
+        worker,
+        "postgres migration history: the migration history is unavailable",
+    );
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

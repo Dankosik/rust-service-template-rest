@@ -9,6 +9,7 @@
 
 mod shutdown;
 
+use std::error::Error;
 use std::ffi::OsString;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -91,15 +92,17 @@ pub(crate) enum BootstrapError {
     // template:end authn:bootstrap-authn-errors
     #[error(transparent)]
     HttpContract(#[from] infra_http::FinalizeError),
+    #[error("http idempotency composition: {0}")]
+    HttpIdempotencyComposition(#[source] Box<dyn Error + Send + Sync>),
     // template:begin postgres:bootstrap-errors
     #[error("configuration is invalid: postgres.dsn: {0}")]
     PostgresDsn(#[from] infra_postgres::DsnError),
     #[error(transparent)]
     Postgres(#[from] infra_postgres::ConnectError),
+    #[error("postgres migration history: {0}")]
+    PostgresHistory(#[from] migrate::HistoryError),
     // template:end postgres:bootstrap-errors
     // template:begin http-idempotency:bootstrap-http-idempotency-errors
-    #[error(transparent)]
-    HttpIdempotencyAgreement(#[from] infra_http::idempotency::AgreementError),
     #[error("http idempotency startup: {0}")]
     HttpIdempotencyStartup(#[from] infra_idempotency_store::StartupError),
     // template:end http-idempotency:bootstrap-http-idempotency-errors
@@ -205,6 +208,9 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
         // template:begin postgres:bootstrap-postgres-startup
         let (probes, pool) = prepare_postgres(probes, &config, &tracker, &cancel).await?;
         postgres_pool = pool;
+        if let Some(pool) = &postgres_pool {
+            migrate::verify_history(pool).await?;
+        }
         // template:end postgres:bootstrap-postgres-startup
         // template:begin http-idempotency:bootstrap-http-idempotency-composer
         let composer = prepare_http_idempotency(&config, postgres_pool.as_ref());
@@ -437,17 +443,15 @@ fn prepare_http_idempotency(config: &Config, postgres_pool: Option<&PgPool>) -> 
     Composer::new(store)
 }
 
-/// Agree the composed idempotent operations with the assembled document,
-/// then start the boundary when it serves at least one. An inactive
+/// Start the composed boundary when it serves at least one. An inactive
 /// boundary makes no query, starts no task, and requires no value.
 async fn activate_http_idempotency(
     composer: Composer,
-    document: &utoipa::openapi::OpenApi,
     config: &Config,
     tracker: &TaskTracker,
     cancel: &CancellationToken,
 ) -> Result<(), BootstrapError> {
-    match composer.agree(document)? {
+    match composer.finish() {
         Activation::Inactive => Ok(()),
         Activation::Active {
             store, operations, ..
@@ -528,10 +532,8 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         // template:begin http-idempotency:bootstrap-http-idempotency-contract-composer
         &mut composer,
         // template:end http-idempotency:bootstrap-http-idempotency-contract-composer
-    );
-    // template:begin http-idempotency:bootstrap-http-idempotency-document
-    let document = contract.document().clone();
-    // template:end http-idempotency:bootstrap-http-idempotency-document
+    )
+    .map_err(BootstrapError::HttpIdempotencyComposition)?;
     let routes = match auth {
         PreparedAuth::None => contract.finalize_public()?,
         // template:begin authn:bootstrap-authn-finalize-enabled
@@ -545,7 +547,7 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         // template:end authn:bootstrap-authn-finalize-enabled
     };
     // template:begin http-idempotency:bootstrap-http-idempotency-activation
-    activate_http_idempotency(composer, &document, config, &tracker, &cancel).await?;
+    activate_http_idempotency(composer, config, &tracker, &cancel).await?;
     // template:end http-idempotency:bootstrap-http-idempotency-activation
     readiness.refresh(policy).await;
     readiness
@@ -723,13 +725,11 @@ mod tests {
         // A contract without an idempotent operation: only the family's
         // components, which every retained document carries.
         let composer = Composer::inert();
-        let contract = composer.components();
         let tracker = TaskTracker::new();
         // An active boundary would refuse this configuration at its first
         // check: `postgres.enabled` is false and no retention is set.
         activate_http_idempotency(
             composer,
-            &contract,
             &Config::default(),
             &tracker,
             &CancellationToken::new(),
