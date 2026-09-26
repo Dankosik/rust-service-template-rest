@@ -1866,11 +1866,13 @@ dependencies = [
  "hyper-util",
  "infra-bearerauthn",
  "infra-idempotency-store",
+ "infra-postgres",
  "itertools 0.15.0",
  "metrics",
  "serde",
  "serde_json",
  "serde_with",
+ "sfv",
  "sha2 0.11.0",
  "strum",
  "thiserror",
@@ -3798,6 +3800,17 @@ dependencies = [
  "thiserror",
  "toml",
  "vergen-gitcl",
+]
+
+[[package]]
+name = "sfv"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "890ef0e5532daf21fdaa3dbaf991417187f3a87ab69231fe69be942495746480"
+dependencies = [
+ "base64 0.22.1",
+ "indexmap 2.14.2",
+ "ref-cast",
 ]
 
 [[package]]

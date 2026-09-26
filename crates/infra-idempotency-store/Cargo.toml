@@ -1,6 +1,6 @@
 [package]
 name = "infra-idempotency-store"
-description = "PostgreSQL record store for HTTP idempotency: arbitration, the execution transaction, readback, startup check, cleanup."
+description = "PostgreSQL record store for HTTP idempotency: arbitration, atomic success records, startup check, cleanup."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 infra-postgres = { workspace = true }
-sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs"] }
+sqlx = { workspace = true, features = ["derive", "postgres", "runtime-tokio", "tls-rustls-aws-lc-rs"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time", "macros"] }
 tokio-util = { workspace = true }

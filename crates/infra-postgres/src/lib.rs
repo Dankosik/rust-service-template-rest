@@ -23,5 +23,5 @@ pub use pool::{
 pub use probe::PostgresProbe;
 pub use sqlx::postgres::PgPool;
 pub use transaction::{
-    Isolation, ROLLBACK_TIMEOUT, TxError, TxOptions, in_tx, in_tx_with, retryable,
+    Isolation, ROLLBACK_TIMEOUT, Tx, TxError, TxOptions, connection, in_tx, in_tx_with, retryable,
 };

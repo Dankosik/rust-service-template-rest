@@ -5,7 +5,7 @@
 //! principal, its `async-trait` port through `Extension`, and the JSON input;
 //! it authorizes every attempt before the seam and runs its work through
 //! `Idempotency::execute`, where the port's adapter writes through
-//! `infra_idempotency_store::connection`. `Composer::route` composes it with
+//! `infra_postgres::connection`. `Composer::route` composes it with
 //! the real introspection verifier, which asks a TLS fixture provider on
 //! loopback; agreement is asserted active, and `axum-test` drives the
 //! hardened router. Each response is checked for status, content type,
@@ -21,20 +21,23 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Bytes;
+use axum::extract::Path;
 use axum::http::header::{
-    CONTENT_LANGUAGE, ETAG, LOCATION, RETRY_AFTER, WWW_AUTHENTICATE, X_CONTENT_TYPE_OPTIONS,
+    CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LANGUAGE, ETAG, LAST_MODIFIED, LOCATION,
+    RETRY_AFTER, WWW_AUTHENTICATE, X_CONTENT_TYPE_OPTIONS,
 };
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{Extension, Json};
+use axum::{Extension, Json, Router};
 use axum_test::{TestRequest, TestResponse, TestServer};
 use health::Readiness;
 use infra_bearerauthn::test_support::{FixtureTransport, prepare_introspection_with_fixture};
 use infra_bearerauthn::{IntrospectionOptions, ProviderUrl, Verifier};
 use infra_http::idempotency::{
-    Activation, Composer, Fingerprint, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, Tx,
+    Activation, Composer, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, Tx,
 };
 use infra_http::problem::SANITIZED_DETAIL;
+use infra_http::problem::responses::ProtectedOperationProblemResponses;
 use infra_http::{
     Code, HardenOptions, Problem, REQUEST_ID_HEADER, VerifiedPrincipal, harden, routes,
 };
@@ -57,17 +60,17 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use utoipa::ToSchema;
 
-use crate::commit_proxy::Fault;
 use crate::{
-    Hold, RETENTION, RETRY_PAUSE, WAIT, bounded, close, count, make_read_only, proxied_pool,
-    template_pool,
+    Hold, RETENTION, RETRY_PAUSE, WAIT, bounded, close, count, make_read_only, template_pool,
 };
 
 const WIDGETS: &str = "/widgets";
+const PRIMARY_PREFIX: &str = "/primary";
+const SECONDARY_PREFIX: &str = "/secondary";
+const PRIMARY_WIDGETS: &str = "/primary/widgets";
+const SECONDARY_WIDGETS: &str = "/secondary/widgets";
 const KEY: &str = "idempotency-key";
 const WIDGET_ROWS: &str = "SELECT count(*) FROM widgets";
-/// The operation's fingerprint version.
-const CREATE_WIDGET_V1: NonZeroU32 = NonZeroU32::MIN;
 /// The request budget, above the provider's own three-second bound, so a slow
 /// TLS handshake is never mistaken for a boundary outcome.
 const BUDGET: Duration = Duration::from_secs(5);
@@ -80,7 +83,8 @@ const STORED_BODY_BOUND: usize = 1_048_576;
 /// A name the operation's own validation refuses inside the work.
 const RESERVED_NAME: &str = "reserved";
 const KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
-const KEY_REASON: &str = "must be one Idempotency-Key field of 1 to 255 RFC 9110 token characters";
+const KEY_REASON: &str =
+    "must be one Idempotency-Key field of 1 to 255 decoded visible-ASCII bytes";
 
 // The fixture provider and the callers it knows.
 const FIXTURE_HOST: &str = "authn.fixture.test";
@@ -164,7 +168,7 @@ impl CreateWidgets for SqlWidgets {
             sqlx::query_scalar("INSERT INTO widgets (name, color) VALUES ($1, $2) RETURNING id")
                 .bind(&input.name)
                 .bind(&input.color)
-                .fetch_one(infra_idempotency_store::connection(tx))
+                .fetch_one(infra_postgres::connection(tx))
                 .await
                 .map_err(|_| CreateError::Store)?;
         // Test control: an armed hold keeps this attempt inside its
@@ -186,19 +190,17 @@ impl CreateWidgets for SqlWidgets {
     path = "/widgets",
     operation_id = "createWidget",
     tag = "widgets",
-    params(infra_http::idempotency::IdempotencyKey),
     request_body = NewWidget,
     security(("bearerAuth" = [])),
     extensions(
         ("x-security-decision" = json!({
             "exposure": "protected",
             "rationale": "test-only idempotent operation composed as the adopter guide's feature path"
-        })),
-        ("x-idempotent" = json!(true))
+        }))
     ),
     responses(
         (status = 201, description = "created", body = Widget),
-        infra_http::idempotency::IdempotentOperationProblemResponses
+        ProtectedOperationProblemResponses
     )
 )]
 async fn create_widget(
@@ -216,27 +218,81 @@ async fn create_widget(
     }
     idempotency
         .execute(
-            Fingerprint::new(CREATE_WIDGET_V1, &input),
             async |tx: &mut Tx<'_>| match widgets.create(tx, &input).await {
-                Ok(widget) => (
-                    StatusCode::CREATED,
-                    [
-                        (LOCATION, widget.location()),
-                        // Replayable: kept on the first response and every
-                        // replay.
-                        (CONTENT_LANGUAGE, "en".to_owned()),
-                        // Not replayable, so the boundary strips it from the
-                        // first response too.
-                        (ETAG, format!("\"widget-{}\"", widget.id)),
-                    ],
-                    Json(widget),
-                )
-                    .into_response(),
+                Ok(widget) => created_response(widget),
                 // Non-2xx: rolled back and returned unchanged.
                 Err(err) => err.into_problem().into_response(),
             },
         )
         .await
+}
+
+#[utoipa::path(
+    put,
+    path = "/widgets/{id}",
+    operation_id = "replaceWidget",
+    tag = "widgets",
+    params(("id" = i64, Path, description = "widget resource identifier")),
+    request_body = NewWidget,
+    security(("bearerAuth" = [])),
+    extensions(
+        ("x-security-decision" = json!({
+            "exposure": "protected",
+            "rationale": "test-only idempotent operation composed as the adopter guide's feature path"
+        }))
+    ),
+    responses(
+        (status = 201, description = "created", body = Widget),
+        ProtectedOperationProblemResponses
+    )
+)]
+async fn replace_widget(
+    Path(_id): Path<i64>,
+    idempotency: Idempotency,
+    principal: VerifiedPrincipal,
+    Extension(widgets): Extension<Arc<dyn CreateWidgets>>,
+    Json(input): Json<NewWidget>,
+) -> Response {
+    if !may_create(&principal) {
+        return forbidden();
+    }
+    idempotency
+        .execute(
+            async |tx: &mut Tx<'_>| match widgets.create(tx, &input).await {
+                Ok(widget) => created_response(widget),
+                Err(err) => err.into_problem().into_response(),
+            },
+        )
+        .await
+}
+
+/// The seven replayable fields, with Content-Language deliberately repeated.
+/// The HTTP boundary, rather than this operation, decides which fields persist.
+fn created_response(widget: Widget) -> Response {
+    let location = widget.location();
+    let id = widget.id;
+    let mut response = (StatusCode::CREATED, Json(widget)).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        LOCATION,
+        HeaderValue::from_str(&location).expect("a location"),
+    );
+    headers.insert(CONTENT_ENCODING, HeaderValue::from_static("br"));
+    headers.append(CONTENT_LANGUAGE, HeaderValue::from_static("en"));
+    headers.append(CONTENT_LANGUAGE, HeaderValue::from_static("fr"));
+    headers.insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=widget.json"),
+    );
+    headers.insert(
+        ETAG,
+        HeaderValue::from_str(&format!("\"widget-{id}\"")).expect("an etag"),
+    );
+    headers.insert(
+        LAST_MODIFIED,
+        HeaderValue::from_static("Sun, 06 Nov 1994 08:49:37 GMT"),
+    );
+    response
 }
 
 /// The operation's authorization: a caller acting through a revoked client
@@ -454,6 +510,7 @@ impl Mounted {
         // 403 among them must resolve), and the composer adds its own.
         let contract = infra_http::router()
             .routes(composer.route(routes!(create_widget)))
+            .routes(composer.route(routes!(replace_widget)))
             .merge_document(composer.components());
         let document = contract.document().clone();
         let activation = composer
@@ -465,8 +522,13 @@ impl Mounted {
         );
         let routes = infra_http::authn::finalize(contract, provider.verifier(), 32 * 1024)
             .expect("the mounted auth contract finalizes");
+        // The two outer mounts intentionally share the same inner routes. The
+        // route layer must use OriginalUri so their request identities differ.
+        let mounted = Router::new()
+            .nest(PRIMARY_PREFIX, routes.clone())
+            .nest(SECONDARY_PREFIX, routes);
         let app = harden(
-            routes
+            mounted
                 .layer(Extension(widgets))
                 .with_state(Readiness::new(Vec::new()).reader()),
             &HardenOptions {
@@ -487,8 +549,35 @@ impl Mounted {
     /// A create request from the caller behind `token`, with `key` as its one
     /// `Idempotency-Key` field and a JSON `input`.
     fn create(&self, token: &str, key: &str, input: &Value, request_id: &str) -> TestRequest {
+        self.create_at(PRIMARY_WIDGETS, token, key, input, request_id)
+    }
+
+    fn create_at(
+        &self,
+        path: &str,
+        token: &str,
+        key: &str,
+        input: &Value,
+        request_id: &str,
+    ) -> TestRequest {
         self.server
-            .post(WIDGETS)
+            .post(path)
+            .authorization_bearer(token)
+            .add_header(KEY, key)
+            .add_header(REQUEST_ID_HEADER, request_id)
+            .json(input)
+    }
+
+    fn replace(
+        &self,
+        id: i64,
+        token: &str,
+        key: &str,
+        input: &Value,
+        request_id: &str,
+    ) -> TestRequest {
+        self.server
+            .put(&format!("{PRIMARY_WIDGETS}/{id}"))
             .authorization_bearer(token)
             .add_header(KEY, key)
             .add_header(REQUEST_ID_HEADER, request_id)
@@ -534,8 +623,9 @@ fn problem(response: &TestResponse, status: StatusCode, code: &str, request_id: 
 }
 
 /// Assert the stored form of a created widget answered to `request_id`: 201,
-/// the replayable headers the work set, none it set beyond them, and the
-/// exchange's own request id. Returns the body.
+/// all seven replayable headers the work set, including repeated
+/// Content-Language values, and the exchange's own request id. Returns the
+/// body.
 fn created(response: &TestResponse, request_id: &str) -> Value {
     assert_eq!(
         response.status_code(),
@@ -557,9 +647,30 @@ fn created(response: &TestResponse, request_id: &str) -> Value {
         response.maybe_header(CONTENT_LANGUAGE),
         Some(HeaderValue::from_static("en"))
     );
-    assert!(
-        response.maybe_header(ETAG).is_none(),
-        "a header beyond the replayable five is stripped"
+    assert_eq!(
+        response
+            .headers()
+            .get_all(CONTENT_LANGUAGE)
+            .iter()
+            .map(HeaderValue::as_bytes)
+            .collect::<Vec<_>>(),
+        vec![b"en".as_slice(), b"fr".as_slice()]
+    );
+    assert_eq!(
+        response.maybe_header(CONTENT_ENCODING),
+        Some(HeaderValue::from_static("br"))
+    );
+    assert_eq!(
+        response.maybe_header(CONTENT_DISPOSITION),
+        Some(HeaderValue::from_static("attachment; filename=widget.json"))
+    );
+    assert_eq!(
+        response.maybe_header(ETAG),
+        Some(HeaderValue::from_str(&format!("\"widget-{}\"", body["id"])).expect("an etag"))
+    );
+    assert_eq!(
+        response.maybe_header(LAST_MODIFIED),
+        Some(HeaderValue::from_static("Sun, 06 Nov 1994 08:49:37 GMT"))
     );
     assert_eq!(
         response.maybe_header(REQUEST_ID_HEADER),
@@ -763,8 +874,9 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
     let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
 
-    // Authentication answers first: a bad key behind a failed authentication
-    // is never looked at.
+    // Authentication answers first: a malformed quoted key behind a failed
+    // authentication is never looked at.
+    let malformed_key = "\"k-1";
     let oversize = format!("Bearer {}", "a".repeat(32 * 1024 + 1));
     let inactive = format!("Bearer {INACTIVE}");
     for (authorization, status, code, challenge) in [
@@ -801,8 +913,8 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
     ] {
         let mut request = mounted
             .server
-            .post(WIDGETS)
-            .add_header(KEY, "\"k-1\"")
+            .post(PRIMARY_WIDGETS)
+            .add_header(KEY, malformed_key)
             .add_header(REQUEST_ID_HEADER, "req-authn")
             .json(&input);
         if let Some(authorization) = authorization {
@@ -830,7 +942,9 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
     assert_eq!(outcomes(&recorder), counts(&[]));
 
     // Once authentication passes, the same key is refused.
-    let refused = mounted.create(ALICE, "\"k-1\"", &input, "req-key").await;
+    let refused = mounted
+        .create(ALICE, malformed_key, &input, "req-key")
+        .await;
     problem(&refused, StatusCode::BAD_REQUEST, "bad_request", "req-key");
     assert_eq!(outcomes(&recorder), counts(&[("invalid_key", 1)]));
     assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
@@ -845,16 +959,15 @@ async fn p9_the_key_grammar_is_exact(pool: PgPool) {
     let input = json!({"name": "gizmo", "color": "red"});
 
     // Every malformed key is one fixed 400 that names the rule and never the
-    // value: missing, empty, 256 bytes, the quoted form, a space, a comma,
-    // non-ASCII, and a repeated field, with distinct and with equal values.
+    // value: missing, empty, 256 bytes, an unquoted space, an unterminated
+    // quoted string, non-ASCII, and repeated fields with distinct/equal values.
     let long = "k".repeat(256);
-    let invalid: [&[&[u8]]; 9] = [
+    let invalid: [&[&[u8]]; 8] = [
         &[],
         &[b""],
         &[long.as_bytes()],
-        &[b"\"k-1\""],
         &[b"k 1"],
-        &[b"k,1"],
+        &[b"\"unterminated"],
         &["k-\u{e9}".as_bytes()],
         &[b"k-1", b"k-2"],
         &[b"k-1", b"k-1"],
@@ -862,7 +975,7 @@ async fn p9_the_key_grammar_is_exact(pool: PgPool) {
     for values in invalid {
         let mut request = mounted
             .server
-            .post(WIDGETS)
+            .post(PRIMARY_WIDGETS)
             .authorization_bearer(ALICE)
             .add_header(REQUEST_ID_HEADER, "req-key")
             .json(&input);
@@ -881,13 +994,15 @@ async fn p9_the_key_grammar_is_exact(pool: PgPool) {
             json!([{"name": "header.Idempotency-Key", "reason": KEY_REASON}])
         );
     }
-    assert_eq!(outcomes(&recorder), counts(&[("invalid_key", 9)]));
+    assert_eq!(outcomes(&recorder), counts(&[("invalid_key", 8)]));
 
-    // The longest key, the shortest, and every token symbol are accepted.
+    // The longest key, the shortest, every visible ASCII byte, and a decoded
+    // structured-field string are accepted.
     for key in [
         "k".repeat(255),
         "k".to_owned(),
-        "!#$%&'*+-.^_`|~09AZaz".to_owned(),
+        "!#$%&'*+,-./:=?@[]^_`{|}~09AZaz".to_owned(),
+        "\"quoted key\"".to_owned(),
     ] {
         created(
             &mounted.create(ALICE, &key, &input, "req-valid").await,
@@ -896,9 +1011,9 @@ async fn p9_the_key_grammar_is_exact(pool: PgPool) {
     }
     assert_eq!(
         outcomes(&recorder),
-        counts(&[("invalid_key", 9), ("executed", 3)])
+        counts(&[("invalid_key", 8), ("executed", 4)])
     );
-    assert_eq!(count(&pool, WIDGET_ROWS).await, 3);
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 4);
     mounted.finish().await;
 }
 
@@ -913,12 +1028,11 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     let widget = created(&first, "req-first");
     assert_eq!(outcomes(&recorder), counts(&[("executed", 1)]));
 
-    // Member order and whitespace are representation: the retry replays the
-    // stored bytes under its own request id, still without the stripped
-    // header.
+    // Member order and whitespace are raw request identity: they do not
+    // canonicalize into a replay.
     let reordered = mounted
         .server
-        .post(WIDGETS)
+        .post(PRIMARY_WIDGETS)
         .authorization_bearer(ALICE)
         .add_header(KEY, "k-1")
         .add_header(REQUEST_ID_HEADER, "req-replay")
@@ -927,12 +1041,21 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
             b"{ \"color\" : \"red\",\n  \"name\" : \"gizmo\" }",
         ))
         .await;
-    created(&reordered, "req-replay");
-    assert_eq!(reordered.as_bytes(), first.as_bytes());
+    problem(
+        &reordered,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "idempotency_key_mismatch",
+        "req-replay",
+    );
     assert_eq!(
         outcomes(&recorder),
-        counts(&[("executed", 1), ("replayed", 1)])
+        counts(&[("executed", 1), ("key_mismatch", 1)])
     );
+
+    // Exact method/path/query/content type/body bytes replay the response.
+    let exact = mounted.create(ALICE, "k-1", &input, "req-exact").await;
+    created(&exact, "req-exact");
+    assert_eq!(exact.as_bytes(), first.as_bytes());
 
     // Authorization runs on every attempt: the same caller through a revoked
     // client is refused before any replay, and no outcome is recorded.
@@ -943,7 +1066,7 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     assert_eq!(body["detail"], "widget creation is not permitted");
     assert_eq!(
         outcomes(&recorder),
-        counts(&[("executed", 1), ("replayed", 1)])
+        counts(&[("executed", 1), ("key_mismatch", 1), ("replayed", 1)])
     );
 
     // Another input under the same key is a mismatch, and the record stays.
@@ -964,9 +1087,94 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     assert_eq!(again.as_bytes(), first.as_bytes());
     assert_eq!(
         outcomes(&recorder),
-        counts(&[("executed", 2), ("replayed", 2), ("key_mismatch", 1)])
+        counts(&[("executed", 2), ("replayed", 2), ("key_mismatch", 2)])
     );
     assert_eq!(count(&pool, WIDGET_ROWS).await, 2);
+    mounted.finish().await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p9_request_identity_keeps_original_uri_resource_and_operation(pool: PgPool) {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let mounted = Mounted::on(&pool, BUDGET).await;
+    let input = json!({"name": "gizmo", "color": "red"});
+
+    // Distinct resources on one operation cannot replay each other.
+    let first_resource = mounted
+        .replace(1, ALICE, "k-resource", &input, "req-resource-one")
+        .await;
+    created(&first_resource, "req-resource-one");
+    let second_resource = mounted
+        .replace(2, ALICE, "k-resource", &input, "req-resource-two")
+        .await;
+    problem(
+        &second_resource,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "idempotency_key_mismatch",
+        "req-resource-two",
+    );
+
+    // The key namespace has no operation ID, but request method/path still
+    // prevent a POST success from replaying through the PUT operation.
+    let post = mounted
+        .create(ALICE, "k-operation", &input, "req-post")
+        .await;
+    created(&post, "req-post");
+    let put = mounted
+        .replace(1, ALICE, "k-operation", &input, "req-put")
+        .await;
+    problem(
+        &put,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "idempotency_key_mismatch",
+        "req-put",
+    );
+
+    // Both mounts resolve the same inner route. A replay here would prove the
+    // middleware hashed its rewritten URI instead of OriginalUri.
+    let primary = mounted
+        .create_at(PRIMARY_WIDGETS, ALICE, "k-original", &input, "req-primary")
+        .await;
+    created(&primary, "req-primary");
+    let secondary = mounted
+        .create_at(
+            SECONDARY_WIDGETS,
+            ALICE,
+            "k-original",
+            &input,
+            "req-secondary",
+        )
+        .await;
+    problem(
+        &secondary,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "idempotency_key_mismatch",
+        "req-secondary",
+    );
+
+    // Query order also stays raw request identity.
+    let ordered = format!("{PRIMARY_WIDGETS}?a=1&b=2");
+    let first_query = mounted
+        .create_at(&ordered, ALICE, "k-query", &input, "req-query-one")
+        .await;
+    created(&first_query, "req-query-one");
+    let reordered = format!("{PRIMARY_WIDGETS}?b=2&a=1");
+    let second_query = mounted
+        .create_at(&reordered, ALICE, "k-query", &input, "req-query-two")
+        .await;
+    problem(
+        &second_query,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "idempotency_key_mismatch",
+        "req-query-two",
+    );
+
+    assert_eq!(
+        outcomes(&recorder),
+        counts(&[("executed", 4), ("key_mismatch", 4)])
+    );
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 4);
     mounted.finish().await;
 }
 
@@ -1010,11 +1218,15 @@ async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: Pg
 
     // An undecodable live record is an integrity failure on every retry, and
     // the work never runs.
-    let corrupted = sqlx::query("UPDATE http_idempotency_records SET format = 9 WHERE body = $1")
-        .bind(&stored.as_bytes()[..])
-        .execute(&pool)
-        .await
-        .expect("the record is corrupted");
+    let corrupted = sqlx::query(
+        "UPDATE http_idempotency_records SET headers = \
+         ARRAY[ROW('x-ignored', convert_to('bad', 'UTF8'))::http_idempotency_header_pair] \
+         WHERE body = $1",
+    )
+    .bind(&stored.as_bytes()[..])
+    .execute(&pool)
+    .await
+    .expect("the record is corrupted");
     assert_eq!(corrupted.rows_affected(), 1);
     for request_id in ["req-integrity", "req-integrity-again"] {
         let response = mounted.create(ALICE, "k-3", &input, request_id).await;
@@ -1133,57 +1345,4 @@ async fn p9_a_read_only_writer_answers_unavailable(pool: PgPool) {
     assert_eq!(outcomes(&recorder), counts(&[("unavailable", 1)]));
     assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
     mounted.finish().await;
-}
-
-#[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn p9_lost_commit_acknowledgements_answer_outcome_unknown_or_the_reconciled_success(
-    pool: PgPool,
-) {
-    let recorder = PrometheusBuilder::new().build_recorder();
-    let _local = metrics::set_default_local_recorder(&recorder);
-    create_widgets(&pool).await;
-    let (proxy, store_pool) = proxied_pool(&pool, 4).await;
-    let mounted = Mounted::new(store_pool, BUDGET).await;
-    let input = json!({"name": "gizmo", "color": "red"});
-
-    // `COMMIT` never reaches the server: the readback finds no record, so the
-    // outcome is unknown.
-    proxy.arm(Fault::DropBeforeForward);
-    let unknown = mounted.create(ALICE, "k-6", &input, "req-unknown").await;
-    problem(
-        &unknown,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "idempotency_outcome_unknown",
-        "req-unknown",
-    );
-    assert_eq!(retry_after(&unknown).as_deref(), Some("1"));
-    assert_eq!(proxy.fired(), Some(Fault::DropBeforeForward));
-    assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
-    // A later retry executes once.
-    let (retry, conflicts) = until_free(|| mounted.create(ALICE, "k-6", &input, "req-retry")).await;
-    created(&retry, "req-retry");
-    assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
-
-    // The server commits and the acknowledgement is lost: the readback
-    // reconciles the stored success, and a retry replays the same bytes.
-    proxy.arm(Fault::ForwardThenDrop);
-    let reconciled = mounted.create(ALICE, "k-7", &input, "req-reconciled").await;
-    created(&reconciled, "req-reconciled");
-    assert_eq!(proxy.fired(), Some(Fault::ForwardThenDrop));
-    let replay = mounted.create(ALICE, "k-7", &input, "req-replay").await;
-    created(&replay, "req-replay");
-    assert_eq!(replay.as_bytes(), reconciled.as_bytes());
-    assert_eq!(
-        outcomes(&recorder),
-        counts(&[
-            ("outcome_unknown", 1),
-            ("in_progress", conflicts),
-            ("executed", 1),
-            ("reconciled", 1),
-            ("replayed", 1),
-        ])
-    );
-    assert_eq!(count(&pool, WIDGET_ROWS).await, 2);
-    mounted.finish().await;
-    proxy.shutdown().await;
 }

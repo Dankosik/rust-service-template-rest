@@ -19,6 +19,7 @@
       "migrations/",
       "crates/config/src/postgres.rs",
       "test/tests/postgres.rs",
+      "test/tests/support/commit_proxy.rs",
       "test/fixtures/migrations/",
       "test/src/lib.rs",
       "env/docker-compose.yml",
@@ -698,6 +699,7 @@
       "crates/infra-http/src/idempotency/",
       "crates/config/src/http_idempotency.rs",
       "migrations/20260923000001_create_http_idempotency_records.sql",
+      "migrations/20260926001448_simplify_http_idempotency_records.sql",
       "test/tests/http_idempotency/",
       "docs/http-idempotency.md"
     ],
@@ -744,6 +746,7 @@
       "crates/jobs-worker/",
       "crates/config/src/jobs.rs",
       "migrations/20260924000001_create_background_jobs.sql",
+      "migrations/20260925000001_simplify_background_jobs.sql",
       "test/src/jobs.rs",
       "test/src/bin/",
       "test/tests/jobs/",
@@ -785,8 +788,7 @@
     ],
     "markers": [
       {"path": "test/tests/jobs/main.rs", "ids": ["jobs-http-idempotency-module"]},
-      {"path": "docs/background-jobs.md", "ids": ["docs-background-jobs-idempotency"]},
-      {"path": "docs/architecture/async.md", "ids": ["docs-async-idempotency"]}
+      {"path": "docs/background-jobs.md", "ids": ["docs-background-jobs-idempotency"]}
     ]
   }
 }

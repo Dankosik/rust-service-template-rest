@@ -623,11 +623,14 @@ markers, tests, and initializer support. Order by expected demand:
    **Merged via PR #51 at
    `48e565af7c2875832996816b975a2e2b01457d4f`**;
    [adoption guide](background-jobs.md).
-5. Outbound webhooks (Standard Webhooks signing, retry, public-address
-   predicate) and inbound webhooks (verification, receipt deduplication,
-   durable dispatch).
+5. Outbound and inbound webhooks: Standard Webhooks signing, retry,
+   public-address predicate, verification, receipt deduplication, and durable
+   dispatch. Reuse `infra-jobs` scheduling, attempts, and fenced completion;
+   this stage does not add a second queue or a generic lifecycle crate.
 6. NATS JetStream messaging with typed domain events and a `worker` binary;
-   transactional outbox with an `outbox-relay` binary.
+   transactional outbox with an `outbox-relay` binary. Reuse `infra-jobs` for
+   durable local scheduling and completion where that boundary applies; the
+   messaging/outbox design owns its distinct delivery semantics.
 7. gRPC with `tonic`: server policy, interceptors, health, bounded drain,
    shared client connections, buf lint and breaking checks.
 8. OAuth 2.0 client-credentials outbound authentication.
@@ -680,6 +683,17 @@ activation before readiness admission, one forward-only migration, and the
 [guide](http-idempotency.md). It stays inert until an operation declares
 `x-idempotent: true`; `none` removes it.
 
+The accepted request-owned simplification supersedes the stage-10.3 contract:
+identity now comes from the complete bounded HTTP request and decoded key, not
+an operation namespace or caller fingerprint; `execute(work)` uses the shared
+`infra-postgres` transaction capability; durable replay retains seven
+byte-preserving headers and trusted caller metadata; and the guarded forward
+migration refuses live legacy rows. The current [guide](http-idempotency.md)
+and architecture documents are authoritative for that replacement. The
+following receipt is historical evidence for the earlier PR #49 implementation;
+it does not prove the simplification, its migration, generated contract, or
+current tests.
+
 Stage-10.3 local acceptance ran every local step of the `make plan` route:
 formatting, the workspace lint including the integration feature, build, 403
 workspace tests, the contract check, dependency and secret gates, workflow
@@ -709,8 +723,8 @@ The selected pack holds the `infra-jobs` crate (enqueue inside the caller's
 transaction, the job-kind contracts, and the engine over one
 `background_jobs` table: fenced claims, persisted backoff, lost-worker
 recovery, and retention), the `jobs-worker` library and binary shipped as
-the image's `/jobs-worker` entrypoint, the `jobs.max_workers` setting, one
-forward-only migration, the [guide](background-jobs.md), and
+the image's `/jobs-worker` entrypoint, the `jobs.max_workers` setting, the
+creation and simplification forward-only migrations, the [guide](background-jobs.md), and
 [Async Architecture](architecture/async.md). It stays inert: the service
 makes no jobs query, and nothing starts a worker until an operator deploys
 `/jobs-worker`; `none` removes it.
@@ -741,6 +755,15 @@ build step grew from 293 s to 406 s with the third release binary. The
 slowest initializer part took 278 s, inside the image job, so the
 initializer stayed off the critical path. Publication and deployment are not
 claimed.
+
+The subsequent jobs simplification retains that profile boundary while
+replacing lease upkeep and outcome attribution with a fixed lease and
+supervisor-owned outcome. It converts payloads to JSONB and unique keys to
+C-collated text through a stopped-producer/worker forward migration. Future
+stage 10.5 (webhooks) and 10.6 (messaging/outbox) reuse the jobs scheduling,
+attempt, and fenced-completion mechanisms. Process lifecycle ownership stays
+separate until a shared signal, deadline, or tracked-task teardown change
+justifies extraction; another binary alone does not.
 
 ### Stage 11: Benchmarking and performance evidence
 

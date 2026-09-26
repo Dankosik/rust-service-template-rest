@@ -3,9 +3,8 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use infra_postgres::{TxError, in_tx, in_tx_with};
+use infra_postgres::{TxError, connection, in_tx, in_tx_with};
 use sqlx::Row;
-use sqlx::postgres::PgConnection;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -21,13 +20,17 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 /// The most rows one cleanup batch deletes: the `LIMIT` in [`CLEANUP_BATCH`].
 const CLEANUP_BATCH_ROWS: u64 = 500;
 
-/// The writer check and the table's shape: every column the store names,
-/// selected without reading a row. A missing table or column fails the
-/// statement.
+/// The writer check and the table's shape. The catalog identity check refuses
+/// the old `bytea` header column even when every named column exists.
 const STARTUP_CHECK: &str = "SELECT NOT pg_is_in_recovery() \
     AND current_setting('transaction_read_only') = 'off' AS writable, \
-    (SELECT count(*) FROM (SELECT scope_key, fingerprint, format, status, headers, body, \
-    expires_at FROM http_idempotency_records LIMIT 0) AS shape) AS shape_rows";
+    (SELECT count(*) FROM (SELECT scope_key, fingerprint, status, headers, body, issuer, \
+    caller_kind, caller_value, expires_at FROM http_idempotency_records LIMIT 0) AS shape) \
+    AS shape_rows, \
+    (SELECT a.atttypid = to_regtype('http_idempotency_header_pair[]') \
+    FROM pg_catalog.pg_attribute AS a \
+    WHERE a.attrelid = 'http_idempotency_records'::regclass \
+    AND a.attname = 'headers' AND NOT a.attisdropped) AS headers_type_matches";
 
 /// Bounds a cleanup batch on the server, so a batch whose client has gone
 /// still ends within 1 s.
@@ -44,8 +47,7 @@ const CLEANUP_BATCH: &str = "DELETE FROM http_idempotency_records WHERE scope_ke
 /// Why an active idempotency boundary cannot start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StartupError {
-    /// The table or one of its columns is missing: the migration has not
-    /// run.
+    /// The table, required metadata, or structured-header type is missing.
     #[error("the idempotency schema is missing")]
     SchemaMissing,
     /// The session is read-only or recovering.
@@ -74,10 +76,11 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// [`StartupError::SchemaMissing`] for a missing table or column
-    /// (SQLSTATE `42P01` or `42703`), [`StartupError::NotWritable`] for a
-    /// read-only or recovering session, and [`StartupError::Unavailable`]
-    /// for anything else, including the bound and an inert store.
+    /// [`StartupError::SchemaMissing`] for a missing table, column, or the
+    /// required structured-header type (SQLSTATE `42P01` or `42703`),
+    /// [`StartupError::NotWritable`] for a read-only or recovering session,
+    /// and [`StartupError::Unavailable`] for anything else, including the
+    /// bound and an inert store.
     pub async fn check_startup(&self) -> Result<(), StartupError> {
         let Some(inner) = &self.inner else {
             return Err(StartupError::Unavailable);
@@ -85,15 +88,19 @@ impl Store {
         let check = in_tx_with(
             &inner.pool,
             READ_COMMITTED,
-            async |conn: &mut PgConnection| -> Result<(), Refused> {
+            async |tx| -> Result<(), Refused> {
                 let row = sqlx::query(STARTUP_CHECK)
-                    .fetch_one(conn)
+                    .fetch_one(connection(tx))
                     .await
                     .map_err(|err| Refused(schema_refusal(&err)))?;
-                match row.try_get::<bool, _>("writable") {
-                    Ok(true) => Ok(()),
-                    Ok(false) => Err(Refused(StartupError::NotWritable)),
-                    Err(_) => Err(Refused(StartupError::Unavailable)),
+                match (
+                    row.try_get::<bool, _>("writable"),
+                    row.try_get::<Option<bool>, _>("headers_type_matches"),
+                ) {
+                    (Ok(true), Ok(Some(true))) => Ok(()),
+                    (Ok(false), _) => Err(Refused(StartupError::NotWritable)),
+                    (Ok(true), Ok(_)) => Err(Refused(StartupError::SchemaMissing)),
+                    _ => Err(Refused(StartupError::Unavailable)),
                 }
             },
         );
@@ -119,20 +126,17 @@ impl Store {
         };
         let mut removed = 0;
         loop {
-            let batch = in_tx(
-                &inner.pool,
-                async |conn: &mut PgConnection| -> Result<u64, Failed> {
-                    sqlx::query(CLEANUP_STATEMENT_TIMEOUT)
-                        .execute(&mut *conn)
-                        .await
-                        .map_err(|_| Failed(CleanupError::Statement))?;
-                    let deleted = sqlx::query(CLEANUP_BATCH)
-                        .execute(conn)
-                        .await
-                        .map_err(|_| Failed(CleanupError::Statement))?;
-                    Ok(deleted.rows_affected())
-                },
-            )
+            let batch = in_tx(&inner.pool, async |tx| -> Result<u64, Failed> {
+                sqlx::query(CLEANUP_STATEMENT_TIMEOUT)
+                    .execute(connection(tx))
+                    .await
+                    .map_err(|_| Failed(CleanupError::Statement))?;
+                let deleted = sqlx::query(CLEANUP_BATCH)
+                    .execute(connection(tx))
+                    .await
+                    .map_err(|_| Failed(CleanupError::Statement))?;
+                Ok(deleted.rows_affected())
+            })
             .await
             .map_err(|Failed(failure)| failure)?;
             removed += batch;

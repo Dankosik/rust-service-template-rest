@@ -206,8 +206,8 @@ where
     }
 
     // template:begin http-idempotency:contract-idempotency-route-methods
-    pub(crate) fn documented_paths(&self) -> Option<&Paths> {
-        match self.registrations.as_slice() {
+    pub(crate) fn documented_paths_mut(&mut self) -> Option<&mut Paths> {
+        match self.registrations.as_mut_slice() {
             [Registration::Documented((_, paths, _))] => Some(paths),
             _ => None,
         }
@@ -467,11 +467,7 @@ impl PublicPolicy {
     }
 
     fn is_missing(&self, request: &Request) -> bool {
-        let Some(path) = request
-            .extensions()
-            .get::<axum::extract::MatchedPath>()
-            .map(axum::extract::MatchedPath::as_str)
-        else {
+        let Some(path) = contract_path(request.extensions()) else {
             return true;
         };
         self.methods
@@ -493,6 +489,18 @@ async fn enforce_public(
     } else {
         next.run(request).await
     }
+}
+
+/// The contract path of the matched route. A finalized router mounted with
+/// `Router::nest` matches the prefixed path, while the contract is keyed by
+/// the document's own path.
+pub(crate) fn contract_path(extensions: &axum::http::Extensions) -> Option<&str> {
+    let matched = extensions.get::<axum::extract::MatchedPath>()?.as_str();
+    let inner = extensions
+        .get::<axum::extract::NestedPath>()
+        .and_then(|nested| matched.strip_prefix(nested.as_str()))
+        .map_or(matched, |inner| if inner.is_empty() { "/" } else { inner });
+    Some(inner)
 }
 
 pub(crate) fn is_public(document: &OpenApi, operation: &Operation) -> Result<bool, FinalizeError> {
@@ -691,6 +699,34 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("application/problem+json")
         );
+    }
+
+    #[tokio::test]
+    async fn finalized_contract_mounted_with_nest_keeps_its_policy() {
+        let routes = ContractRouter::with_openapi(Api::openapi())
+            .routes(crate::routes!(documented_get))
+            .finalize_public()
+            .expect("the documented public contract finalizes");
+        let app = harden(
+            axum::Router::new().nest("/mounted", routes),
+            &HardenOptions {
+                max_body_bytes: 1024,
+                request_timeout: Duration::from_secs(1),
+                max_in_flight: NonZeroU32::new(2),
+                log_health_probes: false,
+            },
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/mounted/_test/method")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | `infra-egress-dns` (`crates/infra-egress-dns`) | Public-address admission and tracked, cancellation-aware Hickory resolution. | Consumer HTTP policy, provider failures, credentials or readiness. |
 <!-- template:end egress-dns:docs-boundaries-egress-owner -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-owner -->
-| `infra-idempotency-store` (`crates/infra-idempotency-store`) | The PostgreSQL idempotency record store: arbitration, the execution transaction, readback, startup check, and cleanup ([guide](../http-idempotency.md)). | HTTP types, Problems, business rules, readiness registration, or request routing. |
+| `infra-idempotency-store` (`crates/infra-idempotency-store`) | PostgreSQL idempotency arbitration, durable records, schema admission and maintenance ([guide](../http-idempotency.md)). | Transaction lifecycle/connection ownership, HTTP types/Problems, business rules, readiness registration, or request routing. |
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-owner -->
 <!-- template:begin jobs:docs-boundaries-jobs-owners -->
 | `infra-jobs` (`crates/infra-jobs`) | The job table's statements, enqueue, the job-kind and handler contracts (`JobKind`, `Handler`, `Kinds`), and the engine ([guide](../background-jobs.md)). | Concrete kinds or handlers (they live in adapter crates), configuration, process lifecycle, or business rules. |
@@ -80,7 +80,7 @@ infra-egress-dns -> reqwest DNS types, hickory-resolver, tokio, tokio-util
 <!-- template:end egress-dns:docs-boundaries-egress-edges -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-edges -->
 main binary -> infra-idempotency-store
-infra-http -> infra-idempotency-store, sha2
+infra-http -> infra-idempotency-store, infra-postgres (the Tx re-export), sha2, sfv
 infra-idempotency-store -> infra-postgres, sqlx, tokio, tokio-util, tracing, thiserror
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-edges -->
 <!-- template:begin jobs:docs-boundaries-jobs-edges -->
@@ -125,9 +125,11 @@ HTTP idempotency is a shared inbound transport contract, not a feature
 adapter: `infra-http` composes it the way it composes authentication,
 through `Composer::route` and `Composer::agree`, and owns key handling,
 declaration and agreement, and Problem mapping. `infra-idempotency-store`
-owns the PostgreSQL mechanism behind the opaque `Tx` handle. Feature
-handlers consume only the `Idempotency` extractor and `Tx` through the
-supported composed route.
+owns PostgreSQL arbitration and records. `infra-postgres` owns the opaque
+`Tx`; `infra_http::idempotency` re-exports it only as an inbound contract, so
+`infra-http` depends on `infra-postgres` only while this profile is retained.
+Feature handlers consume `Idempotency` and that `Tx` through the supported
+composed route, while provider adapters alone use the connection.
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-composition -->
 <!-- template:begin jobs:docs-boundaries-jobs-composition -->
 Jobs are a provider seam, not a transport contract: an adapter enqueues on

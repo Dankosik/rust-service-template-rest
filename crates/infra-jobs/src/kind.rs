@@ -9,7 +9,10 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use sqlx::postgres::PgPool;
+use sqlx::Connection as _;
+use sqlx::postgres::{PgConnection, PgPool};
+
+use crate::enqueue::{InvalidDelay, checked_delay_micros};
 use tokio_util::sync::CancellationToken;
 
 /// The longest kind name, in bytes.
@@ -45,11 +48,6 @@ impl JobId {
             Err(_) => None,
         }
     }
-
-    /// The two 64-bit halves, high first.
-    pub(crate) const fn as_u64_pair(self) -> (u64, u64) {
-        self.0.as_u64_pair()
-    }
 }
 
 impl fmt::Display for JobId {
@@ -70,6 +68,7 @@ impl fmt::Debug for JobId {
 pub struct Job<K> {
     id: JobId,
     attempt: u16,
+    generation: i64,
     payload: K,
     cancellation: CancellationToken,
     pool: PgPool,
@@ -100,10 +99,37 @@ impl<K: JobKind> Job<K> {
         &self.payload
     }
 
-    /// Fires at timeout, at the end of the drain, or when the claim is lost.
+    /// Fires at timeout or at the end of the drain.
     #[must_use]
     pub fn cancellation(&self) -> CancellationToken {
         self.cancellation.clone()
+    }
+
+    /// Complete this fenced claim on the caller's already-open transaction.
+    ///
+    /// Propagate this error out of the transaction closure so stale ownership
+    /// rolls back earlier business writes. This method never commits or retries.
+    ///
+    /// # Errors
+    ///
+    /// [`CompleteError::NoTransaction`] outside a tracked transaction,
+    /// [`CompleteError::StaleClaim`] when this running claim no longer exists,
+    /// or [`CompleteError::Database`] when the statement fails.
+    pub async fn complete_in_tx(&self, conn: &mut PgConnection) -> Result<(), CompleteError> {
+        if !conn.is_in_transaction() {
+            return Err(CompleteError::NoTransaction);
+        }
+        let affected = sqlx::query(crate::attempt::COMPLETE)
+            .bind(self.id.to_string())
+            .bind(self.generation)
+            .execute(conn)
+            .await?
+            .rows_affected();
+        if affected == 1 {
+            Ok(())
+        } else {
+            Err(CompleteError::StaleClaim)
+        }
     }
 
     /// The worker's pool.
@@ -124,10 +150,33 @@ impl<K: JobKind> fmt::Debug for Job<K> {
     }
 }
 
-/// A handler failure. Not a [`std::error::Error`]; [`Display`] is the summary.
+/// Why transactional completion could not establish current ownership.
+#[derive(Debug, thiserror::Error)]
+pub enum CompleteError {
+    /// The connection has no sqlx-tracked transaction.
+    #[error("job completion requires an open transaction")]
+    NoTransaction,
+    /// The running row no longer has this job's fencing generation.
+    #[error("job claim is stale")]
+    StaleClaim,
+    /// The completion statement failed.
+    #[error("complete job: {0}")]
+    Database(#[from] sqlx::Error),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Disposition {
+    Retry,
+    Permanent,
+    RetryAfter(i64),
+    Snooze(i64),
+    TransactionUnknown,
+}
+
+/// A handler disposition. Not a [`std::error::Error`]; [`Display`] is the summary.
 #[derive(Debug)]
 pub struct JobError {
-    permanent: bool,
+    pub(crate) disposition: Disposition,
     summary: String,
 }
 
@@ -136,16 +185,48 @@ impl JobError {
     #[must_use]
     pub fn retryable(error: impl fmt::Display) -> Self {
         Self {
-            permanent: false,
+            disposition: Disposition::Retry,
             summary: error.to_string(),
         }
     }
 
-    /// A permanent failure. The summary is `error`'s [`Display`] text.
+    /// A permanent failure.
     #[must_use]
     pub fn permanent(error: impl fmt::Display) -> Self {
         Self {
-            permanent: true,
+            disposition: Disposition::Permanent,
+            summary: error.to_string(),
+        }
+    }
+
+    /// Retry after an explicit database-time delay, spending this attempt.
+    ///
+    /// # Errors
+    /// [`InvalidDelay`] if the delay exceeds [`crate::MAX_DELAY`].
+    pub fn retry_after(error: impl fmt::Display, delay: Duration) -> Result<Self, InvalidDelay> {
+        Ok(Self {
+            disposition: Disposition::RetryAfter(checked_delay_micros(delay)?),
+            summary: error.to_string(),
+        })
+    }
+
+    /// Schedule again without a failure, refunding this attempt exactly once.
+    ///
+    /// # Errors
+    /// [`InvalidDelay`] if the delay exceeds [`crate::MAX_DELAY`].
+    pub fn snooze(delay: Duration) -> Result<Self, InvalidDelay> {
+        Ok(Self {
+            disposition: Disposition::Snooze(checked_delay_micros(delay)?),
+            summary: String::new(),
+        })
+    }
+
+    /// The caller's business transaction may have committed. Issue no queue
+    /// transition and never blindly replay that transaction's closure.
+    #[must_use]
+    pub fn transaction_unknown(error: impl fmt::Display) -> Self {
+        Self {
+            disposition: Disposition::TransactionUnknown,
             summary: error.to_string(),
         }
     }
@@ -153,7 +234,7 @@ impl JobError {
     /// Whether the worker must not retry this failure.
     #[must_use]
     pub const fn is_permanent(&self) -> bool {
-        self.permanent
+        matches!(self.disposition, Disposition::Permanent)
     }
 }
 
@@ -366,6 +447,21 @@ pub(crate) const fn is_valid_kind_name(name: &str) -> bool {
     true
 }
 
+/// Assert a statically declared kind name at compile time.
+///
+/// Use `const _: () = infra_jobs::assert_valid_kind_name(MyKind::NAME);`.
+/// Runtime registration and enqueue still validate names independently.
+///
+/// # Panics
+/// Panics when `name` is outside the kind-name grammar.
+#[allow(
+    clippy::panic,
+    reason = "an opt-in const assertion must reject invalid literals"
+)]
+pub const fn assert_valid_kind_name(name: &str) {
+    assert!(is_valid_kind_name(name), "invalid job kind name");
+}
+
 pub(crate) struct Registered {
     pub(crate) name: &'static str,
     pub(crate) policy: Policy,
@@ -381,6 +477,7 @@ pub(crate) trait Dispatch: Send + Sync {
         &self,
         id: JobId,
         attempt: u16,
+        generation: i64,
         payload: &[u8],
         cancellation: CancellationToken,
         pool: PgPool,
@@ -401,6 +498,7 @@ where
         &self,
         id: JobId,
         attempt: u16,
+        generation: i64,
         payload: &[u8],
         cancellation: CancellationToken,
         pool: PgPool,
@@ -409,6 +507,7 @@ where
         let job = Job {
             id,
             attempt,
+            generation,
             payload: decoded,
             cancellation,
             pool,
@@ -435,6 +534,8 @@ mod tests {
     impl JobKind for Sample {
         const NAME: &'static str = "sample";
     }
+
+    const _: () = assert_valid_kind_name(Sample::NAME);
 
     async fn accept(_: Job<Sample>) -> Result<(), JobError> {
         Ok(())
@@ -580,14 +681,10 @@ mod tests {
     }
 
     #[test]
-    fn job_id_parse_and_halves() {
+    fn job_id_parse_and_display() {
         let text = "01234567-89ab-cdef-fedc-ba9876543210";
         let id = JobId::parse(text).unwrap();
         assert_eq!(id.to_string(), text);
-        assert_eq!(
-            id.as_u64_pair(),
-            (0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210)
-        );
         assert_eq!(
             format!("{id:?}"),
             "JobId(01234567-89ab-cdef-fedc-ba9876543210)"
@@ -621,6 +718,7 @@ mod tests {
             .prepare(
                 id,
                 3,
+                99,
                 br#"{"n":7,"secret":"payload-secret"}"#,
                 token,
                 lazy_pool(),
@@ -631,7 +729,7 @@ mod tests {
         let err =
             registered
                 .dispatch
-                .prepare(id, 1, b"null", CancellationToken::new(), lazy_pool());
+                .prepare(id, 1, 99, b"null", CancellationToken::new(), lazy_pool());
         assert!(err.is_err());
     }
 
@@ -640,6 +738,7 @@ mod tests {
         let job = Job {
             id: JobId::parse("01234567-89ab-cdef-fedc-ba9876543210").unwrap(),
             attempt: 4,
+            generation: 99,
             payload: Sample {
                 n: 7,
                 secret: "payload-secret".to_owned(),

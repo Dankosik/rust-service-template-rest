@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use axum::Router;
-use axum::extract::{FromRequestParts, MatchedPath, Request, State};
+use axum::extract::{FromRequestParts, Request, State};
 use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::http::request::Parts;
 use axum::middleware::{self, Next};
@@ -219,11 +219,7 @@ async fn authenticate(
     let request_id = request_id::request_id(request.extensions());
     request.extensions_mut().remove::<Principal>();
     request.extensions_mut().remove::<VerifiedPrincipal>();
-    let Some(path) = request
-        .extensions()
-        .get::<MatchedPath>()
-        .map(MatchedPath::as_str)
-    else {
+    let Some(path) = crate::contract::contract_path(request.extensions()) else {
         return wiring_failure(request_id);
     };
     let Some(method) = state.methods.effective(path, request.method()) else {

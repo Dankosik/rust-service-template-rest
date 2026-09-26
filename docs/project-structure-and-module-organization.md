@@ -32,8 +32,8 @@ Do not create a crate, module, or directory before its first real artifact.
 <!-- template:end request-budget:docs-structure-request-budget -->
 <!-- template:begin http-idempotency:docs-structure-http-idempotency-placement -->
 | Inbound idempotency composition, key handling, and the executor seam | `crates/infra-http/src/idempotency/`; callers use `infra_http::idempotency::{Idempotency, Composer}` ([guide](http-idempotency.md)) |
-| The PostgreSQL idempotency record store | `crates/infra-idempotency-store`; besides `infra-http` and the composition root, only a feature's own `infra-<provider>` adapter depends on it (for `Tx` and `connection`), and no feature does |
-| A feature's idempotent persistence adapter | `crates/infra-<provider>`, depending on the feature and on `infra-idempotency-store`, never the reverse |
+| The PostgreSQL idempotency record store | `crates/infra-idempotency-store`; `infra-http` and the composition root consume it, and no feature does. Provider adapters use `infra-postgres` for the shared `Tx` and `connection` |
+| A feature's idempotent persistence adapter | `crates/infra-<provider>`, depending on the feature and on `infra-postgres` for `Tx` and `connection`; never on `infra-idempotency-store`, and never the reverse |
 | A partially removable database-backed suite | `test/tests/<owner>/main.rs` as the crate root, with removable modules named by their own marker profile |
 <!-- template:end http-idempotency:docs-structure-http-idempotency-placement -->
 <!-- template:begin jobs:docs-structure-jobs-placement -->

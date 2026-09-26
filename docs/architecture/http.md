@@ -127,6 +127,12 @@ extractor. `Composer::agree(document)` re-checks the declaration rules
 against the assembled contract and activates the boundary; a violation fails
 startup and the contract tests. The [HTTP idempotency guide](../http-idempotency.md)
 owns retained-profile activation, retry, and data-custody decisions.
+
+The composed seam captures the bounded original URI, received Content-Type
+values, and raw body once, restores the body for extraction, then lets normal
+validation and authorization run on every replay before `execute(work)`.
+Generated OpenAPI owns the required key and Problem metadata; no adopter
+supplies an operation namespace, fingerprint, or manual idempotency declaration.
 <!-- template:end http-idempotency:docs-http-idempotent-composition -->
 <!-- template:begin jobs:docs-http-jobs-worker-listener -->
 With the jobs pack retained, the `jobs-worker` process serves the same probe

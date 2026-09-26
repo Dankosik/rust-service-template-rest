@@ -1,27 +1,21 @@
-//! Contract types an idempotent operation names in its annotation, and the
-//! values the declaration rules expect of it.
+//! The idempotency contract that [`super::Composer::route`] generates.
 //!
-//! The four response components below are registered only through
-//! [`super::Composer::components`]; the reused authentication and transport
-//! components come from [`crate::problem::responses`]. Doc comments on the
-//! components and on [`IdempotencyKey`] are contract text.
+//! An operation supplies its normal protected metadata and business responses.
+//! The composer adds the idempotency extension, key parameter, and response
+//! family to the served tuple before it is protected or merged into a document.
 
-use utoipa::{IntoParams, IntoResponses, OpenApi, ToResponse};
+use std::collections::BTreeMap;
+
+use utoipa::openapi::path::{Parameter, ParameterIn};
+use utoipa::openapi::response::Response;
+use utoipa::openapi::schema::{ObjectBuilder, Type};
+use utoipa::openapi::{Ref, RefOr, Required};
+use utoipa::{OpenApi, ToResponse};
 
 use crate::problem::Problem;
-use crate::problem::responses::{
-    AuthenticationForbidden, AuthenticationOversize, AuthenticationTimeout,
-    AuthenticationUnauthorized, InternalServerError, RequestEntityTooLarge,
-};
 
 /// The key's header parameter name.
 pub(super) const KEY_HEADER: &str = "Idempotency-Key";
-/// The key's schema pattern: one or more RFC 9110 `tchar` characters.
-pub(super) const KEY_PATTERN: &str = "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$";
-/// The key's shortest admitted length.
-pub(super) const KEY_MIN_LENGTH: u64 = 1;
-/// The key's longest admitted length.
-pub(super) const KEY_MAX_LENGTH: u64 = 255;
 
 /// Response component names the family registers.
 pub(super) const BAD_REQUEST_COMPONENT: &str = "IdempotencyBadRequest";
@@ -36,49 +30,82 @@ pub(super) const RESPONSE_COMPONENTS: [&str; 4] = [
     UNAVAILABLE_COMPONENT,
 ];
 
-/// Statuses whose response must be exactly the component that
-/// [`IdempotentOperationProblemResponses`] declares.
-pub(super) const FIXED_PROBLEM_STATUSES: [&str; 8] =
-    ["400", "401", "409", "422", "431", "500", "503", "504"];
-/// The authorization status: any Problem response, so an operation may
-/// describe its own authorization.
-pub(super) const AUTHORIZATION_STATUS: &str = "403";
-/// Headers a 2xx response of an idempotent operation may declare: the ones
-/// a replay reproduces.
-pub(super) const REPLAYABLE_HEADERS: [&str; 5] = [
-    "Content-Type",
-    "Content-Encoding",
-    "Content-Language",
-    "Content-Disposition",
-    "Location",
-];
+const KEY_DESCRIPTION: &str = "One key for one intended effect. Supply exactly one header field. An unquoted value is visible ASCII; a value beginning with `\"` is an IETF Structured Field string. After decoding, the key must contain 1 to 255 bytes. Retry the same request with the same decoded key.";
+const KEY_SCHEMA_DESCRIPTION: &str = "A visible-ASCII value or an IETF Structured Field string. The decoded value must contain 1 to 255 bytes; quoted values can have a longer wire representation because of quotes and escapes.";
+const UNQUOTED_KEY_EXAMPLE: &str = "retry-key/with=visible-ascii";
+const QUOTED_KEY_EXAMPLE: &str = "\"retry key with spaces\"";
+const AUTHENTICATION_MALFORMED_COMPONENT: &str = "AuthenticationMalformed";
+const BAD_REQUEST_PROBLEM_COMPONENT: &str = "BadRequest";
+const AUTHENTICATION_UNAVAILABLE_COMPONENT: &str = "AuthenticationUnavailable";
+const REQUEST_ENTITY_TOO_LARGE_COMPONENT: &str = "RequestEntityTooLarge";
+const INTERNAL_SERVER_ERROR_COMPONENT: &str = "InternalServerError";
 
-/// The `Idempotency-Key` request header. Name it in `params(..)` of every
-/// idempotent operation.
-#[derive(Debug, IntoParams)]
-#[into_params(parameter_in = Header)]
-pub struct IdempotencyKey {
-    /// Client-chosen key for one intended effect. Retry with the same key to
-    /// receive the recorded result instead of a second effect. Exactly one
-    /// field of 1 to 255 RFC 9110 token characters, compared byte for byte.
-    #[param(
-        rename = "Idempotency-Key",
-        min_length = 1,
-        max_length = 255,
-        pattern = "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
-    )]
-    pub idempotency_key: String,
+/// Construct the one generated `Idempotency-Key` parameter.
+pub(super) fn key_parameter() -> Parameter {
+    Parameter::builder()
+        .name(KEY_HEADER)
+        .parameter_in(ParameterIn::Header)
+        .description(Some(KEY_DESCRIPTION))
+        .required(Required::True)
+        .schema(Some(
+            ObjectBuilder::new()
+                .schema_type(Type::String)
+                .description(Some(KEY_SCHEMA_DESCRIPTION))
+                .examples([UNQUOTED_KEY_EXAMPLE, QUOTED_KEY_EXAMPLE]),
+        ))
+        .build()
+}
+
+/// The generated responses that supplement an operation's own success and
+/// protected-operation declarations.
+pub(super) fn response_family() -> BTreeMap<String, RefOr<Response>> {
+    [
+        ("400", BAD_REQUEST_COMPONENT),
+        ("409", REQUEST_IN_PROGRESS_COMPONENT),
+        ("413", REQUEST_ENTITY_TOO_LARGE_COMPONENT),
+        ("422", KEY_MISMATCH_COMPONENT),
+        ("500", INTERNAL_SERVER_ERROR_COMPONENT),
+        ("503", UNAVAILABLE_COMPONENT),
+    ]
+    .into_iter()
+    .map(|(status, component)| (status.to_owned(), Ref::from_response_name(component).into()))
+    .collect()
+}
+
+/// Whether the normal protected-operation declaration in this slot can be
+/// replaced by the richer generated idempotency response.
+pub(super) fn replaces_protected_response(status: &str, response: &RefOr<Response>) -> bool {
+    match status {
+        "400" => {
+            response == &response_reference(AUTHENTICATION_MALFORMED_COMPONENT)
+                || response == &response_reference(BAD_REQUEST_PROBLEM_COMPONENT)
+        }
+        "503" => response == &response_reference(AUTHENTICATION_UNAVAILABLE_COMPONENT),
+        _ => false,
+    }
+}
+
+fn response_reference(component: &str) -> RefOr<Response> {
+    Ref::from_response_name(component).into()
 }
 
 /// bearer authentication is malformed, the Idempotency-Key header is missing
 /// or invalid, or the request is otherwise malformed or invalid
 #[derive(Debug, ToResponse)]
+#[expect(
+    dead_code,
+    reason = "The response body exists only for the OpenAPI derive"
+)]
 #[response(content_type = "application/problem+json")]
-pub struct IdempotencyBadRequest(pub Problem);
+pub(super) struct IdempotencyBadRequest(pub Problem);
 
-/// a request with this Idempotency-Key is still in progress, so retry with
-/// the same key later, or the operation reports its own conflict
+/// a request with this Idempotency-Key is still in progress, or the operation
+/// reports a conflict; retry with the same key after the Retry-After interval
 #[derive(Debug, ToResponse)]
+#[expect(
+    dead_code,
+    reason = "The response body exists only for the OpenAPI derive"
+)]
 #[response(
     content_type = "application/problem+json",
     headers((
@@ -86,18 +113,25 @@ pub struct IdempotencyBadRequest(pub Problem);
         description = "seconds to wait before retrying with the same Idempotency-Key"
     ))
 )]
-pub struct IdempotencyRequestInProgress(pub Problem);
+pub(super) struct IdempotencyRequestInProgress(pub Problem);
 
 /// the Idempotency-Key is bound to a different request, or the operation
 /// cannot process the request content
 #[derive(Debug, ToResponse)]
+#[expect(
+    dead_code,
+    reason = "The response body exists only for the OpenAPI derive"
+)]
 #[response(content_type = "application/problem+json")]
-pub struct IdempotencyKeyMismatch(pub Problem);
+pub(super) struct IdempotencyKeyMismatch(pub Problem);
 
-/// bearer authentication trust or provider is unavailable, idempotent request
-/// processing is unavailable, or the outcome of this request is unknown;
-/// retry with the same Idempotency-Key
+/// bearer authentication trust or idempotent request processing is unavailable,
+/// or the committed outcome is uncertain; retry with the same Idempotency-Key
 #[derive(Debug, ToResponse)]
+#[expect(
+    dead_code,
+    reason = "The response body exists only for the OpenAPI derive"
+)]
 #[response(
     content_type = "application/problem+json",
     headers((
@@ -105,35 +139,7 @@ pub struct IdempotencyKeyMismatch(pub Problem);
         description = "seconds to wait before retrying with the same Idempotency-Key"
     ))
 )]
-pub struct IdempotencyUnavailable(pub Problem);
-
-/// Responses every idempotent operation declares beside its own success
-/// shape: authentication, the idempotency boundary, and the transport. The
-/// 403 authorization response may be replaced by an operation-specific
-/// Problem response.
-#[derive(Debug, IntoResponses)]
-pub enum IdempotentOperationProblemResponses {
-    #[response(status = 400)]
-    BadRequest(#[ref_response] IdempotencyBadRequest),
-    #[response(status = 401)]
-    Unauthorized(#[ref_response] AuthenticationUnauthorized),
-    #[response(status = 403)]
-    Forbidden(#[ref_response] AuthenticationForbidden),
-    #[response(status = 409)]
-    RequestInProgress(#[ref_response] IdempotencyRequestInProgress),
-    #[response(status = 413)]
-    RequestEntityTooLarge(#[ref_response] RequestEntityTooLarge),
-    #[response(status = 422)]
-    KeyMismatch(#[ref_response] IdempotencyKeyMismatch),
-    #[response(status = 431)]
-    Oversize(#[ref_response] AuthenticationOversize),
-    #[response(status = 500)]
-    InternalServerError(#[ref_response] InternalServerError),
-    #[response(status = 503)]
-    Unavailable(#[ref_response] IdempotencyUnavailable),
-    #[response(status = 504)]
-    Timeout(#[ref_response] AuthenticationTimeout),
-}
+pub(super) struct IdempotencyUnavailable(pub Problem);
 
 /// The family's components, seeded into a router by
 /// [`super::Composer::components`]: their only registration path.
@@ -149,107 +155,66 @@ pub(super) struct IdempotencyComponents;
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use utoipa::openapi::path::Parameter;
 
     use super::*;
 
     #[test]
-    fn the_key_parameter_schema_is_pinned_to_the_expected_values() {
-        let parameters: Vec<Parameter> = IdempotencyKey::into_params(|| None);
-        let [parameter] = parameters.as_slice() else {
-            panic!("one key parameter");
-        };
-        let parameter = serde_json::to_value(parameter).unwrap();
+    fn generated_key_documents_both_encodings_and_decoded_byte_limit() {
+        let parameter = serde_json::to_value(key_parameter()).expect("parameter serializes");
         assert_eq!(parameter["name"], KEY_HEADER);
         assert_eq!(parameter["in"], "header");
         assert_eq!(parameter["required"], true);
         assert_eq!(parameter["schema"]["type"], "string");
-        assert_eq!(parameter["schema"]["minLength"], KEY_MIN_LENGTH);
-        assert_eq!(parameter["schema"]["maxLength"], KEY_MAX_LENGTH);
-        assert_eq!(parameter["schema"]["pattern"], KEY_PATTERN);
+        assert_eq!(
+            parameter["schema"]["examples"],
+            json!([UNQUOTED_KEY_EXAMPLE, QUOTED_KEY_EXAMPLE])
+        );
+        assert!(
+            parameter["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("decoded key"))
+        );
+        assert!(
+            parameter["schema"]["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("decoded value"))
+        );
+        assert!(parameter["schema"].get("minLength").is_none());
+        assert!(parameter["schema"].get("maxLength").is_none());
+        assert!(parameter["schema"].get("pattern").is_none());
     }
 
     #[test]
-    fn the_family_registers_exactly_the_four_named_components() {
+    fn generated_family_uses_registered_and_shared_problem_components() {
+        let family = serde_json::to_value(response_family()).expect("family serializes");
+        let reference = |name: &str| json!({ "$ref": format!("#/components/responses/{name}") });
         assert_eq!(
-            <IdempotencyBadRequest as ToResponse>::response().0,
-            BAD_REQUEST_COMPONENT
+            family,
+            json!({
+                "400": reference(BAD_REQUEST_COMPONENT),
+                "409": reference(REQUEST_IN_PROGRESS_COMPONENT),
+                "413": reference(REQUEST_ENTITY_TOO_LARGE_COMPONENT),
+                "422": reference(KEY_MISMATCH_COMPONENT),
+                "500": reference(INTERNAL_SERVER_ERROR_COMPONENT),
+                "503": reference(UNAVAILABLE_COMPONENT),
+            })
         );
-        assert_eq!(
-            <IdempotencyRequestInProgress as ToResponse>::response().0,
-            REQUEST_IN_PROGRESS_COMPONENT
-        );
-        assert_eq!(
-            <IdempotencyKeyMismatch as ToResponse>::response().0,
-            KEY_MISMATCH_COMPONENT
-        );
-        assert_eq!(
-            <IdempotencyUnavailable as ToResponse>::response().0,
-            UNAVAILABLE_COMPONENT
-        );
-        let components = IdempotencyComponents::openapi().components.unwrap();
-        let mut expected = RESPONSE_COMPONENTS.to_vec();
-        expected.sort_unstable();
+
+        let components = IdempotencyComponents::openapi()
+            .components
+            .expect("idempotency response components");
         assert_eq!(
             components
                 .responses
                 .keys()
                 .map(String::as_str)
-                .collect::<Vec<_>>(),
-            expected
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                "IdempotencyBadRequest",
+                "IdempotencyKeyMismatch",
+                "IdempotencyRequestInProgress",
+                "IdempotencyUnavailable",
+            ])
         );
-        assert!(components.schemas.is_empty());
-    }
-
-    #[test]
-    fn only_the_retryable_components_declare_an_optional_retry_after() {
-        let components = serde_json::to_value(IdempotencyComponents::openapi().components).unwrap();
-        for (name, retryable) in [
-            (BAD_REQUEST_COMPONENT, false),
-            (REQUEST_IN_PROGRESS_COMPONENT, true),
-            (KEY_MISMATCH_COMPONENT, false),
-            (UNAVAILABLE_COMPONENT, true),
-        ] {
-            let response = &components["responses"][name];
-            assert_eq!(
-                response["content"]["application/problem+json"]["schema"]["$ref"],
-                "#/components/schemas/Problem",
-                "{name}"
-            );
-            assert!(
-                response["description"]
-                    .as_str()
-                    .is_some_and(|description| !description.is_empty()),
-                "{name}"
-            );
-            let retry_after = &response["headers"]["Retry-After"];
-            assert_eq!(retry_after.is_object(), retryable, "{name}");
-            assert!(retry_after.get("required").is_none(), "{name}");
-        }
-    }
-
-    #[test]
-    fn the_family_declares_the_section_five_table() {
-        let reference = |name: &str| json!({ "$ref": format!("#/components/responses/{name}") });
-        let responses =
-            serde_json::to_value(IdempotentOperationProblemResponses::responses()).unwrap();
-        assert_eq!(
-            responses,
-            json!({
-                "400": reference(BAD_REQUEST_COMPONENT),
-                "401": reference("AuthenticationUnauthorized"),
-                "403": reference("AuthenticationForbidden"),
-                "409": reference(REQUEST_IN_PROGRESS_COMPONENT),
-                "413": reference("RequestEntityTooLarge"),
-                "422": reference(KEY_MISMATCH_COMPONENT),
-                "431": reference("AuthenticationOversize"),
-                "500": reference("InternalServerError"),
-                "503": reference(UNAVAILABLE_COMPONENT),
-                "504": reference("AuthenticationTimeout"),
-            })
-        );
-        for status in FIXED_PROBLEM_STATUSES.iter().chain([&AUTHORIZATION_STATUS]) {
-            assert!(responses.get(*status).is_some(), "{status}");
-        }
     }
 }

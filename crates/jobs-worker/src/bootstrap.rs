@@ -538,7 +538,7 @@ mod tests {
         config.http.grace_period = Duration::from_secs(30);
         assert_eq!(
             check_preconditions(&config).unwrap_err().to_string(),
-            "http.grace_period (30s) must be >= http.drain_timeout (25s) plus the 17s jobs worker teardown tail (release, listeners, background join, dependency close, telemetry flush)"
+            "http.grace_period (30s) must be >= http.drain_timeout (25s) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)"
         );
         assert_eq!(
             WorkerError::Kinds(KindError::NoKinds).to_string(),
