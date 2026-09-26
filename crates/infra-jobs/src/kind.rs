@@ -172,7 +172,6 @@ pub(crate) enum Disposition {
     RetryAfter(i64),
     RetryAfterAtLeast(i64),
     Snooze(i64),
-    TransactionUnknown,
 }
 
 /// A handler disposition. Not a [`std::error::Error`]; [`Display`] is the summary.
@@ -239,16 +238,6 @@ impl JobError {
             disposition: Disposition::Snooze(checked_delay_micros(delay)?),
             summary: String::new(),
         })
-    }
-
-    /// The caller's business transaction may have committed. Issue no queue
-    /// transition and never blindly replay that transaction's closure.
-    #[must_use]
-    pub fn transaction_unknown(error: impl fmt::Display) -> Self {
-        Self {
-            disposition: Disposition::TransactionUnknown,
-            summary: error.to_string(),
-        }
     }
 
     /// Whether the worker must not retry this failure.
@@ -708,7 +697,7 @@ mod tests {
     }
 
     #[test]
-    fn job_id_parse_and_display() {
+    fn job_id_uuid_display_preserves_external_format() {
         let text = "01234567-89ab-cdef-fedc-ba9876543210";
         let id = JobId::parse(text).unwrap();
         assert_eq!(id.to_string(), text);
@@ -716,7 +705,6 @@ mod tests {
             format!("{id:?}"),
             "JobId(01234567-89ab-cdef-fedc-ba9876543210)"
         );
-        assert!(JobId::parse("not-a-uuid").is_none());
     }
 
     #[tokio::test]

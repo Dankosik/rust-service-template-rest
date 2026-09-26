@@ -9,6 +9,7 @@ END $$;
 -- live while pending or running; completed and failed jobs are terminal.
 CREATE TABLE background_jobs (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     kind text NOT NULL,
     payload jsonb NOT NULL,
     unique_key text COLLATE "C",
@@ -19,6 +20,7 @@ CREATE TABLE background_jobs (
     claim_generation bigint NOT NULL DEFAULT 0 CHECK (claim_generation >= 0),  -- 0: never claimed
     not_before timestamptz NOT NULL,
     claim_expires_at timestamptz,
+    attempted_by uuid,
     finished_at timestamptz,
     error_summary text,
     trace_context text,
@@ -29,6 +31,9 @@ CREATE TABLE background_jobs (
         CHECK ((state = 'failed') = (failure_reason IS NOT NULL)),
     CONSTRAINT background_jobs_finished_matches_state
         CHECK ((state IN ('completed', 'failed')) = (finished_at IS NOT NULL))
+) WITH (
+    autovacuum_vacuum_scale_factor = 0,
+    autovacuum_vacuum_threshold = 5000
 );
 
 -- Every claim draws its fencing token here, so no value is ever reused, not even

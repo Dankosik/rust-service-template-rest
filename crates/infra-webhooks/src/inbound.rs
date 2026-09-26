@@ -391,11 +391,9 @@ impl Handler<Incoming> for Processor {
                 Err(ProcessFailure::Completion(CompleteError::Database(_))) => Err(
                     JobError::retryable("inbound webhook completion is unavailable"),
                 ),
-                Err(ProcessFailure::Transaction(TxError::CommitUnknown(_))) => {
-                    Err(JobError::transaction_unknown(
-                        "inbound webhook processing commit outcome is unknown",
-                    ))
-                }
+                Err(ProcessFailure::Transaction(TxError::CommitUnknown(_))) => Err(
+                    JobError::retryable("inbound webhook processing commit outcome is unknown"),
+                ),
                 Err(ProcessFailure::Transaction(_)) => Err(JobError::retryable(
                     "inbound webhook processing is unavailable",
                 )),

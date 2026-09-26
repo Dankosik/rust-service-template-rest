@@ -1,10 +1,8 @@
 //! CLAIM and the claim loop.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use infra_postgres::{connection, in_tx_with};
 use sqlx::Row;
 use tokio::sync::{OwnedSemaphorePermit, SemaphorePermit};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -13,10 +11,24 @@ use tokio_util::task::TaskTracker;
 
 use crate::attempt;
 use crate::engine::{
-    CANCEL_MARGIN, LEASE_RESERVE, OpFailed, Operation, OperationError, POLL_INTERVAL,
-    READ_COMMITTED, Shared, backstop, observe_failure, observe_recovery,
+    CANCEL_MARGIN, LEASE_RESERVE, Operation, OperationError, POLL_INTERVAL, Shared, backstop,
+    observe_failure, observe_recovery,
 };
 use crate::kind::JobId;
+
+/// Claim request duration through its database acknowledgement. No labels.
+pub const CLAIM_DURATION_METRIC: &str = "jobs_claim_duration_seconds";
+/// Histogram buckets for [`CLAIM_DURATION_METRIC`], in seconds.
+pub const CLAIM_DURATION_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 8.0, 12.0,
+];
+/// Queue time between a job's current `not_before` and its acknowledged claim. Label `kind`.
+pub const QUEUE_WAIT_METRIC: &str = "jobs_queue_wait_seconds";
+/// Histogram buckets for [`QUEUE_WAIT_METRIC`], in seconds.
+pub const QUEUE_WAIT_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+    1800.0, 3600.0, 10_800.0, 21_600.0, 43_200.0, 86_400.0,
+];
 
 /// Claim due pending jobs and expired running jobs, up to the free slots.
 ///
@@ -72,7 +84,12 @@ const CLAIM: &str = "WITH policy AS ( \
                                       + interval '60 seconds' END, \
          attempts = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempts \
                          ELSE job.attempts + 1 END, \
-         error_summary = CASE WHEN job.attempts >= policy.max_attempts \
+         attempted_by = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempted_by \
+                             ELSE $5::uuid END, \
+         error_summary = CASE WHEN job.state = 'running' \
+                                   AND job.claim_expires_at <= statement_timestamp() \
+                              THEN 'lease expired; rescued' \
+                              WHEN job.attempts >= policy.max_attempts \
                               THEN COALESCE(job.error_summary, 'attempt budget spent') \
                               ELSE job.error_summary END, \
          claim_generation = nextval('background_jobs_claim_generation') \
@@ -85,7 +102,8 @@ const CLAIM: &str = "WITH policy AS ( \
                policy.timeout_micros, \
                CASE WHEN job.state = 'running' THEN job.payload::text END AS payload, \
                job.trace_context, job.trace_state, job.error_summary, \
-               CASE WHEN job.state = 'running' THEN random() END AS jitter";
+               EXTRACT(EPOCH FROM statement_timestamp())::double precision AS claimed_at, \
+               EXTRACT(EPOCH FROM job.not_before)::double precision AS not_before_epoch";
 
 /// A row CLAIM set `running`.
 #[derive(Debug)]
@@ -97,8 +115,19 @@ pub(crate) struct Claimed {
     pub(crate) payload: Vec<u8>,
     pub(crate) trace_context: Option<String>,
     pub(crate) trace_state: Option<String>,
-    pub(crate) jitter: f64,
     pub(crate) slot: OwnedSemaphorePermit,
+}
+
+/// Describe claim metrics once during engine startup.
+pub(crate) fn describe_metrics() {
+    metrics::describe_histogram!(
+        CLAIM_DURATION_METRIC,
+        "Claim request duration through acknowledgement"
+    );
+    metrics::describe_histogram!(
+        QUEUE_WAIT_METRIC,
+        "Time from a job's current not-before to its acknowledged claim"
+    );
 }
 
 /// Claim until `stop` fires. Closes the attempt tracker on every exit.
@@ -118,13 +147,12 @@ pub(crate) async fn run_claim_loop(shared: Arc<Shared>, stop: CancellationToken)
         let Some(permit) = engine_permit(&shared, &stop).await else {
             return;
         };
-        let round = tokio::select! {
-            biased;
-            () = stop.cancelled() => return,
-            round = send_claim(&shared, as_i64(requested)) => round,
-        };
+        if stop.is_cancelled() {
+            return;
+        }
+        let round = send_claim(&shared, as_i64(requested)).await;
+        wait_for_tick = finish_round(&shared, &mut slots, requested, round);
         drop(permit);
-        wait_for_tick = finish_round(&shared, &stop, &mut slots, requested, round);
     }
 }
 
@@ -175,40 +203,40 @@ async fn engine_permit<'a>(
 
 enum ClaimRound {
     Known { sent: Instant, rows: Vec<Drawn> },
-    Unknown,
     Failed(OperationError),
 }
 
 async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
+    let sent = Instant::now();
     let (names, max_attempts, timeouts) = policy_binds(&shared.registry);
-    let returned = AtomicBool::new(false);
-    let result = backstop(
-        &returned,
-        in_tx_with(
-            &shared.pool,
-            READ_COMMITTED,
-            async |tx| -> Result<(Instant, Vec<Drawn>), OpFailed> {
-                let conn = connection(tx);
-                let sent = Instant::now();
-                let rows = sqlx::query(CLAIM)
-                    .bind(&names)
-                    .bind(&max_attempts)
-                    .bind(&timeouts)
-                    .bind(requested)
-                    .fetch_all(&mut *conn)
-                    .await?;
-                let decoded = decode_claims(&rows, &shared.registry)?;
-                returned.store(true, Ordering::SeqCst);
-                Ok((sent, decoded))
-            },
-        ),
-    )
+    let result = backstop(async {
+        let mut connection = shared
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| OperationError::Acquire)?;
+        let rows = sqlx::query(CLAIM)
+            .bind(&names)
+            .bind(&max_attempts)
+            .bind(&timeouts)
+            .bind(requested)
+            .bind(shared.worker_id.to_string())
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(statement_error)?;
+        let decoded = decode_claims(&rows, &shared.registry)?;
+        Ok((sent, decoded))
+    })
     .await;
+    metrics::histogram!(CLAIM_DURATION_METRIC).record(sent.elapsed().as_secs_f64());
     match result {
         Ok((sent, rows)) => ClaimRound::Known { sent, rows },
-        Err(OperationError::CommitUnknown) => ClaimRound::Unknown,
         Err(error) => ClaimRound::Failed(error),
     }
+}
+
+fn statement_error(_error: sqlx::Error) -> OperationError {
+    OperationError::Statement
 }
 
 fn policy_binds(registry: &crate::Registry) -> (Vec<&str>, Vec<i16>, Vec<i64>) {
@@ -233,7 +261,6 @@ fn as_i64(count: usize) -> i64 {
 
 fn finish_round(
     shared: &Arc<Shared>,
-    stop: &CancellationToken,
     slots: &mut OwnedSemaphorePermit,
     requested: usize,
     round: ClaimRound,
@@ -242,12 +269,8 @@ fn finish_round(
         ClaimRound::Known { sent, rows } => {
             observe_recovery(shared, Operation::Claim);
             let filled = rows.len() == requested;
-            dispatch_known(shared, stop, slots, rows, sent);
+            dispatch_known(shared, slots, rows, sent);
             !filled
-        }
-        ClaimRound::Unknown => {
-            observe_failure(shared, Operation::Claim, OperationError::CommitUnknown);
-            true
         }
         ClaimRound::Failed(error) => {
             observe_failure(shared, Operation::Claim, error);
@@ -258,7 +281,6 @@ fn finish_round(
 
 fn dispatch_known(
     shared: &Arc<Shared>,
-    stop: &CancellationToken,
     slots: &mut OwnedSemaphorePermit,
     rows: Vec<Drawn>,
     sent: Instant,
@@ -269,16 +291,13 @@ fn dispatch_known(
             continue;
         }
         let deadline = local_deadline(sent, row.timeout_micros);
-        if stop.is_cancelled() || Instant::now() >= deadline {
-            return;
+        if Instant::now() >= deadline {
+            continue;
         }
         let Some(slot) = slots.split(1) else {
             return;
         };
         let Some(payload) = row.payload else {
-            return;
-        };
-        let Some(jitter) = row.jitter else {
             return;
         };
         let claimed = Claimed {
@@ -289,12 +308,10 @@ fn dispatch_known(
             payload: payload.into_bytes(),
             trace_context: row.trace_context,
             trace_state: row.trace_state,
-            jitter,
             slot,
         };
-        if stop.is_cancelled() {
-            return;
-        }
+        metrics::histogram!(QUEUE_WAIT_METRIC, "kind" => row.kind)
+            .record((row.claimed_at - row.not_before_epoch).max(0.0));
         shared
             .attempt_tracker
             .spawn(attempt::supervise(Arc::clone(shared), claimed, deadline));
@@ -326,13 +343,14 @@ struct Drawn {
     trace_context: Option<String>,
     trace_state: Option<String>,
     error_summary: Option<String>,
-    jitter: Option<f64>,
+    claimed_at: f64,
+    not_before_epoch: f64,
 }
 
 fn decode_claims(
     rows: &[sqlx::postgres::PgRow],
     registry: &crate::Registry,
-) -> Result<Vec<Drawn>, OpFailed> {
+) -> Result<Vec<Drawn>, OperationError> {
     let mut decoded = Vec::with_capacity(rows.len());
     for row in rows {
         decoded.push(decode_claim(row, registry)?);
@@ -343,42 +361,42 @@ fn decode_claims(
 fn decode_claim(
     row: &sqlx::postgres::PgRow,
     registry: &crate::Registry,
-) -> Result<Drawn, OpFailed> {
-    let id_text: String = row.try_get("id")?;
-    let id = JobId::parse(&id_text).ok_or(OpFailed(OperationError::Statement))?;
-    let kind_text: String = row.try_get("kind")?;
+) -> Result<Drawn, OperationError> {
+    let id_text: String = row.try_get("id").map_err(statement_error)?;
+    let id = JobId::parse(&id_text).ok_or(OperationError::Statement)?;
+    let kind_text: String = row.try_get("kind").map_err(statement_error)?;
     let kind = registry
         .get(&kind_text)
         .map(|registered| registered.name)
-        .ok_or(OpFailed(OperationError::Statement))?;
-    let state_text: String = row.try_get("state")?;
+        .ok_or(OperationError::Statement)?;
+    let state_text: String = row.try_get("state").map_err(statement_error)?;
     let state = match state_text.as_str() {
         "running" => DrawnState::Running,
         "failed" => DrawnState::Failed,
-        _ => return Err(OpFailed(OperationError::Statement)),
+        _ => return Err(OperationError::Statement),
     };
-    let attempts_i16: i16 = row.try_get("attempts")?;
-    let attempt = u16::try_from(attempts_i16).map_err(|_| OpFailed(OperationError::Statement))?;
-    let timeout_micros: i64 = row.try_get("timeout_micros")?;
+    let attempts_i16: i16 = row.try_get("attempts").map_err(statement_error)?;
+    let attempt = u16::try_from(attempts_i16).map_err(|_| OperationError::Statement)?;
+    let timeout_micros: i64 = row.try_get("timeout_micros").map_err(statement_error)?;
     if timeout_micros < 0 {
-        return Err(OpFailed(OperationError::Statement));
+        return Err(OperationError::Statement);
     }
-    let payload: Option<String> = row.try_get("payload")?;
-    let jitter: Option<f64> = row.try_get("jitter")?;
-    if state == DrawnState::Running && (payload.is_none() || jitter.is_none()) {
-        return Err(OpFailed(OperationError::Statement));
+    let payload: Option<String> = row.try_get("payload").map_err(statement_error)?;
+    if state == DrawnState::Running && payload.is_none() {
+        return Err(OperationError::Statement);
     }
     Ok(Drawn {
         id,
-        generation: row.try_get("claim_generation")?,
+        generation: row.try_get("claim_generation").map_err(statement_error)?,
         kind,
         state,
         attempt,
         timeout_micros,
         payload,
-        trace_context: row.try_get("trace_context")?,
-        trace_state: row.try_get("trace_state")?,
-        error_summary: row.try_get("error_summary")?,
-        jitter,
+        trace_context: row.try_get("trace_context").map_err(statement_error)?,
+        trace_state: row.try_get("trace_state").map_err(statement_error)?,
+        error_summary: row.try_get("error_summary").map_err(statement_error)?,
+        claimed_at: row.try_get("claimed_at").map_err(statement_error)?,
+        not_before_epoch: row.try_get("not_before_epoch").map_err(statement_error)?,
     })
 }
