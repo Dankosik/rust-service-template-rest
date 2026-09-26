@@ -1,7 +1,6 @@
 //! The startup check, retention, and the live-job gauges.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -19,8 +18,16 @@ use crate::engine::{
 
 /// Gauge of live jobs. Labels `kind`, `state` (`available`, `scheduled`, `running`).
 pub const LIVE_JOBS_METRIC: &str = "jobs_live_jobs";
+/// Whether a live-job sample reached its per-kind/state cap. Labels `kind`, `state`.
+pub const LIVE_JOBS_CENSORED_METRIC: &str = "jobs_live_jobs_censored";
+/// The fixed maximum published live-job count.
+pub const LIVE_JOBS_SAMPLE_CAP_METRIC: &str = "jobs_live_jobs_sample_cap";
 /// Age of the oldest available job. Label `kind`. Zero when none.
 pub const OLDEST_AVAILABLE_AGE_METRIC: &str = "jobs_oldest_available_age_seconds";
+/// Database timestamp of the last successfully committed observation.
+pub const OBSERVATION_TIMESTAMP_METRIC: &str = "jobs_observation_timestamp_seconds";
+/// Whether the current observation gauges came from a successful sample.
+pub const OBSERVATION_SUCCESS_METRIC: &str = "jobs_observation_success";
 /// How long a completed job is kept.
 pub const RETAIN_COMPLETED_FOR: Duration = Duration::from_hours(24);
 /// How long a failed job is kept.
@@ -31,16 +38,28 @@ pub const RETENTION_BATCH_ROWS: i64 = 500;
 pub const RETENTION_INTERVAL: Duration = Duration::from_secs(60);
 /// How often a worker samples the gauges. The first sample runs at once.
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
+/// Maximum rows counted for one registered kind and live state.
+pub const LIVE_JOBS_SAMPLE_CAP: i64 = 1_000;
+const LIVE_JOBS_SAMPLE_CAP_VALUE: f64 = 1_000.0;
 /// Bound on the startup check, from acquire to the transaction's end.
 pub const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
-/// Gauge label for every kind this worker does not register.
-pub const UNREGISTERED_KIND: &str = "<unregistered>";
-
 /// The writer check and the table's shape. A missing table or column fails the statement.
 const STARTUP_CHECK: &str = "SELECT NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS writable, \
      (SELECT count(*) FROM (SELECT id, kind, payload, unique_key, state, failure_reason, attempts, \
-          claim_generation, not_before, claim_expires_at, finished_at, error_summary, trace_context \
-      FROM background_jobs LIMIT 0) AS shape) AS shape_rows";
+          claim_generation, not_before, claim_expires_at, finished_at, error_summary, trace_context, trace_state \
+      FROM background_jobs LIMIT 0) AS shape) AS shape_rows, \
+     COALESCE((SELECT attribute.atttypid = 'jsonb'::regtype \
+          FROM pg_attribute AS attribute \
+          WHERE attribute.attrelid = 'background_jobs'::regclass \
+            AND attribute.attname = 'payload' \
+            AND attribute.attnum > 0 \
+            AND NOT attribute.attisdropped), false) AS payload_jsonb, \
+     COALESCE((SELECT attribute.atttypid = 'text'::regtype \
+          FROM pg_attribute AS attribute \
+          WHERE attribute.attrelid = 'background_jobs'::regclass \
+            AND attribute.attname = 'unique_key' \
+            AND attribute.attnum > 0 \
+            AND NOT attribute.attisdropped), false) AS unique_key_text";
 
 const RETAIN_COMPLETED: &str = "DELETE FROM background_jobs \
      WHERE id = ANY (ARRAY( \
@@ -58,21 +77,62 @@ const RETAIN_FAILED: &str = "DELETE FROM background_jobs \
          LIMIT $2 \
          FOR UPDATE SKIP LOCKED))";
 
-const SAMPLE: &str = "SELECT kind, \
-            count(*) FILTER (WHERE not_before <= statement_timestamp()) AS available, \
-            count(*) FILTER (WHERE not_before > statement_timestamp()) AS scheduled, \
-            0::bigint AS running, \
-            COALESCE(EXTRACT(EPOCH FROM statement_timestamp() - min(not_before) \
-                FILTER (WHERE not_before <= statement_timestamp())), 0)::double precision \
-                AS oldest_available_seconds \
-     FROM background_jobs \
-     WHERE state = 'pending' \
-     GROUP BY kind \
-     UNION ALL \
-     SELECT kind, 0, 0, count(*), 0 \
-     FROM background_jobs \
-     WHERE state = 'running' \
-     GROUP BY kind";
+const SAMPLE: &str = "WITH sampled AS ( \
+         SELECT statement_timestamp() AS observed_at \
+     ), registered AS ( \
+         SELECT name.kind \
+         FROM unnest($1::text[]) AS name(kind) \
+     ) \
+     SELECT registered.kind, \
+            available.count AS available, \
+            scheduled.count AS scheduled, \
+            running.count AS running, \
+            COALESCE(EXTRACT(EPOCH FROM sampled.observed_at - oldest.not_before), 0)::double precision \
+                AS oldest_available_seconds, \
+            EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS observed_at \
+     FROM sampled \
+     CROSS JOIN registered \
+     CROSS JOIN LATERAL ( \
+         SELECT count(*) AS count \
+         FROM ( \
+             SELECT 1 \
+             FROM background_jobs AS job \
+             WHERE job.kind = registered.kind \
+               AND job.state = 'pending' \
+               AND job.not_before <= sampled.observed_at \
+             LIMIT 1001 \
+         ) AS capped \
+     ) AS available \
+     CROSS JOIN LATERAL ( \
+         SELECT count(*) AS count \
+         FROM ( \
+             SELECT 1 \
+             FROM background_jobs AS job \
+             WHERE job.kind = registered.kind \
+               AND job.state = 'pending' \
+               AND job.not_before > sampled.observed_at \
+             LIMIT 1001 \
+         ) AS capped \
+     ) AS scheduled \
+     CROSS JOIN LATERAL ( \
+         SELECT count(*) AS count \
+         FROM ( \
+             SELECT 1 \
+             FROM background_jobs AS job \
+             WHERE job.kind = registered.kind \
+               AND job.state = 'running' \
+             LIMIT 1001 \
+         ) AS capped \
+     ) AS running \
+     LEFT JOIN LATERAL ( \
+         SELECT job.not_before \
+         FROM background_jobs AS job \
+         WHERE job.kind = registered.kind \
+           AND job.state = 'pending' \
+           AND job.not_before <= sampled.observed_at \
+         ORDER BY job.not_before, job.id \
+         LIMIT 1 \
+     ) AS oldest ON true";
 
 const RETENTION_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '1000ms'";
 const SAMPLE_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '2000ms'";
@@ -82,6 +142,7 @@ const SAMPLE_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '2000ms'";
 /// # Errors
 ///
 /// [`StartupError::SchemaMissing`] for SQLSTATE `42P01` or `42703`,
+/// [`StartupError::UnsupportedEncoding`] when PostgreSQL is not UTF8,
 /// [`StartupError::NotWritable`] when `writable` is false, and
 /// [`StartupError::Unavailable`] for anything else, including the bound.
 pub(crate) async fn check_startup(shared: &Shared) -> Result<(), StartupError> {
@@ -89,14 +150,32 @@ pub(crate) async fn check_startup(shared: &Shared) -> Result<(), StartupError> {
         &shared.pool,
         READ_COMMITTED,
         async |conn: &mut PgConnection| -> Result<(), Refused> {
+            let encoding: String = sqlx::query_scalar("SELECT current_setting('server_encoding')")
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(|_| Refused(StartupError::Unavailable))?;
+            if encoding != "UTF8" {
+                return Err(Refused(StartupError::UnsupportedEncoding));
+            }
             let row = sqlx::query(STARTUP_CHECK)
                 .fetch_one(&mut *conn)
                 .await
                 .map_err(|err| Refused(schema_refusal(&err)))?;
-            match row.try_get::<bool, _>("writable") {
-                Ok(true) => Ok(()),
-                Ok(false) => Err(Refused(StartupError::NotWritable)),
-                Err(_) => Err(Refused(StartupError::Unavailable)),
+            let payload_jsonb = row
+                .try_get::<bool, _>("payload_jsonb")
+                .map_err(|_| Refused(StartupError::Unavailable))?;
+            let unique_key_text = row
+                .try_get::<bool, _>("unique_key_text")
+                .map_err(|_| Refused(StartupError::Unavailable))?;
+            let writable = row
+                .try_get::<bool, _>("writable")
+                .map_err(|_| Refused(StartupError::Unavailable))?;
+            if !payload_jsonb || !unique_key_text {
+                Err(Refused(StartupError::SchemaMissing))
+            } else if !writable {
+                Err(Refused(StartupError::NotWritable))
+            } else {
+                Ok(())
             }
         },
     );
@@ -140,21 +219,54 @@ pub(crate) async fn run_retention(shared: Arc<Shared>, cancel: CancellationToken
 /// One gauge sample every 10 s, the first at once, until `cancel` fires.
 pub(crate) async fn run_sampling(shared: Arc<Shared>, cancel: CancellationToken) {
     let _ = Box::pin(cancel.run_until_cancelled(async {
+        describe_sampling_metrics();
+        let mut last_success_timestamp = 0.0;
+        publish_unavailable(&shared, last_success_timestamp);
         let mut ticker = tokio::time::interval(SAMPLE_INTERVAL);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
             match sample_once(&shared).await {
-                Ok(rows) => {
-                    let stats = aggregate(&shared.registry, &rows);
-                    publish(&shared, &stats);
+                Ok(sample) => {
+                    last_success_timestamp = sample.observed_at;
+                    publish_sample(&sample);
                     observe_recovery(&shared, Operation::Sample);
                 }
-                Err(error) => observe_failure(&shared, Operation::Sample, error),
+                Err(error) => {
+                    publish_unavailable(&shared, last_success_timestamp);
+                    observe_failure(&shared, Operation::Sample, error);
+                }
             }
         }
     }))
     .await;
+}
+
+fn describe_sampling_metrics() {
+    metrics::describe_gauge!(
+        LIVE_JOBS_METRIC,
+        "Per-process capped sample of live jobs by registered kind and state."
+    );
+    metrics::describe_gauge!(
+        LIVE_JOBS_CENSORED_METRIC,
+        "Whether a per-process live-job sample reached its cap by registered kind and state."
+    );
+    metrics::describe_gauge!(
+        LIVE_JOBS_SAMPLE_CAP_METRIC,
+        "Maximum count published by one per-process live-job sample."
+    );
+    metrics::describe_gauge!(
+        OLDEST_AVAILABLE_AGE_METRIC,
+        "Age in seconds of the oldest available job in one per-process sample."
+    );
+    metrics::describe_gauge!(
+        OBSERVATION_TIMESTAMP_METRIC,
+        "Database Unix timestamp of the last successful jobs observation."
+    );
+    metrics::describe_gauge!(
+        OBSERVATION_SUCCESS_METRIC,
+        "Whether the current jobs observation gauges came from a successful sample."
+    );
 }
 
 async fn delete_until(
@@ -205,7 +317,7 @@ async fn delete_batch(
     .await
 }
 
-async fn sample_once(shared: &Shared) -> Result<Vec<SampleRow>, OperationError> {
+async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
     let Ok(_permit) = shared.permit.acquire().await else {
         return Err(OperationError::Acquire);
     };
@@ -215,11 +327,15 @@ async fn sample_once(shared: &Shared) -> Result<Vec<SampleRow>, OperationError> 
         in_tx_with(
             &shared.pool,
             READ_COMMITTED,
-            async |conn| -> Result<Vec<SampleRow>, OpFailed> {
+            async |conn| -> Result<Sample, OpFailed> {
                 sqlx::query(SAMPLE_STATEMENT_TIMEOUT)
                     .execute(&mut *conn)
                     .await?;
-                let rows = sqlx::query(SAMPLE).fetch_all(&mut *conn).await?;
+                let kinds: Vec<&str> = shared.registry.names().collect();
+                let rows = sqlx::query(SAMPLE)
+                    .bind(kinds)
+                    .fetch_all(&mut *conn)
+                    .await?;
                 let decoded = decode_sample(&rows)?;
                 returned.store(true, Ordering::SeqCst);
                 Ok(decoded)
@@ -237,9 +353,23 @@ struct SampleRow {
     oldest: f64,
 }
 
-fn decode_sample(rows: &[sqlx::postgres::PgRow]) -> Result<Vec<SampleRow>, OpFailed> {
+struct Sample {
+    rows: Vec<SampleRow>,
+    observed_at: f64,
+}
+
+fn decode_sample(rows: &[sqlx::postgres::PgRow]) -> Result<Sample, OpFailed> {
     let mut decoded = Vec::with_capacity(rows.len());
+    let mut observed_at: Option<f64> = None;
     for row in rows {
+        let timestamp: f64 = row.try_get("observed_at")?;
+        match observed_at {
+            Some(existing) if existing.to_bits() != timestamp.to_bits() => {
+                return Err(OpFailed(OperationError::Statement));
+            }
+            Some(_) => {}
+            None => observed_at = Some(timestamp),
+        }
         decoded.push(SampleRow {
             kind: row.try_get("kind")?,
             available: row.try_get("available")?,
@@ -248,52 +378,56 @@ fn decode_sample(rows: &[sqlx::postgres::PgRow]) -> Result<Vec<SampleRow>, OpFai
             oldest: row.try_get("oldest_available_seconds")?,
         });
     }
-    Ok(decoded)
-}
-
-#[derive(Clone, Copy, Default)]
-struct Counts {
-    available: i64,
-    scheduled: i64,
-    running: i64,
-    oldest: f64,
-}
-
-fn aggregate(registry: &crate::Registry, rows: &[SampleRow]) -> HashMap<&'static str, Counts> {
-    let mut stats: HashMap<&'static str, Counts> = HashMap::new();
-    for row in rows {
-        let label = registry
-            .get(&row.kind)
-            .map_or(UNREGISTERED_KIND, |registered| registered.name);
-        let entry = stats.entry(label).or_default();
-        entry.available = entry.available.saturating_add(row.available);
-        entry.scheduled = entry.scheduled.saturating_add(row.scheduled);
-        entry.running = entry.running.saturating_add(row.running);
-        if row.oldest > entry.oldest {
-            entry.oldest = row.oldest;
-        }
-    }
-    stats
-}
-
-fn publish(shared: &Shared, stats: &HashMap<&'static str, Counts>) {
-    for label in shared
-        .registry
-        .names()
-        .chain(std::iter::once(UNREGISTERED_KIND))
-    {
-        let counts = stats.get(label).copied().unwrap_or_default();
-        set_live(label, "available", counts.available);
-        set_live(label, "scheduled", counts.scheduled);
-        set_live(label, "running", counts.running);
-        metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => label).set(counts.oldest);
+    match observed_at {
+        Some(observed_at) => Ok(Sample {
+            rows: decoded,
+            observed_at,
+        }),
+        None => Err(OpFailed(OperationError::Statement)),
     }
 }
 
-fn set_live(kind: &'static str, state: &'static str, count: i64) {
+fn publish_sample(sample: &Sample) {
+    metrics::gauge!(LIVE_JOBS_SAMPLE_CAP_METRIC).set(LIVE_JOBS_SAMPLE_CAP_VALUE);
+    for row in &sample.rows {
+        set_live(&row.kind, "available", row.available);
+        set_live(&row.kind, "scheduled", row.scheduled);
+        set_live(&row.kind, "running", row.running);
+        metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => row.kind.clone()).set(row.oldest);
+    }
+    metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(sample.observed_at);
+    metrics::gauge!(OBSERVATION_SUCCESS_METRIC).set(1.0);
+}
+
+fn publish_unavailable(shared: &Shared, last_success_timestamp: f64) {
+    metrics::gauge!(LIVE_JOBS_SAMPLE_CAP_METRIC).set(LIVE_JOBS_SAMPLE_CAP_VALUE);
+    metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(last_success_timestamp);
+    metrics::gauge!(OBSERVATION_SUCCESS_METRIC).set(0.0);
+    for kind in shared.registry.names() {
+        set_live_unavailable(kind, "available");
+        set_live_unavailable(kind, "scheduled");
+        set_live_unavailable(kind, "running");
+        metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => kind).set(f64::NAN);
+    }
+}
+
+fn set_live(kind: impl Into<String>, state: &'static str, count: i64) {
+    let kind = kind.into();
+    let censored = count > LIVE_JOBS_SAMPLE_CAP;
     #[allow(clippy::cast_precision_loss)]
-    let value = count as f64;
-    metrics::gauge!(LIVE_JOBS_METRIC, "kind" => kind, "state" => state).set(value);
+    let published = count.min(LIVE_JOBS_SAMPLE_CAP) as f64;
+    metrics::gauge!(LIVE_JOBS_METRIC, "kind" => kind.clone(), "state" => state).set(published);
+    metrics::gauge!(LIVE_JOBS_CENSORED_METRIC, "kind" => kind, "state" => state).set(if censored {
+        1.0
+    } else {
+        0.0
+    });
+}
+
+fn set_live_unavailable(kind: impl Into<String>, state: &'static str) {
+    let kind = kind.into();
+    metrics::gauge!(LIVE_JOBS_METRIC, "kind" => kind.clone(), "state" => state).set(f64::NAN);
+    metrics::gauge!(LIVE_JOBS_CENSORED_METRIC, "kind" => kind, "state" => state).set(f64::NAN);
 }
 
 struct Refused(StartupError);

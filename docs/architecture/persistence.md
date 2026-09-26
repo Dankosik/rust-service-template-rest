@@ -182,9 +182,11 @@ against it; no other crate names the table. Enqueue (`infra_jobs::enqueue`)
 runs on the caller's `&mut PgConnection` inside the caller's transaction,
 under the caller's isolation level, with no transaction-control SQL; the job
 commits or rolls back with the caller's write under the commit-outcome
-policy this document records. Every worker statement runs in its own explicit
-`READ COMMITTED` transaction through `in_tx_with`, so a stricter server
-default cannot turn `SKIP LOCKED` claims into serialization failures.
+policy this document records. The insert is its only statement: UTF-8 is a
+schema precondition that the simplification migration enforces and the
+worker's startup check verifies. Every worker statement runs in its own
+explicit `READ COMMITTED` transaction through `in_tx_with`, so a stricter
+server default cannot turn `SKIP LOCKED` claims into serialization failures.
 
 The worker's sessions carry a derived `application_name` of the form
 `{service_name}-jobs-worker`, with the service name cut to at most 51 bytes
@@ -194,9 +196,12 @@ least `jobs.max_workers + 2` (one connection per concurrent attempt plus the
 engine's statements and the readiness probe); the worker refuses less. The
 statements are template-owned constants proven by the jobs database suite,
 so they adopt no `query!` (the deferral stays at the first feature-owned
-repository). The schema is the pack's one forward-only migration, ordinary
-history from the moment it merges. See the [guide](../background-jobs.md)
-and [Async Architecture](async.md).
+repository). The schema includes the creation migration and
+`20260925000001_simplify_background_jobs.sql`, which converts payload to
+JSONB and unique keys to C-collated text, adds trace-state, and requires a
+stopped-producer/worker conversion. Both are ordinary forward-only history
+from the moment they merge. See the [guide](../background-jobs.md) and
+[Async Architecture](async.md).
 <!-- template:end jobs:docs-persistence-jobs -->
 
 ## Decisions Recorded Here

@@ -9,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use infra_jobs::{EnqueueOptions, Enqueued, enqueue};
+use infra_jobs::{EnqueueOptions, Enqueued, JobKind, enqueue};
 use infra_postgres::PgPool;
 use integration_tests::jobs::{CREATE_PROBE_ATTEMPTS, Probe, ProbeAction};
 use nix::sys::signal::{Signal, kill};
@@ -187,6 +187,61 @@ fn await_completed_probe_metrics(url: &str) {
     panic!("metrics never showed the completed probe attempt:\n{scraped}");
 }
 
+fn capped_scheduled_probe_sample(body: &str) -> bool {
+    let mut scheduled = false;
+    let mut censored = false;
+    let mut cap = false;
+    let mut success = false;
+    let mut timestamp = false;
+    for line in body.lines() {
+        let value = line
+            .split_ascii_whitespace()
+            .last()
+            .and_then(|text| text.parse::<f64>().ok());
+        if line.starts_with("jobs_live_jobs{")
+            && line.contains("kind=\"test.probe\"")
+            && line.contains("state=\"scheduled\"")
+            && value == Some(1_000.0)
+        {
+            scheduled = true;
+        }
+        if line.starts_with("jobs_live_jobs_censored{")
+            && line.contains("kind=\"test.probe\"")
+            && line.contains("state=\"scheduled\"")
+            && value == Some(1.0)
+        {
+            censored = true;
+        }
+        if line.starts_with("jobs_live_jobs_sample_cap ") && value == Some(1_000.0) {
+            cap = true;
+        }
+        if line.starts_with("jobs_observation_success ") && value == Some(1.0) {
+            success = true;
+        }
+        if line.starts_with("jobs_observation_timestamp_seconds ")
+            && value.is_some_and(|seen| seen > 0.0)
+        {
+            timestamp = true;
+        }
+    }
+    scheduled && censored && cap && success && timestamp
+}
+
+fn await_capped_scheduled_probe_sample(url: &str) {
+    let deadline = Instant::now() + METRICS_BOUND;
+    let mut scraped = String::new();
+    while Instant::now() < deadline {
+        if let Ok((status, body)) = get(url) {
+            scraped = body;
+            if status == 200 && capped_scheduled_probe_sample(&scraped) {
+                return;
+            }
+        }
+        std::thread::sleep(POLL);
+    }
+    panic!("metrics never showed the capped scheduled sample:\n{scraped}");
+}
+
 async fn child_database_url(pool: &PgPool) -> String {
     let database: String = sqlx::query_scalar("SELECT current_database()")
         .fetch_one(pool)
@@ -352,6 +407,30 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
+    let inserted = sqlx::query(
+        "INSERT INTO background_jobs (kind, payload, state, not_before) \
+         SELECT $1, jsonb_build_object('action', 'succeed'), 'pending', \
+                statement_timestamp() + interval '1 hour' \
+         FROM generate_series(1, 1001)",
+    )
+    .bind(Probe::NAME)
+    .execute(&pool)
+    .await
+    .expect("the scheduled jobs");
+    assert_eq!(inserted.rows_affected(), 1_001);
+    let database_url = child_database_url(&pool).await;
+    let worker = Worker::spawn(&database_url, &[]);
+    let diagnostics = listener_addr(&worker, "diagnostics listener bound");
+    worker.await_record("jobs_worker_ready");
+    await_capped_scheduled_probe_sample(&format!("http://{diagnostics}/metrics"));
+
+    worker.terminate();
+    let (code, stderr) = worker.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPool) {
     prepare(&pool).await;
     let id = enqueue_committed(&pool, ProbeAction::WaitForCancellation).await;
@@ -369,7 +448,7 @@ async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPo
     worker.terminate();
     let forced = worker.await_record("drain_forced");
     assert_eq!(forced["reason"], "budget", "{forced}");
-    let released = worker.await_record("attempts_released");
+    let released = worker.await_record("attempts_finished");
     assert_eq!(released["cancelled"], 1, "{released}");
     assert_eq!(released["released"], 1, "{released}");
     assert_eq!(released["timed_out"], false, "{released}");

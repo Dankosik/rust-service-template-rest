@@ -15,8 +15,11 @@
 // for unwrap/expect/panic do not apply to them.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+#[path = "../support/commit_proxy.rs"]
+mod commit_proxy;
 mod enqueue;
 mod execution;
+mod migration;
 mod process;
 // template:begin jobs-http-idempotency:jobs-http-idempotency-module
 mod http_idempotency;
