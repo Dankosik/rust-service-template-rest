@@ -1,30 +1,30 @@
 //! The operations this crate owns: the platform probes, seeded with the
 //! problem components every operation references.
 //!
-//! [`router`] returns a [`ContractRouter`], so the axum routes, their OpenAPI
-//! description, and actual registered methods stay together until the service
-//! crate finalizes policy and supplies state. New operations join a feature
-//! carrier, never this file or the hardened chain.
+//! [`router`] returns an [`OpenApiRouter`], so the axum routes and their
+//! OpenAPI description stay together until the service crate finalizes policy
+//! and supplies state. New operations join a feature carrier, never this file
+//! or the hardened chain.
 
 // Probe handlers live in `probes`; the readiness reader comes from the
 // `health` crate.
-use crate::contract::ContractRouter;
 use crate::probes;
 use crate::problem::responses::ProblemComponents;
-use crate::routes;
 use health::ReadinessReader;
 use utoipa::OpenApi;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// Route templates served without an access-log line unless enabled.
 pub(crate) const HEALTH_PROBE_ROUTES: &[&str] = &[probes::LIVE_PATH, probes::READY_PATH];
 
 /// The probe routes with their contract and the problem components, as one
-/// [`ContractRouter`] whose [`ReadinessReader`] state is still unapplied: the
+/// [`OpenApiRouter`] whose [`ReadinessReader`] state is still unapplied: the
 /// service crate's `api::contract` merges this value, finalizes policy, then
 /// calls `with_state` before [`crate::harden`]. One `routes!` call per path:
 /// the macro groups the methods of a single path.
-pub fn router() -> ContractRouter<ReadinessReader> {
-    ContractRouter::with_openapi(ProblemComponents::openapi())
+pub fn router() -> OpenApiRouter<ReadinessReader> {
+    OpenApiRouter::with_openapi(ProblemComponents::openapi())
         .routes(routes!(probes::live))
         .routes(routes!(probes::ready))
 }
@@ -67,9 +67,8 @@ mod tests {
 
     fn app(reader: ReadinessReader) -> (axum::Router, serde_json::Value) {
         let contract = router();
-        let document = serde_json::to_value(contract.document()).unwrap();
-        let routes = contract
-            .finalize_public()
+        let document = serde_json::to_value(contract.get_openapi()).unwrap();
+        let routes = crate::finalize_public(contract)
             .expect("the probe contract is public")
             .with_state(reader);
         (harden(routes, &options()), document)
@@ -109,7 +108,7 @@ mod tests {
 
     #[test]
     fn document_paths_are_the_access_log_probe_routes() {
-        let document = router().into_document();
+        let document = router().into_openapi();
         assert_eq!(
             document
                 .paths

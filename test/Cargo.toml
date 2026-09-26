@@ -106,6 +106,7 @@ secrecy = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 utoipa = { workspace = true, features = ["macros"] }
+utoipa-axum = { workspace = true }
 async-trait = { workspace = true }
 # template:end http-idempotency-mounted:test-http-idempotency-mounted-dependencies
 # template:begin jobs:test-jobs-dev-dependencies

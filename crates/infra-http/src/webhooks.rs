@@ -17,11 +17,11 @@ use health::ReadinessReader;
 use infra_webhooks::inbound::{ReceiptOutcome, ReceiveError, Receiver};
 use infra_webhooks::protocol::MAX_BODY_BYTES;
 use utoipa::OpenApi;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
-use crate::ContractRouter;
 use crate::problem::responses::WebhookProblemResponses;
 use crate::problem::{Code, Problem};
-use crate::routes;
 
 /// Bounded result labels for webhook ingress telemetry.
 pub const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
@@ -62,12 +62,12 @@ impl WebhookState {
     }
 }
 
-/// Tracked public webhook route.  It shares the service's readiness state;
-/// the webhook receiver is a route extension so existing probe state and the
-/// hardened router stay unchanged.
+/// The public webhook route with its annotated contract.  It shares the
+/// service's readiness state; the webhook receiver is a route extension so
+/// existing probe state and the hardened router stay unchanged.
 #[must_use]
-pub fn router() -> ContractRouter<ReadinessReader> {
-    ContractRouter::with_openapi(crate::problem::responses::ProblemComponents::openapi())
+pub fn router() -> OpenApiRouter<ReadinessReader> {
+    OpenApiRouter::with_openapi(crate::problem::responses::ProblemComponents::openapi())
         .routes(routes!(receive))
 }
 
@@ -171,8 +171,7 @@ mod tests {
                 failure_threshold: 1,
             })
             .await;
-        let app = router()
-            .finalize_public()
+        let app = crate::finalize_public(router())
             .expect("the webhook operation is explicitly public")
             .with_state(readiness.reader())
             .layer(Extension(WebhookState::inert()));

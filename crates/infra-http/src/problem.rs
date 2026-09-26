@@ -42,7 +42,6 @@ pub enum Code {
     // template:begin authn:http-authentication-codes
     AuthenticationRequired,
     AuthenticationMalformed,
-    AuthenticationOversize,
     AuthenticationInvalid,
     AuthenticationUnavailable,
     // template:end authn:http-authentication-codes
@@ -138,12 +137,6 @@ impl Code {
                 status: StatusCode::BAD_REQUEST,
                 title: "authentication malformed",
                 type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.1"),
-            },
-            Code::AuthenticationOversize => CodeMeta {
-                wire: "authentication_oversize",
-                status: StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-                title: "authentication oversize",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc6585", "#section-5"),
             },
             Code::AuthenticationInvalid => CodeMeta {
                 wire: "authentication_invalid",
@@ -514,11 +507,6 @@ pub mod responses {
     #[response(content_type = "application/problem+json")]
     pub struct AuthenticationForbidden(pub Problem);
 
-    /// bearer authentication exceeds the admitted header value size
-    #[derive(Debug, ToResponse)]
-    #[response(content_type = "application/problem+json")]
-    pub struct AuthenticationOversize(pub Problem);
-
     /// bearer authentication trust or provider is unavailable
     #[derive(Debug, ToResponse)]
     #[response(content_type = "application/problem+json")]
@@ -527,7 +515,7 @@ pub mod responses {
     /// the enclosing request budget expired before a response committed
     #[derive(Debug, ToResponse)]
     #[response(content_type = "application/problem+json")]
-    pub struct AuthenticationTimeout(pub Problem);
+    pub struct RequestTimeout(pub Problem);
 
     /// Responses every protected operation declares in addition to its own
     /// success shape. Authentication never returns 403 itself; that status is
@@ -540,12 +528,10 @@ pub mod responses {
         Unauthorized(#[ref_response] AuthenticationUnauthorized),
         #[response(status = 403)]
         Forbidden(#[ref_response] AuthenticationForbidden),
-        #[response(status = 431)]
-        Oversize(#[ref_response] AuthenticationOversize),
         #[response(status = 503)]
         Unavailable(#[ref_response] AuthenticationUnavailable),
         #[response(status = 504)]
-        Timeout(#[ref_response] AuthenticationTimeout),
+        Timeout(#[ref_response] RequestTimeout),
     }
     // template:end authn:http-authentication-problem-responses
 
@@ -581,7 +567,7 @@ pub mod responses {
             // template:end inbound-webhooks:http-webhook-problem-components
             // template:begin authn:http-authentication-problem-components
             , AuthenticationMalformed, AuthenticationUnauthorized, AuthenticationForbidden,
-            AuthenticationOversize, AuthenticationUnavailable, AuthenticationTimeout
+            AuthenticationUnavailable, RequestTimeout
             // template:end authn:http-authentication-problem-components
         )
     ))]

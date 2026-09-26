@@ -446,8 +446,6 @@ mod tests {
             ("APP__AUTHN__CACHE_ENABLED", ""),
             ("APP__AUTHN__CACHE_ENABLED", "not-a-boolean"),
             ("APP__AUTHN__CACHE_CAPACITY", ""),
-            ("APP__AUTHN__CACHE_CAPACITY", "0"),
-            ("APP__AUTHN__CACHE_CAPACITY", "1025"),
             ("APP__AUTHN__CACHE_CAPACITY", "-1"),
             ("APP__AUTHN__CACHE_CAPACITY", "1.5"),
             ("APP__AUTHN__PROVIDER_CONCURRENCY", ""),

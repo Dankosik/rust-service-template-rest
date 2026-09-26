@@ -469,7 +469,7 @@ def _assert_introspection_cache_output(initializer, nodes: dict[str, Node], auth
             rb"\bcache_capacity\s*:\s*usize\b",
             rb"\bcache_ttl\s*:\s*Duration\b",
         ),
-        "crates/infra-bearerauthn/src/lib.rs": (
+        "crates/infra-bearerauthn/src/introspection.rs": (
             rb"\bpub\s+struct\s+IntrospectionCacheOptions\b",
             rb"\bpub\s+cache\s*:\s*Option<IntrospectionCacheOptions>",
         ),

@@ -20,15 +20,15 @@ use http_body_util::{BodyExt, Full, LengthLimitError};
 use infra_idempotency_store::Store;
 use utoipa::OpenApi as _;
 
-use super::declaration::{self, CompositionError, Rule};
+use super::declaration::{self, CompositionError};
 use super::execute::{Attempt, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, Provenance, sanitized};
 use super::identity;
 use super::openapi::{IdempotencyComponents, KEY_HEADER, REPLAYED_HEADER};
 use crate::authn::VerifiedPrincipal;
-use crate::contract::RegisteredRoutes;
 use crate::harden::RequestDeadline;
 use crate::problem::{Code, Problem};
 use crate::request_id;
+use utoipa_axum::router::UtoipaMethodRouter;
 
 const INVALID_KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
 const INVALID_KEY_REASON: &str =
@@ -86,8 +86,8 @@ impl Composer {
     /// support idempotent execution and replay.
     pub fn route<S>(
         &mut self,
-        mut routes: RegisteredRoutes<S>,
-    ) -> Result<RegisteredRoutes<S>, CompositionError>
+        mut routes: UtoipaMethodRouter<S>,
+    ) -> Result<UtoipaMethodRouter<S>, CompositionError>
     where
         S: Clone + Send + Sync + 'static,
     {
@@ -96,20 +96,16 @@ impl Composer {
             metrics::Unit::Count,
             "Outcomes of requests to idempotent operations, by outcome."
         );
-        let operation = routes
-            .documented_paths_mut()
-            .ok_or_else(|| CompositionError::new("registered route", Rule::Shape))
-            .and_then(declaration::prepare);
-        let operation = operation?;
+        let operation = declaration::prepare(&mut routes.1)?;
         let keys = KeyLayer {
             store: self.store.clone(),
             operation: Arc::from(operation),
         };
         self.operations += 1;
-        Ok(routes.map_method_routers(|method_router| {
-            let keys = keys.clone();
-            method_router.route_layer(middleware::from_fn_with_state(keys, handle_key))
-        }))
+        routes.2 = routes
+            .2
+            .route_layer(middleware::from_fn_with_state(keys, handle_key));
+        Ok(routes)
     }
 
     /// Register the generated idempotency Problem components for the contract

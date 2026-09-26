@@ -163,6 +163,10 @@ fn outbound_histogram_builder(builder: PrometheusBuilder) -> Result<PrometheusBu
 /// spans, or access logs; the address is trusted-private. `http.*`
 /// `ServerOptions` still apply as shared transport policy (header timeout
 /// and size, connection cap, drain), not request-level policy.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the private Prometheus listener is outside the application OpenAPI contract"
+)]
 pub fn diagnostics_router(metrics: Metrics) -> Router {
     Router::new()
         .route("/metrics", get(render))

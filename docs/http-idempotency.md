@@ -17,8 +17,9 @@ name is not part of that durable identity.
 
 ## Compose a protected operation
 
-`Composer::route(infra_http::routes!(handler))?` is the sole opt-in. It returns
-`Result<RegisteredRoutes<_>, CompositionError>` after it adds the required
+`Composer::route(routes)?` is the sole opt-in, using an annotated route tuple
+bound as shown below. It returns
+`Result<UtoipaMethodRouter<_>, CompositionError>` after it adds the required
 `Idempotency-Key` header and generated Problem responses to the route value
 that is served. The service assembly calls `finish(self) -> Activation` after
 all routes are composed; activation counts those routes and does not inspect
@@ -73,7 +74,7 @@ precedes key handling without per-operation wrapping:
 
 ```rust,ignore
 // crates/service/src/api.rs, inside contract(idempotency: &mut Composer):
-.routes(idempotency.route(infra_http::routes!(widgets::http::create_widget))?)
+.routes(idempotency.route(utoipa_axum::routes!(widgets::http::create_widget))?)
 ```
 
 Regenerate and review the OpenAPI document after composition changes. The

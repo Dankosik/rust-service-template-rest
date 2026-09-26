@@ -39,8 +39,9 @@ it against the built binary.
 <!-- template:begin authn:docs-lifecycle-authn -->
 With authentication retained, bootstrap prepares the selected verifier before
 finalizing the complete contract and binding the server. Disabled runtime mode
-is inert only for a public-only contract; protected policy refuses startup.
-Introspection construction does no provider I/O; JWT startup discovers metadata
+uses public finalization without a verifier; protected policy refuses startup.
+Bootstrap validates introspection cache options even when caching is disabled,
+before any listener or provider I/O. Introspection construction does no provider I/O; JWT startup discovers metadata
 and installs a usable JWKS inside its bounded startup budget. A JWT refresh
 future joins the existing `TaskTracker` with a child cancellation token.
 Authentication neither adds a readiness probe nor changes public health behavior.

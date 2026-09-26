@@ -47,6 +47,10 @@ async fn inspect_query(
 }
 
 #[tokio::test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "this test-local router exercises library extractors rather than application operations"
+)]
 async fn typed_header_and_query_extractors_compose_on_axum() {
     let server = TestServer::new(Router::new().route("/tags", get(inspect_query)));
     let response = server

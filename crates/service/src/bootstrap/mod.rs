@@ -398,7 +398,6 @@ async fn prepare_auth(
                     },
                     algorithms: algorithms.iter().copied().map(jwt_algorithm).collect(),
                 },
-                tracker.clone(),
                 cancel.child_token(),
             )
             .await
@@ -424,11 +423,12 @@ async fn prepare_auth(
             cache_ttl,
         } => {
             let issuer = provider_url("oidc-introspection", "authn.issuer", issuer)?;
-            let endpoint = provider_url(
-                "oidc-introspection",
-                "authn.introspection_endpoint",
-                introspection_endpoint,
-            )?;
+            let endpoint = infra_bearerauthn::ProviderUrl::parse_endpoint(introspection_endpoint)
+                .map_err(|source| BootstrapError::AuthenticationPreparation {
+                mode: "oidc-introspection",
+                key: "authn.introspection_endpoint",
+                source,
+            })?;
             let client_secret =
                 introspection_client_secret
                     .clone()
@@ -443,6 +443,13 @@ async fn prepare_auth(
                     mode: "oidc-introspection",
                     key: "authn.provider_concurrency",
                 })?;
+            let cache =
+                infra_bearerauthn::IntrospectionCacheOptions::new(*cache_capacity, *cache_ttl)
+                    .map_err(|source| BootstrapError::AuthenticationPreparation {
+                        mode: "oidc-introspection",
+                        key: "authn.cache_capacity/authn.cache_ttl",
+                        source,
+                    })?;
             infra_bearerauthn::prepare_introspection(infra_bearerauthn::IntrospectionOptions {
                 issuer,
                 audiences: audience.as_slice().to_vec(),
@@ -450,10 +457,7 @@ async fn prepare_auth(
                 client_id: introspection_client_id.clone(),
                 client_secret,
                 provider_concurrency,
-                cache: cache_enabled.then_some(infra_bearerauthn::IntrospectionCacheOptions {
-                    capacity: *cache_capacity,
-                    ttl: *cache_ttl,
-                }),
+                cache: cache_enabled.then_some(cache),
             })
             .map(|verifier| PreparedAuth::Enabled(Box::new(verifier)))
             .map_err(|source| BootstrapError::AuthenticationPreparation {
@@ -647,15 +651,9 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
     )
     .map_err(BootstrapError::HttpComposition)?;
     let routes = match auth {
-        PreparedAuth::None => contract.finalize_public()?,
+        PreparedAuth::None => infra_http::finalize_public(contract)?,
         // template:begin authn:bootstrap-authn-finalize-enabled
-        PreparedAuth::Enabled(verifier) => infra_http::authn::finalize(
-            contract,
-            *verifier,
-            usize::try_from(config.http.max_header_bytes.as_u64())
-                .unwrap_or(usize::MAX)
-                .min(32 * 1024),
-        )?,
+        PreparedAuth::Enabled(verifier) => infra_http::authn::finalize(contract, *verifier)?,
         // template:end authn:bootstrap-authn-finalize-enabled
     };
     // template:begin http-idempotency:bootstrap-http-idempotency-activation
@@ -815,6 +813,39 @@ mod tests {
             matches!(options.sampler, ResolvedSampler::TraceIdRatio(ratio) if (ratio - 0.5).abs() < f64::EPSILON)
         );
     }
+
+    // template:begin oidc-introspection:bootstrap-introspection-cache-tests
+    #[tokio::test]
+    async fn introspection_preparation_validates_cache_options_even_when_disabled() {
+        for (capacity, ttl) in [(0, "30s"), (1025, "30s"), (256, "0s"), (256, "301s")] {
+            let config = Config {
+                authn: serde_json::from_value(serde_json::json!({
+                "mode": "oidc-introspection",
+                "issuer": "https://issuer.example.test",
+                "audience": "api",
+                "introspection_endpoint": "https://issuer.example.test/introspect?tenant=private",
+                "introspection_client_id": "service",
+                "introspection_client_secret": "fixture-secret",
+                "cache_enabled": false,
+                "cache_capacity": capacity,
+                "cache_ttl": ttl,
+            }))
+                .expect("raw typed configuration"),
+                ..Config::default()
+            };
+            let tracker = TaskTracker::new();
+            let result = prepare_auth(&config, &tracker, &CancellationToken::new()).await;
+            assert!(matches!(
+                result,
+                Err(BootstrapError::AuthenticationPreparation {
+                    key: "authn.cache_capacity/authn.cache_ttl",
+                    ..
+                })
+            ));
+            assert!(tracker.is_empty());
+        }
+    }
+    // template:end oidc-introspection:bootstrap-introspection-cache-tests
 
     // template:begin http-idempotency:bootstrap-http-idempotency-tests
     /// Start an active boundary of one operation over `store`, on a fresh

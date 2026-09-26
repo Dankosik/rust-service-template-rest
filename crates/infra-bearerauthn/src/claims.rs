@@ -1,8 +1,8 @@
 //! Typed claim decoding and application identity normalization.
 
 use crate::{Failure, Principal, VerificationError, VerificationReason};
-use serde::{Deserialize, Deserializer};
-use std::collections::BTreeSet;
+use serde::Deserialize;
+use std::{collections::BTreeSet, sync::Arc};
 // template:begin oidc-jwt:authn-claims-jwt-import
 use crate::TokenProfile;
 // template:end oidc-jwt:authn-claims-jwt-import
@@ -33,14 +33,18 @@ impl ClaimPolicy {
 /// Serde checks the consumed shapes and duplicate fields; verified decode's
 /// Validation owns issuer, audience, expiry and not-before checks.
 #[derive(Deserialize)]
+#[allow(
+    clippy::option_option,
+    reason = "serde double_option preserves missing and explicit null while derived fields reject duplicates"
+)]
 pub(crate) struct JwtClaims {
     #[serde(rename = "iss")]
     _issuer: String,
     #[serde(rename = "aud")]
     _audience: Audience,
     pub(crate) exp: u64,
-    #[serde(default, rename = "nbf")]
-    _not_before: Nullable<u64>,
+    #[serde(default, rename = "nbf", with = "serde_with::rust::double_option")]
+    _not_before: Option<Option<u64>>,
     #[serde(default)]
     sub: Option<String>,
     #[serde(default)]
@@ -51,10 +55,10 @@ pub(crate) struct JwtClaims {
     appid: Option<String>,
     #[serde(default)]
     cid: Option<String>,
-    #[serde(default)]
-    scope: Nullable<String>,
-    #[serde(default)]
-    scp: Nullable<Vec<String>>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    scope: Option<Option<serde_json::Value>>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    scp: Option<Option<serde_json::Value>>,
     #[serde(default)]
     jti: Option<String>,
     #[serde(default)]
@@ -66,72 +70,44 @@ pub(crate) struct JwtClaims {
 /// Keep the fixed consumed fields until active is known. This struct rejects
 /// duplicates even for inactive responses without interpreting their claim types.
 #[derive(Deserialize)]
+#[allow(
+    clippy::option_option,
+    reason = "serde double_option preserves missing and explicit null while derived fields reject duplicates"
+)]
 struct ActiveEnvelope {
     active: bool,
-    #[serde(default)]
-    iss: Nullable<serde_json::Value>,
-    #[serde(default)]
-    aud: Nullable<serde_json::Value>,
-    #[serde(default)]
-    exp: Nullable<serde_json::Value>,
-    #[serde(default)]
-    nbf: Nullable<serde_json::Value>,
-    #[serde(default)]
-    sub: Nullable<serde_json::Value>,
-    #[serde(default)]
-    client_id: Nullable<serde_json::Value>,
-    #[serde(default)]
-    scope: Nullable<serde_json::Value>,
-    #[serde(default)]
-    scp: Nullable<serde_json::Value>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    iss: Option<Option<serde_json::Value>>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    aud: Option<Option<serde_json::Value>>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    exp: Option<Option<serde_json::Value>>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    nbf: Option<Option<serde_json::Value>>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    sub: Option<Option<serde_json::Value>>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    client_id: Option<Option<serde_json::Value>>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    scope: Option<Option<serde_json::Value>>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    scp: Option<Option<serde_json::Value>>,
 }
 
+#[allow(
+    clippy::option_option,
+    reason = "typed decoding must preserve the admitted field distinction between missing, null and value"
+)]
 fn typed_claim<T: serde::de::DeserializeOwned>(
-    raw: Nullable<serde_json::Value>,
-) -> Result<Nullable<T>, VerificationError> {
-    match raw {
-        Nullable::Missing => Ok(Nullable::Missing),
-        Nullable::Null => Ok(Nullable::Null),
-        Nullable::Value(value) => {
-            serde_json::from_value(value)
-                .map(Nullable::Value)
-                .map_err(|_| {
-                    VerificationError::new(
-                        Failure::Unavailable,
-                        VerificationReason::MalformedClaims,
-                    )
-                })
-        }
-    }
+    raw: Option<Option<serde_json::Value>>,
+) -> Result<Option<Option<T>>, VerificationError> {
+    raw.map(|value| value.map(serde_json::from_value).transpose())
+        .transpose()
+        .map_err(|_| {
+            VerificationError::new(Failure::Unavailable, VerificationReason::MalformedClaims)
+        })
 }
 // template:end oidc-introspection:authn-claims-introspection-envelope
-
-/// Preserve absence separately from a supplied numeric null.
-#[derive(Default)]
-pub(crate) enum Nullable<T> {
-    #[default]
-    Missing,
-    Null,
-    Value(T),
-}
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for Nullable<T> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(match Option::<T>::deserialize(deserializer)? {
-            Some(value) => Self::Value(value),
-            None => Self::Null,
-        })
-    }
-}
-impl<T> Nullable<T> {
-    // template:begin oidc-introspection:authn-claims-optional-value
-    fn optional(self) -> Option<T> {
-        match self {
-            Self::Value(value) => Some(value),
-            Self::Missing | Self::Null => None,
-        }
-    }
-    // template:end oidc-introspection:authn-claims-optional-value
-}
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -160,6 +136,7 @@ pub(crate) fn validate_jwt_claims(
     policy: &ClaimPolicy,
     token_profile: TokenProfile,
     now: u64,
+    payload: Arc<str>,
 ) -> Result<Principal, VerificationError> {
     let client_id = coherent_identity([
         claims.client_id.as_deref(),
@@ -191,13 +168,18 @@ pub(crate) fn validate_jwt_claims(
             return Err(VerificationError::invalid(VerificationReason::Profile));
         }
     }
-    let scopes = normalize_scopes(&claims.scope, &claims.scp, Failure::Invalid)?;
+    let scopes = normalize_scopes(
+        claims.scope.as_ref().and_then(Option::as_ref),
+        claims.scp.as_ref().and_then(Option::as_ref),
+        Failure::Invalid,
+    )?;
     Ok(Principal::new(
         policy.issuer.clone(),
         subject,
         client_id,
         scopes,
         claims.exp,
+        payload,
     ))
 }
 
@@ -264,31 +246,35 @@ pub(crate) fn validate_introspection_claims(
     let malformed =
         || VerificationError::new(Failure::Unavailable, VerificationReason::MalformedClaims);
     let missing = || VerificationError::invalid(VerificationReason::MissingClaim);
-    let claims: ActiveEnvelope = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let payload: Box<serde_json::value::RawValue> =
+        serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let claims: ActiveEnvelope = serde_json::from_str(payload.get()).map_err(|_| malformed())?;
     if !claims.active {
         return Err(VerificationError::invalid(VerificationReason::Inactive));
     }
     // Decode every supplied field before classifying missing evidence: a wrong
     // supplied type remains a provider failure even alongside an omitted claim.
-    let issuer: Option<String> = typed_claim(claims.iss)?.optional();
-    let audience: Option<Audience> = typed_claim(claims.aud)?.optional();
-    let expiry: Nullable<u64> = typed_claim(claims.exp)?;
-    let not_before: Nullable<u64> = typed_claim(claims.nbf)?;
-    let subject: Option<String> = typed_claim(claims.sub)?.optional();
-    let client_id: Option<String> = typed_claim(claims.client_id)?.optional();
-    let scope: Nullable<String> = typed_claim(claims.scope)?;
-    let scp: Nullable<Vec<String>> = typed_claim(claims.scp)?;
+    let issuer: Option<String> = typed_claim(claims.iss)?.flatten();
+    let audience: Option<Audience> = typed_claim(claims.aud)?.flatten();
+    let expiry: Option<Option<u64>> = typed_claim(claims.exp)?;
+    let not_before: Option<Option<u64>> = typed_claim(claims.nbf)?;
+    let subject: Option<String> = typed_claim(claims.sub)?.flatten();
+    let client_id: Option<String> = typed_claim(claims.client_id)?.flatten();
     let expiry = match expiry {
-        Nullable::Null => return Err(malformed()),
-        Nullable::Missing => None,
-        Nullable::Value(value) => Some(value),
+        Some(None) => return Err(malformed()),
+        None => None,
+        Some(Some(value)) => Some(value),
     };
     let not_before = match not_before {
-        Nullable::Null => return Err(malformed()),
-        Nullable::Missing => None,
-        Nullable::Value(value) => Some(value),
+        Some(None) => return Err(malformed()),
+        None => None,
+        Some(Some(value)) => Some(value),
     };
-    let scopes = normalize_scopes(&scope, &scp, Failure::Unavailable)?;
+    let scopes = normalize_scopes(
+        claims.scope.as_ref().and_then(Option::as_ref),
+        claims.scp.as_ref().and_then(Option::as_ref),
+        Failure::Unavailable,
+    )?;
     let (issuer, audience, expiry) = (
         issuer.ok_or_else(missing)?,
         audience.ok_or_else(missing)?,
@@ -325,7 +311,14 @@ pub(crate) fn validate_introspection_claims(
         return Err(missing());
     }
     Ok(VerifiedIntrospection {
-        principal: Principal::new(policy.issuer.clone(), subject, client_id, scopes, expiry),
+        principal: Principal::new(
+            policy.issuer.clone(),
+            subject,
+            client_id,
+            scopes,
+            expiry,
+            Arc::from(payload.get()),
+        ),
         not_before,
     })
 }
@@ -340,41 +333,27 @@ fn identity(value: &str) -> Result<&str, VerificationError> {
 }
 
 fn normalize_scopes(
-    scope: &Nullable<String>,
-    scp: &Nullable<Vec<String>>,
+    scope: Option<&serde_json::Value>,
+    scp: Option<&serde_json::Value>,
     malformed: Failure,
 ) -> Result<Vec<String>, VerificationError> {
     let error = || VerificationError::new(malformed, VerificationReason::Scope);
-    let from_scope = match scope {
-        Nullable::Missing | Nullable::Null => None,
-        Nullable::Value(value) => Some(if value.is_empty() {
-            BTreeSet::new()
-        } else {
-            value
-                .split(' ')
-                .map(|token| scope_token(token).ok_or_else(error).map(ToOwned::to_owned))
-                .collect::<Result<BTreeSet<_>, _>>()?
-        }),
+    let selected = scope.or(scp);
+    let values = match selected {
+        None => return Ok(Vec::new()),
+        Some(serde_json::Value::String(value)) if value.is_empty() => return Ok(Vec::new()),
+        Some(serde_json::Value::String(value)) => value.split(' ').collect::<Vec<_>>(),
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .map(|value| value.as_str().ok_or_else(error))
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => return Err(error()),
     };
-    let from_scp = match scp {
-        Nullable::Missing | Nullable::Null => None,
-        Nullable::Value(values) => Some(
-            values
-                .iter()
-                .map(|value| scope_token(value).ok_or_else(error).map(ToOwned::to_owned))
-                .collect::<Result<BTreeSet<_>, _>>()?,
-        ),
-    };
-    if let (Some(left), Some(right)) = (&from_scope, &from_scp)
-        && left != right
-    {
-        return Err(error());
-    }
-    Ok(from_scope
-        .or(from_scp)
-        .unwrap_or_default()
+    values
         .into_iter()
-        .collect())
+        .map(|value| scope_token(value).ok_or_else(error).map(ToOwned::to_owned))
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map(|values| values.into_iter().collect())
 }
 
 fn scope_token(value: &str) -> Option<&str> {
@@ -405,8 +384,14 @@ mod tests {
     #[test]
     fn typed_jwt_claims_normalize_matching_scope_forms() {
         let claims: JwtClaims = serde_json::from_str(r#"{"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":"read write read","scp":["write","read"]}"#).unwrap();
-        let principal =
-            validate_jwt_claims(&claims, &policy(), TokenProfile::ResourceServer, 100).unwrap();
+        let principal = validate_jwt_claims(
+            &claims,
+            &policy(),
+            TokenProfile::ResourceServer,
+            100,
+            std::sync::Arc::from("{}"),
+        )
+        .unwrap();
         assert_eq!(principal.scopes(), ["read", "write"]);
         assert_eq!(principal.expires_at(), 130);
     }
@@ -415,11 +400,14 @@ mod tests {
 
     // template:begin oidc-introspection:authn-claims-introspection-shape-test
     #[test]
-    fn provider_claim_shape_and_scope_disagreement_remain_unavailable() {
+    fn selected_scope_ignores_conflicting_fallback_and_null_nbf_is_unavailable() {
         let response = br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":"read","scp":["write"]}"#;
         assert_eq!(
-            validate_introspection_claims(response, &policy(), 100).map_err(|error| error.failure),
-            Err(Failure::Unavailable)
+            validate_introspection_claims(response, &policy(), 100)
+                .unwrap()
+                .into_principal()
+                .scopes(),
+            ["read"]
         );
         assert_eq!(
             validate_introspection_claims(br#"{"active":false,"iss":false}"#, &policy(), 100)
@@ -443,6 +431,8 @@ mod tests {
         for response in [
             br#"{"active":false,"sub":"one","sub":"two"}"#.as_slice(),
             br#"{"active":true,"sub":null,"sub":"two"}"#,
+            br#"{"active":false,"scope":null,"scope":"read"}"#,
+            br#"{"active":false,"scp":null,"scp":[]}"#,
         ] {
             assert_eq!(
                 validate_introspection_claims(response, &policy(), 100)
@@ -466,11 +456,38 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn typed_claim_access_preserves_evidence_and_custom_last_member_semantics() {
+        #[derive(serde::Deserialize)]
+        struct ApplicationClaims {
+            tenant: String,
+            scope: Vec<String>,
+            sub: String,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        struct WrongShape {
+            #[serde(rename = "tenant")]
+            _tenant: u64,
+        }
+        let principal = validate_introspection_claims(
+            br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":["write","read","read"],"tenant":"old","tenant":"private-value"}"#,
+            &policy(), 100,
+        ).unwrap().into_principal();
+        let claims = principal.claims::<ApplicationClaims>().unwrap();
+        assert_eq!(claims.tenant, "private-value");
+        assert_eq!(claims.scope, ["write", "read", "read"]);
+        assert_eq!(claims.sub, "subject");
+        assert_eq!(principal.scopes(), ["read", "write"]);
+        let error = principal.claims::<WrongShape>().unwrap_err();
+        assert_eq!(error, crate::ClaimAccessError::InvalidShape);
+        assert!(!format!("{error:?} {error} {principal:?}").contains("private-value"));
+    }
+
     // template:end oidc-introspection:authn-claims-introspection-shape-test
 
     // template:begin oidc-introspection:authn-claims-introspection-missing-test
     #[test]
-    fn repair_regression_missing_active_claims_are_invalid_not_provider_failures() {
+    fn missing_active_claims_are_invalid_not_provider_failures() {
         let complete = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject"});
         for claim in ["iss", "aud", "exp", "sub"] {
             let mut response = complete.clone();
@@ -509,10 +526,22 @@ mod tests {
     // template:end oidc-introspection:authn-claims-introspection-missing-test
 
     #[test]
-    fn repair_regression_explicit_empty_scope_disagrees_with_nonempty_scp() {
+    fn selected_scope_has_precedence_and_accepts_both_shapes() {
         for (extra, expected) in [
-            (serde_json::json!({"scope":"","scp":["read"]}), None),
-            (serde_json::json!({"scope":"read","scp":[]}), None),
+            (serde_json::json!({"scope":"","scp":["read"]}), Some(vec![])),
+            (
+                serde_json::json!({"scope":"read","scp":[]}),
+                Some(vec!["read"]),
+            ),
+            (
+                serde_json::json!({"scope":["read"],"scp":42}),
+                Some(vec!["read"]),
+            ),
+            (
+                serde_json::json!({"scope":null,"scp":"write read"}),
+                Some(vec!["read", "write"]),
+            ),
+            (serde_json::json!({"scope":42,"scp":"read"}), None),
             (
                 serde_json::json!({"scope":null,"scp":["read"]}),
                 Some(vec!["read"]),
@@ -549,8 +578,13 @@ mod tests {
             // template:begin oidc-jwt:authn-claims-scope-jwt-assertion
             let claims: JwtClaims = serde_json::from_value(response).unwrap();
             {
-                let result =
-                    validate_jwt_claims(&claims, &policy(), TokenProfile::ResourceServer, 100);
+                let result = validate_jwt_claims(
+                    &claims,
+                    &policy(),
+                    TokenProfile::ResourceServer,
+                    100,
+                    std::sync::Arc::from("{}"),
+                );
                 if let Some(expected) = &expected {
                     assert_eq!(result.unwrap().scopes(), expected.as_slice());
                 } else {

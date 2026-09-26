@@ -446,8 +446,7 @@ async fn missing_consumer_snoozes_without_spending_an_attempt(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn mounted_percent_decoded_endpoint_reaches_signature_rejection(pool: PgPool) {
-    let router = infra_http::webhooks::router()
-        .finalize_public()
+    let router = infra_http::finalize_public(infra_http::webhooks::router())
         .expect("webhook operation is public");
     let app = infra_http::webhooks::with_webhook_state(
         router,

@@ -1,7 +1,5 @@
 //! Final contract-driven inbound bearer authentication.
 
-use std::collections::BTreeMap;
-
 use axum::Router;
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
@@ -9,23 +7,19 @@ use axum::http::request::Parts;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use infra_bearerauthn::{Failure, Principal, Verifier, parse_bearer};
-use utoipa::openapi::{OpenApi, path::Operation};
+use utoipa_axum::router::OpenApiRouter;
 
-use crate::contract::{ContractRouter, FinalizeError, RouteMethod, RouteMethods, is_public};
-use crate::harden::RequestDeadline;
+use crate::contract::{FinalizeError, Policy};
 use crate::problem::{Code, Problem, SANITIZED_DETAIL};
 use crate::request_id;
 
 /// Verification outcomes at the HTTP authentication boundary.
 pub const AUTHN_VERIFICATIONS_METRIC: &str = "authn_verifications_total";
 
-const PROTECTED_STATUSES: &[&str] = &["400", "401", "403", "431", "503", "504"];
 const AUTHENTICATION_REQUIRED_DETAIL: &str = "bearer authentication is required";
 const AUTHENTICATION_MALFORMED_DETAIL: &str = "bearer authentication is malformed";
-const AUTHENTICATION_OVERSIZE_DETAIL: &str = "bearer authentication is too large";
 const AUTHENTICATION_INVALID_DETAIL: &str = "bearer authentication is invalid";
 const AUTHENTICATION_UNAVAILABLE_DETAIL: &str = "bearer authentication is unavailable";
-const AUTHENTICATION_TIMEOUT_DETAIL: &str = "bearer authentication exceeded the request deadline";
 const INSUFFICIENT_SCOPE_DETAIL: &str = "the verified principal lacks the required scope";
 
 /// A principal verified by the final authentication layer.
@@ -59,6 +53,16 @@ impl VerifiedPrincipal {
     #[must_use]
     pub fn scopes(&self) -> &[String] {
         self.0.scopes()
+    }
+
+    /// Deserialize application claims from the same accepted verification evidence.
+    ///
+    /// # Errors
+    /// Returns a sanitized typed error if the requested claim shape does not match.
+    pub fn claims<T: serde::de::DeserializeOwned>(
+        &self,
+    ) -> Result<T, infra_bearerauthn::ClaimAccessError> {
+        self.0.claims()
     }
 
     /// The verified `exp` claim in Unix epoch seconds.
@@ -128,28 +132,18 @@ pub fn require_scope(principal: &VerifiedPrincipal, required: &str) -> Result<()
 /// # Errors
 ///
 /// Returns a closed finalization error for unsupported or contradictory
-/// OpenAPI security/exposure metadata. A real endpoint absent from the
+/// OpenAPI effective security. A real endpoint absent from the
 /// document remains a served, sanitized 500 rather than a silent bypass.
 pub fn finalize<S>(
-    contract: ContractRouter<S>,
+    contract: OpenApiRouter<S>,
     verifier: Verifier,
-    token_bound: usize,
 ) -> Result<Router<S>, FinalizeError>
 where
     S: Send + Sync + Clone + 'static,
 {
-    let (contract, methods) = contract.into_parts();
-    let policy = Policy::compile(contract.get_openapi(), &methods)?;
-    if !verifier.is_enabled()
-        && policy
-            .0
-            .values()
-            .any(|access| matches!(access, Access::Protected))
-    {
-        return Err(FinalizeError::NonPublicOperation);
-    }
+    let policy = Policy::compile(contract.get_openapi())?;
     let (router, _) = contract.split_for_parts();
-    if methods.is_empty() {
+    if !router.has_routes() {
         return Ok(router);
     }
     metrics::describe_counter!(
@@ -158,12 +152,7 @@ where
         "Inbound bearer-authentication verification outcomes."
     );
     Ok(router.route_layer(middleware::from_fn_with_state(
-        AuthState {
-            verifier,
-            token_bound,
-            methods,
-            policy,
-        },
+        AuthState { verifier, policy },
         authenticate,
     )))
 }
@@ -171,44 +160,7 @@ where
 #[derive(Clone)]
 struct AuthState {
     verifier: Verifier,
-    token_bound: usize,
-    methods: RouteMethods,
     policy: Policy,
-}
-
-#[derive(Clone, Copy)]
-enum Access {
-    Public,
-    Protected,
-    Missing,
-}
-
-#[derive(Clone)]
-struct Policy(BTreeMap<(String, RouteMethod), Access>);
-
-impl Policy {
-    fn compile(document: &OpenApi, methods: &RouteMethods) -> Result<Self, FinalizeError> {
-        let mut table = BTreeMap::new();
-        for (path, method) in methods.iter() {
-            let access = document
-                .paths
-                .paths
-                .get(path)
-                .and_then(|item| method.operation(item))
-                .map(|operation| classify(document, operation))
-                .transpose()?
-                .unwrap_or(Access::Missing);
-            table.insert((path.to_owned(), method), access);
-        }
-        Ok(Self(table))
-    }
-
-    fn access(&self, path: &str, method: RouteMethod) -> Access {
-        self.0
-            .get(&(path.to_owned(), method))
-            .copied()
-            .unwrap_or(Access::Missing)
-    }
 }
 
 async fn authenticate(
@@ -222,13 +174,10 @@ async fn authenticate(
     let Some(path) = crate::contract::contract_path(request.extensions()) else {
         return wiring_failure(request_id);
     };
-    let Some(method) = state.methods.effective(path, request.method()) else {
-        return wiring_failure(request_id);
-    };
-    match state.policy.access(path, method) {
-        Access::Public => next.run(request).await,
-        Access::Missing => wiring_failure(request_id),
-        Access::Protected => authenticate_protected(state, request, next, request_id).await,
+    match state.policy.public(path, request.method()) {
+        Some(true) => next.run(request).await,
+        None => wiring_failure(request_id),
+        Some(false) => authenticate_protected(state, request, next, request_id).await,
     }
 }
 
@@ -239,21 +188,12 @@ async fn authenticate_protected(
     request_id: Option<String>,
 ) -> Response {
     let mut metric = VerificationMetric::new();
-    let Some(deadline) = request
-        .extensions()
-        .get::<RequestDeadline>()
-        .map(RequestDeadline::at)
-    else {
-        metric.wiring_failure();
-        return wiring_failure(request_id);
-    };
     let token = match parse_bearer(
         request
             .headers()
             .get_all(AUTHORIZATION)
             .iter()
             .map(axum::http::HeaderValue::as_bytes),
-        state.token_bound,
     ) {
         Ok(token) => token,
         Err(failure) => {
@@ -261,7 +201,7 @@ async fn authenticate_protected(
             return failure_response(failure, request_id);
         }
     };
-    let principal = match state.verifier.verify(&token, deadline).await {
+    let principal = match state.verifier.verify(&token).await {
         Ok(principal) => principal,
         Err(failure) => {
             metric.failure(failure);
@@ -273,26 +213,6 @@ async fn authenticate_protected(
     request.headers_mut().remove(AUTHORIZATION);
     request.extensions_mut().insert(principal);
     next.run(request).await
-}
-
-fn classify(document: &OpenApi, operation: &Operation) -> Result<Access, FinalizeError> {
-    if is_public(document, operation)? {
-        Ok(Access::Public)
-    } else if protected_problem_responses(operation) {
-        Ok(Access::Protected)
-    } else {
-        Err(FinalizeError::InvalidPolicy)
-    }
-}
-
-fn protected_problem_responses(operation: &Operation) -> bool {
-    let Ok(serde_json::Value::Object(responses)) = serde_json::to_value(&operation.responses)
-    else {
-        return false;
-    };
-    PROTECTED_STATUSES
-        .iter()
-        .all(|status| responses.contains_key(*status))
 }
 
 fn wiring_failure(request_id: Option<String>) -> Response {
@@ -314,11 +234,6 @@ fn failure_response(failure: Failure, request_id: Option<String>) -> Response {
             AUTHENTICATION_MALFORMED_DETAIL,
             Some("Bearer error=\"invalid_request\""),
         ),
-        Failure::Oversize => (
-            Code::AuthenticationOversize,
-            AUTHENTICATION_OVERSIZE_DETAIL,
-            None,
-        ),
         Failure::Invalid => (
             Code::AuthenticationInvalid,
             AUTHENTICATION_INVALID_DETAIL,
@@ -329,7 +244,6 @@ fn failure_response(failure: Failure, request_id: Option<String>) -> Response {
             AUTHENTICATION_UNAVAILABLE_DETAIL,
             None,
         ),
-        Failure::Timeout => (Code::RequestTimeout, AUTHENTICATION_TIMEOUT_DETAIL, None),
     };
     let mut response = Problem::new(code)
         .detail(detail)
@@ -362,11 +276,6 @@ impl VerificationMetric {
         record_verification("failure", failure_class(failure));
         self.recorded = true;
     }
-
-    fn wiring_failure(&mut self) {
-        record_verification("failure", "wiring");
-        self.recorded = true;
-    }
 }
 
 impl Drop for VerificationMetric {
@@ -391,9 +300,7 @@ const fn failure_class(failure: Failure) -> &'static str {
     match failure {
         Failure::Missing => "missing",
         Failure::Malformed => "malformed",
-        Failure::Oversize => "oversize",
         Failure::Invalid => "invalid",
         Failure::Unavailable => "unavailable",
-        Failure::Timeout => "timeout",
     }
 }

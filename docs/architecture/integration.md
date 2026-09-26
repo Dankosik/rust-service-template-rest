@@ -71,16 +71,19 @@ service's composition, otherwise their own crate with its own lifecycle.
 
 <!-- template:begin authn:docs-integration-authn-provider -->
 Inbound authentication's provider destination is fixed by configuration or an
-exact-issuer discovery response, never by the caller. The adapter's one
-`ProviderUrl` grammar admits HTTPS, host, and no userinfo, query, fragment,
-whitespace, or controls before I/O. It retains normal TLS hostname/certificate
+exact-issuer discovery response, never by the caller. The adapter's
+`ProviderUrl` admission requires HTTPS and host, with no userinfo, fragment,
+whitespace or controls. Issuers forbid queries; JWKS and introspection endpoint
+queries are preserved on requests and excluded from diagnostics. It retains normal TLS hostname/certificate
 validation, permits configured private HTTPS providers, disables redirects,
 ambient proxy and retry, and caps a response at 1 MiB. Provider work has a
-three-second attempt cap inside the request's remaining budget.
+three-second attempt cap through body completion. The outer HTTP timeout alone
+owns request expiry; authentication has no request-deadline propagation.
 
 The adapter owns URL representation because discovery and direct adapter inputs
 must pass the same admission. Config owns field presence, type, and useful key
-context; bootstrap converts primitive configuration into adapter options.
+context; bootstrap converts primitive configuration into adapter options. The validated
+cache-options constructor owns numeric ranges, including when caching is disabled.
 Authentication has its own trusted-provider transport and does not share the
 outbound HTTP client.
 <!-- template:end authn:docs-integration-authn-provider -->
@@ -95,8 +98,8 @@ startup call.
 <!-- template:end outbound-http:docs-integration-outbound -->
 
 <!-- template:begin oidc-jwt:docs-integration-jwt -->
-JWT mode uses OIDC discovery and JWKS only from the exact configured issuer's discovery result. It accepts signed RS256 access tokens against eligible RSA keys; token headers never choose a trust destination. Refresh replaces a key set atomically, retains the last usable set after a failed fetch, and is not a revocation service.
+JWT mode uses OIDC discovery and JWKS only from the exact configured issuer's discovery result. It accepts access tokens under configured algorithms and compatible eligible keys; token headers never choose a trust destination. Refresh replaces a key set atomically, retains the last usable set after a failed fetch, and is not a revocation service.
 <!-- template:end oidc-jwt:docs-integration-jwt -->
 <!-- template:begin oidc-introspection:docs-integration-introspection -->
-Introspection sends one RFC 7662 POST per admitted cache miss, with the opaque token in form data and `client_secret_basic` credentials. The cache is disabled by default; enabling it permits bounded positive reuse within the same verifier's immutable trust context. Reuse ends at the earlier of the fixed TTL and token expiry, without expiry leeway. A valid hit can delay observing revocation or provider outages until that boundary. Negative results, provider failures, and expired entries never supply cached success; misses keep the same provider/deadline path, with no retry, redirect, or remembered outage. The verifier owns and releases the store without a background task; [Authentication](../authentication.md#oidc-introspection) defines the operator inputs and storage bounds.
+Introspection sends one RFC 7662 POST per admitted cache miss, with the opaque token in form data and `client_secret_basic` credentials. The cache is disabled by default; enabling it permits bounded positive reuse within the same verifier's immutable trust context. Reuse ends at the earlier of the fixed TTL and token expiry, without expiry leeway. A valid hit can delay observing revocation or provider outages until that boundary. Negative results, provider failures, and expired entries never supply cached success; concurrent same-token misses share one in-flight attempt, while distinct misses retain the immediate provider bulkhead and independent exchange bound, with no retry, redirect, or remembered outage. The verifier owns and releases the store without a background task; [Authentication](../authentication.md#oidc-introspection) defines the operator inputs and storage bounds.
 <!-- template:end oidc-introspection:docs-integration-introspection -->

@@ -19,7 +19,7 @@ Do not create a crate, module, or directory before its first real artifact.
 | Runtime configuration | the existing `crates/config/src/<section>.rs` owner |
 <!-- template:begin authn:docs-structure-authn-placement -->
 | Inbound bearer verification, canonical provider URL admission, and sealed principal | `crates/infra-bearerauthn`; shared grammar/claims stay in the crate and JWT/refresh or introspection remain whole-file engines selected by the initializer |
-| Contract registration, final authentication policy, and principal extraction | `crates/infra-http/src/contract.rs` and `authn.rs`; service finalizes the assembled `ContractRouter`, while handlers receive only the sealed principal |
+| Annotated route composition, final authentication policy, and principal extraction | `crates/infra-http/src/contract.rs` and `authn.rs`; service finalizes the assembled `OpenApiRouter`, while handlers receive only the sealed principal |
 <!-- template:end authn:docs-structure-authn-placement -->
 <!-- template:begin outbound-http:docs-structure-outbound-placement -->
 | Fixed trusted-origin bounded HTTP exchanges and attempt observation | `crates/infra-outbound-http`; provider policy uses its standard `Request<Bytes>`/`Response<Bytes>` API ([guide](outbound-http.md)) |

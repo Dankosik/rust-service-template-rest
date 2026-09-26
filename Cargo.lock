@@ -1805,11 +1805,14 @@ dependencies = [
  "base64 0.23.1",
  "jsonwebtoken",
  "metrics",
+ "moka",
  "rcgen",
  "reqwest",
  "secrecy",
  "serde",
  "serde_json",
+ "serde_with",
+ "sha2 0.11.0",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -2036,6 +2039,7 @@ dependencies = [
  "ureq",
  "url",
  "utoipa",
+ "utoipa-axum",
  "uuid",
  "validator",
  "walkdir",
@@ -3770,6 +3774,7 @@ dependencies = [
  "tracing",
  "ureq",
  "utoipa",
+ "utoipa-axum",
 ]
 
 [[package]]
