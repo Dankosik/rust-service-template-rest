@@ -406,6 +406,93 @@ async fn parser_header_count_overflow_is_a_transport_error() {
     server.await.expect("parser header fixture joins");
 }
 
+const REQUEST_SENTINELS: [&str; 6] = [
+    "sentinel-path",
+    "sentinel-query",
+    "sentinel-header",
+    "sentinel-body",
+    "sentinel-value",
+    "SENTINEL-METHOD",
+];
+
+async fn exercise_completed_attempts() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let client = fixture_client_with_limits(
+        "127.0.0.1:0".parse().expect("unused address"),
+        &material,
+        Limits {
+            response_body_bytes: 2,
+            ..limits()
+        },
+    );
+    let unpolled = client.execute(request(), operation());
+    drop(unpolled);
+
+    let (address, server) = tls_server(
+        &material,
+        b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
+    let success = fixture_client(address, &material)
+        .execute(request(), operation())
+        .await;
+    assert!(success.is_ok());
+    server.await.expect("success fixture joins");
+
+    let (address, server) = tls_server(
+        &material,
+        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
+    let not_found = fixture_client(address, &material)
+        .execute(request(), operation())
+        .await
+        .expect("HTTP error statuses remain responses");
+    assert_eq!(not_found.status(), http::StatusCode::NOT_FOUND);
+    server.await.expect("not-found fixture joins");
+
+    assert!(matches!(
+        client
+            .execute(
+                Request::get("https://other.fixture.test/items")
+                    .body(Bytes::new())
+                    .expect("absolute URI request"),
+                operation(),
+            )
+            .await,
+        Err(Error::InvalidTarget)
+    ));
+
+    let (address, server) = tls_server(
+        &material,
+        b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 3\r\n\r\nno!",
+    )
+    .await;
+    let mut request = Request::builder()
+        .method(http::Method::from_bytes(b"SENTINEL-METHOD").expect("method"))
+        .uri("/sentinel-path?token=sentinel-query")
+        .header(header::AUTHORIZATION, "Bearer sentinel-header")
+        .body(Bytes::from_static(b"sentinel-body"))
+        .expect("sensitive fixture request");
+    request
+        .headers_mut()
+        .insert("x-sentinel", "sentinel-value".parse().expect("header"));
+    assert!(matches!(
+        fixture_client_with_limits(
+            address,
+            &material,
+            Limits {
+                response_body_bytes: 2,
+                ..limits()
+            },
+        )
+        .execute(request, operation())
+        .await,
+        Err(Error::ResponseBodyTooLarge)
+    ));
+    server.await.expect("body-limit fixture joins");
+}
+
 #[test]
 fn observation_records_polled_attempts_once_without_request_data() {
     let recorder = observation_recorder();
@@ -416,83 +503,7 @@ fn observation_records_polled_attempts_once_without_request_data() {
         .expect("test runtime");
     metrics::with_local_recorder(&recorder, || {
         tracing::subscriber::with_default(diagnostics.clone(), || {
-            runtime.block_on(async {
-                let material = TlsMaterial::new(FIXTURE_HOST);
-                let client = fixture_client_with_limits(
-                    "127.0.0.1:0".parse().expect("unused address"),
-                    &material,
-                    Limits {
-                        response_body_bytes: 2,
-                        ..limits()
-                    },
-                );
-                let unpolled = client.execute(request(), operation());
-                drop(unpolled);
-
-                let (address, server) = tls_server(
-                    &material,
-                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n",
-                )
-                .await;
-                let success = fixture_client(address, &material)
-                    .execute(request(), operation())
-                    .await;
-                assert!(success.is_ok());
-                server.await.expect("success fixture joins");
-
-                let (address, server) = tls_server(
-                    &material,
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
-                )
-                .await;
-                let not_found = fixture_client(address, &material)
-                    .execute(request(), operation())
-                    .await
-                    .expect("HTTP error statuses remain responses");
-                assert_eq!(not_found.status(), http::StatusCode::NOT_FOUND);
-                server.await.expect("not-found fixture joins");
-
-                assert!(matches!(
-                    client
-                        .execute(
-                            Request::get("https://other.fixture.test/items")
-                                .body(Bytes::new())
-                                .expect("absolute URI request"),
-                            operation(),
-                        )
-                        .await,
-                    Err(Error::InvalidTarget)
-                ));
-
-                let (address, server) = tls_server(
-                    &material,
-                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 3\r\n\r\nno!",
-                )
-                .await;
-                let mut request = Request::builder()
-                    .method(http::Method::from_bytes(b"SENTINEL-METHOD").expect("method"))
-                    .uri("/sentinel-path?token=sentinel-query")
-                    .header(header::AUTHORIZATION, "Bearer sentinel-header")
-                    .body(Bytes::from_static(b"sentinel-body"))
-                    .expect("sensitive fixture request");
-                request
-                    .headers_mut()
-                    .insert("x-sentinel", "sentinel-value".parse().expect("header"));
-                assert!(matches!(
-                    fixture_client_with_limits(
-                        address,
-                        &material,
-                        Limits {
-                            response_body_bytes: 2,
-                            ..limits()
-                        },
-                    )
-                    .execute(request, operation())
-                    .await,
-                    Err(Error::ResponseBodyTooLarge)
-                ));
-                server.await.expect("body-limit fixture joins");
-            });
+            runtime.block_on(exercise_completed_attempts());
         });
     });
 
@@ -540,15 +551,8 @@ fn observation_records_polled_attempts_once_without_request_data() {
         ),
         1
     );
-    for secret in [
-        "sentinel-path",
-        "sentinel-query",
-        "sentinel-header",
-        "sentinel-body",
-        "sentinel-value",
-        "SENTINEL-METHOD",
-    ] {
-        assert!(!scrape.contains(secret), "metric leaked {secret}");
+    for secret in REQUEST_SENTINELS {
+        assert!(!scrape.contains(secret), "metric disclosed request data");
     }
 
     let spans = diagnostics.0.lock().expect("span diagnostic lock");
@@ -578,15 +582,8 @@ fn observation_records_polled_attempts_once_without_request_data() {
     );
     for fields in spans.iter() {
         let fields = format!("{fields:?}");
-        for secret in [
-            "sentinel-path",
-            "sentinel-query",
-            "sentinel-header",
-            "sentinel-body",
-            "sentinel-value",
-            "SENTINEL-METHOD",
-        ] {
-            assert!(!fields.contains(secret), "span leaked {secret}");
+        for secret in REQUEST_SENTINELS {
+            assert!(!fields.contains(secret), "span disclosed request data");
         }
     }
 }
@@ -609,7 +606,7 @@ fn observation_records_timeout_and_polled_drop_once() {
                 timeout_client.response_head_observed = Some(timeout_observed.clone());
                 let mut timed_exchange = Box::pin(timeout_client.execute(request(), operation()));
                 tokio::select! {
-                    _ = timeout_observed.notified() => {}
+                    () = timeout_observed.notified() => {}
                     result = &mut timed_exchange => panic!("stalled exchange completed unexpectedly: {result:?}"),
                 }
                 // Start virtual time only after the real TLS handshake and headers.
@@ -626,7 +623,7 @@ fn observation_records_timeout_and_polled_drop_once() {
                 client.response_head_observed = Some(observed.clone());
                 let mut exchange = Box::pin(client.execute(request(), operation()));
                 tokio::select! {
-                    _ = observed.notified() => {}
+                    () = observed.notified() => {}
                     result = &mut exchange => panic!("stalled exchange completed unexpectedly: {result:?}"),
                 }
                 drop(exchange);

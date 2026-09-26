@@ -155,6 +155,28 @@ fn outbound_histogram_builder(builder: PrometheusBuilder) -> Result<PrometheusBu
 }
 // template:end outbound-http:telemetry-outbound-buckets-helper
 
+/// The diagnostics router: `GET /metrics` only. Serve it on the private
+/// diagnostics listener, never on the application listener.
+///
+/// That listener is intentionally outside the application `harden` chain:
+/// Prometheus text, not Problem JSON; no scrape-on-scrape HTTP metrics,
+/// spans, or access logs; the address is trusted-private. `http.*`
+/// `ServerOptions` still apply as shared transport policy (header timeout
+/// and size, connection cap, drain), not request-level policy.
+pub fn diagnostics_router(metrics: Metrics) -> Router {
+    Router::new()
+        .route("/metrics", get(render))
+        .with_state(metrics)
+}
+
+async fn render(State(metrics): State<Metrics>) -> Response {
+    (
+        [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        metrics.render(),
+    )
+        .into_response()
+}
+
 // template:begin outbound-http:telemetry-outbound-histogram-test
 #[cfg(test)]
 mod tests {
@@ -179,25 +201,3 @@ mod tests {
     }
 }
 // template:end outbound-http:telemetry-outbound-histogram-test
-
-/// The diagnostics router: `GET /metrics` only. Serve it on the private
-/// diagnostics listener, never on the application listener.
-///
-/// That listener is intentionally outside the application `harden` chain:
-/// Prometheus text, not Problem JSON; no scrape-on-scrape HTTP metrics,
-/// spans, or access logs; the address is trusted-private. `http.*`
-/// `ServerOptions` still apply as shared transport policy (header timeout
-/// and size, connection cap, drain), not request-level policy.
-pub fn diagnostics_router(metrics: Metrics) -> Router {
-    Router::new()
-        .route("/metrics", get(render))
-        .with_state(metrics)
-}
-
-async fn render(State(metrics): State<Metrics>) -> Response {
-    (
-        [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
-        metrics.render(),
-    )
-        .into_response()
-}
