@@ -7,6 +7,7 @@
 use std::{
     collections::BTreeMap,
     fmt,
+    num::NonZeroU32,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -27,7 +28,6 @@ use crate::protocol::{KeyRing, MAX_BODY_BYTES};
 const DELIVERY_KIND: &str = "webhooks.deliver";
 const DELIVERY_VERSION: u8 = 2;
 const RETRY_AFTER_CAP: Duration = Duration::from_hours(24);
-const CAPACITY_SNOOZE: Duration = Duration::from_secs(1);
 const DEFAULT_CONTENT_TYPE: &str = "application/json";
 const RESPONSE_HEADER_COUNT: usize = 64;
 const RESPONSE_BODY_BYTES: usize = 64 * 1024;
@@ -84,7 +84,8 @@ impl Outbound {
                 validate_endpoint_id(&endpoint_id)?;
                 let destination = parse_destination(&endpoint.destination)?;
                 // Admission never resolves or contacts a receiver.
-                Client::new(&origin(&destination)?, limits()).map_err(OutboundError::Client)?;
+                Client::new(&origin(&destination)?, limits(NonZeroU32::MIN)?)
+                    .map_err(OutboundError::Client)?;
                 Ok((endpoint_id, destination))
             })
             .collect::<Result<_, OutboundError>>()?;
@@ -135,13 +136,22 @@ impl Outbound {
 
     /// Construct a fixed endpoint/client/key snapshot before claiming jobs.
     ///
+    /// `max_workers` is the jobs worker capacity. Each endpoint client admits
+    /// that many exchanges, so a local attempt never fails for capacity; the
+    /// jobs slots are the only in-process concurrency bound.
+    ///
     /// # Errors
     ///
     /// Every configured endpoint must have a decoded signing ring and an
     /// admitted transport client.
-    pub fn dispatcher(&self, keys: BTreeMap<String, KeyRing>) -> Result<Dispatcher, OutboundError> {
+    pub fn dispatcher(
+        &self,
+        keys: BTreeMap<String, KeyRing>,
+        max_workers: NonZeroU32,
+    ) -> Result<Dispatcher, OutboundError> {
+        let limits = limits(max_workers)?;
         self.build_dispatcher(keys, |destination| {
-            Client::new(&origin(destination)?, limits()).map_err(OutboundError::Client)
+            Client::new(&origin(destination)?, limits).map_err(OutboundError::Client)
         })
     }
 
@@ -154,15 +164,17 @@ impl Outbound {
     pub fn dispatcher_for_test_http(
         &self,
         keys: BTreeMap<String, KeyRing>,
+        max_workers: NonZeroU32,
         socket: std::net::SocketAddr,
     ) -> Result<Dispatcher, OutboundError> {
+        let limits = limits(max_workers)?;
         self.build_dispatcher(keys, |destination| {
             if destination.host_str() != Some("authn.fixture.test")
                 || destination.port_or_known_default() != Some(443)
             {
                 return Err(OutboundError::InvalidEndpoint);
             }
-            Client::new_for_test_http(&format!("http://{socket}/"), limits())
+            Client::new_for_test_http(&format!("http://{socket}/"), limits)
                 .map_err(OutboundError::Client)
         })
     }
@@ -414,13 +426,15 @@ impl fmt::Display for DeliveryOutcome {
     }
 }
 
-fn limits() -> Limits {
-    Limits {
-        max_active: 1,
+fn limits(max_workers: NonZeroU32) -> Result<Limits, OutboundError> {
+    let max_active =
+        usize::try_from(max_workers.get()).map_err(|_| OutboundError::InvalidEndpoint)?;
+    Ok(Limits {
+        max_active,
         operation_timeout: DELIVERY_POLICY.timeout,
         response_header_count: RESPONSE_HEADER_COUNT,
         response_body_bytes: RESPONSE_BODY_BYTES,
-    }
+    })
 }
 
 fn validate_endpoint_id(endpoint_id: &str) -> Result<(), OutboundError> {
@@ -523,10 +537,6 @@ fn classify_response(
             }
             Err(JobError::retryable(DeliveryOutcome::Retryable))
         }
-        Err(HttpError::AtCapacity) => {
-            tracing::debug!(webhook.outcome = "at_capacity", "webhook_delivery_deferred");
-            Err(JobError::snooze(CAPACITY_SNOOZE)?)
-        }
         Err(_) => {
             tracing::info!(
                 webhook.outcome = "retryable",
@@ -588,6 +598,7 @@ mod base64_body {
 mod tests {
     use std::{
         collections::BTreeMap,
+        num::NonZeroU32,
         time::{Duration, UNIX_EPOCH},
     };
 
@@ -634,14 +645,17 @@ mod tests {
     fn dispatcher_requires_a_current_ring_for_every_configured_endpoint() {
         let outbound = outbound("https://partner.example/events");
         assert!(matches!(
-            outbound.dispatcher(BTreeMap::new()),
+            outbound.dispatcher(BTreeMap::new(), NonZeroU32::MIN),
             Err(OutboundError::MissingKeyRing)
         ));
         let ring =
             KeyRing::from_encoded("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", None).unwrap();
         assert!(
             outbound
-                .dispatcher(BTreeMap::from([("partner".to_owned(), ring)]))
+                .dispatcher(
+                    BTreeMap::from([("partner".to_owned(), ring)]),
+                    NonZeroU32::MIN
+                )
                 .is_ok()
         );
     }

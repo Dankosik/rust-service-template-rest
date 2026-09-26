@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, num::NonZeroU32, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
 use base64::Engine as _;
 use infra_jobs::{Engine, Kinds};
@@ -11,7 +11,6 @@ use sqlx::Row;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::Notify,
     task::JoinHandle,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -73,7 +72,7 @@ fn dispatcher(
     address: std::net::SocketAddr,
 ) -> Dispatcher {
     outbound
-        .dispatcher_for_test_http(keys(endpoints), address)
+        .dispatcher_for_test_http(keys(endpoints), NonZeroU32::MIN, address)
         .expect("fixture dispatcher")
 }
 
@@ -156,24 +155,6 @@ async fn job_is(pool: &PgPool, id: &str, state: &str, attempts: i16) {
         (row.try_get::<String, _>("state").expect("state") == state
             && row.try_get::<i16, _>("attempts").expect("attempts") == attempts)
             .then_some(())
-    })
-    .await;
-}
-
-async fn job_is_snoozed(pool: &PgPool, id: &str) {
-    until("the at-capacity delivery is durably snoozed", async || {
-        let row = sqlx::query(
-            "SELECT state, attempts, not_before > clock_timestamp() AS deferred \
-             FROM background_jobs WHERE id::text = $1",
-        )
-        .bind(id)
-        .fetch_one(pool)
-        .await
-        .expect("delivery row");
-        (row.try_get::<String, _>("state").expect("state") == "pending"
-            && row.try_get::<i16, _>("attempts").expect("attempts") == 0
-            && row.try_get::<bool, _>("deferred").expect("deferred"))
-        .then_some(())
     })
     .await;
 }
@@ -460,7 +441,7 @@ async fn missing_current_endpoint_spends_the_final_attempt_and_exhausts(pool: Pg
 
     let current = outbound(&[]);
     let dispatcher = current
-        .dispatcher(BTreeMap::new())
+        .dispatcher(BTreeMap::new(), NonZeroU32::MIN)
         .expect("empty current dispatcher");
     let running = RunningDispatcher::start(&pool, dispatcher, 1);
     job_is(&pool, &id, "failed", 20).await;
@@ -505,7 +486,7 @@ async fn invalid_or_unsupported_common_payloads_fail_permanently_before_transpor
         let running = RunningDispatcher::start(
             &pool,
             configured
-                .dispatcher(keys(&["partner"]))
+                .dispatcher(keys(&["partner"]), NonZeroU32::MIN)
                 .expect("current dispatcher"),
             1,
         );
@@ -531,69 +512,5 @@ async fn invalid_or_unsupported_common_payloads_fail_permanently_before_transpor
         );
         running.stop().await;
     }
-    super::close(&[&pool]).await;
-}
-
-#[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn one_held_endpoint_refunds_capacity_while_another_same_origin_endpoint_runs(pool: PgPool) {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("fixture listener");
-    let address = listener.local_addr().expect("fixture address");
-    let held = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let other_received = Arc::new(Notify::new());
-    let server = {
-        let held = Arc::clone(&held);
-        let release = Arc::clone(&release);
-        let other_received = Arc::clone(&other_received);
-        tokio::spawn(async move {
-            let (mut first, _) = listener.accept().await.expect("held exchange connects");
-            read_headers(&mut first).await;
-            held.notify_one();
-
-            let (mut other, _) = listener.accept().await.expect("other exchange connects");
-            read_headers(&mut other).await;
-            other_received.notify_one();
-            other
-                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
-                .await
-                .expect("other response");
-            other.shutdown().await.expect("other closes");
-
-            release.notified().await;
-            first
-                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
-                .await
-                .expect("held response");
-            first.shutdown().await.expect("held exchange closes");
-        })
-    };
-
-    let configured = outbound(&[("held", "/held"), ("other", "/other")]);
-    let running = RunningDispatcher::start(
-        &pool,
-        dispatcher(&configured, &["held", "other"], address),
-        2,
-    );
-    let first = enqueue(&pool, &configured, "held", b"{\"event\":\"first\"}").await;
-    super::bounded("the first exchange is held", held.notified()).await;
-
-    let at_capacity = enqueue(&pool, &configured, "held", b"{\"event\":\"second\"}").await;
-    job_is_snoozed(&pool, &at_capacity).await;
-    let other = enqueue(&pool, &configured, "other", b"{\"event\":\"other\"}").await;
-    super::bounded(
-        "the other endpoint reaches the peer",
-        other_received.notified(),
-    )
-    .await;
-    job_is(&pool, &other, "completed", 1).await;
-
-    release.notify_one();
-    job_is(&pool, &first, "completed", 1).await;
-    super::bounded("held fixture peer joins", server)
-        .await
-        .expect("fixture succeeds");
-    running.stop().await;
     super::close(&[&pool]).await;
 }

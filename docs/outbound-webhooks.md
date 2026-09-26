@@ -63,11 +63,11 @@ metadata only. The returned `JobId` is the stable Standard Webhooks message ID.
 This is provider wiring, not a template business event or consumer.
 
 The worker decodes each endpoint's current and optional predecessor keys before
-claims, builds one dispatcher from that current snapshot, and consumes it into
-the existing kind registry:
+claims, builds one dispatcher from that current snapshot and its nonzero
+`jobs.max_workers`, and consumes it into the existing kind registry:
 
 ```rust,ignore
-let dispatcher = outbound.dispatcher(signing_keys)?;
+let dispatcher = outbound.dispatcher(signing_keys, max_workers)?;
 dispatcher.register(kinds);
 ```
 
@@ -133,11 +133,14 @@ outcome with an operator warning. Every other HTTP status, plus network,
 timeout, DNS, and response-read failures, retries with the stable ID. Valid
 `Retry-After` delta-seconds or HTTP-date is a jobs delay floor capped at 24h;
 malformed, elapsed, or conflicting advice uses ordinary backoff. Each endpoint
-allows one active exchange. At capacity, it performs no HTTP I/O and returns the
-one-second `AtCapacity` snooze, refunding the attempt and freeing the worker
-slot. With at least two worker slots, one slow endpoint cannot occupy every slot;
-one worker remains serial. This is neither a fairness nor a cross-process
-capacity guarantee. Jobs alone owns jitter, leases, delay, exhaustion, and retry.
+client admits as many exchanges as the worker has jobs slots, so an attempt
+never fails locally for capacity. There is no per-endpoint concurrency limit: a
+refused attempt would be claimed again at once while the queue has due work, so
+a slow endpoint with a backlog would turn into a claim/snooze loop against
+PostgreSQL. Slow endpoints can therefore occupy worker slots until their
+30-second deadline. Isolating them needs a claim-time concurrency limit in the
+jobs owner, not a webhook-side refusal. Jobs alone owns jitter, leases, delay,
+exhaustion, and retry.
 
 ## Raw-byte interoperability vector
 
