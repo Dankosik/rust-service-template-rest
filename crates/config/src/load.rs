@@ -159,12 +159,12 @@ mod tests {
 
     use super::*;
     use crate::LogFormat;
+    // template:begin authn:load-authn-config-import
+    use crate::AuthnConfig;
+    // template:end authn:load-authn-config-import
     // template:begin oidc-jwt:load-token-profile-import
     use crate::TokenProfile;
     // template:end oidc-jwt:load-token-profile-import
-    // template:begin oidc-introspection:load-authn-mode-import
-    use crate::AuthnMode;
-    // template:end oidc-introspection:load-authn-mode-import
 
     const BUILD: BuildInfo = BuildInfo {
         version: "1.2.3",
@@ -192,6 +192,22 @@ mod tests {
         assert_eq!(cfg.app.commit, "abc123");
         assert_eq!(cfg.log.format, LogFormat::Json);
         assert_eq!(cfg.app.instance_id, None);
+    }
+
+    #[test]
+    fn shipped_local_configuration_loads_without_environment_overrides() {
+        let cfg = load_from(
+            &LoadOptions {
+                config: Some(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../env/config/local.toml"),
+                ),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        )
+        .unwrap();
+        assert_eq!(cfg.log.format, LogFormat::Text);
     }
 
     #[test]
@@ -263,26 +279,92 @@ mod tests {
     // template:end jobs:load-jobs-environment
 
     // template:begin oidc-introspection:load-introspection-environment
+    fn introspection_environment(extra: &[(&str, &str)]) -> Vec<(String, String)> {
+        let mut values = env(&[
+            ("APP__AUTHN__MODE", "oidc-introspection"),
+            ("APP__AUTHN__ISSUER", "https://issuer.example/tenant"),
+            ("APP__AUTHN__AUDIENCE", "00123"),
+            (
+                "APP__AUTHN__INTROSPECTION_ENDPOINT",
+                "https://issuer.example/introspect",
+            ),
+            ("APP__AUTHN__INTROSPECTION_CLIENT_ID", "false"),
+            ("APP__AUTHN__INTROSPECTION_CLIENT_SECRET", "000042"),
+        ]);
+        values.extend(env(extra));
+        values
+    }
+
     #[test]
     fn introspection_environment_decodes_and_redacts_the_secret() {
-        let cfg = load_from(
-            &LoadOptions::default(),
-            BUILD,
-            env(&[
-                ("APP__AUTHN__MODE", "oidc-introspection"),
-                ("APP__AUTHN__ISSUER", "https://issuer.example/tenant"),
-                ("APP__AUTHN__AUDIENCE", "service"),
-                (
-                    "APP__AUTHN__INTROSPECTION_ENDPOINT",
-                    "https://issuer.example/introspect",
-                ),
-                ("APP__AUTHN__INTROSPECTION_CLIENT_ID", "service-client"),
-                ("APP__AUTHN__INTROSPECTION_CLIENT_SECRET", "loader-secret"),
-            ]),
-        )
-        .unwrap();
-        assert_eq!(cfg.authn.mode, AuthnMode::OidcIntrospection);
-        assert!(!format!("{cfg:?}").contains("loader-secret"));
+        use secrecy::ExposeSecret;
+
+        for (enabled, expected) in [("true", true), ("false", false)] {
+            let cfg = load_from(
+                &LoadOptions::default(),
+                BUILD,
+                introspection_environment(&[
+                    ("APP__AUTHN__PROVIDER_CONCURRENCY", "7"),
+                    ("APP__AUTHN__CACHE_ENABLED", enabled),
+                    ("APP__AUTHN__CACHE_CAPACITY", "64"),
+                    ("APP__AUTHN__CACHE_TTL", "1m 30s"),
+                ]),
+            )
+            .unwrap();
+            let AuthnConfig::OidcIntrospection {
+                audience,
+                introspection_client_id,
+                introspection_client_secret,
+                provider_concurrency,
+                cache_enabled,
+                cache_capacity,
+                cache_ttl,
+                ..
+            } = &cfg.authn
+            else {
+                panic!("expected OIDC introspection configuration");
+            };
+            assert_eq!(*cache_enabled, expected);
+            assert_eq!(*cache_capacity, 64);
+            assert_eq!(*cache_ttl, Duration::from_secs(90));
+            assert_eq!(provider_concurrency.get(), 7);
+            assert_eq!(audience.as_slice(), ["00123"]);
+            assert_eq!(introspection_client_id, "false");
+            assert_eq!(
+                introspection_client_secret
+                    .as_ref()
+                    .unwrap()
+                    .expose_secret(),
+                "000042"
+            );
+            assert!(!format!("{cfg:?}").contains("000042"));
+        }
+    }
+
+    #[test]
+    fn introspection_environment_rejects_invalid_scalar_overrides() {
+        for (key, value) in [
+            ("APP__AUTHN__CACHE_ENABLED", ""),
+            ("APP__AUTHN__CACHE_ENABLED", "not-a-boolean"),
+            ("APP__AUTHN__CACHE_CAPACITY", ""),
+            ("APP__AUTHN__CACHE_CAPACITY", "0"),
+            ("APP__AUTHN__CACHE_CAPACITY", "1025"),
+            ("APP__AUTHN__CACHE_CAPACITY", "-1"),
+            ("APP__AUTHN__CACHE_CAPACITY", "1.5"),
+            ("APP__AUTHN__PROVIDER_CONCURRENCY", ""),
+            ("APP__AUTHN__PROVIDER_CONCURRENCY", "0"),
+            ("APP__AUTHN__PROVIDER_CONCURRENCY", "4294967296"),
+        ] {
+            assert!(
+                load_from(
+                    &LoadOptions::default(),
+                    BUILD,
+                    introspection_environment(&[(key, value)]),
+                )
+                .is_err(),
+                "{key}={value}"
+            );
+        }
     }
     // template:end oidc-introspection:load-introspection-environment
 
@@ -300,7 +382,10 @@ mod tests {
             ]),
         )
         .unwrap();
-        assert_eq!(jwt.authn.token_profile, Some(TokenProfile::Rfc9068));
+        let AuthnConfig::OidcJwt { token_profile, .. } = jwt.authn else {
+            panic!("expected OIDC JWT configuration");
+        };
+        assert_eq!(token_profile, TokenProfile::Rfc9068);
     }
     // template:end oidc-jwt:load-jwt-token-profile-environment
 
@@ -336,7 +421,7 @@ mod tests {
         let profile = write(
             &dir,
             "profile.toml",
-            "[authn]\ntoken_profile = \"rfc9068\"\n",
+            "[authn]\nmode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\ntoken_profile = \"rfc9068\"\n",
         );
         let cfg = load_from(
             &LoadOptions {
@@ -347,7 +432,10 @@ mod tests {
             env(&[]),
         )
         .unwrap();
-        assert_eq!(cfg.authn.token_profile, Some(TokenProfile::Rfc9068));
+        let AuthnConfig::OidcJwt { token_profile, .. } = cfg.authn else {
+            panic!("expected OIDC JWT configuration");
+        };
+        assert_eq!(token_profile, TokenProfile::Rfc9068);
     }
     // template:end oidc-jwt:load-jwt-token-profile-file
 

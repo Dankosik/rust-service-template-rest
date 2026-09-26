@@ -25,11 +25,11 @@ _AUTH_ONLY_PROFILE_KEYS = (
 )
 _OUTBOUND_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection",
-    "outbound-http", "egress-dns", "request-budget", "identity", "cargo_lock",
+    "outbound-http", "egress-dns", "tls-fixtures", "request-budget", "identity", "cargo_lock",
 )
 _HTTP_IDEMPOTENCY_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection",
-    "outbound-http", "egress-dns", "request-budget", "http-idempotency", "http-idempotency-mounted",
+    "outbound-http", "egress-dns", "tls-fixtures", "request-budget", "http-idempotency", "http-idempotency-mounted",
     "identity", "cargo_lock",
 )
 _NEW_PROJECTION_CHECKER = "scripts/tests/template-profile-projections.py"
@@ -362,7 +362,8 @@ def assert_profile_packs(
     assert_profile_pack(source, target, "oidc-introspection", authn == "oidc-introspection")
     assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
     shared_selected = authn != "none" or outbound_http == "bounded"
-    assert_profile_pack(source, target, "egress-dns", shared_selected)
+    assert_profile_pack(source, target, "tls-fixtures", shared_selected)
+    assert_profile_pack(source, target, "egress-dns", outbound_http == "bounded")
     assert_profile_pack(source, target, "request-budget", shared_selected)
     assert_profile_pack(source, target, "http-idempotency", http_idempotency == "postgres")
     assert_profile_pack(

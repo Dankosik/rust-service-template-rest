@@ -46,7 +46,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
 utoipa = { workspace = true, features = ["macros", "yaml"] }
-utoipa-axum = { workspace = true }
 
 [dev-dependencies]
 # template:begin authn:service-authn-test-dependencies

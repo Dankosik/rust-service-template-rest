@@ -53,6 +53,7 @@ def check(root: Path) -> None:
         "oidc-introspection": "remove_when_unselected",
         "outbound-http": "remove_when_unselected",
         "egress-dns": "remove_when_unselected",
+        "tls-fixtures": "remove_when_unselected",
         "request-budget": "remove_when_unselected",
         "http-idempotency": "remove_when_unselected",
         "http-idempotency-mounted": "remove_when_unselected",
@@ -67,7 +68,7 @@ def check(root: Path) -> None:
         markers = section["markers"]
         if not isinstance(removals, list) or not isinstance(markers, list) or not markers:
             raise AssertionError(f"profile inventory has an incomplete {name} projection")
-        if name != "request-budget" and not removals:
+        if name not in {"request-budget", "tls-fixtures"} and not removals:
             raise AssertionError(f"profile inventory has no removable {name} output")
         for relative in removals:
             plain = relative.rstrip("/")

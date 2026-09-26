@@ -189,9 +189,15 @@ _OUTBOUND_PROFILE_INVENTORY_KEYS = frozenset(
         "request-budget",
     }
 )
-_HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS = frozenset(
+_TLS_FIXTURE_PROFILE_INVENTORY_KEYS = frozenset(
     {
         *_OUTBOUND_PROFILE_INVENTORY_KEYS,
+        "tls-fixtures",
+    }
+)
+_HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS = frozenset(
+    {
+        *_TLS_FIXTURE_PROFILE_INVENTORY_KEYS,
         "http-idempotency",
         "http-idempotency-mounted",
     }
@@ -224,26 +230,31 @@ def _profile_data(
     if keys == _JOBS_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
+        include_tls_fixtures = True
         include_http_idempotency = True
         include_jobs = True
     elif historical_jobs and keys == _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
+        include_tls_fixtures = True
         include_http_idempotency = True
         include_jobs = False
-    elif historical_http_idempotency and keys == _OUTBOUND_PROFILE_INVENTORY_KEYS:
+    elif historical_http_idempotency and keys == _TLS_FIXTURE_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
+        include_tls_fixtures = True
         include_http_idempotency = False
         include_jobs = False
     elif historical_outbound and keys == _CURRENT_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = False
+        include_tls_fixtures = False
         include_http_idempotency = False
         include_jobs = False
     elif historical_authn and keys == _LEGACY_PROFILE_INVENTORY_KEYS:
         include_authn = False
         include_outbound = False
+        include_tls_fixtures = False
         include_http_idempotency = False
         include_jobs = False
     else:
@@ -268,6 +279,14 @@ def _profile_data(
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
             removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
             markers.extend(_markers(profile, section["markers"]))
+    if include_tls_fixtures:
+        section = raw["tls-fixtures"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template tls-fixtures inventory has an unsupported shape")
+        removals["tls-fixtures"] = tuple(
+            _path_list(section["remove_when_unselected"], "tls-fixtures remove_when_unselected")
+        )
+        markers.extend(_markers("tls-fixtures", section["markers"]))
     if include_http_idempotency:
         for profile in ("http-idempotency", "http-idempotency-mounted"):
             section = raw[profile]
@@ -430,7 +449,9 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
     if inputs.outbound_http == "bounded":
         selected.add("outbound-http")
     if inputs.authn != "none" or inputs.outbound_http == "bounded":
-        selected.update(("egress-dns", "request-budget"))
+        selected.update(("tls-fixtures", "request-budget"))
+    if inputs.outbound_http == "bounded":
+        selected.add("egress-dns")
     if inputs.http_idempotency == "postgres":
         selected.add("http-idempotency")
         if inputs.authn == "oidc-introspection":
@@ -1016,7 +1037,7 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
     if inputs.authn != "oidc-jwt":
         _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
         _project_feature_edge(records, "zeroize", "1.9.0", ["zeroize_derive"], [])
-    if inputs.authn == "none" and inputs.outbound_http == "none":
+    if inputs.outbound_http == "none":
         _project_feature_edge(records, "ipnet", "2.12.2", ["serde"], [])
         _project_feature_edge(records, "once_cell", "1.21.4", ["critical-section", "portable-atomic"], [])
 

@@ -14,13 +14,16 @@ name is not part of that durable identity.
 
 ## Compose a protected operation
 
-`Composer::route(routes!(handler))` is the sole opt-in. It adds the required
-`Idempotency-Key` header and generated Problem responses to the route value
-that is served. Adopters retain their normal protected-operation security,
-success, and business-response declarations; they do not hand-declare
-idempotency metadata or validators. The composed operation must be POST, PUT,
-PATCH, or DELETE, bearer-only protected, declare at least one 2xx response and
-no 1xx/3xx response. `Composer::agree` rejects disagreement between composition
+`Composer::route(infra_http::routes!(handler))` is the sole opt-in. It adds
+the required `Idempotency-Key` header and generated Problem responses to the
+route value that is served. Adopters retain their normal protected-operation
+security, success, and business-response declarations; they do not
+hand-declare idempotency metadata or validators. The composed operation must
+be POST, PUT, PATCH, or DELETE, effectively protected by the assembled OpenAPI
+policy (normally the retained profile's root bearer requirement; an optional
+`x-security-decision` must agree, and an anonymous alternative or public
+override cannot scope a caller key), declare at least one 2xx response and no
+1xx/3xx response. `Composer::agree` rejects disagreement between composition
 and the assembled OpenAPI document before readiness.
 
 At request time the hardened body limit and deadline apply, authentication runs
@@ -43,15 +46,16 @@ async fn create_widget(
 }
 ```
 
-The handler keeps its ordinary protected-operation annotation (security,
-`x-security-decision`, its success response, and
-`ProtectedOperationProblemResponses`) with no idempotency metadata. Compose it
-inside `service::api::contract`, which receives the composer; `route` already
-applies `protect`, so do not wrap the route again:
+The handler keeps its ordinary protected-operation annotation (its success
+response and `ProtectedOperationProblemResponses`; security normally inherits
+the root bearer default) with no idempotency metadata. Compose it inside
+`service::api::contract`, which receives the composer. The final
+authentication layer wraps the fully assembled contract, so authentication
+precedes key handling without per-operation wrapping:
 
 ```rust,ignore
 // crates/service/src/api.rs, inside contract(idempotency: &mut Composer):
-.routes(idempotency.route(routes!(widgets::http::create_widget)))
+.routes(idempotency.route(infra_http::routes!(widgets::http::create_widget)))
 ```
 
 Regenerate and review the OpenAPI document after composition changes. The

@@ -64,6 +64,8 @@ pub(crate) enum WorkerError {
     JobsStartup(#[from] infra_jobs::StartupError),
     #[error(transparent)]
     Server(#[from] infra_http::ServerError),
+    #[error(transparent)]
+    HttpContract(#[from] infra_http::FinalizeError),
     #[error("startup admission: {0}")]
     Admission(health::NotReady),
     #[error("the job engine stopped without a stop signal")]
@@ -316,11 +318,10 @@ async fn bind_listeners(
         failure_threshold: config.health.failure_threshold,
     };
     let options = server_options(config);
-    let (routes, _document) = infra_http::router().split_for_parts();
-    let app = infra_http::harden(
-        routes.with_state(readiness.reader()),
-        &harden_options(config),
-    );
+    let routes = infra_http::router()
+        .finalize_public()?
+        .with_state(readiness.reader());
+    let app = infra_http::harden(routes, &harden_options(config));
     let health = Server::bind(config.http.listen_addr()?, app, options).await?;
     tracing::info!(addr = %health.local_addr(), "http listener bound");
     opened.listeners.health = Some(health);

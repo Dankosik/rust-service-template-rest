@@ -1825,8 +1825,8 @@ dependencies = [
 name = "infra-bearerauthn"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "base64 0.23.1",
- "infra-egress-dns",
  "jsonwebtoken",
  "metrics",
  "reqwest",
@@ -1837,6 +1837,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
+ "tracing",
  "url",
 ]
 
@@ -1868,7 +1869,6 @@ dependencies = [
  "infra-postgres",
  "itertools 0.15.0",
  "metrics",
- "secrecy",
  "serde",
  "serde_json",
  "serde_with",
@@ -1877,7 +1877,6 @@ dependencies = [
  "strum",
  "thiserror",
  "tokio",
- "tokio-rustls",
  "tokio-util",
  "tower",
  "tower-http 0.7.1",
@@ -2041,7 +2040,6 @@ dependencies = [
  "ureq",
  "url",
  "utoipa",
- "utoipa-axum",
  "uuid",
  "validator",
  "walkdir",
@@ -3784,7 +3782,6 @@ dependencies = [
  "tracing",
  "ureq",
  "utoipa",
- "utoipa-axum",
 ]
 
 [[package]]
@@ -3802,7 +3799,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
- "url",
  "vergen-gitcl",
 ]
 

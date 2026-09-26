@@ -1,9 +1,10 @@
 //! Inbound HTTP idempotency: composition, authenticated capture, and replay.
 //!
-//! Passing a route tuple to `Composer::route` opts it in and generates the
-//! served contract. The seam captures the verified caller, decoded key,
-//! original URI, raw Content-Type values, and bounded raw body. Handlers
-//! validate and authorize every attempt before `Idempotency::execute`.
+//! Passing a tracked route carrier to [`Composer::route`] opts it in and
+//! generates the served contract; final contract authentication wraps that
+//! carrier. The seam captures the verified caller, decoded key, original URI,
+//! raw Content-Type values, and bounded raw body. Handlers validate and
+//! authorize every attempt before `Idempotency::execute`.
 
 mod compose;
 mod declaration;

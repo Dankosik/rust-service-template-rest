@@ -9,12 +9,12 @@ walkthrough's code.
 ## 1. Close the behavior and trust decision
 
 Write down the resource, the operation, the success response, the expected
-failures, and the compatibility requirement before touching code. Decide the
-operation's exposure and record it as its `x-security-decision`: `public` by
-design, `protected` by a real identity and authorization design, or `blocked`
-pending a security specification. The template supplies no placeholder
-authentication and the contract test refuses an operation without a
-decision.
+failures, and the compatibility requirement before touching code. Decide whether
+the operation is public or needs the authentication profile's root bearer
+default. In a retained profile, `security()` records the explicit public
+override; an omitted security attribute inherits bearer protection. An optional
+`x-security-decision` may record the rationale, but it cannot contradict the
+effective OpenAPI policy. The template supplies no placeholder authentication.
 
 If the feature calls another service or persists data, also decide who owns
 the source of truth, the timeout and retry eligibility inside
@@ -180,19 +180,21 @@ async fn get_greeting(Path(name): Path<String>, parts: Parts) -> GreetingRespons
 }
 
 #[must_use]
-pub fn router<S>() -> OpenApiRouter<S>
+pub fn router<S>() -> ContractRouter<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    OpenApiRouter::new().routes(routes!(get_greeting))
+    ContractRouter::with_openapi(utoipa::openapi::OpenApi::default())
+        .routes(infra_http::routes!(get_greeting))
 }
 ```
 
 What each choice buys:
 
 - `operation_id` is the stable identifier oasdiff tracks; `security()`
-  renders `security: []`, the explicit public override the linter and the
-  contract test require; the extension is the recorded decision from step 1.
+  renders `security: []`, the explicit public override when a retained
+  authentication profile has a root bearer default. The extension is optional
+  recorded context from step 1.
 - `TransportProblemResponses` declares the `400`, `413`, and `500` problems
   the hardened chain can answer on any route; the operation adds only its own
   statuses. A new status that several operations share becomes a
@@ -217,12 +219,12 @@ comment on a type becomes its schema description; write them as contract
 text.
 
 Test the operation as a caller sees it, with `tower::ServiceExt::oneshot`
-against `router::<()>().split_for_parts().0`: status, `Content-Type`, body,
+against `router::<()>().finalize_public().expect("documented public route")`: status, `Content-Type`, body,
 and for the failure the problem `code`. The walkthrough's two tests are
 `greets_with_json` and `reserved_name_is_a_not_found_problem`.
 
 For new ordinary router tests, the workspace now provides `axum-test` as a
-dev-dependency: `TestServer::new(router::<()>().split_for_parts().0)` uses the
+dev-dependency: `TestServer::new(router::<()>().finalize_public().expect("documented public route"))` uses the
 in-process transport. The hardened-chain tests demonstrate request, header,
 status and JSON assertions. Keep the direct `oneshot` form above where raw
 bodies, framing, concurrency or response extensions are the subject.
@@ -243,8 +245,8 @@ the document, and one `.merge`:
 )]
 struct ApiDoc;
 
-pub fn contract() -> OpenApiRouter<ReadinessReader> {
-    OpenApiRouter::with_openapi(ApiDoc::openapi())
+pub fn contract() -> ContractRouter<ReadinessReader> {
+    ContractRouter::with_openapi(ApiDoc::openapi())
         .merge(infra_http::router())
         .merge(greeting::http::router())
 }
@@ -252,9 +254,10 @@ pub fn contract() -> OpenApiRouter<ReadinessReader> {
 
 <!-- template:begin http-idempotency:docs-first-feature-http-idempotency-contract -->
 With the idempotency pack retained, `contract` also takes the idempotency
-composer: `pub fn contract(idempotency: &mut infra_http::idempotency::Composer) -> OpenApiRouter<ReadinessReader>`,
-merging `idempotency.components()` and composing an idempotent operation's
-routes through `idempotency.route(routes!(handler))` instead of a plain
+composer: `pub fn contract(idempotency: &mut infra_http::idempotency::Composer) -> ContractRouter<ReadinessReader>`,
+merging `idempotency.components()` through `merge_document` and composing an
+idempotent operation's routes through
+`idempotency.route(infra_http::routes!(handler))` instead of a plain
 `.merge`.
 <!-- template:end http-idempotency:docs-first-feature-http-idempotency-contract -->
 

@@ -1,8 +1,10 @@
 //! Generation of an idempotent route's contract and the assembled agreement.
 //!
-//! [`prepare`] is the only idempotency opt-in: it mutates one `routes!` tuple
-//! before the tuple is protected and served. [`agree`] is read-only and checks
-//! the resulting document once, after response references can resolve.
+//! [`prepare`] is the only idempotency opt-in: it mutates one documented route
+//! carrier before final contract authentication wraps it and it is served.
+//! [`agree`] is read-only and checks the resulting document once, after
+//! response references can resolve. Final contract authentication owns
+//! protected-operation policy acceptance.
 
 use std::collections::BTreeSet;
 
@@ -63,7 +65,6 @@ pub(super) enum Rule {
     Undeclared,
     NotTrue,
     Method,
-    Protected,
     KeyParameter,
     SuccessResponses,
     ProblemResponses,
@@ -83,7 +84,6 @@ impl Rule {
             Self::Undeclared => "a composed route must declare generated idempotency metadata",
             Self::NotTrue => "x-idempotent must be the boolean true",
             Self::Method => "the method must be POST, PUT, PATCH, or DELETE",
-            Self::Protected => "the operation must meet the protected-operation contract",
             Self::KeyParameter => {
                 "Idempotency-Key must be absent or one byte-equal generated header parameter"
             }

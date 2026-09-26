@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,13 +32,15 @@ use axum::{Extension, Json, Router};
 use axum_test::{TestRequest, TestResponse, TestServer};
 use health::Readiness;
 use infra_bearerauthn::test_support::{FixtureTransport, prepare_introspection_with_fixture};
-use infra_bearerauthn::{IntrospectionOptions, Verifier};
+use infra_bearerauthn::{IntrospectionOptions, ProviderUrl, Verifier};
 use infra_http::idempotency::{
     Activation, Composer, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, Tx,
 };
 use infra_http::problem::SANITIZED_DETAIL;
 use infra_http::problem::responses::ProtectedOperationProblemResponses;
-use infra_http::{Code, HardenOptions, Problem, REQUEST_ID_HEADER, VerifiedPrincipal, harden};
+use infra_http::{
+    Code, HardenOptions, Problem, REQUEST_ID_HEADER, VerifiedPrincipal, harden, routes,
+};
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;
 use integration_tests::dsn_for;
@@ -57,7 +59,6 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use utoipa::ToSchema;
-use utoipa_axum::routes;
 
 use crate::{
     Hold, RETENTION, RETRY_PAUSE, WAIT, bounded, close, count, make_read_only, template_pool,
@@ -100,6 +101,8 @@ const ALICE: &str = "alice-token";
 /// by the operation's authorization.
 const ALICE_REVOKED: &str = "alice-revoked-client-token";
 const BOB: &str = "bob-token";
+/// A verified caller with no scope required by this operation.
+const NO_SCOPE: &str = "no-scope-token";
 const INACTIVE: &str = "inactive-token";
 const REVOKED_CLIENT: &str = "revoked-client";
 /// Bound on one introspection request.
@@ -207,6 +210,9 @@ async fn create_widget(
     Json(input): Json<NewWidget>,
 ) -> Response {
     // Every attempt is authorized before the seam, so a replay never skips it.
+    if let Err(response) = infra_http::require_scope(&principal, "widgets:write") {
+        return response;
+    }
     if !may_create(&principal) {
         return forbidden();
     }
@@ -330,20 +336,22 @@ impl Provider {
     /// fixture transport.
     fn verifier(&self) -> Verifier {
         let transport = FixtureTransport::new(
-            self.tasks.clone(),
-            self.cancel.child_token(),
             FIXTURE_HOST,
             self.address,
             FIXTURE_ROOT_DER,
+            self.cancel.child_token(),
         )
         .expect("the fixture transport");
         prepare_introspection_with_fixture(
             IntrospectionOptions {
-                issuer: ISSUER.to_owned(),
-                audience: AUDIENCE.to_owned(),
-                endpoint: format!("https://{FIXTURE_HOST}/introspect"),
+                issuer: ProviderUrl::parse(ISSUER).expect("fixture issuer URL"),
+                audiences: vec![AUDIENCE.to_owned()],
+                endpoint: ProviderUrl::parse(&format!("https://{FIXTURE_HOST}/introspect"))
+                    .expect("fixture endpoint URL"),
                 client_id: "fixture-client".to_owned(),
                 client_secret: SecretString::from("fixture-secret"),
+                provider_concurrency: NonZeroUsize::new(16).expect("fixture capacity"),
+                cache: None,
             },
             transport,
         )
@@ -451,10 +459,11 @@ fn request_body(request: &[u8]) -> Option<&[u8]> {
 /// The provider's answer for `token`: two subjects, the first also through a
 /// revoked client, and inactive for anything else.
 fn introspection(token: &str) -> String {
-    let (subject, client) = match token {
-        ALICE => ("alice", "widgets-app"),
-        ALICE_REVOKED => ("alice", REVOKED_CLIENT),
-        BOB => ("bob", "widgets-app"),
+    let (subject, client, scope) = match token {
+        ALICE => ("alice", "widgets-app", "widgets:write"),
+        ALICE_REVOKED => ("alice", REVOKED_CLIENT, "widgets:write"),
+        BOB => ("bob", "widgets-app", "widgets:write"),
+        NO_SCOPE => ("scope-less", "widgets-app", ""),
         _ => return json!({"active": false}).to_string(),
     };
     json!({
@@ -464,6 +473,7 @@ fn introspection(token: &str) -> String {
         "exp": 2_147_483_647,
         "sub": subject,
         "client_id": client,
+        "scope": scope,
     })
     .to_string()
 }
@@ -494,18 +504,15 @@ impl Mounted {
         let widgets: Arc<dyn CreateWidgets> = Arc::new(SqlWidgets {
             hold: Arc::clone(&hold),
         });
-        let mut composer = Composer::new(
-            Store::new(store_pool.clone(), RETENTION),
-            provider.verifier(),
-        );
+        let mut composer = Composer::new(Store::new(store_pool.clone(), RETENTION));
         // As `service::api::contract` assembles it: the transport router
         // registers the shared problem responses the family references (the
         // 403 among them must resolve), and the composer adds its own.
-        let (routes, document) = infra_http::router()
+        let contract = infra_http::router()
             .routes(composer.route(routes!(create_widget)))
             .routes(composer.route(routes!(replace_widget)))
-            .merge(composer.components())
-            .split_for_parts();
+            .merge_document(composer.components());
+        let document = contract.document().clone();
         let activation = composer
             .agree(&document)
             .expect("the composed operation agrees with the document");
@@ -513,6 +520,8 @@ impl Mounted {
             matches!(activation, Activation::Active { .. }),
             "{activation:?}"
         );
+        let routes = infra_http::authn::finalize(contract, provider.verifier(), 32 * 1024)
+            .expect("the mounted auth contract finalizes");
         // The two outer mounts intentionally share the same inner routes. The
         // route layer must use OriginalUri so their request identities differ.
         let mounted = Router::new()
@@ -732,6 +741,132 @@ async fn until_free(request: impl Fn() -> TestRequest) -> (TestResponse, u64) {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/_test/authorization",
+    operation_id = "authorizationWithoutIdempotency",
+    responses(
+        (status = 200, description = "verified", content_type = "text/plain", body = String),
+        infra_http::problem::responses::ProtectedOperationProblemResponses,
+    )
+)]
+async fn authorized_without_idempotency(
+    principal: VerifiedPrincipal,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(response) = infra_http::require_scope(&principal, "widgets:write") {
+        return response;
+    }
+    assert!(!headers.contains_key(axum::http::header::AUTHORIZATION));
+    (
+        StatusCode::OK,
+        principal.subject().unwrap_or_default().to_owned(),
+    )
+        .into_response()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn repair_regression_authentication_and_scope_authorization_work_without_a_composer() {
+    // Keep the router and provider tasks on the test thread so this recorder
+    // cannot observe counters from concurrently running tests.
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let provider = Provider::start().await;
+    let root_policy = serde_json::from_value(json!({
+        "openapi": "3.1.0",
+        "info": {"title": "authorization fixture", "version": "1"},
+        "paths": {},
+        "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}},
+        "security": [{"bearerAuth": []}]
+    }))
+    .expect("the inherited bearer policy");
+    let contract = infra_http::ContractRouter::with_openapi(root_policy)
+        .merge(infra_http::router())
+        .routes(routes!(authorized_without_idempotency));
+    let router = infra_http::authn::finalize(contract, provider.verifier(), 32 * 1024)
+        .expect("the protected contract finalizes without an idempotency composer");
+    let server = TestServer::new(harden(
+        router.with_state(Readiness::new(Vec::new()).reader()),
+        &HardenOptions {
+            max_body_bytes: MAX_BODY_BYTES,
+            request_timeout: BUDGET,
+            max_in_flight: NonZeroU32::new(16),
+            log_health_probes: false,
+        },
+    ));
+    let mut responses = Vec::new();
+    let mut verification_counts = Vec::new();
+    for authorization in [
+        None,
+        Some("Bearer token token"),
+        Some(NO_SCOPE),
+        Some(ALICE),
+    ] {
+        let mut request = server.get("/_test/authorization");
+        if let Some(value) = authorization {
+            request = request.authorization(if value.starts_with("Bearer ") {
+                value.to_owned()
+            } else {
+                format!("Bearer {value}")
+            });
+        }
+        responses.push(request.await);
+        let scrape = recorder.handle().render();
+        let count = |name: &str| -> u64 {
+            scrape
+                .lines()
+                .filter_map(|line| {
+                    let series = line.strip_prefix(name)?;
+                    if !series.starts_with('{') && !series.starts_with(' ') {
+                        return None;
+                    }
+                    let (_, value) = series.rsplit_once(' ')?;
+                    Some(value.parse::<u64>().expect("a whole verification counter"))
+                })
+                .sum()
+        };
+        verification_counts.push((
+            count("authn_verifications_total"),
+            count("authn_token_verifications_total"),
+        ));
+    }
+    provider.stop().await;
+
+    for (response, status, code, challenge) in [
+        (
+            &responses[0],
+            StatusCode::UNAUTHORIZED,
+            "authentication_required",
+            "Bearer",
+        ),
+        (
+            &responses[1],
+            StatusCode::BAD_REQUEST,
+            "authentication_malformed",
+            "Bearer error=\"invalid_request\"",
+        ),
+        (
+            &responses[2],
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Bearer error=\"insufficient_scope\"",
+        ),
+    ] {
+        problem_body(response, status, code);
+        assert_eq!(
+            response.header(WWW_AUTHENTICATE),
+            HeaderValue::from_static(challenge)
+        );
+    }
+    assert_eq!(responses[3].status_code(), StatusCode::OK);
+    assert_eq!(responses[3].text(), "alice");
+    assert_eq!(
+        verification_counts,
+        [(1, 0), (2, 0), (3, 1), (4, 2)],
+        "each request records one HTTP outcome; only a parsed token reaches engine verification"
+    );
+}
+
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) {
     let recorder = PrometheusBuilder::new().build_recorder();
@@ -753,9 +888,15 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
         ),
         (
             Some("Basic Zm9vOmJhcg=="),
+            StatusCode::UNAUTHORIZED,
+            "authentication_required",
+            Some("Bearer"),
+        ),
+        (
+            Some("Bearer token token"),
             StatusCode::BAD_REQUEST,
             "authentication_malformed",
-            None,
+            Some("Bearer error=\"invalid_request\""),
         ),
         (
             Some(oversize.as_str()),
@@ -786,6 +927,18 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
             challenge.map(HeaderValue::from_static)
         );
     }
+    assert_eq!(outcomes(&recorder), counts(&[]));
+
+    let scope_denied = mounted
+        .create(NO_SCOPE, "scope-check", &input, "req-scope")
+        .await;
+    problem_body(&scope_denied, StatusCode::FORBIDDEN, "forbidden");
+    assert_eq!(
+        scope_denied.maybe_header(WWW_AUTHENTICATE),
+        Some(HeaderValue::from_static(
+            "Bearer error=\"insufficient_scope\""
+        ))
+    );
     assert_eq!(outcomes(&recorder), counts(&[]));
 
     // Once authentication passes, the same key is refused.

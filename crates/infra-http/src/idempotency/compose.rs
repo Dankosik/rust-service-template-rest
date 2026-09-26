@@ -1,4 +1,8 @@
-//! Composition and authenticated request capture for idempotent routes.
+//! Composition and authenticated request capture for idempotent route carriers.
+//!
+//! Key handling and request capture are the only policy this module owns. The
+//! final contract layer authenticates first and inserts a sealed principal
+//! before this carrier runs.
 
 use std::convert::Infallible;
 use std::error::Error as StdError;
@@ -13,16 +17,15 @@ use axum::http::header::CONTENT_TYPE;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use http_body_util::{BodyExt, Full, LengthLimitError};
-use infra_bearerauthn::Verifier;
 use infra_idempotency_store::Store;
 use utoipa::OpenApi as _;
-use utoipa_axum::router::{OpenApiRouter, UtoipaMethodRouter, UtoipaMethodRouterExt};
 
 use super::declaration::{self, AgreementError, ComposedOperation, Rule};
 use super::execute::{Attempt, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, sanitized};
 use super::identity;
 use super::openapi::{IdempotencyComponents, KEY_HEADER};
-use crate::authn::{self, VerifiedPrincipal};
+use crate::authn::VerifiedPrincipal;
+use crate::contract::RegisteredRoutes;
 use crate::harden::RequestDeadline;
 use crate::problem::{Code, Problem};
 use crate::request_id;
@@ -33,11 +36,11 @@ const INVALID_KEY_REASON: &str =
 const BODY_READ_DETAIL: &str = "request body could not be read";
 const BODY_LIMIT_DETAIL: &str = "request body exceeds the configured limit";
 
-/// The generated contract and runtime composition owner for idempotent routes.
+/// The generated contract and runtime composition owner for idempotent route
+/// carriers.
 #[derive(Debug)]
 pub struct Composer {
     store: Store,
-    verifier: Verifier,
     composed: std::collections::BTreeSet<ComposedOperation>,
     failures: Vec<AgreementError>,
 }
@@ -56,25 +59,30 @@ pub enum Activation {
 }
 
 impl Composer {
-    /// Build a composer over the given store and bearer verifier.
+    /// A composer whose routes arbitrate through `store`.
     #[must_use]
-    pub fn new(store: Store, verifier: Verifier) -> Self {
+    pub fn new(store: Store) -> Self {
         Self {
             store,
-            verifier,
             composed: std::collections::BTreeSet::new(),
             failures: Vec::new(),
         }
     }
 
-    /// Build an inert composer for document rendering and local tests.
+    /// A composer over an inert store for rendering the document and tests.
+    /// It performs no I/O.
     #[must_use]
     pub fn inert() -> Self {
-        Self::new(Store::inert(), Verifier::disabled())
+        Self::new(Store::inert())
     }
 
-    /// Make one route idempotent and generate its served contract metadata.
-    pub fn route<S>(&mut self, mut routes: UtoipaMethodRouter<S>) -> UtoipaMethodRouter<S>
+    /// Make one annotated route carrier idempotent and generate its served
+    /// contract metadata.
+    ///
+    /// Key handling stays inside final authentication. A carrier that breaks a
+    /// declaration rule remains fail-closed as sanitized 500 endpoints, and
+    /// [`Composer::agree`] reports the declaration error before admission.
+    pub fn route<S>(&mut self, mut routes: RegisteredRoutes<S>) -> RegisteredRoutes<S>
     where
         S: Clone + Send + Sync + 'static,
     {
@@ -83,49 +91,45 @@ impl Composer {
             metrics::Unit::Count,
             "Outcomes of requests to idempotent operations, by outcome."
         );
-        let refused = routes.clone();
-        let operation = match declaration::prepare(&mut routes.1) {
+        let operation = routes
+            .documented_paths_mut()
+            .ok_or_else(|| AgreementError::new("registered route", Rule::Shape))
+            .and_then(declaration::prepare);
+        let operation = match operation {
             Ok(operation) => operation,
             Err(failure) => {
                 self.failures.push(failure);
-                return refuse(refused);
+                return refuse(routes);
             }
         };
         let keys = KeyLayer {
             store: self.store.clone(),
             operation: Arc::from(operation.operation_id.as_str()),
         };
-        let layered = routes.map(|method_router| {
+        self.composed.insert(operation);
+        routes.map_method_routers(|method_router| {
+            let keys = keys.clone();
             method_router.route_layer(middleware::from_fn_with_state(keys, handle_key))
-        });
-        if let Ok(protected) = authn::protect(layered, self.verifier.clone()) {
-            self.composed.insert(operation);
-            protected
-        } else {
-            self.failures
-                .push(AgreementError::new(operation.operation_id, Rule::Protected));
-            refuse(refused)
-        }
+        })
     }
 
-    /// Register the generated idempotency Problem components.
+    /// Register the generated idempotency Problem components for the contract
+    /// document merge.
     #[must_use]
     #[allow(
         clippy::unused_self,
         reason = "response components enter only through the composer-owned contract path"
     )]
-    pub fn components<S>(&self) -> OpenApiRouter<S>
-    where
-        S: Clone + Send + Sync + 'static,
-    {
-        OpenApiRouter::with_openapi(IdempotencyComponents::openapi())
+    pub fn components(&self) -> utoipa::openapi::OpenApi {
+        IdempotencyComponents::openapi()
     }
 
     /// Verify the one assembled agreement and select activation.
     ///
     /// # Errors
     ///
-    /// Returns a sanitized, static route-contract failure.
+    /// Returns [`AgreementError`] when a composed route or the final document
+    /// breaks an idempotency declaration rule.
     pub fn agree(self, document: &utoipa::openapi::OpenApi) -> Result<Activation, AgreementError> {
         if let Some(failure) = self.failures.into_iter().next() {
             return Err(failure);
@@ -141,11 +145,12 @@ impl Composer {
     }
 }
 
-fn refuse<S>(routes: UtoipaMethodRouter<S>) -> UtoipaMethodRouter<S>
+/// The fail-closed form of a carrier that broke a declaration rule.
+fn refuse<S>(routes: RegisteredRoutes<S>) -> RegisteredRoutes<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    routes.map(|method_router| {
+    routes.map_method_routers(|method_router| {
         method_router.route_layer(middleware::from_fn(|request: Request, _: Next| {
             std::future::ready(sanitized(request_id::request_id(request.extensions())))
         }))
@@ -158,7 +163,8 @@ struct KeyLayer {
     operation: Arc<str>,
 }
 
-/// Capture identity after bearer verification and before ordinary extraction.
+/// Capture identity after final contract authentication and before ordinary
+/// extraction.
 async fn handle_key(State(keys): State<KeyLayer>, request: Request, next: Next) -> Response {
     let request_id = request_id::request_id(request.extensions());
     let request = request.with_limited_body();

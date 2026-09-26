@@ -80,6 +80,13 @@ cost. Check supported configuration and extension points before adding a custom
 wrapper, fork, or replacement. Keep application-specific policy with its current
 owner; a ready-made mechanism need not own the surrounding business rules.
 
+For a protocol, standard, or provider contract, implement applicable normative
+MUST and MUST NOT requirements. Follow SHOULD guidance unless a documented,
+understood reason justifies a deviation. Extra strictness beyond that contract
+needs a concrete threat crossing an untrusted boundary, a real incident, or a
+necessary accepted application constraint, with its compatibility and operating
+cost; suspicion or strictness alone is insufficient.
+
 Before a new capability starts, research the crates that already solve its
 problems and record the comparison and decision in the service's accepted
 decision artifact. Use the service's local planning rules when they exist.

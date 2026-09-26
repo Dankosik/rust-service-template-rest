@@ -167,18 +167,18 @@ Delivered:
 
 - Code-first generation with `utoipa` 5.5 and `utoipa-axum` 0.2: the probe
   handlers in `crates/infra-http` carry `#[utoipa::path]` with
-  `operationId`, `summary`, `x-security-decision`, `security: []`, and every
+  `operationId`, `summary`, explicit public `security: []` where a root bearer
+  default exists, and every
   response; `Problem` and `InvalidParam` derive their schemas from the
   serializer (`deny_unknown_fields` → `additionalProperties: false`); the
   shared problem responses are `ToResponse` components; the readiness
   handler returns an `IntoResponses` enum with one variant per status.
 - `crates/service` gained a library (`api`) that merges every
-  `OpenApiRouter` into one value whose halves are the served router and the
-  document, an `openapi` binary that renders it, and contract tests: the
-  committed file equals the generator output byte for byte, every operation
-  declares its security decision, `public` means `security: []`,
-  `protected` means the bearer scheme alone plus `400`/`401`/`403`/`431`/
-  `503`/`504` problem responses, and the problem schemas are closed. The
+  `ContractRouter` into one tracked contract, finalizes the served router from
+  it, renders its document through an `openapi` binary, and has contract tests:
+  committed file equals the generator output byte for byte, root and operation
+  security produce an unambiguous effective policy, explicit public means
+  `security: []`, and the problem schemas are closed. The
   `infra-http` router tests compare served media types with the declared
   ones for `200`, `503`, and `413`.
 - `api/openapi/service.yaml` (OpenAPI 3.1, health-only), `.redocly.yaml`
@@ -638,7 +638,7 @@ markers, tests, and initializer support. Order by expected demand:
 10. `examples/reference-service`: one isolated vertical slice.
 
 Stage 10.1 local evidence includes workspace build/tests, the generated
-contract, real local TLS/DNS and mounted HTTP authentication cases, dependency
+contract, real local TLS and mounted HTTP authentication cases, dependency
 policy and existing initializer safety/sync proof. All six DATABASE × AUTHN
 runtime graphs passed initialized build/full checks; those scoped results were
 reused after exact input-equivalence checks during a validation-only refactor.
@@ -659,8 +659,9 @@ owner. The auth client keeps its own JWT/introspection HTTP policy, deadlines,
 body rules and count-only header limit. The shared public-address predicate
 also refuses ambiguous 6to4, reserved IPv6 and private IPv4 embedded in the
 well-known NAT64 prefix. The selected pack is inert until a provider constructs
-it; the default initializer removes it and shared code is retained when auth
-still needs it. The [guide](outbound-http.md) owns the usable API and limits.
+it; the default initializer removes it unless outbound HTTP retains it.
+Authentication has its own trusted-provider transport and TLS fixtures. The
+[guide](outbound-http.md) owns the usable API and limits.
 
 Stage-10.2 local acceptance covered a workspace build, 261 unique source tests,
 formatting, documentation, scoped shell checks, dependency and secret gates,
