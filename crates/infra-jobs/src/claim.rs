@@ -98,7 +98,7 @@ const CLAIM: &str = "WITH policy AS ( \
        AND policy.kind = job.kind \
        AND ((job.state = 'pending' AND job.not_before <= statement_timestamp()) \
             OR (job.state = 'running' AND job.claim_expires_at <= statement_timestamp())) \
-     RETURNING job.id, job.kind, job.state, job.attempts, job.claim_generation, \
+     RETURNING job.id::text AS id, job.kind, job.state, job.attempts, job.claim_generation, \
                policy.timeout_micros, \
                CASE WHEN job.state = 'running' THEN job.payload::text END AS payload, \
                job.trace_context, job.trace_state, job.error_summary, \
@@ -220,7 +220,7 @@ async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
             .bind(&max_attempts)
             .bind(&timeouts)
             .bind(requested)
-            .bind(shared.worker_id)
+            .bind(shared.worker_id.to_string())
             .fetch_all(&mut *connection)
             .await
             .map_err(statement_error)?;
@@ -362,7 +362,8 @@ fn decode_claim(
     row: &sqlx::postgres::PgRow,
     registry: &crate::Registry,
 ) -> Result<Drawn, OperationError> {
-    let id = JobId::from_uuid(row.try_get("id").map_err(statement_error)?);
+    let id_text: String = row.try_get("id").map_err(statement_error)?;
+    let id = JobId::parse(&id_text).ok_or(OperationError::Statement)?;
     let kind_text: String = row.try_get("kind").map_err(statement_error)?;
     let kind = registry
         .get(&kind_text)

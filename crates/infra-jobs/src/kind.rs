@@ -40,12 +40,14 @@ pub trait JobKind: Serialize + DeserializeOwned + Send + Sync + 'static {
 pub struct JobId(uuid::Uuid);
 
 impl JobId {
-    pub(crate) const fn from_uuid(id: uuid::Uuid) -> Self {
-        Self(id)
-    }
-
-    pub(crate) const fn as_uuid(self) -> uuid::Uuid {
-        self.0
+    /// The id as the database returns it (`id::text`).
+    ///
+    /// `None` when `text` is not a UUID.
+    pub(crate) const fn parse(text: &str) -> Option<Self> {
+        match uuid::Uuid::try_parse(text) {
+            Ok(id) => Some(Self(id)),
+            Err(_) => None,
+        }
     }
 }
 
@@ -122,7 +124,7 @@ impl<K: JobKind> Job<K> {
     /// or [`CompleteError::Database`] when the statement fails.
     pub async fn complete_in_tx(&self, tx: &mut Tx<'_>) -> Result<(), CompleteError> {
         let affected = sqlx::query(crate::attempt::COMPLETE)
-            .bind(self.id.as_uuid())
+            .bind(self.id.to_string())
             .bind(self.generation)
             .execute(&mut *connection(tx))
             .await?
@@ -697,7 +699,7 @@ mod tests {
     #[test]
     fn job_id_uuid_display_preserves_external_format() {
         let text = "01234567-89ab-cdef-fedc-ba9876543210";
-        let id = JobId::from_uuid(uuid::Uuid::parse_str(text).unwrap());
+        let id = JobId::parse(text).unwrap();
         assert_eq!(id.to_string(), text);
         assert_eq!(
             format!("{id:?}"),
@@ -707,9 +709,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_prepare_runs_the_handler_and_rejects_a_bad_payload() {
-        let id = JobId::from_uuid(uuid::Uuid::from_u128(
-            0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
-        ));
+        let id = JobId::parse("01234567-89ab-cdef-fedc-ba9876543210").unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut kinds = Kinds::new();
         kinds.register(Policy::default(), move |job: Job<Sample>| async move {
@@ -759,9 +759,7 @@ mod tests {
     #[tokio::test]
     async fn job_debug_omits_payload() {
         let job = Job {
-            id: JobId::from_uuid(uuid::Uuid::from_u128(
-                0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
-            )),
+            id: JobId::parse("01234567-89ab-cdef-fedc-ba9876543210").unwrap(),
             attempt: 4,
             generation: 99,
             payload: Sample {

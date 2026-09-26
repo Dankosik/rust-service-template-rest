@@ -380,7 +380,7 @@ async fn send_outcome(
             .map_err(|_| OperationError::Acquire)?;
         execute(
             &mut connection,
-            attempt.id.as_uuid(),
+            &attempt.id.to_string(),
             attempt.generation,
             intended,
         )
@@ -392,7 +392,7 @@ async fn send_outcome(
 
 async fn execute(
     connection: &mut PgConnection,
-    id: uuid::Uuid,
+    id: &str,
     generation: i64,
     intended: &Intended,
 ) -> Result<u64, sqlx::Error> {
