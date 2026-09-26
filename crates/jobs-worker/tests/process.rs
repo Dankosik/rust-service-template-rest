@@ -59,6 +59,11 @@ fn configured_inbound_endpoint_refuses_without_a_consumer_before_database_admiss
     let output = Command::new(env!("CARGO_BIN_EXE_jobs-worker"))
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("APP__POSTGRES__ENABLED", "true")
+        .env(
+            "APP__POSTGRES__DSN",
+            "postgres://app:pw@127.0.0.1:1/app?sslmode=disable",
+        )
         .env(
             "APP__INBOUND_WEBHOOKS__ENDPOINTS__PARTNER__ACTIVE_KEY",
             "partner_v1",

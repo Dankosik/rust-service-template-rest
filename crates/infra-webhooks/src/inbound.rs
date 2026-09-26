@@ -341,7 +341,9 @@ impl Handler<Incoming> for Processor {
                     event = "webhook_processor_missing_binding",
                     reason = "missing_binding"
                 );
-                return Err(JobError::retryable("inbound webhook consumer is unavailable"));
+                return Err(JobError::retryable(
+                    "inbound webhook consumer is unavailable",
+                ));
             };
             let pool = job.pool().clone();
             let completed = in_tx(&pool, async |tx| -> Result<(), ProcessFailure> {

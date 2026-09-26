@@ -248,8 +248,10 @@ fn header(headers: &[u8], name: &str) -> String {
     text.lines()
         .filter_map(|line| line.split_once(':'))
         .find(|(field, _)| field.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.trim().to_owned())
-        .unwrap_or_else(|| panic!("request contains {name}"))
+        .map_or_else(
+            || panic!("request contains {name}"),
+            |(_, value)| value.trim().to_owned(),
+        )
 }
 
 fn request_body(request: &[u8]) -> &[u8] {

@@ -37,12 +37,7 @@ fn register_outbound(
         .webhooks
         .endpoints
         .iter()
-        .map(|(endpoint_id, endpoint)| {
-            (
-                endpoint_id.clone(),
-                Endpoint::new(endpoint.url.clone()),
-            )
-        })
+        .map(|(endpoint_id, endpoint)| (endpoint_id.clone(), Endpoint::new(endpoint.url.clone())))
         .collect();
     let outbound = Outbound::new(endpoints)?;
     let keys = config
@@ -52,10 +47,13 @@ fn register_outbound(
         .map(|(endpoint_id, endpoint)| {
             KeyRing::from_encoded(
                 endpoint.secret.expose_secret(),
-                endpoint.previous_secret.as_ref().map(ExposeSecret::expose_secret),
+                endpoint
+                    .previous_secret
+                    .as_ref()
+                    .map(ExposeSecret::expose_secret),
             )
-                .map(|ring| (endpoint_id.clone(), ring))
-                .map_err(|source| RegistrationError::OutboundKey { source })
+            .map(|ring| (endpoint_id.clone(), ring))
+            .map_err(|source| RegistrationError::OutboundKey { source })
         })
         .collect::<Result<_, _>>()?;
     outbound.dispatcher(keys)?.register(kinds);
@@ -88,10 +86,7 @@ fn register(
             .into());
         }
     }
-    kinds.register(
-        infra_jobs::Policy::default(),
-        Processor::new(consumers),
-    );
+    kinds.register(infra_jobs::Policy::default(), Processor::new(consumers));
     // template:end inbound-webhooks:worker-webhooks-register-inbound
     // template:begin webhooks-common:worker-webhooks-register-suffix
     Ok(())
