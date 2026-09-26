@@ -134,6 +134,33 @@ service composes nothing for jobs; the worker composes its own process.
 
 ## Decisions Recorded Here
 
+<!-- template:begin webhooks-common:docs-boundaries-webhooks-provider -->
+## Webhook provider boundary
+
+`infra-webhooks` owns Standard Webhooks framing/verification, durable outbound
+delivery and inbound receipt/processing adapters. `infra-http` owns only inbound
+transport; `service` and `jobs-worker` remain composition roots. Feature code
+uses its provider adapter and never depends on jobs, PostgreSQL, transport, or
+webhook protocol types directly. This avoids both a reverse root edge and a
+second queue or receipt-store owner.
+<!-- template:end webhooks-common:docs-boundaries-webhooks-provider -->
+
+<!-- template:begin webhooks:docs-boundaries-webhooks-outbound -->
+The outbound module owns prepared immutable destination/key references, the
+`webhooks.deliver` handler, and its private per-origin client cache. It may use
+jobs, PostgreSQL, the existing bounded outbound HTTP client, and protocol glue;
+it does not own business acceptance, endpoint management, DNS policy, or retry
+scheduling.
+<!-- template:end webhooks:docs-boundaries-webhooks-outbound -->
+
+<!-- template:begin inbound-webhooks:docs-boundaries-webhooks-inbound -->
+The inbound module owns raw-byte verification, receipt arbitration, and the
+consumer registry/processor. It may use protocol, jobs, PostgreSQL, and SQLx;
+it does not own router middleware, endpoint configuration precedence, or a
+business event schema. `infra-http::webhooks` owns route annotation and problem
+mapping, not receipt SQL or signature implementation.
+<!-- template:end inbound-webhooks:docs-boundaries-webhooks-inbound -->
+
 Ownership choices made in stages 1 to 3 and 8 that a later change should not
 silently reopen:
 

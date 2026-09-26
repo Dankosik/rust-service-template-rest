@@ -118,7 +118,7 @@ classify() {
 		# Database-backed proof: the adapter, the runner, the test crate and
 		# its fixtures, the compose file, and the scripts that drive them.
 		if [[ ${database} == postgres ]]; then case "${file}" in
-		crates/infra-postgres/* | crates/infra-idempotency-store/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/migrate/* | test/* | env/docker-compose.yml | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh)
+		crates/infra-postgres/* | crates/infra-idempotency-store/* | crates/infra-jobs/* | crates/infra-webhooks/* | crates/jobs-worker/* | crates/migrate/* | test/* | env/docker-compose.yml | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh)
 			mark db_integration
 			;;
 		esac
@@ -144,7 +144,7 @@ classify() {
 		clippy.toml | rustfmt.toml | Cargo.toml) mark lint_config ;;
 		esac
 		case "${file}" in
-		.redocly.yaml | api/openapi/*) mark openapi ;;
+		.redocly.yaml | api/openapi/* | crates/infra-http/src/webhooks.rs | crates/service/src/api.rs) mark openapi ;;
 		esac
 		# The Dockerfile carries tool pins too (ARG defaults, FROM digests).
 		case "${file}" in
@@ -196,7 +196,7 @@ classify() {
 		template-owned.paths | \
 		scripts/ci/template-init-check.sh | scripts/tests/template-* | \
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
-		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | \
+		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
 		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | \
 		test/* | migrations/*)
 			mark module_initializer initializer_runtime
@@ -323,6 +323,15 @@ EOF
 	assert_case crates/infra-http/src/idempotency/mod.rs \
 		"rust_source module_initializer initializer_runtime" \
 		"cargo_dependencies documentation db_integration"
+	assert_case crates/infra-http/src/webhooks.rs \
+		"rust_source openapi module_initializer initializer_runtime" \
+		"cargo_dependencies documentation"
+	assert_case crates/infra-webhooks/src/lib.rs \
+		"rust_source db_integration module_initializer initializer_runtime" \
+		"cargo_dependencies documentation"
+	assert_case crates/service/src/api.rs \
+		"rust_source openapi module_initializer initializer_runtime" \
+		"cargo_dependencies documentation"
 	assert_case crates/infra-idempotency-store/src/lib.rs \
 		"rust_source db_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations documentation"

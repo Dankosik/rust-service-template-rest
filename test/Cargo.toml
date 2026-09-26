@@ -41,8 +41,13 @@ tokio = { workspace = true, features = ["time"] }
 [dev-dependencies]
 # template:begin outbound-http:test-outbound-http-dependencies
 infra-outbound-http = { workspace = true, features = ["test-support"] }
-http = { workspace = true }
 # template:end outbound-http:test-outbound-http-dependencies
+# template:begin webhooks-common:test-webhooks-dependencies
+infra-webhooks = { workspace = true }
+# template:end webhooks-common:test-webhooks-dependencies
+# template:begin inbound-webhooks:test-inbound-webhooks-dependencies
+http = { workspace = true }
+# template:end inbound-webhooks:test-inbound-webhooks-dependencies
 url = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 wiremock = { workspace = true }

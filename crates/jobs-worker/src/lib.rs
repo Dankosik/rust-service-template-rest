@@ -1,10 +1,11 @@
 //! The jobs worker's entry point and registration contract.
 //!
-//! A derived service registers its job kinds in `src/main.rs` by passing a
-//! [`Register`] function to [`run`]. The shipped binary passes `None` and
-//! refuses. The synchronous startup phases and the one exit-code mapping
-//! live here, the asynchronous startup in `bootstrap`, and the staged
-//! teardown in `shutdown`. The full order is in
+//! A composition root registers its retained job kinds in `src/main.rs` by
+//! passing a [`Register`] function to [`run`]. The shipped binary supplies its
+//! retained profile registrations; a composition with no registrations still
+//! refuses. The synchronous startup phases and the one exit-code mapping live
+//! here, the asynchronous startup in `bootstrap`, and the staged teardown in
+//! `shutdown`. The full order is in
 //! docs/architecture/runtime-lifecycle.md (section "Jobs worker").
 
 mod bootstrap;

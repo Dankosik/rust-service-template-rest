@@ -573,7 +573,7 @@
       "test/tests/outbound_http.rs"
     ],
     "markers": [
-      {"path": "Cargo.toml", "ids": ["workspace-outbound-http-types"]},
+      {"path": "Cargo.toml", "ids": ["workspace-outbound-http-crate"]},
       {"path": "test/Cargo.toml", "ids": ["test-outbound-http-dependencies"]},
       {"path": "crates/infra-telemetry/src/metrics.rs", "ids": ["telemetry-outbound-buckets-constants", "telemetry-outbound-buckets-install", "telemetry-outbound-buckets-helper", "telemetry-outbound-histogram-test"]},
       {
@@ -761,6 +761,393 @@
     "markers": [
       {"path": "test/tests/jobs/main.rs", "ids": ["jobs-http-idempotency-module"]},
       {"path": "docs/background-jobs.md", "ids": ["docs-background-jobs-idempotency"]}
+    ]
+  },
+  "webhooks-common": {
+    "remove_when_unselected": [
+      "crates/infra-webhooks/",
+      "test/tests/webhooks/"
+    ],
+    "markers": [
+      {
+        "path": "Cargo.toml",
+        "ids": [
+          "workspace-webhooks-crate"
+        ]
+      },
+      {
+        "path": "crates/jobs-worker/Cargo.toml",
+        "ids": [
+          "worker-webhooks-dependency"
+        ]
+      },
+      {
+        "path": "crates/jobs-worker/src/main.rs",
+        "ids": [
+          "worker-webhooks-register-prefix",
+          "worker-webhooks-register-suffix",
+          "worker-webhooks-registration"
+        ]
+      },
+      {
+        "path": "crates/jobs-worker/tests/process.rs",
+        "ids": [
+          "worker-webhooks-process-expectation"
+        ]
+      },
+      {
+        "path": "test/Cargo.toml",
+        "ids": [
+          "test-webhooks-dependencies"
+        ]
+      },
+      {
+        "path": "README.md",
+        "ids": [
+          "readme-webhooks-profiles"
+        ]
+      },
+      {
+        "path": "docs/architecture/async.md",
+        "ids": [
+          "docs-async-webhooks"
+        ]
+      },
+      {
+        "path": "docs/architecture/boundaries.md",
+        "ids": [
+          "docs-boundaries-webhooks-provider"
+        ]
+      },
+      {
+        "path": "docs/architecture/integration.md",
+        "ids": [
+          "docs-integration-webhooks-protocol"
+        ]
+      },
+      {
+        "path": "docs/background-jobs.md",
+        "ids": [
+          "docs-background-jobs-webhooks"
+        ]
+      },
+      {
+        "path": "docs/configuration-source-policy.md",
+        "ids": [
+          "docs-config-webhooks-snapshot"
+        ]
+      },
+      {
+        "path": "docs/project-structure-and-module-organization.md",
+        "ids": [
+          "docs-structure-webhooks-common"
+        ]
+      },
+      {
+        "path": "docs/roadmap.md",
+        "ids": [
+          "roadmap-stage-10-5-webhooks"
+        ]
+      },
+      {
+        "path": "docs/template-sync.md",
+        "ids": [
+          "docs-template-sync-webhooks"
+        ]
+      }
+    ]
+  },
+  "webhooks": {
+    "remove_when_unselected": [
+      "crates/config/src/webhooks.rs",
+      "crates/infra-webhooks/src/outbound.rs",
+      "test/tests/webhooks/outbound.rs",
+      "docs/outbound-webhooks.md"
+    ],
+    "markers": [
+      {
+        "path": "Cargo.toml",
+        "ids": [
+          "workspace-webhooks-httpdate"
+        ]
+      },
+      {
+        "path": "crates/config/src/lib.rs",
+        "ids": [
+          "config-webhooks-module",
+          "config-webhooks-export",
+          "config-webhooks-field",
+          "config-webhooks-validate"
+        ]
+      },
+      {
+        "path": "crates/config/src/load.rs",
+        "ids": [
+          "load-webhooks-environment"
+        ]
+      },
+      {
+        "path": "crates/infra-webhooks/Cargo.toml",
+        "ids": [
+          "webhooks-outbound-dependencies"
+        ]
+      },
+      {
+        "path": "crates/infra-webhooks/src/lib.rs",
+        "ids": [
+          "webhooks-outbound-module"
+        ]
+      },
+      {
+        "path": "crates/jobs-worker/src/main.rs",
+        "ids": [
+          "worker-webhooks-outbound-imports",
+          "worker-webhooks-outbound-registration",
+          "worker-webhooks-register-outbound"
+        ]
+      },
+      {
+        "path": "README.md",
+        "ids": [
+          "readme-webhooks-outbound-guide"
+        ]
+      },
+      {
+        "path": "docs/architecture/async.md",
+        "ids": [
+          "docs-async-webhooks-outbound"
+        ]
+      },
+      {
+        "path": "docs/architecture/boundaries.md",
+        "ids": [
+          "docs-boundaries-webhooks-outbound"
+        ]
+      },
+      {
+        "path": "docs/architecture/integration.md",
+        "ids": [
+          "docs-integration-webhooks-outbound"
+        ]
+      },
+      {
+        "path": "docs/background-jobs.md",
+        "ids": [
+          "docs-background-jobs-webhooks-outbound"
+        ]
+      },
+      {
+        "path": "docs/configuration-source-policy.md",
+        "ids": [
+          "docs-config-webhooks-outbound"
+        ]
+      },
+      {
+        "path": "docs/project-structure-and-module-organization.md",
+        "ids": [
+          "docs-structure-webhooks-outbound"
+        ]
+      },
+      {
+        "path": "docs/roadmap.md",
+        "ids": [
+          "roadmap-stage-10-5-outbound-guide"
+        ]
+      },
+      {
+        "path": "docs/outbound-webhooks.md",
+        "ids": [
+          "docs-outbound-webhooks-guide"
+        ]
+      },
+      {
+        "path": "test/tests/webhooks/main.rs",
+        "ids": [
+          "test-webhooks-outbound-module"
+        ]
+      }
+    ]
+  },
+  "inbound-webhooks": {
+    "remove_when_unselected": [
+      "crates/config/src/inbound_webhooks.rs",
+      "crates/infra-http/src/webhooks.rs",
+      "crates/infra-webhooks/src/inbound.rs",
+      "migrations/20260926022945_create_webhook_receipts.sql",
+      "test/tests/webhooks/inbound.rs",
+      "docs/inbound-webhooks.md"
+    ],
+    "markers": [
+      {
+        "path": "crates/config/src/lib.rs",
+        "ids": [
+          "config-inbound-webhooks-module",
+          "config-inbound-webhooks-export",
+          "config-inbound-webhooks-field",
+          "config-inbound-webhooks-validate"
+        ]
+      },
+      {
+        "path": "crates/config/src/load.rs",
+        "ids": [
+          "load-inbound-webhooks-environment"
+        ]
+      },
+      {
+        "path": "crates/infra-webhooks/Cargo.toml",
+        "ids": [
+          "webhooks-inbound-dependencies"
+        ]
+      },
+      {
+        "path": "crates/infra-webhooks/src/lib.rs",
+        "ids": [
+          "webhooks-inbound-module"
+        ]
+      },
+      {
+        "path": "crates/infra-http/Cargo.toml",
+        "ids": [
+          "http-webhooks-dependency"
+        ]
+      },
+      {
+        "path": "crates/infra-http/src/lib.rs",
+        "ids": [
+          "http-webhooks-module"
+        ]
+      },
+      {
+        "path": "crates/infra-http/src/problem.rs",
+        "ids": [
+          "http-webhook-codes",
+          "http-webhook-code-meta",
+          "http-webhook-problem-responses",
+          "http-webhook-problem-components"
+        ]
+      },
+      {
+        "path": "crates/service/Cargo.toml",
+        "ids": [
+          "service-webhooks-dependency"
+        ]
+      },
+      {
+        "path": "crates/service/src/api.rs",
+        "ids": [
+          "service-api-webhooks-router",
+          "service-api-webhooks-tag"
+        ]
+      },
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "ids": [
+          "bootstrap-webhooks-imports",
+          "bootstrap-webhooks-constructor",
+          "bootstrap-webhooks-destructure",
+          "bootstrap-webhooks-errors",
+          "bootstrap-webhooks-prepare",
+          "bootstrap-webhooks-prepared-field",
+          "bootstrap-webhooks-prepared-value",
+          "bootstrap-webhooks-route-state"
+        ]
+      },
+      {
+        "path": "crates/service/tests/lifecycle.rs",
+        "ids": [
+          "service-webhooks-lifecycle-tests"
+        ]
+      },
+      {
+        "path": "crates/service/tests/openapi.rs",
+        "ids": [
+          "service-webhooks-contract-test"
+        ]
+      },
+      {
+        "path": "crates/jobs-worker/src/main.rs",
+        "ids": [
+          "worker-webhooks-register-inbound",
+          "worker-webhooks-inbound-imports"
+        ]
+      },
+      {
+        "path": "test/Cargo.toml",
+        "ids": [
+          "test-inbound-webhooks-dependencies"
+        ]
+      },
+      {
+        "path": "README.md",
+        "ids": [
+          "readme-webhooks-inbound-guide"
+        ]
+      },
+      {
+        "path": "docs/architecture/async.md",
+        "ids": [
+          "docs-async-webhooks-inbound"
+        ]
+      },
+      {
+        "path": "docs/architecture/boundaries.md",
+        "ids": [
+          "docs-boundaries-webhooks-inbound"
+        ]
+      },
+      {
+        "path": "docs/architecture/http.md",
+        "ids": [
+          "docs-http-inbound-webhooks"
+        ]
+      },
+      {
+        "path": "docs/architecture/integration.md",
+        "ids": [
+          "docs-integration-webhooks-inbound"
+        ]
+      },
+      {
+        "path": "docs/background-jobs.md",
+        "ids": [
+          "docs-background-jobs-webhooks-inbound"
+        ]
+      },
+      {
+        "path": "docs/configuration-source-policy.md",
+        "ids": [
+          "docs-config-webhooks-inbound"
+        ]
+      },
+      {
+        "path": "docs/project-structure-and-module-organization.md",
+        "ids": [
+          "docs-structure-webhooks-inbound"
+        ]
+      },
+      {
+        "path": "docs/roadmap.md",
+        "ids": [
+          "roadmap-stage-10-5-inbound-guide"
+        ]
+      },
+      {
+        "path": "docs/inbound-webhooks.md",
+        "ids": [
+          "docs-inbound-webhooks-guide"
+        ]
+      },
+      {
+        "path": "test/tests/webhooks/main.rs",
+        "ids": [
+          "test-webhooks-inbound-modules",
+          "test-webhooks-inbound-std",
+          "test-webhooks-inbound-postgres",
+          "test-webhooks-inbound-constants",
+          "test-webhooks-inbound-pool",
+          "test-webhooks-inbound-bounded"
+        ]
+      }
     ]
   }
 }

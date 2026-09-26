@@ -15,6 +15,32 @@ the access shape, never credentials, tokens, or customer data.
 
 ## Adding a dependency
 
+<!-- template:begin webhooks-common:docs-integration-webhooks-protocol -->
+## Standard Webhooks protocol
+
+The shared provider uses already-resolved aws-lc-rs HMAC and base64 for raw-byte
+v1 HMAC-SHA256 framing and library constant-time verification. The published
+`standardwebhooks` 1.0.1 crate is not admitted because its UTF-8 input,
+uncontrolled clock, overflow-sensitive subtraction, and handwritten comparison
+cannot all be repaired by a wrapper. `httpdate` parses outbound Retry-After
+HTTP-dates. Reopen only if a published library closes the named gaps or retained
+Cargo graphs show a concrete aws-lc backend drawback.
+<!-- template:end webhooks-common:docs-integration-webhooks-protocol -->
+
+<!-- template:begin webhooks:docs-integration-webhooks-outbound -->
+Outbound webhook delivery reuses `infra-outbound-http` as one bounded,
+fixed-authority client per cached origin. The provider passes an admitted saved
+origin and original path/query; it does not introduce raw reqwest calls, a
+general many-authority transport, proxy handling, redirects, or an inner retry.
+<!-- template:end webhooks:docs-integration-webhooks-outbound -->
+
+<!-- template:begin inbound-webhooks:docs-integration-webhooks-inbound -->
+Inbound webhook processing crosses to adopter code through a registered consumer
+that receives immutable incoming bytes and `&mut Tx`. Database effects and
+fenced completion share that transaction; external recipients must be
+idempotent. A missing binding snoozes rather than acknowledging work.
+<!-- template:end inbound-webhooks:docs-integration-webhooks-inbound -->
+
 Provider adapters live in `crates/infra-<provider>` and own admission,
 budgets, retry eligibility, provider errors, and the mapping into
 feature-owned types; feature crates depend on the adapter's types through

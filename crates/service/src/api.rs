@@ -36,7 +36,12 @@ const GENERATED_HEADER: &str =
         description = "HTTP contract served by the `service` binary: platform probes and feature operations, with RFC 9457 problem responses from one closed catalog."
     ),
     servers((url = "/", description = "current service origin")),
-    tags((name = "system", description = "Operational endpoints for liveness and readiness.")),
+    tags(
+        (name = "system", description = "Operational endpoints for liveness and readiness."),
+        // template:begin inbound-webhooks:service-api-webhooks-tag
+        (name = "webhooks", description = "Authenticated inbound webhook admission.")
+        // template:end inbound-webhooks:service-api-webhooks-tag
+    ),
     // template:begin authn:service-api-authn-document-security
     modifiers(&BearerAuth),
     security(("bearerAuth" = []))
@@ -77,7 +82,11 @@ pub fn contract(
 }
 
 fn assemble() -> ContractRouter<ReadinessReader> {
-    ContractRouter::with_openapi(ApiDoc::openapi()).merge(infra_http::router())
+    ContractRouter::with_openapi(ApiDoc::openapi())
+        .merge(infra_http::router())
+        // template:begin inbound-webhooks:service-api-webhooks-router
+        .merge(infra_http::webhooks::router())
+    // template:end inbound-webhooks:service-api-webhooks-router
 }
 
 /// The OpenAPI document of [`contract`].

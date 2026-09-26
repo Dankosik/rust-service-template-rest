@@ -114,11 +114,11 @@ echo "runtime image stopped cleanly in ${stop_seconds}s (budget 45s)"
 # The /jobs-worker entrypoint. The repository decides what the image
 # must hold. Where the jobs pack is retained, the image carries /jobs-worker, and
 # the binary refuses before any database I/O under the hardened flags, with the
-# default configuration and no network. The template source registers no job
-# kind, so it must give the no-kind refusal. A derived service may have
-# registered kinds, so it may instead refuse first because PostgreSQL is
-# disabled by default. Where the pack is not retained, the image must not carry
-# the entrypoint.
+# default configuration and no network. Retained webhook profiles register
+# their kinds, so the template then refuses because PostgreSQL is disabled;
+# without them the source has no registered kind. A derived service may add its
+# own registration and can reach either refusal. Where the jobs pack is not
+# retained, the image must not carry the entrypoint.
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 jobs=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field jobs) || {
 	echo "cannot resolve the selected jobs profile" >&2
@@ -152,6 +152,12 @@ postgres:true)
 	expected='no job kind is registered'
 	if [[ -f "${root}/template.lock" ]]; then
 		expected='no job kind is registered|postgres\.enabled must be true to run the jobs worker'
+	else
+		webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field webhooks)
+		inbound_webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field inbound_webhooks)
+		if [[ ${webhooks} != none || ${inbound_webhooks} != none ]]; then
+			expected='postgres\.enabled must be true to run the jobs worker'
+		fi
 	fi
 	worker_output=$(docker start --attach "${worker}" 2>&1 || true)
 	worker_exit=$(docker inspect -f '{{.State.ExitCode}}' "${worker}")

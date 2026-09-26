@@ -4,7 +4,7 @@ Select `OUTBOUND_HTTP=bounded` (or `--outbound-http bounded`) during initializat
 
 ## One client for one trusted provider origin
 
-A provider adapter owns its endpoint, credentials, parsing, business errors, and retry eligibility. It constructs one reusable client for an operator-selected HTTPS origin; never construct a client from a request, tenant input, registered webhook URL, or another untrusted value.
+A provider adapter owns its endpoint, credentials, parsing, business errors, and retry eligibility. It constructs one reusable client for an operator-selected HTTPS origin; never construct a client from a request, tenant input, tenant-registered webhook URL, or another untrusted value.
 
 The production constructor accepts an HTTPS origin with a host and optional port. Private, loopback, and literal IP origins are valid when the operator's configuration, certificate, and deployment network trust that provider. The client rejects userinfo, a path other than `/`, query, fragment, controls, and whitespace. Normal certificate-chain and hostname/IP verification remain on. It does not claim to prevent private-network access or defend arbitrary URLs: those are deployment and future untrusted-destination boundary decisions.
 

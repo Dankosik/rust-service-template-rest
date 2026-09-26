@@ -7,8 +7,7 @@
 
 use std::time::Duration;
 
-use http::Request;
-use infra_outbound_http::{Bytes, Client, Error, Limits, Operation};
+use infra_outbound_http::{Bytes, Client, Error, Limits, Operation, Request};
 use tokio::time::Instant;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

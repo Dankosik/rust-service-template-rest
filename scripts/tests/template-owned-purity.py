@@ -58,6 +58,9 @@ def check(root: Path) -> None:
         "http-idempotency-mounted": "remove_when_unselected",
         "jobs": "remove_when_unselected",
         "jobs-http-idempotency": "remove_when_unselected",
+        "webhooks-common": "remove_when_unselected",
+        "webhooks": "remove_when_unselected",
+        "inbound-webhooks": "remove_when_unselected",
     }
     for name, removal_key in expected_profiles.items():
         section = profile.get(name)

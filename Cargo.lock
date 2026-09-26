@@ -1834,6 +1834,7 @@ dependencies = [
  "infra-bearerauthn",
  "infra-idempotency-store",
  "infra-postgres",
+ "infra-webhooks",
  "itertools 0.15.0",
  "metrics",
  "serde",
@@ -1943,6 +1944,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "infra-webhooks"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "bytes",
+ "http",
+ "httpdate",
+ "infra-jobs",
+ "infra-outbound-http",
+ "infra-postgres",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "insta"
 version = "1.48.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1982,6 +2003,7 @@ dependencies = [
  "infra-jobs",
  "infra-outbound-http",
  "infra-postgres",
+ "infra-webhooks",
  "insta",
  "ipnet",
  "itertools 0.15.0",
@@ -2181,6 +2203,7 @@ dependencies = [
  "infra-jobs",
  "infra-postgres",
  "infra-telemetry",
+ "infra-webhooks",
  "secrecy",
  "service-config",
  "thiserror",
@@ -3449,7 +3472,7 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26d1e2536ce4f35f4846aa13bff16bd0ff40157cdb14cc056c7b14ba41233ba0"
 dependencies = [
- "core-foundation 0.10.1",
+ "core-foundation",
  "core-foundation-sys",
  "jni",
  "log",
@@ -3565,7 +3588,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
 dependencies = [
  "bitflags 2.13.2",
- "core-foundation 0.10.1",
+ "core-foundation",
  "core-foundation-sys",
  "libc",
  "security-framework-sys",
@@ -3733,6 +3756,7 @@ dependencies = [
  "infra-idempotency-store",
  "infra-postgres",
  "infra-telemetry",
+ "infra-webhooks",
  "nix",
  "rstest",
  "secrecy",
