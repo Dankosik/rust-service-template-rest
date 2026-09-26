@@ -217,9 +217,9 @@ async fn prepare_with_provider(
     let discovery_url = discovery_url(&options.issuer);
     let discovery = fetch_discovery(&provider, &discovery_url, startup_deadline).await?;
     if discovery.issuer != options.issuer.as_str() {
-        return Err(PreparationError::new(
-            PreparationPhase::Discovery,
-            PreparationReason::IssuerMismatch,
+        return Err(PreparationError::issuer_mismatch(
+            &options.issuer,
+            &discovery.issuer,
         ));
     }
     let jwks_uri = ProviderUrl::parse_endpoint(&discovery.jwks_uri).map_err(|_| {
@@ -254,6 +254,25 @@ async fn prepare_with_provider(
         run_refresh_worker(refresh, provider, jwks_uri, algorithms, refresh_cancel).await;
     });
     Ok((Verifier::new(verifier), refresh_task))
+}
+
+impl PreparationError {
+    /// Discovery named another issuer. Both values are public issuer URLs; a
+    /// discovered value outside the issuer grammar is not echoed.
+    fn issuer_mismatch(configured: &ProviderUrl, discovered: &str) -> Self {
+        let discovered = if discovered.len() <= 256 && ProviderUrl::parse(discovered).is_ok() {
+            discovered.to_owned()
+        } else {
+            "<not an issuer URL>".to_owned()
+        };
+        Self {
+            issuers: Some(Box::new((configured.as_str().to_owned(), discovered))),
+            ..Self::new(
+                PreparationPhase::Discovery,
+                PreparationReason::IssuerMismatch,
+            )
+        }
+    }
 }
 
 fn ensure_crypto_provider() -> Result<(), PreparationError> {
@@ -846,14 +865,31 @@ mod tests {
     }
 
     #[test]
-    fn preparation_errors_expose_only_closed_phase_and_reason() {
-        use crate::{PreparationError, PreparationPhase, PreparationReason};
-        let error = PreparationError::new(
-            PreparationPhase::Discovery,
-            PreparationReason::IssuerMismatch,
+    fn preparation_errors_are_closed_and_an_issuer_mismatch_names_both_issuers() {
+        use crate::{PreparationError, PreparationPhase, PreparationReason, ProviderUrl};
+        assert_eq!(
+            PreparationError::new(PreparationPhase::Jwks, PreparationReason::Fetch).to_string(),
+            "authentication preparation failed during Jwks: Fetch"
         );
+        let configured = ProviderUrl::parse("https://issuer.example").unwrap();
+        let error = PreparationError::issuer_mismatch(&configured, "https://issuer.example/");
         assert_eq!(error.phase(), PreparationPhase::Discovery);
         assert_eq!(error.reason(), PreparationReason::IssuerMismatch);
+        assert_eq!(
+            error.to_string(),
+            "authentication preparation failed during Discovery: IssuerMismatch \
+             (configured issuer \"https://issuer.example\", \
+             discovered issuer \"https://issuer.example/\")"
+        );
+        for discovered in [
+            "https://issuer.example/?token=private".to_owned(),
+            format!("https://{}.example", "a".repeat(256)),
+            "not an issuer\nprivate".to_owned(),
+        ] {
+            let rendered = PreparationError::issuer_mismatch(&configured, &discovered).to_string();
+            assert!(rendered.contains("<not an issuer URL>"), "{rendered}");
+            assert!(!rendered.contains("private") && !rendered.contains("aaaa"));
+        }
         assert!(matches!(
             parse_key_set(br#"{"keys":false}"#, &[JwtAlgorithm::Rs256]),
             Err(super::KeySetError::Parse)

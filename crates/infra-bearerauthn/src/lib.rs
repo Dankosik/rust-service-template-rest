@@ -61,17 +61,37 @@ pub enum PreparationReason {
     NoUsableKeys,
 }
 
-/// A safe preparation error containing only closed diagnostics.
+/// A safe preparation error with closed diagnostics. An issuer mismatch also
+/// names the configured and discovered issuer URLs.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("authentication preparation failed during {phase:?}: {reason:?}")]
+#[error("authentication preparation failed during {phase:?}: {reason:?}{}", IssuerContext(.issuers.as_deref()))]
 pub struct PreparationError {
     phase: PreparationPhase,
     reason: PreparationReason,
+    issuers: Option<Box<(String, String)>>,
+}
+
+struct IssuerContext<'a>(Option<&'a (String, String)>);
+
+impl fmt::Display for IssuerContext<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some((configured, discovered)) => write!(
+                formatter,
+                " (configured issuer {configured:?}, discovered issuer {discovered:?})"
+            ),
+            None => Ok(()),
+        }
+    }
 }
 
 impl PreparationError {
     pub(crate) const fn new(phase: PreparationPhase, reason: PreparationReason) -> Self {
-        Self { phase, reason }
+        Self {
+            phase,
+            reason,
+            issuers: None,
+        }
     }
 
     /// The failed preparation stage.

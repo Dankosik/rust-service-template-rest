@@ -47,8 +47,7 @@ Unavailable trust or provider capacity is `503 authentication_unavailable`, and
 the outer hardened HTTP timer alone emits `504 request_timeout`. A completed
 provider timeout is unavailable trust if the HTTP request is still live.
 Caller Problems never include a token, identity, endpoint, key ID, or provider
-body. Operator diagnostics use closed reasons and the bounded safe preparation
-context described below.
+body. Operator diagnostics use the closed reasons described below.
 
 ## Configuration
 
@@ -194,7 +193,9 @@ an OAuth client library would not own these response and identity rules.
 protected request, including envelope rejection. `authn_token_verifications_total`
 records decisions that reach a verifier engine, with closed `mode`, `outcome`,
 and `reason` labels. Keep these counts separate when querying outcomes.
-Preparation errors identify closed phase/reason values and static field labels.
+Preparation errors identify closed phase/reason values and static field labels;
+an issuer mismatch also names the configured and the discovered issuer, echoing
+the discovered value only when it is an issuer URL of at most 256 bytes.
 Configuration and provider Debug views redact trust inputs, including endpoint
 queries and audiences. Tokens, credentials, raw key material, response
 bodies and unfiltered provider errors are never diagnostic fields.
