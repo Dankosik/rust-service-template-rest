@@ -1,0 +1,493 @@
+{
+  "schema_version": 1,
+  "source_only": [
+    "make/source.mk",
+    "scripts/ci/template-init-check.sh",
+    "scripts/tests/template-candidate-paths.txt",
+    "scripts/tests/template-owned-purity.py",
+    "scripts/tests/template-init-safety.py",
+    "scripts/tests/template-sync-canary.py",
+    "specs/",
+    "docs/roadmap.md",
+    "evals/"
+  ],
+  "postgres": {
+    "remove_when_none": [
+      "crates/infra-postgres/",
+      "crates/migrate/",
+      "migrations/",
+      "crates/config/src/postgres.rs",
+      "test/tests/postgres.rs",
+      "test/fixtures/migrations/",
+      "test/src/lib.rs",
+      "env/docker-compose.yml",
+      "scripts/lib/compose-postgres.sh",
+      "scripts/ci/test-integration-db.sh",
+      "scripts/ci/migration-validate.sh",
+      "scripts/ci/migration-history-check.sh",
+      "make/profile-postgres.mk"
+    ],
+    "markers": [
+      {
+        "path": "Cargo.toml",
+        "id": "workspace-postgres-crates"
+      },
+      {
+        "path": "Cargo.toml",
+        "id": "workspace-migrate-crate"
+      },
+      {
+        "path": "Cargo.toml",
+        "id": "workspace-postgres-dependencies"
+      },
+      {
+        "path": "crates/service/Cargo.toml",
+        "id": "service-postgres-dependency"
+      },
+      {
+        "path": "test/Cargo.toml",
+        "id": "test-integration-feature"
+      },
+      {
+        "path": "test/Cargo.toml",
+        "id": "test-postgres-dependencies"
+      },
+      {
+        "path": "test/Cargo.toml",
+        "id": "test-migrate-dependency"
+      },
+      {
+        "path": "env/config/local.toml",
+        "id": "local-config"
+      },
+      {
+        "path": "build/docker/Dockerfile",
+        "id": "docker-migrator-build"
+      },
+      {
+        "path": "build/docker/Dockerfile",
+        "id": "docker-migrator-output"
+      },
+      {
+        "path": "build/docker/Dockerfile",
+        "id": "docker-migrator-runtime"
+      },
+      {
+        "path": "crates/config/src/lib.rs",
+        "id": "config-module"
+      },
+      {
+        "path": "crates/config/src/lib.rs",
+        "id": "config-export"
+      },
+      {
+        "path": "crates/config/src/lib.rs",
+        "id": "config-field"
+      },
+      {
+        "path": "crates/config/src/lib.rs",
+        "id": "config-validate"
+      },
+      {
+        "path": "crates/config/src/load.rs",
+        "id": "load-empty-dsn-env"
+      },
+      {
+        "path": "crates/config/src/load.rs",
+        "id": "load-empty-dsn-assertion"
+      },
+      {
+        "path": "crates/config/src/secret_policy.rs",
+        "id": "secret-key-vector"
+      },
+      {
+        "path": "crates/config/src/secret_policy.rs",
+        "id": "secret-policy-postgres-fixture"
+      },
+      {
+        "path": "crates/config/src/cli.rs",
+        "id": "cli-migrate-test"
+      },
+      {
+        "path": "crates/config/src/observability.rs",
+        "id": "otel-postgres-application-name-doc"
+      },
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "id": "bootstrap-imports"
+      },
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "id": "bootstrap-errors"
+      },
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "id": "bootstrap-postgres-startup"
+      },
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "id": "bootstrap-startup-pool"
+      },
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "id": "bootstrap-prepared-pool"
+      },
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "id": "bootstrap-startup-pool-close"
+      },
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "id": "bootstrap-open-postgres"
+      },
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "id": "bootstrap-prepared-field"
+      },
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "id": "bootstrap-destructure-pool"
+      },
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "id": "bootstrap-shutdown-plan-pool"
+      },
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "id": "bootstrap-startup-log-postgres"
+      },
+      {
+        "path": "crates/service/src/bootstrap/shutdown.rs",
+        "id": "shutdown-imports"
+      },
+      {
+        "path": "crates/service/src/bootstrap/shutdown.rs",
+        "id": "shutdown-startup-pool-close"
+      },
+      {
+        "path": "crates/service/src/bootstrap/shutdown.rs",
+        "id": "shutdown-plan-pool"
+      },
+      {
+        "path": "crates/service/src/bootstrap/shutdown.rs",
+        "id": "shutdown-pool-close-prefix"
+      },
+      {
+        "path": "crates/service/src/bootstrap/shutdown.rs",
+        "id": "shutdown-pool-close-suffix"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "id": "ci-quality-migrations"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "id": "ci-image-lifecycle-migration-branch"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "id": "ci-image-migration-rehearsal"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "id": "ci-integration-job"
+      },
+      {
+        "path": ".github/dependabot.yml",
+        "id": "dependabot-compose"
+      },
+      {
+        "path": "CONTRIBUTING.md",
+        "id": "contributing-postgres-prerequisites"
+      },
+      {
+        "path": "CONTRIBUTING.md",
+        "id": "contributing-postgres-proof"
+      },
+      {
+        "path": "test/README.md",
+        "id": "test-readme-postgres"
+      },
+      {
+        "path": "docs/build-test-and-development-commands.md",
+        "id": "commands-postgres"
+      },
+      {
+        "path": "docs/build-test-and-development-commands.md",
+        "id": "commands-require-docker"
+      },
+      {
+        "path": "docs/build-test-and-development-commands.md",
+        "id": "commands-postgres-port"
+      },
+      {
+        "path": "docs/repo-architecture.md",
+        "id": "docs-architecture-schema"
+      },
+      {
+        "path": "docs/architecture/boundaries.md",
+        "id": "docs-boundaries-postgres-owners"
+      },
+      {
+        "path": "docs/architecture/boundaries.md",
+        "id": "docs-boundaries-postgres-edges"
+      },
+      {
+        "path": "docs/architecture/boundaries.md",
+        "id": "docs-boundaries-migrator-decision"
+      },
+      {
+        "path": "docs/architecture/runtime-lifecycle.md",
+        "id": "docs-lifecycle-postgres-startup"
+      },
+      {
+        "path": "docs/architecture/runtime-lifecycle.md",
+        "id": "docs-lifecycle-postgres-close"
+      },
+      {
+        "path": "docs/architecture/persistence.md",
+        "id": "docs-persistence-runtime"
+      },
+      {
+        "path": "docs/architecture/persistence.md",
+        "id": "docs-persistence-decisions"
+      },
+      {
+        "path": "docs/validation/postgres.md",
+        "id": "docs-postgres-validation"
+      },
+      {
+        "path": "docs/configuration-source-policy.md",
+        "id": "docs-config-postgres-source"
+      },
+      {
+        "path": "docs/configuration-source-policy.md",
+        "id": "docs-config-postgres-budget"
+      },
+      {
+        "path": "docs/project-structure-and-module-organization.md",
+        "id": "docs-structure-schema"
+      },
+      {
+        "path": "docs/project-structure-and-module-organization.md",
+        "id": "docs-structure-repository"
+      },
+      {
+        "path": "docs/project-structure-and-module-organization.md",
+        "id": "docs-structure-db-proof"
+      },
+      {
+        "path": "docs/project-structure-and-module-organization.md",
+        "id": "docs-structure-compose"
+      },
+      {
+        "path": "docs/project-structure-and-module-organization.md",
+        "id": "docs-structure-migration-projection"
+      },
+      {
+        "path": "docs/ci-cd-production-ready.md",
+        "id": "docs-ci-postgres-gates"
+      },
+      {
+        "path": "docs/ci-cd-production-ready.md",
+        "id": "docs-ci-postgres-routing"
+      },
+      {
+        "path": "docs/ci-cd-production-ready.md",
+        "id": "docs-ci-migrator-image"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "id": "ci-required-integration-need"
+      },
+      {
+        "path": "crates/service/src/bootstrap/mod.rs",
+        "id": "bootstrap-postgres-secret-import"
+      },
+      {
+        "path": "test/Cargo.toml",
+        "id": "test-postgres-health-dependency"
+      }
+    ]
+  },
+  "identity": [
+    {
+      "path": "Cargo.toml",
+      "old": "https://github.com/Dankosik/rust-service-template-rest",
+      "template": "https://github.com/{repository_path}",
+      "count": 1,
+      "encoding": "url"
+    },
+    {
+      "path": "crates/service/Cargo.toml",
+      "old": "name = \"service\"",
+      "template": "name = \"{service_name}\"",
+      "count": 2,
+      "encoding": "toml_string"
+    },
+    {
+      "path": "crates/service/Cargo.toml",
+      "old": "description = \"Service entrypoint and runtime composition root.\"",
+      "template": "description = \"{description}\"",
+      "count": 1,
+      "encoding": "toml_string"
+    },
+    {
+      "path": "crates/config/src/observability.rs",
+      "old": "service_name: \"service\".to_owned(),",
+      "template": "service_name: \"{service_name}\".to_owned(),",
+      "count": 1,
+      "encoding": "rust_string"
+    },
+    {
+      "path": "crates/service/src/api.rs",
+      "old": "rust-service-template-rest",
+      "template": "{service_name}",
+      "count": 1,
+      "encoding": "rust_string"
+    },
+    {
+      "path": "crates/service/src/api.rs",
+      "old": "HTTP contract served by the `service` binary: platform probes and feature operations, with RFC 9457 problem responses from one closed catalog.",
+      "template": "{description}",
+      "count": 1,
+      "encoding": "rust_string"
+    },
+    {
+      "path": "crates/service/tests/lifecycle.rs",
+      "old": "CARGO_BIN_EXE_service",
+      "template": "CARGO_BIN_EXE_{service_name}",
+      "count": 2,
+      "encoding": "text"
+    },
+    {
+      "path": "make/service.mk",
+      "old": "SERVICE_PACKAGE ?= service",
+      "template": "SERVICE_PACKAGE ?= {service_name}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": "make/service.mk",
+      "old": "SERVICE_BIN ?= service",
+      "template": "SERVICE_BIN ?= {service_name}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": "make/service.mk",
+      "old": "RUNTIME_IMAGE ?= service:ci",
+      "template": "RUNTIME_IMAGE ?= {service_name}:ci",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": "build/docker/Dockerfile",
+      "old": "ARG SERVICE_PACKAGE=service",
+      "template": "ARG SERVICE_PACKAGE={service_name}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": "build/docker/Dockerfile",
+      "old": "ARG SERVICE_BIN=service",
+      "template": "ARG SERVICE_BIN={service_name}",
+      "count": 2,
+      "encoding": "text"
+    },
+    {
+      "path": "README.md",
+      "old": "# rust-service-template-rest\n",
+      "template": "# {service_name}\n",
+      "count": 1,
+      "encoding": "markdown"
+    },
+    {
+      "path": "README.md",
+      "old": "OpenAPI-first Rust HTTP service on Tokio and axum.",
+      "template": "{description}",
+      "count": 1,
+      "encoding": "markdown"
+    },
+    {
+      "path": "README.md",
+      "old": "Repository: https://github.com/Dankosik/rust-service-template-rest",
+      "template": "Repository: {repository}",
+      "count": 1,
+      "encoding": "url"
+    },
+    {
+      "path": ".github/CODEOWNERS",
+      "old": "* @Dankosik",
+      "template": "* {codeowner}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": ".github/CODEOWNERS",
+      "old": "/crates/ @Dankosik",
+      "template": "/crates/ {codeowner}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": ".github/CODEOWNERS",
+      "old": "/.github/workflows/ @Dankosik",
+      "template": "/.github/workflows/ {codeowner}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": ".github/CODEOWNERS",
+      "old": "/Cargo.toml @Dankosik",
+      "template": "/Cargo.toml {codeowner}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": ".github/CODEOWNERS",
+      "old": "/Cargo.lock @Dankosik",
+      "template": "/Cargo.lock {codeowner}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": ".github/CODEOWNERS",
+      "old": "/rust-toolchain.toml @Dankosik",
+      "template": "/rust-toolchain.toml {codeowner}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": ".gitleaks.toml",
+      "old": "rust-service-template-rest gitleaks configuration",
+      "template": "{service_name} gitleaks configuration",
+      "count": 1,
+      "encoding": "toml_string"
+    },
+    {
+      "path": "SECURITY.md",
+      "old": "https://github.com/Dankosik/rust-service-template-rest/security/advisories/new",
+      "template": "https://github.com/{repository_path}/security/advisories/new",
+      "count": 1,
+      "encoding": "url"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/config.yml",
+      "old": "https://github.com/Dankosik/rust-service-template-rest/security/advisories/new",
+      "template": "https://github.com/{repository_path}/security/advisories/new",
+      "count": 1,
+      "encoding": "url"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/config.yml",
+      "old": "https://github.com/Dankosik/rust-service-template-rest#documentation",
+      "template": "https://github.com/{repository_path}#documentation",
+      "count": 1,
+      "encoding": "url"
+    }
+  ],
+  "cargo_lock": {
+    "schema_version": 1
+  }
+}

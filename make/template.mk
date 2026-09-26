@@ -84,7 +84,7 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	openapi-generate openapi-check openapi-lint openapi-breaking \
 	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck docs-check \
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
-	publish-image-metadata-check compose-up compose-down test-integration-db migration-check migration-history-self-test migration-validate \
+	publish-image-metadata-check compose-up compose-down test-integration-db test-integration-messaging migration-check migration-history-self-test migration-validate \
 	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test
 
 # Source-only checks are contributed by make/source.mk in the template source.
@@ -94,7 +94,9 @@ SOURCE_CHECK_TARGETS ?=
 # postgres/all; a derived service must have a complete lock. Synchronization
 # never invokes Make, so this lookup is limited to normal local commands.
 POSTGRES_PROFILE_TARGETS := compose-up compose-down test-integration-db migration-check migration-history-self-test migration-validate
+MESSAGING_PROFILE_TARGETS := test-integration-messaging
 DATABASE_PROFILE := $(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field database))
+MESSAGING_PROFILE := $(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field messaging))
 ifeq ($(DATABASE_PROFILE),postgres)
 include make/profile-postgres.mk
 ACTIVE_TEMPLATE_STANDARD_TARGETS := $(TEMPLATE_STANDARD_TARGETS)
@@ -102,6 +104,14 @@ else ifeq ($(DATABASE_PROFILE),none)
 ACTIVE_TEMPLATE_STANDARD_TARGETS := $(filter-out $(POSTGRES_PROFILE_TARGETS),$(TEMPLATE_STANDARD_TARGETS))
 else
 $(error unable to select database profile; template.lock must be complete and supported)
+endif
+
+ifeq ($(MESSAGING_PROFILE),none)
+ACTIVE_TEMPLATE_STANDARD_TARGETS := $(filter-out $(MESSAGING_PROFILE_TARGETS),$(ACTIVE_TEMPLATE_STANDARD_TARGETS))
+else ifeq ($(MESSAGING_PROFILE),nats-jetstream)
+MESSAGING_LINT_FEATURES := --features infra-messaging/integration
+else
+$(error unable to select messaging profile; template.lock must be complete and supported)
 endif
 
 .PHONY: $(ACTIVE_TEMPLATE_STANDARD_TARGETS)
@@ -117,6 +127,12 @@ export HTTP_IDEMPOTENCY
 
 JOBS ?= none
 export JOBS
+
+MESSAGING ?= none
+export MESSAGING
+
+OUTBOX ?= none
+export OUTBOX
 
 WEBHOOKS ?= none
 export WEBHOOKS
@@ -144,6 +160,10 @@ test-changed: ## Run the tests of the crates in PKGS="<crate> <crate>"
 	$(REQUIRE_PKGS)
 	$(CARGO) test $(addprefix -p ,$(PKGS)) $(CARGO_FLAGS)
 
+test-integration-messaging: ## JetStream adapter proof against a throwaway Compose NATS; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
+	$(HEAVY_GUARD)
+	$(VALIDATION_LOCK) bash scripts/ci/test-integration-messaging.sh
+
 fmt: ## Format every crate
 	$(CARGO) fmt --all
 
@@ -154,11 +174,11 @@ fmt-check: ## Fail when formatting differs from rustfmt output
 INTEGRATION_LINT_FEATURES ?=
 
 lint: ## Clippy over all targets, warnings are errors
-	$(CARGO) clippy --workspace --all-targets $(INTEGRATION_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
+	$(CARGO) clippy --workspace --all-targets $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
 
 lint-changed: ## Clippy over the crates in PKGS="<crate> <crate>", warnings are errors
 	$(REQUIRE_PKGS)
-	$(CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
+	$(CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
 
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py

@@ -139,6 +139,13 @@ It runs only once a service registers its kinds; the template's worker
 refuses with `no job kind is registered`. See the
 [guide](background-jobs.md#configure-and-size-the-worker).
 <!-- template:end jobs:docs-commands-jobs -->
+<!-- template:begin messaging:docs-commands-messaging -->
+With `MESSAGING=nats-jetstream`, `domain-events` and `infra-messaging` are
+package names for `make test-package`. `ALLOW_HEAVY=1 make
+test-integration-messaging` is the real NATS proof when the current Make owner
+retains that target; it requires Docker and does not certify a deployment.
+Use `make help` for the exact retained command surface.
+<!-- template:end messaging:docs-commands-messaging -->
 
 ## Guards and variables
 

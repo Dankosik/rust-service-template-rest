@@ -40,6 +40,26 @@ rehearsal in place of plain lifecycle: `/migrate` against a fresh database,
 `no_change` replay, then lifecycle with the pool open.
 <!-- template:end postgres:docs-ci-postgres-gates -->
 
+<!-- template:begin messaging:docs-ci-messaging-gates -->
+With JetStream retained, `messaging_integration` selects one real-NATS suite
+and the actual Go compatibility bridge when adapter, profile, Compose, or
+bridge inputs change. It has a messaging-only representative with no PostgreSQL
+or jobs and a combined representative only when another retained profile needs
+it. CI also checks locked offline Cargo metadata after initialization, the
+resolved NATS image digest, and dependency policy. These are selected surfaces,
+not a Cartesian multiplication of every profile, database, and harness.
+<!-- template:end messaging:docs-ci-messaging-gates -->
+<!-- template:begin outbox:docs-ci-outbox-gates -->
+With the outbox profile retained, the database-and-NATS integration selection
+covers transactional commit/rollback, live-key same/conflict/lost outcomes,
+outage snooze/recovery, uncertain completion, durable consumer effect dedupe,
+and publication despite occupied webhook slots. The initializer retains
+meaningful outbox-only and combined representatives and verifies the initialized
+locked graph with `cargo metadata --locked --offline`. These checks join the
+assembled candidate's final CI route; a documentation change does not create a
+separate acceptance gate.
+<!-- template:end outbox:docs-ci-outbox-gates -->
+
 The source template additionally selects the initializer matrix on
 `initializer_runtime`, the paths that can change an initialized service's
 build and tests or the initializer itself. Eight parallel parts together run
@@ -67,13 +87,20 @@ restore its cache and save none; their retained full database suites require
 Docker.
 
 <!-- template:begin outbound-auth:docs-ci-outbound-auth-gates -->
-OAuth adds four source projections and runtime graphs 47--50, without another
-CI part or harness cross-product. The database-none part owns 47--49 (OAuth
+OAuth adds four source projections and runtime graphs 50--53, without another
+CI part or harness cross-product. The database-none part owns 50--52 (OAuth
 alone, with JWT, with introspection); jobs-http-idempotency-2 owns the maximal
-PostgreSQL graph 50. Each runs initialization, locked metadata and compilation
+PostgreSQL graph 53. Graph 54 joins the database-none part for the
+messaging/OAuth seam, and graph 55 joins jobs-http-idempotency-2 for the full
+outbox/OAuth pack. Each runs initialization, locked metadata and compilation
 of retained test targets; the workspace quality gate runs the OAuth behavior
 suite. Database-free graphs do not request the removed integration-test feature.
 <!-- template:end outbound-auth:docs-ci-outbound-auth-gates -->
+Graph 56 joins jobs-1 for PostgreSQL/jobs/messaging without outbox. It uses the
+focused locked offline metadata and all-target compile path with
+`integration-tests/integration`, so the fixture callback's optional registry
+argument is compiled. It adds no live PostgreSQL or NATS scenario; eight CI
+parts cover 56 runtime representatives.
 
 A change to projected text alone selects `module_initializer` without the
 runtime surface and runs the Cargo-free `initializer (projections)` job.

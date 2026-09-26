@@ -1,13 +1,12 @@
 //! The one test-only job kind.
 //!
 //! Shared by the jobs database suite and the fixture worker. The fixture
-//! binary registers it through `register`. The shipped binary never contains
+//! binary registers it through [`REGISTER`]. The shipped binary never contains
 //! this kind.
 
 use std::time::Duration;
 
-use infra_jobs::{Job, JobError, JobKind, Kinds, Policy};
-use jobs_worker::{BuildError, Support};
+use infra_jobs::{Job, JobError, JobKind, Policy};
 use serde::{Deserialize, Serialize};
 
 /// A probe payload. The action tells the handler what to do.
@@ -118,11 +117,12 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
 }
 
 /// The fixture worker's registration, the one test-only kind with the default policy.
-///
-/// # Errors
-///
-/// Never fails today. The signature is the worker's registration contract.
-pub fn register(kinds: &mut Kinds, _support: &Support<'_>) -> Result<(), BuildError> {
+/// The public worker callback type owns its profile-dependent argument types.
+pub const REGISTER: jobs_worker::Register = |kinds,
+                                             // template:begin messaging:integration-jobs-register-messaging-parameter
+                                             _messages,
+                                             // template:end messaging:integration-jobs-register-messaging-parameter
+                                             _support| {
     kinds.register(Policy::default(), handle);
     Ok(())
-}
+};

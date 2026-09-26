@@ -121,6 +121,10 @@ rather than assuming any SeaORM release can share the current pool.
 <!-- template:begin jobs:docs-library-selection-jobs -->
 | Durable background jobs on PostgreSQL | The template-owned engine in `crates/infra-jobs` | Enqueue inside the caller's transaction; kinds and handlers in adapter crates; effects idempotent per [the guide](background-jobs.md); reassess the crates on [async.md's watch list](architecture/async.md#reopen-conditions-and-watch-list) before replacing the engine |
 <!-- template:end jobs:docs-library-selection-jobs -->
+<!-- template:begin messaging:docs-library-selection-messaging -->
+| Typed durable JetStream transport interoperable with Go | `async-nats = "=0.50.0"`, default features off, with only `jetstream`, `aws-lc-rs`, and `nkeys` in `infra-messaging` | Reuse `time`, `serde`/`serde_json`, `bytes`, `sha2`, `base64`, Tokio, metrics, and tracing. AWS-LC is the workspace Rustls provider; do not also enable `ring`, whose coexistence makes native client-provider selection ambiguous. Keep normal hostname verification and native roots. No chrono, websocket, KV, object-store, service, nuid, crypto, experimental, or server-extension feature is admitted. |
+| Provider-free typed event identity | `domain-events`, a small local contract crate | It exists to enforce feature-to-provider dependency direction. It does not mint IDs, read clocks, own routes, or introduce a generic producer/event-bus API. |
+<!-- template:end messaging:docs-library-selection-messaging -->
 
 The recipe suite exercises the selected utility mechanisms without installing
 a cache, HTTP provider, retry policy or new endpoint in the running service.
@@ -146,6 +150,24 @@ Keep Compose plus `#[sqlx::test]` for PostgreSQL tests. Do not add
 that reopens the recorded persistence decision. Likewise, do not add a second
 OpenAPI generator, snapshot, configuration loader or error library for a
 mechanism the selected dependency already supplies.
+
+<!-- template:begin messaging:docs-library-selection-messaging-rejection -->
+Do not add a generic messaging framework, alternate NATS client, blocking
+client, second worker executable, lifecycle crate, or stream-administration
+wrapper. `async-nats` supplies the selected protocol mechanics; the local
+adapter owns the accepted Go-compatible wire and settlement policy. Reconsider
+that boundary only for an accepted second transport or changed feature
+dependency direction.
+
+The adapter enables `time/large-dates` because a Go-accepted RFC3339 timestamp
+with a year-9999 offset can normalize to UTC year 10000. This keeps that
+normalization representable without introducing a date parser or another
+library. In time 0.3.55 the feature propagates only to `time-core` and an already
+selected `time-macros`; it adds no package. The actual Go bridge separately
+checks inbound acceptance, normalization, re-encoding, and decode of the emitted
+timestamp: Go's own RFC3339 parser does not promise to round-trip every
+`time.Time` value.
+<!-- template:end messaging:docs-library-selection-messaging-rejection -->
 
 ## Acceptance for a library-driven refactor
 

@@ -26,6 +26,8 @@ from template_state import (
     HTTP_IDEMPOTENCY_CHOICES,
     INBOUND_WEBHOOKS_CHOICES,
     JOBS_CHOICES,
+    MESSAGING_CHOICES,
+    OUTBOX_CHOICES,
     LOCK_NAME,
     LOCK_SCHEMA_VERSION,
     TEMPLATE_REPOSITORY,
@@ -42,6 +44,7 @@ from template_state import (
     http_idempotency_requirement,
     inbound_webhooks_requirement,
     jobs_requirement,
+    outbox_requirement,
     lock_has_explicit_authn,
     lock_has_explicit_http_idempotency,
     lock_has_explicit_jobs,
@@ -90,6 +93,8 @@ class InitInputs:
     outbound_auth: str
     http_idempotency: str
     jobs: str
+    messaging: str
+    outbox: str
     webhooks: str
     inbound_webhooks: str
     agent_harness: str
@@ -110,6 +115,8 @@ class InitInputs:
             "outbound_auth": self.outbound_auth,
             "http_idempotency": self.http_idempotency,
             "jobs": self.jobs,
+            "messaging": self.messaging,
+            "outbox": self.outbox,
             "webhooks": self.webhooks,
             "inbound_webhooks": self.inbound_webhooks,
             "agent_harness": self.agent_harness,
@@ -151,6 +158,8 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         outbound_auth=_argument_value(arguments, "outbound_auth", default="none"),
         http_idempotency=_argument_value(arguments, "http_idempotency", default="none"),
         jobs=_argument_value(arguments, "jobs", default="none"),
+        messaging=_argument_value(arguments, "messaging", default="none"),
+        outbox=_argument_value(arguments, "outbox", default="none"),
         webhooks=_argument_value(arguments, "webhooks", default="none"),
         inbound_webhooks=_argument_value(arguments, "inbound_webhooks", default="none"),
         agent_harness=_argument_value(arguments, "agent_harness", default="all"),
@@ -175,6 +184,8 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
             outbound_auth=inputs.outbound_auth,
             http_idempotency=inputs.http_idempotency,
             jobs=inputs.jobs,
+            messaging=inputs.messaging,
+            outbox=inputs.outbox,
             webhooks=inputs.webhooks,
             inbound_webhooks=inputs.inbound_webhooks,
             agent_harness=inputs.agent_harness,
@@ -185,6 +196,10 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         raise Refusal("AGENT_HARNESS is unsupported")
     if inputs.jobs not in JOBS_CHOICES:
         raise Refusal("JOBS is unsupported")
+    if inputs.messaging not in MESSAGING_CHOICES:
+        raise Refusal("MESSAGING is unsupported")
+    if inputs.outbox not in OUTBOX_CHOICES:
+        raise Refusal("OUTBOX is unsupported")
     if inputs.webhooks not in WEBHOOKS_CHOICES:
         raise Refusal("WEBHOOKS is unsupported")
     if inputs.inbound_webhooks not in INBOUND_WEBHOOKS_CHOICES:
@@ -197,6 +212,10 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
             raise Refusal("HTTP_IDEMPOTENCY=postgres requires AUTHN=oidc-jwt or oidc-introspection")
     if inputs.jobs == "postgres":
         requirement = jobs_requirement(inputs.database)
+        if requirement is not None:
+            raise Refusal(requirement)
+    if inputs.outbox == "postgres":
+        requirement = outbox_requirement(inputs.database, inputs.jobs, inputs.messaging)
         if requirement is not None:
             raise Refusal(requirement)
     if inputs.webhooks == "durable":
@@ -261,11 +280,24 @@ _WEBHOOKS_PROFILE_INVENTORY_KEYS = frozenset(
         "inbound-webhooks",
     }
 )
+_MESSAGING_PROFILE_INVENTORY_KEYS = frozenset(
+    {
+        *(_WEBHOOKS_PROFILE_INVENTORY_KEYS - {"egress-dns"}),
+        "messaging",
+        "worker",
+        "service-secrets",
+        "jobs-messaging",
+        "integration",
+    }
+)
+_OUTBOX_PROFILE_INVENTORY_KEYS = frozenset({*(_MESSAGING_PROFILE_INVENTORY_KEYS - {"jobs-messaging"}), "outbox"})
 
 
 # The DNS-bearing key sets above are supported historical replay input only.
 _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS = _WEBHOOKS_PROFILE_INVENTORY_KEYS - {"egress-dns"}
 _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS = _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS | {"outbound-auth"}
+_OUTBOX_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS = _OUTBOX_PROFILE_INVENTORY_KEYS | {"outbound-auth"}
+_SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS = _OUTBOX_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS | {"config-url"}
 
 
 def _profile_data(
@@ -285,7 +317,37 @@ def _profile_data(
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
         raise Refusal("template profile inventory has an unsupported schema")
     keys = frozenset(raw)
-    if keys == _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS or (
+    if keys in (_OUTBOX_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS, _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS):
+        include_authn = True
+        include_outbound = True
+        include_outbound_auth = True
+        include_tls_fixtures = True
+        include_http_idempotency = True
+        include_jobs = True
+        include_webhooks = True
+        include_messaging = True
+        include_outbox = True
+    elif keys == _OUTBOX_PROFILE_INVENTORY_KEYS:
+        include_authn = True
+        include_outbound = True
+        include_outbound_auth = False
+        include_tls_fixtures = True
+        include_http_idempotency = True
+        include_jobs = True
+        include_webhooks = True
+        include_messaging = True
+        include_outbox = True
+    elif keys == _MESSAGING_PROFILE_INVENTORY_KEYS:
+        include_authn = True
+        include_outbound = True
+        include_outbound_auth = False
+        include_tls_fixtures = True
+        include_http_idempotency = True
+        include_jobs = True
+        include_webhooks = True
+        include_messaging = True
+        include_outbox = False
+    elif keys == _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS or (
         historical_egress and keys == (_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS | {"egress-dns"})
     ):
         include_authn = True
@@ -295,6 +357,8 @@ def _profile_data(
         include_http_idempotency = True
         include_jobs = True
         include_webhooks = True
+        include_messaging = False
+        include_outbox = False
     elif keys == _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS or (
         historical_egress and keys == _WEBHOOKS_PROFILE_INVENTORY_KEYS
     ):
@@ -305,6 +369,8 @@ def _profile_data(
         include_http_idempotency = True
         include_jobs = True
         include_webhooks = True
+        include_messaging = False
+        include_outbox = False
     elif historical_egress and keys == _JOBS_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
@@ -313,6 +379,21 @@ def _profile_data(
         include_http_idempotency = True
         include_jobs = True
         include_webhooks = False
+        include_messaging = False
+        include_outbox = False
+    elif historical_jobs and historical_egress and keys == (
+        _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS - {"tls-fixtures"}
+    ):
+        # Exact HTTP-idempotency/DNS generation, before jobs or TLS fixtures.
+        include_authn = True
+        include_outbound = True
+        include_outbound_auth = False
+        include_tls_fixtures = False
+        include_http_idempotency = True
+        include_jobs = False
+        include_webhooks = False
+        include_messaging = False
+        include_outbox = False
     elif historical_jobs and keys == _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
@@ -321,6 +402,8 @@ def _profile_data(
         include_http_idempotency = True
         include_jobs = False
         include_webhooks = False
+        include_messaging = False
+        include_outbox = False
     elif historical_http_idempotency and keys == _TLS_FIXTURE_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
@@ -329,6 +412,20 @@ def _profile_data(
         include_http_idempotency = False
         include_jobs = False
         include_webhooks = False
+        include_messaging = False
+        include_outbox = False
+    elif historical_egress and keys == _OUTBOUND_PROFILE_INVENTORY_KEYS:
+        # Exact outbound-HTTP/DNS generation, before TLS fixtures or jobs.
+        # Accepted only for byte-preserving replay, never current projection.
+        include_authn = True
+        include_outbound = True
+        include_outbound_auth = False
+        include_tls_fixtures = False
+        include_http_idempotency = False
+        include_jobs = False
+        include_webhooks = False
+        include_messaging = False
+        include_outbox = False
     elif historical_outbound and keys == _CURRENT_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = False
@@ -337,6 +434,8 @@ def _profile_data(
         include_http_idempotency = False
         include_jobs = False
         include_webhooks = False
+        include_messaging = False
+        include_outbox = False
     elif historical_authn and keys == _LEGACY_PROFILE_INVENTORY_KEYS:
         include_authn = False
         include_outbound = False
@@ -345,6 +444,8 @@ def _profile_data(
         include_http_idempotency = False
         include_jobs = False
         include_webhooks = False
+        include_messaging = False
+        include_outbox = False
     else:
         raise Refusal("template profile inventory has an unsupported schema")
     source_only = _path_list(raw["source_only"], "source_only")
@@ -379,6 +480,14 @@ def _profile_data(
             _path_list(section["remove_when_unselected"], "outbound-auth remove_when_unselected")
         )
         markers.extend(_markers("outbound-auth", section["markers"]))
+    if "config-url" in keys:
+        section = raw["config-url"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template config-url inventory has an unsupported shape")
+        removals["config-url"] = tuple(
+            _path_list(section["remove_when_unselected"], "config-url remove_when_unselected")
+        )
+        markers.extend(_markers("config-url", section["markers"]))
     if include_tls_fixtures:
         section = raw["tls-fixtures"]
         if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
@@ -408,6 +517,22 @@ def _profile_data(
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
             removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
             markers.extend(_markers(profile, section["markers"]))
+    if include_messaging:
+        messaging_profiles = ("messaging", "worker", "service-secrets", "integration")
+        if "jobs-messaging" in keys:
+            messaging_profiles += ("jobs-messaging",)
+        for profile in messaging_profiles:
+            section = raw[profile]
+            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+                raise Refusal(f"template {profile} inventory has an unsupported shape")
+            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
+            markers.extend(_markers(profile, section["markers"]))
+    if include_outbox:
+        section = raw["outbox"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template outbox inventory has an unsupported shape")
+        removals["outbox"] = tuple(_path_list(section["remove_when_unselected"], "outbox remove_when_unselected"))
+        markers.extend(_markers("outbox", section["markers"]))
     identity = raw["identity"]
     if not isinstance(identity, list):
         raise Refusal("template identity inventory has an unsupported shape")
@@ -557,6 +682,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("outbound-http")
     if inputs.outbound_auth == "oauth2-client-credentials":
         selected.add("outbound-auth")
+    if inputs.messaging == "nats-jetstream" or inputs.outbound_auth == "oauth2-client-credentials":
+        selected.add("config-url")
     if inputs.authn != "none" or inputs.outbound_http == "bounded":
         selected.add("tls-fixtures")
     if inputs.outbound_http == "bounded":
@@ -569,6 +696,16 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("jobs")
         if inputs.http_idempotency == "postgres":
             selected.add("jobs-http-idempotency")
+    if inputs.messaging == "nats-jetstream":
+        selected.add("messaging")
+    if inputs.outbox == "postgres":
+        selected.add("outbox")
+    if inputs.jobs == "postgres" or inputs.messaging == "nats-jetstream":
+        selected.add("worker")
+    if inputs.database == "postgres" or inputs.messaging == "nats-jetstream":
+        selected.add("service-secrets")
+    if inputs.database == "postgres" or inputs.messaging == "nats-jetstream":
+        selected.add("integration")
     if inputs.webhooks == "durable" or inputs.inbound_webhooks == "standard-webhooks":
         selected.add("webhooks-common")
     if inputs.webhooks == "durable":
@@ -848,7 +985,9 @@ def _run_staged_command(snapshot: Path, command: Sequence[str], operation: str) 
     except OSError as error:
         raise ToolFailure(f"staged {operation} tool is unavailable") from error
     if result.returncode:
-        raise Refusal(f"staged {operation} failed (exit {result.returncode})")
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        diagnostic = f"\n{detail[:8192]}" if detail else ""
+        raise Refusal(f"staged {operation} failed (exit {result.returncode}){diagnostic}")
     return result.stdout
 
 
@@ -1146,6 +1285,16 @@ def _project_feature_edge(
 def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInputs) -> None:
     """Remove only source-anchored feature edges made unreachable by a profile."""
 
+    if inputs.messaging == "none":
+        # async-nats alone enables bytes/serde. Removing messaging must also
+        # remove that registry feature edge from the retained bytes package.
+        _project_feature_edge(records, "bytes", "1.12.1", ["serde"], [])
+        # NATS nkeys selects ed25519-dalek/digest -> signature/digest. JWT
+        # retains signature's rand_core edge but does not select digest.
+        _project_feature_edge(
+            records, "signature", "2.2.0",
+            ["digest 0.10.7", "rand_core 0.6.4"], ["rand_core 0.6.4"],
+        )
     if inputs.database == "none":
         for name, version, expected, retained in (
             ("bitflags", "2.13.2", ["serde_core"], []),
@@ -1158,10 +1307,11 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
             _project_feature_edge(records, name, version, expected, retained)
     if inputs.authn != "oidc-jwt":
         _project_feature_edge(records, "zeroize", "1.9.0", ["zeroize_derive"], [])
-    if inputs.authn == "none" and inputs.outbound_http == "none":
+    if inputs.authn == "none" and inputs.outbound_http == "none" and inputs.messaging == "none":
         # Generated TLS fixtures retained by either authentication or outbound
         # test support enable rcgen/aws_lc_rs and its weak x509-parser/verify-aws
-        # edge; those aws-lc-rs defaults retain untrusted even without JWT.
+        # edge; NATS also enables aws-lc-rs defaults directly. Either owner
+        # retains untrusted even without JWT.
         _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
     if inputs.outbound_auth == "none":
         # oauth2 enables url's serde feature; the source still uses url through
@@ -1331,6 +1481,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--outbound-auth", action=SingleValue)
     parser.add_argument("--http-idempotency", action=SingleValue)
     parser.add_argument("--jobs", action=SingleValue)
+    parser.add_argument("--messaging", action=SingleValue)
+    parser.add_argument("--outbox", action=SingleValue)
     parser.add_argument("--webhooks", action=SingleValue)
     parser.add_argument("--inbound-webhooks", action=SingleValue)
     parser.add_argument("--agent-harness", action=SingleValue)

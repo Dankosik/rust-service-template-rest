@@ -175,6 +175,71 @@ fn invalid_configuration_exits_one_with_the_key_named() {
     assert!(stderr.contains("request_timeout"), "stderr: {stderr}");
 }
 
+// template:begin messaging:service-messaging-lifecycle-admission
+#[test]
+fn active_messaging_refuses_missing_credentials_before_listener_admission() {
+    let (code, stderr) = Service::spawn(&[
+        ("APP__MESSAGING__URLS", "tls://nats.example:4222"),
+        ("APP__MESSAGING__SOURCE_STREAM", "events"),
+    ])
+    .wait();
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("messaging.credentials"), "stderr: {stderr}");
+}
+
+#[test]
+fn sigterm_cancels_a_stalled_messaging_connect_before_its_startup_timeout() {
+    use std::io::ErrorKind;
+    use std::net::TcpListener;
+
+    // A TCP peer that never sends NATS INFO holds the actual client's connect
+    // future open. Receiving the connection establishes that signals are
+    // installed and avoids guessing when startup reaches broker I/O.
+    let broker = TcpListener::bind("127.0.0.1:0").unwrap();
+    broker.set_nonblocking(true).unwrap();
+    let url = format!("nats://{}", broker.local_addr().unwrap());
+    let mut service = Service::spawn(&[
+        ("APP__APP__ENV", "local"),
+        ("APP__MESSAGING__URLS", &url),
+        ("APP__MESSAGING__SOURCE_STREAM", "events"),
+        ("APP__MESSAGING__ALLOW_PLAINTEXT", "true"),
+        ("APP__MESSAGING__ALLOW_UNAUTHENTICATED", "true"),
+    ]);
+    let admission_deadline = Instant::now() + Duration::from_secs(10);
+    let _connection = loop {
+        match broker.accept() {
+            Ok((stream, _)) => break stream,
+            Err(error)
+                if error.kind() == ErrorKind::WouldBlock && Instant::now() < admission_deadline =>
+            {
+                if let Some(status) = service.child.try_wait().unwrap() {
+                    let (_, stderr) = service.wait();
+                    panic!("startup exited before broker connect: {status}; {stderr}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => {
+                let _ = service.child.kill();
+                let _ = service.child.wait();
+                panic!("service did not reach broker connect: {result:?}");
+            }
+        }
+    };
+    service.terminate();
+    let stop_deadline = Instant::now() + Duration::from_secs(3);
+    while service.child.try_wait().unwrap().is_none() {
+        if Instant::now() >= stop_deadline {
+            let _ = service.child.kill();
+            let _ = service.child.wait();
+            panic!("SIGTERM did not cancel the pending broker startup");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (code, stderr) = service.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+}
+// template:end messaging:service-messaging-lifecycle-admission
+
 // template:begin inbound-webhooks:service-webhooks-lifecycle-tests
 #[test]
 fn active_inbound_webhook_endpoint_refuses_without_postgres_before_listener_admission() {

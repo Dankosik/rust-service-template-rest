@@ -81,6 +81,9 @@ only for stable domain decisions.
 <!-- template:begin jobs:docs-architecture-jobs-leaf -->
 | Durable background jobs: the job table, enqueue, claiming, the worker process | [Async Architecture](architecture/async.md) |
 <!-- template:end jobs:docs-architecture-jobs-leaf -->
+<!-- template:begin messaging:docs-architecture-messaging-leaf -->
+| Durable JetStream event transport, Go wire, consumer settlement, DLQ, or operator topology | [Durable JetStream messaging](durable-messaging.md) and [Component Boundaries](architecture/boundaries.md) |
+<!-- template:end messaging:docs-architecture-messaging-leaf -->
 
 Queue, job, outbox, and event architecture (`architecture/async.md`) exists
 only where a profile that owns it is retained; otherwise there is no owner to

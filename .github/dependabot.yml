@@ -51,8 +51,8 @@ updates:
     commit-message:
       prefix: "build"
 
-  # template:begin postgres:dependabot-compose
-  # The PostgreSQL image digest in the local compose file.
+  # template:begin integration:dependabot-compose
+  # PostgreSQL and NATS image digests in the local compose file.
   - package-ecosystem: "docker-compose"
     directory: "/env"
     schedule:
@@ -65,4 +65,4 @@ updates:
       docker-compose:
         patterns:
           - "*"
-  # template:end postgres:dependabot-compose
+  # template:end integration:dependabot-compose

@@ -1,9 +1,16 @@
+# template:begin integration:compose-file
+# Local retained-profile services. PostgreSQL is selected by `DATABASE=postgres`;
+# JetStream is selected by `MESSAGING=nats-jetstream`.
+# template:end integration:compose-file
+# template:begin postgres:compose-postgres-header
 # Local PostgreSQL for the profile: `make compose-up`, then
 #   APP__POSTGRES__ENABLED=true \
 #   APP__POSTGRES__DSN='postgres://app:app@127.0.0.1:5432/app?sslmode=disable' make run
 # The same file serves `make test-integration-db` and the image rehearsal,
 # which set POSTGRES_PORT=0 for an ephemeral host port and read it back.
+# template:end postgres:compose-postgres-header
 services:
+  # template:begin postgres:compose-postgres-service
   postgres:
     image: postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
     environment:
@@ -24,3 +31,18 @@ services:
       start_period: 30s
       timeout: 3s
       retries: 20
+  # template:end postgres:compose-postgres-service
+  # template:begin messaging:compose-nats-service
+  nats:
+    image: nats:2.14.3-alpine3.22@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    ports:
+      - "${NATS_PORT:-4222}:4222"
+    volumes:
+      - ./nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+  # template:end messaging:compose-nats-service

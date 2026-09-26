@@ -40,6 +40,8 @@ from template_state import (
     selected_http_idempotency,
     selected_inbound_webhooks,
     selected_jobs,
+    selected_messaging,
+    selected_outbox,
     selected_outbound_auth,
     selected_outbound_http,
     selected_profiles,
@@ -815,6 +817,8 @@ def _run(arguments: argparse.Namespace) -> int:
         selected_outbound_auth(target)
         selected_http_idempotency(target)
         selected_jobs(target)
+        selected_messaging(target)
+        selected_outbox(target)
         selected_webhooks(target)
         selected_inbound_webhooks(target)
         selected = set(selected_adapters(harness))

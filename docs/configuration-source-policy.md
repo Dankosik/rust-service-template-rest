@@ -58,6 +58,28 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   are refused at startup, and the diagnostic never carries the value
   ([Persistence](architecture/persistence.md#connection-admission)).
 <!-- template:end postgres:docs-config-postgres-source -->
+<!-- template:begin messaging:docs-config-messaging-source -->
+- `messaging` is an optional typed section. Its non-secret endpoint, stream,
+  consumer, DLQ, TLS, timeout, concurrency, and delivery-size inputs use normal
+  file/environment precedence; credentials are `SecretString`, environment-only,
+  and redacted. Active consumption requires complete named topology and distinct
+  source/DLQ subjects. Local plaintext or unauthenticated use is an explicit
+  development/test escape hatch, never a production default. Configuration
+  validates shape and resource bounds before any provider I/O; the adapter maps
+  the admitted snapshot to its client options.
+  `messaging.urls` uses a TOML array or one comma-separated
+  `APP__MESSAGING__URLS` value, for example
+  `tls://nats-a.example:4222,tls://nats-b.example:4222`. A single URL is written
+  directly; JSON array syntax is not an environment format. List parsing is
+  confined to this key, so other environment strings, including credentials,
+  keep their exact bytes.
+<!-- template:end messaging:docs-config-messaging-source -->
+<!-- template:begin outbox:docs-config-outbox-source -->
+- `OUTBOX=postgres` is initializer/profile selection, not a configuration
+  section or runtime switch. It requires the retained PostgreSQL, jobs, and
+  JetStream messaging capabilities. Its retry, snooze, dedupe, capacity, and
+  shutdown rules are code-owned; it adds no operator tuning key.
+<!-- template:end outbox:docs-config-outbox-source -->
 <!-- template:begin authn:docs-config-authn-source -->
 - `authn.mode` defaults to `none`. A retained initialized profile admits only `none` plus its selected engine. The `none` variant accepts no provider fields; an active engine needs exact, nonblank `authn.issuer` and `authn.audience`. Issuer, audience, and identity values are not trimmed or case-folded. `AuthnConfig` Debug exposes only mode; trust inputs, endpoints, queries and credentials remain redacted.
 <!-- template:end authn:docs-config-authn-source -->

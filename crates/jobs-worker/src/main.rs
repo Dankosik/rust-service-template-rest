@@ -76,17 +76,21 @@ fn register_outbound(
 }
 // template:end webhooks:worker-webhooks-outbound-registration
 
-// template:begin webhooks-common:worker-webhooks-register-prefix
 #[allow(
     clippy::unnecessary_wraps,
     unused_variables,
+    dead_code,
     reason = "the registration signature stays fixed across independently retained profiles"
 )]
 fn register(
+    // template:begin jobs:worker-main-register-jobs-parameter
     kinds: &mut infra_jobs::Kinds,
+    // template:end jobs:worker-main-register-jobs-parameter
+    // template:begin messaging:worker-main-register-messaging-parameter
+    _messages: &mut infra_messaging::Registry,
+    // template:end messaging:worker-main-register-messaging-parameter
     support: &jobs_worker::Support<'_>,
 ) -> Result<(), jobs_worker::BuildError> {
-    // template:end webhooks-common:worker-webhooks-register-prefix
     // template:begin webhooks:worker-webhooks-register-outbound
     register_outbound(kinds, support)?;
     // template:end webhooks:worker-webhooks-register-outbound
@@ -97,10 +101,8 @@ fn register(
         Processor::new(Consumers::new()),
     );
     // template:end inbound-webhooks:worker-webhooks-register-inbound
-    // template:begin webhooks-common:worker-webhooks-register-suffix
     Ok(())
 }
-// template:end webhooks-common:worker-webhooks-register-suffix
 
 fn main() -> ExitCode {
     #[allow(
@@ -109,7 +111,14 @@ fn main() -> ExitCode {
     )]
     let registration: Option<jobs_worker::Register> = None;
     // template:begin webhooks-common:worker-webhooks-registration
+    #[allow(
+        unused_variables,
+        reason = "retained outbox also supplies the registration"
+    )]
     let registration = Some(register as jobs_worker::Register);
     // template:end webhooks-common:worker-webhooks-registration
+    // template:begin outbox:worker-outbox-registration
+    let registration = Some(register as jobs_worker::Register);
+    // template:end outbox:worker-outbox-registration
     jobs_worker::run(std::env::args_os(), registration)
 }

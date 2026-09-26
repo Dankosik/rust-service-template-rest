@@ -35,8 +35,14 @@ infra-idempotency-store = { path = "crates/infra-idempotency-store" }
 # template:end http-idempotency:workspace-http-idempotency-store
 # template:begin jobs:workspace-jobs-crates
 infra-jobs = { path = "crates/infra-jobs" }
-jobs-worker = { path = "crates/jobs-worker" }
 # template:end jobs:workspace-jobs-crates
+# template:begin worker:workspace-worker-crate
+jobs-worker = { path = "crates/jobs-worker" }
+# template:end worker:workspace-worker-crate
+# template:begin messaging:workspace-messaging-crates
+domain-events = { path = "crates/domain-events" }
+infra-messaging = { path = "crates/infra-messaging" }
+# template:end messaging:workspace-messaging-crates
 # template:begin webhooks-common:workspace-webhooks-crate
 infra-webhooks = { path = "crates/infra-webhooks" }
 # template:end webhooks-common:workspace-webhooks-crate
@@ -57,6 +63,9 @@ oauth2 = { version = "5.0.0", default-features = false }
 # template:end outbound-auth:workspace-oauth2-dependency
 
 # Runtime and transport
+# template:begin messaging:workspace-messaging-client
+async-nats = { version = "=0.50.0", default-features = false }
+# template:end messaging:workspace-messaging-client
 futures-util = { version = "0.3", default-features = false }
 axum = { version = "0.8.9", default-features = false }
 hyper-util = { version = "0.1.20", default-features = false }

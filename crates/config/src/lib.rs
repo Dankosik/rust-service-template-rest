@@ -13,13 +13,14 @@
 //! `docs/configuration-source-policy.md` for why, and for what the two
 //! pre-scans in [`load`] add that the crate does not.
 
-use std::collections::BTreeMap;
-
 pub mod app;
 pub mod health;
 pub mod http;
 pub mod log;
 pub mod observability;
+// template:begin messaging:config-module
+pub mod messaging;
+// template:end messaging:config-module
 // template:begin outbound-auth:config-module
 pub mod integrations;
 // template:end outbound-auth:config-module
@@ -64,6 +65,9 @@ pub use log::{LogConfig, LogFormat};
 pub use observability::{
     MetricsConfig, ObservabilityConfig, OtelConfig, OtelExporterConfig, TracesSampler,
 };
+// template:begin messaging:config-export
+pub use messaging::MessagingConfig;
+// template:end messaging:config-export
 // template:begin authn:config-export
 pub use authn::{Audiences, AuthnConfig};
 // template:end authn:config-export
@@ -97,9 +101,12 @@ pub struct Config {
     pub health: HealthConfig,
     pub log: LogConfig,
     pub observability: ObservabilityConfig,
+    // template:begin messaging:config-field
+    pub messaging: MessagingConfig,
+    // template:end messaging:config-field
     // template:begin outbound-auth:config-field
     #[serde(default, deserialize_with = "integrations::deserialize_integrations")]
-    pub integrations: BTreeMap<String, IntegrationConfig>,
+    pub integrations: std::collections::BTreeMap<String, IntegrationConfig>,
     // template:end outbound-auth:config-field
     // template:begin authn:config-field
     pub authn: AuthnConfig,
@@ -134,6 +141,9 @@ impl Config {
         self.health.validate()?;
         self.log.validate()?;
         self.observability.validate()?;
+        // template:begin messaging:config-validate
+        self.messaging.validate(&self.app.env)?;
+        // template:end messaging:config-validate
         // template:begin outbound-auth:config-validate
         integrations::validate_integrations(&self.integrations)?;
         // template:end outbound-auth:config-validate

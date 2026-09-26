@@ -677,6 +677,9 @@ fi
 if is_true db_integration; then
 	add_command make test-integration-db "database adapter, runner, or database proof changed" "make test-integration-db" docker true true
 fi
+if is_true messaging_integration; then
+	add_command make test-integration-messaging "JetStream adapter, bridge, Compose, or messaging proof changed" "make test-integration-messaging" docker true true
+fi
 if is_true runtime_image || is_true migrations; then
 	image=${VERIFY_RUNTIME_IMAGE:-service:verify}
 	if is_true runtime_image; then

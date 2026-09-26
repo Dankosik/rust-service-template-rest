@@ -16,6 +16,9 @@ use std::time::Duration;
 
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
+// template:begin messaging:service-bootstrap-messaging-imports
+use infra_messaging::{Messaging, MessagingError, MessagingOptions};
+// template:end messaging:service-bootstrap-messaging-imports
 // template:begin inbound-webhooks:bootstrap-webhooks-imports
 use infra_http::webhooks::WebhookState;
 use infra_webhooks::inbound::{Consumers, Receiver};
@@ -35,9 +38,9 @@ use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, ResolvedSampler, TracingOptions,
     diagnostics_router, install_subscriber, install_tracer_provider,
 };
-// template:begin postgres:bootstrap-postgres-secret-import
+// template:begin service-secrets:bootstrap-postgres-secret-import
 use secrecy::ExposeSecret;
-// template:end postgres:bootstrap-postgres-secret-import
+// template:end service-secrets:bootstrap-postgres-secret-import
 use service_config::{
     AppConfig, BuildInfo, Config, FromArgs, LogFormat, TracesSampler, process_failure,
 };
@@ -66,6 +69,9 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Interval for Prometheus histogram upkeep and Tokio runtime metrics.
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
+// template:begin messaging:service-bootstrap-messaging-startup-budget
+const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+// template:end messaging:service-bootstrap-messaging-startup-budget
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum BootstrapError {
@@ -77,6 +83,14 @@ pub(crate) enum BootstrapError {
     Logging(#[from] infra_telemetry::LoggingError),
     #[error(transparent)]
     Metrics(#[from] infra_telemetry::MetricsError),
+    // template:begin messaging:service-bootstrap-messaging-errors
+    #[error("messaging startup: {0}")]
+    Messaging(#[from] MessagingError),
+    #[error("messaging configuration requires {key}")]
+    MessagingConfigRequired { key: &'static str },
+    #[error("messaging.max_payload_bytes cannot fit this platform")]
+    MessagingPayloadBound,
+    // template:end messaging:service-bootstrap-messaging-errors
     #[error("startup admission: {0}")]
     Admission(health::NotReady),
     #[error("configuration is invalid: {0}")]
@@ -173,6 +187,10 @@ where
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "keep acquired startup resources, admission, and their shared error cleanup in one composition scope"
+)]
 async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // Before this point SIGTERM has its default disposition and kills the
     // process; install the handlers first and keep them for the lifetime.
@@ -217,7 +235,10 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // template:begin postgres:bootstrap-startup-pool
     let mut postgres_pool = None;
     // template:end postgres:bootstrap-startup-pool
-    let outcome = async {
+    // template:begin messaging:service-bootstrap-messaging-opened
+    let mut messaging = None;
+    // template:end messaging:service-bootstrap-messaging-opened
+    let outcome = Box::pin(async {
         let probes: Vec<Box<dyn Probe>> = Vec::new();
         #[allow(
             unused_variables,
@@ -234,6 +255,31 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             migrate::verify_history(pool).await?;
         }
         // template:end postgres:bootstrap-postgres-startup
+        #[allow(
+            unused_variables,
+            reason = "retained messaging shadows the startup stop result"
+        )]
+        let startup_stop: Option<tokio::time::Instant> = None;
+        // template:begin messaging:service-bootstrap-messaging-startup
+        let (probes, opened_messaging, startup_stop) =
+            Box::pin(prepare_messaging(probes, &config, &cancel, &mut signals)).await?;
+        messaging = opened_messaging;
+        // template:end messaging:service-bootstrap-messaging-startup
+        if let Some(deadline) = startup_stop {
+            return Ok(shutdown::finish_stopped_startup(
+                &cancel,
+                &tracker,
+                // template:begin postgres:bootstrap-stopped-startup-pool
+                postgres_pool.as_ref(),
+                // template:end postgres:bootstrap-stopped-startup-pool
+                // template:begin messaging:service-bootstrap-stopped-startup-messaging
+                messaging.take(),
+                // template:end messaging:service-bootstrap-stopped-startup-messaging
+                tracer_provider,
+                deadline,
+            )
+            .await);
+        }
         // template:begin http-idempotency:bootstrap-http-idempotency-composer
         let composer = prepare_http_idempotency(&config, postgres_pool.as_ref());
         // template:end http-idempotency:bootstrap-http-idempotency-composer
@@ -263,6 +309,9 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             // template:begin postgres:bootstrap-prepared-pool
             postgres_pool: postgres_pool.clone(),
             // template:end postgres:bootstrap-prepared-pool
+            // template:begin messaging:service-bootstrap-prepared-messaging-value
+            messaging: &mut messaging,
+            // template:end messaging:service-bootstrap-prepared-messaging-value
             // template:begin http-idempotency:bootstrap-http-idempotency-prepared-value
             composer,
             // template:end http-idempotency:bootstrap-http-idempotency-prepared-value
@@ -271,7 +320,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             // template:end inbound-webhooks:bootstrap-webhooks-prepared-value
         })
         .await
-    }
+    })
     .await;
     // Bind, admission, or connect failure: cancel and join tracked tasks,
     // then close any opened pool. `Server` only cancels accept. Dropping
@@ -279,11 +328,16 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // until process teardown.
     if outcome.is_err() {
         shutdown::cancel_and_join_background_tasks(&cancel, &tracker).await;
-        // template:begin postgres:bootstrap-startup-pool-close
-        if let Some(pool) = postgres_pool.as_ref() {
-            shutdown::close_opened_postgres(pool).await;
-        }
-        // template:end postgres:bootstrap-startup-pool-close
+        let _ = shutdown::close_dependencies(
+            // template:begin postgres:bootstrap-startup-pool-close
+            postgres_pool.as_ref(),
+            // template:end postgres:bootstrap-startup-pool-close
+            // template:begin messaging:service-bootstrap-messaging-startup-close
+            messaging.take(),
+            // template:end messaging:service-bootstrap-messaging-startup-close
+            tokio::time::Instant::now() + shutdown::DEPENDENCY_CLOSE,
+        )
+        .await;
     }
     outcome
 }
@@ -540,6 +594,72 @@ async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
 }
 // template:end postgres:bootstrap-open-postgres
 
+/// Open the optional API producer before readiness admission. The API owns no
+/// consumer; HTTP and metrics later read the cached probe through `health`.
+// template:begin messaging:service-bootstrap-messaging-functions
+async fn prepare_messaging(
+    mut probes: Vec<Box<dyn Probe>>,
+    config: &Config,
+    cancel: &CancellationToken,
+    signals: &mut Signals,
+) -> Result<
+    (
+        Vec<Box<dyn Probe>>,
+        Option<Messaging>,
+        Option<tokio::time::Instant>,
+    ),
+    BootstrapError,
+> {
+    if !config.messaging.is_active() {
+        return Ok((probes, None, None));
+    }
+    config.messaging.validate_producer(&config.app.env)?;
+    let deadline = tokio::time::Instant::now() + MESSAGING_STARTUP_TIMEOUT;
+    let startup_cancel = cancel.child_token();
+    let connect = Messaging::connect(messaging_options(config)?, deadline, startup_cancel.clone());
+    tokio::pin!(connect);
+    let messaging = tokio::select! {
+        biased;
+        () = signals.wait() => {
+            let deadline = tokio::time::Instant::now() + config.http.grace_period;
+            startup_cancel.cancel();
+            return Ok((probes, connect.await.ok(), Some(deadline)));
+        }
+        result = &mut connect => result?,
+    };
+    probes.push(Box::new(messaging.probe()));
+    Ok((probes, Some(messaging), None))
+}
+// template:end messaging:service-bootstrap-messaging-functions
+
+// template:begin messaging:service-bootstrap-messaging-options
+fn messaging_options(config: &Config) -> Result<MessagingOptions, BootstrapError> {
+    let messaging = &config.messaging;
+    let source_stream =
+        messaging
+            .source_stream
+            .clone()
+            .ok_or(BootstrapError::MessagingConfigRequired {
+                key: "messaging.source_stream",
+            })?;
+    Ok(MessagingOptions {
+        servers: messaging.urls.clone(),
+        credentials: messaging
+            .credentials
+            .as_ref()
+            .map(|value| value.expose_secret().to_owned()),
+        root_ca_path: messaging.root_ca_path.clone(),
+        allow_plaintext: messaging.allow_plaintext,
+        allow_unauthenticated: messaging.allow_unauthenticated,
+        source_stream,
+        dlq_stream: None,
+        max_payload_bytes: usize::try_from(messaging.max_payload_bytes.as_u64())
+            .map_err(|_| BootstrapError::MessagingPayloadBound)?,
+        consumer: None,
+    })
+}
+// template:end messaging:service-bootstrap-messaging-options
+
 // template:begin http-idempotency:bootstrap-http-idempotency-functions
 /// The composer through which idempotent operations join the contract. Its
 /// store uses the pool only when a retention is set as well; otherwise the
@@ -612,6 +732,11 @@ struct Prepared<'a> {
     // template:begin postgres:bootstrap-prepared-field
     postgres_pool: Option<PgPool>,
     // template:end postgres:bootstrap-prepared-field
+    // template:begin messaging:service-bootstrap-prepared-messaging-field
+    /// The optional producer remains outside the request path and transfers
+    /// to the dependency-close stage only after listener admission succeeds.
+    messaging: &'a mut Option<Messaging>,
+    // template:end messaging:service-bootstrap-prepared-messaging-field
     // template:begin http-idempotency:bootstrap-http-idempotency-prepared-field
     /// A unique move: activation consumes it after route assembly.
     composer: Composer,
@@ -635,6 +760,9 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         // template:begin postgres:bootstrap-destructure-pool
         postgres_pool,
         // template:end postgres:bootstrap-destructure-pool
+        // template:begin messaging:service-bootstrap-destructure-messaging
+        messaging,
+        // template:end messaging:service-bootstrap-destructure-messaging
         // template:begin http-idempotency:bootstrap-http-idempotency-destructure
         mut composer,
         // template:end http-idempotency:bootstrap-http-idempotency-destructure
@@ -717,6 +845,9 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         // template:begin postgres:bootstrap-shutdown-plan-pool
         postgres_pool,
         // template:end postgres:bootstrap-shutdown-plan-pool
+        // template:begin messaging:service-bootstrap-shutdown-messaging
+        messaging: messaging.take(),
+        // template:end messaging:service-bootstrap-shutdown-messaging
         tracer_provider,
         signals,
     })
