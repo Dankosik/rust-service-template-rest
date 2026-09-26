@@ -8,6 +8,13 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# template:begin http-idempotency-mounted:test-http-idempotency-mounted-tls-dependency-scan
+# cargo-shear 1.13.4 misses the mounted test's #[path] inclusion of
+# test/fixtures/tls.rs. Remove this exception when it follows that source.
+[package.metadata.cargo-shear]
+ignored = ["rcgen"]
+# template:end http-idempotency-mounted:test-http-idempotency-mounted-tls-dependency-scan
+
 [lints]
 workspace = true
 

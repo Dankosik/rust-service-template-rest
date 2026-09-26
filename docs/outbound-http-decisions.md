@@ -14,6 +14,14 @@ The selected normal transport does not own provider retry policy. `backon` 1.6.0
 
 The default-off `test-support` feature exposes only the named literal-loopback HTTP mock constructor. It does not weaken the HTTPS production constructor, publish a raw reqwest client, or add custom roots. The test-source owner `test/fixtures/tls.rs` shares generated material between outbound, authentication, and mounted idempotency tests. It uses the existing pinned `rcgen` 0.14.10 only through test dependencies; production has no generated certificate or custom-root path.
 
+Cargo-shear 1.13.4 scans Cargo target directories and misses the shared
+`#[path]` fixture outside those directories. Each of its three consuming
+packages therefore records only `rcgen` in `package.metadata.cargo-shear.ignored`.
+Package exceptions also count as workspace usage, so no workspace-wide ignore
+is needed. The mounted-test exception leaves with that profile; auth and
+outbound exceptions leave with their crates. Remove these exceptions when the
+pinned scanner follows the shared source.
+
 ## Observation boundary
 
 The existing `metrics` 0.24.6 and tracing stack record the private attempt lifecycle. `http.client.request.duration` uses explicit second buckets in the existing Prometheus recorder owner. The chosen attributes are a privacy-restricted subset of the current [OpenTelemetry HTTP span](https://opentelemetry.io/docs/specs/semconv/http/http-spans/) and [metric](https://opentelemetry.io/docs/specs/semconv/http/http-metrics/) conventions: method, configured server identity, known status, static failure type, and finite outcome. Full URLs, targets, headers, request identifiers, credentials, bodies, and arbitrary error text remain excluded.

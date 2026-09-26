@@ -708,7 +708,7 @@
       "test/tests/http_idempotency/mounted.rs"
     ],
     "markers": [
-      {"path": "test/Cargo.toml", "ids": ["test-http-idempotency-mounted-dependencies"]},
+      {"path": "test/Cargo.toml", "ids": ["test-http-idempotency-mounted-dependencies", "test-http-idempotency-mounted-tls-dependency-scan"]},
       {"path": "test/tests/http_idempotency/main.rs", "ids": ["http-idempotency-mounted-module"]}
     ]
   },
