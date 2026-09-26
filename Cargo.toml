@@ -98,10 +98,10 @@ gethostname = "1.1.0"
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false }
 json-subscriber = { version = "0.3.0", default-features = false }
-opentelemetry = { version = "0.32.0", default-features = false }
-opentelemetry_sdk = { version = "0.32.1", default-features = false }
-opentelemetry-otlp = { version = "0.32.0", default-features = false }
-opentelemetry-semantic-conventions = { version = "0.32.1", default-features = false }
+opentelemetry = { version = "0.33.0", default-features = false }
+opentelemetry_sdk = { version = "0.33.0", default-features = false }
+opentelemetry-otlp = { version = "0.33.0", default-features = false }
+opentelemetry-semantic-conventions = { version = "0.33.0", default-features = false }
 tracing-opentelemetry = { version = "0.33.0", default-features = false }
 axum-tracing-opentelemetry = { version = "0.39.1", default-features = false }
 metrics = { version = "0.24.6", default-features = false }
