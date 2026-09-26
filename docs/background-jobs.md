@@ -1,7 +1,7 @@
 # Background jobs
 
 Select `JOBS=postgres` with `DATABASE=postgres`. The default `JOBS=none`
-removes both jobs migrations, `infra-jobs`, `jobs-worker`, this guide, the
+removes the jobs migration, `infra-jobs`, `jobs-worker`, this guide, the
 async architecture leaf, jobs tests, configuration, and the worker image
 entrypoint. The retained pack stays inert: service code touches the table only
 when it calls `enqueue`, and an operator separately runs `/jobs-worker`.
