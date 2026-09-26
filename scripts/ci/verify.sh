@@ -391,6 +391,8 @@ check-instructions:
 	@test -f allow-skills
 secret-scan:
 	@printf 'secrets\n' >>invoked
+dockerfile-check:
+	@:
 MAKE
 	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
 	if output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml 2>&1); then

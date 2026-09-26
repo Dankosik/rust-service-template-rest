@@ -333,6 +333,7 @@ def _compare_lock(reference: bytes, actual: bytes, harness: str, initializer) ->
 def _inputs(
     initializer, database: str, authn: str, outbound_http: str, http_idempotency: str,
     jobs: str, webhooks: str, inbound_webhooks: str, harness: str, outbound_auth: str = "none", grpc: str = "none",
+    messaging: str = "none", outbox: str = "none",
 ):
     # Canonical projection identities remain stable across harness comparisons.
     # Runtime representatives use their graph number to stay within the name bound.
@@ -364,8 +365,8 @@ def _inputs(
         grpc=grpc,
         http_idempotency=http_idempotency,
         jobs=jobs,
-        messaging="none",
-        outbox="none",
+        messaging=messaging,
+        outbox=outbox,
         webhooks=webhooks,
         inbound_webhooks=inbound_webhooks,
         agent_harness=harness,
@@ -524,6 +525,25 @@ def _check_oauth_projections(source: Path, candidate: str, initializer, work: Pa
             initializer, database, authn, "bounded", http_idempotency, jobs, webhooks, inbound_webhooks, "core",
             outbound_auth="oauth2-client-credentials",
         )
+        with tempfile.TemporaryDirectory(prefix=f"oauth-{index}-", dir=work) as selection:
+            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+        _assert_profile_output(initializer, nodes, "outbound-auth", outbound_paths)
+        profiles = inputs.profiles()
+        if profiles["outbound_auth"] != "oauth2-client-credentials" or profiles["outbound_http"] != "bounded":
+            raise initializer.Refusal("OAuth projection did not retain its effective bounded HTTP profile")
+        _emit(
+            "oauth-selection",
+            scenario=index,
+            database=database,
+            authn=authn,
+            http_idempotency=http_idempotency,
+            jobs=jobs,
+            webhooks=webhooks,
+            inbound_webhooks=inbound_webhooks,
+            profiles=profiles,
+            tree_sha256=_tree_digest(nodes),
+            lock_sha256=hashlib.sha256(initializer._lock_bytes(inputs, candidate, "complete")).hexdigest(),
+        )
 
 
 def _check_grpc_projections(source: Path, candidate: str, initializer, work: Path) -> None:
@@ -535,16 +555,16 @@ def _check_grpc_projections(source: Path, candidate: str, initializer, work: Pat
         relative.rstrip("/") for relative in profile_data.removals["outbound-auth-grpc"]
     )
     scenarios = (
-        ("none", "none", "none", "none", "none", "none", "none", "none"),
-        ("none", "oidc-jwt", "none", "none", "none", "none", "none", "none"),
-        ("none", "oidc-introspection", "none", "none", "none", "none", "none", "none"),
-        ("none", "none", "bounded", "oauth2-client-credentials", "none", "none", "none", "none"),
-        ("postgres", "oidc-introspection", "bounded", "oauth2-client-credentials", "postgres", "postgres", "durable", "standard-webhooks"),
+        ("none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
+        ("none", "oidc-jwt", "none", "none", "none", "none", "none", "none", "none", "none"),
+        ("none", "oidc-introspection", "none", "none", "none", "none", "none", "none", "none", "none"),
+        ("none", "none", "bounded", "oauth2-client-credentials", "none", "none", "none", "none", "none", "none"),
+        ("postgres", "oidc-introspection", "bounded", "oauth2-client-credentials", "postgres", "postgres", "nats-jetstream", "postgres", "durable", "standard-webhooks"),
     )
-    for index, (database, authn, outbound_http, outbound_auth, http_idempotency, jobs, webhooks, inbound_webhooks) in enumerate(scenarios, 1):
+    for index, (database, authn, outbound_http, outbound_auth, http_idempotency, jobs, messaging, outbox, webhooks, inbound_webhooks) in enumerate(scenarios, 1):
         inputs = _inputs(
             initializer, database, authn, outbound_http, http_idempotency, jobs, webhooks, inbound_webhooks,
-            "core", outbound_auth=outbound_auth, grpc="enabled",
+            "core", outbound_auth=outbound_auth, grpc="enabled", messaging=messaging, outbox=outbox,
         )
         with tempfile.TemporaryDirectory(prefix=f"grpc-{index}-", dir=work) as selection:
             nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
@@ -565,27 +585,8 @@ def _check_grpc_projections(source: Path, candidate: str, initializer, work: Pat
             outbound_auth=outbound_auth,
             http_idempotency=http_idempotency,
             jobs=jobs,
-            webhooks=webhooks,
-            inbound_webhooks=inbound_webhooks,
-            profiles=profiles,
-            tree_sha256=_tree_digest(nodes),
-            lock_sha256=hashlib.sha256(initializer._lock_bytes(inputs, candidate, "complete")).hexdigest(),
-        )
-        with tempfile.TemporaryDirectory(prefix=f"oauth-{index}-", dir=work) as selection:
-            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
-        for relative in outbound_paths:
-            if relative not in nodes and not any(path.startswith(f"{relative}/") for path in nodes):
-                raise initializer.Refusal(f"OAuth projection omitted profile output: {relative}")
-        profiles = inputs.profiles()
-        if profiles["outbound_auth"] != "oauth2-client-credentials" or profiles["outbound_http"] != "bounded":
-            raise initializer.Refusal("OAuth projection did not retain its effective bounded HTTP profile")
-        _emit(
-            "oauth-selection",
-            scenario=index,
-            database=database,
-            authn=authn,
-            http_idempotency=http_idempotency,
-            jobs=jobs,
+            messaging=messaging,
+            outbox=outbox,
             webhooks=webhooks,
             inbound_webhooks=inbound_webhooks,
             profiles=profiles,

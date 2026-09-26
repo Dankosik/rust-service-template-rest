@@ -9,6 +9,11 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | Service package (`crates/service/Cargo.toml`) | The main binary named by that manifest: `main` maps the bootstrap result to an exit code; `bootstrap` composes configuration, telemetry, readiness, the route tree, the two listeners, background tasks, signals, and the staged teardown; `api` merges every `OpenApiRouter` into the one contract and finalizes its served router; the `openapi` binary renders its document; the process tests drive the built binary. | Business behavior, request handling beyond composition, provider details. |
 | `service-config` (`crates/config`) | One validated immutable snapshot: section types with defaults and validation in `<section>.rs`, loader precedence, the `APP__` name pre-scan, the secret-in-file refusal, `SecretString` fields, human-form durations and sizes, build metadata (`app.version`, `app.commit`). | Feature behavior, dependency wiring, request handling, telemetry construction. |
 | `health` (`crates/health`) | The readiness refresher over `tokio::sync::watch`: probe trait, failure threshold, staleness guard, drain flag, O(1) snapshot reads. | Probe implementations, HTTP handlers, the schedule (bootstrap owns the policy values). |
+| `service-failure` (`crates/service-failure`) | Closed failure identity, wire code spelling and transport-neutral meaning. | HTTP response metadata, tonic Status, arbitrary detail text, configuration or provider calls. |
+<!-- template:begin grpc:docs-boundaries-grpc-owners -->
+| `infra-grpc` (`crates/infra-grpc`) | Generated-service registration, native RPC policy, validation/provenance, full-call ownership, health projection, TLS listener and lazy clients. | Configuration loading, feature behavior, OAuth tokens, process signals or a second lifecycle budget. |
+| `grpc-contracts` (`crates/grpc-contracts`) | Committed prost messages, native tonic contracts, descriptors and generated policy adapters. | Business behavior or a runtime generator. |
+<!-- template:end grpc:docs-boundaries-grpc-owners -->
 | `infra-http` (`crates/infra-http`) | The hardened middleware chain, the bounded accept loop (`Server`), the probe handlers with their `#[utoipa::path]` contract, the RFC 9457 `Problem` type and closed code catalog, request-id admission, the route-template access log. | Business rules, configuration loading, feature routes (they merge in `service::api`). |
 | `infra-telemetry` (`crates/infra-telemetry`) | Subscriber installation (`json`/`text`), the tracer provider with the OTLP endpoint resolution and ambient-credential refusal, the Prometheus recorder with process and Tokio runtime metrics, the diagnostics router. | Feature semantics, startup logging content, request routing, which fields a handler emits. |
 <!-- template:begin authn:docs-boundaries-authn-owner -->
@@ -119,6 +124,19 @@ a feature's infra-<provider> adapter -> infra-jobs
 integration-tests (test/)
   -> utility and transport recipes, health
 ```
+
+Each transport projects `service-failure`; the shared leaf imports no transport.
+<!-- template:begin grpc:docs-boundaries-grpc-edges -->
+`service -> infra-grpc -> health, service-failure` owns transport composition.
+`grpc-contracts -> infra-grpc` contains the generated adapters; `infra-grpc`
+never imports a feature or its contracts in production. The standalone generator
+under `tools/grpc-codegen` is excluded from the runtime workspace.
+<!-- template:end grpc:docs-boundaries-grpc-edges -->
+<!-- template:begin outbound-auth-grpc:docs-boundaries-grpc-oauth-edge -->
+The optional edge `infra-oauth2-client-credentials -> infra-grpc` supplies the
+concrete authenticated Service inside the private Credentials owner. Removing
+either profile removes this bridge; the surviving owner keeps its behavior.
+<!-- template:end outbound-auth-grpc:docs-boundaries-grpc-oauth-edge -->
 
 <!-- template:begin postgres:docs-boundaries-postgres-edges -->
 The PostgreSQL profile also adds `infra-postgres -> health, sqlx, url, metrics`,

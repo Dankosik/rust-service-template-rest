@@ -356,6 +356,11 @@ jobs:
       - name: Dependency policy
         if: needs.changes.outputs.cargo_dependencies == 'true' || needs.changes.outputs.dependency_policy == 'true'
         run: bash ./scripts/ci/measure.sh security-deny -- make deny
+      # template:begin grpc:ci-grpc-generator-dependencies
+      - name: Generator dependency policy
+        if: needs.changes.outputs.grpc_schema == 'true'
+        run: cargo-deny --manifest-path tools/grpc-codegen/Cargo.toml --locked check --config deny.toml
+      # template:end grpc:ci-grpc-generator-dependencies
       - name: Workflow security
         if: needs.changes.outputs.github_workflows == 'true'
         env:
@@ -634,7 +639,7 @@ jobs:
       fail-fast: false
       matrix:
         # Together the parts are `make template-init-check`: the source
-        # suites with the canonical projections and fifty-six runtime graphs.
+        # suites with the canonical projections and sixty-one runtime graphs.
         # Graphs 1-46 retain the established database, idempotency, jobs, and
         # webhook representatives. Graphs 47-49 retain messaging and outbox;
         # 50-53 retain OAuth; 54 proves messaging plus OAuth without PostgreSQL;
@@ -649,7 +654,7 @@ jobs:
         include:
           - part: source
           - part: database-none
-            graphs: 1,2,3,4,5,6,47,50,51,52,54
+            graphs: 1,2,3,4,5,6,47,50,51,52,54,57,58,59,60
           - part: database-postgres
             graphs: 7,8,9,10,11,12
           - part: http-idempotency
@@ -669,7 +674,7 @@ jobs:
             cache: database-postgres
             docker: true
           - part: jobs-http-idempotency-2
-            graphs: 25,26,28,34,38,42,46,49,53,55
+            graphs: 25,26,28,34,38,42,46,49,53,55,61
             cache: database-postgres
             docker: true
     steps:
@@ -792,6 +797,11 @@ jobs:
       - name: Require selected initializer matrix success
         if: needs.changes.outputs.initializer_runtime == 'true' && needs.initializer.result != 'success'
         run: exit 1
+      # template:begin grpc:ci-required-grpc-success
+      - name: Require selected protobuf contract success
+        if: needs.changes.outputs.grpc_schema == 'true' && needs.grpc.result != 'success'
+        run: exit 1
+      # template:end grpc:ci-required-grpc-success
       - name: Require selected initializer projections success
         if: >-
           needs.changes.outputs.module_initializer == 'true' &&

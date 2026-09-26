@@ -16,6 +16,9 @@ use std::time::Duration;
 
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
+// template:begin grpc:bootstrap-grpc-imports
+use infra_grpc::Server as GrpcServer;
+// template:end grpc:bootstrap-grpc-imports
 // template:begin messaging:service-bootstrap-messaging-imports
 use infra_messaging::{Messaging, MessagingError, MessagingOptions};
 // template:end messaging:service-bootstrap-messaging-imports
@@ -144,6 +147,10 @@ pub(crate) enum BootstrapError {
     // template:end inbound-webhooks:bootstrap-webhooks-errors
     #[error(transparent)]
     Server(#[from] infra_http::ServerError),
+    // template:begin grpc:bootstrap-grpc-error
+    #[error(transparent)]
+    Grpc(#[from] infra_grpc::Error),
+    // template:end grpc:bootstrap-grpc-error
 }
 
 /// Parse flags, load configuration, run the service, and map the result to
@@ -782,6 +789,22 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         webhook_state,
         // template:end inbound-webhooks:bootstrap-webhooks-destructure
     } = prepared;
+    // template:begin grpc:bootstrap-grpc-prepare
+    let grpc_prepared = if config.grpc.enabled {
+        let verifier = match &auth {
+            PreparedAuth::None => return Err(infra_grpc::Error::InvalidConfiguration.into()),
+            PreparedAuth::Enabled(verifier) => (**verifier).clone(),
+        };
+        Some(GrpcServer::prepare(
+            crate::grpc::services(grpc_registration)?,
+            readiness.reader(),
+            verifier,
+            crate::grpc::server_options(config)?,
+        )?)
+    } else {
+        None
+    };
+    // template:end grpc:bootstrap-grpc-prepare
     // The routes and the committed OpenAPI document are the two halves of
     // one contract. Assembly is pure, so it runs before readiness admission.
     let contract = service::api::contract(
@@ -844,6 +867,23 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         }
     };
 
+    // template:begin grpc:bootstrap-grpc-bind
+    let grpc_listener = match grpc_prepared {
+        Some(prepared) => {
+            let bound = prepared.bind(config.grpc.listen_addr()?).await?;
+            tracing::info!(addr = %bound.local_addr(), "grpc listener bound");
+            Some(bound.start())
+        }
+        None => None,
+    };
+    // template:end grpc:bootstrap-grpc-bind
+
+    // template:begin grpc:bootstrap-grpc-open-admission
+    if let Some(listener) = grpc_listener.as_ref() {
+        listener.open_admission();
+    }
+    // template:end grpc:bootstrap-grpc-open-admission
+
     tracing::info!("service_ready");
     signals.wait().await;
 
@@ -852,6 +892,9 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         readiness: &readiness,
         app_listener,
         diagnostics,
+        // template:begin grpc:shutdown-plan-grpc
+        grpc_listener,
+        // template:end grpc:shutdown-plan-grpc
         cancel,
         tracker,
         // template:begin postgres:bootstrap-shutdown-plan-pool

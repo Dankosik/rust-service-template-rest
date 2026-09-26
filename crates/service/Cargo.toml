@@ -63,17 +63,23 @@ utoipa-axum = { workspace = true }
 [dev-dependencies]
 # template:begin grpc:service-grpc-example-dependencies
 grpc-contracts = { workspace = true }
-tonic = { workspace = true, features = ["codegen"] }
+service-failure = { workspace = true }
+tonic = { workspace = true, features = ["codegen", "channel", "tls-aws-lc"] }
 tonic-health = { workspace = true }
 tokio-stream = { workspace = true, features = ["sync"] }
 futures-util = { workspace = true, features = ["std"] }
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 # template:end grpc:service-grpc-example-dependencies
+# template:begin grpc-jwt:service-grpc-jwt-test-dependencies
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
+base64 = { workspace = true, features = ["alloc"] }
+# template:end grpc-jwt:service-grpc-jwt-test-dependencies
 # template:begin authn:service-authn-test-dependencies
 axum = { workspace = true }
 # template:end authn:service-authn-test-dependencies
 rstest = { workspace = true }
 nix = { workspace = true, features = ["signal"] }
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "io-util"] }
 serde_json = { workspace = true, features = ["std"] }
 ureq = { workspace = true }

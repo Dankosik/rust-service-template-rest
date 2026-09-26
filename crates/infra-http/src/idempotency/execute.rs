@@ -13,9 +13,9 @@ use tokio::time::Instant;
 
 use super::Tx;
 use super::stored::{self, Stored};
-use crate::problem::{Code, Problem, SANITIZED_DETAIL};
 #[cfg(test)]
 use crate::problem::http_status;
+use crate::problem::{Code, Problem, SANITIZED_DETAIL};
 use crate::request_id;
 
 /// Idempotent request outcomes at the HTTP idempotency boundary.

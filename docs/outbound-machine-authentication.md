@@ -149,9 +149,12 @@ certification. Adopters own registration, grants/scopes, credentials, rotation,
 network/TLS policy, capacity, readiness criticality, and live-provider acceptance.
 Other authentication methods require a separate accepted behavior decision.
 
-The HTTP surface is complete in this stage. Stage 10.7 owns gRPC transport;
-whichever stage merges second composes credentials there and proves the combined
-behavior. Keep the token private inside infrastructure; do not add a speculative
-public authorizer now. gRPC composition may add a concrete adapter in this crate
-when the real transport exists.
 <!-- template:end outbound-auth:docs-outbound-machine-authentication-guide -->
+<!-- template:begin outbound-auth-grpc:docs-oauth-grpc-binding -->
+With `GRPC=enabled`, `Credentials::grpc` binds the same private acquisition owner
+to a governed native client. Each RPC carries its original absolute operation
+deadline; token failure prevents resource dispatch, and resource authentication
+errors never trigger replay. Streaming acquires once at opening. The [gRPC
+guide](grpc.md#reuse-clients-and-original-deadlines) shows the concrete binding.
+Removing either profile removes only the combined bridge.
+<!-- template:end outbound-auth-grpc:docs-oauth-grpc-binding -->

@@ -155,9 +155,15 @@ reachability. Do not multiply by every harness/database/profile permutation or
 repeat identical full builds; harness projections remain separate static proof.
 Heavy validation remains CI-owned.
 
-The second landing stage merges current main and adds concrete gRPC composition,
-with the same private-token ownership, deadline accounting, and unauthenticated/
-permission-denied pass-through. No gRPC dependency or unused interface is added
-in this stage before that boundary exists. Exact-head CI and whole-result review
-belong to delivery; no deployment or image publication is authorized.
+Exact-head CI and whole-result review belong to delivery; no deployment or image
+publication is implied by template proof.
 <!-- template:end outbound-auth:docs-outbound-machine-authentication-decisions -->
+
+<!-- template:begin outbound-auth-grpc:docs-oauth-grpc-decision -->
+The concrete gRPC binding is now inside `Credentials`, with the same private-token
+ownership, original deadline and no-replay response behavior. Its optional
+dependency points from OAuth to `infra-grpc`; removing either profile removes
+the bridge. Native generated clients use the concrete authenticated Service,
+without a generic authorizer or public acquisition API. See the [transport
+decision record](grpc-decisions.md).
+<!-- template:end outbound-auth-grpc:docs-oauth-grpc-decision -->

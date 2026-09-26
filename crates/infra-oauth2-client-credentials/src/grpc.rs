@@ -1,6 +1,10 @@
 //! Concrete gRPC binding. The credential and cache remain in their private owner.
 
-use std::{future::Future, pin::Pin, task::{Context, Poll}};
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use http::{Request, Response, header::AUTHORIZATION};
 use infra_grpc::{Client, Operation};
@@ -49,22 +53,35 @@ impl Service<Request<Body>> for AuthenticatedClient {
         let mut resource = self.resource.clone();
         Box::pin(async move {
             if request.headers().contains_key(AUTHORIZATION) {
-                return Err(Status::invalid_argument("authorization conflicts with client credentials"));
+                return Err(Status::invalid_argument(
+                    "authorization conflicts with client credentials",
+                ));
             }
-            let operation = request.extensions().get::<Operation>().copied()
+            let operation = request
+                .extensions()
+                .get::<Operation>()
+                .copied()
                 .ok_or_else(|| Status::invalid_argument("operation deadline is required"))?;
             if Instant::now() >= operation.deadline {
                 return Err(Status::deadline_exceeded("request deadline exceeded"));
             }
-            let value = credentials.acquire(operation.deadline).await.map_err(acquisition_status)?;
+            let value = credentials
+                .acquire(operation.deadline)
+                .await
+                .map_err(acquisition_status)?;
             if Instant::now() >= operation.deadline {
                 return Err(Status::deadline_exceeded("request deadline exceeded"));
             }
-            if value.hard_expiry.is_some_and(|expiry| Instant::now() >= expiry) {
+            if value
+                .hard_expiry
+                .is_some_and(|expiry| Instant::now() >= expiry)
+            {
                 return Err(Status::unavailable("client credentials unavailable"));
             }
             // The cache owner validates the bearer grammar and marks this value sensitive.
-            request.headers_mut().insert(AUTHORIZATION, value.header.clone());
+            request
+                .headers_mut()
+                .insert(AUTHORIZATION, value.header.clone());
             resource.call(request).await
         })
     }
@@ -73,7 +90,11 @@ impl Service<Request<Body>> for AuthenticatedClient {
 fn acquisition_status(error: AcquisitionError) -> Status {
     match error {
         AcquisitionError::Timeout => Status::deadline_exceeded("request deadline exceeded"),
-        AcquisitionError::Transport | AcquisitionError::ResponseLimit | AcquisitionError::Rejected |
-        AcquisitionError::InvalidResponse => Status::unavailable("client credentials unavailable"),
+        AcquisitionError::Transport
+        | AcquisitionError::ResponseLimit
+        | AcquisitionError::Rejected
+        | AcquisitionError::InvalidResponse => {
+            Status::unavailable("client credentials unavailable")
+        }
     }
 }

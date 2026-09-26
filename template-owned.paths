@@ -34,6 +34,13 @@ docs/validation/security.md
 Makefile
 make/template.mk
 tools/versions.env
+# template:begin grpc:grpc-portable-tool-owners
+.cargo/config.toml
+tools/grpc-codegen/
+scripts/grpc-protoc.py
+scripts/grpc-generate.sh
+scripts/ci/grpc-check.sh
+# template:end grpc:grpc-portable-tool-owners
 scripts/template-sync.sh
 scripts/lib/template_sync.py
 scripts/lib/template_state.py

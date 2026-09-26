@@ -297,17 +297,23 @@ _MESSAGING_PROFILE_INVENTORY_KEYS = frozenset(
         "integration",
     }
 )
-_OUTBOX_PROFILE_INVENTORY_KEYS = frozenset({*(_MESSAGING_PROFILE_INVENTORY_KEYS - {"jobs-messaging"}), "outbox"})
+_OUTBOX_LEGACY_PROFILE_INVENTORY_KEYS = frozenset(
+    {*(_MESSAGING_PROFILE_INVENTORY_KEYS - {"jobs-messaging"}), "outbox"}
+)
+_OUTBOX_PROFILE_INVENTORY_KEYS = frozenset({*_MESSAGING_PROFILE_INVENTORY_KEYS, "outbox"})
 
 
 # The DNS-bearing key sets above are supported historical replay input only.
 _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS = _WEBHOOKS_PROFILE_INVENTORY_KEYS - {"egress-dns"}
 _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS = _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS | {"outbound-auth"}
+_OUTBOX_LEGACY_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS = _OUTBOX_LEGACY_PROFILE_INVENTORY_KEYS | {"outbound-auth"}
 _OUTBOX_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS = _OUTBOX_PROFILE_INVENTORY_KEYS | {"outbound-auth"}
+_SHARED_CONFIG_URL_LEGACY_PROFILE_INVENTORY_KEYS = _OUTBOX_LEGACY_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS | {"config-url"}
 _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS = _OUTBOX_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS | {"config-url"}
 _GRPC_PROFILE_INVENTORY_KEYS = _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS | {
     "grpc",
     "grpc-none",
+    "grpc-jwt",
     "outbound-auth-grpc",
 }
 
@@ -340,7 +346,12 @@ def _profile_data(
         include_webhooks = True
         include_messaging = True
         include_outbox = True
-    elif keys in (_OUTBOX_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS, _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS):
+    elif keys in (
+        _OUTBOX_LEGACY_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS,
+        _OUTBOX_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS,
+        _SHARED_CONFIG_URL_LEGACY_PROFILE_INVENTORY_KEYS,
+        _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS,
+    ):
         include_authn = True
         include_outbound = True
         include_outbound_auth = True
@@ -351,7 +362,7 @@ def _profile_data(
         include_grpc = False
         include_messaging = True
         include_outbox = True
-    elif keys == _OUTBOX_PROFILE_INVENTORY_KEYS:
+    elif keys in (_OUTBOX_LEGACY_PROFILE_INVENTORY_KEYS, _OUTBOX_PROFILE_INVENTORY_KEYS):
         include_authn = True
         include_outbound = True
         include_outbound_auth = False
@@ -516,7 +527,7 @@ def _profile_data(
         )
         markers.extend(_markers("outbound-auth", section["markers"]))
     if include_grpc:
-        for profile in ("grpc", "grpc-none", "outbound-auth-grpc"):
+        for profile in ("grpc", "grpc-none", "grpc-jwt", "outbound-auth-grpc"):
             section = raw[profile]
             if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
@@ -726,6 +737,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("outbound-auth")
     if inputs.grpc == "enabled":
         selected.add("grpc")
+        if inputs.authn == "oidc-jwt":
+            selected.add("grpc-jwt")
         if inputs.outbound_auth == "oauth2-client-credentials":
             selected.add("outbound-auth-grpc")
     else:
@@ -818,6 +831,60 @@ def _apply_markers(snapshot: Path, profiles: ProfileData, inputs: InitInputs) ->
             path.write_text("".join(transformed), encoding="utf-8")
     if seen != expected:
         raise Refusal("template profile marker inventory does not match source")
+
+
+def _project_grpc_none(snapshot: Path, inputs: InitInputs) -> None:
+    """Restore shared lifecycle signatures after gRPC-only items are removed."""
+
+    if inputs.grpc != "none":
+        return
+    rewrites = (
+        (
+            "crates/service/src/lib.rs",
+            "    bootstrap::run(args, None)\n",
+            "    bootstrap::run(args)\n",
+        ),
+        (
+            "crates/service/src/lib.rs",
+            "/// Run the service with one generated gRPC registration hook.\n"
+            "pub fn run_with_grpc<I>(args: I, registration: GrpcRegistration) -> ExitCode\n"
+            "where\n"
+            "    I: IntoIterator<Item = OsString>,\n"
+            "{\n"
+            "    bootstrap::run(args, Some(registration))\n"
+            "}\n",
+            "",
+        ),
+        (
+            "crates/service/src/bootstrap/mod.rs",
+            "pub(crate) fn run<I>(args: I, grpc_registration: Option<crate::GrpcRegistration>) -> ExitCode\n",
+            "pub(crate) fn run<I>(args: I) -> ExitCode\n",
+        ),
+        (
+            "crates/service/src/bootstrap/mod.rs",
+            "    let outcome = runtime.block_on(serve(config, grpc_registration));\n",
+            "    let outcome = runtime.block_on(serve(config));\n",
+        ),
+        (
+            "crates/service/src/bootstrap/mod.rs",
+            "async fn serve(\n"
+            "    config: Config,\n"
+            "    grpc_registration: Option<crate::GrpcRegistration>,\n"
+            ") -> Result<Outcome, BootstrapError> {\n",
+            "async fn serve(config: Config) -> Result<Outcome, BootstrapError> {\n",
+        ),
+        (
+            "crates/service/src/bootstrap/shutdown.rs",
+            "    };\n\n    if let Some(diagnostics) = plan.diagnostics {\n",
+            "    };\n    let drain_overran = http_drain.await;\n\n    if let Some(diagnostics) = plan.diagnostics {\n",
+        ),
+    )
+    for relative, expected, replacement in rewrites:
+        path = snapshot / relative
+        contents = path.read_text(encoding="utf-8")
+        if contents.count(expected) != 1:
+            raise Refusal(f"gRPC=none lifecycle anchor changed: {relative}")
+        path.write_text(contents.replace(expected, replacement), encoding="utf-8")
 
 
 def _remove_paths(snapshot: Path, paths: Sequence[str]) -> None:
@@ -1022,7 +1089,9 @@ def _replay(root: Path, inputs: InitInputs) -> int:
     return 0
 
 
-def _run_staged_command(snapshot: Path, command: Sequence[str], operation: str) -> bytes:
+def _run_staged_command(
+    snapshot: Path, command: Sequence[str], operation: str, tools_root: Path | None = None
+) -> bytes:
     try:
         result = subprocess.run(
             command,
@@ -1030,7 +1099,7 @@ def _run_staged_command(snapshot: Path, command: Sequence[str], operation: str) 
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
-            env=_staged_environment(snapshot),
+            env=_staged_environment(snapshot, tools_root),
         )
     except OSError as error:
         raise ToolFailure(f"staged {operation} tool is unavailable") from error
@@ -1041,9 +1110,11 @@ def _run_staged_command(snapshot: Path, command: Sequence[str], operation: str) 
     return result.stdout
 
 
-def _preflight_staged(snapshot: Path, inputs: InitInputs, profiles: ProfileData) -> None:
+def _preflight_staged(
+    snapshot: Path, inputs: InitInputs, profiles: ProfileData, tools_root: Path | None = None
+) -> None:
     _project_staged(snapshot, inputs, profiles)
-    _validate_staged_runtime(snapshot, inputs)
+    _validate_staged_runtime(snapshot, inputs, tools_root)
 
 
 def _project_staged(snapshot: Path, inputs: InitInputs, profiles: ProfileData) -> None:
@@ -1051,6 +1122,7 @@ def _project_staged(snapshot: Path, inputs: InitInputs, profiles: ProfileData) -
 
     _check_harness_projection(snapshot, "all")
     _apply_markers(snapshot, profiles, inputs)
+    _project_grpc_none(snapshot, inputs)
     _apply_identity(snapshot, profiles, inputs)
     _remove_paths(snapshot, profiles.source_only)
     unselected_removals = [
@@ -1068,15 +1140,16 @@ def _project_staged(snapshot: Path, inputs: InitInputs, profiles: ProfileData) -
     _project_cargo_lock(snapshot, profiles.cargo_lock, inputs)
 
 
-def _validate_staged_runtime(snapshot: Path, inputs: InitInputs) -> None:
+def _validate_staged_runtime(snapshot: Path, inputs: InitInputs, tools_root: Path | None = None) -> None:
     """Validate the projected runtime tree with the existing locked commands."""
 
     metadata_bytes = _run_staged_command(
         snapshot,
         ["cargo", "metadata", "--locked", "--offline", "--format-version", "1"],
         "locked offline Cargo metadata",
+        tools_root,
     )
-    _format_staged_rust(snapshot, metadata_bytes)
+    _format_staged_rust(snapshot, metadata_bytes, tools_root)
     try:
         generated = subprocess.run(
             ["cargo", "run", "-q", "-p", inputs.service_name, "--bin", "openapi", "--locked", "--offline"],
@@ -1084,7 +1157,7 @@ def _validate_staged_runtime(snapshot: Path, inputs: InitInputs) -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
-            env=_staged_environment(snapshot),
+            env=_staged_environment(snapshot, tools_root),
         )
     except OSError as error:
         raise ToolFailure("staged OpenAPI generator is unavailable") from error
@@ -1093,7 +1166,7 @@ def _validate_staged_runtime(snapshot: Path, inputs: InitInputs) -> None:
     (snapshot / "api/openapi/service.yaml").write_bytes(generated.stdout)
 
 
-def _format_staged_rust(snapshot: Path, metadata_bytes: bytes) -> None:
+def _format_staged_rust(snapshot: Path, metadata_bytes: bytes, tools_root: Path | None = None) -> None:
     """Use pinned rustfmt on Cargo's workspace targets, without another resolver."""
 
     try:
@@ -1121,12 +1194,13 @@ def _format_staged_rust(snapshot: Path, metadata_bytes: bytes) -> None:
             snapshot,
             ["rustup", "run", channel, "rustfmt", "--edition", edition, *sorted(targets)],
             "pinned Rust formatting",
+            tools_root,
         )
     if (snapshot / "Cargo.lock").read_bytes() != lock_before:
         raise Refusal("staged formatting changed the projected Cargo.lock")
 
 
-def _staged_environment(snapshot: Path) -> dict[str, str]:
+def _staged_environment(snapshot: Path, tools_root: Path | None = None) -> dict[str, str]:
     environment = os.environ.copy()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     # An explicit absolute caller cache is reused, so repeated initializations
@@ -1134,6 +1208,8 @@ def _staged_environment(snapshot: Path) -> dict[str, str]:
     # private to this attempt and outside the staged tree.
     if not os.path.isabs(environment.get("CARGO_TARGET_DIR", "")):
         environment["CARGO_TARGET_DIR"] = os.fspath(snapshot.parent / "cargo-target")
+    if tools_root is not None:
+        environment["TOOLS_ROOT"] = os.fspath(tools_root)
     return environment
 
 
@@ -1471,6 +1547,44 @@ def _collect_plan(
     return sorted(writes, key=lambda item: item.relative), removals
 
 
+def _managed_tools_root(root: Path) -> Path:
+    configured = os.environ.get("TOOLS_ROOT")
+    if configured:
+        if not os.path.isabs(configured):
+            raise Refusal("TOOLS_ROOT must be absolute")
+        return Path(configured)
+    common = Path(git(root, ["rev-parse", "--git-common-dir"]).decode("utf-8").strip())
+    if not common.is_absolute():
+        common = root / common
+    return common.resolve(strict=True) / "tools"
+
+
+def _provision_grpc_tools(root: Path, inputs: InitInputs) -> Path | None:
+    """Provision the managed compiler before a gRPC staged tree runs Cargo."""
+
+    if inputs.grpc == "none":
+        return None
+    tools_root = _managed_tools_root(root)
+    environment = os.environ.copy()
+    environment["TOOLS_ROOT"] = os.fspath(tools_root)
+    try:
+        result = subprocess.run(
+            ["make", "grpc-tools"],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            env=environment,
+        )
+    except OSError as error:
+        raise ToolFailure("managed gRPC tool preflight is unavailable") from error
+    if result.returncode:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        diagnostic = f"\n{detail[:8192]}" if detail else ""
+        raise Refusal(f"managed gRPC tool preflight failed (exit {result.returncode}){diagnostic}")
+    return tools_root
+
+
 def initialize(arguments: argparse.Namespace) -> int:
     inputs = parse_inputs(arguments)
     root = git_root(arguments.repo)
@@ -1478,12 +1592,13 @@ def initialize(arguments: argparse.Namespace) -> int:
     if existing is not None:
         return _replay(root, inputs)
     _tracked_checkout_is_clean(root)
+    tools_root = _provision_grpc_tools(root, inputs)
     revision = git_head(root)
     with tempfile.TemporaryDirectory(prefix="template-init-") as temporary:
         staged = Path(temporary) / "snapshot"
         snapshot_tree(root, staged, revision)
         profiles = _profile_data(staged)
-        _preflight_staged(staged, inputs, profiles)
+        _preflight_staged(staged, inputs, profiles, tools_root)
         _postconditions(staged, inputs, profiles, initial=True)
         owned_removals = list(profiles.source_only)
         for profile, removals in profiles.removals.items():

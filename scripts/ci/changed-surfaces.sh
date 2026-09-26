@@ -202,9 +202,15 @@ classify() {
 		esac
 		# template:begin grpc:classifier-grpc-schema
 		case "${file}" in
-		api/proto/* | crates/grpc-contracts/* | tools/grpc-codegen/* | buf.yaml | buf.lock | scripts/grpc-generate.sh | scripts/ci/grpc-check.sh | tools/versions.env)
+		api/proto/* | crates/grpc-contracts/* | tools/grpc-codegen/* | buf.yaml | buf.lock | scripts/grpc-generate.sh | scripts/ci/grpc-check.sh | scripts/grpc-protoc.py | scripts/tests/grpc-protoc.py | .cargo/config.toml | tools/versions.env)
 			mark grpc_schema
 			;;
+		esac
+		case "${file}" in
+		tools/grpc-codegen/Cargo.toml | tools/grpc-codegen/Cargo.lock) mark cargo_dependencies ;;
+		esac
+		case "${file}" in
+		scripts/grpc-protoc.py | scripts/tests/grpc-protoc.py | .cargo/config.toml | tools/versions.env) mark tool_manifest runtime_image ;;
 		esac
 		# template:end grpc:classifier-grpc-schema
 		# The Dockerfile carries tool pins too (ARG defaults, FROM digests).
@@ -264,7 +270,7 @@ classify() {
 			mark module_initializer initializer_runtime
 			;;
 		# template:begin grpc:classifier-grpc-initializer
-		api/proto/* | crates/infra-grpc/* | crates/grpc-contracts/* | crates/service/examples/grpc.rs | tools/grpc-codegen/* | buf.yaml | buf.lock | scripts/grpc-generate.sh | scripts/ci/grpc-check.sh)
+		api/proto/* | crates/infra-grpc/* | crates/grpc-contracts/* | crates/service/examples/grpc.rs | tools/grpc-codegen/* | buf.yaml | buf.lock | scripts/grpc-generate.sh | scripts/ci/grpc-check.sh | scripts/grpc-protoc.py | scripts/tests/grpc-protoc.py | .cargo/config.toml)
 			mark module_initializer initializer_runtime
 			;;
 		# template:end grpc:classifier-grpc-initializer
@@ -503,6 +509,8 @@ EOF
 	for file in api/proto/example/v1/echo.proto crates/grpc-contracts/src/generated/example.v1.rs tools/grpc-codegen/Cargo.toml buf.yaml buf.lock; do
 		assert_case "${file}" "grpc_schema" "openapi runtime_image"
 	done
+	assert_case scripts/grpc-protoc.py "grpc_schema tool_manifest runtime_image" "openapi"
+	assert_case .cargo/config.toml "grpc_schema tool_manifest runtime_image" "openapi"
 	# template:end grpc:classifier-grpc-tests
 	assert_case .redocly.yaml \
 		"openapi" \

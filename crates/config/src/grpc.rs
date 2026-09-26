@@ -62,10 +62,9 @@ impl GrpcConfig {
     ///
     /// Returns the validation error for a missing or malformed `grpc.addr`.
     pub fn listen_addr(&self) -> Result<SocketAddr, ValidationError> {
-        let addr = self
-            .addr
-            .as_deref()
-            .ok_or_else(|| ValidationError::new("grpc.addr", "is required when grpc.enabled is true"))?;
+        let addr = self.addr.as_deref().ok_or_else(|| {
+            ValidationError::new("grpc.addr", "is required when grpc.enabled is true")
+        })?;
         socket_addr("grpc.addr", addr)
     }
 
@@ -115,7 +114,10 @@ impl GrpcConfig {
 
 fn required(key: &'static str, value: Option<&str>) -> Result<(), ValidationError> {
     if value.is_none_or(str::is_empty) {
-        return Err(ValidationError::new(key, "is required when grpc.security is tls"));
+        return Err(ValidationError::new(
+            key,
+            "is required when grpc.security is tls",
+        ));
     }
     Ok(())
 }
@@ -147,7 +149,8 @@ mod tests {
         let missing = parse("enabled = true\naddr = \"127.0.0.1:50051\"").unwrap();
         assert_eq!(missing.validate().unwrap_err().key, "grpc.security");
 
-        let config = parse("enabled = true\naddr = \"127.0.0.1:0\"\nsecurity = \"plaintext\"").unwrap();
+        let config =
+            parse("enabled = true\naddr = \"127.0.0.1:0\"\nsecurity = \"plaintext\"").unwrap();
         config.validate().unwrap();
     }
 

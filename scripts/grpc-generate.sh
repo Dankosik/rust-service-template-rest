@@ -26,4 +26,4 @@ run_buf build "${root_dir}/api/proto" \
   --output "${descriptor_path}" \
   --as-file-descriptor-set
 cargo run --locked --manifest-path "${root_dir}/tools/grpc-codegen/Cargo.toml" -- \
-  "${descriptor_path}" "${generated_dir}"
+  "${descriptor_path}" "${generated_dir}" "${root_dir}/api/proto"

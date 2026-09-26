@@ -375,15 +375,13 @@ impl ReadinessReader {
         if snapshot.draining {
             return Ok(());
         }
-        let stale_at = snapshot
-            .evaluation
-            .as_ref()
-            .zip(snapshot.stale_after)
-            .map(|(evaluation, stale_after)| {
+        let stale_at = snapshot.evaluation.as_ref().zip(snapshot.stale_after).map(
+            |(evaluation, stale_after)| {
                 // `verdict` refuses only an age strictly above `stale_after`,
                 // so one nanosecond is the earliest representable stale instant.
                 evaluation.evaluated_at() + stale_after + Duration::from_nanos(1)
-            });
+            },
+        );
         if let Some(stale_at) = stale_at {
             tokio::select! {
                 changed = self.rx.changed() => changed.map_err(|_| OwnerDropped),
