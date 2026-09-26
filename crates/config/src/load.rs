@@ -459,7 +459,11 @@ mod tests {
                 "configuration error exposed {value}"
             );
         }
+    }
 
+    #[test]
+    fn oauth_invalid_types_have_static_key_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
         let wrong_type = write(
             &dir,
             "wrong-type.toml",
@@ -507,7 +511,11 @@ mod tests {
             assert!(rendered.contains(expected_key), "{rendered}");
             assert!(!rendered.contains("private-sentinel"), "{rendered}");
         }
+    }
 
+    #[test]
+    fn oauth_scope_presence_and_userinfo_validation_stays_private() {
+        let dir = tempfile::tempdir().unwrap();
         let invalid_scope = write(
             &dir,
             "invalid-scope.toml",

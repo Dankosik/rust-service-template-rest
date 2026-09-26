@@ -270,8 +270,19 @@ outbound HTTP or DNS solely for webhooks.
 Use the service's [command policy](build-test-and-development-commands.md) and
 [validation router](validation-routing.md) for ordinary development.
 The source template additionally owns `make template-owned-purity-check` and
-`ALLOW_FULL=1 make template-init-check`. It checks 368 cheap canonical
+`ALLOW_FULL=1 make template-init-check`. Its baseline checks 368 cheap canonical
 profile/harness projections, then initializes and validates 46 runtime graphs.
+<!-- template:begin outbound-auth:docs-template-init-outbound-auth-proof -->
+OAuth adds four canonical projections and runtime graphs 47--50: OAuth alone,
+with JWT, with introspection (all without PostgreSQL), and the maximal
+PostgreSQL/introspection/idempotency/jobs/webhook graph. Graphs 47--49 join the
+existing database-none CI part; graph 50 joins jobs-http-idempotency-2. These
+compile retained production and test targets once per graph; only PostgreSQL
+selections request the integration-test feature. The workspace quality gate
+runs the OAuth adapter's behavior suite. OAuth does not multiply harness or
+database proof, and the existing eight CI parts cover all 50 runtime graphs.
+<!-- template:end outbound-auth:docs-template-init-outbound-auth-proof -->
+
 Graphs 1--26 are the existing baseline. Graphs 27--46 add five auth/idempotency
 blocks, each ordered as inbound-only without bounded outbound HTTP, inbound-only
 with it, outbound-only with it, and both directions with it: graphs 27--30 use

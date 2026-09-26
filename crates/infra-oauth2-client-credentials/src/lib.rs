@@ -1,4 +1,4 @@
-//! Private OAuth2 client credentials for bounded outbound integrations.
+//! Private `OAuth2` client credentials for bounded outbound integrations.
 //!
 //! Composition prepares one immutable credential owner and binds it to a
 //! resource client. Neither access tokens nor raw provider errors leave it.
@@ -306,7 +306,7 @@ impl Owner {
         request: oauth2::HttpRequest,
         deadline: Instant,
     ) -> Result<oauth2::HttpResponse, AcquisitionError> {
-        if request.uri().to_string() != self.endpoint.as_str() {
+        if request.uri() != self.endpoint.as_str() {
             return Err(AcquisitionError::InvalidResponse);
         }
         let (mut parts, body) = request.into_parts();
@@ -361,7 +361,7 @@ struct ReuseExpiry;
 impl Expiry<(), Arc<CachedCredential>> for ReuseExpiry {
     fn expire_after_create(
         &self,
-        _: &(),
+        (): &(),
         value: &Arc<CachedCredential>,
         _: std::time::Instant,
     ) -> Option<Duration> {

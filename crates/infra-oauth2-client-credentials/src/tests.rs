@@ -73,7 +73,7 @@ impl Fixture {
         let state = Arc::new(FixtureState {
             token_response: Mutex::new(json_response(
                 "200 OK",
-                serde_json::json!({
+                &serde_json::json!({
                     "access_token": "fixture-token",
                     "token_type": "Bearer",
                     "expires_in": 60,
@@ -123,7 +123,7 @@ impl Fixture {
         .unwrap()
     }
 
-    fn token_json(&self, status: &str, body: serde_json::Value) {
+    fn token_json(&self, status: &str, body: &serde_json::Value) {
         *self.state.token_response.lock().unwrap() = json_response(status, body);
     }
 
@@ -268,8 +268,8 @@ fn response(status: &str, body: &[u8]) -> Vec<u8> {
     response
 }
 
-fn json_response(status: &str, body: serde_json::Value) -> Vec<u8> {
-    response(status, &serde_json::to_vec(&body).unwrap())
+fn json_response(status: &str, body: &serde_json::Value) -> Vec<u8> {
+    response(status, &serde_json::to_vec(body).unwrap())
 }
 
 fn request() -> Request<Bytes> {
@@ -358,7 +358,7 @@ async fn token_exchange_encodes_basic_scopes_and_audience_then_injects_bearer() 
     let fixture = Fixture::new().await;
     fixture.token_json(
         "200 OK",
-        serde_json::json!({
+        &serde_json::json!({
             "access_token": "token+/_~.=",
             "token_type": "bEaReR",
             "expires_in": 60,
@@ -412,7 +412,7 @@ async fn bearer_grammar_refuses_unsafe_tokens_before_resource_dispatch() {
     for token in ["", "contains space", "token=middle=padding"] {
         fixture.token_json(
             "200 OK",
-            serde_json::json!({"access_token": token, "token_type": "BEARER", "expires_in": 60}),
+            &serde_json::json!({"access_token": token, "token_type": "BEARER", "expires_in": 60}),
         );
         let result = fixture
             .credentials(&[], None)
@@ -433,9 +433,9 @@ async fn bearer_grammar_refuses_unsafe_tokens_before_resource_dispatch() {
 async fn short_lived_and_missing_expiry_tokens_are_not_retained() {
     let fixture = Fixture::new().await;
     for body in [
-        serde_json::json!({"access_token": "short", "token_type": "Bearer", "expires_in": 10}),
-        serde_json::json!({"access_token": "no-expiry", "token_type": "Bearer"}),
-        serde_json::json!({"access_token": "overflow", "token_type": "Bearer", "expires_in": u64::MAX}),
+        &serde_json::json!({"access_token": "short", "token_type": "Bearer", "expires_in": 10}),
+        &serde_json::json!({"access_token": "no-expiry", "token_type": "Bearer"}),
+        &serde_json::json!({"access_token": "overflow", "token_type": "Bearer", "expires_in": u64::MAX}),
     ] {
         fixture.token_json("200 OK", body);
         let client = fixture
@@ -460,7 +460,7 @@ async fn zero_or_expired_during_acquisition_never_authorizes_dispatch() {
     let fixture = Fixture::new().await;
     fixture.token_json(
         "200 OK",
-        serde_json::json!({"access_token":"expired", "token_type":"Bearer", "expires_in":0}),
+        &serde_json::json!({"access_token":"expired", "token_type":"Bearer", "expires_in":0}),
     );
     let client = fixture
         .credentials(&[], None)
@@ -473,7 +473,7 @@ async fn zero_or_expired_during_acquisition_never_authorizes_dispatch() {
     ));
     fixture.token_json(
         "200 OK",
-        serde_json::json!({"access_token":"late", "token_type":"Bearer", "expires_in":1}),
+        &serde_json::json!({"access_token":"late", "token_type":"Bearer", "expires_in":1}),
     );
     let gate = fixture.block_tokens();
     let mut operation = Box::pin(client.execute(request(), operation(Duration::from_secs(10))));
@@ -495,7 +495,7 @@ async fn clones_reuse_one_owner_cache_but_independent_owners_do_not_share() {
     let fixture = Fixture::new().await;
     fixture.token_json(
         "200 OK",
-        serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 60}),
+        &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 60}),
     );
     let credentials = fixture.credentials(&[], None);
     credentials
@@ -511,7 +511,7 @@ async fn clones_reuse_one_owner_cache_but_independent_owners_do_not_share() {
         .unwrap();
     fixture.token_json(
         "200 OK",
-        serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
+        &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
     );
     fixture
         .credentials(&[], None)
@@ -537,17 +537,17 @@ async fn concurrent_callers_coalesce_success_failure_and_nonretained_results() {
     let fixture = Fixture::new().await;
     for (body, expected_error, retained) in [
         (
-            serde_json::json!({"access_token": "retained", "token_type": "Bearer", "expires_in": 60}),
+            &serde_json::json!({"access_token": "retained", "token_type": "Bearer", "expires_in": 60}),
             None,
             true,
         ),
         (
-            serde_json::json!({"access_token": "short", "token_type": "Bearer", "expires_in": 10}),
+            &serde_json::json!({"access_token": "short", "token_type": "Bearer", "expires_in": 10}),
             None,
             false,
         ),
         (
-            serde_json::json!({"error": "provider-secret"}),
+            &serde_json::json!({"error": "provider-secret"}),
             Some(AcquisitionError::InvalidResponse),
             false,
         ),
@@ -572,7 +572,7 @@ async fn concurrent_callers_coalesce_success_failure_and_nonretained_results() {
         for result in [leader, waiter] {
             match expected_error {
                 Some(expected) => {
-                    assert!(matches!(result, Err(Error::Acquisition(error)) if error == expected))
+                    assert!(matches!(result, Err(Error::Acquisition(error)) if error == expected));
                 }
                 None => assert!(result.is_ok()),
             }
@@ -588,7 +588,7 @@ async fn concurrent_callers_coalesce_success_failure_and_nonretained_results() {
             .await;
         match expected_error {
             Some(expected) => {
-                assert!(matches!(follow_up, Err(Error::Acquisition(error)) if error == expected))
+                assert!(matches!(follow_up, Err(Error::Acquisition(error)) if error == expected));
             }
             None => assert!(follow_up.is_ok()),
         }

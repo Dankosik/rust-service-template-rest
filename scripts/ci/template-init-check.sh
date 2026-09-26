@@ -273,9 +273,13 @@ run_graph() {
 		fi
 		return
 	fi
+	local -a check_features=()
+	if [[ ${database} == postgres ]]; then
+		check_features=(--features integration-tests/integration)
+	fi
 	record_command "${receipt}" "${log_dir}/runtime-${graph}-check.log" "runtime-${graph}-check" \
 		"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" cargo check --workspace --all-targets \
-			--features integration-tests/integration --locked --offline --manifest-path "${target}/Cargo.toml"
+			"${check_features[@]}" --locked --offline --manifest-path "${target}/Cargo.toml"
 	if [[ ${outbound_auth} == none ]]; then
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-provider.log" "runtime-${graph}-provider" \
 			"${scrubbed_identity[@]}" CARGO_TARGET_DIR="${target_cache}" make -C "${target}" test-package PKG=infra-webhooks

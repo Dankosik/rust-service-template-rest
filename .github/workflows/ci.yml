@@ -534,11 +534,12 @@ jobs:
       fail-fast: false
       matrix:
         # Together the parts are `make template-init-check`: the source
-        # suites with the canonical projections and the forty-six runtime
+        # suites with the canonical projections and the fifty runtime
         # graphs. template-init-check.sh numbers DATABASE none 1-6, postgres
         # 7-12, http-idempotency 13-16, jobs 17-22, and jobs with
         # http-idempotency 23-26. Webhook graphs 27-46 extend the five
-        # jobs-compatible profile families without multiplying harnesses.
+        # jobs-compatible profile families without multiplying harnesses. OAuth
+        # graphs 47-49 are database-free; graph 50 is the maximal retained pack.
         # `source`, `database-none`, and
         # `database-postgres` keep their own warm target caches. Every part
         # with `cache` restores that part's cache (database-postgres) and
@@ -547,7 +548,7 @@ jobs:
         include:
           - part: source
           - part: database-none
-            graphs: 1,2,3,4,5,6
+            graphs: 1,2,3,4,5,6,47,48,49
           - part: database-postgres
             graphs: 7,8,9,10,11,12
           - part: http-idempotency
@@ -567,7 +568,7 @@ jobs:
             cache: database-postgres
             docker: true
           - part: jobs-http-idempotency-2
-            graphs: 25,26,28,34,38,42,46
+            graphs: 25,26,28,34,38,42,46,50
             cache: database-postgres
             docker: true
     steps:
