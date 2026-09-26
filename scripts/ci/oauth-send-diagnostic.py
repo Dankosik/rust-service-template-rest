@@ -20,21 +20,30 @@ INITIALIZER = """        // Give Moka a Send initializer without propagating nes
         let result = tokio::time::timeout_at(deadline, self.0.cache.try_get_with((), init))
 """
 
-HOOK = """struct TokenHttpClient<'owner> {
-    owner: &'owner Owner,
+EXCHANGE_SIGNATURE = """    fn exchange(
+        &self,
+        request: oauth2::HttpRequest,
+        deadline: Instant,
+    ) -> Pin<Box<dyn Future<Output = Result<oauth2::HttpResponse, AcquisitionError>> + Send + '_>>
+    {
+        // Expose Send before oauth2 projects the closure's AsyncHttpClient future.
+"""
+
+HOOK = """}
+
+struct TokenHttpClient {
+    endpoint: Url,
+    transport: Client,
     deadline: Instant,
 }
 
-impl<'client, 'owner: 'client> oauth2::AsyncHttpClient<'client> for TokenHttpClient<'owner> {
+impl<'client> oauth2::AsyncHttpClient<'client> for TokenHttpClient {
     type Error = AcquisitionError;
     type Future =
         Pin<Box<dyn Future<Output = Result<oauth2::HttpResponse, Self::Error>> + Send + 'client>>;
 
     fn call(&'client self, request: oauth2::HttpRequest) -> Self::Future {
-        self.owner.exchange(request, self.deadline)
-    }
-}
-
+        let deadline = self.deadline;
 """
 
 
@@ -49,9 +58,15 @@ def variants(pristine):
     concrete = replace_once(
         pristine,
         "        let hook = |request| self.exchange(request, deadline);\n",
-        "        let hook = TokenHttpClient { owner: self, deadline };\n",
+        """        let hook = TokenHttpClient {
+            endpoint: self.endpoint.clone(),
+            transport: self.transport.clone(),
+            deadline,
+        };
+""",
     )
-    concrete = replace_once(concrete, "struct CachedCredential {\n", HOOK + "struct CachedCredential {\n")
+    # Move the existing HTTP conversion body unchanged into the owned hook.
+    concrete = replace_once(concrete, EXCHANGE_SIGNATURE, HOOK)
     direct = replace_once(
         concrete,
         INITIALIZER,
@@ -61,26 +76,10 @@ def variants(pristine):
         )
 """,
     )
-    owned = replace_once(
-        pristine,
-        INITIALIZER,
-        """        // The elected initializer owns the same private credential owner.
-        let init: Pin<
-            Box<dyn Future<Output = Result<Arc<CachedCredential>, FillError>> + Send>,
-        > = Box::pin(Arc::clone(&self.0).fetch(deadline));
-        let result = tokio::time::timeout_at(deadline, self.0.cache.try_get_with((), init))
-""",
-    )
-    owned = replace_once(
-        owned,
-        "    async fn fetch(&self, caller_deadline: Instant) -> Result<Arc<CachedCredential>, FillError> {\n",
-        "    async fn fetch(self: Arc<Self>, caller_deadline: Instant) -> Result<Arc<CachedCredential>, FillError> {\n",
-    )
     return [
         ("00-baseline", "Unchanged typed closure and borrowed boxed initializer.", pristine),
-        ("01-concrete-hook", "Explicit AsyncHttpClient lifetime; retain borrowed boxed initializer.", concrete),
-        ("02-concrete-hook-direct-initializer", "Same concrete hook; remove only the initializer box.", direct),
-        ("03-owned-initializer", "Original typed closure; change only initializer ownership to Arc.", owned),
+        ("01-owned-hook", "Owned endpoint/transport AsyncHttpClient; retain borrowed boxed initializer.", concrete),
+        ("02-owned-hook-direct-initializer", "Same owned hook; remove only the initializer box.", direct),
     ]
 
 
