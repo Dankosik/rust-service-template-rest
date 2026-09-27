@@ -198,7 +198,10 @@ async fn probe_is_ready_and_fails_generically_when_the_pool_is_exhausted(pool: P
     let started = std::time::Instant::now();
     let err = probe.check().await.unwrap_err();
     assert!(started.elapsed() + Duration::from_millis(200) >= ACQUIRE_TIMEOUT);
-    assert_eq!(err.0, "no connection available inside the acquire budget");
+    assert_eq!(
+        err.to_string(),
+        "no connection available inside the acquire budget"
+    );
 }
 
 #[sqlx::test(migrations = false)]

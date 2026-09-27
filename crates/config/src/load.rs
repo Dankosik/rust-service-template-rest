@@ -1327,7 +1327,7 @@ mod tests {
     }
 
     #[test]
-    fn drain_timeout_and_probe_budget_accept_legacy_keys() {
+    fn drain_timeout_accepts_its_legacy_key() {
         let canonical = load_from(
             &LoadOptions::default(),
             BUILD,
@@ -1347,12 +1347,22 @@ mod tests {
             env(&[
                 ("APP__HTTP__SHUTDOWN_TIMEOUT", "22s"),
                 ("APP__HTTP__REQUEST_TIMEOUT", "4s"),
-                ("APP__HEALTH__READINESS_TIMEOUT", "5s"),
             ]),
         )
         .unwrap();
         assert_eq!(legacy.http.drain_timeout, Duration::from_secs(22));
-        assert_eq!(legacy.health.probe_budget, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn readiness_timeout_is_no_longer_accepted() {
+        assert!(matches!(
+            load_from(
+                &LoadOptions::default(),
+                BUILD,
+                env(&[("APP__HEALTH__READINESS_TIMEOUT", "5s")]),
+            ),
+            Err(Error::Deserialize(_))
+        ));
     }
 
     #[test]

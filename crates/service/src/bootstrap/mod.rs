@@ -327,12 +327,14 @@ async fn serve(
 
         // Admission runs even without probes so the first probe after bind
         // answers from an evaluation.
-        let readiness = Readiness::new(probes);
-        let policy = RefreshPolicy {
-            interval: config.health.refresh_interval,
-            probe_budget: config.health.probe_budget,
-            failure_threshold: config.health.failure_threshold,
-        };
+        let readiness = Readiness::new(
+            probes,
+            RefreshPolicy {
+                interval: config.health.refresh_interval,
+                probe_budget: config.health.probe_budget,
+                failure_threshold: config.health.failure_threshold,
+            },
+        );
 
         admit_and_serve(Prepared {
             config: &config,
@@ -342,7 +344,6 @@ async fn serve(
             cancel: cancel.clone(),
             tracker: tracker.clone(),
             readiness,
-            policy,
             auth,
             // template:begin grpc:bootstrap-registration
             grpc_registration,
@@ -725,7 +726,7 @@ async fn prepare_cache(config: &Config) -> Result<Option<Cache>, BootstrapError>
                 server.address = %server.host,
                 server.port = server.port,
                 cache.tls = server.tls,
-                reason = %error.0,
+                reason = %error,
                 "cache_unavailable_at_startup"
             );
         }
@@ -823,7 +824,6 @@ struct Prepared<'a> {
     cancel: CancellationToken,
     tracker: TaskTracker,
     readiness: Readiness,
-    policy: RefreshPolicy,
     auth: PreparedAuth,
     // template:begin grpc:bootstrap-prepared-registration
     grpc_registration: Option<crate::GrpcRegistration>,
@@ -862,7 +862,6 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         cancel,
         tracker,
         readiness,
-        policy,
         auth,
         // template:begin grpc:bootstrap-destructure-registration
         grpc_registration,
@@ -929,7 +928,7 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
     // template:begin http-idempotency:bootstrap-http-idempotency-activation
     activate_http_idempotency(composer, config, &tracker, &cancel).await?;
     // template:end http-idempotency:bootstrap-http-idempotency-activation
-    readiness.refresh(policy).await;
+    readiness.refresh().await;
     readiness
         .reader()
         .verdict()
@@ -937,7 +936,7 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
     tracker.spawn({
         let readiness = readiness.clone();
         let cancel = cancel.child_token();
-        async move { readiness.refresh_until(policy, cancel).await }
+        async move { readiness.refresh_until(cancel).await }
     });
 
     let server_options = ServerOptions {

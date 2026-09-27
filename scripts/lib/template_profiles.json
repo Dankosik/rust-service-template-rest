@@ -648,6 +648,7 @@
       {
         "path": "crates/health/src/lib.rs",
         "ids": [
+          "health-owner-dropped",
           "health-reader-stale-edge",
           "health-reader-stale-edge-init",
           "health-changed-verdict",

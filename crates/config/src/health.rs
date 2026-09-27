@@ -1,8 +1,7 @@
 //! Readiness refresh cadence.
 //!
-//! Probes are evaluated on an interval by a background task, never per
-//! request, so a probe route can never consume the dependency capacity it
-//! reports on.
+//! Probes are checked on an interval by a background task, never per
+//! request, so an unauthenticated probe request never reaches a dependency.
 
 use std::time::Duration;
 
@@ -13,22 +12,22 @@ use crate::validate::{ValidationError, duration_range, int_range};
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct HealthConfig {
-    /// How often readiness is re-evaluated. Together with [`Self::probe_budget`]
-    /// this also sizes the cached-verdict staleness bound owned by the
-    /// readiness type: `probe_budget + max(interval, probe_budget) * 3`.
+    /// How often readiness is re-checked. Together with [`Self::probe_budget`]
+    /// this sizes the staleness bound on the cached verdict, which
+    /// `health::RefreshPolicy::stale_after` owns.
     #[serde(with = "humantime_serde")]
     pub refresh_interval: Duration,
-    /// Budget for one background readiness evaluation across every probe.
-    /// `/health/ready` itself never runs a probe; it serves the cached
-    /// verdict. The previous operator key `health.readiness_timeout` is
-    /// still accepted. Also feeds the staleness bound described on
-    /// [`Self::refresh_interval`].
-    #[serde(alias = "readiness_timeout", with = "humantime_serde")]
+    /// One deadline shared by every probe of a background check; the verdict
+    /// names the probe that ran out of it. `/health/ready` itself never runs
+    /// a probe; it serves the cached verdict. Also feeds the staleness bound
+    /// described on [`Self::refresh_interval`].
+    #[serde(with = "humantime_serde")]
     pub probe_budget: Duration,
-    /// Consecutive failed evaluations before a healthy verdict flips off.
-    /// Hysteresis applies only after a healthy streak; admission and a
-    /// never-ready instance report the first failure immediately. One slow
+    /// Failed checks in a row before a ready verdict is withdrawn. Some
+    /// readers, such as a gRPC health `Watch` client, drop the backend on the
+    /// first unready answer with no threshold of their own, so one slow
     /// round-trip must not evict an instance that is still serving.
+    /// Admission and a never-ready instance report the first failure at once.
     pub failure_threshold: u32,
 }
 

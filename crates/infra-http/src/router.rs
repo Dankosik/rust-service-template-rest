@@ -53,15 +53,20 @@ mod tests {
         }
     }
 
-    async fn ready_reader() -> ReadinessReader {
-        let readiness = Readiness::new(Vec::new());
-        readiness
-            .refresh(RefreshPolicy {
+    fn readiness() -> Readiness {
+        Readiness::new(
+            Vec::new(),
+            RefreshPolicy {
                 interval: Duration::from_secs(1),
                 probe_budget: Duration::from_secs(1),
                 failure_threshold: 1,
-            })
-            .await;
+            },
+        )
+    }
+
+    async fn ready_reader() -> ReadinessReader {
+        let readiness = readiness();
+        readiness.refresh().await;
         readiness.reader()
     }
 
@@ -141,7 +146,7 @@ mod tests {
 
     #[tokio::test]
     async fn not_ready_is_the_declared_503() {
-        let (app, document) = app(Readiness::new(Vec::new()).reader());
+        let (app, document) = app(readiness().reader());
         let response = app
             .oneshot(Request::get("/health/ready").body(Body::empty()).unwrap())
             .await

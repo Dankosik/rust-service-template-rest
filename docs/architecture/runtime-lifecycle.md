@@ -98,11 +98,23 @@ exits `1`.
 
 `/health/live` is process-only and always `200 ok` while the process runs.
 `/health/ready` reads the cached verdict published by the `health` crate's
-refresher: healthy after every probe passed, unhealthy after
-`health.failure_threshold` consecutive failures, not ready when the snapshot
-is older than the staleness guard allows (a dead refresher fails closed),
-and not ready as soon as teardown starts. The handler never runs a probe, so
-its latency is independent of dependency latency.
+refresher: ready after every probe passed; a failure is published at once
+while the instance is not ready yet, and after a ready verdict only once
+`health.failure_threshold` checks in a row have failed. A verdict older than
+the staleness bound is refused (a dead or hung refresher fails closed), and
+the instance is not ready as soon as teardown starts. The handler never runs
+a probe, so its latency is independent of dependency latency, and an
+unauthenticated caller cannot turn a probe request into a dependency
+round-trip. A probe that runs out of `health.probe_budget` is named in the
+verdict.
+
+Dependency probes are a trade-off. Registering a shared dependency such as
+PostgreSQL makes every instance unready together when that dependency fails,
+so the load balancer has no backend and clients see its error instead of the
+service's own `503` Problem. The template registers the probes because an
+instance that cannot reach its database cannot serve any route; a service
+whose routes degrade gracefully without a dependency should leave that
+dependency's probe out and watch it through metrics.
 
 ## Shutdown
 
@@ -326,8 +338,8 @@ not add a second budget or change NATS/provider shutdown ownership. See
   Go template's single error code, so an expired drain budget is not read as
   a crash.
 - **Readiness over `tokio::sync::watch`** rather than a per-request probe or
-  a mutex: tests await `changed()` instead of sleeping, and the handler is an
-  O(1) read.
+  a mutex: a streaming reader such as the gRPC health `Watch` wakes on each
+  publication, and the handler is an O(1) read.
 - **Build metadata**: `app.version` is `CARGO_PKG_VERSION` of the calling
   binary; `app.commit` is `vergen-gitcl` in `crates/config/build.rs` with
   `default_on_error()`, overridable through `VERGEN_GIT_SHA`, which the image

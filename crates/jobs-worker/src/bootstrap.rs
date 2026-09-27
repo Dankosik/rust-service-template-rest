@@ -137,7 +137,6 @@ struct Opened {
 struct Prepared {
     tracer_provider: TracerProviderHandle,
     readiness: Readiness,
-    policy: RefreshPolicy,
     // template:begin jobs:worker-bootstrap-prepared-jobs
     pool: Option<PgPool>,
     // template:end jobs:worker-bootstrap-prepared-jobs
@@ -217,7 +216,7 @@ pub(crate) async fn serve(
         }
     };
     let stop_signal = if prepared.admitted {
-        spawn_refresher(&prepared.readiness, prepared.policy, &cancel, &tracker);
+        spawn_refresher(&prepared.readiness, &cancel, &tracker);
         tracing::info!("jobs_worker_ready");
         wait_for_stop(
             // template:begin jobs:worker-bootstrap-wait-started-argument
@@ -440,15 +439,8 @@ async fn prepare(
     // template:begin messaging:worker-bootstrap-messaging-probe-value
     let messaging_probe = opened.messaging.as_ref().map(Messaging::probe);
     // template:end messaging:worker-bootstrap-messaging-probe-value
-    let (readiness, policy) = if startup_stopped {
-        (
-            Readiness::new(Vec::new()),
-            RefreshPolicy {
-                interval: config.health.refresh_interval,
-                probe_budget: config.health.probe_budget,
-                failure_threshold: config.health.failure_threshold,
-            },
-        )
+    let readiness = if startup_stopped {
+        Readiness::new(Vec::new(), refresh_policy(config))
     } else {
         bind_listeners(
             config,
@@ -466,7 +458,7 @@ async fn prepare(
     let admitted = if startup_stopped || signals.pending() {
         false
     } else {
-        admit(signals, &readiness, policy).await?
+        admit(signals, &readiness).await?
     };
     // template:begin jobs:worker-bootstrap-start-admitted-jobs
     if admitted {
@@ -486,7 +478,6 @@ async fn prepare(
     Ok(Prepared {
         tracer_provider,
         readiness,
-        policy,
         // template:begin jobs:worker-bootstrap-prepared-jobs-value
         pool,
         // template:end jobs:worker-bootstrap-prepared-jobs-value
@@ -690,7 +681,7 @@ async fn bind_listeners(
     // template:begin messaging:worker-bootstrap-listener-messaging-parameter
     messaging_probe: Option<infra_messaging::MessagingProbe>,
     // template:end messaging:worker-bootstrap-listener-messaging-parameter
-) -> Result<(Readiness, RefreshPolicy), WorkerError> {
+) -> Result<Readiness, WorkerError> {
     let mut probes: Vec<Box<dyn Probe>> = Vec::new();
     // template:begin jobs:worker-bootstrap-listener-jobs-probe
     if let Some(pool) = pool {
@@ -702,12 +693,7 @@ async fn bind_listeners(
         probes.push(Box::new(probe));
     }
     // template:end messaging:worker-bootstrap-listener-messaging-probe
-    let readiness = Readiness::new(probes);
-    let policy = RefreshPolicy {
-        interval: config.health.refresh_interval,
-        probe_budget: config.health.probe_budget,
-        failure_threshold: config.health.failure_threshold,
-    };
+    let readiness = Readiness::new(probes, refresh_policy(config));
     let options = server_options(config);
     let routes = infra_http::finalize_public(infra_http::router())?.with_state(readiness.reader());
     let app = infra_http::harden(routes, &harden_options(config));
@@ -719,7 +705,15 @@ async fn bind_listeners(
         tracing::info!(addr = %diagnostics.local_addr(), "diagnostics listener bound");
         opened.listeners.diagnostics = Some(diagnostics);
     }
-    Ok((readiness, policy))
+    Ok(readiness)
+}
+
+fn refresh_policy(config: &Config) -> RefreshPolicy {
+    RefreshPolicy {
+        interval: config.health.refresh_interval,
+        probe_budget: config.health.probe_budget,
+        failure_threshold: config.health.failure_threshold,
+    }
 }
 
 // template:begin messaging:worker-bootstrap-messaging-options
@@ -776,15 +770,11 @@ fn messaging_options(
 }
 // template:end messaging:worker-bootstrap-messaging-options
 
-async fn admit(
-    signals: &mut Signals,
-    readiness: &Readiness,
-    policy: RefreshPolicy,
-) -> Result<bool, WorkerError> {
+async fn admit(signals: &mut Signals, readiness: &Readiness) -> Result<bool, WorkerError> {
     let verdict = tokio::select! {
         biased;
         () = signals.wait() => None,
-        () = readiness.refresh(policy) => Some(readiness.reader().verdict()),
+        () = readiness.refresh() => Some(readiness.reader().verdict()),
     };
     match verdict {
         None => Ok(false),
@@ -793,15 +783,10 @@ async fn admit(
     }
 }
 
-fn spawn_refresher(
-    readiness: &Readiness,
-    policy: RefreshPolicy,
-    cancel: &CancellationToken,
-    tracker: &TaskTracker,
-) {
+fn spawn_refresher(readiness: &Readiness, cancel: &CancellationToken, tracker: &TaskTracker) {
     let readiness = readiness.clone();
     let cancel = cancel.child_token();
-    tracker.spawn(async move { readiness.refresh_until(policy, cancel).await });
+    tracker.spawn(async move { readiness.refresh_until(cancel).await });
 }
 
 /// `true` when a stop signal ended the wait. A terminal jobs or messaging
