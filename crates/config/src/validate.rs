@@ -13,7 +13,10 @@ pub struct ValidationError {
 }
 
 impl ValidationError {
-    pub(crate) fn new(key: &str, message: impl Into<String>) -> Self {
+    /// A violated rule for `key`. Composition roots use it for rules that
+    /// depend on a transport constant this crate does not know.
+    #[must_use]
+    pub fn new(key: &str, message: impl Into<String>) -> Self {
         Self {
             key: key.to_owned(),
             message: message.into(),
