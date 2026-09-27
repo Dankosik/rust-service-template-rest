@@ -29,7 +29,8 @@ The profile adds five packages to `Cargo.lock`: `infra-cache`, `redis`
 `arcstr` 1.2.0 and `xxhash-rust` 0.8.18. `combine` 4.6.8 was already locked;
 it gains only the async feature edges `redis` needs. `socket2` 0.6.5 was
 already locked; `infra-cache` names it directly because `redis` does not
-re-export `TcpKeepalive`, which sets keepalive retries. No existing package
+re-export `TcpKeepalive`, which sets keepalive retries. `xxhash-rust` is BSL-1.0 (Boost Software License, OSI
+approved); `deny.toml` allows it inside the cache marker. No existing package
 changed version. `CACHE=none` projects the lock without these packages and
 edges.
 

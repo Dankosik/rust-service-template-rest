@@ -1680,6 +1680,7 @@
       {"path": "crates/infra-telemetry/src/metrics.rs", "ids": ["telemetry-cache-buckets-constants", "telemetry-cache-buckets-install", "telemetry-cache-buckets-helper", "telemetry-cache-histogram-test"]},
       {"path": "env/config/local.toml", "ids": ["local-config"]},
       {"path": "env/docker-compose.yml", "ids": ["compose-valkey-service"]},
+      {"path": "deny.toml", "ids": ["deny-cache-license"]},
       {"path": "README.md", "ids": ["docs-readme-cache-profile"]},
       {"path": "CONTRIBUTING.md", "ids": ["contributing-cache-prerequisites", "contributing-cache-proof"]},
       {"path": "docs/cache.md", "ids": ["docs-cache"]},
