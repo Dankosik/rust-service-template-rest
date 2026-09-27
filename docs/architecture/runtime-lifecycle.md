@@ -140,8 +140,8 @@ The retained PostgreSQL pool closes in the dependency-close stage and records
 <!-- template:end postgres:docs-lifecycle-postgres-close -->
 
 <!-- template:begin oidc-jwt:docs-lifecycle-jwt-refresh -->
-JWT refresh is periodic and may be triggered by an unknown key; one shared
-fetch is coalesced and canceled/joined with background work during shutdown.
+JWT refresh is periodic and may be triggered by an unknown key or a kid-less
+signature miss; one shared fetch is coalesced and canceled/joined with background work during shutdown.
 Failed refresh keeps the last usable keys. There is no maximum cached-key age
 and this is not an immediate-revocation mechanism.
 <!-- template:end oidc-jwt:docs-lifecycle-jwt-refresh -->

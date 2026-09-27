@@ -1,227 +1,206 @@
-//! Shared, process-owned JWKS refresh coordination.
+//! Process-owned JWKS refresh shared by every request.
+//!
+//! One worker performs every fetch, so a request that stops waiting never
+//! cancels the fetch other requests wait for.
 
 use std::{sync::Arc, time::Duration};
 
-use tokio::sync::{Mutex, Notify, watch};
+use tokio::sync::{Notify, watch};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    ProviderUrl,
+    EndpointUrl, JwtAlgorithm,
     jwt::{KeySet, KeySetError, parse_key_set},
-    provider::{ProviderClient, ProviderDeadline},
+    provider::ProviderClient,
 };
 
 const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
 const REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 const REFRESH_METRIC: &str = "authn_jwks_refreshes_total";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum UnknownKeyResult {
-    Refreshed,
-    RefreshFailed,
-    CooldownSuccess,
-    CooldownFailure,
+/// The outcome of asking for keys a token needs but the installed set lacks.
+pub(crate) enum UnknownKeyRefresh {
+    /// A fetch finished after the request and installed this set.
+    Refreshed(Arc<KeySet>),
+    /// A fetch succeeded within the cooldown, so the key is really unknown.
+    StillUnknown,
+    /// The latest fetch failed or the worker stopped.
+    Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FetchOutcome {
-    Success,
-    Failure,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Reservation {
-    generation: u64,
-}
-
-struct RefreshState {
-    next_generation: u64,
-    in_flight: Option<Reservation>,
+#[derive(Clone)]
+struct State {
+    keys: Arc<KeySet>,
+    /// Fetches asked for so far; each is a ticket that waiters compare against.
+    requested: u64,
+    /// Fetches finished so far, successful or not.
+    finished: u64,
     last_started: Instant,
-    last_outcome: FetchOutcome,
+    last_succeeded: bool,
+    stopped: bool,
 }
 
-/// Coordinates one worker-owned snapshot publication and request-local waits.
-pub(crate) struct SharedRefresh {
-    snapshot: watch::Sender<Arc<KeySet>>,
-    snapshot_reader: watch::Receiver<Arc<KeySet>>,
-    state: Mutex<RefreshState>,
-    completed: watch::Sender<(u64, FetchOutcome)>,
-    requested: Notify,
-    stopped: CancellationToken,
+/// The installed key set and the bookkeeping that coalesces refreshes.
+pub(crate) struct KeyStore {
+    state: watch::Sender<State>,
+    wake: Notify,
 }
 
-impl SharedRefresh {
+impl KeyStore {
+    /// Installs the startup key set; that fetch starts the first cooldown.
     pub(crate) fn new(keys: Arc<KeySet>) -> Arc<Self> {
         metrics::describe_counter!(REFRESH_METRIC, "JWKS refresh outcomes by closed reason");
-        let (snapshot, snapshot_reader) = watch::channel(keys);
-        let (completed, _) = watch::channel((0, FetchOutcome::Success));
         Arc::new(Self {
-            snapshot,
-            snapshot_reader,
-            completed,
-            requested: Notify::new(),
-            stopped: CancellationToken::new(),
-            state: Mutex::new(RefreshState {
-                next_generation: 1,
-                in_flight: None,
+            state: watch::Sender::new(State {
+                keys,
+                requested: 0,
+                finished: 0,
                 last_started: Instant::now(),
-                last_outcome: FetchOutcome::Success,
+                last_succeeded: true,
+                stopped: false,
             }),
+            wake: Notify::new(),
         })
     }
 
-    /// Clones the current immutable key snapshot without taking the control lock.
     pub(crate) fn keys(&self) -> Arc<KeySet> {
-        self.snapshot_reader.borrow().clone()
+        self.state.borrow().keys.clone()
     }
 
-    pub(crate) async fn refresh_unknown(&self) -> UnknownKeyResult {
-        enum Action {
-            Wait(u64, watch::Receiver<(u64, FetchOutcome)>),
-            Cooldown(UnknownKeyResult),
-        }
-        let action = {
-            let mut state = tokio::select! {
-                biased;
-                () = self.stopped.cancelled() => return UnknownKeyResult::RefreshFailed,
-                state = self.state.lock() => state,
-            };
-            let now = Instant::now();
-            let receiver = self.completed.subscribe();
-            if let Some(reservation) = state.in_flight {
-                Action::Wait(reservation.generation, receiver)
-            } else if now.saturating_duration_since(state.last_started) < REFRESH_COOLDOWN {
-                Action::Cooldown(match state.last_outcome {
-                    FetchOutcome::Success => UnknownKeyResult::CooldownSuccess,
-                    FetchOutcome::Failure => UnknownKeyResult::CooldownFailure,
-                })
-            } else {
-                let reservation = Reservation {
-                    generation: state.next_generation,
-                };
-                state.next_generation = state.next_generation.saturating_add(1);
-                state.last_started = now;
-                state.in_flight = Some(reservation);
-                self.requested.notify_one();
-                Action::Wait(reservation.generation, receiver)
+    /// Joins the fetch in flight, or starts one outside the cooldown.
+    pub(crate) async fn refresh_for_unknown_key(&self) -> UnknownKeyRefresh {
+        let mut ticket = None;
+        let mut answer = UnknownKeyRefresh::Unavailable;
+        let started = self.state.send_if_modified(|state| {
+            if state.stopped {
+                return false;
             }
-        };
-        match action {
-            Action::Wait(generation, receiver) => {
-                wait_for_generation(receiver, generation, &self.stopped).await
+            if state.requested > state.finished {
+                ticket = Some(state.requested);
+                return false;
             }
-            Action::Cooldown(result) => result,
-        }
-    }
-
-    async fn claim(&self, periodic: bool) -> Option<Reservation> {
-        let now = Instant::now();
-        let mut state = self.state.lock().await;
-        if let Some(reservation) = state.in_flight {
-            return Some(reservation);
-        }
-        if !periodic {
-            return None;
-        }
-        let reservation = Reservation {
-            generation: state.next_generation,
+            if state.last_started.elapsed() < REFRESH_COOLDOWN {
+                if state.last_succeeded {
+                    answer = UnknownKeyRefresh::StillUnknown;
+                }
+                return false;
+            }
+            state.requested += 1;
+            state.last_started = Instant::now();
+            ticket = Some(state.requested);
+            true
+        });
+        let Some(ticket) = ticket else {
+            return answer;
         };
-        state.next_generation = state.next_generation.saturating_add(1);
-        state.last_started = now;
-        state.in_flight = Some(reservation);
-        Some(reservation)
+        if started {
+            self.wake.notify_one();
+        }
+        let mut state = self.state.subscribe();
+        match state
+            .wait_for(|state| state.stopped || state.finished >= ticket)
+            .await
+        {
+            Ok(state) if !state.stopped && state.last_succeeded => {
+                UnknownKeyRefresh::Refreshed(state.keys.clone())
+            }
+            _ => UnknownKeyRefresh::Unavailable,
+        }
     }
 
-    async fn complete(
-        &self,
-        reservation: Reservation,
-        replacement: Result<Arc<KeySet>, RefreshFailure>,
-    ) {
-        let mut state = self.state.lock().await;
-        if state.in_flight.map(|current| current.generation) != Some(reservation.generation) {
-            return;
-        }
+    /// Asks for a periodic fetch unless one is already pending.
+    fn request_periodic(&self) {
+        self.state.send_if_modified(|state| {
+            if state.requested > state.finished {
+                return false;
+            }
+            state.requested += 1;
+            state.last_started = Instant::now();
+            true
+        });
+    }
+
+    /// The newest requested ticket, when a fetch is pending.
+    pub(crate) fn pending(&self) -> Option<u64> {
+        let state = self.state.borrow();
+        (state.requested > state.finished).then_some(state.requested)
+    }
+
+    /// Records a finished fetch; every ticket up to `ticket` is served by it.
+    pub(crate) fn finish(&self, ticket: u64, replacement: Result<Arc<KeySet>, RefreshFailure>) {
         let reason = replacement
             .as_ref()
             .map_or_else(|failure| failure.label(), |_| "success");
-        let outcome = match replacement {
-            Ok(keys) => {
-                self.snapshot.send_replace(keys);
-                FetchOutcome::Success
+        let succeeded = replacement.is_ok();
+        if let Err(failure) = &replacement {
+            warn!(reason = failure.label(), "authn_jwks_refresh_failed");
+        }
+        self.state.send_modify(|state| {
+            if let Ok(keys) = replacement {
+                state.keys = keys;
             }
-            Err(failure) => {
-                warn!(reason = failure.label(), "authn_jwks_refresh_failed");
-                FetchOutcome::Failure
-            }
-        };
-        state.last_outcome = outcome;
-        state.in_flight = None;
-        drop(state);
-        self.completed
-            .send_replace((reservation.generation, outcome));
-        metrics::counter!(REFRESH_METRIC, "result" => match outcome { FetchOutcome::Success => "success", FetchOutcome::Failure => "failure" }, "reason" => reason).increment(1);
+            state.finished = ticket;
+            state.last_succeeded = succeeded;
+        });
+        let result = if succeeded { "success" } else { "failure" };
+        metrics::counter!(REFRESH_METRIC, "result" => result, "reason" => reason).increment(1);
     }
 
-    async fn cancel_in_flight(&self) {
-        self.stopped.cancel();
-        let reservation = self.state.lock().await.in_flight;
-        if let Some(reservation) = reservation {
-            self.complete(reservation, Err(RefreshFailure::Cancelled))
-                .await;
-        }
+    /// Releases every current and future waiter.
+    fn stop(&self) {
+        self.state.send_modify(|state| state.stopped = true);
     }
 
     #[cfg(test)]
-    pub(crate) async fn permit_unknown_refresh_for_test(&self) {
-        self.state.lock().await.last_started =
-            Instant::now() - REFRESH_COOLDOWN - Duration::from_secs(1);
+    pub(crate) fn permit_unknown_refresh_for_test(&self) {
+        self.state.send_modify(|state| {
+            state.last_started = Instant::now() - REFRESH_COOLDOWN - Duration::from_secs(1);
+        });
     }
 }
 
-/// Runs the one bootstrap-owned worker for periodic and unknown-kid refreshes.
+/// Runs the one bootstrap-owned worker for periodic and unknown-key refreshes.
 pub(crate) async fn run_refresh_worker(
-    refresh: Arc<SharedRefresh>,
+    store: Arc<KeyStore>,
     provider: ProviderClient,
-    jwks_uri: ProviderUrl,
-    algorithms: Vec<crate::JwtAlgorithm>,
+    jwks_uri: EndpointUrl,
+    algorithms: Vec<JwtAlgorithm>,
     cancel: CancellationToken,
 ) {
     let mut interval =
         tokio::time::interval_at(Instant::now() + REFRESH_INTERVAL, REFRESH_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    loop {
-        let periodic = tokio::select! {
+    'worker: loop {
+        tokio::select! {
             biased;
             () = cancel.cancelled() => break,
-            () = refresh.requested.notified() => false,
-            _ = interval.tick() => true,
-        };
-        let Some(reservation) = refresh.claim(periodic).await else {
-            continue;
-        };
-        let replacement = fetch_set(&provider, &jwks_uri, &algorithms, &cancel).await;
-        refresh.complete(reservation, replacement).await;
+            () = store.wake.notified() => {}
+            _ = interval.tick() => store.request_periodic(),
+        }
+        while let Some(ticket) = store.pending() {
+            let replacement = tokio::select! {
+                biased;
+                () = cancel.cancelled() => break 'worker,
+                replacement = fetch_key_set(&provider, &jwks_uri, &algorithms) => replacement,
+            };
+            store.finish(ticket, replacement);
+        }
     }
-    refresh.cancel_in_flight().await;
+    store.stop();
 }
 
-async fn fetch_set(
+async fn fetch_key_set(
     provider: &ProviderClient,
-    jwks_uri: &ProviderUrl,
-    algorithms: &[crate::JwtAlgorithm],
-    cancel: &CancellationToken,
+    jwks_uri: &EndpointUrl,
+    algorithms: &[JwtAlgorithm],
 ) -> Result<Arc<KeySet>, RefreshFailure> {
-    let deadline = ProviderDeadline::independent(Instant::now());
-    let result = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return Err(RefreshFailure::Cancelled),
-        result = provider.get_json(jwks_uri.url(), deadline) => result,
-    }
-    .map_err(|_| RefreshFailure::Fetch)?;
-    parse_key_set(&result, algorithms)
+    let bytes = provider
+        .get_json(jwks_uri.url())
+        .await
+        .map_err(|_| RefreshFailure::Fetch)?;
+    parse_key_set(&bytes, algorithms)
         .map(Arc::new)
         .map_err(|error| match error {
             KeySetError::Parse => RefreshFailure::Parse,
@@ -230,54 +209,25 @@ async fn fetch_set(
 }
 
 #[derive(Clone, Copy)]
-enum RefreshFailure {
+pub(crate) enum RefreshFailure {
     Fetch,
     Parse,
     NoUsableKeys,
-    Cancelled,
 }
+
 impl RefreshFailure {
     fn label(self) -> &'static str {
         match self {
             Self::Fetch => "fetch",
             Self::Parse => "parse",
             Self::NoUsableKeys => "no_usable_keys",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
-async fn wait_for_generation(
-    mut receiver: watch::Receiver<(u64, FetchOutcome)>,
-    generation: u64,
-    stopped: &CancellationToken,
-) -> UnknownKeyResult {
-    loop {
-        if stopped.is_cancelled() {
-            return UnknownKeyResult::RefreshFailed;
-        }
-        let (completed, outcome) = *receiver.borrow_and_update();
-        if completed >= generation {
-            return match outcome {
-                FetchOutcome::Success => UnknownKeyResult::Refreshed,
-                FetchOutcome::Failure => UnknownKeyResult::RefreshFailed,
-            };
-        }
-        tokio::select! {
-            biased;
-            () = stopped.cancelled() => return UnknownKeyResult::RefreshFailed,
-            result = receiver.changed() => {
-                if result.is_err() {
-                    return UnknownKeyResult::RefreshFailed;
-                }
-            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SharedRefresh, UnknownKeyResult};
+    use super::{KeyStore, UnknownKeyRefresh};
     use crate::jwt::parse_key_set;
     use jsonwebtoken::{Algorithm, EncodingKey, crypto::aws_lc::DEFAULT_PROVIDER, jwk::Jwk};
     use std::sync::Arc;
@@ -301,71 +251,68 @@ mod tests {
         )
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn refresh_replaces_a_snapshot_only_after_a_usable_generation() {
-        let refresh = SharedRefresh::new(key_set("old"));
-        refresh.permit_unknown_refresh_for_test().await;
-        let call = {
-            let refresh = refresh.clone();
-            tokio::spawn(async move { refresh.refresh_unknown().await })
-        };
-        tokio::task::yield_now().await;
-        let reservation = refresh.state.lock().await.in_flight.unwrap();
-        refresh.complete(reservation, Ok(key_set("new"))).await;
-        assert_eq!(call.await.unwrap(), UnknownKeyResult::Refreshed);
-        assert!(refresh.keys().has_kid("new"));
+    fn spawn_refresh(store: &Arc<KeyStore>) -> tokio::task::JoinHandle<Option<bool>> {
+        let store = Arc::clone(store);
+        tokio::spawn(async move {
+            match store.refresh_for_unknown_key().await {
+                UnknownKeyRefresh::Refreshed(keys) => Some(keys.has_kid("new")),
+                UnknownKeyRefresh::StillUnknown => None,
+                UnknownKeyRefresh::Unavailable => Some(false),
+            }
+        })
     }
 
     #[tokio::test(start_paused = true)]
-    async fn dropping_a_waiter_does_not_cancel_the_shared_generation() {
-        let refresh = SharedRefresh::new(key_set("old"));
-        refresh.permit_unknown_refresh_for_test().await;
-        let first = {
-            let refresh = refresh.clone();
-            tokio::spawn(async move { refresh.refresh_unknown().await })
-        };
+    async fn waiters_share_one_fetch_and_see_its_keys() {
+        let store = KeyStore::new(key_set("old"));
+        store.permit_unknown_refresh_for_test();
+        let first = spawn_refresh(&store);
         tokio::task::yield_now().await;
-        let reservation = refresh.state.lock().await.in_flight.unwrap();
-        let second = {
-            let refresh = refresh.clone();
-            tokio::spawn(async move { refresh.refresh_unknown().await })
-        };
+        let second = spawn_refresh(&store);
+        tokio::task::yield_now().await;
+        assert_eq!(store.pending(), Some(1));
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        store.finish(1, Ok(key_set("new")));
+        assert_eq!(first.await.unwrap(), Some(true));
+        assert_eq!(second.await.unwrap(), Some(true));
+        assert!(store.keys().has_kid("new"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_a_waiter_does_not_cancel_the_shared_fetch() {
+        let store = KeyStore::new(key_set("old"));
+        store.permit_unknown_refresh_for_test();
+        let first = spawn_refresh(&store);
+        tokio::task::yield_now().await;
+        let second = spawn_refresh(&store);
         tokio::task::yield_now().await;
         second.abort();
         assert!(second.await.unwrap_err().is_cancelled());
-        refresh.complete(reservation, Ok(key_set("new"))).await;
-        assert_eq!(first.await.unwrap(), UnknownKeyResult::Refreshed);
+        store.finish(1, Ok(key_set("new")));
+        assert_eq!(first.await.unwrap(), Some(true));
     }
+
     #[tokio::test(start_paused = true)]
-    async fn waiter_remains_until_shared_generation_completes() {
-        let refresh = SharedRefresh::new(key_set("old"));
-        refresh.permit_unknown_refresh_for_test().await;
-        let call = {
-            let refresh = refresh.clone();
-            tokio::spawn(async move { refresh.refresh_unknown().await })
-        };
+    async fn the_cooldown_reports_the_last_outcome() {
+        let store = KeyStore::new(key_set("old"));
+        assert!(spawn_refresh(&store).await.unwrap().is_none());
+        store.permit_unknown_refresh_for_test();
+        let waiter = spawn_refresh(&store);
         tokio::task::yield_now().await;
-        let reservation = refresh.state.lock().await.in_flight.unwrap();
-        tokio::time::advance(std::time::Duration::from_secs(4)).await;
-        tokio::task::yield_now().await;
-        refresh.complete(reservation, Ok(key_set("new"))).await;
-        assert_eq!(call.await.unwrap(), UnknownKeyResult::Refreshed);
+        store.finish(1, Err(super::RefreshFailure::Fetch));
+        assert_eq!(waiter.await.unwrap(), Some(false));
+        assert_eq!(spawn_refresh(&store).await.unwrap(), Some(false));
+        assert!(store.keys().has_kid("old"));
     }
 
     #[tokio::test]
-    async fn worker_shutdown_releases_current_and_future_waiters() {
-        let refresh = SharedRefresh::new(key_set("old"));
-        refresh.permit_unknown_refresh_for_test().await;
-        let call = {
-            let refresh = refresh.clone();
-            tokio::spawn(async move { refresh.refresh_unknown().await })
-        };
+    async fn stopping_releases_current_and_future_waiters() {
+        let store = KeyStore::new(key_set("old"));
+        store.permit_unknown_refresh_for_test();
+        let waiter = spawn_refresh(&store);
         tokio::task::yield_now().await;
-        refresh.cancel_in_flight().await;
-        assert_eq!(call.await.unwrap(), UnknownKeyResult::RefreshFailed);
-        assert_eq!(
-            refresh.refresh_unknown().await,
-            UnknownKeyResult::RefreshFailed
-        );
+        store.stop();
+        assert_eq!(waiter.await.unwrap(), Some(false));
+        assert_eq!(spawn_refresh(&store).await.unwrap(), Some(false));
     }
 }

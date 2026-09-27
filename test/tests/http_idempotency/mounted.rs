@@ -33,7 +33,9 @@ use axum::{Extension, Json, Router};
 use axum_test::{TestRequest, TestResponse, TestServer};
 use health::{Readiness, RefreshPolicy};
 use infra_bearerauthn::test_support::{FixtureTransport, prepare_introspection_with_fixture};
-use infra_bearerauthn::{IntrospectionCacheOptions, IntrospectionOptions, ProviderUrl, Verifier};
+use infra_bearerauthn::{
+    EndpointUrl, IntrospectionCacheOptions, IntrospectionOptions, IssuerUrl, Verifier,
+};
 use infra_http::idempotency::{
     Activation, Composer, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, Tx,
 };
@@ -368,9 +370,9 @@ impl Provider {
         .expect("the fixture transport");
         prepare_introspection_with_fixture(
             IntrospectionOptions {
-                issuer: ProviderUrl::parse(ISSUER).expect("fixture issuer URL"),
+                issuer: IssuerUrl::parse(ISSUER).expect("fixture issuer URL"),
                 audiences: vec![AUDIENCE.to_owned()],
-                endpoint: ProviderUrl::parse(&format!("https://{FIXTURE_HOST}/introspect"))
+                endpoint: EndpointUrl::parse(&format!("https://{FIXTURE_HOST}/introspect"))
                     .expect("fixture endpoint URL"),
                 client_id: "fixture-client".to_owned(),
                 client_secret: SecretString::from("fixture-secret"),
