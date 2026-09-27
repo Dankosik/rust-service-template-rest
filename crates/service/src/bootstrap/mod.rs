@@ -18,9 +18,6 @@ use std::time::Duration;
 
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
-// template:begin messaging:service-bootstrap-messaging-imports
-use infra_messaging::{Messaging, MessagingError, MessagingOptions};
-// template:end messaging:service-bootstrap-messaging-imports
 // template:begin cache:service-bootstrap-cache-imports
 use infra_cache::{Cache, CacheError, CacheOptions};
 // template:end cache:service-bootstrap-cache-imports
@@ -75,9 +72,6 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Interval for Prometheus histogram upkeep and Tokio runtime metrics.
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
-// template:begin messaging:service-bootstrap-messaging-startup-budget
-const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
-// template:end messaging:service-bootstrap-messaging-startup-budget
 // template:begin cache:service-bootstrap-cache-startup-budget
 const CACHE_STARTUP_CHECK: Duration = Duration::from_secs(1);
 // template:end cache:service-bootstrap-cache-startup-budget
@@ -92,10 +86,6 @@ pub(crate) enum BootstrapError {
     Logging(#[from] infra_telemetry::LoggingError),
     #[error(transparent)]
     Metrics(#[from] infra_telemetry::MetricsError),
-    // template:begin messaging:service-bootstrap-messaging-errors
-    #[error("messaging startup: {0}")]
-    Messaging(#[from] MessagingError),
-    // template:end messaging:service-bootstrap-messaging-errors
     // template:begin cache:service-bootstrap-cache-errors
     #[error("cache startup: {0}")]
     Cache(#[from] CacheError),
@@ -316,20 +306,6 @@ async fn serve_until_stopped(
         migrate::verify_history(pool).await?;
     }
     // template:end postgres:bootstrap-postgres-startup
-    // template:begin messaging:service-bootstrap-messaging-startup
-    if Box::pin(open_messaging(
-        config,
-        cancel,
-        signals,
-        &mut probes,
-        dependencies,
-    ))
-    .await?
-    .is_break()
-    {
-        return Ok(None);
-    }
-    // template:end messaging:service-bootstrap-messaging-startup
     // template:begin cache:service-bootstrap-cache-startup
     dependencies.cache = open_cache(config).await?;
     // template:end cache:service-bootstrap-cache-startup
@@ -719,63 +695,7 @@ async fn open_postgres(
 }
 // template:end postgres:bootstrap-open-postgres
 
-// template:begin messaging:service-bootstrap-messaging-functions
-/// Connect the optional API producer before readiness admission. The API owns
-/// no consumer. A stop signal during the connect cancels it and breaks
-/// startup; a connection that completed anyway still reaches teardown.
-async fn open_messaging(
-    config: &Config,
-    cancel: &CancellationToken,
-    signals: &mut Signals,
-    probes: &mut Vec<Box<dyn Probe>>,
-    dependencies: &mut Dependencies,
-) -> Result<ControlFlow<()>, BootstrapError> {
-    if !config.messaging.is_active() {
-        return Ok(ControlFlow::Continue(()));
-    }
-    config.messaging.validate_producer(&config.app.env)?;
-    let deadline = tokio::time::Instant::now() + MESSAGING_STARTUP_TIMEOUT;
-    let startup_cancel = cancel.child_token();
-    let connect = Messaging::connect(messaging_options(config)?, deadline, startup_cancel.clone());
-    tokio::pin!(connect);
-    tokio::select! {
-        biased;
-        () = signals.wait() => {
-            startup_cancel.cancel();
-            dependencies.messaging = connect.await.ok();
-            Ok(ControlFlow::Break(()))
-        }
-        connected = &mut connect => {
-            let messaging = connected?;
-            probes.push(Box::new(messaging.probe()));
-            dependencies.messaging = Some(messaging);
-            Ok(ControlFlow::Continue(()))
-        }
-    }
-}
-// template:end messaging:service-bootstrap-messaging-functions
 
-// template:begin messaging:service-bootstrap-messaging-options
-fn messaging_options(config: &Config) -> Result<MessagingOptions, BootstrapError> {
-    let messaging = &config.messaging;
-    Ok(MessagingOptions {
-        servers: messaging.urls.clone(),
-        credentials: messaging
-            .credentials
-            .as_ref()
-            .map(|value| value.expose_secret().to_owned()),
-        root_ca_path: messaging.root_ca_path.clone(),
-        allow_plaintext: messaging.allow_plaintext,
-        allow_unauthenticated: messaging.allow_unauthenticated,
-        source_stream: messaging.required_source_stream()?.to_owned(),
-        dlq_stream: None,
-        // Validation bounds the size to 64 MiB, so it fits every `usize`.
-        max_payload_bytes: usize::try_from(messaging.max_payload_bytes.as_u64())
-            .unwrap_or(usize::MAX),
-        consumer: None,
-    })
-}
-// template:end messaging:service-bootstrap-messaging-options
 
 // template:begin cache:service-bootstrap-cache-functions
 /// Connect the optional cache. An outage at startup is logged, not fatal:

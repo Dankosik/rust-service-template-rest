@@ -11,9 +11,6 @@ use std::time::Duration;
 
 use health::Readiness;
 use infra_http::{Drained, Server};
-// template:begin messaging:service-shutdown-messaging-imports
-use infra_messaging::{CloseOutcome, Messaging};
-// template:end messaging:service-shutdown-messaging-imports
 // template:begin cache:service-shutdown-cache-imports
 use infra_cache::Cache;
 // template:end cache:service-shutdown-cache-imports
@@ -160,9 +157,6 @@ pub(crate) struct Dependencies {
     /// dropped by `runtime.shutdown_timeout`.
     pub(crate) postgres: Option<PgPool>,
     // template:end postgres:shutdown-dependencies-postgres-field
-    // template:begin messaging:service-shutdown-dependencies-messaging-field
-    pub(crate) messaging: Option<Messaging>,
-    // template:end messaging:service-shutdown-dependencies-messaging-field
     // template:begin cache:service-shutdown-dependencies-cache-field
     /// Not a readiness probe; the connection closes when it drops.
     pub(crate) cache: Option<Cache>,
@@ -181,9 +175,6 @@ impl Dependencies {
             // template:begin postgres:shutdown-dependencies-postgres-destructure
             postgres,
             // template:end postgres:shutdown-dependencies-postgres-destructure
-            // template:begin messaging:service-shutdown-dependencies-messaging-destructure
-            messaging,
-            // template:end messaging:service-shutdown-dependencies-messaging-destructure
             // template:begin cache:service-shutdown-dependencies-cache-destructure
             cache,
             // template:end cache:service-shutdown-dependencies-cache-destructure
@@ -213,25 +204,7 @@ impl Dependencies {
             // template:end postgres:shutdown-dependencies-postgres-close
             false
         };
-        let messaging_close = async {
-            // template:begin messaging:service-shutdown-dependencies-messaging-close
-            if let Some(messaging) = messaging {
-                return match messaging.close(deadline, &CancellationToken::new()).await {
-                    CloseOutcome::Complete => {
-                        tracing::info!("messaging_closed");
-                        false
-                    }
-                    CloseOutcome::TimedOut | CloseOutcome::UnobservedClose => {
-                        tracing::warn!("messaging resource outlived its close budget");
-                        true
-                    }
-                };
-            }
-            // template:end messaging:service-shutdown-dependencies-messaging-close
-            false
-        };
-        let (postgres_overran, messaging_overran) = tokio::join!(postgres_close, messaging_close);
-        postgres_overran || messaging_overran
+        postgres_close.await
     }
 }
 

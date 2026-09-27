@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_nats::ConnectErrorKind;
@@ -14,21 +14,18 @@ use crate::consumer::Consumer;
 use crate::error::MessagingError;
 use crate::producer::Producer;
 use crate::registry::Registry;
-use crate::wire::{
-    HEADER_LIMIT_BYTES, filter_covers, subject_matches, valid_filter, valid_subject,
-};
+use crate::wire::HEADER_LIMIT_BYTES;
 
 pub(crate) const BROKER_OPERATION_BUDGET: Duration = Duration::from_secs(5);
-const RESIDENT_DELIVERY_LIMIT: usize = 64 * 1024 * 1024;
 
-/// Configuration already validated by the composition root.
+/// Configuration already validated by the composition root, which owns the
+/// transport, credential and resident-memory policy.
 #[derive(Clone)]
 pub struct MessagingOptions {
     pub servers: Vec<String>,
     pub credentials: Option<String>,
     pub root_ca_path: Option<PathBuf>,
     pub allow_plaintext: bool,
-    pub allow_unauthenticated: bool,
     pub source_stream: String,
     pub dlq_stream: Option<String>,
     pub max_payload_bytes: usize,
@@ -46,7 +43,6 @@ impl std::fmt::Debug for MessagingOptions {
             )
             .field("root_ca_path", &self.root_ca_path)
             .field("allow_plaintext", &self.allow_plaintext)
-            .field("allow_unauthenticated", &self.allow_unauthenticated)
             .field("source_stream", &self.source_stream)
             .field("dlq_stream", &self.dlq_stream)
             .field("max_payload_bytes", &self.max_payload_bytes)
@@ -76,16 +72,12 @@ pub(crate) struct Shared {
     pub(crate) client: async_nats::Client,
     pub(crate) jetstream: async_nats::jetstream::Context,
     pub(crate) source_stream: String,
-    pub(crate) source_subjects: Vec<String>,
     pub(crate) dlq_stream: Option<String>,
-    pub(crate) source_max_message_size: usize,
-    pub(crate) dlq_max_message_size: usize,
     pub(crate) max_payload_bytes: usize,
     pub(crate) startup_deadline: Instant,
     pub(crate) startup_cancel: CancellationToken,
     pub(crate) draining: AtomicBool,
     pub(crate) failed: AtomicBool,
-    admitted_consumer: RwLock<Option<String>>,
     closed: watch::Receiver<bool>,
 }
 
@@ -115,17 +107,17 @@ impl Messaging {
         deadline: Instant,
         cancel: CancellationToken,
     ) -> Result<Self, MessagingError> {
-        validate_options(&options)?;
-        let (closed_tx, closed) = watch::channel(false);
-        let capacity = options
+        if options
             .consumer
             .as_ref()
-            .map_or(1, |consumer| consumer.concurrency);
+            .is_some_and(|consumer| consumer.concurrency == 0)
+        {
+            return Err(MessagingError::Bounds);
+        }
+        let (closed_tx, closed) = watch::channel(false);
         let mut connect = async_nats::ConnectOptions::new()
             .connection_timeout(BROKER_OPERATION_BUDGET)
             .request_timeout(Some(BROKER_OPERATION_BUDGET))
-            .subscription_capacity(capacity)
-            .client_capacity(capacity)
             .require_tls(!options.allow_plaintext)
             .event_callback(move |event| {
                 let outcome = match event {
@@ -163,38 +155,32 @@ impl Messaging {
         let jetstream = async_nats::jetstream::context::ContextBuilder::new()
             .timeout(BROKER_OPERATION_BUDGET)
             .ack_timeout(BROKER_OPERATION_BUDGET)
-            .max_ack_inflight(capacity)
             .build(client.clone());
         let topology = admit_topology(&options, &client, &jetstream, deadline, &cancel).await;
-        let (source_subjects, source_max_message_size, dlq_stream, dlq_max_message_size) =
-            match topology {
-                Ok(topology) => topology,
-                Err(error) => {
-                    let _ = close_client(
-                        &client,
-                        &closed,
-                        deadline.min(Instant::now() + BROKER_OPERATION_BUDGET),
-                        &cancel,
-                    )
-                    .await;
-                    return Err(error);
-                }
-            };
+        let dlq_stream = match topology {
+            Ok(dlq_stream) => dlq_stream,
+            Err(error) => {
+                let _ = close_client(
+                    &client,
+                    &closed,
+                    deadline.min(Instant::now() + BROKER_OPERATION_BUDGET),
+                    &cancel,
+                )
+                .await;
+                return Err(error);
+            }
+        };
         Ok(Self {
             shared: Arc::new(Shared {
                 client,
                 jetstream,
                 source_stream: options.source_stream,
-                source_subjects,
                 dlq_stream,
-                source_max_message_size,
-                dlq_max_message_size,
                 max_payload_bytes: options.max_payload_bytes,
                 startup_deadline: deadline,
                 startup_cancel: cancel,
                 draining: AtomicBool::new(false),
                 failed: AtomicBool::new(false),
-                admitted_consumer: RwLock::new(None),
                 closed,
             }),
             consumer: options.consumer,
@@ -234,23 +220,7 @@ impl Messaging {
         registry
             .validate_consumer()
             .map_err(|_| MessagingError::Configuration("no typed event handlers are registered"))?;
-        if registry.subjects().any(|subject| {
-            !self
-                .shared
-                .source_subjects
-                .iter()
-                .any(|filter| subject_matches(filter, subject))
-        }) {
-            return Err(MessagingError::Topology);
-        }
-        let name = options.durable_name.clone();
-        let consumer = Consumer::admit(Arc::clone(&self.shared), options, registry).await?;
-        *self
-            .shared
-            .admitted_consumer
-            .write()
-            .map_err(|_| MessagingError::Closed)? = Some(name);
-        Ok(consumer)
+        Consumer::admit(Arc::clone(&self.shared), options, registry).await
     }
 
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
@@ -290,31 +260,7 @@ impl Probe for MessagingProbe {
             &self.shared.client,
             self.shared.max_payload_bytes + HEADER_LIMIT_BYTES,
         )
-        .map_err(|_| ProbeError::new("messaging server admission is unavailable"))?;
-        let consumer_name = self
-            .shared
-            .admitted_consumer
-            .read()
-            .map_err(|_| ProbeError::new("messaging consumer admission is unavailable"))?
-            .clone();
-        let check = async {
-            let stream = self
-                .shared
-                .jetstream
-                .get_stream(&self.shared.source_stream)
-                .await
-                .map_err(|_| ProbeError::new("messaging source topology is unavailable"))?;
-            if let Some(name) = consumer_name {
-                stream
-                    .consumer_info(name)
-                    .await
-                    .map_err(|_| ProbeError::new("messaging consumer topology is unavailable"))?;
-            }
-            Ok(())
-        };
-        tokio::time::timeout(BROKER_OPERATION_BUDGET, check)
-            .await
-            .map_err(|_| ProbeError::new("messaging topology check timed out"))?
+        .map_err(|_| ProbeError::new("messaging server admission is unavailable"))
     }
 }
 
@@ -370,39 +316,27 @@ async fn admission<T>(
     }
 }
 
+/// Admits the source stream and, for a consumer, its dead-letter stream.
+/// Returns the dead-letter stream name.
 async fn admit_topology(
     options: &MessagingOptions,
     client: &async_nats::Client,
     jetstream: &async_nats::jetstream::Context,
     deadline: Instant,
     cancel: &CancellationToken,
-) -> Result<(Vec<String>, usize, Option<String>, usize), MessagingError> {
+) -> Result<Option<String>, MessagingError> {
     let envelope_limit = options.max_payload_bytes + HEADER_LIMIT_BYTES;
     validate_server(client, envelope_limit)?;
-    let source = admission(deadline, cancel, async {
-        jetstream
-            .get_stream(&options.source_stream)
-            .await
-            .map_err(|error| classify_topology(&error))
-    })
-    .await?;
-    let source_config = &source.cached_info().config;
-    let source_max = admit_stream(source_config, client.max_payload(), envelope_limit)?;
-    let source_subjects = source_config.subjects.clone();
+    let source = get_stream(jetstream, &options.source_stream, deadline, cancel).await?;
     let Some(consumer) = &options.consumer else {
-        return Ok((source_subjects, source_max, None, 0));
+        return Ok(None);
     };
-    if source_config.max_message_size <= 0
-        || usize::try_from(source_config.max_message_size).map_err(|_| MessagingError::Bounds)?
-            > envelope_limit
+    // The stream's own message limit bounds what one delivery can hold in memory.
+    let source_limit = source.cached_info().config.max_message_size;
+    if source_limit <= 0
+        || usize::try_from(source_limit).map_err(|_| MessagingError::Bounds)? > envelope_limit
     {
         return Err(MessagingError::Bounds);
-    }
-    if !source_subjects
-        .iter()
-        .any(|subject| filter_covers(subject, &consumer.filter_subject))
-    {
-        return Err(MessagingError::Topology);
     }
     let dlq_name = match &options.dlq_stream {
         Some(name) => name.clone(),
@@ -419,23 +353,23 @@ async fn admit_topology(
     if dlq_name == options.source_stream {
         return Err(MessagingError::Topology);
     }
-    let dlq = admission(deadline, cancel, async {
+    get_stream(jetstream, &dlq_name, deadline, cancel).await?;
+    Ok(Some(dlq_name))
+}
+
+async fn get_stream(
+    jetstream: &async_nats::jetstream::Context,
+    name: &str,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Result<async_nats::jetstream::stream::Stream, MessagingError> {
+    admission(deadline, cancel, async {
         jetstream
-            .get_stream(&dlq_name)
+            .get_stream(name)
             .await
             .map_err(|error| classify_topology(&error))
     })
-    .await?;
-    let dlq_config = &dlq.cached_info().config;
-    let dlq_max = admit_stream(dlq_config, client.max_payload(), envelope_limit)?;
-    if !dlq_config
-        .subjects
-        .iter()
-        .any(|filter| subject_matches(filter, &consumer.dlq_subject))
-    {
-        return Err(MessagingError::Topology);
-    }
-    Ok((source_subjects, source_max, Some(dlq_name), dlq_max))
+    .await
 }
 
 fn validate_server(
@@ -450,25 +384,6 @@ fn validate_server(
         return Err(MessagingError::Bounds);
     }
     Ok(())
-}
-
-fn admit_stream(
-    config: &async_nats::jetstream::stream::Config,
-    server_max: usize,
-    envelope_limit: usize,
-) -> Result<usize, MessagingError> {
-    if config.no_ack || config.sealed || config.subjects.is_empty() {
-        return Err(MessagingError::Topology);
-    }
-    let maximum = if config.max_message_size > 0 {
-        usize::try_from(config.max_message_size).map_err(|_| MessagingError::Bounds)?
-    } else {
-        server_max
-    };
-    if maximum < envelope_limit {
-        return Err(MessagingError::Bounds);
-    }
-    Ok(maximum.min(server_max))
 }
 
 fn classify_topology(error: &(dyn std::error::Error + 'static)) -> MessagingError {
@@ -493,56 +408,6 @@ fn classify_topology(error: &(dyn std::error::Error + 'static)) -> MessagingErro
     error
         .source()
         .map_or(MessagingError::Topology, classify_topology)
-}
-
-fn validate_options(options: &MessagingOptions) -> Result<(), MessagingError> {
-    if options.servers.is_empty()
-        || options.source_stream.is_empty()
-        || options.max_payload_bytes == 0
-    {
-        return Err(MessagingError::Configuration(
-            "servers, source stream and payload bound are required",
-        ));
-    }
-    if options
-        .max_payload_bytes
-        .checked_add(HEADER_LIMIT_BYTES)
-        .is_none()
-    {
-        return Err(MessagingError::Bounds);
-    }
-    if options.credentials.is_none() && !options.allow_unauthenticated {
-        return Err(MessagingError::Configuration("credentials are required"));
-    }
-    for server in &options.servers {
-        let address = server
-            .parse::<async_nats::ServerAddr>()
-            .map_err(|_| MessagingError::Configuration("server URL is invalid"))?;
-        if address.host().is_empty()
-            || address.username().is_some()
-            || address.password().is_some()
-            || !matches!(address.scheme(), "nats" | "tls")
-            || (address.scheme() == "nats" && !options.allow_plaintext)
-        {
-            return Err(MessagingError::Configuration(
-                "server URL violates transport policy",
-            ));
-        }
-    }
-    if let Some(consumer) = &options.consumer
-        && (consumer.concurrency == 0
-            || consumer.durable_name.is_empty()
-            || !valid_filter(&consumer.filter_subject)
-            || !valid_subject(&consumer.dlq_subject)
-            || subject_matches(&consumer.filter_subject, &consumer.dlq_subject)
-            || consumer
-                .concurrency
-                .saturating_mul(options.max_payload_bytes.saturating_add(8 * 1024))
-                > RESIDENT_DELIVERY_LIMIT)
-    {
-        return Err(MessagingError::Bounds);
-    }
-    Ok(())
 }
 
 fn classify_connect(error: &async_nats::ConnectError) -> MessagingError {

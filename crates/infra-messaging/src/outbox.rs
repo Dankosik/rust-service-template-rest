@@ -16,18 +16,17 @@ use infra_jobs::{
 };
 use infra_postgres::Tx;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
 
+use crate::Producer;
 use crate::prepared::PreparedEvent;
-use crate::wire::{encode_prepared, valid_subject};
-use crate::{Producer, PublishError};
+use crate::wire::{encode_prepared, prefixed_sha256_hex, valid_subject};
 
 const OUTBOX_KIND: &str = "publish_domain_event";
 const FORMAT_VERSION: u8 = 1;
-const OUTAGE_DELAY: Duration = Duration::from_secs(30);
 
-/// Policy for an acknowledged publication attempt.
+/// A failed publication retries with the jobs backoff; after `max_attempts`
+/// the job stays visible in the `failed` state.
 const POLICY: Policy = Policy {
     max_attempts: 25,
     timeout: Duration::from_secs(30),
@@ -150,17 +149,13 @@ impl Publisher {
             .payload()
             .prepared()
             .map_err(|_| JobError::permanent("outbox immutable intent is invalid"))?;
-        match self
-            .producer
+        // Retrying an ambiguous publication is safe: the broker deduplicates
+        // by the unchanged publication ID.
+        self.producer
             .publish(&event, job.deadline(), &job.cancellation())
             .await
-        {
-            Ok(_) => Ok(()),
-            Err(PublishError::Rejected | PublishError::Ambiguous) => {
-                let error = JobError::snooze(OUTAGE_DELAY).map_err(JobError::from)?;
-                Err(error)
-            }
-        }
+            .map(|_| ())
+            .map_err(JobError::retryable)
     }
 }
 
@@ -229,14 +224,7 @@ impl PublishDomainEvent {
 struct StoredIntentError;
 
 fn event_key(message_id: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut key = String::with_capacity(70);
-    key.push_str("event-");
-    for byte in Sha256::digest(message_id.as_bytes()) {
-        key.push(char::from(HEX[usize::from(byte >> 4)]));
-        key.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    key
+    prefixed_sha256_hex("event-", message_id.as_bytes())
 }
 
 fn max_payload_bytes(intent: &PublishDomainEvent) -> Result<usize, infra_jobs::EnqueueError> {

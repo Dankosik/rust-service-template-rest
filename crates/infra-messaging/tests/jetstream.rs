@@ -15,8 +15,8 @@ use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use futures_util::StreamExt;
 use infra_messaging::{
-    ConsumerError, ConsumerOptions, HandlerError, Messaging, MessagingError, MessagingOptions,
-    PublishError, Registry, Route,
+    ConsumerError, ConsumerOptions, HandlerError, Messaging, MessagingOptions, PublishError,
+    Registry, Route,
 };
 use tokio::sync::{Notify, oneshot};
 use tokio::time::{Instant, timeout};
@@ -293,7 +293,6 @@ fn options_with_servers(
         credentials: None,
         root_ca_path: None,
         allow_plaintext: true,
-        allow_unauthenticated: true,
         source_stream: fixture.stream.clone(),
         dlq_stream: Some(fixture.dlq_stream.clone()),
         max_payload_bytes,
@@ -626,7 +625,7 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
             async { Ok(()) }
         })
         .expect("fixture handler is registered");
-    let handle = messaging
+    let mut handle = messaging
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
@@ -649,7 +648,7 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
     wait_for_source_ack(&fixture).await;
 
     handle
-        .join(deadline())
+        .finish(deadline())
         .await
         .expect("bounded consumer drain must join its pull task");
     close(messaging).await;
@@ -692,7 +691,7 @@ async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked(
             }
         })
         .expect("fixture handler is registered");
-    let handle = messaging
+    let mut handle = messaging
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
@@ -715,7 +714,7 @@ async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked(
     wait_for_source_ack(&fixture).await;
 
     handle
-        .join(deadline())
+        .finish(deadline())
         .await
         .expect("bounded consumer drain must join its pull task");
     close(messaging).await;
@@ -748,7 +747,7 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
             async { Err(HandlerError::Permanent) }
         })
         .expect("fixture handler is registered");
-    let handle = messaging
+    let mut handle = messaging
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
@@ -783,7 +782,7 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
     );
     wait_for_source_ack(&fixture).await;
     handle
-        .join(deadline())
+        .finish(deadline())
         .await
         .expect("terminal transfer worker can drain after source settlement");
 
@@ -841,7 +840,7 @@ async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_t
             async { Ok(()) }
         })
         .expect("fixture handler is registered");
-    let handle = messaging
+    let mut handle = messaging
         .consumer(handlers)
         .await
         .expect("operator-provisioned durable consumer is admitted")
@@ -894,7 +893,7 @@ async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_t
     wait_for_source_ack_at_least(&fixture, 2).await;
 
     handle
-        .join(deadline())
+        .finish(deadline())
         .await
         .expect("bounded consumer drain must join its pull task");
     close(messaging).await;
@@ -902,7 +901,7 @@ async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_t
 }
 
 #[tokio::test]
-async fn definite_dlq_refusal_leaves_the_permanent_source_delivery_unacknowledged() {
+async fn definite_dlq_refusal_keeps_the_source_for_redelivery_and_the_consumer_running() {
     let fixture = Fixture::create_with_limits(true, 10, 1).await;
     fixture
         .jetstream
@@ -926,7 +925,7 @@ async fn definite_dlq_refusal_leaves_the_permanent_source_delivery_unacknowledge
     registry
         .register::<ExampleEvent, _, _>(|_, _| async { Err(HandlerError::Permanent) })
         .expect("fixture handler is registered");
-    let handle = messaging
+    let mut handle = messaging
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
@@ -941,15 +940,29 @@ async fn definite_dlq_refusal_leaves_the_permanent_source_delivery_unacknowledge
         .await
         .expect("fixture event publication is acknowledged");
 
-    let failure = timeout(Duration::from_secs(3), handle.failed())
-        .await
-        .expect("definite DLQ refusal must surface through the failure latch");
-    assert!(matches!(failure, ConsumerError::DeadLetterRejected));
     wait_for_source_unacked(&fixture).await;
-    assert!(matches!(
-        handle.join(deadline()).await,
-        Err(ConsumerError::DeadLetterRejected)
-    ));
+    assert!(
+        timeout(Duration::from_secs(2), handle.failed())
+            .await
+            .is_err(),
+        "a refused dead-letter transfer must not stop the consumer"
+    );
+    let dlq = fixture
+        .jetstream
+        .get_stream(&fixture.dlq_stream)
+        .await
+        .expect("fixture DLQ stream remains available")
+        .get_info()
+        .await
+        .expect("fixture DLQ state is observable");
+    assert_eq!(
+        dlq.state.messages, 1,
+        "only the fixture fill reached the DLQ"
+    );
+    handle
+        .finish(deadline())
+        .await
+        .expect("the consumer drains after a refused transfer");
 
     close(messaging).await;
     fixture.cleanup().await;
@@ -986,7 +999,7 @@ async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
             async { Err(HandlerError::Retryable) }
         })
         .expect("fixture handler is registered");
-    let handle = messaging
+    let mut handle = messaging
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
@@ -1003,7 +1016,7 @@ async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
     wait_for_source_ack(&fixture).await;
 
     handle
-        .join(deadline())
+        .finish(deadline())
         .await
         .expect("bounded consumer drain must join its pull task");
     close(messaging).await;
@@ -1011,7 +1024,7 @@ async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
 }
 
 #[tokio::test]
-async fn handler_panic_is_terminal_and_leaves_its_source_unacknowledged() {
+async fn handler_panic_is_retried_like_a_retryable_failure() {
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
@@ -1021,11 +1034,19 @@ async fn handler_panic_is_terminal_and_leaves_its_source_unacknowledged() {
     ))
     .await
     .expect("fixture source stream is admitted");
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_handler = Arc::clone(&attempts);
     let mut registry = registry(&fixture);
     registry
-        .register::<ExampleEvent, _, _>(|_, _| async { panic!("intentional handler panic") })
+        .register::<ExampleEvent, _, _>(move |_, _| {
+            let attempt = attempts_for_handler.fetch_add(1, Ordering::SeqCst);
+            async move {
+                assert!(attempt > 0, "intentional first-delivery handler panic");
+                Ok(())
+            }
+        })
         .expect("fixture handler is registered");
-    let handle = messaging
+    let mut handle = messaging
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
@@ -1040,22 +1061,19 @@ async fn handler_panic_is_terminal_and_leaves_its_source_unacknowledged() {
         .await
         .expect("fixture event publication is acknowledged");
 
-    let failure = timeout(Duration::from_secs(3), handle.failed())
+    wait_for_source_ack(&fixture).await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    handle
+        .finish(deadline())
         .await
-        .expect("handler panic must surface through the consumer failure latch");
-    assert!(matches!(failure, ConsumerError::HandlerPanicked));
-    wait_for_source_unacked(&fixture).await;
-    assert!(matches!(
-        handle.join(deadline()).await,
-        Err(ConsumerError::HandlerPanicked)
-    ));
+        .expect("a handler panic must not stop the consumer");
 
     close(messaging).await;
     fixture.cleanup().await;
 }
 
 #[tokio::test]
-async fn oversized_source_message_is_terminal_without_invoking_the_handler() {
+async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler() {
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
     let producer = Box::pin(Messaging::connect(
@@ -1105,22 +1123,25 @@ async fn oversized_source_message_is_terminal_without_invoking_the_handler() {
             async { Ok(()) }
         })
         .expect("fixture handler is registered");
-    let handle = messaging
+    let mut handle = messaging
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
 
-    let failure = timeout(Duration::from_secs(3), handle.failed())
-        .await
-        .expect("oversized source delivery must surface through the failure latch");
-    assert!(matches!(failure, ConsumerError::SourceOversized));
+    let dead_letter = wait_for_dead_letter(&fixture).await;
+    assert_dead_letter(
+        &dead_letter,
+        &fixture,
+        "malformed",
+        oversized.payload().as_ref(),
+    );
     assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
-    wait_for_source_unacked(&fixture).await;
-    assert!(matches!(
-        handle.join(deadline()).await,
-        Err(ConsumerError::SourceOversized)
-    ));
+    wait_for_source_ack(&fixture).await;
+    handle
+        .finish(deadline())
+        .await
+        .expect("an oversized delivery must not stop the consumer");
 
     close(messaging).await;
     fixture.cleanup().await;
@@ -1149,7 +1170,7 @@ async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
             }
         })
         .expect("fixture handler is registered");
-    let handle = messaging
+    let mut handle = messaging
         .consumer(registry)
         .await
         .expect("operator-provisioned durable consumer is admitted")
@@ -1167,31 +1188,11 @@ async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
         .await
         .expect("handler must begin before drain is requested");
 
-    let outcome = handle.join(Instant::now() + Duration::from_secs(1)).await;
+    let outcome = handle.finish(Instant::now() + Duration::from_secs(1)).await;
     assert!(matches!(outcome, Err(ConsumerError::DrainTimedOut)));
     wait_for_source_unacked(&fixture).await;
 
     close(messaging).await;
-    fixture.cleanup().await;
-}
-
-#[tokio::test]
-async fn consumer_resident_delivery_bound_is_refused() {
-    let fixture = Fixture::create(false).await;
-    let cancel = CancellationToken::new();
-    let invalid = ConsumerOptions {
-        concurrency: 2,
-        ..consumer_options(&fixture)
-    };
-
-    let result = Box::pin(Messaging::connect(
-        options(&fixture, Some(invalid), 32 * 1024 * 1024),
-        deadline(),
-        cancel,
-    ))
-    .await;
-
-    assert!(matches!(result, Err(MessagingError::Bounds)));
     fixture.cleanup().await;
 }
 
@@ -1211,7 +1212,7 @@ async fn consumer_reconciles_its_named_durable_without_stream_administration() {
         .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
         .expect("fixture handler is registered");
 
-    let handle = messaging
+    let mut handle = messaging
         .consumer(registry)
         .await
         .expect("adapter creates or reconciles only its named durable consumer")
@@ -1231,9 +1232,14 @@ async fn consumer_reconciles_its_named_durable_without_stream_administration() {
         .expect("created durable consumer has observable configuration");
     assert_eq!(actual.config.filter_subject, fixture.subject);
     assert_eq!(actual.config.max_deliver, -1);
-    assert_eq!(actual.config.max_ack_pending, 1);
+    assert_eq!(actual.config.ack_policy, consumer::AckPolicy::Explicit);
+    assert_eq!(actual.config.ack_wait, Duration::from_secs(41));
+    assert!(
+        actual.config.max_ack_pending > 1,
+        "the durable keeps the broker default instead of one replica's concurrency"
+    );
     handle
-        .join(deadline())
+        .finish(deadline())
         .await
         .expect("empty durable consumer drains within the shared deadline");
     close(messaging).await;

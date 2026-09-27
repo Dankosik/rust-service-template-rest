@@ -14,9 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{MessagingError, PublishError};
 use crate::messaging::{BROKER_OPERATION_BUDGET, Shared};
 use crate::prepared::{PreparedEvent, PublishAck};
-use crate::wire::{
-    encode_prepared, encoded_header_bytes, subject_matches, valid_subject, validate_encoded_message,
-};
+use crate::wire::encode_prepared;
 
 /// A clonable producer admitted by one live messaging resource.
 #[derive(Clone, Debug)]
@@ -32,8 +30,7 @@ impl Producer {
     ///
     /// # Errors
     ///
-    /// Returns an error for invalid or oversized intent, a subject outside the
-    /// admitted stream, or a draining dependency.
+    /// Returns an error for invalid or oversized intent or a draining dependency.
     pub fn prepare<T: EventPayload>(
         &self,
         subject: impl Into<String>,
@@ -42,16 +39,7 @@ impl Producer {
         if self.shared.draining.load(Ordering::Acquire) {
             return Err(MessagingError::Draining);
         }
-        let prepared = PreparedEvent::prepare(subject, event, self.shared.max_payload_bytes)?;
-        if !self
-            .shared
-            .source_subjects
-            .iter()
-            .any(|filter| subject_matches(filter, prepared.subject()))
-        {
-            return Err(MessagingError::Topology);
-        }
-        Ok(prepared)
+        PreparedEvent::prepare(subject, event, self.shared.max_payload_bytes)
     }
 
     /// Dispatches and awaits one confirmed `JetStream` acknowledgment under one deadline.
@@ -74,7 +62,7 @@ impl Producer {
         } else {
             match encode_prepared(event) {
                 Ok(headers) => {
-                    publish_raw(
+                    publish(
                         &self.shared,
                         &event.subject,
                         headers,
@@ -100,89 +88,47 @@ impl Producer {
     }
 }
 
-/// Shared exchange for a producer or a previously admitted DLQ settlement.
-/// Settlements remain allowed after consumer admission begins draining.
-pub(crate) async fn publish_raw(
+/// Publishes one message and awaits the `JetStream` acknowledgement of
+/// `expected_stream`. The broker refuses a subject, size or stream mismatch.
+pub(crate) async fn publish(
     shared: &Shared,
     subject: &str,
-    mut headers: HeaderMap,
+    headers: HeaderMap,
     payload: Bytes,
     expected_stream: &str,
     deadline: Instant,
     cancel: &CancellationToken,
 ) -> Result<PublishAck, PublishError> {
     let deadline = deadline.min(Instant::now() + BROKER_OPERATION_BUDGET);
-    if cancel.is_cancelled() || Instant::now() >= deadline || !valid_subject(subject) {
-        return Err(PublishError::Rejected);
-    }
-    let stream_max = if expected_stream == shared.source_stream {
-        if shared.draining.load(Ordering::Acquire) || shared.failed.load(Ordering::Acquire) {
-            return Err(PublishError::Rejected);
-        }
-        if !shared
-            .source_subjects
-            .iter()
-            .any(|filter| subject_matches(filter, subject))
-        {
-            return Err(PublishError::Rejected);
-        }
-        shared.source_max_message_size
-    } else if shared.dlq_stream.as_deref() == Some(expected_stream) {
-        shared.dlq_max_message_size
-    } else {
-        return Err(PublishError::Rejected);
-    };
-    headers.insert(async_nats::header::NATS_EXPECTED_STREAM, expected_stream);
-    validate_encoded_message(subject, &headers, payload.len(), shared.max_payload_bytes)
-        .map_err(|_| PublishError::Rejected)?;
-    let message_bytes = payload.len().saturating_add(encoded_header_bytes(&headers));
-    if subject.len().saturating_add(message_bytes) > stream_max
-        || message_bytes > shared.client.max_payload()
-    {
-        return Err(PublishError::Rejected);
-    }
-    // No await precedes this admission check. Once the exchange is polled,
-    // cancellation or timeout may race a queued publish and is ambiguous.
     if cancel.is_cancelled() || Instant::now() >= deadline {
         return Err(PublishError::Rejected);
     }
-    let mut dispatched = false;
-    let result = {
-        let exchange = async {
-            dispatched = true;
-            let ack = shared
-                .jetstream
-                .send_publish(
-                    subject.to_owned(),
-                    PublishMessage::build()
-                        .headers(headers)
-                        .payload(payload)
-                        .expected_stream(expected_stream),
-                )
-                .await
-                .map_err(|error| classify_publish(&error))?;
-            let ack = ack.await.map_err(|error| classify_publish(&error))?;
-            if ack.stream != expected_stream {
-                return Err(PublishError::Ambiguous);
-            }
-            Ok(PublishAck {
-                stream: ack.stream,
-                sequence: ack.sequence,
-                duplicate: ack.duplicate,
-            })
-        };
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => None,
-            () = tokio::time::sleep_until(deadline) => None,
-            result = exchange => Some(result),
-        }
+    let exchange = async {
+        let message = PublishMessage::build()
+            .headers(headers)
+            .payload(payload)
+            .expected_stream(expected_stream);
+        let ack = shared
+            .jetstream
+            .send_publish(subject.to_owned(), message)
+            .await
+            .map_err(|error| classify_publish(&error))?
+            .await
+            .map_err(|error| classify_publish(&error))?;
+        Ok(PublishAck {
+            stream: ack.stream,
+            sequence: ack.sequence,
+            duplicate: ack.duplicate,
+        })
     };
-    result.unwrap_or(Err(if dispatched {
-        PublishError::Ambiguous
-    } else {
-        PublishError::Rejected
-    }))
+    // Nothing awaits between the check above and the first poll of the
+    // exchange, so a cancellation or timeout here may follow dispatch.
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(PublishError::Ambiguous),
+        () = tokio::time::sleep_until(deadline) => Err(PublishError::Ambiguous),
+        result = exchange => result,
+    }
 }
 
 fn classify_publish(error: &async_nats::jetstream::context::PublishError) -> PublishError {

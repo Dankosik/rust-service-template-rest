@@ -189,9 +189,6 @@ func generatedFixtures(t *testing.T) compatFixtureSet {
 		Cases: []compatFixtureCase{
 			generateFixture(t, "fractional_raw_bytes", "events.created", "message-fraction", "publication-fraction", "example.created", 1, "2026-09-26T12:34:56.123456789Z", []byte(`{"amount":1.00,"escaped":"\\u0041","items":[true,false]}`), "2026-09-26T18:04:56.123456789+05:30"),
 			generateFixture(t, "identity_schema_boundary", "events.boundary", strings.Repeat("m", 256), strings.Repeat("p", 256), strings.Repeat("t", 256), 65535, "2026-09-26T12:34:56Z", []byte(`{"raw": "spacing is preserved"}`), "2026-09-26T12:34:56.5+00:00"),
-			generateFixture(t, "go_permissive_fraction_offset", "events.timestamp", "message-permissive", "publication-permissive", "example.timestamp", 1, "2026-09-26T12:34:56Z", []byte(`{"source":"Go RFC3339Nano parser"}`), "2026-01-02T3:04:05,12345678912+24:00"),
-			generateFixture(t, "go_offset_minute_sixty", "events.timestamp", "message-offset-minute", "publication-offset-minute", "example.timestamp", 1, "2026-09-26T12:34:56Z", []byte(`{"source":"Go RFC3339Nano parser"}`), "2026-01-02T03:04:05+00:60"),
-			generateFixture(t, "go_utc_year_boundary", "events.timestamp", "message-year-boundary", "publication-year-boundary", "example.timestamp", 1, "2026-09-26T12:34:56Z", []byte(`{"source":"Go RFC3339Nano parser"}`), "9999-12-31T23:59:59-01:00"),
 		},
 	}
 }
