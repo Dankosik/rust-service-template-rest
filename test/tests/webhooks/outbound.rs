@@ -72,7 +72,7 @@ fn dispatcher(
     address: std::net::SocketAddr,
 ) -> Dispatcher {
     outbound
-        .dispatcher_for_test_http(keys(endpoints), NonZeroU32::MIN, address)
+        .dispatcher_for_test_http(keys(endpoints), address)
         .expect("fixture dispatcher")
 }
 
@@ -441,7 +441,7 @@ async fn missing_current_endpoint_spends_the_final_attempt_and_exhausts(pool: Pg
 
     let current = outbound(&[]);
     let dispatcher = current
-        .dispatcher(BTreeMap::new(), NonZeroU32::MIN)
+        .dispatcher(BTreeMap::new())
         .expect("empty current dispatcher");
     let running = RunningDispatcher::start(&pool, dispatcher, 1);
     job_is(&pool, &id, "failed", 20).await;
@@ -486,7 +486,7 @@ async fn invalid_or_unsupported_common_payloads_fail_permanently_before_transpor
         let running = RunningDispatcher::start(
             &pool,
             configured
-                .dispatcher(keys(&["partner"]), NonZeroU32::MIN)
+                .dispatcher(keys(&["partner"]))
                 .expect("current dispatcher"),
             1,
         );

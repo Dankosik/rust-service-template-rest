@@ -133,9 +133,8 @@ or rotated token does not fail every call until its provider lifetime ends. A
 403 is a permission result and keeps the credential.
 The ten-second rule is a refresh preference, never a minimum accepted token TTL.
 
-The existing resource `Operation` is forwarded unchanged after acquisition.
-The token client uses constants: one active attempt, five seconds, 64 response
-headers, 1 MiB encoded body. One MiB matches the existing provider envelope and
+The caller's resource deadline is forwarded unchanged after acquisition.
+The token client uses constants: five seconds, 64 response headers, 1 MiB encoded body. One MiB matches the existing provider envelope and
 allows provider extras without a token-size policy; 64 counts metadata rather
 than pretending reqwest exposes a header-byte limit. No claims about measured
 latency, memory, or provider capacity are made by these bounds.

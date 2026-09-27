@@ -29,10 +29,10 @@ Cargo graphs show a concrete aws-lc backend drawback.
 
 <!-- template:begin webhooks:docs-integration-webhooks-outbound -->
 Outbound webhook delivery reuses `infra-outbound-http` as one bounded,
-fixed-authority client per configured endpoint in a fixed startup map. Every
+fixed-origin client per configured endpoint in a fixed startup map. Every
 attempt resolves its endpoint ID to that map's current URL and key ring,
 including historical payloads whose saved routing fields are ignored. The
-provider passes the admitted current origin and path/query; it does not introduce raw reqwest calls, a
+provider requests the admitted current URL; it does not introduce raw reqwest calls, a
 general many-authority transport, proxy handling, redirects, or an inner retry.
 <!-- template:end webhooks:docs-integration-webhooks-outbound -->
 
@@ -132,7 +132,7 @@ A provider with an operator-selected fixed HTTPS dependency uses the retained
 [bounded outbound client](../outbound-http.md). The adapter supplies finite
 limits, credentials, and a parent deadline; it owns parsing, retry eligibility,
 and business errors. The client enforces same-origin targets, normal TLS,
-bounded encoded bodies/header count, and removal of correlation headers. Never
+and bounded encoded bodies/header count; request headers stay adapter-owned. Never
 construct it from a caller-controlled URL. Selection itself adds no neighbour or
 startup call.
 <!-- template:end outbound-http:docs-integration-outbound -->

@@ -63,11 +63,11 @@ metadata only. The returned `JobId` is the stable Standard Webhooks message ID.
 This is provider wiring, not a template business event or consumer.
 
 The worker decodes each endpoint's current and optional predecessor keys before
-claims, builds one dispatcher from that current snapshot and its nonzero
-`jobs.max_workers`, and consumes it into the existing kind registry:
+claims, builds one dispatcher from that current snapshot, and consumes it into
+the existing kind registry. The jobs worker slots bound delivery concurrency:
 
 ```rust,ignore
-let dispatcher = outbound.dispatcher(signing_keys, max_workers)?;
+let dispatcher = outbound.dispatcher(signing_keys)?;
 dispatcher.register(kinds);
 ```
 
@@ -116,7 +116,7 @@ named gaps or the retained Cargo graphs expose a concrete aws-lc backend drawbac
 The interoperable wire authority is the [Standard Webhooks
 specification](https://github.com/standard-webhooks/standard-webhooks/blob/bece768d960f09e242f5cd5686d859e475d6b478/spec/standard-webhooks.md).
 
-The outbound snapshot builds one fixed-authority client and one decoded key ring
+The outbound snapshot builds one fixed-origin client and one decoded key ring
 for each configured endpoint before claims. The client owns hostname TLS
 verification, pooling, no proxy/redirect, and response bounds. Its attempt
 telemetry carries the method, receiver host and port, status, and a static

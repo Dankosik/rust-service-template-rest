@@ -7,18 +7,17 @@
 use std::{
     collections::BTreeMap,
     fmt,
-    num::NonZeroU32,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
-use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header};
+use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use infra_jobs::{
     EnqueueOptions, Enqueued, Job, JobError, JobId, JobKind, Kinds, MAX_PAYLOAD_BYTES, Policy,
     enqueue,
 };
-use infra_outbound_http::{Client, Error as HttpError, Limits, Operation};
+use infra_outbound_http::{Client, Error as HttpError, Limits};
 use infra_postgres::Tx;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -29,13 +28,17 @@ const DELIVERY_KIND: &str = "webhooks.deliver";
 const DELIVERY_VERSION: u8 = 2;
 const RETRY_AFTER_CAP: Duration = Duration::from_hours(24);
 const DEFAULT_CONTENT_TYPE: &str = "application/json";
-const RESPONSE_HEADER_COUNT: usize = 64;
-const RESPONSE_BODY_BYTES: usize = 64 * 1024;
 
 /// Jobs policy for one outbound delivery attempt.
 pub const DELIVERY_POLICY: Policy = Policy {
     max_attempts: 20,
     timeout: Duration::from_secs(30),
+};
+
+const LIMITS: Limits = Limits {
+    operation_timeout: DELIVERY_POLICY.timeout,
+    response_header_count: 64,
+    response_body_bytes: 64 * 1024,
 };
 
 /// Static, non-secret properties of one outbound endpoint.
@@ -84,8 +87,7 @@ impl Outbound {
                 validate_endpoint_id(&endpoint_id)?;
                 let destination = parse_destination(&endpoint.destination)?;
                 // Admission never resolves or contacts a receiver.
-                Client::new(&origin(&destination)?, limits(NonZeroU32::MIN)?)
-                    .map_err(OutboundError::Client)?;
+                Client::new(&destination, LIMITS).map_err(OutboundError::Client)?;
                 Ok((endpoint_id, destination))
             })
             .collect::<Result<_, OutboundError>>()?;
@@ -136,26 +138,21 @@ impl Outbound {
 
     /// Construct a fixed endpoint/client/key snapshot before claiming jobs.
     ///
-    /// `max_workers` is the jobs worker capacity. Each endpoint client admits
-    /// that many exchanges, so a local attempt never fails for capacity; the
-    /// jobs slots are the only in-process concurrency bound.
+    /// The jobs slots are the only in-process concurrency bound.
     ///
     /// # Errors
     ///
     /// Every configured endpoint must have a decoded signing ring and an
     /// admitted transport client.
-    pub fn dispatcher(
-        &self,
-        keys: BTreeMap<String, KeyRing>,
-        max_workers: NonZeroU32,
-    ) -> Result<Dispatcher, OutboundError> {
-        let limits = limits(max_workers)?;
+    pub fn dispatcher(&self, keys: BTreeMap<String, KeyRing>) -> Result<Dispatcher, OutboundError> {
         self.build_dispatcher(keys, |destination| {
-            Client::new(&origin(destination)?, limits).map_err(OutboundError::Client)
+            let client = Client::new(destination, LIMITS).map_err(OutboundError::Client)?;
+            Ok((destination.clone(), client))
         })
     }
 
-    /// Construct the same dispatcher for the fixed metadata fixture and local HTTP peer.
+    /// Construct the same dispatcher for the fixed metadata fixture and local
+    /// HTTP peer. Each destination keeps its path and query on the peer origin.
     ///
     /// # Errors
     ///
@@ -164,25 +161,30 @@ impl Outbound {
     pub fn dispatcher_for_test_http(
         &self,
         keys: BTreeMap<String, KeyRing>,
-        max_workers: NonZeroU32,
         socket: std::net::SocketAddr,
     ) -> Result<Dispatcher, OutboundError> {
-        let limits = limits(max_workers)?;
         self.build_dispatcher(keys, |destination| {
             if destination.host_str() != Some("authn.fixture.test")
                 || destination.port_or_known_default() != Some(443)
             {
                 return Err(OutboundError::InvalidEndpoint);
             }
-            Client::new_for_test_http(&format!("http://{socket}/"), limits)
-                .map_err(OutboundError::Client)
+            let mut target = destination.clone();
+            target
+                .set_scheme("http")
+                .and_then(|()| target.set_ip_host(socket.ip()))
+                .and_then(|()| target.set_port(Some(socket.port())))
+                .map_err(|()| OutboundError::InvalidEndpoint)?;
+            let client =
+                Client::new_for_test_http(&target, LIMITS).map_err(OutboundError::Client)?;
+            Ok((target, client))
         })
     }
 
     fn build_dispatcher(
         &self,
         mut keys: BTreeMap<String, KeyRing>,
-        make_client: impl Fn(&Url) -> Result<Client, OutboundError>,
+        make_binding: impl Fn(&Url) -> Result<(Url, Client), OutboundError>,
     ) -> Result<Dispatcher, OutboundError> {
         let endpoints = self
             .endpoints
@@ -191,11 +193,11 @@ impl Outbound {
                 let keys = keys
                     .remove(endpoint_id)
                     .ok_or(OutboundError::MissingKeyRing)?;
-                let client = make_client(destination)?;
+                let (destination, client) = make_binding(destination)?;
                 Ok((
                     endpoint_id.clone(),
                     Binding {
-                        destination: destination.clone(),
+                        destination,
                         client,
                         keys,
                     },
@@ -308,16 +310,7 @@ impl Dispatcher {
             &signature,
         )
         .map_err(|_| JobError::permanent(DeliveryOutcome::InvalidPayload))?;
-        let response = binding
-            .client
-            .execute(
-                request,
-                Operation {
-                    deadline: job.deadline(),
-                    response_body_bytes: Some(RESPONSE_BODY_BYTES),
-                },
-            )
-            .await;
+        let response = binding.client.execute(request, job.deadline()).await;
         classify_response(response, SystemTime::now())
     }
 }
@@ -397,7 +390,7 @@ pub enum OutboundError {
     /// A configured endpoint has no current signing ring.
     #[error("outbound webhook endpoint signing ring is missing")]
     MissingKeyRing,
-    /// Existing fixed-authority client construction failed.
+    /// Existing fixed-origin client construction failed.
     #[error("outbound webhook client configuration is invalid")]
     Client(#[source] HttpError),
 }
@@ -426,17 +419,6 @@ impl fmt::Display for DeliveryOutcome {
     }
 }
 
-fn limits(max_workers: NonZeroU32) -> Result<Limits, OutboundError> {
-    let max_active =
-        usize::try_from(max_workers.get()).map_err(|_| OutboundError::InvalidEndpoint)?;
-    Ok(Limits {
-        max_active,
-        operation_timeout: DELIVERY_POLICY.timeout,
-        response_header_count: RESPONSE_HEADER_COUNT,
-        response_body_bytes: RESPONSE_BODY_BYTES,
-    })
-}
-
 fn validate_endpoint_id(endpoint_id: &str) -> Result<(), OutboundError> {
     if endpoint_id.is_empty() || endpoint_id.contains('\0') {
         return Err(OutboundError::InvalidEndpoint);
@@ -457,20 +439,6 @@ fn parse_destination(raw: &str) -> Result<Url, OutboundError> {
     Ok(destination)
 }
 
-fn origin(destination: &Url) -> Result<String, OutboundError> {
-    let mut origin = destination.clone();
-    origin.set_path("/");
-    origin.set_query(None);
-    origin.set_fragment(None);
-    origin
-        .set_username("")
-        .map_err(|()| OutboundError::InvalidEndpoint)?;
-    origin
-        .set_password(None)
-        .map_err(|()| OutboundError::InvalidEndpoint)?;
-    Ok(origin.to_string())
-}
-
 fn request(
     delivery: &Delivery,
     destination: &Url,
@@ -478,28 +446,15 @@ fn request(
     timestamp: i64,
     signature: &str,
 ) -> Result<Request<Bytes>, OutboundError> {
-    let target = origin_form(destination)?;
     Request::builder()
         .method(Method::POST)
-        .uri(target)
+        .uri(destination.as_str())
         .header(header::CONTENT_TYPE, &delivery.content_type)
         .header("webhook-id", message_id)
         .header("webhook-timestamp", timestamp.to_string())
         .header("webhook-signature", signature)
         .body(Bytes::copy_from_slice(&delivery.body))
         .map_err(|_| OutboundError::InvalidEndpoint)
-}
-
-fn origin_form(destination: &Url) -> Result<Uri, OutboundError> {
-    let mut target = destination.path().to_owned();
-    if target.is_empty() {
-        target.push('/');
-    }
-    if let Some(query) = destination.query() {
-        target.push('?');
-        target.push_str(query);
-    }
-    target.parse().map_err(|_| OutboundError::InvalidEndpoint)
 }
 
 fn classify_response(
@@ -598,7 +553,6 @@ mod base64_body {
 mod tests {
     use std::{
         collections::BTreeMap,
-        num::NonZeroU32,
         time::{Duration, UNIX_EPOCH},
     };
 
@@ -645,17 +599,14 @@ mod tests {
     fn dispatcher_requires_a_current_ring_for_every_configured_endpoint() {
         let outbound = outbound("https://partner.example/events");
         assert!(matches!(
-            outbound.dispatcher(BTreeMap::new(), NonZeroU32::MIN),
+            outbound.dispatcher(BTreeMap::new()),
             Err(OutboundError::MissingKeyRing)
         ));
         let ring =
             KeyRing::from_encoded("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", None).unwrap();
         assert!(
             outbound
-                .dispatcher(
-                    BTreeMap::from([("partner".to_owned(), ring)]),
-                    NonZeroU32::MIN
-                )
+                .dispatcher(BTreeMap::from([("partner".to_owned(), ring)]))
                 .is_ok()
         );
     }

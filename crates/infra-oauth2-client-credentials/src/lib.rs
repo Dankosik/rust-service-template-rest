@@ -7,7 +7,7 @@ use std::{fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use http::{HeaderValue, Request, Response, StatusCode, header::AUTHORIZATION};
-use infra_outbound_http::{Client, Limits, Operation};
+use infra_outbound_http::{Client, Limits};
 use moka::{Expiry, future::Cache, ops::compute::Op};
 use oauth2::{
     AuthType, ClientId, ClientSecret, EndpointNotSet, EndpointSet, Scope, TokenResponse, TokenUrl,
@@ -28,7 +28,6 @@ pub mod grpc;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const REUSE_MARGIN: Duration = Duration::from_secs(10);
 const TOKEN_LIMITS: Limits = Limits {
-    max_active: 1,
     operation_timeout: FETCH_TIMEOUT,
     response_header_count: 64,
     response_body_bytes: 1024 * 1024,
@@ -113,7 +112,7 @@ impl Credentials {
     /// Returns a sanitized option or transport-construction failure.
     pub fn new(options: Options) -> Result<Self, ConfigurationError> {
         let endpoint = admit_options(&options)?;
-        let transport = Client::new(&endpoint.origin().ascii_serialization(), TOKEN_LIMITS)
+        let transport = Client::new(&endpoint, TOKEN_LIMITS)
             .map_err(|_| configuration_error("token_url", "transport construction failed"))?;
         Self::prepare(options, endpoint, transport)
     }
@@ -210,12 +209,12 @@ impl AuthenticatedClient {
     pub async fn execute(
         &self,
         mut request: Request<Bytes>,
-        operation: Operation,
+        deadline: Instant,
     ) -> Result<Response<Bytes>, Error> {
         if request.headers().contains_key(AUTHORIZATION) {
             return Err(Error::AuthorizationConflict);
         }
-        let value = self.credentials.acquire(operation.deadline).await?;
+        let value = self.credentials.acquire(deadline).await?;
         if value
             .hard_expiry
             .is_some_and(|expiry| Instant::now() >= expiry)
@@ -225,7 +224,7 @@ impl AuthenticatedClient {
         request
             .headers_mut()
             .insert(AUTHORIZATION, value.header.clone());
-        let response = self.resource.execute(request, operation).await?;
+        let response = self.resource.execute(request, deadline).await?;
         if response.status() == StatusCode::UNAUTHORIZED {
             self.credentials.invalidate(&value).await;
         }
@@ -338,24 +337,15 @@ impl<'client> oauth2::AsyncHttpClient<'client> for TokenHttpClient {
                 return Err(AcquisitionError::InvalidResponse);
             }
             let (mut parts, body) = request.into_parts();
-            parts.uri = self.endpoint[url::Position::BeforePath..]
-                .parse()
-                .map_err(|_| AcquisitionError::InvalidResponse)?;
             if let Some(header) = parts.headers.get_mut(AUTHORIZATION) {
                 header.set_sensitive(true);
             }
             let response = self
                 .transport
-                .execute(
-                    Request::from_parts(parts, Bytes::from(body)),
-                    Operation {
-                        deadline,
-                        response_body_bytes: None,
-                    },
-                )
+                .execute(Request::from_parts(parts, Bytes::from(body)), deadline)
                 .await
                 .map_err(|error| match error {
-                    infra_outbound_http::Error::Timeout { .. } => AcquisitionError::Timeout,
+                    infra_outbound_http::Error::Timeout => AcquisitionError::Timeout,
                     infra_outbound_http::Error::ResponseBodyTooLarge => {
                         AcquisitionError::ResponseLimit
                     }

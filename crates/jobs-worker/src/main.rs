@@ -56,9 +56,7 @@ fn register_outbound(
             .map_err(|source| RegistrationError::OutboundKey { source })
         })
         .collect::<Result<_, _>>()?;
-    outbound
-        .dispatcher(keys, config.jobs.max_workers()?)?
-        .register(kinds);
+    outbound.dispatcher(keys)?.register(kinds);
 
     Ok(())
 }

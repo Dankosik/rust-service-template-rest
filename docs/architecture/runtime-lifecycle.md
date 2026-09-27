@@ -48,8 +48,8 @@ Authentication neither adds a readiness probe nor changes public health behavior
 <!-- template:end authn:docs-lifecycle-authn -->
 <!-- template:begin outbound-http:docs-lifecycle-outbound -->
 A retained [outbound client](../outbound-http.md) is inert until a concrete
-provider is wired. Operations are caller-owned futures and future drop releases
-their admission permit. Resolver, connection-pool, and HTTP library tasks are
+provider is wired. Operations are caller-owned futures; dropping one ends its
+exchange. Resolver, connection-pool, and HTTP library tasks are
 library-owned; bootstrap neither gives them a tracker/token nor joins them in a
 shutdown stage. The client adds no readiness probe or teardown stage. JWT refresh
 remains the separate process-owned task that the existing tracker cancels and

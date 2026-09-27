@@ -1,6 +1,6 @@
 [package]
 name = "infra-outbound-http"
-description = "Bounded fixed-authority HTTPS exchange adapter."
+description = "Bounded fixed-origin HTTPS exchange adapter."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,11 +23,12 @@ test-support = []
 [dependencies]
 http = { workspace = true }
 bytes = { workspace = true, features = ["std"] }
+http-body-util = { workspace = true }
 metrics = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 reqwest = { workspace = true, features = ["rustls"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["time"] }
 url = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
