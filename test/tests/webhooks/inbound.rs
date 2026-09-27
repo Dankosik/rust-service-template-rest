@@ -66,6 +66,31 @@ fn signed_headers(keys: &KeyRing, message_id: impl AsRef<[u8]>, body: &[u8]) -> 
     headers
 }
 
+fn unsigned_headers(message_id: impl AsRef<[u8]>) -> HeaderMap {
+    let message_id = message_id.as_ref();
+    let timestamp: i64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
+        .try_into()
+        .expect("timestamp fits i64");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "webhook-id",
+        HeaderValue::from_bytes(message_id).expect("message id"),
+    );
+    headers.insert(
+        "webhook-timestamp",
+        HeaderValue::from_str(&timestamp.to_string()).expect("timestamp"),
+    );
+    headers.insert("webhook-signature", HeaderValue::from_static("v1,unsigned"));
+    headers.insert(
+        "content-type",
+        HeaderValue::from_bytes(b"application/webhook\xff").expect("opaque content type"),
+    );
+    headers
+}
+
 async fn receipt_count(pool: &PgPool) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM webhook_receipts")
         .fetch_one(pool)
@@ -655,14 +680,7 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
             .body(Body::from(body))
             .expect("request");
         *request.headers_mut() = if id.len() > 255 {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                "webhook-id",
-                HeaderValue::from_bytes(&id).expect("message id"),
-            );
-            headers.insert("webhook-timestamp", HeaderValue::from_static("0"));
-            headers.insert("webhook-signature", HeaderValue::from_static("v1,invalid"));
-            headers
+            unsigned_headers(&id)
         } else {
             signed_headers(&keys, &id, body)
         };
@@ -817,12 +835,11 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
     let approximation: bool = sqlx::query_scalar("SELECT count(DISTINCT received_at) = 1 AND bool_and(received_at >= $1::text::timestamptz AND received_at <= now()) FROM webhook_receipts")
         .bind(before).fetch_one(&pool).await.expect("migration timestamp approximation");
     assert!(approximation);
-    let keys = KeyRing::from_encoded(KEY, None).expect("key");
     assert_eq!(
         receiver(pool.clone())
             .receive(
                 ENDPOINT,
-                &signed_headers(&keys, &legacy, b"legacy"),
+                &unsigned_headers(&legacy),
                 b"legacy",
                 SystemTime::now()
             )
