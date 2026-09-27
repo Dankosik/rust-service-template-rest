@@ -30,8 +30,8 @@ use std::time::Duration;
 use futures_util::FutureExt as _;
 use futures_util::future::join_all;
 use infra_idempotency_store::{
-    Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey, StartupError,
-    Store, WorkOutput,
+    AttemptError, Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey,
+    StartupError, Store,
 };
 use infra_postgres::{Closed, Dsn, Isolation, PgPool, PoolOptions, Tx, connection};
 use integration_tests::dsn_for;
@@ -39,6 +39,17 @@ use sqlx::Executor as _;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+
+/// What a test's work returns: `Ok` commits the record and hands it back.
+type Committing<R> = Result<(Record, Record), R>;
+
+/// What an attempt of a test's work returns.
+type Outcome<R> = Result<Attempted<Record, R>, AttemptError>;
+
+/// A record to commit that the attempt also hands back as its value.
+fn returned(record: Record) -> (Record, Record) {
+    (record.clone(), record)
+}
 
 const APP: &str = "integration-tests-idempotency";
 /// How long the replicas' records stay live.
@@ -296,7 +307,7 @@ async fn execute(
     fingerprint: Digest,
     record: &Record,
     work: &Work,
-) -> Attempted<Refusal> {
+) -> Outcome<Refusal> {
     let caller = caller("fixture-subject");
     store
         .attempt(
@@ -305,7 +316,7 @@ async fn execute(
             &fingerprint,
             async |tx: &mut Tx<'_>| {
                 work.run(tx).await;
-                WorkOutput::Commit(record.clone())
+                Ok(returned(record.clone()))
             },
         )
         .await
@@ -313,16 +324,11 @@ async fn execute(
 
 /// [`execute`] until the key is free: a dropped attempt holds it until
 /// `PostgreSQL` ends that attempt's transaction.
-async fn once_free(
-    store: &Store,
-    scope: Digest,
-    record: &Record,
-    work: &Work,
-) -> Attempted<Refusal> {
+async fn once_free(store: &Store, scope: Digest, record: &Record, work: &Work) -> Outcome<Refusal> {
     let deadline = Instant::now() + WAIT;
     loop {
         let outcome = execute(store, scope, record.fingerprint, record, work).await;
-        if !matches!(outcome, Attempted::InProgress) {
+        if !matches!(outcome, Ok(Attempted::InProgress)) {
             return outcome;
         }
         assert!(
@@ -338,17 +344,19 @@ async fn bounded<F: Future>(what: &str, future: F) -> F::Output {
     tokio::time::timeout(WAIT, future).await.expect(what)
 }
 
-fn committed(outcome: Attempted<Refusal>) -> Record {
+fn committed(outcome: Outcome<Refusal>) -> Record {
     match outcome {
-        Attempted::Committed(record) => record,
+        Ok(Attempted::Committed(record)) => record,
         unexpected => panic!("expected a commit, got {unexpected:?}"),
     }
 }
 
-/// Whether the live record that decided an attempt matched, and the record.
-fn live(outcome: Attempted<Refusal>) -> (bool, Record) {
+/// The record a live record replayed, or `None` when it refused a
+/// different request.
+fn live(outcome: Outcome<Refusal>) -> Option<Record> {
     match outcome {
-        Attempted::Live { matched, record } => (matched, record),
+        Ok(Attempted::Replay(record)) => Some(record),
+        Ok(Attempted::Mismatch) => None,
         unexpected => panic!("expected a live record, got {unexpected:?}"),
     }
 }
@@ -371,7 +379,10 @@ async fn p1_a_held_key_refuses_duplicates_and_commits_one_effect(pool: PgPool) {
         for replica in [&replica_1, &replica_2] {
             for fingerprint in [INPUT, OTHER_INPUT] {
                 let duplicate = execute(replica, SCOPE, fingerprint, &record, &work).await;
-                assert!(matches!(duplicate, Attempted::InProgress), "{duplicate:?}");
+                assert!(
+                    matches!(duplicate, Ok(Attempted::InProgress)),
+                    "{duplicate:?}"
+                );
             }
         }
         assert_eq!(work.runs(), 1, "no duplicate ran its work");
@@ -383,14 +394,14 @@ async fn p1_a_held_key_refuses_duplicates_and_commits_one_effect(pool: PgPool) {
     // and all at once, and none runs the work.
     for replica in [&replica_1, &replica_2] {
         let retry = execute(replica, SCOPE, INPUT, &record, &work).await;
-        assert_eq!(live(retry), (true, record.clone()));
+        assert_eq!(live(retry), Some(record.clone()));
     }
     let concurrent = [
         &replica_1, &replica_2, &replica_1, &replica_2, &replica_1, &replica_2,
     ]
     .map(|replica| execute(replica, SCOPE, INPUT, &record, &work));
     for retry in join_all(concurrent).await {
-        assert_eq!(live(retry), (true, record.clone()));
+        assert_eq!(live(retry), Some(record.clone()));
     }
     assert_eq!(work.runs(), 1);
     assert_eq!(count(&pool, EFFECTS).await, 1);
@@ -418,14 +429,14 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
                 &ScopeKey::from_digest(scope),
                 &caller,
                 &INPUT,
-                async |tx: &mut Tx<'_>| {
+                async |tx: &mut Tx<'_>| -> Committing<Refusal> {
                     work.run(tx).await;
-                    WorkOutput::Rollback(refusal)
+                    Err(refusal)
                 },
             )
             .await;
         assert!(
-            matches!(outcome, Attempted::RolledBack(returned) if returned == refusal),
+            matches!(outcome, Ok(Attempted::RolledBack(returned)) if returned == refusal),
             "{outcome:?}"
         );
     }
@@ -435,7 +446,7 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
         &ScopeKey::from_digest(OTHER_SCOPE),
         &caller,
         &INPUT,
-        async |tx: &mut Tx<'_>| -> WorkOutput<Refusal> {
+        async |tx: &mut Tx<'_>| -> Committing<Refusal> {
             work.run(tx).await;
             panic!("the work panics after writing its effect");
         },
@@ -472,10 +483,10 @@ async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(p
     // The same fingerprint gets the stored status, headers, and body bytes on
     // the other replica, not what its own work would have produced.
     let replayed = execute(&replica_2, SCOPE, INPUT, &other, &work).await;
-    assert_eq!(live(replayed), (true, record.clone()));
+    assert_eq!(live(replayed), Some(record.clone()));
     // Another fingerprint is refused by the live record, which stays.
     let mismatched = execute(&replica_2, SCOPE, OTHER_INPUT, &other, &work).await;
-    assert_eq!(live(mismatched), (false, record.clone()));
+    assert_eq!(live(mismatched), None);
     assert_eq!(work.runs(), 1);
 
     // Other scopes hold keys of their own.
@@ -517,7 +528,7 @@ async fn p3_a_long_verified_caller_identity_commits_and_replays(pool: PgPool) {
     let caller = caller(&caller_value);
     let record = success(INPUT, r#"{"id":1,"name":"long-caller"}"#);
 
-    let first: Attempted<()> = store
+    let first: Outcome<()> = store
         .attempt(
             &ScopeKey::from_digest(SCOPE),
             &caller,
@@ -527,16 +538,16 @@ async fn p3_a_long_verified_caller_identity_commits_and_replays(pool: PgPool) {
                     .execute(connection(tx))
                     .await
                     .expect("the committed effect");
-                WorkOutput::Commit(record.clone())
+                Ok(returned(record.clone()))
             },
         )
         .await;
     match first {
-        Attempted::Committed(actual) => assert_eq!(actual, record),
+        Ok(Attempted::Committed(actual)) => assert_eq!(actual, record),
         unexpected => panic!("expected a committed long-caller record, got {unexpected:?}"),
     }
 
-    let replayed: Attempted<()> = store
+    let replayed: Outcome<()> = store
         .attempt(
             &ScopeKey::from_digest(SCOPE),
             &caller,
@@ -546,15 +557,12 @@ async fn p3_a_long_verified_caller_identity_commits_and_replays(pool: PgPool) {
                     .execute(connection(tx))
                     .await
                     .expect("a replay must not run this effect");
-                WorkOutput::Commit(record.clone())
+                Ok(returned(record.clone()))
             },
         )
         .await;
     match replayed {
-        Attempted::Live {
-            matched: true,
-            record: actual,
-        } => assert_eq!(actual, record),
+        Ok(Attempted::Replay(actual)) => assert_eq!(actual, record),
         unexpected => panic!("expected a matching long-caller replay, got {unexpected:?}"),
     }
     assert_eq!(count(&pool, EFFECTS).await, 1);
@@ -587,7 +595,7 @@ async fn p4_an_expired_record_is_not_replayed_and_is_replaced(pool: PgPool) {
     let afresh = execute(&replica_2, SCOPE, OTHER_INPUT, &replacement, &work).await;
     assert_eq!(committed(afresh), replacement);
     let decided = execute(&replica_1, SCOPE, INPUT, &record, &work).await;
-    assert_eq!(live(decided), (false, replacement.clone()));
+    assert_eq!(live(decided), None);
     assert_eq!(records(&pool, SCOPE).await, 1);
     assert_eq!(work.runs(), 2);
     assert_eq!(count(&pool, EFFECTS).await, 2);
@@ -646,7 +654,10 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
             let removed = bounded("a cleanup run", replica_2.remove_expired()).await;
             // The executing attempt still holds its key.
             let duplicate = execute(&replica_2, SCOPE, INPUT, &record, &work).await;
-            assert!(matches!(duplicate, Attempted::InProgress), "{duplicate:?}");
+            assert!(
+                matches!(duplicate, Ok(Attempted::InProgress)),
+                "{duplicate:?}"
+            );
             work.hold.release();
             removed
         },);
@@ -706,7 +717,10 @@ async fn p5_a_read_only_session_is_unavailable_even_with_a_live_record(pool: PgP
     let (reader_pool, reader) = replica(&dsn).await;
     for scope in [SCOPE, OTHER_CALLER] {
         let refused = execute(&reader, scope, INPUT, &record, &work).await;
-        assert!(matches!(refused, Attempted::Unavailable), "{refused:?}");
+        assert!(
+            matches!(refused, Err(AttemptError::Unavailable)),
+            "{refused:?}"
+        );
     }
     assert_eq!(work.runs(), 1);
     assert_eq!(count(&pool, EFFECTS).await, 1);
@@ -723,7 +737,7 @@ async fn p6_an_aborted_statement_is_internal_and_the_same_key_can_retry(pool: Pg
     // PostgreSQL marks the transaction failed after division by zero. The
     // store's normal record write then observes SQLSTATE 25P02 and classifies
     // it as an internal fault, not transient unavailability.
-    let aborted: Attempted<()> = store
+    let aborted: Outcome<()> = store
         .attempt(
             &ScopeKey::from_digest(SCOPE),
             &caller,
@@ -740,11 +754,14 @@ async fn p6_an_aborted_statement_is_internal_and_the_same_key_can_retry(pool: Pg
                         .is_err(),
                     "the first statement aborts the transaction"
                 );
-                WorkOutput::Commit(record.clone())
+                Ok(returned(record.clone()))
             },
         )
         .await;
-    assert!(matches!(aborted, Attempted::Internal), "{aborted:?}");
+    assert!(
+        matches!(aborted, Err(AttemptError::Internal)),
+        "{aborted:?}"
+    );
     assert_eq!(count(&pool, EFFECTS).await, 0);
     assert_eq!(records(&pool, SCOPE).await, 0);
 

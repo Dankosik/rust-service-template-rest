@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use infra_idempotency_store::{
-    Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey, Store, WorkOutput,
+    AttemptError, Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey,
+    Store,
 };
 use infra_jobs::{EnqueueOptions, Enqueued, JobKind, enqueue};
 use infra_postgres::{Dsn, PgPool, Tx};
@@ -18,6 +19,17 @@ struct WidgetWelcome {
 
 impl JobKind for WidgetWelcome {
     const NAME: &'static str = "widgets.welcome";
+}
+
+/// What a test's work returns: `Ok` commits the record and hands it back.
+type Committing<R> = Result<(Record, Record), R>;
+
+/// What an attempt of a test's work returns.
+type Outcome<R> = Result<Attempted<Record, R>, AttemptError>;
+
+/// A record to commit that the attempt also hands back as its value.
+fn returned(record: Record) -> (Record, Record) {
+    (record.clone(), record)
 }
 
 const SCOPE: Digest = [0x11; 32];
@@ -138,9 +150,9 @@ async fn row_is(pool: &PgPool, id: &str, widget: u64) -> bool {
     .expect("the job row")
 }
 
-fn committed(outcome: Attempted<()>) -> Record {
+fn committed(outcome: Outcome<()>) -> Record {
     match outcome {
-        Attempted::Committed(record) => record,
+        Ok(Attempted::Committed(record)) => record,
         other => panic!("expected a commit, got {other:?}"),
     }
 }
@@ -156,10 +168,10 @@ async fn e1_e3_a_committed_attempt_enqueues_once(pool: PgPool) {
             &ScopeKey::from_digest(SCOPE),
             &caller(),
             &INPUT,
-            async |tx: &mut Tx<'_>| -> WorkOutput<()> {
+            async |tx: &mut Tx<'_>| -> Committing<()> {
                 let enqueued = enqueue_widget(tx, WIDGET).await;
                 *seen.lock().expect("seen") = Some(enqueued);
-                WorkOutput::Commit(record.clone())
+                Ok(returned(record.clone()))
             },
         )
         .await;
@@ -181,11 +193,11 @@ async fn e3_a_replayed_attempt_enqueues_nothing(pool: PgPool) {
             &ScopeKey::from_digest(SCOPE),
             &caller(),
             &INPUT,
-            async |tx: &mut Tx<'_>| -> WorkOutput<()> {
+            async |tx: &mut Tx<'_>| -> Committing<()> {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let enqueued = enqueue_widget(tx, WIDGET).await;
                 assert!(matches!(enqueued, Enqueued::Created(_)));
-                WorkOutput::Commit(record.clone())
+                Ok(returned(record.clone()))
             },
         )
         .await;
@@ -197,21 +209,15 @@ async fn e3_a_replayed_attempt_enqueues_nothing(pool: PgPool) {
             &ScopeKey::from_digest(SCOPE),
             &caller(),
             &INPUT,
-            async |tx: &mut Tx<'_>| -> WorkOutput<()> {
+            async |tx: &mut Tx<'_>| -> Committing<()> {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let _enqueued = enqueue_widget(tx, WIDGET).await;
-                WorkOutput::Commit(success(INPUT, r#"{"widget":8}"#))
+                Ok(returned(success(INPUT, r#"{"widget":8}"#)))
             },
         )
         .await;
     match replay {
-        Attempted::Live {
-            matched,
-            record: stored,
-        } => {
-            assert!(matched);
-            assert_eq!(stored, record);
-        }
+        Ok(Attempted::Replay(stored)) => assert_eq!(stored, record),
         other => panic!("expected a replay, got {other:?}"),
     }
     assert_eq!(runs.load(Ordering::SeqCst), 1);
@@ -229,15 +235,15 @@ async fn e3_a_rolled_back_attempt_enqueues_nothing(pool: PgPool) {
             &ScopeKey::from_digest(SCOPE),
             &caller(),
             &INPUT,
-            async |tx: &mut Tx<'_>| -> WorkOutput<()> {
+            async |tx: &mut Tx<'_>| -> Committing<()> {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let enqueued = enqueue_widget(tx, WIDGET).await;
                 assert!(matches!(enqueued, Enqueued::Created(_)), "{enqueued:?}");
-                WorkOutput::Rollback(())
+                Err(())
             },
         )
         .await;
-    assert!(matches!(outcome, Attempted::RolledBack(())));
+    assert!(matches!(outcome, Ok(Attempted::RolledBack(()))));
     assert_eq!(runs.load(Ordering::SeqCst), 1);
     assert_eq!(super::job_count(&pool).await, 0);
     super::close(&[&first.pool, &second.pool]).await;
@@ -259,12 +265,12 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
             &scope,
             &first_caller,
             &INPUT,
-            async |tx: &mut Tx<'_>| -> WorkOutput<()> {
+            async |tx: &mut Tx<'_>| -> Committing<()> {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let enqueued = enqueue_widget(tx, WIDGET).await;
                 *seen.lock().expect("seen") = Some(enqueued);
                 hold.pass().await;
-                WorkOutput::Commit(record.clone())
+                Ok(returned(record.clone()))
             },
         ),
         async {
@@ -275,14 +281,14 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
                     &scope,
                     &second_caller,
                     &INPUT,
-                    async |tx: &mut Tx<'_>| -> WorkOutput<()> {
+                    async |tx: &mut Tx<'_>| -> Committing<()> {
                         runs.fetch_add(1, Ordering::SeqCst);
                         let _enqueued = enqueue_widget(tx, WIDGET).await;
-                        WorkOutput::Commit(record.clone())
+                        Ok(returned(record.clone()))
                     },
                 )
                 .await;
-            assert!(matches!(refused, Attempted::InProgress), "{refused:?}");
+            assert!(matches!(refused, Ok(Attempted::InProgress)), "{refused:?}");
             assert_eq!(runs.load(Ordering::SeqCst), 1);
             assert_eq!(super::job_count(&pool).await, 0);
             hold.release();
@@ -307,10 +313,10 @@ async fn e6_another_scope_gets_duplicate_and_still_commits(pool: PgPool) {
             &ScopeKey::from_digest(SCOPE),
             &caller(),
             &INPUT,
-            async |tx: &mut Tx<'_>| -> WorkOutput<()> {
+            async |tx: &mut Tx<'_>| -> Committing<()> {
                 let enqueued = enqueue_widget(tx, WIDGET).await;
                 assert!(matches!(enqueued, Enqueued::Created(_)));
-                WorkOutput::Commit(record.clone())
+                Ok(returned(record.clone()))
             },
         )
         .await;
@@ -323,10 +329,10 @@ async fn e6_another_scope_gets_duplicate_and_still_commits(pool: PgPool) {
             &ScopeKey::from_digest(OTHER),
             &caller(),
             &INPUT,
-            async |tx: &mut Tx<'_>| -> WorkOutput<()> {
+            async |tx: &mut Tx<'_>| -> Committing<()> {
                 let enqueued = enqueue_widget(tx, WIDGET).await;
                 *seen.lock().expect("seen") = Some(enqueued);
-                WorkOutput::Commit(other.clone())
+                Ok(returned(other.clone()))
             },
         )
         .await;
@@ -363,11 +369,11 @@ async fn e6_a_concurrent_enqueue_waits_then_duplicate_and_both_commit(pool: PgPo
                 &ScopeKey::from_digest(SCOPE),
                 &caller(),
                 &INPUT,
-                async |tx: &mut Tx<'_>| -> WorkOutput<()> {
+                async |tx: &mut Tx<'_>| -> Committing<()> {
                     let enqueued = enqueue_widget(tx, WIDGET).await;
                     *first_seen.lock().expect("seen") = Some(enqueued);
                     first_hold.pass().await;
-                    WorkOutput::Commit(first_record)
+                    Ok(returned(first_record))
                 },
             )
             .await
@@ -383,10 +389,10 @@ async fn e6_a_concurrent_enqueue_waits_then_duplicate_and_both_commit(pool: PgPo
                 &ScopeKey::from_digest(OTHER),
                 &caller(),
                 &INPUT,
-                async |tx: &mut Tx<'_>| -> WorkOutput<()> {
+                async |tx: &mut Tx<'_>| -> Committing<()> {
                     let enqueued = enqueue_widget(tx, WIDGET).await;
                     *second_seen.lock().expect("seen") = Some(enqueued);
-                    WorkOutput::Commit(second_record)
+                    Ok(returned(second_record))
                 },
             )
             .await
