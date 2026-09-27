@@ -155,11 +155,10 @@ impl Credentials {
     /// Returns a sanitized option or transport-construction failure.
     pub fn new(options: Options) -> Result<Self, ConfigurationError> {
         let endpoint = admit_options(&options)?;
-        let token_http = Client::new(&endpoint, TOKEN_LIMITS)
-            .map_err(|_| ConfigurationError {
-                key: "token_url",
-                reason: "transport construction failed",
-            })?;
+        let token_http = Client::new(&endpoint, TOKEN_LIMITS).map_err(|_| ConfigurationError {
+            key: "token_url",
+            reason: "transport construction failed",
+        })?;
         Self::prepare(options, &endpoint, token_http)
     }
 

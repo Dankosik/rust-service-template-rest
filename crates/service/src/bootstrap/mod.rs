@@ -12,12 +12,14 @@ mod shutdown;
 
 use std::error::Error;
 use std::ffi::OsString;
-use std::ops::ControlFlow;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use health::{Probe, Readiness, RefreshPolicy};
-use infra_http::{HTTP_REQUESTS_DURATION_BUCKETS, HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
+use infra_http::{
+    HTTP_REQUESTS_DURATION_BUCKETS, HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server,
+    ServerOptions,
+};
 // template:begin cache:service-bootstrap-cache-imports
 use infra_cache::{Cache, CacheError, CacheOptions};
 // template:end cache:service-bootstrap-cache-imports
@@ -327,7 +329,8 @@ async fn serve_until_stopped(
     let mut composer = prepare_http_idempotency(config, dependencies.postgres.as_ref());
     // template:end http-idempotency:bootstrap-http-idempotency-composer
     // template:begin inbound-webhooks:bootstrap-webhooks-prepare
-    let webhook_state = prepare_inbound_webhooks(config, dependencies.postgres.as_ref(), tracker, cancel)?;
+    let webhook_state =
+        prepare_inbound_webhooks(config, dependencies.postgres.as_ref(), tracker, cancel)?;
     // template:end inbound-webhooks:bootstrap-webhooks-prepare
     let readiness = Readiness::new(
         probes,
@@ -447,7 +450,7 @@ async fn serve_until_stopped(
     // template:begin grpc:bootstrap-grpc-bind
     let grpc_listener = match grpc_prepared {
         Some((grpc_router, tls)) => {
-            let addr = config.grpc.addr;
+            let addr = config.grpc.listen_addr()?;
             let bound = match tls {
                 Some(tls) => {
                     Server::bind_tls(addr, grpc_router, infra_grpc::server_options(), tls).await?
@@ -598,12 +601,13 @@ async fn prepare_auth(
             cache_ttl,
         } => {
             let issuer = issuer_url("oidc-introspection", "authn.issuer", issuer)?;
-            let endpoint = infra_bearerauthn::EndpointUrl::parse(introspection_endpoint)
-                .map_err(|source| BootstrapError::AuthenticationPreparation {
-                mode: "oidc-introspection",
-                key: "authn.introspection_endpoint",
-                source,
-            })?;
+            let endpoint = infra_bearerauthn::EndpointUrl::parse(introspection_endpoint).map_err(
+                |source| BootstrapError::AuthenticationPreparation {
+                    mode: "oidc-introspection",
+                    key: "authn.introspection_endpoint",
+                    source,
+                },
+            )?;
             // Configuration validation requires the secret in this mode.
             let client_secret = introspection_client_secret.clone().ok_or_else(|| {
                 service_config::ValidationError::new(
@@ -708,8 +712,6 @@ async fn open_postgres(
     Ok(Some(pool))
 }
 // template:end postgres:bootstrap-open-postgres
-
-
 
 // template:begin cache:service-bootstrap-cache-functions
 /// Connect the optional cache. An outage at startup is logged, not fatal:

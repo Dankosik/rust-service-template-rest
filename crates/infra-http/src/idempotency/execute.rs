@@ -205,9 +205,7 @@ fn map_attempted(
     operation: &str,
 ) -> Answer {
     match attempted {
-        Err(AttemptError::Unavailable) => {
-            Answer::problem(unavailable(), Outcome::Unavailable)
-        }
+        Err(AttemptError::Unavailable) => Answer::problem(unavailable(), Outcome::Unavailable),
         Err(AttemptError::Internal) => Answer::problem(sanitized(), Outcome::NotStored),
         Err(AttemptError::Integrity) => integrity_failure(),
         Ok(Attempted::Mismatch) => Answer::problem(key_mismatch(), Outcome::KeyMismatch),
@@ -218,10 +216,9 @@ fn map_attempted(
             ),
             Err(stored::Undecodable) => integrity_failure(),
         },
-        Ok(Attempted::InProgress) => Answer::problem(
-            in_progress(scope, operation),
-            Outcome::InProgress,
-        ),
+        Ok(Attempted::InProgress) => {
+            Answer::problem(in_progress(scope, operation), Outcome::InProgress)
+        }
         Ok(Attempted::RolledBack(Rollback::Response(response))) => {
             Answer::computed(response, Outcome::NotStored)
         }
@@ -368,44 +365,28 @@ mod tests {
     #[tokio::test]
     async fn store_outcomes_keep_retry_and_integrity_semantics_distinct() {
         assert_problem(
-            map_attempted(
-                Err(AttemptError::Unavailable),
-                &scope(),
-                "test",
-            ),
+            map_attempted(Err(AttemptError::Unavailable), &scope(), "test"),
             Outcome::Unavailable,
             Code::IdempotencyUnavailable,
             true,
         )
         .await;
         assert_problem(
-            map_attempted(
-                Err(AttemptError::Internal),
-                &scope(),
-                "test",
-            ),
+            map_attempted(Err(AttemptError::Internal), &scope(), "test"),
             Outcome::NotStored,
             Code::InternalServerError,
             false,
         )
         .await;
         assert_problem(
-            map_attempted(
-                Err(AttemptError::Integrity),
-                &scope(),
-                "test",
-            ),
+            map_attempted(Err(AttemptError::Integrity), &scope(), "test"),
             Outcome::Integrity,
             Code::InternalServerError,
             false,
         )
         .await;
         assert_problem(
-            map_attempted(
-                Ok(Attempted::InProgress),
-                &scope(),
-                "test",
-            ),
+            map_attempted(Ok(Attempted::InProgress), &scope(), "test"),
             Outcome::InProgress,
             Code::IdempotencyRequestInProgress,
             true,
@@ -415,11 +396,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_live_record_replays_or_refuses_a_different_request() {
-        let replay = map_attempted(
-            Ok(Attempted::Replay(stored_record())),
-            &scope(),
-            "test",
-        );
+        let replay = map_attempted(Ok(Attempted::Replay(stored_record())), &scope(), "test");
         assert_eq!(replay.outcome, Outcome::Replayed);
         assert_eq!(replay.response.status(), StatusCode::CREATED);
         assert_eq!(
@@ -437,11 +414,7 @@ mod tests {
             "stored"
         );
         assert_problem(
-            map_attempted(
-                Ok(Attempted::Mismatch),
-                &scope(),
-                "test",
-            ),
+            map_attempted(Ok(Attempted::Mismatch), &scope(), "test"),
             Outcome::KeyMismatch,
             Code::IdempotencyKeyMismatch,
             false,

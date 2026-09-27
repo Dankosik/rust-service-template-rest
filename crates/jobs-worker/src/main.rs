@@ -43,10 +43,7 @@ fn register_outbound(
             endpoint: endpoint_id.clone(),
             source,
         })?;
-        endpoints.insert(
-            endpoint_id.clone(),
-            Endpoint::new(&endpoint.url, keys)?,
-        );
+        endpoints.insert(endpoint_id.clone(), Endpoint::new(&endpoint.url, keys)?);
     }
     Dispatcher::new(endpoints).register(kinds);
     Ok(())

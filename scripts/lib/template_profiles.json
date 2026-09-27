@@ -99,6 +99,10 @@
         "id": "load-empty-dsn-assertion"
       },
       {
+        "path": "crates/config/src/load.rs",
+        "id": "load-zero-postgres-count"
+      },
+      {
         "path": "crates/config/src/secret_policy.rs",
         "id": "secret-key-vector"
       },

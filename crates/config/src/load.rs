@@ -1335,9 +1335,8 @@ mod tests {
             ("APP__HTTP__SHUTDOWN_TIMEOUT", "shutdown_timeout"),
             ("APP__HEALTH__READINESS_TIMEOUT", "readiness_timeout"),
         ] {
-            let legacy = load_from(
-                &LoadOptions::default(), BUILD, env(&[(name, "22s")]),
-            ).unwrap_err();
+            let legacy =
+                load_from(&LoadOptions::default(), BUILD, env(&[(name, "22s")])).unwrap_err();
             assert!(matches!(legacy, Error::Deserialize(_)), "{legacy}");
             assert!(legacy.to_string().contains(key), "{legacy}");
         }

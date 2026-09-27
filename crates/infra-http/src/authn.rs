@@ -170,11 +170,7 @@ async fn authenticate(
     }
 }
 
-async fn authenticate_protected(
-    state: AuthState,
-    mut request: Request,
-    next: Next,
-) -> Response {
+async fn authenticate_protected(state: AuthState, mut request: Request, next: Next) -> Response {
     let authorization = request
         .headers()
         .get_all(AUTHORIZATION)
