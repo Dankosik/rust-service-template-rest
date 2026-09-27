@@ -154,9 +154,10 @@ Other authentication methods require a separate accepted behavior decision.
 <!-- template:end outbound-auth:docs-outbound-machine-authentication-guide -->
 <!-- template:begin outbound-auth-grpc:docs-oauth-grpc-binding -->
 With `GRPC=enabled`, `Credentials::grpc` binds the same private acquisition owner
-to a governed native client. Each RPC carries its original absolute operation
-deadline; token failure prevents resource dispatch, and resource authentication
-errors never trigger replay. Streaming acquires once at opening. The [gRPC
+to an `infra_grpc::Client`. Each call spends `grpc-timeout` when that header is
+present, otherwise the owner's fetch timeout. Token failure prevents resource
+dispatch. Eviction inspects only the initial response and never replays the
+call. Streaming acquires once at opening. The [gRPC
 guide](grpc.md#reuse-clients-and-original-deadlines) shows the concrete binding.
 Removing either profile removes only the combined bridge.
 <!-- template:end outbound-auth-grpc:docs-oauth-grpc-binding -->

@@ -7,13 +7,12 @@ use std::{
 };
 
 use http::{Request, Response, StatusCode, header::AUTHORIZATION};
-use http_body_util::BodyExt as _;
-use infra_grpc::{Client, Operation};
-use tokio::{sync::oneshot, time::Instant};
+use infra_grpc::Client;
+use tokio::time::Instant;
 use tonic::{Code, Status, body::Body};
 use tower::Service;
 
-use crate::{AcquisitionError, Credentials};
+use crate::{AcquisitionError, Credentials, FETCH_TIMEOUT};
 
 /// A cloneable governed gRPC client with private machine credentials.
 #[derive(Clone)]
@@ -45,7 +44,6 @@ impl Service<Request<Body>> for AuthenticatedClient {
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // The operation, including resource readiness, spends its absolute deadline.
         Poll::Ready(Ok(()))
     }
 
@@ -58,19 +56,13 @@ impl Service<Request<Body>> for AuthenticatedClient {
                     "authorization conflicts with client credentials",
                 ));
             }
-            let operation = request
-                .extensions()
-                .get::<Operation>()
-                .copied()
-                .ok_or_else(|| Status::invalid_argument("operation deadline is required"))?;
-            if Instant::now() >= operation.deadline {
-                return Err(Status::deadline_exceeded("request deadline exceeded"));
-            }
+            let deadline = Instant::now()
+                + infra_grpc::grpc_timeout(request.headers()).unwrap_or(FETCH_TIMEOUT);
             let value = credentials
-                .acquire(operation.deadline)
+                .acquire(deadline)
                 .await
                 .map_err(acquisition_status)?;
-            if Instant::now() >= operation.deadline {
+            if Instant::now() >= deadline {
                 return Err(Status::deadline_exceeded("request deadline exceeded"));
             }
             if value
@@ -84,47 +76,15 @@ impl Service<Request<Body>> for AuthenticatedClient {
                 .headers_mut()
                 .insert(AUTHORIZATION, value.header.clone());
             let response = resource.call(request).await?;
-            if let Some(status) = response.headers().get("grpc-status") {
-                if Code::from_bytes(status.as_bytes()) == Code::Unauthenticated {
-                    let _ =
-                        tokio::time::timeout_at(operation.deadline, credentials.invalidate(&value))
-                            .await;
-                }
-                return Ok(response);
+            let unauthenticated =
+                response.headers().get("grpc-status").is_some_and(|status| {
+                    Code::from_bytes(status.as_bytes()) == Code::Unauthenticated
+                }) || (response.status() == StatusCode::UNAUTHORIZED
+                    && !response.headers().contains_key("grpc-status"));
+            if unauthenticated {
+                let _ = tokio::time::timeout_at(deadline, credentials.invalidate(&value)).await;
             }
-
-            let (parts, body) = response.into_parts();
-            let http_status = parts.status;
-            let (sender, receiver) = oneshot::channel();
-            let mut sender = Some(sender);
-            let body = body
-                .inspect_frame(move |frame| {
-                    if let Some(trailers) = frame.trailers_ref()
-                        && let Some(sender) = sender.take()
-                    {
-                        let status = trailers
-                            .get("grpc-status")
-                            .map(|status| Code::from_bytes(status.as_bytes()));
-                        let _ = sender.send(status);
-                    }
-                })
-                // Drop the observer at EOF/error so status-less completion closes the channel.
-                .fuse()
-                .with_trailers(async move {
-                    let rejected = match receiver.await {
-                        Ok(Some(code)) => code == Code::Unauthenticated,
-                        Ok(None) | Err(_) => http_status == StatusCode::UNAUTHORIZED,
-                    };
-                    if rejected {
-                        let _ = tokio::time::timeout_at(
-                            operation.deadline,
-                            credentials.invalidate(&value),
-                        )
-                        .await;
-                    }
-                    None
-                });
-            Ok(Response::from_parts(parts, Body::new(body)))
+            Ok(response)
         })
     }
 }

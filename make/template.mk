@@ -88,7 +88,7 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	publish-image-metadata-check compose-up compose-down test-integration-db test-integration-messaging migration-check migration-history-self-test migration-validate \
 	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test
 # template:begin grpc:make-grpc-standard-targets
-TEMPLATE_STANDARD_TARGETS += grpc-tools grpc-generate grpc-check
+TEMPLATE_STANDARD_TARGETS += grpc-generate grpc-check
 # template:end grpc:make-grpc-standard-targets
 
 # Source-only checks are contributed by make/source.mk in the template source.
@@ -321,14 +321,9 @@ publish-image-metadata-check: ## Self-test of the publication naming and tag pro
 	bash scripts/ci/publish-image-metadata.sh self-test
 
 # template:begin grpc:make-grpc-targets
-.PHONY: grpc-tools grpc-generate grpc-check
+.PHONY: grpc-generate grpc-check
 GRPC ?= none
 export GRPC
-grpc-tools: ## Provision the pinned, checksum-verified compiler for dependency schemas
-	python3 scripts/grpc-protoc.py --provision
-
-build run test test-package test-changed lint lint-changed openapi-generate openapi-check tools-check: grpc-tools
-$(filter test-integration-db test-integration-messaging migration-check,$(ACTIVE_TEMPLATE_STANDARD_TARGETS)): grpc-tools
 
 grpc-generate: ## Generate committed protobuf Rust from pinned Buf descriptors
 	$(VALIDATION_LOCK) bash scripts/grpc-generate.sh

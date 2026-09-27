@@ -654,13 +654,14 @@ markers, tests, and initializer support. Order by expected demand:
    [PostgreSQL transactional outbox](postgres-transactional-outbox.md) own the
    adopted contracts. Implemented and merged in PR #65.
 <!-- template:begin grpc:roadmap-stage-10-7 -->
-7. Native gRPC with tonic/prost, generated all-cardinality policy, semantic
-   validation, shared failure identity, cached standard health, explicit
-   plaintext/TLS13/mTLS, full-call deadlines and one concurrent process drain.
-   Shared lazy clients integrate private OAuth credentials. Buf owns committed
-   schema generation, lint and PR-base compatibility; initializer graphs retain
-   or remove the complete profile. The [guide](grpc.md) and [decisions](grpc-decisions.md)
-   own adoption and the source-supported custom gaps.
+ 7. Native gRPC: tonic routes on the shared HTTP listener, bearer auth,
+   standard health, plaintext or TLS 1.3/mTLS, header deadlines and one
+   concurrent process drain. Handlers validate their own input. Shared lazy
+   clients integrate private OAuth credentials. Buf owns lint and PR-base
+   compatibility; stock tonic-prost-build commits generated Rust. The
+   [guide](grpc.md) and [decisions](grpc-decisions.md) own adoption. A
+   follow-up simplification replaced the custom transport; this item does not
+   record that change as merged.
 <!-- template:end grpc:roadmap-stage-10-7 -->
 <!-- template:begin outbound-auth:roadmap-stage-10-8-outbound-auth -->
 8. OAuth 2.0 client-credentials outbound authentication.

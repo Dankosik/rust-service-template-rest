@@ -190,10 +190,11 @@ publication is implied by template proof.
 <!-- template:end outbound-auth:docs-outbound-machine-authentication-decisions -->
 
 <!-- template:begin outbound-auth-grpc:docs-oauth-grpc-decision -->
-The concrete gRPC binding is now inside `Credentials`, with the same private-token
-ownership, original deadline and no-replay response behavior. Its optional
-dependency points from OAuth to `infra-grpc`; removing either profile removes
-the bridge. Native generated clients use the concrete authenticated Service,
-without a generic authorizer or public acquisition API. See the [transport
-decision record](grpc-decisions.md).
+The concrete gRPC binding stays inside `Credentials`. It injects one bearer,
+does not replay, and evicts only from the initial `UNAUTHENTICATED` status or
+HTTP 401 without `grpc-status`. The call deadline is `grpc-timeout` or the
+owner's fetch timeout. Its optional dependency points from OAuth to
+`infra-grpc`; removing either profile removes the bridge. Generated clients
+take the concrete authenticated `Service`. See the [transport decision
+record](grpc-decisions.md).
 <!-- template:end outbound-auth-grpc:docs-oauth-grpc-decision -->

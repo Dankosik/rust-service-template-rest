@@ -5,20 +5,15 @@
     reason = "integration fixtures fail closed with their local setup context"
 )]
 
-//! Real loopback transport proof for the generated Echo registration.
-//!
-//! This deliberately mounts only `register_echo_service` and talks through
-//! tonic clients over TCP.  It therefore catches a generated adapter bypassing
-//! the inbound call owner, rather than repeating its policy in a test service.
+//! Loopback proof of the tonic router on the shared HTTP listener.
 
 use std::{
     net::SocketAddr,
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    task::{Context, Poll},
     time::Duration,
 };
 
@@ -26,24 +21,24 @@ use std::{
 use std::time::{SystemTime, UNIX_EPOCH};
 // template:end authn:grpc-transport-test-auth-time
 
-use futures_util::Stream;
 use grpc_contracts::generated::{
     BidiStreamRequest, BidiStreamResponse, ClientStreamRequest, ClientStreamResponse,
     ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
-    echo_service_client::EchoServiceClient, echo_service_server::EchoService,
-    register_echo_service,
+    echo_service_client::EchoServiceClient,
+    echo_service_server::{EchoService, EchoServiceServer},
 };
 use health::{Readiness, RefreshPolicy};
 // template:begin authn:grpc-transport-test-auth-imports
 use infra_bearerauthn::{
-    IntrospectionOptions, ProviderUrl, Verifier,
+    IntrospectionCacheOptions, IntrospectionOptions, ProviderUrl, Verifier,
     test_support::{FixtureTransport, prepare_introspection_with_fixture},
 };
 // template:end authn:grpc-transport-test-auth-imports
 use infra_grpc::{
-    Client, ClientSecurity, ClientTlsMaterial, Operation, RunningServer, Server, ServerOptions,
-    ServerSecurity, ServerTlsMaterial, Services,
+    ClientSecurity, ClientTlsMaterial, ServerTlsMaterial, Services, classified_status,
+    server_options, server_tls_config,
 };
+use infra_http::{Drained, Server};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose,
@@ -55,32 +50,31 @@ use rustls::{
 // template:begin authn:grpc-transport-test-auth-secret
 use secrecy::SecretString;
 // template:end authn:grpc-transport-test-auth-secret
-use tokio::{
-    io::AsyncReadExt as _,
-    net::TcpStream,
-    sync::Notify,
-    time::{Instant, timeout},
-};
+use service_failure::{ClassifiedFailure, Code as FailureCode};
+use tokio::{io::AsyncReadExt as _, net::TcpStream, sync::Notify, time::timeout};
 // template:begin authn:grpc-transport-test-auth-listener
 use tokio::net::TcpListener;
 // template:end authn:grpc-transport-test-auth-listener
 // template:begin authn:grpc-transport-test-auth-io
-use tokio::{io::AsyncWriteExt as _, task::JoinHandle};
+use tokio::io::AsyncWriteExt as _;
 // template:end authn:grpc-transport-test-auth-io
 // template:begin authn:grpc-transport-test-auth-tls-acceptor
 use tokio_rustls::TlsAcceptor;
 // template:end authn:grpc-transport-test-auth-tls-acceptor
 use tokio_rustls::TlsConnector;
-use tokio_util::sync::CancellationToken;
 use tonic::{Code, Request, Response, Status};
 use tonic_health::pb::{
     HealthCheckRequest, health_check_response::ServingStatus, health_client::HealthClient,
 };
+use tonic_types::StatusExt as _;
 
-const DEADLINE: Duration = Duration::from_secs(3);
-const DRAIN: Duration = Duration::from_secs(9);
+// template:begin authn:grpc-transport-test-accepted-token
+const ACCEPTED: &str = "accepted";
+// template:end authn:grpc-transport-test-accepted-token
 
-type ResponseStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
+const WAIT: Duration = Duration::from_secs(5);
+const FILL: Duration = Duration::from_secs(30);
+const ECHO_SERVICE: &str = "example.v1.EchoService";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Seen {
@@ -99,66 +93,94 @@ struct SeenCall {
     had_authorization: bool,
 }
 
-#[derive(Clone, Default)]
-struct Echo {
-    calls: Arc<Mutex<Vec<SeenCall>>>,
-    entered: Arc<AtomicUsize>,
-    dropped: Arc<AtomicUsize>,
-    entered_notify: Arc<Notify>,
-    release: CancellationToken,
+struct Hold {
+    release: Notify,
+    released: AtomicBool,
+    entered: AtomicUsize,
+    entered_notify: Notify,
 }
 
-impl Echo {
-    fn observe<T>(&self, request: &Request<T>, seen: Seen) {
-        self.calls
-            .lock()
-            .expect("test observations remain unlocked")
-            .push(SeenCall {
-                cardinality: seen,
-                // template:begin authn:grpc-transport-test-seen-principal
-                had_identity: request
-                    .extensions()
-                    .get::<infra_bearerauthn::Principal>()
-                    .is_some(),
-                // template:end authn:grpc-transport-test-seen-principal
-                had_authorization: request.metadata().get("authorization").is_some(),
-            });
+impl Hold {
+    fn new() -> Self {
+        Self {
+            release: Notify::new(),
+            released: AtomicBool::new(false),
+            entered: AtomicUsize::new(0),
+            entered_notify: Notify::new(),
+        }
     }
 
-    async fn hold(&self) {
-        let witness = DropWitness(Arc::clone(&self.dropped));
-        self.entered.fetch_add(1, Ordering::AcqRel);
+    async fn wait(&self) {
+        let notified = self.release.notified();
+        self.entered.fetch_add(1, Ordering::Release);
         self.entered_notify.notify_waiters();
-        self.release.cancelled().await;
-        drop(witness);
+        if !self.released.load(Ordering::Acquire) {
+            notified.await;
+        }
     }
 
-    async fn wait_for_entries(&self, expected: usize) {
-        timeout(DEADLINE, async {
-            while self.entered.load(Ordering::Acquire) < expected {
+    async fn wait_for(&self, expected: usize) {
+        timeout(FILL, async {
+            loop {
                 let notified = self.entered_notify.notified();
-                if self.entered.load(Ordering::Acquire) < expected {
-                    notified.await;
+                if self.entered.load(Ordering::Acquire) >= expected {
+                    return;
                 }
+                notified.await;
             }
         })
         .await
-        .expect("expected handlers reach the real server");
+        .expect("handlers enter");
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        self.release.notify_waiters();
     }
 }
 
-struct DropWitness(Arc<AtomicUsize>);
+#[derive(Clone)]
+struct Echo {
+    calls: Arc<Mutex<Vec<SeenCall>>>,
+    hold: Arc<Hold>,
+}
 
-impl Drop for DropWitness {
-    fn drop(&mut self) {
-        self.0.fetch_add(1, Ordering::AcqRel);
+impl Echo {
+    fn new() -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            hold: Arc::new(Hold::new()),
+        }
+    }
+
+    fn observe<T>(&self, request: &Request<T>, seen: Seen) {
+        self.calls.lock().expect("observations").push(SeenCall {
+            cardinality: seen,
+            // template:begin authn:grpc-transport-test-seen-principal
+            had_identity: request
+                .extensions()
+                .get::<infra_bearerauthn::Principal>()
+                .is_some(),
+            // template:end authn:grpc-transport-test-seen-principal
+            had_authorization: request.metadata().get("authorization").is_some(),
+        });
     }
 }
 
 #[tonic::async_trait]
 impl EchoService for Echo {
-    type ServerStreamStream = ResponseStream<ServerStreamResponse>;
-    type BidiStreamStream = ResponseStream<BidiStreamResponse>;
+    type ServerStreamStream = Pin<
+        Box<
+            dyn tonic::codegen::tokio_stream::Stream<Item = Result<ServerStreamResponse, Status>>
+                + Send,
+        >,
+    >;
+    type BidiStreamStream = Pin<
+        Box<
+            dyn tonic::codegen::tokio_stream::Stream<Item = Result<BidiStreamResponse, Status>>
+                + Send,
+        >,
+    >;
 
     async fn unary(
         &self,
@@ -166,13 +188,19 @@ impl EchoService for Echo {
     ) -> Result<Response<UnaryResponse>, Status> {
         self.observe(&request, Seen::Unary);
         match request.into_inner().message.as_str() {
-            "raw-initial" => Err(Status::invalid_argument("forged detail: do not leak")),
-            "panic-initial" => panic!("panic detail: do not leak"),
-            "hold" | "deadline" => {
-                self.hold().await;
+            "panic" => panic!("panic detail: do not leak"),
+            "classified" => Err(classified_status(ClassifiedFailure::new(
+                FailureCode::BadRequest,
+            ))),
+            "hold" => {
+                self.hold.wait().await;
                 Ok(Response::new(UnaryResponse {
                     message: "released".to_owned(),
                 }))
+            }
+            "deadline" => {
+                self.hold.wait().await;
+                std::future::pending().await
             }
             message => Ok(Response::new(UnaryResponse {
                 message: message.to_owned(),
@@ -201,30 +229,9 @@ impl EchoService for Echo {
     ) -> Result<Response<Self::ServerStreamStream>, Status> {
         self.observe(&request, Seen::ServerStream);
         let message = request.into_inner().message;
-        let stream: ResponseStream<ServerStreamResponse> = match message.as_str() {
-            "deadline-stream" | "hold-stream" => Box::pin(HeldStream {
-                first: Some(ServerStreamResponse {
-                    message: "first".to_owned(),
-                }),
-                _witness: DropWitness(Arc::clone(&self.dropped)),
-            }),
-            "raw-later" => Box::pin(RawLaterStream {
-                first: Some(ServerStreamResponse {
-                    message: "first".to_owned(),
-                }),
-                panic: false,
-            }),
-            "panic-later" => Box::pin(RawLaterStream {
-                first: Some(ServerStreamResponse {
-                    message: "first".to_owned(),
-                }),
-                panic: true,
-            }),
-            other => Box::pin(tokio_stream::iter([Ok(ServerStreamResponse {
-                message: other.to_owned(),
-            })])),
-        };
-        Ok(Response::new(stream))
+        Ok(Response::new(Box::pin(tonic::codegen::tokio_stream::iter(
+            [Ok(ServerStreamResponse { message })],
+        ))))
     }
 
     async fn bidi_stream(
@@ -233,68 +240,19 @@ impl EchoService for Echo {
     ) -> Result<Response<Self::BidiStreamStream>, Status> {
         self.observe(&request, Seen::BidiStream);
         let mut input = request.into_inner();
-        let first = input
+        let message = input
             .message()
             .await?
-            .expect("test client sends one message")
+            .expect("client sends one message")
             .message;
-        let stream: ResponseStream<BidiStreamResponse> = match first.as_str() {
-            "raw-later" => Box::pin(RawLaterStream {
-                first: Some(BidiStreamResponse {
-                    message: "first".to_owned(),
-                }),
-                panic: false,
-            }),
-            "panic-later" => Box::pin(RawLaterStream {
-                first: Some(BidiStreamResponse {
-                    message: "first".to_owned(),
-                }),
-                panic: true,
-            }),
-            other => Box::pin(tokio_stream::iter([Ok(BidiStreamResponse {
-                message: other.to_owned(),
-            })])),
-        };
-        Ok(Response::new(stream))
-    }
-}
-
-struct RawLaterStream<T> {
-    first: Option<T>,
-    panic: bool,
-}
-
-impl<T: Unpin> Stream for RawLaterStream<T> {
-    type Item = Result<T, Status>;
-
-    fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Some(first) = self.first.take() {
-            return Poll::Ready(Some(Ok(first)));
-        }
-        assert!(!self.panic, "later panic detail: do not leak");
-        Poll::Ready(Some(Err(Status::permission_denied(
-            "later forged detail: do not leak",
+        Ok(Response::new(Box::pin(tonic::codegen::tokio_stream::iter(
+            [Ok(BidiStreamResponse { message })],
         ))))
     }
 }
 
-struct HeldStream {
-    first: Option<ServerStreamResponse>,
-    _witness: DropWitness,
-}
-
-impl Stream for HeldStream {
-    type Item = Result<ServerStreamResponse, Status>;
-
-    fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.first
-            .take()
-            .map_or(Poll::Pending, |item| Poll::Ready(Some(Ok(item))))
-    }
-}
-
 struct Fixture {
-    running: RunningServer,
+    server: Option<Server>,
     readiness: Readiness,
     echo: Echo,
     address: SocketAddr,
@@ -305,46 +263,51 @@ struct Fixture {
 
 impl Fixture {
     async fn plaintext() -> Self {
-        Self::start(ServerSecurity::Plaintext).await
+        Self::open(true, None).await
     }
 
-    async fn start(security: ServerSecurity) -> Self {
+    async fn unseeded() -> Self {
+        Self::open(false, None).await
+    }
+
+    async fn tls(material: ServerTlsMaterial) -> Self {
+        Self::open(true, Some(material)).await
+    }
+
+    async fn open(seed: bool, tls: Option<ServerTlsMaterial>) -> Self {
         // template:begin authn:grpc-transport-test-auth-fixture
         let (verifier, provider) = verifier_fixture().await;
         // template:end authn:grpc-transport-test-auth-fixture
         let readiness = Readiness::new(Vec::new());
-        readiness
-            .refresh(RefreshPolicy {
-                interval: Duration::from_secs(1),
-                probe_budget: Duration::from_secs(1),
-                failure_threshold: 1,
-            })
-            .await;
-        let echo = Echo::default();
+        if seed {
+            seed_ready(&readiness).await;
+        }
+        let echo = Echo::new();
         let mut services = Services::new();
-        register_echo_service(&mut services, echo.clone())
-            .expect("generated service registers once");
-        let prepared = Server::prepare(
+        services
+            .add(EchoServiceServer::new(echo.clone()))
+            .expect("echo registers once");
+        let app = infra_grpc::router(
             services,
             readiness.reader(),
-            // template:begin authn:grpc-transport-test-auth-server-argument
+            // template:begin authn:grpc-transport-test-router-verifier
             verifier,
-            // template:end authn:grpc-transport-test-auth-server-argument
-            ServerOptions {
-                security,
-                effective_drain_budget: DRAIN,
-            },
-        )
-        .expect("accepted transport setup prepares");
-        let bound = prepared
-            .bind("127.0.0.1:0".parse().unwrap())
-            .await
-            .expect("loopback binds");
+            // template:end authn:grpc-transport-test-router-verifier
+        );
+        let bound = match tls {
+            Some(material) => {
+                let config = server_tls_config(&material).expect("server TLS config");
+                Server::bind_tls(loopback(), app, server_options(), config)
+                    .await
+                    .expect("tls listener binds")
+            }
+            None => Server::bind(loopback(), app, server_options())
+                .await
+                .expect("listener binds"),
+        };
         let address = bound.local_addr();
-        let running = bound.start();
-        running.open_admission();
         Self {
-            running,
+            server: Some(bound),
             readiness,
             echo,
             address,
@@ -354,561 +317,570 @@ impl Fixture {
         }
     }
 
-    fn client(&self) -> EchoServiceClient<Client> {
-        let transport = grpc_contracts::generated::echo_service_client_transport(
-            Client::new(
-                &format!("http://{}", self.address),
-                ClientSecurity::Plaintext,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        EchoServiceClient::new(transport)
+    fn echo_client(&self) -> EchoServiceClient<infra_grpc::Client> {
+        EchoServiceClient::new(plaintext_client(self.address))
     }
 
-    async fn native_client(&self) -> EchoServiceClient<tonic::transport::Channel> {
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://{}", self.address))
-            .unwrap()
-            .connect()
-            .await
-            .unwrap();
-        EchoServiceClient::new(channel)
+    fn health(&self) -> HealthClient<infra_grpc::Client> {
+        HealthClient::new(plaintext_client(self.address))
+    }
+
+    fn take_server(&mut self) -> Server {
+        self.server.take().expect("listener still owned")
     }
 
     async fn stop(mut self) {
-        self.echo.release.cancel();
-        self.running
-            .drain(Instant::now() + DEADLINE)
-            .await
-            .expect("server drains");
+        self.echo.hold.release();
+        if let Some(server) = self.server.take() {
+            let drained = timeout(WAIT, server.drain(Duration::from_secs(3)))
+                .await
+                .expect("listener drain finishes")
+                .expect("listener drain succeeds");
+            assert_eq!(drained, Drained::Complete);
+        }
         // template:begin authn:grpc-transport-test-auth-provider-stop
         self.provider.stop().await;
         // template:end authn:grpc-transport-test-auth-provider-stop
     }
 }
 
+fn loopback() -> SocketAddr {
+    "127.0.0.1:0".parse().unwrap()
+}
+
+fn plaintext_client(address: SocketAddr) -> infra_grpc::Client {
+    infra_grpc::Client::new(&format!("http://{address}"), ClientSecurity::Plaintext)
+        .expect("plaintext client")
+}
+
 fn request<T>(message: T) -> Request<T> {
     let mut request = Request::new(message);
-    request.extensions_mut().insert(Operation {
-        deadline: Instant::now() + DEADLINE,
+    // template:begin authn:grpc-transport-test-bearer
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {ACCEPTED}").parse().unwrap(),
+    );
+    // template:end authn:grpc-transport-test-bearer
+    request
+}
+
+fn watch_request(service: &str) -> Request<HealthCheckRequest> {
+    let mut request = Request::new(HealthCheckRequest {
+        service: service.to_owned(),
     });
-    request
-        .metadata_mut()
-        .insert("authorization", "Bearer accepted".parse().unwrap());
-    request
-}
-
-fn health_watch_request(service: String) -> Request<HealthCheckRequest> {
-    let mut request = Request::new(HealthCheckRequest { service });
-    request
-        .metadata_mut()
-        .insert("authorization", "Bearer accepted".parse().unwrap());
+    // template:begin authn:grpc-transport-test-watch-bearer
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {ACCEPTED}").parse().unwrap(),
+    );
+    // template:end authn:grpc-transport-test-watch-bearer
     request
 }
 
-// template:begin authn:grpc-transport-test-auth-cardinalities
+async fn seed_ready(readiness: &Readiness) {
+    readiness
+        .refresh(RefreshPolicy {
+            interval: Duration::from_secs(60),
+            probe_budget: Duration::from_secs(1),
+            failure_threshold: 1,
+        })
+        .await;
+}
+
+fn assert_seen(echo: &Echo, expected: &[Seen]) {
+    let calls = echo.calls.lock().expect("observations");
+    assert_eq!(calls.len(), expected.len());
+    for (call, cardinality) in calls.iter().zip(expected) {
+        assert_eq!(call.cardinality, *cardinality);
+        // template:begin authn:grpc-transport-test-seen-identity-assert
+        assert!(call.had_identity);
+        // template:end authn:grpc-transport-test-seen-identity-assert
+        assert!(!call.had_authorization);
+    }
+}
+
 #[tokio::test]
-async fn generated_registration_applies_authentication_validation_and_privacy_to_all_cardinalities()
-{
+async fn all_cardinalities_round_trip() {
     let fixture = Fixture::plaintext().await;
-    let mut client = fixture.client();
+    let mut client = fixture.echo_client();
 
-    assert_eq!(
-        client
-            .unary(request(UnaryRequest {
-                message: "one".to_owned()
-            }))
-            .await
-            .unwrap()
-            .into_inner()
-            .message,
-        "one"
-    );
-    assert_eq!(
-        client
-            .client_stream(request(tokio_stream::iter([ClientStreamRequest {
-                message: "two".to_owned()
-            }])))
-            .await
-            .unwrap()
-            .into_inner()
-            .message,
-        "two"
-    );
-    let mut server = client
-        .server_stream(request(ServerStreamRequest {
+    let unary = timeout(
+        WAIT,
+        client.unary(request(UnaryRequest {
+            message: "one".to_owned(),
+        })),
+    )
+    .await
+    .expect("unary")
+    .unwrap();
+    assert_eq!(unary.into_inner().message, "one");
+
+    let client_stream = timeout(
+        WAIT,
+        client.client_stream(request(tokio_stream_once(ClientStreamRequest {
+            message: "two".to_owned(),
+        }))),
+    )
+    .await
+    .expect("client stream")
+    .unwrap();
+    assert_eq!(client_stream.into_inner().message, "two");
+
+    let mut server = timeout(
+        WAIT,
+        client.server_stream(request(ServerStreamRequest {
             message: "three".to_owned(),
-        }))
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(server.message().await.unwrap().unwrap().message, "three");
-    let mut bidi = client
-        .bidi_stream(request(tokio_stream::iter([BidiStreamRequest {
-            message: "four".to_owned(),
-        }])))
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(bidi.message().await.unwrap().unwrap().message, "four");
-
+        })),
+    )
+    .await
+    .expect("server stream")
+    .unwrap()
+    .into_inner();
     assert_eq!(
-        fixture.echo.calls.lock().unwrap().as_slice(),
-        [
-            SeenCall {
-                cardinality: Seen::Unary,
-                had_identity: true,
-                had_authorization: false
-            },
-            SeenCall {
-                cardinality: Seen::ClientStream,
-                had_identity: true,
-                had_authorization: false
-            },
-            SeenCall {
-                cardinality: Seen::ServerStream,
-                had_identity: true,
-                had_authorization: false
-            },
-            SeenCall {
-                cardinality: Seen::BidiStream,
-                had_identity: true,
-                had_authorization: false
-            },
-        ]
+        timeout(WAIT, server.message())
+            .await
+            .expect("server item")
+            .unwrap()
+            .unwrap()
+            .message,
+        "three"
     );
 
-    let invalid = client
-        .unary(request(UnaryRequest {
-            message: String::new(),
-        }))
-        .await
-        .unwrap_err();
-    assert_eq!(invalid.code(), Code::InvalidArgument);
-    assert!(!invalid.message().contains("accepted"));
-    fixture.stop().await;
-}
-// template:end authn:grpc-transport-test-auth-cardinalities
-
-#[tokio::test]
-async fn later_invalid_stream_message_is_not_delivered_to_the_feature() {
-    let fixture = Fixture::plaintext().await;
-    let mut client = fixture.client();
-    let error = client
-        .client_stream(request(tokio_stream::iter([
-            ClientStreamRequest {
-                message: "first".to_owned(),
-            },
-            ClientStreamRequest {
-                message: String::new(),
-            },
-        ])))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code(), Code::InvalidArgument);
-    {
-        let calls = fixture.echo.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].cardinality, Seen::ClientStream);
-        // template:begin authn:grpc-transport-test-auth-stream-identity
-        assert!(calls[0].had_identity);
-        assert!(!calls[0].had_authorization);
-        // template:end authn:grpc-transport-test-auth-stream-identity
-    }
-    fixture.stop().await;
-}
-
-#[tokio::test]
-async fn initial_and_later_handler_failures_are_sanitized_on_the_wire() {
-    let fixture = Fixture::plaintext().await;
-    let mut client = fixture.client();
-    for input in ["raw-initial", "panic-initial"] {
-        let error = client
-            .unary(request(UnaryRequest {
-                message: input.to_owned(),
-            }))
+    let mut bidi = timeout(
+        WAIT,
+        client.bidi_stream(request(tokio_stream_once(BidiStreamRequest {
+            message: "four".to_owned(),
+        }))),
+    )
+    .await
+    .expect("bidi")
+    .unwrap()
+    .into_inner();
+    assert_eq!(
+        timeout(WAIT, bidi.message())
             .await
-            .unwrap_err();
-        assert_eq!(error.code(), Code::Internal);
-        assert_eq!(error.message(), "request failed");
-    }
-    for input in ["raw-later", "panic-later"] {
-        let mut response = client
-            .server_stream(request(ServerStreamRequest {
-                message: input.to_owned(),
-            }))
-            .await
+            .expect("bidi item")
             .unwrap()
-            .into_inner();
-        assert_eq!(response.message().await.unwrap().unwrap().message, "first");
-        let error = response.message().await.unwrap_err();
-        assert_eq!(error.code(), Code::Internal);
-        assert_eq!(error.message(), "request failed");
-
-        let mut response = client
-            .bidi_stream(request(tokio_stream::iter([BidiStreamRequest {
-                message: input.to_owned(),
-            }])))
-            .await
             .unwrap()
-            .into_inner();
-        assert_eq!(response.message().await.unwrap().unwrap().message, "first");
-        let error = response.message().await.unwrap_err();
-        assert_eq!(error.code(), Code::Internal);
-        assert_eq!(error.message(), "request failed");
-    }
+            .message,
+        "four"
+    );
+
+    assert_seen(
+        &fixture.echo,
+        &[
+            Seen::Unary,
+            Seen::ClientStream,
+            Seen::ServerStream,
+            Seen::BidiStream,
+        ],
+    );
+    drop(client);
     fixture.stop().await;
 }
 
-#[tokio::test]
-async fn held_business_calls_shed_without_starving_standard_health_and_release_after_cancellation()
-{
-    let fixture = Fixture::plaintext().await;
-    // Admit one authenticated stream at a time so the fixture's single
-    // introspection slot does not shed calls before transport capacity fills.
-    // Three connections keep each below the native 100-stream connection cap.
-    let mut clients = [
-        fixture.native_client().await,
-        fixture.native_client().await,
-        fixture.native_client().await,
-    ];
-    let mut calls = Vec::new();
-    for index in 0..256 {
-        let mut response = timeout(
-            DEADLINE,
-            clients[index % 3].server_stream(request(ServerStreamRequest {
-                message: "hold-stream".to_owned(),
-            })),
-        )
-        .await
-        .expect("stream admission completes")
-        .expect("stream authenticates")
-        .into_inner();
-        assert_eq!(
-            timeout(DEADLINE, response.message())
-                .await
-                .expect("held stream starts")
-                .unwrap()
-                .unwrap()
-                .message,
-            "first"
-        );
-        calls.push(response);
-    }
-    let exhausted = fixture
-        .client()
-        .unary(request(UnaryRequest {
-            message: "after".to_owned(),
-        }))
-        .await
-        .unwrap_err();
-    assert_eq!(exhausted.code(), Code::ResourceExhausted);
+fn tokio_stream_once<T>(item: T) -> impl tonic::codegen::tokio_stream::Stream<Item = T> {
+    tonic::codegen::tokio_stream::iter([item])
+}
 
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://{}", fixture.address))
-        .unwrap()
-        .connect()
+// template:begin authn:grpc-transport-test-unauthenticated
+#[tokio::test]
+async fn missing_and_malformed_bearers_are_unauthenticated_and_only_health_check_is_public() {
+    let fixture = Fixture::plaintext().await;
+    let mut echo = fixture.echo_client();
+    let missing = timeout(
+        WAIT,
+        echo.unary(Request::new(UnaryRequest {
+            message: "missing".to_owned(),
+        })),
+    )
+    .await
+    .expect("missing bearer")
+    .unwrap_err();
+    assert_eq!(missing.code(), Code::Unauthenticated);
+    assert_eq!(missing.message(), "authentication failed");
+
+    let mut malformed = Request::new(UnaryRequest {
+        message: "malformed".to_owned(),
+    });
+    malformed
+        .metadata_mut()
+        .insert("authorization", "Bearer bad token".parse().unwrap());
+    let malformed = timeout(WAIT, echo.unary(malformed))
         .await
-        .unwrap();
-    let health = timeout(
-        DEADLINE,
-        HealthClient::new(channel).check(Request::new(HealthCheckRequest {
+        .expect("malformed bearer")
+        .unwrap_err();
+    assert_eq!(malformed.code(), Code::Unauthenticated);
+    assert_eq!(malformed.message(), "authentication failed");
+    assert!(fixture.echo.calls.lock().expect("observations").is_empty());
+
+    let mut health = fixture.health();
+    let check = timeout(
+        WAIT,
+        health.check(Request::new(HealthCheckRequest {
             service: String::new(),
         })),
     )
     .await
-    .expect("health is not starved by business capacity")
+    .expect("public health check")
     .unwrap();
-    assert_eq!(health.into_inner().status, ServingStatus::Serving as i32);
+    assert_eq!(check.into_inner().status, ServingStatus::Serving as i32);
 
-    drop(calls);
-    timeout(DEADLINE, async {
-        while fixture.echo.dropped.load(Ordering::Acquire) < 256 {
-            tokio::task::yield_now().await;
+    let watch = timeout(
+        WAIT,
+        health.watch(Request::new(HealthCheckRequest {
+            service: String::new(),
+        })),
+    )
+    .await
+    .expect("health watch")
+    .unwrap_err();
+    assert_eq!(watch.code(), Code::Unauthenticated);
+    assert_eq!(watch.message(), "authentication failed");
+    drop(echo);
+    drop(health);
+    fixture.stop().await;
+}
+// template:end authn:grpc-transport-test-unauthenticated
+
+#[tokio::test]
+async fn business_limit_sheds_the_next_call_without_starving_health() {
+    let fixture = Fixture::plaintext().await;
+    timeout(
+        WAIT,
+        fixture.echo_client().unary(request(UnaryRequest {
+            message: "warm".to_owned(),
+        })),
+    )
+    .await
+    .expect("warm call")
+    .unwrap();
+
+    let first = fixture.echo_client();
+    let second = fixture.echo_client();
+    let mut calls = Vec::with_capacity(256);
+    for index in 0..256 {
+        let mut client = if index < 128 {
+            first.clone()
+        } else {
+            second.clone()
+        };
+        calls.push(tokio::spawn(async move {
+            client
+                .unary(request(UnaryRequest {
+                    message: "hold".to_owned(),
+                }))
+                .await
+        }));
+    }
+    fixture.echo.hold.wait_for(256).await;
+
+    let exhausted = timeout(
+        WAIT,
+        fixture.echo_client().unary(request(UnaryRequest {
+            message: "overflow".to_owned(),
+        })),
+    )
+    .await
+    .expect("overflow call")
+    .unwrap_err();
+    assert_eq!(exhausted.code(), Code::ResourceExhausted);
+    assert_eq!(exhausted.message(), service_failure::AT_CAPACITY_DETAIL);
+
+    let serving = timeout(
+        WAIT,
+        fixture.health().check(Request::new(HealthCheckRequest {
+            service: String::new(),
+        })),
+    )
+    .await
+    .expect("health during capacity")
+    .unwrap();
+    assert_eq!(serving.into_inner().status, ServingStatus::Serving as i32);
+
+    fixture.echo.hold.release();
+    timeout(WAIT, async {
+        for call in calls {
+            let response = call.await.expect("held call joins").unwrap();
+            assert_eq!(response.into_inner().message, "released");
         }
     })
     .await
-    .expect("held work is dropped");
-    assert_eq!(
-        fixture
-            .client()
-            .unary(request(UnaryRequest {
-                message: "after".to_owned()
-            }))
-            .await
-            .unwrap()
-            .into_inner()
-            .message,
-        "after"
-    );
-    drop(clients);
-    fixture.stop().await;
-}
+    .expect("held calls finish");
 
-#[tokio::test]
-async fn caller_deadline_cancels_work_and_releases_its_permit() {
-    let fixture = Fixture::plaintext().await;
-    // Channel installs its own grpc-timeout timer, which can race the server
-    // into CANCELLED. Keep native tonic messages over Hyper's HTTP/2 transport
-    // here so only the server under test owns the one-second request deadline.
-    let stream = timeout(DEADLINE, TcpStream::connect(fixture.address))
-        .await
-        .unwrap()
-        .unwrap();
-    let (sender, connection) = timeout(
-        DEADLINE,
-        hyper::client::conn::http2::handshake::<_, _, tonic::body::Body>(
-            hyper_util::rt::TokioExecutor::new(),
-            hyper_util::rt::TokioIo::new(stream),
-        ),
+    let followed = timeout(
+        WAIT,
+        fixture.echo_client().unary(request(UnaryRequest {
+            message: "after".to_owned(),
+        })),
     )
     .await
-    .unwrap()
+    .expect("call after release")
     .unwrap();
-    let connection = tokio::spawn(connection);
+    assert_eq!(followed.into_inner().message, "after");
+    drop(first);
+    drop(second);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn unary_deadline_is_deadline_exceeded_on_the_raw_http2_response() {
+    let fixture = Fixture::plaintext().await;
     let address = fixture.address;
-    let transport = tower::service_fn(move |mut request: http::Request<tonic::body::Body>| {
-        let mut sender = sender.clone();
-        let uri = format!("http://{address}{}", request.uri().path())
-            .parse()
-            .unwrap();
-        *request.uri_mut() = uri;
-        async move {
-            sender.ready().await?;
-            sender.send_request(request).await
-        }
-    });
-    let mut client = EchoServiceClient::new(transport);
-    let mut deadline = request(UnaryRequest {
-        message: "deadline".to_owned(),
-    });
-    deadline.set_timeout(Duration::from_secs(1));
-    let call = tokio::spawn(async move { client.unary(deadline).await });
-    fixture.echo.wait_for_entries(1).await;
-    let error = timeout(DEADLINE, call)
+    let call = tokio::spawn(async move { raw_deadline(address).await });
+    fixture.echo.hold.wait_for(1).await;
+    let status = timeout(WAIT, call)
         .await
-        .expect("server deadline terminates initial work")
-        .expect("client joins")
-        .unwrap_err();
-    assert_eq!(error.code(), Code::DeadlineExceeded);
-    assert_eq!(fixture.echo.dropped.load(Ordering::Acquire), 1);
-    assert_eq!(
-        fixture
-            .client()
-            .unary(request(UnaryRequest {
-                message: "after".to_owned()
-            }))
-            .await
-            .unwrap()
-            .into_inner()
-            .message,
-        "after"
-    );
-    fixture.stop().await;
-    let _ = timeout(DEADLINE, connection)
-        .await
-        .expect("HTTP/2 driver stops")
-        .expect("HTTP/2 driver joins");
-}
-
-#[tokio::test]
-async fn deadline_wakes_a_suspended_response_and_emits_terminal_status() {
-    let fixture = Fixture::plaintext().await;
-    let mut client = fixture.native_client().await;
-    let mut request = request(ServerStreamRequest {
-        message: "deadline-stream".to_owned(),
-    });
-    request.set_timeout(Duration::from_secs(1));
-    let mut response = client.server_stream(request).await.unwrap().into_inner();
-    assert_eq!(response.message().await.unwrap().unwrap().message, "first");
-    let error = timeout(DEADLINE, response.message())
-        .await
-        .expect("server wakes the pending body for deadline trailers")
-        .unwrap_err();
-    assert_eq!(error.code(), Code::DeadlineExceeded);
-    assert_eq!(fixture.echo.dropped.load(Ordering::Acquire), 1);
+        .expect("raw deadline response")
+        .expect("raw deadline task");
+    assert_eq!(status, "4");
     fixture.stop().await;
 }
 
-#[tokio::test]
-async fn unknown_methods_do_not_authenticate_or_invoke_the_feature() {
-    let fixture = Fixture::plaintext().await;
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://{}", fixture.address))
+async fn raw_deadline(address: SocketAddr) -> String {
+    let stream = TcpStream::connect(address).await.expect("connect");
+    let (mut sender, connection) = hyper::client::conn::http2::handshake(
+        hyper_util::rt::TokioExecutor::new(),
+        hyper_util::rt::TokioIo::new(stream),
+    )
+    .await
+    .expect("http2 handshake");
+    let driver = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let mut timeout_request = Request::new(());
+    timeout_request.set_timeout(Duration::from_millis(100));
+    let grpc_timeout = timeout_request
+        .metadata()
+        .get("grpc-timeout")
+        .expect("set_timeout header")
+        .to_str()
         .unwrap()
-        .connect()
-        .await
+        .to_owned();
+    let mut builder = http::Request::builder()
+        .method("POST")
+        .uri(format!("http://{address}{ECHO_SERVICE_UNARY}"))
+        .header("host", address.to_string())
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .header("grpc-timeout", grpc_timeout);
+    // template:begin authn:grpc-transport-test-deadline-bearer
+    builder = builder.header("authorization", format!("Bearer {ACCEPTED}"));
+    // template:end authn:grpc-transport-test-deadline-bearer
+    let request = builder
+        .body(axum::body::Body::from(grpc_frame("deadline")))
         .unwrap();
-    let mut client = tonic::client::Grpc::new(channel);
-    for authenticated in [false, true] {
-        let message = UnaryRequest {
-            message: "unknown".to_owned(),
-        };
-        let request = if authenticated {
-            request(message)
-        } else {
-            Request::new(message)
-        };
-        client.ready().await.unwrap();
-        let result: Result<Response<UnaryResponse>, Status> = client
-            .unary(
-                request,
-                http::uri::PathAndQuery::from_static("/example.v1.EchoService/Unknown"),
-                tonic_prost::ProstCodec::default(),
-            )
-            .await;
-        assert_eq!(result.unwrap_err().code(), Code::Unimplemented);
-    }
-    assert!(fixture.echo.calls.lock().unwrap().is_empty());
-    // template:begin authn:grpc-transport-test-unknown-provider
-    assert_eq!(fixture.provider.requests.load(Ordering::Acquire), 0);
-    // template:end authn:grpc-transport-test-unknown-provider
+    let pending = tokio::spawn(async move { sender.send_request(request).await });
+    let response = pending.await.expect("request task").expect("response");
+    let status = response
+        .headers()
+        .get("grpc-status")
+        .expect("server status")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    driver.abort();
+    status
+}
+
+const ECHO_SERVICE_UNARY: &str = "/example.v1.EchoService/Unary";
+
+fn grpc_frame(message: &str) -> Vec<u8> {
+    let text = message.as_bytes();
+    let mut payload = Vec::with_capacity(2 + text.len());
+    payload.push(0x0a);
+    payload.push(u8::try_from(text.len()).unwrap());
+    payload.extend_from_slice(text);
+    let mut frame = Vec::with_capacity(5 + payload.len());
+    frame.push(0);
+    frame.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
+    frame.extend_from_slice(&payload);
+    frame
+}
+
+#[tokio::test]
+async fn handler_panic_is_internal_and_the_server_keeps_serving() {
+    let fixture = Fixture::plaintext().await;
+    let error = timeout(
+        WAIT,
+        fixture.echo_client().unary(request(UnaryRequest {
+            message: "panic".to_owned(),
+        })),
+    )
+    .await
+    .expect("panic call")
+    .unwrap_err();
+    assert_eq!(error.code(), Code::Internal);
+    assert_eq!(error.message(), "request failed");
+    let followed = timeout(
+        WAIT,
+        fixture.echo_client().unary(request(UnaryRequest {
+            message: "after-panic".to_owned(),
+        })),
+    )
+    .await
+    .expect("call after panic")
+    .unwrap();
+    assert_eq!(followed.into_inner().message, "after-panic");
     fixture.stop().await;
 }
 
 #[tokio::test]
-async fn health_reports_readiness_unknown_watch_and_monotone_drain() {
+async fn classified_status_passes_through_with_error_info() {
     let fixture = Fixture::plaintext().await;
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://{}", fixture.address))
-        .unwrap()
-        .connect()
-        .await
-        .unwrap();
-    let mut health = HealthClient::new(channel);
-    let unknown = health
-        .check(Request::new(HealthCheckRequest {
+    let error = timeout(
+        WAIT,
+        fixture.echo_client().unary(request(UnaryRequest {
+            message: "classified".to_owned(),
+        })),
+    )
+    .await
+    .expect("classified call")
+    .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    let details = error.get_error_details();
+    let info = details.error_info().expect("error info");
+    assert_eq!(info.reason, FailureCode::BadRequest.as_str());
+    assert_eq!(info.domain, "service");
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn health_watch_ends_on_drain_and_the_listener_drain_completes() {
+    let mut fixture = Fixture::unseeded().await;
+    let mut health = fixture.health();
+    let before = timeout(
+        WAIT,
+        health.check(Request::new(HealthCheckRequest {
+            service: ECHO_SERVICE.to_owned(),
+        })),
+    )
+    .await
+    .expect("check before seed")
+    .unwrap();
+    assert_eq!(before.into_inner().status, ServingStatus::NotServing as i32);
+    let unknown = timeout(
+        WAIT,
+        health.check(Request::new(HealthCheckRequest {
             service: "missing".to_owned(),
-        }))
-        .await
-        .unwrap_err();
+        })),
+    )
+    .await
+    .expect("unknown check")
+    .unwrap_err();
     assert_eq!(unknown.code(), Code::NotFound);
-    let mut unknown_watch = health
-        .watch(health_watch_request("missing".to_owned()))
+
+    seed_ready(&fixture.readiness).await;
+    let mut known = timeout(WAIT, health.watch(watch_request(ECHO_SERVICE)))
         .await
+        .expect("known watch")
         .unwrap()
         .into_inner();
     assert_eq!(
-        unknown_watch.message().await.unwrap().unwrap().status,
-        ServingStatus::ServiceUnknown as i32
-    );
-    assert!(
-        timeout(Duration::from_millis(20), unknown_watch.message())
+        timeout(WAIT, known.message())
             .await
-            .is_err(),
-        "unknown Watch must remain open"
-    );
-    let mut watch = health
-        .watch(health_watch_request(String::new()))
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(
-        watch.message().await.unwrap().unwrap().status,
+            .expect("known watch item")
+            .unwrap()
+            .unwrap()
+            .status,
         ServingStatus::Serving as i32
     );
+    let mut unknown_watch = timeout(WAIT, health.watch(watch_request("missing")))
+        .await
+        .expect("unknown watch")
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        timeout(WAIT, unknown_watch.message())
+            .await
+            .expect("unknown watch item")
+            .unwrap()
+            .unwrap()
+            .status,
+        ServingStatus::ServiceUnknown as i32
+    );
+
+    let server = fixture.take_server();
+    let drain = tokio::spawn(async move { server.drain(Duration::from_secs(3)).await });
     fixture.readiness.start_drain();
-    fixture.running.begin_drain();
-    // template:begin authn:grpc-transport-test-drain-provider-before
-    let provider_requests = fixture.provider.requests.load(Ordering::Acquire);
-    // template:end authn:grpc-transport-test-drain-provider-before
-    let rejected = fixture
-        .client()
-        .unary(request(UnaryRequest {
-            message: "after-drain".to_owned(),
-        }))
-        .await
-        .unwrap_err();
-    assert_eq!(rejected.code(), Code::Unavailable);
-    assert!(fixture.echo.calls.lock().unwrap().is_empty());
-    // template:begin authn:grpc-transport-test-drain-provider-after
     assert_eq!(
-        fixture.provider.requests.load(Ordering::Acquire),
-        provider_requests
-    );
-    // template:end authn:grpc-transport-test-drain-provider-after
-    assert_eq!(
-        watch.message().await.unwrap().unwrap().status,
-        ServingStatus::NotServing as i32
-    );
-    let stopped = health
-        .check(Request::new(HealthCheckRequest {
-            service: String::new(),
-        }))
-        .await
-        .unwrap();
-    assert_eq!(
-        stopped.into_inner().status,
-        ServingStatus::NotServing as i32
-    );
-    fixture.stop().await;
-}
-
-#[tokio::test]
-async fn expired_drain_retains_transport_tasks_for_the_existing_cleanup_stage() {
-    let mut fixture = Fixture::plaintext().await;
-    let mut client = fixture.native_client().await;
-    let call = tokio::spawn(async move {
-        client
-            .unary(request(UnaryRequest {
-                message: "hold".to_owned(),
-            }))
+        timeout(WAIT, known.message())
             .await
-    });
-    fixture.echo.wait_for_entries(1).await;
-    assert_eq!(
-        fixture.running.drain(Instant::now()).await,
-        Err(infra_grpc::Error::DrainTimedOut)
+            .expect("drain status")
+            .unwrap()
+            .unwrap()
+            .status,
+        ServingStatus::NotServing as i32
     );
-    fixture
-        .running
-        .join_shutdown(Instant::now() + DEADLINE)
-        .await
-        .expect("forced transport work joins in cleanup");
-    assert_eq!(fixture.echo.dropped.load(Ordering::Acquire), 1);
     assert!(
-        timeout(DEADLINE, call)
+        timeout(WAIT, known.message())
             .await
-            .expect("client observes closure")
-            .expect("client task joins")
-            .is_err()
+            .expect("known watch end")
+            .unwrap()
+            .is_none()
     );
+    assert!(
+        timeout(WAIT, unknown_watch.message())
+            .await
+            .expect("unknown watch end")
+            .unwrap()
+            .is_none()
+    );
+    drop(known);
+    drop(unknown_watch);
+    drop(health);
+    let drained = timeout(WAIT, drain)
+        .await
+        .expect("drain task")
+        .expect("drain joins")
+        .expect("drain succeeds");
+    assert_eq!(drained, Drained::Complete);
     fixture.stop().await;
 }
 
 #[tokio::test]
-async fn tls13_and_mtls_accept_only_the_trusted_client_and_reject_tls12() {
-    let pki = Pki::new("localhost");
-    let fixture = Fixture::start(ServerSecurity::Tls(ServerTlsMaterial {
+async fn tls13_with_a_trusted_ca_succeeds_and_tls12_is_refused() {
+    let pki = Pki::new(&["127.0.0.1", "localhost"]);
+    let fixture = Fixture::tls(ServerTlsMaterial {
+        certificate_pem: pki.server_certificate.clone(),
+        private_key_pem: pki.server_key.clone(),
+        client_ca_pem: None,
+    })
+    .await;
+    let mut client = EchoServiceClient::new(tls_client(
+        fixture.address,
+        ClientTlsMaterial {
+            ca_certificate_pem: Some(pki.ca_certificate.clone()),
+            certificate_pem: None,
+            private_key_pem: None,
+        },
+    ));
+    let response = timeout(
+        WAIT,
+        client.unary(request(UnaryRequest {
+            message: "tls13".to_owned(),
+        })),
+    )
+    .await
+    .expect("tls unary")
+    .unwrap();
+    assert_eq!(response.into_inner().message, "tls13");
+    assert_tls_denied(fixture.address, &pki, None, true).await;
+    drop(client);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn mtls_refuses_a_client_without_a_trusted_certificate() {
+    let pki = Pki::new(&["127.0.0.1", "localhost"]);
+    let fixture = Fixture::tls(ServerTlsMaterial {
         certificate_pem: pki.server_certificate.clone(),
         private_key_pem: pki.server_key.clone(),
         client_ca_pem: Some(pki.ca_certificate.clone()),
-    }))
+    })
     .await;
-    let transport = grpc_contracts::generated::echo_service_client_transport(
-        Client::new(
-            &format!("https://localhost:{}", fixture.address.port()),
-            ClientSecurity::Tls(ClientTlsMaterial {
-                ca_certificate_pem: Some(pki.ca_certificate.clone()),
-                certificate_pem: Some(pki.client_certificate.clone()),
-                private_key_pem: Some(pki.client_key.clone()),
-            }),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let mut client = EchoServiceClient::new(transport);
-    assert_eq!(
-        client
-            .unary(request(UnaryRequest {
-                message: "tls13".to_owned()
-            }))
-            .await
-            .unwrap()
-            .into_inner()
-            .message,
-        "tls13"
-    );
-
     assert_tls_denied(fixture.address, &pki, None, false).await;
-    let wrong = Pki::new("localhost");
+    let wrong = Pki::new(&["127.0.0.1"]);
     assert_tls_denied(
         fixture.address,
         &pki,
@@ -917,49 +889,89 @@ async fn tls13_and_mtls_accept_only_the_trusted_client_and_reject_tls12() {
     )
     .await;
     assert_tls_denied(fixture.address, &pki, None, true).await;
+
+    let mut client = EchoServiceClient::new(tls_client(
+        fixture.address,
+        ClientTlsMaterial {
+            ca_certificate_pem: Some(pki.ca_certificate.clone()),
+            certificate_pem: Some(pki.client_certificate.clone()),
+            private_key_pem: Some(pki.client_key.clone()),
+        },
+    ));
+    let response = timeout(
+        WAIT,
+        client.unary(request(UnaryRequest {
+            message: "mtls".to_owned(),
+        })),
+    )
+    .await
+    .expect("mtls unary")
+    .unwrap();
+    assert_eq!(response.into_inner().message, "mtls");
+    drop(client);
     fixture.stop().await;
+}
+
+fn tls_client(address: SocketAddr, material: ClientTlsMaterial) -> infra_grpc::Client {
+    infra_grpc::Client::new(
+        &format!("https://127.0.0.1:{}", address.port()),
+        ClientSecurity::Tls(material),
+    )
+    .expect("tls client")
 }
 
 // template:begin authn:grpc-transport-test-auth-provider
 struct ProviderFixture {
-    cancel: CancellationToken,
-    task: JoinHandle<()>,
-    requests: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    wake: Arc<Notify>,
+    cancel: tokio_util::sync::CancellationToken,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl ProviderFixture {
     async fn stop(self) {
         self.cancel.cancel();
-        self.task.await.expect("provider task joins");
+        self.stop.store(true, Ordering::Release);
+        self.wake.notify_waiters();
+        timeout(WAIT, self.task)
+            .await
+            .expect("provider stops")
+            .expect("provider joins");
     }
 }
 
 async fn verifier_fixture() -> (Verifier, ProviderFixture) {
-    let pki = Pki::new("provider.test");
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let pki = Pki::new(&["provider.test"]);
+    let listener = TcpListener::bind(loopback()).await.unwrap();
     let address = listener.local_addr().unwrap();
-    let mut tls = server_tls_config(&pki, false);
-    // This provider writes HTTP/1.1; advertising h2 would select the wrong wire protocol.
+    let mut tls = provider_tls_config(&pki);
     tls.alpn_protocols.clear();
     let acceptor = TlsAcceptor::from(Arc::new(tls));
-    let cancel = CancellationToken::new();
-    let requests = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let wake = Arc::new(Notify::new());
+    let cancel = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn({
-        let cancel = cancel.clone();
-        let requests = Arc::clone(&requests);
+        let stop = Arc::clone(&stop);
+        let wake = Arc::clone(&wake);
         async move {
             loop {
-                let accepted = tokio::select! { () = cancel.cancelled() => break, accepted = listener.accept() => accepted };
+                let notified = wake.notified();
+                if stop.load(Ordering::Acquire) {
+                    break;
+                }
+                let accepted = tokio::select! {
+                    biased;
+                    () = notified => break,
+                    accepted = listener.accept() => accepted,
+                };
                 let Ok((stream, _)) = accepted else {
                     continue;
                 };
                 let acceptor = acceptor.clone();
-                let requests = Arc::clone(&requests);
                 tokio::spawn(async move {
                     if let Ok(mut stream) = acceptor.accept(stream).await {
                         let mut request = [0_u8; 4096];
                         let _ = stream.read(&mut request).await;
-                        requests.fetch_add(1, Ordering::AcqRel);
                         let expiry = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
@@ -992,8 +1004,8 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
             .unwrap(),
             client_id: "fixture".to_owned(),
             client_secret: SecretString::from("fixture"),
-            provider_concurrency: std::num::NonZeroUsize::new(1).unwrap(),
-            cache: None,
+            provider_concurrency: std::num::NonZeroUsize::new(32).unwrap(),
+            cache: Some(IntrospectionCacheOptions::new(16, Duration::from_secs(60)).unwrap()),
         },
         fixture,
     )
@@ -1001,11 +1013,29 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
     (
         verifier,
         ProviderFixture {
+            stop,
+            wake,
             cancel,
             task,
-            requests,
         },
     )
+}
+
+fn provider_tls_config(pki: &Pki) -> rustls::ServerConfig {
+    let certificates = rustls::pki_types::CertificateDer::pem_slice_iter(&pki.server_certificate)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let key = PrivateKeyDer::from_pem_slice(&pki.server_key).unwrap();
+    let mut config = rustls::ServerConfig::builder_with_provider(
+        rustls::crypto::aws_lc_rs::default_provider().into(),
+    )
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(certificates, key)
+    .unwrap();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config
 }
 // template:end authn:grpc-transport-test-auth-provider
 
@@ -1021,15 +1051,18 @@ struct Pki {
 }
 
 impl Pki {
-    fn new(host: &str) -> Self {
+    fn new(names: &[&str]) -> Self {
         let mut ca = CertificateParams::default();
         ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let issuer = CertifiedIssuer::self_signed(ca, KeyPair::generate().unwrap()).unwrap();
         let (server_certificate, server_key) =
-            leaf(host, vec![ExtendedKeyUsagePurpose::ServerAuth], &issuer);
-        let (client_certificate, client_key) =
-            leaf("client", vec![ExtendedKeyUsagePurpose::ClientAuth], &issuer);
+            leaf(names, vec![ExtendedKeyUsagePurpose::ServerAuth], &issuer);
+        let (client_certificate, client_key) = leaf(
+            &["client"],
+            vec![ExtendedKeyUsagePurpose::ClientAuth],
+            &issuer,
+        );
         Self {
             ca_certificate: issuer.pem().into_bytes(),
             // template:begin authn:grpc-transport-test-auth-ca-der-init
@@ -1044,12 +1077,18 @@ impl Pki {
 }
 
 fn leaf(
-    host: &str,
+    names: &[&str],
     usages: Vec<ExtendedKeyUsagePurpose>,
     issuer: &CertifiedIssuer<'_, KeyPair>,
 ) -> (Vec<u8>, Vec<u8>) {
     let key = KeyPair::generate().unwrap();
-    let mut params = CertificateParams::new(vec![host.to_owned()]).unwrap();
+    let mut params = CertificateParams::new(
+        names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
     params.extended_key_usages = usages;
     let certificate = params.signed_by(&key, issuer).unwrap();
     (
@@ -1057,38 +1096,6 @@ fn leaf(
         key.serialize_pem().into_bytes(),
     )
 }
-
-// template:begin authn:grpc-transport-test-auth-provider-tls
-fn server_tls_config(pki: &Pki, client_auth: bool) -> rustls::ServerConfig {
-    // PEM parsing here follows the production parser through the public material.
-    let certs = rustls::pki_types::CertificateDer::pem_slice_iter(&pki.server_certificate)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let key = PrivateKeyDer::from_pem_slice(&pki.server_key).unwrap();
-    let builder = rustls::ServerConfig::builder_with_provider(
-        rustls::crypto::aws_lc_rs::default_provider().into(),
-    )
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .unwrap();
-    let mut config = if client_auth {
-        let mut roots = RootCertStore::empty();
-        for certificate in rustls::pki_types::CertificateDer::pem_slice_iter(&pki.ca_certificate) {
-            roots.add(certificate.unwrap()).unwrap();
-        }
-        builder.with_client_cert_verifier(
-            rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
-                .build()
-                .unwrap(),
-        )
-    } else {
-        builder.with_no_client_auth()
-    }
-    .with_single_cert(certs, key)
-    .unwrap();
-    config.alpn_protocols = vec![b"h2".to_vec()];
-    config
-}
-// template:end authn:grpc-transport-test-auth-provider-tls
 
 async fn assert_tls_denied(
     address: SocketAddr,
@@ -1100,14 +1107,14 @@ async fn assert_tls_denied(
     for certificate in rustls::pki_types::CertificateDer::pem_slice_iter(&trusted.ca_certificate) {
         roots.add(certificate.unwrap()).unwrap();
     }
-    let versions = if tls12 {
-        vec![&rustls::version::TLS12]
+    let versions: &[&rustls::SupportedProtocolVersion] = if tls12 {
+        &[&rustls::version::TLS12]
     } else {
-        vec![&rustls::version::TLS13]
+        &[&rustls::version::TLS13]
     };
     let builder =
         ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
-            .with_protocol_versions(&versions)
+            .with_protocol_versions(versions)
             .unwrap()
             .with_root_certificates(roots);
     let config = match identity {
@@ -1123,20 +1130,17 @@ async fn assert_tls_denied(
     };
     let stream = TcpStream::connect(address).await.unwrap();
     let result = timeout(
-        DEADLINE,
+        WAIT,
         TlsConnector::from(Arc::new(config))
-            .connect(ServerName::try_from("localhost").unwrap(), stream),
+            .connect(ServerName::try_from("127.0.0.1").unwrap(), stream),
     )
     .await;
     let denied = match result {
         Ok(Err(_)) => true,
         Ok(Ok(mut stream)) => {
-            // TLS 1.3 can finish the client's flight before the client reads
-            // the server's certificate-required or untrusted-certificate alert.
-            // A timeout is not proof of denial: observe an error or peer close.
             let mut byte = [0_u8; 1];
             matches!(
-                timeout(DEADLINE, stream.read(&mut byte)).await,
+                timeout(WAIT, stream.read(&mut byte)).await,
                 Ok(Err(_) | Ok(0))
             )
         }

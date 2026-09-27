@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package example.v1;
 
-import "buf/validate/validate.proto";
-
 // Echo is an intentionally small transport example. It exercises each native
 // gRPC cardinality without defining a production business API.
 service EchoService {
@@ -14,45 +12,33 @@ service EchoService {
 }
 
 message UnaryRequest {
-  string message = 1 [(buf.validate.field).string = {
-    min_len: 1
-    max_len: 1024
-  }];
+  string message = 1;
 }
 
 message UnaryResponse {
-  string message = 1 [(buf.validate.field).string.max_len = 1024];
+  string message = 1;
 }
 
 message ClientStreamRequest {
-  string message = 1 [(buf.validate.field).string = {
-    min_len: 1
-    max_len: 1024
-  }];
+  string message = 1;
 }
 
 message ClientStreamResponse {
-  string message = 1 [(buf.validate.field).string.max_len = 1024];
+  string message = 1;
 }
 
 message ServerStreamRequest {
-  string message = 1 [(buf.validate.field).string = {
-    min_len: 1
-    max_len: 1024
-  }];
+  string message = 1;
 }
 
 message ServerStreamResponse {
-  string message = 1 [(buf.validate.field).string.max_len = 1024];
+  string message = 1;
 }
 
 message BidiStreamRequest {
-  string message = 1 [(buf.validate.field).string = {
-    min_len: 1
-    max_len: 1024
-  }];
+  string message = 1;
 }
 
 message BidiStreamResponse {
-  string message = 1 [(buf.validate.field).string.max_len = 1024];
+  string message = 1;
 }

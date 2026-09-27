@@ -1,5 +1,6 @@
 //! Black-box proof that the gRPC example shares the shipped process lifecycle.
 
+#![cfg(target_os = "linux")]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use std::io::{BufRead as _, BufReader};
@@ -8,9 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
-use grpc_contracts::generated::{
-    BidiStreamRequest, BidiStreamResponse, UnaryRequest, echo_service_client::EchoServiceClient,
-};
+use grpc_contracts::generated::{UnaryRequest, echo_service_client::EchoServiceClient};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
@@ -103,7 +102,7 @@ impl Example {
         .expect("send SIGTERM");
     }
 
-    fn wait_within(mut self, within: Duration) -> (Option<i32>, String) {
+    fn wait_within(mut self, within: Duration) -> (Option<i32>, String, Vec<String>) {
         let deadline = Instant::now() + within;
         let status = loop {
             if let Some(status) = self.child.try_wait().expect("poll gRPC example") {
@@ -120,7 +119,16 @@ impl Example {
         if let Some(mut pipe) = self.child.stderr.take() {
             let _ = std::io::Read::read_to_string(&mut pipe, &mut stderr);
         }
-        (status.code(), stderr)
+        let mut logs = Vec::new();
+        let log_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < log_deadline {
+            match self.lines.recv_timeout(Duration::from_millis(50)) {
+                Ok(line) => logs.push(line),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        (status.code(), stderr, logs)
     }
 }
 
@@ -318,20 +326,19 @@ fn poll_status(url: &str, expected: u16, within: Duration) -> bool {
     false
 }
 
-fn health_check(address: &str, certificate: String) -> Result<ServingStatus, tonic::Status> {
+fn health_check(address: &str, certificate: String) -> Result<i32, tonic::Status> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|_| tonic::Status::internal("test runtime failed"))?;
     runtime.block_on(async move {
         let mut health = HealthClient::new(channel(address, certificate).await?);
-        let request = Request::new(HealthCheckRequest {
-            service: String::new(),
-        });
         health
-            .check(request)
+            .check(Request::new(HealthCheckRequest {
+                service: String::new(),
+            }))
             .await
-            .map(|response| response.into_inner().status())
+            .map(|response| response.into_inner().status)
     })
 }
 
@@ -356,19 +363,12 @@ fn unary(address: &str, certificate: String, token: &str) -> Result<String, toni
     })
 }
 
-async fn watch_and_hold(
+async fn hold_watch(
     address: &str,
     certificate: String,
     token: String,
-) -> Result<
-    (
-        tonic::Streaming<HealthCheckResponse>,
-        tonic::Streaming<BidiStreamResponse>,
-        tokio::sync::mpsc::Sender<BidiStreamRequest>,
-    ),
-    tonic::Status,
-> {
-    let mut health = HealthClient::new(channel(address, certificate.clone()).await?);
+) -> Result<tonic::Streaming<HealthCheckResponse>, tonic::Status> {
+    let mut health = HealthClient::new(channel(address, certificate).await?);
     let mut watch = Request::new(HealthCheckRequest {
         service: String::new(),
     });
@@ -381,21 +381,12 @@ async fn watch_and_hold(
         .message()
         .await?
         .ok_or_else(|| tonic::Status::internal("missing health watch state"))?;
-    if initial.status() != ServingStatus::Serving {
+    if initial.status != ServingStatus::Serving as i32 {
         return Err(tonic::Status::unavailable(
             "health watch did not start serving",
         ));
     }
-
-    let mut echo = EchoServiceClient::new(channel(address, certificate).await?);
-    let (sender, receiver) = tokio::sync::mpsc::channel(1);
-    let mut held = Request::new(tokio_stream::wrappers::ReceiverStream::new(receiver));
-    held.metadata_mut().insert(
-        "authorization",
-        format!("Bearer {token}").parse().expect("bearer metadata"),
-    );
-    let held = echo.bidi_stream(held).await?.into_inner();
-    Ok((watch, held, sender))
+    Ok(watch)
 }
 
 async fn channel(address: &str, certificate: String) -> Result<Channel, tonic::Status> {
@@ -424,79 +415,70 @@ fn listener_addresses(example: &Example) -> (String, String) {
     (http, grpc)
 }
 
+fn logged_messages(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|record| record["message"].as_str().map(str::to_owned))
+        .collect()
+}
+
 #[test]
-#[cfg(target_os = "linux")]
 fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
-    // The example build can cold-compile the whole selected feature graph.
-    // Finish it before starting the bounded OIDC fixture that waits for the
-    // child process's discovery request.
     let _ = example_binary();
-    let oidc = OidcFixture::new(2);
+    let oidc = OidcFixture::new(1);
     let (certificate, private_key) = tls_material();
-
-    let clean = Example::spawn(&oidc, &certificate, &private_key);
-    let (clean_http, clean_grpc) = listener_addresses(&clean);
-    let clean_ready = format!("http://{clean_http}/health/ready");
-    assert!(poll_status(&clean_ready, 200, Duration::from_secs(5)));
-    assert_eq!(
-        health_check(&clean_grpc, certificate.clone()).expect("clean TLS health check"),
-        ServingStatus::Serving
-    );
-    clean.terminate();
-    assert!(poll_status(&clean_ready, 503, Duration::from_millis(250)));
-    let (code, stderr) = clean.wait_within(Duration::from_secs(5));
-    assert_eq!(code, Some(0), "stderr: {stderr}");
-
     let example = Example::spawn(&oidc, &certificate, &private_key);
     let (http, grpc) = listener_addresses(&example);
-
     let ready = format!("http://{http}/health/ready");
     assert!(
         poll_status(&ready, 200, Duration::from_secs(5)),
         "HTTP readiness never became ready"
     );
-
     assert_eq!(
         health_check(&grpc, certificate.clone()).expect("TLS health check"),
-        ServingStatus::Serving
+        ServingStatus::Serving as i32
     );
     assert_eq!(
         unary(&grpc, certificate.clone(), &oidc.token).expect("authenticated unary"),
         "process echo"
     );
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("build gRPC observer runtime");
-    let (mut watch, _held, _bidi_sender) = runtime
-        .block_on(watch_and_hold(
-            &grpc,
-            certificate.clone(),
-            oidc.token.clone(),
-        ))
-        .expect("open health watch and held RPC");
+    let mut watch = runtime
+        .block_on(hold_watch(&grpc, certificate, oidc.token.clone()))
+        .expect("open health watch");
 
-    let started = Instant::now();
     example.terminate();
-    assert!(
-        poll_status(&ready, 503, Duration::from_millis(250)),
-        "HTTP readiness did not enter drain"
-    );
     let watched = runtime
         .block_on(async { tokio::time::timeout(Duration::from_secs(2), watch.message()).await })
         .expect("health watch did not publish drain")
         .expect("health watch failed")
         .expect("health watch closed before drain state");
-    assert_eq!(watched.status(), ServingStatus::NotServing);
-    assert_eq!(
-        health_check(&grpc, certificate).expect("TLS health during drain"),
-        ServingStatus::NotServing
-    );
-    let (code, stderr) = example.wait_within(Duration::from_secs(15));
-    assert_eq!(code, Some(3), "stderr: {stderr}");
-    assert!(
-        started.elapsed() >= Duration::from_secs(8),
-        "the held RPC did not consume the shared gRPC drain budget"
-    );
+    assert_eq!(watched.status, ServingStatus::NotServing as i32);
+    let ended = runtime
+        .block_on(async { tokio::time::timeout(Duration::from_secs(2), watch.message()).await })
+        .expect("health watch did not end")
+        .expect("health watch end failed");
+    assert!(ended.is_none(), "health watch stayed open after drain");
+
+    let (code, stderr, logs) = example.wait_within(Duration::from_secs(15));
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    let messages = logged_messages(&logs);
+    for message in [
+        "readiness_disabled",
+        "drain_started",
+        "drain_completed",
+        "grpc_drain_completed",
+        "shutdown_completed",
+    ] {
+        assert!(
+            messages.iter().any(|logged| logged == message),
+            "missing {message} in {messages:?}"
+        );
+    }
     oidc.finish();
 }

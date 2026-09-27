@@ -1,10 +1,7 @@
 //! Generates committed Rust bindings from Buf's descriptor set.
 //!
-//! This tool calls prost_build::Config::compile_fds directly. Tonic's
-//! compile_fds_with_config helper replaces a configured service generator,
-//! which would bypass the composite policy generator.
-
-mod policy;
+//! Stock tonic codegen runs over the filtered owned descriptor set. Buf owns
+//! schema compilation; this tool does not invoke protoc.
 
 use std::{
     collections::BTreeSet,
@@ -64,10 +61,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .into());
     }
 
-    let mut config = prost_build::Config::new();
-    config.out_dir(output_dir);
-    policy::configure(&mut config, &owned_descriptor_set);
-    config.compile_fds(owned_descriptor_set)?;
+    tonic_prost_build::configure()
+        .build_server(true)
+        .build_client(true)
+        .build_transport(false)
+        .emit_rerun_if_changed(false)
+        .out_dir(&output_dir)
+        .compile_fds(owned_descriptor_set)?;
     Ok(())
 }
 

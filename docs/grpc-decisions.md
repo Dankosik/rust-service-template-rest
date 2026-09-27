@@ -1,254 +1,32 @@
 # Native gRPC decisions
 
 The [adoption guide](grpc.md) owns the supported API and operator contract.
-These decisions record why the implementation has its present boundaries.
-Source inspection was refreshed on 2026-09-26; version selection is distinct
-from the exact locked graph and executable CI evidence.
+Each row is the present boundary, the alternative it beat, the decisive
+reason, and the condition that would reopen it.
 
-## Ownership and library selection
-
-| Decision | Alternative and decisive gap |
-| --- | --- |
-| Separate native HTTP/2 listener over tonic 0.14.6 and prost 0.14.4 | REST transcoding, gRPC-Web and a second business API are outside the required native transport profile. |
-| `service-failure` owns closed `Code`, meanings and safe classification; HTTP owns its RFC 9457 projection | A second gRPC domain catalog would drift. Moving `Problem` into the leaf would make domain failure identity depend on HTTP. Existing HTTP status, title, URI, body, header and OpenAPI output remain unchanged. |
-| `infra-grpc` owns policy and transport lifetime; `grpc-contracts` owns committed generated messages/native traits and the generated policy adapter | Putting policy in each handler makes validation, panic/privacy and stream admission optional. A feature-facing replacement stream/trait would lose native tonic composition. |
-| prost-reflect 0.16.5 and prost-protovalidate 0.6.0 with CEL | The validator's tonic helpers require per-handler/per-message calls. Its generated-validator companion does not provide the accepted Prost CEL bridge. No template-owned CEL engine or protobuf parser is introduced. |
-| Existing bearer verifier, readiness reader, OTel 0.32/tracing bridge 0.33 and metrics facade | A second verifier/cache, per-health-RPC probes, separate exporter or another OTel minor would duplicate an existing authority. |
-| Optional concrete `Credentials::grpc` inside the existing OAuth owner | A public token getter or generic speculative authorizer loses custody; a second token cache or resource retry can replay an effect. |
-
-The Rust validator is third-party, not a Buf-maintained implementation. Its
-maintained upstream and [published API](https://docs.rs/prost-protovalidate/0.6.0/prost_protovalidate/)
-support the chosen reflection/CEL path. Startup preloads registered inbound
-roots and reachable descriptors with lazy compilation disabled. An ordinary
-constraint violation from an empty message proves compilation only; compiler
-and evaluator failures refuse registration. Unknown constraint fields are not
-allowed. Owned annotations have valid/invalid fixtures; this is not a claim of
-complete cross-language conformance.
-
-## Generated authority and two codec roles
-
-Buf 1.73.0 owns parsing, STANDARD lint and FILE compatibility. Proto3 with explicit
-optional presence is supported by the selected Prost/validation ecosystem;
-Edition 2023 is not required. Packages are versioned and removed fields/names
-must be reserved. Buf's pinned schema dependency is recorded in `buf.lock`.
-
-The [development generator](../tools/grpc-codegen/src/main.rs) consumes Buf's
-import-complete `FileDescriptorSet`. One prost pass emits messages. A composite
-public `prost_build::ServiceGenerator` invokes tonic's server-only and
-client-only generators, then adds a proxy implementing the same native server
-trait and a finite method catalog. Descriptor traversal attaches supported
-reflection attributes, including exact full message names; it is not a schema
-parser or a rewrite of emitted tonic code.
-
-The generator is installed on `prost_build::Config`, which calls
-[`compile_fds`](https://docs.rs/prost-build/0.14.4/prost_build/struct.Config.html#method.compile_fds)
-directly. Tonic's `compile_fds_with_config` convenience method replaces a
-previously installed generator and would silently remove the proxy. The
-generator has its own lock and is excluded from the runtime workspace.
-
-Server dispatch uses `ValidatedCodec`: native Prost decoding followed by
-semantic validation before the feature receives a message. Its decoder captures
-the private per-call state at codec construction and carries it with a moved
-`Streaming` value. First semantic validation failure is sticky, so swallowing
-that validation error cannot later return success or another response item.
-
-Client dispatch uses a separate stateless `BoundedClientCodec`, delegating to
-the public Prost encoder/decoder. It checks `Message::encoded_len()` before
-encoding and `DecodeBuf::remaining()` before decoding, each at 4 MiB. The latter
-is already a single framed, uncompressed message supplied by tonic. There is no
-framing parser, serializer or server call-state capture. This closes two native
-client gaps: encoding defaults to unbounded, and a fluent maximum alone can be
-omitted or raised. It also keeps standalone and nested outbound calls correct.
-The native receive limit remains in place; the codec bounds remain effective
-if a caller changes fluent limits. Native generic clients continue to accept
-the private OAuth `Service`.
-
-Tonic's [encoder](https://docs.rs/tonic/0.14.6/src/tonic/codec/encode.rs.html)
-wraps encoder errors in a new `INTERNAL` status, dropping their code/source.
-Hyper propagates body failure as HTTP/2 `INTERNAL_ERROR`; tonic's `server`
-feature enables its [native HTTP/2 status mapping](https://docs.rs/tonic/0.14.6/src/tonic/status.rs.html)
-even for a Channel. That feature is enabled, while the listener still uses
-Routes/Hyper. [gRPC status guidance](https://github.com/grpc/grpc/blob/master/doc/statuscodes.md)
-recommends `RESOURCE_EXHAUSTED` for configured-size overflow; this client-local
-deviation preserves the selected library's actual behavior and the accepted
-preference for minimal custom policy. No outbound poll scope, latch, raw-text
-parsing or client facade is added solely to force code 8. Reopen if tonic gains
-a supported error-preserving hook or a consumer contract requires a distinct
-local-size status.
-
-Remote Buf generation would add registry execution and availability to the
-source boundary. A separate vendored compiler for application generation would
-duplicate Buf's compiler. Descriptor-driven generation avoids both. Owned
-application messages and descriptors are committed and reproduced in CI, not
-generated in ordinary service builds.
-
-## Compiler for the maintained validator dependency
-
-The unchanged upstream `prost-protovalidate-types` 0.6.0 package compiles its
-packaged standard-rule schema in its build script, with or without reflection.
-It exposes no feature to disable that compilation. This upstream dependency
-build is separate from generation of owned application schemas.
-
-A managed official protoc 36.2 host archive, verified against its pinned SHA256,
-supplies the supported `PROTOC` setting. Plain Cargo, make, initialized trees,
-CI and the Docker builder use the same resolver; there is no system compiler
-fallback or nested Cargo invocation. Provisioning is cached. The final runtime
-image includes neither compiler nor Python/build dependencies.
-
-A fork of validator/types would add an upstream maintenance obligation merely
-to change package generation. `protoc-bin-vendored` 3.2.0 pulls eight platform
-archives (about 26 MiB); an official host archive is about 2.5–3.5 MiB for each
-supported Linux/macOS architecture. The managed host tool is the narrower
-provisioning boundary. Reopen when upstream ships pregenerated types or offers
-a supported no-codegen package feature.
-
-## Status provenance, panics and cancellation
-
-Generated policy invokes feature methods inside the typed boundary. Shared
-failures use tonic's private Rust `Status::source`; arbitrary handler statuses
-cannot forge that source through metadata. Unknown methods and framing errors
-that remain outside feature code use tonic's native statuses, including
-`OUT_OF_RANGE` for its receive-size guard. A native streaming error returned by
-feature code as raw `Status` is sanitized like other raw handler statuses; the
-transport does not add a framing parser or claim sticky handling for all native
-framing errors. Semantic validation has its separate sticky owner. Classified
-details contain a stable `ErrorInfo`; policy-owned retry delay uses `RetryInfo`.
-Validation detail identifiers come from the descriptor-owned validation path,
-not arbitrary feature-provided strings. Rich details share the metadata bound.
-
-The same guard catches initial-future and later stream-poll panics. Because
-Rust invokes its hook before unwinding, enabled startup installs one hook that
-suppresses payload output only inside private guarded polls and delegates to
-the previous process hook otherwise. Per-request hook replacement would race
-other requests; catching unwind without the scope would already have leaked
-the payload.
-
-A permit ends with the actual call, not the initial response headers. A private
-shared slot owns the real tonic response body. Terminal deadline/cancellation
-takes and drops that body before releasing the permit, independently of peer
-flow-control progress. A bounded transport-owned waiter handles deadlines when
-the peer stops reading. It performs no feature work and exits on terminal/drop.
-Feature-spawned work remains feature-owned.
-
-## Why Routes and Hyper own the listener
-
-Tonic's native codec/dispatch remains authoritative. The HTTP/2 listener uses
-public [`tonic::service::Routes`](https://docs.rs/tonic/0.14.6/tonic/service/struct.Routes.html)
-with existing Hyper/Tokio mechanisms because tonic's transport Server has an
-unavoidable private `GrpcTimeout` outside user layers. That timeout ends at
-response headers, can report `CANCELLED` rather than the full-call owner's
-`DEADLINE_EXCEEDED`, and logs malformed timeout values. A tracing filter or
-cancellable incoming stream does not disable the conflicting timer. Reopen if
-tonic exposes a supported outer/disabled timeout hook with equivalent task
-ownership.
-
-The client still uses native `Channel`. In the locked tonic 0.14.6 source,
-`transport/channel/service/connection.rs` installs `GrpcTimeout` even without
-an endpoint timeout; `transport/service/grpc_timeout.rs` reads the request's
-`grpc-timeout` and returns `TimeoutExpired`, which `status.rs` maps to `CANCELLED`.
-That initial client timer may beat the governed server's `DEADLINE_EXCEEDED`.
-No custom remapper makes these client outcomes uniform. Server-deadline proof
-uses generated tonic RPCs over Hyper's HTTP/2 sender to observe the server timer;
-client and OAuth budget tests keep the shipped channel path.
-
-The outbound body preserves a peer's clean EOF and trailers without a
-`grpc-status`, so tonic can apply its native HTTP-status fallback. An earlier
-deadline or cancellation still wins. The existing observation owner records
-the same closed fallback code; tonic's `infer_grpc_status` helper is private,
-so this small HTTP-code mapping follows the locked
-[status implementation](https://docs.rs/tonic/0.14.6/src/tonic/status.rs.html).
-It does not synthesize fallback trailers or reinterpret a transport body error
-as a peer authentication rejection. Observation covers this body boundary;
-typed-message decoding downstream can produce a different native result.
+| Decision | Rejected alternative | Decisive reason | Reopen |
+| --- | --- | --- | --- |
+| Tonic `Routes` on the existing `infra_http::Server`, including `bind_tls` | Tonic's transport `Server`: a second accept loop without this template's connection cap and first-byte bound, plus a drain the process cannot budget. The previous hand-written HTTP/2 server: it duplicated the listener without keepalive or idle bounds, and span-in-body custody cost about 1300 lines. | One accept loop already has the cap, first-byte timeout, HTTP/2 keepalive, accept backoff and `GracefulShutdown`. gRPC drain is the same `Server::drain` as HTTP. | Reopen only if tonic exposes a supported server whose accept and drain the process can budget without a second loop. |
+| Tower, tower-http and axum middleware on the tonic router | A generated policy proxy in front of every method | Registration is `Services::add(EchoServiceServer::new(...))`. Handler statuses pass through. A proxy duplicated tonic dispatch to enforce policy that middleware and handlers now own. | Reopen if a feature must intercept every cardinality inside the generated trait and middleware cannot see that call. |
+| No protovalidate. Handlers validate input, as HTTP extractors do. The example checks length and returns `classified_status`. | The removed path: a third-party 0.x CEL bridge, a protoc build dependency through `prost-protovalidate-types`, and a custom codec | Shared cross-language constraints were not a requirement. The bridge added a compiler and a second decode path for rules the handler can state directly. | Reopen if cross-language shared constraints become a requirement. |
+| Stock `tonic_prost_build` over Buf's temporary file descriptor set | A custom service generator, remote Buf plugins, or `build.rs` generation | Buf owns parse, STANDARD lint and FILE compatibility. Stock codegen emits the native traits. Remote plugins add registry availability. `build.rs` would generate during ordinary service builds. | Reopen if stock codegen cannot emit a required native trait option and a local generator is the smallest fix. |
+| Deadline measured to response headers, tonic `Server::timeout` placement, status `DEADLINE_EXCEEDED`, cap 8 seconds | A body-lifetime timer, or tonic's native timeout code (`CANCELLED`) | Header placement matches tonic's server timeout. The status matches the shared deadline meaning. Client-streaming must finish the upload inside the cap; server and bidi streams are then bounded by the caller and process drain. | Reopen if a feature needs client-streaming longer than 8 seconds; make the cap configurable. |
+| Clients use tonic `ClientTlsConfig` (TLS 1.2 and 1.3, normal verification). The server stays TLS 1.3-only. | The custom connector that forced client TLS 1.3 | The client would have rebuilt rustls only to diverge from tonic's normal verification. The server already builds its own config, so the 1.3 floor has no extra cost. | Reopen if an accepted peer requires a client protocol floor tonic cannot set. |
+| Observation uses `tracing-opentelemetry-instrumentation-sdk` gRPC span helpers, already locked through axum-tracing-opentelemetry | `tonic-tracing-opentelemetry`, an extra crate for the same helpers; or custom body-lifetime observation | Header observation matches the deadline boundary. A body-lifetime span was the removed custody cost. | Reopen if a maintained helper records trailer status without holding the body and a consumer requires that status in the span. |
+| Small tonic-health adapter over `ReadinessReader` | `HealthReporter` | The stock reporter starts `SERVING` and answers unknown `Watch` with `NOT_FOUND`. This adapter reads readiness, returns `NOT_FOUND` for unknown `Check`, emits `SERVICE_UNKNOWN` for unknown `Watch`, and ends after `NOT_SERVING` at drain. | Reopen if tonic-health can start from an external verdict and end unknown `Watch` as `SERVICE_UNKNOWN` without a spawned reporter task. |
+| OAuth eviction at the initial response only | Trailer inspection | Real servers reject authentication with a Trailers-Only response, whose `grpc-status` arrives in the initial headers. Trailer inspection holds the body. The response is returned unchanged. | Reopen if an accepted provider rejects machine auth only in trailers and a supported hook can see that without a body inspector. |
+| Server `method` is the path only when the call was dispatched and the header status is not `UNIMPLEMENTED`; otherwise `method` is `"unknown"` | Labeling every raw path, or omitting undispatched failures from the series | Unknown and undispatched calls must not create a method series. Auth, shed, deadline and panic responses are still counted, under `unknown`. | Reopen if an operator must split those undispatched outcomes by path without unbounded label cardinality. |
+| The replacement fixed five listener and status defects: no HTTP/2 keepalive or idle bound, a spinning drain loop, accept errors without backoff, silently suppressed panics, and malformed bearer mapped to `INVALID_ARGUMENT` | Patching those inside the custom server | The shared listener already had keepalive, the first-byte bound, 50 ms accept backoff and `GracefulShutdown`. `CatchPanicLayer` leaves the payload to the normal hook. Malformed bearer is `UNAUTHENTICATED`. | Do not restore the custom listener to fix one of these. Reopen a single defect only if the shared listener loses that bound. |
 
 <!-- template:begin outbound-auth-grpc:docs-grpc-oauth-eviction -->
-The private OAuth bridge reuses `Credentials::invalidate` and Moka's
-`entry().and_compute_with` / `Arc::ptr_eq` check for a rejected credential.
-An initial `grpc-status` is terminal in tonic; an explicit `UNAUTHENTICATED`
-there triggers conditional eviction before returning the unchanged response.
-Otherwise the existing `http-body-util` 0.1.5
-[body combinators](https://docs.rs/http-body-util/0.1.5/http_body_util/trait.BodyExt.html)
-form `inspect_frame(...).fuse().with_trailers(...)`, boxed by tonic's `Body`.
-The inspector passes only an optional native status code through a private
-oneshot, taking its sender on any trailer. Clean EOF drops the sender; body
-errors and consumer drop bypass or cancel the hook. The hook returns no new
-trailers, preserving the original frame.
-
-Explicit status, including malformed status becoming `UNKNOWN`, wins over
-HTTP fallback. An observed `UNAUTHENTICATED` or a completed HTTP 401 without
-`grpc-status` conditionally evicts the exact used credential. As with the HTTP
-owner, a completed 401 remains rejection evidence if downstream protobuf or
-framing decoding fails. For example, HTTP 401 with a truncated gRPC frame and
-clean EOF evicts conditionally while tonic still returns native `INTERNAL`.
-Transport `Body::Error`, reset, deadline, cancellation or consumer drop before
-completion supplies no such completed-response evidence. No result is rewritten
-and no framing parser is added. `PERMISSION_DENIED` retains the credential.
-Eviction is awaited within the original remaining deadline; exhausted cleanup
-does not alter the response or create background work. This adds only optional
-use of the already locked body utility and Tokio sync feature, with no new
-crate version, custom body state machine, token getter, cache, or replay.
-Reopen if an accepted requirement needs eviction or observation to depend on the
-final typed-decoder result and a supported hook becomes available, or a larger
-client wrapper is explicitly justified. A payload-dependent empty-body heuristic
-would miss ordinary gateway 401 bodies and is not the selected HTTP policy.
+Eviction reuses `Credentials::invalidate`. Real servers reject authentication
+with a Trailers-Only response, whose `grpc-status` arrives in the initial
+headers. It runs only when that response has `grpc-status` `UNAUTHENTICATED`,
+or HTTP 401 and no `grpc-status`. Trailers are not read. The response is
+returned unchanged.
+Cleanup spends only the remaining call deadline and starts no background
+work. `PERMISSION_DENIED` keeps the credential. A caller-supplied
+`Authorization` is `INVALID_ARGUMENT` before acquisition. Reopen if an
+accepted provider rejects machine auth only in trailers and a supported hook
+can observe that without a body inspector.
 <!-- template:end outbound-auth-grpc:docs-grpc-oauth-eviction -->
-
-Existing rustls/tokio-rustls configs explicitly select TLS 1.3, normal hostname
-and chain validation, and required client certificates when a client CA exists.
-Tonic `ServerTlsConfig` has no protocol-floor setter; relying on absence of a
-Cargo `tls12` feature is unsound when another retained dependency enables it.
-Operator-selected plaintext remains valid with bearer authentication behind
-the deployment's trust boundary.
-
-The TLS client keeps a transport-only HTTP routing URI in tonic and preserves
-the HTTPS request origin with `Endpoint::origin`. Tower's `map_request` pins the
-custom connector to the original HTTPS destination, so hyper-rustls remains the
-sole TLS owner with the same hostname, trust, identity and TLS 1.3 checks. In
-tonic 0.14.6, `transport/channel/service/connector.rs` applies an additional TLS
-gate to HTTPS routing URIs whenever another package enables `_tls-any`; the
-routing/origin separation keeps the client correct under workspace feature union.
-
-The listener retains connection permits through TLS handshakes and connection
-drop. Hyper enforces the header/stream limits. An initial five-second admission
-cap reuses the HTTP default. A connection `JoinSet` is not enough: Hyper submits
-H2 stream futures separately. A private supported Executor tracks those futures
-and deadline waiters, prevents new task admission after closure, and cancels and
-joins them on forced drain. No transport future is deliberately detached.
-
-## Health, observation and shutdown
-
-`health::ReadinessReader::changed_verdict` wakes on publication or the exact
-staleness boundary. It does not create a second probe loop. The small standard
-Health adapter uses upstream tonic-health protocol types; the stock reporter
-starts overall health at SERVING and ends unknown Watch with NOT_FOUND, contrary
-to the accepted startup latch and standard SERVICE_UNKNOWN watch behavior.
-
-HTTP/gRPC startup admission opens only after required listeners and dependencies
-are ready. First stop closes business admission and publishes terminal health
-before propagation. Both transports share the remaining effective drain interval
-and existing teardown tail. Health watchers do not own business-drain completion.
-NATS and outbox keep their existing process owners and close within the same
-process lifecycle; this profile adds no second signal or timeout budget.
-
-The maintained `tonic-tracing-opentelemetry` 0.38 fits the repository's OTel
-versions, but its source ends at the initial HTTP response and labels raw paths.
-Wrapping it would retain a duplicate, prematurely finished span. The existing
-terminal owner therefore uses the current tracing/OTel and metrics APIs directly
-for known-method, full-call observation. No exporters or semantic-convention
-framework are copied. Reopen when a maintained layer supplies a policy-controlled
-catalog and full-body lifetime without duplicate spans.
-
-## Projection and evidence
-
-The five additional retained graphs cover gRPC without auth, with JWT, with
-introspection, with OAuth and with the maximal compatible OAuth/NATS/outbox pack.
-They do not multiply harnesses or repeat existing database proof. Initializer
-pruning follows actual retained ownership, preserving the shared failure leaf
-for HTTP and shared prost/TLS families where still needed.
-
-Executable proof must cover the shipped registration/codec/client boundaries,
-TCP/TLS and coordinated service process shutdown. Generated bytes must reproduce,
-and compatibility uses the real PR base. Static design or local metadata alone
-does not establish compilation, protocol correctness, a deployment or capacity.
-The template adds no production deployment, publication, database migration,
-certificate watcher, retries, discovery plane or performance certification.
