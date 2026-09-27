@@ -8,7 +8,7 @@ never the edit owner.
 | --- | --- | --- | --- |
 | OpenAPI (`api/openapi/service.yaml`) | `#[utoipa::path]` attributes and schema derives on the handlers | `make openapi-generate` | `make openapi-check` (Redocly lint plus the drift and contract tests) |
 <!-- template:begin grpc:docs-validation-grpc-generated -->
-| Protobuf (`crates/grpc-contracts/src/generated`) | `api/proto/` and locked `tools/grpc-codegen` | `make grpc-generate` | `make grpc-check`: Buf format/lint, repeat generation, committed drift and exact PR-base FILE compatibility |
+| Protobuf (`crates/grpc-contracts/src/generated`) | `api/proto/` and locked `tools/grpc-codegen` | `make grpc-generate` | `make grpc-check`: Buf format/lint, committed drift and exact PR-base FILE compatibility |
 <!-- template:end grpc:docs-validation-grpc-generated -->
 
 The service's local command and CI owners define ordinary drift and explicit

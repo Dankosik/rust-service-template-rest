@@ -1,7 +1,13 @@
 version: 2
 updates:
   - package-ecosystem: "cargo"
-    directory: "/"
+    directories:
+      - "/"
+      # template:begin grpc:dependabot-grpc-generator
+      # The standalone generator workspace; one grouped PR keeps its prost
+      # and tonic pins with the runtime's.
+      - "/tools/grpc-codegen"
+      # template:end grpc:dependabot-grpc-generator
     schedule:
       interval: "weekly"
     cooldown:

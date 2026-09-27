@@ -9,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
-use grpc_contracts::generated::{UnaryRequest, echo_service_client::EchoServiceClient};
+use grpc_contracts::example::v1::{UnaryRequest, echo_service_client::EchoServiceClient};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;

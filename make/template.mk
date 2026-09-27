@@ -341,12 +341,17 @@ publish-image-metadata-check: ## Self-test of the publication naming and tag pro
 .PHONY: grpc-generate grpc-check
 GRPC ?= none
 export GRPC
+# Buf runs through `go run` like the other Go tools; the gRPC scripts read BUF.
+BUF ?= go run github.com/bufbuild/buf/cmd/buf@v$(BUF_VERSION)
+export BUF
 
 grpc-generate: ## Generate committed protobuf Rust from pinned Buf descriptors
+	$(call REQUIRE_GO,buf@v$(BUF_VERSION))
 	$(VALIDATION_LOCK) bash scripts/grpc-generate.sh
 
 grpc-check: ## Check protobuf format, lint, generation drift and PR-base compatibility; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
+	$(call REQUIRE_GO,buf@v$(BUF_VERSION))
 	$(VALIDATION_LOCK) bash scripts/ci/grpc-check.sh
 # template:end grpc:make-grpc-targets
 
