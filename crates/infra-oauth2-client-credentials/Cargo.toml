@@ -40,7 +40,6 @@ grpc-contracts = { workspace = true }
 hyper = { workspace = true, features = ["server", "http2"] }
 hyper-util = { workspace = true, features = ["tokio", "service"] }
 tonic-prost = { workspace = true }
-tokio-stream = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 # template:end outbound-auth-grpc:oauth-grpc-test-dependencies
 infra-outbound-http = { workspace = true, features = ["test-support"] }
