@@ -24,7 +24,7 @@ names=(
 	grpc_schema
 	# template:end grpc:classifier-grpc-surface
 	github_workflows dependency_automation shell runtime_image publication_metadata secret_scanning
-	db_integration messaging_integration migrations
+	db_integration messaging_integration cache_integration migrations
 	agent_instructions documentation validation_system module_initializer initializer_runtime no_validation_required
 )
 
@@ -39,6 +39,22 @@ profile_database() {
 	none | postgres) printf '%s\n' "${database}" ;;
 	*)
 		echo "invalid selected database profile: ${database}" >&2
+		return 2
+		;;
+	esac
+}
+
+profile_cache() {
+	local root cache
+	root=$(pwd)
+	cache=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field cache) || {
+		echo "cannot resolve selected cache profile" >&2
+		return 2
+	}
+	case "${cache}" in
+	none | redis) printf '%s\n' "${cache}" ;;
+	*)
+		echo "invalid selected cache profile: ${cache}" >&2
 		return 2
 		;;
 	esac
@@ -77,9 +93,10 @@ profile_outbox() {
 }
 
 all_surfaces() {
-	local database messaging outbox source_only=false
+	local database messaging cache outbox source_only=false
 	database=$(profile_database)
 	messaging=$(profile_messaging)
+	cache=$(profile_cache)
 	outbox=$(profile_outbox)
 	[[ -f make/source.mk ]] && source_only=true
 	reset
@@ -88,6 +105,7 @@ all_surfaces() {
 		clear_surface db_integration migrations
 	fi
 	[[ ${messaging} == nats-jetstream ]] || clear_surface messaging_integration
+	[[ ${cache} == redis ]] || clear_surface cache_integration
 	[[ ${source_only} == true ]] || clear_surface module_initializer initializer_runtime
 	emit
 }
@@ -136,9 +154,10 @@ has_line() {
 }
 
 classify() {
-	local file matched database messaging outbox source_only=false p9_retained=false
+	local file matched database messaging cache outbox source_only=false p9_retained=false
 	database=$(profile_database)
 	messaging=$(profile_messaging)
+	cache=$(profile_cache)
 	outbox=$(profile_outbox)
 	[[ -f make/source.mk ]] && source_only=true
 	[[ -f test/tests/http_idempotency/mounted.rs ]] && p9_retained=true
@@ -184,6 +203,14 @@ classify() {
 	crates/jobs-worker/* | crates/service/Cargo.toml | crates/service/src/bootstrap/* | env/docker-compose.yml | env/nats/* | \
 	test/tests/messaging_outbox.rs | scripts/ci/test-integration-db.sh | scripts/ci/test-integration-messaging.sh | scripts/messaging-go-compat.sh | make/template.mk | .github/workflows/ci.yml)
 		mark messaging_integration
+		;;
+	esac; fi
+	# Valkey proof follows the cache adapter, its Compose service, and the integration runner.
+	if [[ ${cache} == redis ]]; then case "${file}" in
+	Cargo.toml | Cargo.lock | crates/infra-cache/* | test/fixtures/tls.rs | crates/config/Cargo.toml | crates/config/src/cache.rs | \
+	crates/service/Cargo.toml | crates/service/src/bootstrap/* | env/docker-compose.yml | \
+	scripts/ci/test-integration-cache.sh | make/template.mk | .github/workflows/ci.yml)
+		mark cache_integration
 		;;
 	esac; fi
 	if [[ ${outbox} == postgres ]]; then case "${file}" in
@@ -261,7 +288,7 @@ classify() {
 		scripts/ci/template-init-check.sh | scripts/tests/template-* | scripts/tests/fixtures/template-profiles-b206.json | \
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
 		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
-		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/domain-events/* | crates/infra-messaging/* | \
+		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/domain-events/* | crates/infra-messaging/* | crates/infra-cache/* | \
 		crates/service-failure/* | crates/infra-oauth2-client-credentials/* | \
 		test/* | migrations/*)
 			mark module_initializer initializer_runtime
@@ -436,6 +463,15 @@ EOF
 		"rust_source db_integration messaging_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations"
 	rm -rf "${classifier_root}/crates/infra-messaging"
+	mkdir -p "${classifier_root}/crates/infra-cache/src"
+	: >"${classifier_root}/crates/infra-cache/src/lib.rs"
+	assert_case crates/infra-cache/src/lib.rs \
+		"rust_source cache_integration module_initializer initializer_runtime" \
+		"cargo_dependencies db_integration messaging_integration migrations"
+	assert_case scripts/ci/test-integration-cache.sh \
+		"shell cache_integration" \
+		"db_integration messaging_integration"
+	rm -rf "${classifier_root}/crates/infra-cache"
 	# P9 only mounts infra-http and infra-bearerauthn against a real
 	# database while the introspection-only fixture is retained.
 	mkdir -p "${classifier_root}/test/tests/http_idempotency"
@@ -696,8 +732,30 @@ PY_LOCK
 	classifier_root=${source_fixture}
 	mv "${derived_fixture}/template.lock.before-messaging" "${derived_fixture}/template.lock"
 
+	# Cache-only derivations must select Valkey even when PostgreSQL is absent.
+	cp "${derived_fixture}/template.lock" "${derived_fixture}/template.lock.before-cache"
+	python3 - "${derived_fixture}/template.lock" <<'PY_LOCK'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+lock = json.loads(path.read_text())
+lock["profiles"].update({
+    "authn": "none", "outbound_http": "none", "outbound_auth": "none", "grpc": "none",
+    "http_idempotency": "none", "jobs": "none", "messaging": "none", "outbox": "none",
+    "webhooks": "none", "inbound_webhooks": "none", "cache": "redis",
+})
+path.write_text(json.dumps(lock) + "\n")
+PY_LOCK
+	classifier_root=${derived_fixture}
+	assert_case crates/infra-cache/src/lib.rs \
+		"rust_source cache_integration" \
+		"db_integration messaging_integration migrations module_initializer initializer_runtime"
+	classifier_root=${source_fixture}
+	mv "${derived_fixture}/template.lock.before-cache" "${derived_fixture}/template.lock"
+
 	# All applicable source surfaces includes a retained messaging capability.
-	mkdir -p "${source_fixture}/crates/infra-messaging"
+	mkdir -p "${source_fixture}/crates/infra-messaging" "${source_fixture}/crates/infra-cache"
 	output="$(cd "${source_fixture}" && bash scripts/ci/changed-surfaces.sh --all)"
 	for name in "${names[@]}"; do
 		has_line "${output}" "${name}=true"
@@ -705,6 +763,7 @@ PY_LOCK
 	output="$(cd "${derived_fixture}" && bash scripts/ci/changed-surfaces.sh --all)"
 	has_line "${output}" 'db_integration=false'
 	has_line "${output}" 'messaging_integration=false'
+	has_line "${output}" 'cache_integration=false'
 	has_line "${output}" 'migrations=false'
 	has_line "${output}" 'module_initializer=false'
 	has_line "${output}" 'initializer_runtime=false'

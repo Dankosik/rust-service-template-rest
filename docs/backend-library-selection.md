@@ -115,6 +115,9 @@ rather than assuming any SeaORM release can share the current pool.
 | Outbound HTTP adapter | [`reqwest`](https://docs.rs/reqwest/latest/reqwest/) | One reusable configured client, explicit request budgets, TLS/provider compatibility and safe errors. Inspect its native retry support before adding retry middleware. |
 | Repeated eligible retry mechanics | [`backon`](https://docs.rs/backon/latest/backon/) | The operation owns idempotency, eligible errors, jitter/backoff, total deadline and cancellation. Never blindly retry `CommitUnknown`, non-idempotent effects, or stack independent retry loops. |
 | Bounded process-local cache | [`moka`](https://docs.rs/moka/latest/moka/) | Specify capacity, expiration, invalidation and source of truth. It is not a distributed cache and does not make the existing readiness snapshot obsolete. |
+<!-- template:begin cache:docs-library-selection-cache -->
+| Distributed cache across replicas | `redis` 1.7.1 in `infra-cache`, default features off, only `tokio-comp`, `connection-manager`, and `tokio-rustls-comp` | One multiplexed `ConnectionManager`. No pool. Bytes only; the feature owns keys, serialization, and TTL. `moka` remains the process-local cache. |
+<!-- template:end cache:docs-library-selection-cache -->
 | Tests of an outbound HTTP contract | [`wiremock`](https://docs.rs/wiremock/latest/wiremock/) | Local mock server, bounded waits and actual status/body/header behavior. Recheck maintenance at adoption; do not use it to replace inbound-router tests. |
 | A complex stable output warrants a reviewed snapshot | [`insta`](https://docs.rs/insta/latest/insta/) | Assert important semantics separately. Redact only irrelevant nondeterminism; never hide the ID or timestamp relationship being tested. Do not create a second snapshot authority for the already committed OpenAPI document. |
 | A parser/transformation has useful algebraic or grammar invariants | [`proptest`](https://docs.rs/proptest/latest/proptest/) | State the property independently of the implementation, retain useful explicit boundary cases, and bound generation. It is not mandatory for every helper. |
@@ -168,6 +171,14 @@ checks inbound acceptance, normalization, re-encoding, and decode of the emitted
 timestamp: Go's own RFC3339 parser does not promise to round-trip every
 `time.Time` value.
 <!-- template:end messaging:docs-library-selection-messaging-rejection -->
+
+<!-- template:begin cache:docs-library-selection-cache-rejection -->
+Do not add `fred`, a Redis pool (`deadpool-redis` or `bb8-redis`), or
+`testcontainers` for the cache profile. `fred` 10.1.0 was last released and
+pushed on 2025-02-27. One multiplexed connection already pipelines get, set,
+and delete. Container proof uses the existing Compose Valkey service. See
+[Cache decisions](cache-decisions.md).
+<!-- template:end cache:docs-library-selection-cache-rejection -->
 
 ## Acceptance for a library-driven refactor
 

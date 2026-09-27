@@ -132,6 +132,7 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("outbox", None)
     lock["profiles"].pop("webhooks", None)
     lock["profiles"].pop("inbound_webhooks", None)
+    lock["profiles"].pop("cache", None)
     lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
@@ -152,6 +153,7 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("outbox", None)
     lock["profiles"].pop("webhooks", None)
     lock["profiles"].pop("inbound_webhooks", None)
+    lock["profiles"].pop("cache", None)
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -194,7 +196,7 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
 
 def assert_profile_output(
     source: Path, target: Path, authn: str, outbound_http: str, http_idempotency: str = "none",
-    jobs: str = "none", webhooks: str = "none", inbound_webhooks: str = "none",
+    jobs: str = "none", webhooks: str = "none", inbound_webhooks: str = "none", cache: str = "none",
 ) -> None:
     for profile, selected in (("authn", authn != "none"), ("oidc-jwt", authn == "oidc-jwt"), ("oidc-introspection", authn == "oidc-introspection")):
         assert_profile_pack(source, target, profile, selected)
@@ -212,8 +214,9 @@ def assert_profile_output(
     if lock["profiles"].get("inbound_webhooks") != inbound_webhooks:
         raise AssertionError(f"sync canary lock did not record inbound_webhooks={inbound_webhooks}")
     assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
-    shared_selected = authn != "none" or outbound_http == "bounded"
+    shared_selected = authn != "none" or outbound_http == "bounded" or cache == "redis"
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
+    assert_profile_pack(source, target, "cache", cache == "redis")
     assert_profile_pack(
         source, target, "request-budget", outbound_http == "bounded" or http_idempotency == "postgres"
     )

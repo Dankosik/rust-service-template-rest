@@ -12,6 +12,9 @@ use infra_http::{Drained, Server};
 // template:begin messaging:service-shutdown-messaging-imports
 use infra_messaging::{CloseOutcome, Messaging};
 // template:end messaging:service-shutdown-messaging-imports
+// template:begin cache:service-shutdown-cache-imports
+use infra_cache::Cache;
+// template:end cache:service-shutdown-cache-imports
 // template:begin postgres:shutdown-imports
 use infra_postgres::{Closed, PgPool};
 // template:end postgres:shutdown-imports
@@ -94,9 +97,16 @@ pub(crate) async fn close_dependencies(
     // template:begin messaging:service-shutdown-startup-messaging-close
     messaging: Option<Messaging>,
     // template:end messaging:service-shutdown-startup-messaging-close
+    // template:begin cache:service-shutdown-startup-cache-close
+    cache: Option<Cache>,
+    // template:end cache:service-shutdown-startup-cache-close
     #[allow(unused_variables, reason = "dependency-free profiles perform no close")]
     deadline: Instant,
 ) -> bool {
+    // template:begin cache:service-shutdown-dependency-cache-close
+    // The connection closes when its last clone drops.
+    drop(cache);
+    // template:end cache:service-shutdown-dependency-cache-close
     let postgres_close = async {
         // template:begin postgres:shutdown-dependency-pool-close
         if let Some(pool) = pool {
@@ -150,6 +160,9 @@ pub(crate) async fn finish_stopped_startup(
     // template:begin messaging:service-shutdown-stopped-startup-messaging-parameter
     messaging: Option<Messaging>,
     // template:end messaging:service-shutdown-stopped-startup-messaging-parameter
+    // template:begin cache:service-shutdown-stopped-startup-cache-parameter
+    cache: Option<Cache>,
+    // template:end cache:service-shutdown-stopped-startup-cache-parameter
     provider: TracerProviderHandle,
     deadline: Instant,
 ) -> Outcome {
@@ -163,6 +176,9 @@ pub(crate) async fn finish_stopped_startup(
         // template:begin messaging:service-shutdown-stopped-startup-messaging-argument
         messaging,
         // template:end messaging:service-shutdown-stopped-startup-messaging-argument
+        // template:begin cache:service-shutdown-stopped-startup-cache-argument
+        cache,
+        // template:end cache:service-shutdown-stopped-startup-cache-argument
         Instant::now() + budget.remaining(DEPENDENCY_CLOSE),
     )
     .await;
@@ -286,6 +302,9 @@ pub(crate) struct Plan<'a> {
     // template:begin messaging:service-shutdown-plan-messaging
     pub(crate) messaging: Option<Messaging>,
     // template:end messaging:service-shutdown-plan-messaging
+    // template:begin cache:service-shutdown-plan-cache
+    pub(crate) cache: Option<Cache>,
+    // template:end cache:service-shutdown-plan-cache
     pub(crate) tracer_provider: TracerProviderHandle,
     pub(crate) signals: &'a mut Signals,
 }
@@ -411,6 +430,9 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         // template:begin messaging:service-shutdown-close-messaging-argument
         plan.messaging,
         // template:end messaging:service-shutdown-close-messaging-argument
+        // template:begin cache:service-shutdown-close-cache-argument
+        plan.cache,
+        // template:end cache:service-shutdown-close-cache-argument
         Instant::now() + budget.remaining(DEPENDENCY_CLOSE),
     )
     .await;

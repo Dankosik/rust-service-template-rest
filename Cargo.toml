@@ -51,6 +51,9 @@ jobs-worker = { path = "crates/jobs-worker" }
 domain-events = { path = "crates/domain-events" }
 infra-messaging = { path = "crates/infra-messaging" }
 # template:end messaging:workspace-messaging-crates
+# template:begin cache:workspace-cache-crates
+infra-cache = { path = "crates/infra-cache" }
+# template:end cache:workspace-cache-crates
 # template:begin webhooks-common:workspace-webhooks-crate
 infra-webhooks = { path = "crates/infra-webhooks" }
 # template:end webhooks-common:workspace-webhooks-crate
@@ -77,6 +80,11 @@ oauth2 = { version = "5.0.0", default-features = false }
 # template:begin messaging:workspace-messaging-client
 async-nats = { version = "=0.50.0", default-features = false }
 # template:end messaging:workspace-messaging-client
+# template:begin cache:workspace-cache-client
+redis = { version = "1.7.1", default-features = false }
+# Keepalive retries are a socket2 method; redis does not re-export the type.
+socket2 = { version = "0.6.5", default-features = false }
+# template:end cache:workspace-cache-client
 futures-util = { version = "0.3", default-features = false }
 axum = { version = "0.8.9", default-features = false }
 hyper-util = { version = "0.1.20", default-features = false }
@@ -95,8 +103,10 @@ prost = { version = "=0.14.4", default-features = false }
 tracing-opentelemetry-instrumentation-sdk = { version = "=0.38.3", default-features = false, features = ["http"] }
 hyper = { version = "1.11.1", default-features = false }
 tokio-stream = { version = "0.1.19", default-features = false }
-rustls = { version = "0.23.45", default-features = false }
 # template:end grpc:workspace-grpc-dependencies
+# template:begin rustls:workspace-rustls
+rustls = { version = "0.23.45", default-features = false }
+# template:end rustls:workspace-rustls
 
 # API contract (docs/architecture/http.md). The document is derived from the
 # handlers and committed as api/openapi/service.yaml.

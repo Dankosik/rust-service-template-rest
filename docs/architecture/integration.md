@@ -92,6 +92,23 @@ source is retained until a confirmed settlement; DLQ arrives before source ACK;
 and the durable logical-ID effect owner, rather than NATS, absorbs replay.
 <!-- template:end messaging:docs-integration-messaging -->
 
+<!-- template:begin cache:docs-integration-cache -->
+## Cache boundary
+
+Valkey, or a Redis OSS server with the same command subset, is an
+operator-fixed neighbour, not a caller-selected destination. `infra-cache`
+accepts only an admitted DSN and owns bytes-only `get`, `set`, and `delete`,
+the command timeout, and sanitized observation. The feature owns keys,
+serialization, TTL, and invalidation. Bootstrap owns admission, the bounded
+startup check, and the shutdown drop. The cache does not gate readiness. A
+service that cannot degrade pushes `cache.probe()` itself. See the
+[guide](../cache.md).
+
+The integration proof uses Compose Valkey. It proves a round trip, expiry,
+probe success, and that an unreachable or silent server returns `Unavailable`
+inside the command timeout. It does not certify a deployed memory policy.
+<!-- template:end cache:docs-integration-cache -->
+
 <!-- template:begin authn:docs-integration-authn-provider -->
 Inbound authentication's provider destination is fixed by configuration or an
 exact-issuer discovery response, never by the caller. The adapter's

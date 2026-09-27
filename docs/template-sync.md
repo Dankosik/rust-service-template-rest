@@ -119,6 +119,13 @@ supplies the operator-created topology. `none` removes the complete messaging
 closure. `OUTBOX` is intentionally not an initializer selection until its
 separate PostgreSQL/jobs extension exists.
 <!-- template:end messaging:docs-template-init-messaging -->
+<!-- template:begin cache:docs-template-init-cache -->
+`CACHE` defaults to `none` and accepts `none` or `redis`; the direct entry
+takes `--cache`. `redis` retains the `infra-cache` crate, the `[cache]`
+section, the digest-pinned Compose Valkey service, the integration proof, and
+the [cache guide](cache.md). It does not require PostgreSQL or jobs. Selection
+starts no client; a configured DSN does. `none` removes that closure.
+<!-- template:end cache:docs-template-init-cache -->
 
 
 Service names are lowercase ASCII, start with a letter, use single hyphens
@@ -166,6 +173,10 @@ The lock records the selected `messaging` value. Historical records without it
 mean `none`; changing it after initialization is a refused profile migration.
 <!-- template:end messaging:docs-template-init-messaging-lock -->
 
+<!-- template:begin cache:docs-template-init-cache-lock -->
+The lock records the selected `cache` value. Historical records without it
+mean `none`; changing it after initialization is a refused profile migration.
+<!-- template:end cache:docs-template-init-cache-lock -->
 
 <!-- template:begin authn:docs-template-init-authn-lock -->
 The lock records the selected `authn` value. Historical records without it

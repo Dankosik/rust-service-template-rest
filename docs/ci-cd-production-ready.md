@@ -52,6 +52,10 @@ it. CI also checks locked offline Cargo metadata after initialization, the
 resolved NATS image digest, and dependency policy. These are selected surfaces,
 not a Cartesian multiplication of every profile, database, and harness.
 <!-- template:end messaging:docs-ci-messaging-gates -->
+<!-- template:begin cache:docs-ci-cache-gates -->
+With the cache profile retained, the `cache_integration` surface runs
+`make test-integration-cache` against Compose Valkey in the integration job.
+<!-- template:end cache:docs-ci-cache-gates -->
 <!-- template:begin outbox:docs-ci-outbox-gates -->
 With the outbox profile retained, the database-and-NATS integration selection
 covers transactional commit/rollback, live-key same/conflict/lost outcomes,
@@ -102,8 +106,10 @@ suite. Database-free graphs do not request the removed integration-test feature.
 Graph 56 joins jobs-1 for PostgreSQL/jobs/messaging without outbox. It uses the
 focused locked offline metadata and all-target compile path with
 `integration-tests/integration`, so the fixture callback's optional registry
-argument is compiled. It adds no live PostgreSQL or NATS scenario; eight CI
-parts cover 56 runtime representatives.
+argument is compiled. It adds no live PostgreSQL or NATS scenario. Graph 62
+joins database-none for cache alone, and graph 63 joins jobs-http-idempotency-2
+for the maximal profile set plus cache. Neither adds a database suite. Eight CI
+parts cover 63 runtime representatives.
 
 A change to projected text alone selects `module_initializer` without the
 runtime surface and runs the Cargo-free `initializer (projections)` job.

@@ -36,6 +36,9 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | `domain-events` (`crates/domain-events`) | Immutable typed event identity, type/version, occurrence time, and payload contract. | Subjects, broker metadata, ID minting, clocks, configuration, or tasks. |
 | `infra-messaging` (`crates/infra-messaging`) | Go-compatible wire admission, prepared publication, typed registry, bounded JetStream consumer, deterministic DLQ/restore, and connection/probe mapping ([guide](../durable-messaging.md)). | Business events, feature policy, queue SQL or commits, stream administration, configuration loading, signals, or a generic bus. |
 <!-- template:end messaging:docs-boundaries-messaging-owner -->
+<!-- template:begin cache:docs-boundaries-cache-owner -->
+| `infra-cache` (`crates/infra-cache`) | Bytes-only RESP admission, a lazy `ConnectionManager`, namespace `get`/`set`/`delete`, the `cache` probe, and sanitized observation ([guide](../cache.md)). | Keys, serialization, TTL policy, invalidation, a generic `Cache<K, V>`, get-or-load, locks, rate limits, configuration loading, or readiness policy. |
+<!-- template:end cache:docs-boundaries-cache-owner -->
 <!-- template:begin outbox:docs-boundaries-outbox-owner -->
 | `infra-messaging::outbox` | The private versioned/base64 immutable publication intent, prepared enqueue, and publication handler ([guide](../postgres-transactional-outbox.md)). | The `background_jobs` SQL, caller transaction control, a second connection, business-closure retries, consumer effect deduplication, or stream administration. |
 <!-- template:end outbox:docs-boundaries-outbox-owner -->
@@ -76,6 +79,13 @@ tests remain with their existing composition owners; their assertions observe
 readiness, bounded drain, and process result rather than broker internals.
 <!-- template:end messaging:docs-boundaries-messaging-tests -->
 
+<!-- template:begin cache:docs-boundaries-cache-tests -->
+`infra-cache` owns admission, redaction, and observation unit tests. Its Valkey
+integration proof uses Compose and has no PostgreSQL prerequisite. The service
+process test observes startup degradation and production plaintext refusal
+rather than server internals.
+<!-- template:end cache:docs-boundaries-cache-tests -->
+
 ## Dependency Direction
 
 ```text
@@ -97,6 +107,11 @@ infra-http -> infra-bearerauthn
 jobs-worker -> infra-messaging only when the messaging profile is retained
 service -> infra-messaging only for optional producer/probe composition
 <!-- template:end messaging:docs-boundaries-messaging-edges -->
+<!-- template:begin cache:docs-boundaries-cache-edges -->
+  -> infra-cache -> redis, rustls, health, secrecy, metrics, tracing, tokio
+service -> infra-cache for connect, the startup check, shutdown drop, and optional probe registration
+a feature -> infra-cache for namespace get, set, and delete
+<!-- template:end cache:docs-boundaries-cache-edges -->
 <!-- template:begin outbox:docs-boundaries-outbox-edges -->
 infra-messaging::outbox -> domain-events, infra-jobs, infra-postgres, base64
 <!-- template:end outbox:docs-boundaries-outbox-edges -->

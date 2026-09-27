@@ -1649,5 +1649,48 @@
         ]
       }
     ]
+  },
+  "rustls": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "Cargo.toml", "id": "workspace-rustls"}
+    ]
+  },
+  "cache": {
+    "remove_when_unselected": [
+      "crates/infra-cache/",
+      "crates/config/src/cache.rs",
+      "scripts/ci/test-integration-cache.sh",
+      "docs/cache.md",
+      "docs/cache-decisions.md"
+    ],
+    "markers": [
+      {"path": "Cargo.toml", "ids": ["workspace-cache-crates", "workspace-cache-client"]},
+      {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate", "config-request-budget"]},
+      {"path": "crates/config/src/load.rs", "ids": ["load-cache-environment"]},
+      {"path": "crates/service/Cargo.toml", "ids": ["service-cache-dependency"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["service-bootstrap-cache-imports", "service-bootstrap-cache-startup-budget", "service-bootstrap-cache-errors", "service-bootstrap-cache-opened", "service-bootstrap-stopped-startup-cache", "service-bootstrap-cache-startup", "service-bootstrap-prepared-cache-value", "service-bootstrap-cache-startup-close", "service-bootstrap-cache-functions", "service-bootstrap-prepared-cache-field", "service-bootstrap-destructure-cache", "service-bootstrap-shutdown-cache"]},
+      {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["service-shutdown-cache-imports", "service-shutdown-startup-cache-close", "service-shutdown-dependency-cache-close", "service-shutdown-stopped-startup-cache-parameter", "service-shutdown-stopped-startup-cache-argument", "service-shutdown-plan-cache", "service-shutdown-close-cache-argument"]},
+      {"path": "crates/service/tests/lifecycle.rs", "ids": ["service-cache-lifecycle-admission"]},
+      {"path": "crates/infra-telemetry/src/metrics.rs", "ids": ["telemetry-cache-buckets-constants", "telemetry-cache-buckets-install", "telemetry-cache-buckets-helper", "telemetry-cache-histogram-test"]},
+      {"path": "env/config/local.toml", "ids": ["local-config"]},
+      {"path": "env/docker-compose.yml", "ids": ["compose-valkey-service"]},
+      {"path": "deny.toml", "ids": ["deny-cache-license"]},
+      {"path": "README.md", "ids": ["docs-readme-cache-profile"]},
+      {"path": "CONTRIBUTING.md", "ids": ["contributing-cache-prerequisites", "contributing-cache-proof"]},
+      {"path": "docs/cache.md", "ids": ["docs-cache"]},
+      {"path": "docs/cache-decisions.md", "ids": ["docs-cache-decisions"]},
+      {"path": "docs/template-sync.md", "ids": ["docs-template-init-cache", "docs-template-init-cache-lock"]},
+      {"path": "docs/repo-architecture.md", "ids": ["docs-architecture-cache-leaf"]},
+      {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-cache-owner", "docs-boundaries-cache-tests", "docs-boundaries-cache-edges"]},
+      {"path": "docs/architecture/integration.md", "ids": ["docs-integration-cache"]},
+      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-cache"]},
+      {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-cache", "docs-library-selection-cache-rejection"]},
+      {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-cache"]},
+      {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-cache-gates"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-cache-source", "docs-config-cache-budget"]},
+      {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-cache-placement"]},
+      {"path": "docs/roadmap.md", "ids": ["roadmap-stage-10-11-cache", "roadmap-stage-10-11-cache-note"]}
+    ]
   }
 }

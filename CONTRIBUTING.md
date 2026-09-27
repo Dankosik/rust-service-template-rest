@@ -26,6 +26,11 @@ repository surface that can prove them.
   Docker Compose NATS image and Go toolchain; they are CI-owned heavy checks
   unless the task specifically requests their local execution.
   <!-- template:end messaging:contributing-messaging-prerequisites -->
+  <!-- template:begin cache:contributing-cache-prerequisites -->
+  Cache integration proof uses the retained Docker Compose Valkey image. It is
+  a heavy check; CI owns it unless the task specifically requests local
+  execution.
+  <!-- template:end cache:contributing-cache-prerequisites -->
   Unit tests never need Docker.
 
 Every tool version is pinned once in `tools/versions.env`; `make` and CI read
@@ -88,6 +93,16 @@ before source ACK, deterministic restore, bounded shutdown, and retained
 profile pruning. It does not certify a deployed broker topology or the
 adopter's durable logical-ID effect store.
 <!-- template:end messaging:contributing-messaging-proof -->
+
+<!-- template:begin cache:contributing-cache-proof -->
+A change to `crates/infra-cache`, cache configuration, Valkey Compose, or its
+profile closure keeps normal crate tests local and selects CI's
+`cache_integration` surface. That gate runs `make test-integration-cache`
+against Compose Valkey. It checks round trip, TTL expiry, probe success,
+unreachable and silent-server degradation, recovery, and TLS trust. It does
+not certify a deployed memory policy or the feature's key and invalidation
+rules. See the [cache guide](docs/cache.md).
+<!-- template:end cache:contributing-cache-proof -->
 
 A change to an HTTP operation is made in the handler's `#[utoipa::path]`
 attributes and schema derives, then `make openapi-generate` rewrites

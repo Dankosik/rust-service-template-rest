@@ -24,7 +24,7 @@ is not a supported template state.
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | done |
 | 9 | Template initializer, profiles, and template sync | done on merge after required CI |
-| 10 | Optional capability profiles | 10.1, 10.2, 10.3, 10.4, 10.6 and 10.8 merged; 10.7 implemented; remaining profiles planned |
+| 10 | Optional capability profiles | 10.1, 10.2, 10.3, 10.4, 10.6 and 10.8 merged; 10.7 and 10.11 implemented; remaining profiles planned |
 | 11 | Benchmarking and performance evidence | planned |
 | 12 | First release and derived-repository verification | planned |
 
@@ -673,6 +673,12 @@ markers, tests, and initializer support. Order by expected demand:
 <!-- template:end outbound-auth:roadmap-stage-10-8-outbound-auth -->
 9. S3-compatible object storage with one fixed endpoint.
 10. `examples/reference-service`: one isolated vertical slice.
+<!-- template:begin cache:roadmap-stage-10-11-cache -->
+11. Optional cache profile: `CACHE=none|redis`. `redis` retains a bytes-only
+    client. A miss or an unavailable server degrades to the source of truth.
+    The [guide](cache.md) and [decision record](cache-decisions.md) own
+    adoption. Implemented; delivery pending review and CI.
+<!-- template:end cache:roadmap-stage-10-11-cache -->
 
 Stage 10.1 local evidence includes workspace build/tests, the generated
 contract, real local TLS and mounted HTTP authentication cases, dependency
@@ -800,6 +806,14 @@ is complete in this candidate, but final assembled validation, exact-head CI,
 initializer representatives, real PostgreSQL+NATS proof, integrated review,
 and any delivery decision remain pending until actual receipts exist. No
 publication or deployment is claimed.
+
+<!-- template:begin cache:roadmap-stage-10-11-cache-note -->
+Stage 10.11 adds `CACHE=none|redis`. `redis` retains a bytes-only client pack
+for namespace get, set, and delete, with an explicit DSN, TLS, and command
+timeout. It does not add a generic cache trait, get-or-load, a serializer, a
+global TTL, locks, or rate limits. No CI result, merge, publication, or
+deployment is claimed.
+<!-- template:end cache:roadmap-stage-10-11-cache-note -->
 
 ### Stage 11: Benchmarking and performance evidence
 
