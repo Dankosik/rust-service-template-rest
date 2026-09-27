@@ -21,7 +21,7 @@ use std::{
 use std::time::{SystemTime, UNIX_EPOCH};
 // template:end authn:grpc-transport-test-auth-time
 
-use grpc_contracts::generated::{
+use grpc_contracts::example::v1::{
     BidiStreamRequest, BidiStreamResponse, ClientStreamRequest, ClientStreamResponse,
     ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
     echo_service_client::EchoServiceClient,

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Generate committed Rust from the owned protobuf module. Buf builds the
+# descriptor set without imports; stock tonic-prost-build emits the code.
+# Run through `make grpc-generate`, which supplies BUF. The optional argument
+# is the output directory.
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -6,27 +10,20 @@ readonly script_dir
 root_dir="$(cd -- "${script_dir}/.." && pwd)"
 readonly root_dir
 
-# shellcheck source=tools/versions.env
-source "${root_dir}/tools/versions.env"
-
-run_buf() {
-  go run "github.com/bufbuild/buf/cmd/buf@v${BUF_VERSION}" "$@"
-}
-
-if [[ "${1:-}" == "buf" ]]; then
-  shift
-  run_buf "$@"
-  exit 0
-fi
-
+read -r -a buf <<<"${BUF:?BUF is unset; run make grpc-generate}"
 readonly generated_dir="${1:-${root_dir}/crates/grpc-contracts/src/generated}"
-descriptor_path="$(mktemp)"
-readonly descriptor_path
-trap 'rm -f "${descriptor_path}"' EXIT
+staging="$(mktemp -d)"
+readonly staging
+trap 'rm -rf -- "${staging}"' EXIT
 
-mkdir -p "${generated_dir}"
-run_buf build "${root_dir}/api/proto" \
-  --output "${descriptor_path}" \
-  --as-file-descriptor-set
+"${buf[@]}" build "${root_dir}/api/proto" \
+  --exclude-imports \
+  --as-file-descriptor-set \
+  --output "${staging}/descriptors.binpb"
 cargo run --locked --manifest-path "${root_dir}/tools/grpc-codegen/Cargo.toml" -- \
-  "${descriptor_path}" "${generated_dir}" "${root_dir}/api/proto"
+  "${staging}/descriptors.binpb" "${staging}/rust"
+
+# Replace the directory whole so a removed package leaves no stale file.
+rm -rf -- "${generated_dir}"
+mkdir -p -- "$(dirname -- "${generated_dir}")"
+cp -R -- "${staging}/rust" "${generated_dir}"

@@ -703,6 +703,12 @@
         ]
       },
       {
+        "path": ".github/dependabot.yml",
+        "ids": [
+          "dependabot-grpc-generator"
+        ]
+      },
+      {
         "path": "tools/versions.env",
         "ids": [
           "tools-buf-version"
