@@ -11,7 +11,6 @@ use utoipa_axum::router::OpenApiRouter;
 
 use crate::contract::{FinalizeError, Policy};
 use crate::problem::{Code, Problem, SANITIZED_DETAIL};
-use crate::request_id;
 
 const AUTHENTICATION_REQUIRED_DETAIL: &str = "bearer authentication is required";
 const AUTHENTICATION_MALFORMED_DETAIL: &str = "bearer authentication is malformed";
@@ -88,7 +87,6 @@ where
                 .ok_or_else(|| {
                     Problem::new(Code::InternalServerError)
                         .detail(SANITIZED_DETAIL)
-                        .request_id(request_id::request_id(&parts.extensions))
                         .into_response()
                 }),
         )
@@ -160,16 +158,15 @@ async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let request_id = request_id::request_id(request.extensions());
     request.extensions_mut().remove::<Principal>();
     request.extensions_mut().remove::<VerifiedPrincipal>();
     let Some(path) = crate::contract::contract_path(request.extensions()) else {
-        return wiring_failure(request_id);
+        return wiring_failure();
     };
     match state.policy.public(path, request.method()) {
         Some(true) => next.run(request).await,
-        None => wiring_failure(request_id),
-        Some(false) => authenticate_protected(state, request, next, request_id).await,
+        None => wiring_failure(),
+        Some(false) => authenticate_protected(state, request, next).await,
     }
 }
 
@@ -177,7 +174,6 @@ async fn authenticate_protected(
     state: AuthState,
     mut request: Request,
     next: Next,
-    request_id: Option<String>,
 ) -> Response {
     let authorization = request
         .headers()
@@ -186,21 +182,20 @@ async fn authenticate_protected(
         .map(axum::http::HeaderValue::as_bytes);
     let principal = match state.verifier.authenticate(authorization, "http").await {
         Ok(principal) => principal,
-        Err(failure) => return failure_response(failure, request_id),
+        Err(failure) => return failure_response(failure),
     };
     request.headers_mut().remove(AUTHORIZATION);
     request.extensions_mut().insert(principal);
     next.run(request).await
 }
 
-fn wiring_failure(request_id: Option<String>) -> Response {
+fn wiring_failure() -> Response {
     Problem::new(Code::InternalServerError)
         .detail(SANITIZED_DETAIL)
-        .request_id(request_id)
         .into_response()
 }
 
-fn failure_response(failure: Failure, request_id: Option<String>) -> Response {
+fn failure_response(failure: Failure) -> Response {
     let (code, detail, challenge) = match failure {
         Failure::Missing => (
             Code::AuthenticationRequired,
@@ -223,10 +218,7 @@ fn failure_response(failure: Failure, request_id: Option<String>) -> Response {
             None,
         ),
     };
-    let mut response = Problem::new(code)
-        .detail(detail)
-        .request_id(request_id)
-        .into_response();
+    let mut response = Problem::new(code).detail(detail).into_response();
     if let Some(challenge) = challenge {
         response.headers_mut().insert(
             WWW_AUTHENTICATE,

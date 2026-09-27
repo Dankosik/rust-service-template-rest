@@ -3,9 +3,9 @@
 //! Order is the contract, outermost first:
 //!
 //! request-id sanitize → set → propagate → nosniff → OpenTelemetry server span →
-//! traceparent response header → HTTP metrics → access log → error mapping →
-//! load shed → in-flight limit → request deadline → request timeout → panic recovery →
-//! body limit → extractor body limit → routes / 404 / 405
+//! traceparent response header → HTTP metrics → access log → problem completion →
+//! error mapping → load shed → in-flight limit → request deadline → request timeout →
+//! panic recovery → body limit (tower-http) → extractor body limit → routes / 404 / 405
 //!
 //! Every layer is applied with `Router::layer`, so the 404 and 405 fallbacks
 //! travel through the same chain. Cross-origin requests are fail-closed by
@@ -16,26 +16,23 @@ use std::any::Any;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use axum::body::Body;
 use axum::error_handling::HandleErrorLayer;
-use axum::extract::{DefaultBodyLimit, Extension, Request, State};
-use axum::http::header::{CONTENT_LENGTH, X_CONTENT_TYPE_OPTIONS};
+use axum::extract::{DefaultBodyLimit, Request};
+use axum::http::header::X_CONTENT_TYPE_OPTIONS;
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{BoxError, Router};
 use axum_prometheus::{EndpointLabel, PrometheusMetricLayerBuilder};
 use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
-use http_body_util::Limited;
 use tower::ServiceBuilder;
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tower::load_shed::error::Overloaded;
 use tower::timeout::error::Elapsed;
 use tower::util::option_layer;
 use tower_http::catch_panic::CatchPanicLayer;
-use tower_http::request_id::{
-    MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
-};
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::access_log::{self, AccessLogOptions, UNMATCHED_ROUTE};
@@ -97,8 +94,8 @@ pub const SHED_REQUESTS_METRIC: &str = "http_server_shed_requests_total";
 /// Request-level policy for [`harden`].
 #[derive(Clone, Debug)]
 pub struct HardenOptions {
-    /// Request body ceiling; overflow answers 413. Applied both to the
-    /// streaming `Limited` wrapper and to axum's extractor `DefaultBodyLimit`;
+    /// Request body ceiling; overflow answers 413. Applied both to tower-http's
+    /// `RequestBodyLimitLayer` and to axum's extractor `DefaultBodyLimit`;
     /// axum's own default is independent, so omitting the extractor layer
     /// would keep a different ceiling than `http.max_body_bytes`.
     pub max_body_bytes: usize,
@@ -153,6 +150,9 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
             },
             access_log::record,
         ))
+        // Inside the access log and outside error mapping, so every Problem
+        // is completed before it is logged.
+        .layer(middleware::from_fn(complete_problems))
         .layer(HandleErrorLayer::new(middleware_error))
         .load_shed()
         .layer(option_layer(in_flight))
@@ -166,10 +166,7 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         // template:end request-budget:http-request-deadline-mapper
         .timeout(options.request_timeout)
         .layer(CatchPanicLayer::custom(panic_to_problem))
-        .layer(middleware::from_fn_with_state(
-            BodyLimit(options.max_body_bytes),
-            enforce_body_limit,
-        ))
+        .layer(RequestBodyLimitLayer::new(options.max_body_bytes))
         .layer(DefaultBodyLimit::max(options.max_body_bytes));
 
     #[allow(
@@ -183,34 +180,54 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
 }
 
 /// Map the shedder and timeout errors to problem responses.
-async fn middleware_error(id: Option<Extension<RequestId>>, err: BoxError) -> Response {
-    let request_id = id
-        .as_ref()
-        .and_then(|Extension(id)| request_id::from_request_id(id));
+async fn middleware_error(err: BoxError) -> Response {
     if err.is::<Overloaded>() {
         metrics::counter!(SHED_REQUESTS_METRIC).increment(1);
         return Problem::new(Code::ServiceUnavailable)
             .detail(AT_CAPACITY_DETAIL)
             .retry_after(SHED_RETRY_AFTER)
-            .request_id(request_id)
             .into_response();
     }
     if err.is::<Elapsed>() {
         return Problem::new(Code::RequestTimeout)
             .detail("request budget expired before a response could be committed")
-            .request_id(request_id)
             .into_response();
     }
     tracing::error!(error = %err, "unclassified middleware error");
     Problem::new(Code::InternalServerError)
         .detail(SANITIZED_DETAIL)
-        .request_id(request_id)
         .into_response()
 }
 
+/// Complete every Problem the chain or a handler returns: a bare 413 from
+/// tower-http's body limit or an axum extractor takes the Problem envelope,
+/// and every Problem body gains the request id.
+async fn complete_problems(request: Request, next: Next) -> Response {
+    let request_id = request_id::request_id(request.extensions());
+    let mut response = next.run(request).await;
+    if response.status() == StatusCode::PAYLOAD_TOO_LARGE
+        && response.extensions().get::<Problem>().is_none()
+    {
+        response = Problem::new(Code::RequestEntityTooLarge)
+            .detail("request body exceeds the configured limit")
+            .into_response();
+    }
+    let Some(id) = request_id else {
+        return response;
+    };
+    let Some(problem) = response.extensions_mut().remove::<Problem>() else {
+        return response;
+    };
+    let problem = problem.with_request_id(id);
+    // Only `Problem::into_response` attaches the extension, so status and
+    // headers (Allow, WWW-Authenticate, Retry-After) are already right.
+    *response.body_mut() = axum::Json(&problem).into_response().into_body();
+    response.extensions_mut().insert(problem);
+    response
+}
+
 /// A recovered panic becomes a sanitized 500. The payload is logged, never
-/// echoed. The request id still reaches the caller through the propagated
-/// header.
+/// echoed. Problem completion adds the request id to the body.
 #[allow(clippy::needless_pass_by_value)] // `ResponseForPanic` hands over the box.
 fn panic_to_problem(payload: Box<dyn Any + Send + 'static>) -> Response {
     let message = payload
@@ -224,63 +241,16 @@ fn panic_to_problem(payload: Box<dyn Any + Send + 'static>) -> Response {
         .into_response()
 }
 
-#[derive(Clone, Copy, Debug)]
-struct BodyLimit(usize);
-
-/// Refuse a declared body above the limit before the handler runs, and cap
-/// every byte read from an undeclared one. tower-http's `RequestBodyLimitLayer`
-/// does the same with a `text/plain` body; this keeps the problem envelope.
-async fn enforce_body_limit(
-    State(BodyLimit(limit)): State<BodyLimit>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let request_id = request_id::request_id(request.extensions());
-    let declared = request
-        .headers()
-        .get(CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok());
-    if declared.is_some_and(|length| length > limit) {
-        return payload_too_large(request_id);
-    }
-    let request = request.map(|body| Body::new(Limited::new(body, limit)));
-    let response = next.run(request).await;
-    if response.status() == StatusCode::PAYLOAD_TOO_LARGE
-        && response.extensions().get::<Code>().is_none()
-    {
-        // An extractor hit the limit while streaming and answered with
-        // axum's plain-text rejection; keep the envelope uniform.
-        return payload_too_large(request_id);
-    }
-    response
-}
-
-fn payload_too_large(request_id: Option<String>) -> Response {
-    Problem::new(Code::RequestEntityTooLarge)
-        .detail("request body exceeds the configured limit")
-        .request_id(request_id)
-        .into_response()
-}
-
-async fn not_found(id: Option<Extension<RequestId>>) -> Response {
+async fn not_found() -> Response {
     Problem::new(Code::NotFound)
         .detail("no resource at this path")
-        .request_id(
-            id.as_ref()
-                .and_then(|Extension(id)| request_id::from_request_id(id)),
-        )
         .into_response()
 }
 
-async fn method_not_allowed(id: Option<Extension<RequestId>>) -> Response {
+async fn method_not_allowed() -> Response {
     // axum appends the computed `Allow` header to this response.
     Problem::new(Code::MethodNotAllowed)
         .detail("method is not allowed for this resource")
-        .request_id(
-            id.as_ref()
-                .and_then(|Extension(id)| request_id::from_request_id(id)),
-        )
         .into_response()
 }
 
@@ -290,7 +260,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use axum::http::header::{ALLOW, CONTENT_TYPE, RETRY_AFTER};
+    use axum::body::Body;
+    use axum::http::header::{ALLOW, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
     use axum::http::{Method, Request as HttpRequest};
     use axum::routing::{get, post};
     use axum_test::TestServer;
@@ -463,6 +434,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn panic_problem_body_request_id_matches_the_header() {
+        let server = TestServer::new(app(&options()));
+        let response = server.get("/panic").await;
+        response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+        let id = response.header(REQUEST_ID_HEADER);
+        assert_eq!(
+            response.json::<Value>()["request_id"].as_str(),
+            Some(id.to_str().unwrap())
+        );
+    }
+
+    #[tokio::test]
     async fn declared_and_streamed_oversize_bodies_are_413_problems() {
         let big = "x".repeat(65);
         let declared = HttpRequest::builder()
@@ -473,6 +456,10 @@ mod tests {
             .unwrap();
         let response = app(&options()).oneshot(declared).await.unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/problem+json"
+        );
         assert_eq!(
             body_json(response).await["code"],
             "request_entity_too_large"
@@ -488,6 +475,10 @@ mod tests {
         assert_eq!(
             response.headers().get(CONTENT_TYPE).unwrap(),
             "application/problem+json"
+        );
+        assert_eq!(
+            body_json(response).await["code"],
+            "request_entity_too_large"
         );
 
         let small = HttpRequest::builder()

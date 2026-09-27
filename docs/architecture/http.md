@@ -16,10 +16,11 @@ alternatives they beat, are recorded at the end of this document.
    drain.
 3. The hardened chain (`crates/infra-http/src/harden.rs`) owns request-level
    policy, outermost first: request-id admission and propagation, `nosniff`,
-   the OpenTelemetry server span, HTTP metrics, the access log, error mapping
+   the OpenTelemetry server span, HTTP metrics, the access log, problem
+   completion (fills `request_id` into every Problem), error mapping
    (`503` shedding with `Retry-After`, `504` timeout with code
    `request_timeout`), load shedding, the in-flight limit, the request timeout,
-   panic recovery (`500`), and the body
+   panic recovery (`500`), the tower-http body limit, and the extractor body
    limit (`413`). Every layer is applied with `Router::layer`, so the `404`
    and `405` fallbacks travel through the same chain. There is no CORS
    layer: browser cross-origin requests are fail-closed by omission.
@@ -186,7 +187,7 @@ one only with new evidence.
 | No `CorsLayer` | an empty `CorsLayer` | an empty layer answers every `OPTIONS` with `200`; browser cross-origin requests are fail-closed by omission until a profile decides |
 | Inbound `X-Request-ID` accepted only within `^[A-Za-z0-9._~-]{1,128}$`, otherwise replaced by a UUIDv4 | tower-http's default, which trusts any present header | a caller-provided id is data, not identity; the grammar bounds log and header size |
 | Template-owned one-line access log with `Option<MatchedPath>` and route-based probe suppression | tower-http `TraceLayer` alone | route templates, not raw paths, keep label cardinality bounded; `MatchedPath` is absent in `Router::fallback`, so unmatched requests carry an explicit label |
-| `413` as a `Problem` body | tower-http's short-circuit | the short-circuit answers `text/plain`; the contract promises `application/problem+json` |
+| tower-http `RequestBodyLimitLayer` plus axum `DefaultBodyLimit` at `http.max_body_bytes`; problem completion maps their `text/plain` `413` to the `Problem` envelope | a template-owned body-limit middleware | the stock layer already short-circuits on `Content-Length` and caps streamed bodies; only the envelope is template policy |
 | Template-owned `Problem` (`code`, `request_id`, `invalid_params`) with a closed `Code` catalog | `problem_details` 0.10 (acceptable), `problemdetails` 0.7 (pins tower-http 0.6) | about sixty lines; nothing submitted by the caller is echoed; a new code is a reviewed contract change |
 | Template-owned accept loop over `hyper_util::server::conn::auto` with `TokioTimer`, a `Semaphore(max_connections)` permit per connection, and a bounded `peek` before hyper sees the socket | `axum::serve` | `axum::serve` sets no timer and exposes no limits (axum #2741); the `auto` builder starts no timer until the first byte (hyper #3756), so a silent client would hold a connection forever |
 | One `http.header_read_timeout` that hyper restarts on idle, so it is both the header and the keep-alive idle bound; body reads are bounded by `http.request_timeout` because extractors run inside the handler future | Go's read/write/idle deadlines | hyper has no per-connection read/write deadlines; one value covers both risks. Streaming response bodies stay unbounded until a streaming operation adopts `ResponseBodyTimeoutLayer` |

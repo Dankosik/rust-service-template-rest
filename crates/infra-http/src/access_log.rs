@@ -13,7 +13,7 @@ use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::Response;
 
-use crate::problem::Code;
+use crate::problem::Problem;
 use crate::request_id::request_id;
 use crate::router::HEALTH_PROBE_ROUTES;
 
@@ -56,8 +56,8 @@ pub(crate) async fn record(
     // incident that distinction is the whole question. Bounded by the catalog.
     let problem_code = response
         .extensions()
-        .get::<Code>()
-        .map(|code| code.as_str());
+        .get::<Problem>()
+        .map(|problem| problem.code().as_str());
     tracing::info!(
         method = %method,
         route = %route,

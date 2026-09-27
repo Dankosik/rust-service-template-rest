@@ -170,13 +170,11 @@ impl IntoResponse for GreetingResponse {
     params(("name" = String, Path, description = "Who to greet")),
     responses(GreetingResponse, TransportProblemResponses)
 )]
-async fn get_greeting(Path(name): Path<String>, parts: Parts) -> GreetingResponse {
+async fn get_greeting(Path(name): Path<String>) -> GreetingResponse {
     match greet(&name) {
         Ok(greeting) => GreetingResponse::Ok(GreetingBody { message: greeting.message }),
         Err(GreetingError::Reserved) => GreetingResponse::NotFound(GreetingNotFound(
-            Problem::new(Code::NotFound)
-                .detail("no greeting exists for a reserved name")
-                .request_id(infra_http::request_id(&parts.extensions)),
+            Problem::new(Code::NotFound).detail("no greeting exists for a reserved name"),
         )),
     }
 }
@@ -208,9 +206,8 @@ What each choice buys:
   declared `application/json`; a `Problem` renders `application/problem+json`
   with the closed `code` from the catalog. `Code` is a closed enum: a code
   the catalog lacks is a reviewed contract change, not a string.
-- `Parts` gives the handler the request extensions, and
-  `infra_http::request_id` reads the id the correlation layer admitted, so a
-  handler-produced problem carries the same `request_id` as the log line.
+- The hardened chain fills `request_id` into every Problem, so a
+  handler-produced problem carries the same id as the log line.
 - `#[serde(deny_unknown_fields)]` renders `additionalProperties: false`.
 - The router is generic over the state so the composition root can merge it
   beside the probe router, whose state is the readiness reader. One
