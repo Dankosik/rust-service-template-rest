@@ -154,17 +154,17 @@ impl Signals {
 /// tasks that use them have joined, on every exit path.
 #[derive(Default)]
 pub(crate) struct Dependencies {
+    // template:begin postgres:shutdown-dependencies-postgres-field
     /// HTTP connection tasks are not in the tracker; `close` waits for any
     /// pooled connections they still hold. Work that outlives close is
     /// dropped by `runtime.shutdown_timeout`.
-    // template:begin postgres:shutdown-dependencies-postgres-field
     pub(crate) postgres: Option<PgPool>,
     // template:end postgres:shutdown-dependencies-postgres-field
     // template:begin messaging:service-shutdown-dependencies-messaging-field
     pub(crate) messaging: Option<Messaging>,
     // template:end messaging:service-shutdown-dependencies-messaging-field
-    /// Not a readiness probe; the connection closes when it drops.
     // template:begin cache:service-shutdown-dependencies-cache-field
+    /// Not a readiness probe; the connection closes when it drops.
     pub(crate) cache: Option<Cache>,
     // template:end cache:service-shutdown-dependencies-cache-field
 }
