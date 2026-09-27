@@ -56,7 +56,6 @@ fn register_outbound(
 #[allow(
     clippy::unnecessary_wraps,
     unused_variables,
-    dead_code,
     reason = "the registration signature stays fixed across independently retained profiles"
 )]
 fn register(
@@ -87,20 +86,5 @@ fn register(
 }
 
 fn main() -> ExitCode {
-    #[allow(
-        unused_variables,
-        reason = "retained profiles replace the inert registration"
-    )]
-    let registration: Option<jobs_worker::Register> = None;
-    // template:begin webhooks-common:worker-webhooks-registration
-    #[allow(
-        unused_variables,
-        reason = "retained outbox also supplies the registration"
-    )]
-    let registration = Some(register as jobs_worker::Register);
-    // template:end webhooks-common:worker-webhooks-registration
-    // template:begin outbox:worker-outbox-registration
-    let registration = Some(register as jobs_worker::Register);
-    // template:end outbox:worker-outbox-registration
-    jobs_worker::run(std::env::args_os(), registration)
+    jobs_worker::run(std::env::args_os(), register)
 }

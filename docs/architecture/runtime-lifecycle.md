@@ -187,35 +187,33 @@ for the shipped binary, and the test-only `jobs-worker-fixture` suite in
 | Step | What | Refusal (exit 1) |
 | --- | --- | --- |
 | 1 | `LoadOptions::parse_from` (`--help` exits `0`) | clap usage error (exit 2) |
-| 2 | Registration function is `None` | `no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs` |
-| 3 | `service_config::load` (same sources, precedence, unknown-key and secret rules as the service) | `configuration is invalid: ...` |
-| 4 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)` |
-| 5 | Build the multi-thread runtime | `build tokio runtime: ...` |
-| 6 | Install `Signals` (SIGINT, then SIGTERM) | `install stop signal handlers: ...` |
-| 7 | Tracer provider with the worker identity, subscriber, recorder, and the retained messaging panic hook | the telemetry errors, as in the service |
-| 8 | Register optional jobs and typed-message capabilities through `register(&mut kinds, &mut messages, &support)`; validate each nonempty registry | `job kind registration failed: ...`; `job kinds are invalid: ...`; `typed message handlers are invalid: ...`; no retained capability refuses with the step-2 message |
-| 9 | `jobs_worker_starting` record; metrics upkeep and Tokio runtime metrics join the tracker | |
-| 10 | After registration, determine whether retained capabilities need PostgreSQL; validate `postgres.enabled` and mode-aware pool capacity, then admit the DSN/pool and migration history | `postgres.enabled must be true to run the jobs worker`; capacity, DSN, pool, or history refusal |
-| 11 | When messaging or outbox is retained, validate producer/consumer configuration, connect NATS under its startup budget, and admit a consumer only for registered typed handlers | messaging configuration, connection, topology, bounds, or consumer refusal |
-| 12 | Construct every required ordinary and reserved publication `Engine`, then run each `Engine::check_startup` | `jobs startup check: ...` |
-| 13 | Bind the health listener (`http.addr`), then the diagnostics listener (`observability.metrics.addr`, when set); `http listener bound`, `diagnostics listener bound` | `bind http listener ...` |
-| 14 | Readiness admission (`refresh`, then cached verdict over retained PostgreSQL and messaging probes), raced against stop signals | `startup admission: ...` |
-| 15 | Only after admission, start every `Engine` and the admitted consumer; `jobs_claiming_started` and `messaging_consuming_started` | |
-| 16 | Refresher task; `jobs_worker_ready` | |
-| 17 | Wait for a stop signal, an engine failure, or a consumer failure | |
+| 2 | `service_config::load` (same sources, precedence, unknown-key and secret rules as the service) | `configuration is invalid: ...` |
+| 3 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)` |
+| 4 | Build the multi-thread runtime | `build tokio runtime: ...` |
+| 5 | Install `Signals` (SIGINT, then SIGTERM) | `install stop signal handlers: ...` |
+| 6 | Tracer provider with the worker identity, subscriber, recorder, and the retained messaging panic hook | the telemetry errors, as in the service |
+| 7 | Register optional jobs and typed-message capabilities through `register(&mut kinds, &mut messages, &support)`; validate each nonempty registry. A composition with no retained capability refuses after configuration is loaded | `job kind registration failed: ...`; `job kinds are invalid: ...`; `typed message handlers are invalid: ...`; `no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs` |
+| 8 | `jobs_worker_starting` record; metrics upkeep and Tokio runtime metrics join the tracker | |
+| 9 | After registration, determine whether retained capabilities need PostgreSQL; validate `postgres.enabled` and mode-aware pool capacity, then admit the DSN/pool and migration history | `postgres.enabled must be true to run the jobs worker`; capacity, DSN, pool, or history refusal |
+| 10 | When messaging or outbox is retained, validate producer/consumer configuration, connect NATS under its startup budget, and admit a consumer only for registered typed handlers | messaging configuration, connection, topology, bounds, or consumer refusal |
+| 11 | Construct every required ordinary and reserved publication `Engine`, then run each `Engine::check_startup` | `jobs startup check: ...` |
+| 12 | Bind the health listener (`http.addr`), then the diagnostics listener (`observability.metrics.addr`, when set); `http listener bound`, `diagnostics listener bound` | `bind http listener ...` |
+| 13 | Readiness admission (`refresh`, then cached verdict over retained PostgreSQL and messaging probes), raced against stop signals | `startup admission: ...` |
+| 14 | Only after admission, start every `Engine` and the admitted consumer; `jobs_claiming_started` and `messaging_consuming_started` | |
+| 15 | Refresher task; `jobs_worker_ready` | |
+| 16 | Wait for a stop signal, an engine failure, or a consumer failure | |
 
-Steps 1-8 open no dependency. Step 2 precedes configuration so the shipped
-binary refuses the same way everywhere; registration itself follows
-configuration and constructs only local registries. Signal streams exist from
-step 6, so a stop during admission remains observable. A signal while NATS
-connects or admits a consumer, before readiness admission, or immediately
-before step 15 starts no engine and no consumer; the staged plan still closes
-any resource already opened. Before admission, `/health/ready` answers `503
-not ready` (not evaluated). Every refusal after the runtime started goes
-through one `abort_startup` teardown: it finishes all started engines and
-consumer work within 2 s, closes bound listeners within 2 s, joins background
-tasks within 3 s, and closes retained pool and messaging resources within 5 s.
-It flushes no telemetry.
+Steps 1-7 open no dependency. Registration follows configuration and
+constructs only local registries. Signal streams exist from step 5, so a
+stop during admission remains observable. A signal while NATS connects or
+admits a consumer, before readiness admission, or immediately before step
+14 starts no engine and no consumer; the staged plan still closes any
+resource already opened. Before admission, `/health/ready` answers `503
+not ready` (not evaluated). A failed signal install returns before anything
+is open. Every later refusal goes through one `abort_startup` teardown: it
+finishes all started engines and consumer work within 2 s, closes bound
+listeners within 2 s, joins background tasks within 3 s, and closes
+retained pool and messaging resources within 5 s. It flushes no telemetry.
 
 **Readiness.** `/health/ready` uses the service's cached-verdict semantics
 with the retained PostgreSQL and messaging probes. The worker is ready only
@@ -246,7 +244,7 @@ that votes degraded makes the exit code `3`.
 | Close retained pool and messaging dependency | 5 s | `postgres_pool_closed` and messaging close outcome | either close overruns or messaging close is unobserved |
 | Flush telemetry | 5 s | `telemetry_flushed`, `shutdown_completed` | the flush is incomplete |
 
-When a stop signal ends startup before step 15, no engine or consumer starts;
+When a stop signal ends startup before step 14, no engine or consumer starts;
 the plan still closes resources already admitted. The tail after the drain is
 2 + 2 + 3 + 5 + 5 = 17 s. `validate_grace_budget` refuses a grace period
 below `http.drain_timeout` plus 17 s. The default worst case is

@@ -180,7 +180,7 @@ fn register(kinds: &mut infra_jobs::Kinds, _: &jobs_worker::Support<'_>)
 }
 ```
 
-Pass `Some(register)` to `jobs_worker::run` in the worker entrypoint. The
+Pass `register` to `jobs_worker::run` in the worker entrypoint. The
 unmodified template refuses startup because it ships no business kind.
 Registration rejects an empty set, duplicate/invalid names, and out-of-range
 policies. Defaults are 25 attempts and a 60-second timeout; accepted ranges
