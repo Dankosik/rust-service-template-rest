@@ -40,20 +40,17 @@ impl Probe for PostgresProbe {
 /// rejection carries its SQLSTATE, a bounded code that tells an
 /// authentication failure (`28P01`) from other rejections.
 fn probe_error(err: &sqlx::Error) -> ProbeError {
-    let class = match err {
-        sqlx::Error::PoolTimedOut => "no connection available inside the acquire budget",
-        sqlx::Error::PoolClosed => "pool is closed",
-        sqlx::Error::Io(_) => "connection failed",
-        sqlx::Error::Tls(_) => "tls handshake failed",
-        sqlx::Error::Database(error) => {
-            if let Some(code) = error.code() {
-                return ProbeError::new(format!("server rejected the ping (SQLSTATE {code})"));
-            }
-            "server rejected the ping"
-        }
-        _ => "ping failed",
-    };
-    ProbeError::new(class)
+    ProbeError::new(match err {
+        sqlx::Error::PoolTimedOut => "no connection available inside the acquire budget".to_owned(),
+        sqlx::Error::PoolClosed => "pool is closed".to_owned(),
+        sqlx::Error::Io(_) => "connection failed".to_owned(),
+        sqlx::Error::Tls(_) => "tls handshake failed".to_owned(),
+        sqlx::Error::Database(error) => match error.code() {
+            Some(code) => format!("server rejected the ping (SQLSTATE {code})"),
+            None => "server rejected the ping".to_owned(),
+        },
+        _ => "ping failed".to_owned(),
+    })
 }
 
 #[cfg(test)]

@@ -212,11 +212,21 @@ impl Readiness {
         let observed = self.check_probes().await;
         let at = Instant::now();
         let failure_threshold = self.policy.failure_threshold;
+        let mut flipped_to = None;
         self.tx.send_modify(|state| {
             let next = next_check(state.last_check.as_ref(), observed, failure_threshold, at);
-            log_transition(state.last_check.as_ref(), &next);
+            // While draining, readers are told "draining" whatever the probes say.
+            if !state.draining {
+                flipped_to = flip(state.last_check.as_ref(), &next);
+            }
             state.last_check = Some(next);
         });
+        // Logged after the write lock is released so readers never wait on it.
+        match flipped_to {
+            Some(Ok(())) => tracing::info!("readiness recovered"),
+            Some(Err(reason)) => tracing::warn!(%reason, "readiness lost"),
+            None => {}
+        }
     }
 
     /// Refresh every `policy.interval` until `cancel` fires.
@@ -291,17 +301,11 @@ fn next_check(
     }
 }
 
-/// Log only flips of the published verdict; the first check at startup has
-/// its own admission log.
-fn log_transition(previous: Option<&Check>, next: &Check) {
-    let Some(previous) = previous else {
-        return;
-    };
-    match (&previous.verdict, &next.verdict) {
-        (Err(_), Ok(())) => tracing::info!("readiness recovered"),
-        (Ok(()), Err(reason)) => tracing::warn!(%reason, "readiness lost"),
-        _ => {}
-    }
+/// The new verdict when it flips between ready and not ready. The first
+/// check at startup is not a flip; admission logs its own outcome.
+fn flip(previous: Option<&Check>, next: &Check) -> Option<Result<(), NotReady>> {
+    let previous = previous?;
+    (previous.verdict.is_ok() != next.verdict.is_ok()).then(|| next.verdict.clone())
 }
 
 impl ReadinessReader {
