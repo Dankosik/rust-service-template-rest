@@ -293,16 +293,23 @@ classify() {
 }
 
 union_classify() {
-	local base_ref=$1 tmp files old_files base_script current old current_status old_status name value count=0
+	local base_ref=$1 tmp files old_files current_files base_script current old current_status old_status name value count=0
 	local current_classified current_unclassified line
 	tmp=$(mktemp -d)
 	trap 'rm -rf -- "${tmp}"' RETURN
 	files=${tmp}/files
 	old_files=${tmp}/old-files
 	base_script=${tmp}/changed-surfaces.sh
+	current_files=${tmp}/current-files
 	cat >"${files}"
 	: >"${old_files}"
+	: >"${current_files}"
 	while IFS= read -r file; do
+		# A path deleted by this change is classified only by the base
+		# classifier, which still knows it; the head classifier may not.
+		if [[ -e ${file} || -L ${file} ]] || ! git cat-file -e "${base_ref}:${file}" 2>/dev/null; then
+			printf '%s\n' "${file}" >>"${current_files}"
+		fi
 		[[ ${file} != scripts/ci/changed-surfaces.sh ]] || continue
 		git cat-file -e "${base_ref}:${file}" 2>/dev/null && printf '%s\n' "${file}" >>"${old_files}"
 	done <"${files}"
@@ -311,7 +318,7 @@ union_classify() {
 		return 2
 	}
 	set +e
-	current=$(classify <"${files}")
+	current=$(classify <"${current_files}")
 	current_status=$?
 	old=$(bash "${base_script}" <"${old_files}")
 	old_status=$?
