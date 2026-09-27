@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use infra_grpc::ServerTlsMaterial;
 use rustls::ServerConfig;
-use secrecy::ExposeSecret as _;
 use service_config::{Config, GrpcSecurity, ValidationError};
 
 /// Registers this service's generated native gRPC adapters.
@@ -30,8 +29,8 @@ pub(crate) fn services(
 /// Convert admitted TLS material into a listener config.
 ///
 /// Configuration validates presence and source policy before this runs. The
-/// conversion does not read paths or perform network I/O. Plaintext has no
-/// server config.
+/// conversion does not read paths or perform network I/O, and borrows the
+/// private key without copying it. Plaintext has no server config.
 ///
 /// # Errors
 ///
@@ -49,26 +48,20 @@ pub(crate) fn tls(config: &Config) -> Result<Option<Arc<ServerConfig>>, Validati
                 certificate_pem: grpc
                     .certificate
                     .as_deref()
-                    .ok_or_else(|| tls_required("grpc.certificate"))?
-                    .as_bytes()
-                    .to_vec(),
+                    .ok_or_else(|| tls_required("grpc.certificate"))?,
                 private_key_pem: grpc
                     .private_key
                     .as_ref()
-                    .ok_or_else(|| tls_required("grpc.private_key"))?
-                    .expose_secret()
-                    .as_bytes()
-                    .to_vec(),
-                client_ca_pem: grpc
-                    .client_ca
-                    .as_deref()
-                    .map(|value| value.as_bytes().to_vec()),
+                    .ok_or_else(|| tls_required("grpc.private_key"))?,
+                client_ca_pem: grpc.client_ca.as_deref(),
             };
-            let server_config = infra_grpc::server_tls_config(&material).map_err(|_| {
-                ValidationError::new(
-                    "grpc.certificate",
-                    "with grpc.private_key and grpc.client_ca must be usable PEM TLS material",
-                )
+            let server_config = infra_grpc::server_tls_config(material).map_err(|error| {
+                let key = match error {
+                    infra_grpc::Error::InvalidPrivateKey => "grpc.private_key",
+                    infra_grpc::Error::InvalidCaCertificate => "grpc.client_ca",
+                    _ => "grpc.certificate",
+                };
+                ValidationError::new(key, error.to_string())
             })?;
             Ok(Some(server_config))
         }

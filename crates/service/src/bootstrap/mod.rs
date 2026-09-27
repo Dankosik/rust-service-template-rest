@@ -364,12 +364,12 @@ async fn serve_until_stopped(
         };
         // template:end grpc-authn:bootstrap-grpc-verifier
         // template:begin grpc:bootstrap-grpc-prepare-call
-        if config.http.effective_drain_budget() < infra_grpc::UNARY_DEADLINE {
+        if config.http.effective_drain_budget() < infra_grpc::CALL_DEADLINE_CAP {
             return Err(service_config::ValidationError::new(
                 "http.drain_timeout",
                 format!(
                     "minus http.readiness_propagation_delay must cover the {:?} gRPC unary deadline",
-                    infra_grpc::UNARY_DEADLINE
+                    infra_grpc::CALL_DEADLINE_CAP
                 ),
             )
             .into());

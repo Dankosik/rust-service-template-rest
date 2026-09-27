@@ -6,15 +6,12 @@ use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::http::request::Parts;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use infra_bearerauthn::{Failure, Principal, Verifier, parse_bearer};
+use infra_bearerauthn::{Failure, Principal, Verifier};
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::contract::{FinalizeError, Policy};
 use crate::problem::{Code, Problem, SANITIZED_DETAIL};
 use crate::request_id;
-
-/// Verification outcomes at the HTTP authentication boundary.
-pub const AUTHN_VERIFICATIONS_METRIC: &str = "authn_verifications_total";
 
 const AUTHENTICATION_REQUIRED_DETAIL: &str = "bearer authentication is required";
 const AUTHENTICATION_MALFORMED_DETAIL: &str = "bearer authentication is malformed";
@@ -146,11 +143,6 @@ where
     if !router.has_routes() {
         return Ok(router);
     }
-    metrics::describe_counter!(
-        AUTHN_VERIFICATIONS_METRIC,
-        metrics::Unit::Count,
-        "Inbound bearer-authentication verification outcomes."
-    );
     Ok(router.route_layer(middleware::from_fn_with_state(
         AuthState { verifier, policy },
         authenticate,
@@ -187,29 +179,15 @@ async fn authenticate_protected(
     next: Next,
     request_id: Option<String>,
 ) -> Response {
-    let mut metric = VerificationMetric::new();
-    let token = match parse_bearer(
-        request
-            .headers()
-            .get_all(AUTHORIZATION)
-            .iter()
-            .map(axum::http::HeaderValue::as_bytes),
-    ) {
-        Ok(token) => token,
-        Err(failure) => {
-            metric.failure(failure);
-            return failure_response(failure, request_id);
-        }
-    };
-    let principal = match state.verifier.verify(&token).await {
+    let authorization = request
+        .headers()
+        .get_all(AUTHORIZATION)
+        .iter()
+        .map(axum::http::HeaderValue::as_bytes);
+    let principal = match state.verifier.authenticate(authorization, "http").await {
         Ok(principal) => principal,
-        Err(failure) => {
-            metric.failure(failure);
-            return failure_response(failure, request_id);
-        }
+        Err(failure) => return failure_response(failure, request_id),
     };
-
-    metric.success();
     request.headers_mut().remove(AUTHORIZATION);
     request.extensions_mut().insert(principal);
     next.run(request).await
@@ -256,51 +234,4 @@ fn failure_response(failure: Failure, request_id: Option<String>) -> Response {
         );
     }
     response
-}
-
-struct VerificationMetric {
-    recorded: bool,
-}
-
-impl VerificationMetric {
-    const fn new() -> Self {
-        Self { recorded: false }
-    }
-
-    fn success(&mut self) {
-        record_verification("success", "none");
-        self.recorded = true;
-    }
-
-    fn failure(&mut self, failure: Failure) {
-        record_verification("failure", failure_class(failure));
-        self.recorded = true;
-    }
-}
-
-impl Drop for VerificationMetric {
-    fn drop(&mut self) {
-        if !self.recorded {
-            record_verification("cancelled", "cancelled");
-        }
-    }
-}
-
-fn record_verification(result: &'static str, failure: &'static str) {
-    metrics::counter!(
-        AUTHN_VERIFICATIONS_METRIC,
-        "transport" => "http",
-        "result" => result,
-        "failure" => failure
-    )
-    .increment(1);
-}
-
-const fn failure_class(failure: Failure) -> &'static str {
-    match failure {
-        Failure::Missing => "missing",
-        Failure::Malformed => "malformed",
-        Failure::Invalid => "invalid",
-        Failure::Unavailable => "unavailable",
-    }
 }

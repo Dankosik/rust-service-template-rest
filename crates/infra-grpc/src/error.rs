@@ -1,9 +1,21 @@
-/// Closed transport failures. This type never retains request metadata,
-/// bearer material, a peer path, a certificate, or a dependency error.
+/// Closed transport failures. Each variant names the rejected input, never its
+/// value: no request metadata, bearer material, peer path, certificate, or key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Error {
-    #[error("gRPC configuration is invalid")]
-    InvalidConfiguration,
-    #[error("gRPC registration is invalid")]
-    InvalidRegistration,
+    #[error("gRPC client destination is not a valid URI")]
+    InvalidDestination,
+    #[error("gRPC client destination must use https with TLS and http with plaintext")]
+    DestinationSecurityMismatch,
+    #[error("gRPC TLS certificate chain is invalid")]
+    InvalidCertificate,
+    #[error("gRPC TLS private key is invalid or does not match the certificate")]
+    InvalidPrivateKey,
+    #[error("gRPC TLS CA certificate is invalid")]
+    InvalidCaCertificate,
+    #[error(
+        "gRPC client TLS setup failed: native roots, destination host name, or certificate and key pairing"
+    )]
+    InvalidClientTls,
+    #[error("gRPC service {0} is registered twice")]
+    DuplicateService(&'static str),
 }

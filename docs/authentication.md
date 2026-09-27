@@ -189,8 +189,9 @@ an OAuth client library would not own these response and identity rules.
 
 ## Provider boundary and operations
 
-`authn_verifications_total` records one HTTP authentication outcome per
-protected request, including envelope rejection. `authn_token_verifications_total`
+`authn_verifications_total` records one authentication outcome per protected
+request, including envelope rejection and cancellation, with a `transport`
+label of `http` or `grpc`. Both transports use `Verifier::authenticate`. `authn_token_verifications_total`
 records decisions that reach a verifier engine, with closed `mode`, `outcome`,
 and `reason` labels. Keep these counts separate when querying outcomes.
 Preparation errors identify closed phase/reason values and static field labels;
