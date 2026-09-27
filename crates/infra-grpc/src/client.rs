@@ -1,10 +1,10 @@
-use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use http::{Request, Response};
+use secrecy::{ExposeSecret as _, SecretString};
 use tonic::body::Body;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tower::ServiceExt as _;
@@ -13,31 +13,30 @@ use tracing::Instrument as _;
 use crate::Error;
 
 /// Explicit security selected for one trusted operator destination.
+///
+/// The destination scheme must agree: `http` for plaintext, `https` for TLS.
+/// Tonic applies TLS only to `https`, so a mismatch is rejected rather than
+/// silently connecting in plaintext.
 #[derive(Clone, Debug)]
 pub enum ClientSecurity {
     Plaintext,
     Tls(ClientTlsMaterial),
 }
 
-/// Trust and optional client identity material for normal TLS verification.
-/// The service config owner admits these values; this adapter never loads a
-/// path or disables hostname verification.
-#[derive(Clone)]
+/// Trust material for normal TLS verification. Without a CA the native roots
+/// are trusted. This adapter never loads a path or disables hostname
+/// verification.
+#[derive(Clone, Debug, Default)]
 pub struct ClientTlsMaterial {
-    pub ca_certificate_pem: Option<Vec<u8>>,
-    pub certificate_pem: Option<Vec<u8>>,
-    pub private_key_pem: Option<Vec<u8>>,
+    pub ca_certificate_pem: Option<String>,
+    pub identity: Option<ClientIdentity>,
 }
 
-impl fmt::Debug for ClientTlsMaterial {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ClientTlsMaterial")
-            .field("has_ca_certificate", &self.ca_certificate_pem.is_some())
-            .field("has_certificate", &self.certificate_pem.is_some())
-            .field("has_private_key", &self.private_key_pem.is_some())
-            .finish()
-    }
+/// Client certificate and key for mTLS.
+#[derive(Clone, Debug)]
+pub struct ClientIdentity {
+    pub certificate_pem: String,
+    pub private_key_pem: SecretString,
 }
 
 /// One lazy, shared channel for a configured dependency.
@@ -55,19 +54,28 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidConfiguration`] for an invalid destination or
-    /// unusable TLS trust or client identity material.
+    /// Returns [`Error::InvalidDestination`] for a destination tonic rejects,
+    /// [`Error::DestinationSecurityMismatch`] when its scheme disagrees with
+    /// `security`, a certificate or key variant for unusable PEM material, and
+    /// [`Error::InvalidClientTls`] when tonic cannot build the TLS connector.
     pub fn new(destination: &str, security: ClientSecurity) -> Result<Self, Error> {
         let mut endpoint = Endpoint::from_shared(destination.to_owned())
-            .map_err(|_| Error::InvalidConfiguration)?
+            .map_err(|_| Error::InvalidDestination)?
             .connect_timeout(Duration::from_secs(5))
             .tcp_keepalive(Some(Duration::from_secs(60)))
             .http2_keep_alive_interval(Duration::from_secs(20))
             .keep_alive_timeout(Duration::from_secs(20));
+        let expected_scheme = match security {
+            ClientSecurity::Plaintext => "http",
+            ClientSecurity::Tls(_) => "https",
+        };
+        if endpoint.uri().scheme_str() != Some(expected_scheme) {
+            return Err(Error::DestinationSecurityMismatch);
+        }
         if let ClientSecurity::Tls(material) = security {
             endpoint = endpoint
                 .tls_config(client_tls(&material)?)
-                .map_err(|_| Error::InvalidConfiguration)?;
+                .map_err(|_| Error::InvalidClientTls)?;
         }
         Ok(Self {
             channel: endpoint.connect_lazy(),
@@ -95,46 +103,59 @@ impl tower::Service<Request<Body>> for Client {
                 request.headers_mut(),
             );
             let started = Instant::now();
-            let label = request.uri().path().to_owned();
+            let path = request.uri().path().to_owned();
             let result = async {
                 let ready = channel.ready().await.map_err(transport_status)?;
                 ready.call(request).await.map_err(transport_status)
             }
             .instrument(span.clone())
             .await;
-            match &result {
+            let code = match &result {
                 Ok(response) => {
-                    let code = crate::observe::code_from_headers(response.headers());
                     tracing_opentelemetry_instrumentation_sdk::http::grpc::update_span_from_response(
                         &span, response, false,
                     );
-                    crate::observe::record(&label, "client", code, started.elapsed());
+                    crate::observe::code_from_headers(response.headers())
                 }
-                Err(status) => {
-                    crate::observe::record(&label, "client", status.code(), started.elapsed());
-                }
-            }
+                Err(status) => status.code(),
+            };
+            crate::observe::record_client(&path, code, started.elapsed());
             result
         })
     }
 }
 
+/// Checks each PEM input first so a failure names it; tonic's own build error
+/// does not say which input it rejected.
 fn client_tls(material: &ClientTlsMaterial) -> Result<ClientTlsConfig, Error> {
-    let mut config = ClientTlsConfig::new();
-    config = match &material.ca_certificate_pem {
-        Some(ca) => config.ca_certificate(Certificate::from_pem(ca)),
-        None => config.with_native_roots(),
-    };
-    match (&material.certificate_pem, &material.private_key_pem) {
-        (Some(certificate), Some(key)) => {
-            config = config.identity(Identity::from_pem(certificate, key));
+    let mut config = match &material.ca_certificate_pem {
+        Some(ca) => {
+            crate::tls::certificates(ca, Error::InvalidCaCertificate)?;
+            ClientTlsConfig::new().ca_certificate(Certificate::from_pem(ca))
         }
-        (None, None) => {}
-        _ => return Err(Error::InvalidConfiguration),
+        None => ClientTlsConfig::new().with_native_roots(),
+    };
+    if let Some(identity) = &material.identity {
+        crate::tls::certificates(&identity.certificate_pem, Error::InvalidCertificate)?;
+        crate::tls::private_key(&identity.private_key_pem)?;
+        config = config.identity(Identity::from_pem(
+            &identity.certificate_pem,
+            identity.private_key_pem.expose_secret(),
+        ));
     }
     Ok(config)
 }
 
-fn transport_status(_error: tonic::transport::Error) -> tonic::Status {
+/// The caller sees a fixed status, because a handler may forward it to its
+/// own caller; the cause is logged inside the client span.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "used as a `map_err` callback, which hands over the owned error"
+)]
+fn transport_status(error: tonic::transport::Error) -> tonic::Status {
+    tracing::warn!(
+        error = &error as &dyn std::error::Error,
+        "grpc_client_transport_failed"
+    );
     tonic::Status::unavailable("transport unavailable")
 }

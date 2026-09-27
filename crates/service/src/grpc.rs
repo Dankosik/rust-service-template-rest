@@ -7,8 +7,9 @@ use std::sync::Arc;
 
 use infra_grpc::ServerTlsMaterial;
 use rustls::ServerConfig;
-use secrecy::ExposeSecret as _;
 use service_config::{Config, GrpcSecurity};
+
+use crate::bootstrap::BootstrapError;
 
 /// Registers this service's generated native gRPC adapters.
 pub type GrpcRegistration = fn(&mut infra_grpc::Services) -> Result<(), infra_grpc::Error>;
@@ -30,41 +31,33 @@ pub(crate) fn services(
 /// Convert admitted TLS material into a listener config.
 ///
 /// Configuration validates presence and source policy before this runs. The
-/// conversion does not read paths or perform network I/O. Plaintext has no
-/// server config.
+/// conversion does not read paths or perform network I/O, and borrows the
+/// private key without copying it. Plaintext has no server config.
 ///
 /// # Errors
 ///
-/// Returns [`infra_grpc::Error::InvalidConfiguration`] when security is unset
-/// or the TLS material cannot be used.
-pub(crate) fn tls(config: &Config) -> Result<Option<Arc<ServerConfig>>, infra_grpc::Error> {
+/// Returns [`BootstrapError::GrpcInvalid`] when security or TLS material is
+/// unset, and the transport error naming unusable TLS material.
+pub(crate) fn tls(config: &Config) -> Result<Option<Arc<ServerConfig>>, BootstrapError> {
     let grpc = &config.grpc;
-    match grpc
-        .security
-        .ok_or(infra_grpc::Error::InvalidConfiguration)?
-    {
-        GrpcSecurity::Plaintext => Ok(None),
-        GrpcSecurity::Tls => {
-            let material = ServerTlsMaterial {
-                certificate_pem: grpc
-                    .certificate
-                    .as_deref()
-                    .ok_or(infra_grpc::Error::InvalidConfiguration)?
-                    .as_bytes()
-                    .to_vec(),
-                private_key_pem: grpc
-                    .private_key
-                    .as_ref()
-                    .ok_or(infra_grpc::Error::InvalidConfiguration)?
-                    .expose_secret()
-                    .as_bytes()
-                    .to_vec(),
-                client_ca_pem: grpc
-                    .client_ca
-                    .as_deref()
-                    .map(|value| value.as_bytes().to_vec()),
+    let missing = BootstrapError::GrpcInvalid {
+        reason: "grpc.security, and for tls grpc.certificate and grpc.private_key, must be set",
+    };
+    match grpc.security {
+        None => Err(missing),
+        Some(GrpcSecurity::Plaintext) => Ok(None),
+        Some(GrpcSecurity::Tls) => {
+            let (Some(certificate_pem), Some(private_key_pem)) =
+                (grpc.certificate.as_deref(), grpc.private_key.as_ref())
+            else {
+                return Err(missing);
             };
-            Ok(Some(infra_grpc::server_tls_config(&material)?))
+            let material = ServerTlsMaterial {
+                certificate_pem,
+                private_key_pem,
+                client_ca_pem: grpc.client_ca.as_deref(),
+            };
+            Ok(Some(infra_grpc::server_tls_config(material)?))
         }
     }
 }

@@ -53,97 +53,31 @@ impl Health for Adapter {
     }
 }
 
+/// Sends the current status, then each change. Ends after reporting drain, so
+/// watchers never hold the listener drain. An unknown service is reported as
+/// `SERVICE_UNKNOWN` and the stream stays open, as the health protocol requires.
 fn watch(
     reader: ReadinessReader,
     known: bool,
 ) -> impl futures_util::Stream<Item = Result<HealthCheckResponse, Status>> + Send {
-    let state = if known {
-        Watch::Known {
-            reader,
-            previous: None,
-        }
-    } else {
-        Watch::Unknown {
-            reader,
-            sent: false,
-        }
-    };
-    futures_util::stream::unfold(state, step)
-}
-
-enum Watch {
-    Known {
-        reader: ReadinessReader,
-        previous: Option<ServingStatus>,
-    },
-    Unknown {
-        reader: ReadinessReader,
-        sent: bool,
-    },
-    Finished,
-}
-
-async fn step(state: Watch) -> Option<(Result<HealthCheckResponse, Status>, Watch)> {
-    match state {
-        Watch::Unknown {
-            reader,
-            sent: false,
-        } => Some((
-            Ok(response(ServingStatus::ServiceUnknown)),
-            Watch::Unknown { reader, sent: true },
-        )),
-        Watch::Unknown {
-            mut reader,
-            sent: true,
-        } => loop {
-            if matches!(reader.verdict(), Err(NotReady::Draining)) {
-                return None;
-            }
-            if reader.changed_verdict().await.is_err() {
-                return None;
-            }
-        },
-        Watch::Known {
-            reader,
-            previous: None,
-        } => {
-            let status = serving(&reader);
-            let next = if matches!(reader.verdict(), Err(NotReady::Draining)) {
-                Watch::Finished
+    futures_util::stream::unfold(Some((reader, None)), move |state| async move {
+        let (mut reader, sent) = state?;
+        loop {
+            let status = if known {
+                serving(&reader)
             } else {
-                Watch::Known {
-                    reader,
-                    previous: Some(status),
-                }
+                ServingStatus::ServiceUnknown
             };
-            Some((Ok(response(status)), next))
-        }
-        Watch::Known {
-            mut reader,
-            previous: Some(previous),
-        } => loop {
-            if reader.changed_verdict().await.is_err() {
+            let draining = matches!(reader.verdict(), Err(NotReady::Draining));
+            if sent != Some(status) {
+                let next = (!draining).then_some((reader, Some(status)));
+                return Some((Ok(response(status)), next));
+            }
+            if draining || reader.changed_verdict().await.is_err() {
                 return None;
             }
-            if matches!(reader.verdict(), Err(NotReady::Draining)) {
-                if previous == ServingStatus::NotServing {
-                    return None;
-                }
-                return Some((Ok(response(ServingStatus::NotServing)), Watch::Finished));
-            }
-            let status = serving(&reader);
-            if status != previous {
-                return Some((
-                    Ok(response(status)),
-                    Watch::Known {
-                        reader,
-                        previous: Some(status),
-                    },
-                ));
-            }
-        },
-        Watch::Finished => None,
-    }
+        }
+    })
 }
 
 fn serving(reader: &ReadinessReader) -> ServingStatus {

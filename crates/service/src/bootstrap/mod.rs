@@ -157,6 +157,8 @@ pub(crate) enum BootstrapError {
     // template:begin grpc:bootstrap-grpc-error
     #[error(transparent)]
     Grpc(#[from] infra_grpc::Error),
+    #[error("configuration is invalid: {reason}")]
+    GrpcInvalid { reason: &'static str },
     // template:end grpc:bootstrap-grpc-error
 }
 
@@ -888,13 +890,19 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         // template:end grpc:bootstrap-grpc-prepare-start
         // template:begin grpc-authn:bootstrap-grpc-verifier
         let verifier = match &auth {
-            PreparedAuth::None => return Err(infra_grpc::Error::InvalidConfiguration.into()),
+            PreparedAuth::None => {
+                return Err(BootstrapError::GrpcInvalid {
+                    reason: "grpc.enabled requires inbound authentication to be configured",
+                });
+            }
             PreparedAuth::Enabled(verifier) => (**verifier).clone(),
         };
         // template:end grpc-authn:bootstrap-grpc-verifier
         // template:begin grpc:bootstrap-grpc-prepare-call
-        if config.http.effective_drain_budget() < infra_grpc::UNARY_DEADLINE {
-            return Err(infra_grpc::Error::InvalidConfiguration.into());
+        if config.http.effective_drain_budget() < infra_grpc::CALL_DEADLINE_CAP {
+            return Err(BootstrapError::GrpcInvalid {
+                reason: "the effective HTTP drain budget must be at least the 8 s gRPC call deadline cap",
+            });
         }
         Some((
             infra_grpc::router(

@@ -4,6 +4,7 @@
 //! verified identity. HTTP routing, configuration loading, and authorization
 //! policy remain with their existing owners.
 
+mod authenticate;
 mod bearer;
 mod claims;
 // template:begin oidc-introspection:authn-introspection-module
@@ -23,6 +24,7 @@ mod tls;
 
 use std::{fmt, future::Future, pin::Pin, sync::Arc};
 
+pub use authenticate::AUTHN_VERIFICATIONS_METRIC;
 pub use bearer::{BearerToken, parse_bearer};
 // template:begin oidc-introspection:authn-introspection-prepare-export
 pub use introspection::{IntrospectionCacheOptions, IntrospectionOptions, prepare_introspection};
