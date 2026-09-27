@@ -47,7 +47,7 @@ pub struct AppConfig {
     /// [`BuildInfo`] before validation; this field is not. Without an
     /// instance identity every replica pushes the same resource and their
     /// cumulative counters collide into one series.
-    #[serde(default, deserialize_with = "occupied_string")]
+    #[serde(default, deserialize_with = "crate::de::blank_as_none")]
     pub instance_id: Option<String>,
 }
 
@@ -78,17 +78,4 @@ impl AppConfig {
         non_empty("app.commit", &self.commit)?;
         Ok(())
     }
-}
-
-/// Missing, empty, or whitespace-only text is vacant (`None`); a present
-/// value is stored trimmed.
-pub(crate) fn occupied_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = Option::<String>::deserialize(deserializer)?;
-    Ok(raw.and_then(|s| {
-        let trimmed = s.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    }))
 }

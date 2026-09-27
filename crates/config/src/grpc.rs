@@ -10,9 +10,8 @@ use std::net::SocketAddr;
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::app::occupied_string;
-use crate::secret_policy::occupied_secret;
-use crate::validate::{ValidationError, socket_addr};
+use crate::de::{blank_as_none, blank_secret_as_none};
+use crate::validate::ValidationError;
 
 /// Explicit security mode for a native gRPC server or client.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -31,18 +30,20 @@ pub struct GrpcConfig {
     /// Whether bootstrap starts a native gRPC listener.
     pub enabled: bool,
     /// Listener address, required only when the listener is enabled.
-    #[serde(default, deserialize_with = "occupied_string")]
-    pub addr: Option<String>,
+    /// An IP `host:port`, or `:port` for IPv4 all-interfaces (`0.0.0.0`).
+    /// Hostnames are refused; load does not look them up. Blank is absent.
+    #[serde(default, deserialize_with = "crate::de::optional_listen_addr")]
+    pub addr: Option<SocketAddr>,
     /// Explicit listener security mode, required only when enabled.
     pub security: Option<GrpcSecurity>,
     /// PEM certificate chain for TLS, never read while the listener is off.
-    #[serde(default, deserialize_with = "occupied_string")]
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub certificate: Option<String>,
     /// Environment-only PEM private key for TLS.
-    #[serde(default, deserialize_with = "occupied_secret")]
+    #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub private_key: Option<SecretString>,
     /// Optional PEM client trust anchor; present means mTLS is required.
-    #[serde(default, deserialize_with = "occupied_string")]
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub client_ca: Option<String>,
 }
 
@@ -56,16 +57,15 @@ impl fmt::Debug for GrpcConfig {
 }
 
 impl GrpcConfig {
-    /// The parsed listener address.
+    /// The listener address when one was configured.
     ///
     /// # Errors
     ///
-    /// Returns the validation error for a missing or malformed `grpc.addr`.
+    /// Returns an error when `grpc.addr` is absent.
     pub fn listen_addr(&self) -> Result<SocketAddr, ValidationError> {
-        let addr = self.addr.as_deref().ok_or_else(|| {
+        self.addr.ok_or_else(|| {
             ValidationError::new("grpc.addr", "is required when grpc.enabled is true")
-        })?;
-        socket_addr("grpc.addr", addr)
+        })
     }
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {

@@ -12,7 +12,7 @@ use std::time::Duration;
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::secret_policy::occupied_secret;
+use crate::de::blank_secret_as_none;
 use crate::validate::{ValidationError, duration_range};
 
 /// Optional Redis-compatible cache. Absent `dsn` keeps the profile inert.
@@ -22,7 +22,7 @@ pub struct CacheConfig {
     /// `redis://`, `rediss://`, `valkey://`, or `valkeys://`, password included.
     /// Environment only (`APP__CACHE__DSN`). Missing, empty, or whitespace-only
     /// is absent (`None`).
-    #[serde(default, deserialize_with = "occupied_secret")]
+    #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub dsn: Option<SecretString>,
     /// PEM root CA path for a private certificate. Empty when unset.
     pub root_ca_path: Option<PathBuf>,

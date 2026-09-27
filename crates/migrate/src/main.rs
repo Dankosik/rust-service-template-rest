@@ -15,7 +15,7 @@ use infra_postgres::{Dsn, DsnError};
 use infra_telemetry::{LoggingFormat, LoggingOptions, install_subscriber};
 use migrate::{MIGRATOR, Report, RunError, RunOptions};
 use secrecy::ExposeSecret;
-use service_config::{BuildInfo, Config, FromArgs, ValidationError, process_failure};
+use service_config::{BuildInfo, Config, LoadOptions, ValidationError, process_failure};
 
 const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
@@ -49,10 +49,7 @@ impl Failure {
 }
 
 fn main() -> ExitCode {
-    let options = match FromArgs::from_argv(std::env::args_os()) {
-        FromArgs::Run(options) => options,
-        FromArgs::Exit(code) => return code,
-    };
+    let options = LoadOptions::parse_from(std::env::args_os());
     let config = match service_config::load(&options, BUILD_INFO) {
         Ok(config) => config,
         Err(err) => return process_failure(&err.to_string()),

@@ -16,7 +16,7 @@ use std::fmt;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use service_config::{BuildInfo, FromArgs, LoadOptions, process_failure};
+use service_config::{BuildInfo, LoadOptions, process_failure};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -82,17 +82,15 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Parse flags, load configuration, run the worker, and map the result to an
 /// exit code. `None` refuses with the no-kind message before configuration is
-/// loaded. `--help` exits 0 and a flag error exits 1 through [`FromArgs`], as
-/// in the service. A failure is reported once. Never calls `process::exit`.
+/// loaded. `--help` exits 0 and a flag error exits 2, both printed by clap,
+/// as in the service. A failure is reported once. Later failures do not call
+/// `process::exit`.
 #[must_use]
 pub fn run<I>(args: I, register: Option<Register>) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
-    let options = match FromArgs::from_argv(args) {
-        FromArgs::Exit(code) => return code,
-        FromArgs::Run(options) => options,
-    };
+    let options = LoadOptions::parse_from(args);
     let result = start(options, register);
     if let Err(err) = &result {
         tracing::error!(error = %err, "jobs worker failed");

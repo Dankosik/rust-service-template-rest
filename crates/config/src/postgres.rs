@@ -13,7 +13,7 @@ use std::num::NonZeroU32;
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::secret_policy::occupied_secret;
+use crate::de::blank_secret_as_none;
 use crate::validate::{ValidationError, int_range};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -25,12 +25,12 @@ pub struct PostgresConfig {
     /// `postgres://user:password@host:port/database?sslmode=<mode>`.
     /// Environment only (`APP__POSTGRES__DSN`). Missing, empty, or
     /// whitespace-only is absent (`None`); `enabled` is a separate axis.
-    #[serde(default, deserialize_with = "occupied_secret")]
+    #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub dsn: Option<SecretString>,
     /// Upper bound on pooled connections. Size it from the database's
     /// `max_connections` divided across every instance and job that shares
     /// the database, not from the service's concurrency.
-    pub max_connections: u32,
+    pub max_connections: NonZeroU32,
 }
 
 impl Default for PostgresConfig {
@@ -38,7 +38,7 @@ impl Default for PostgresConfig {
         Self {
             enabled: false,
             dsn: None,
-            max_connections: 4,
+            max_connections: const { NonZeroU32::new(4).expect("4 is nonzero") },
         }
     }
 }
@@ -62,25 +62,13 @@ impl PostgresConfig {
         })
     }
 
-    /// Pool size for the adapter. [`Self::validate`] already rejects 0;
-    /// this is the typed form `connect` takes.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same key as validation when the size is 0.
-    pub fn pool_max_connections(&self) -> Result<NonZeroU32, ValidationError> {
-        NonZeroU32::new(self.max_connections).ok_or_else(|| {
-            ValidationError::new("postgres.max_connections", "must be greater than 0")
-        })
-    }
-
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
         if self.enabled {
             self.required_dsn()?;
         }
         int_range(
             "postgres.max_connections",
-            u64::from(self.max_connections),
+            u64::from(self.max_connections.get()),
             1,
             500,
         )?;
@@ -97,7 +85,7 @@ mod tests {
         let config = PostgresConfig::default();
         assert!(!config.enabled);
         assert!(!config.has_dsn());
-        assert_eq!(config.max_connections, 4);
+        assert_eq!(config.max_connections.get(), 4);
         config.validate().unwrap();
     }
 
@@ -126,14 +114,12 @@ mod tests {
 
     #[test]
     fn pool_size_is_bounded() {
-        for max_connections in [0, 501] {
-            let config = PostgresConfig {
-                max_connections,
-                ..PostgresConfig::default()
-            };
-            let err = config.validate().unwrap_err();
-            assert_eq!(err.key, "postgres.max_connections");
-        }
+        let config = PostgresConfig {
+            max_connections: NonZeroU32::new(501).unwrap(),
+            ..PostgresConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert_eq!(err.key, "postgres.max_connections");
     }
 
     #[test]

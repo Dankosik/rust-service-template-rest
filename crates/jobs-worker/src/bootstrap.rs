@@ -425,7 +425,7 @@ async fn prepare(
         let engine = Engine::new(
             pool.as_ref().ok_or(WorkerError::PostgresDisabled)?.clone(),
             registry,
-            config.jobs.max_workers()?,
+            config.jobs.max_workers,
         );
         engine.check_startup().await?;
         engines.push(engine);
@@ -647,7 +647,7 @@ async fn open_pool(
     let pool = infra_postgres::connect(
         &dsn,
         &PoolOptions {
-            max_connections: config.postgres.pool_max_connections()?,
+            max_connections: config.postgres.max_connections,
             application_name: &application_name,
             default_isolation: infra_postgres::Isolation::ReadCommitted,
         },
@@ -659,7 +659,7 @@ async fn open_pool(
         postgres.port = dsn.port(),
         postgres.database = dsn.database(),
         postgres.sslmode = dsn.ssl_mode_name(),
-        postgres.max_connections = config.postgres.max_connections,
+        postgres.max_connections = config.postgres.max_connections.get(),
         "postgres_pool_opened"
     );
     tracker.spawn(infra_postgres::record_metrics_periodically(
@@ -697,10 +697,10 @@ async fn bind_listeners(
     let options = server_options(config);
     let routes = infra_http::finalize_public(infra_http::router())?.with_state(readiness.reader());
     let app = infra_http::harden(routes, &harden_options(config));
-    let health = Server::bind(config.http.listen_addr()?, app, options).await?;
+    let health = Server::bind(config.http.addr, app, options).await?;
     tracing::info!(addr = %health.local_addr(), "http listener bound");
     opened.listeners.health = Some(health);
-    if let Some(addr) = config.observability.metrics.listen_addr()? {
+    if let Some(addr) = config.observability.metrics.addr {
         let diagnostics = Server::bind(addr, diagnostics_router(metrics.clone()), options).await?;
         tracing::info!(addr = %diagnostics.local_addr(), "diagnostics listener bound");
         opened.listeners.diagnostics = Some(diagnostics);
@@ -746,7 +746,7 @@ fn messaging_options(
                     key: "messaging.dlq_subject",
                 },
             )?,
-            concurrency: usize::try_from(messaging.consumer_concurrency)
+            concurrency: usize::try_from(messaging.consumer_concurrency.get())
                 .map_err(|_| WorkerError::MessagingConcurrency)?,
         })
     } else {
@@ -910,10 +910,10 @@ fn log_startup_record(
         http.addr = %config.http.addr,
         http.drain_timeout = ?config.http.drain_timeout,
         http.grace_period = ?config.http.grace_period,
-        observability.metrics.addr = %config.observability.metrics.addr,
+        observability.metrics.addr = ?config.observability.metrics.addr,
         // template:begin jobs:worker-bootstrap-log-jobs-fields
-        postgres.max_connections = config.postgres.max_connections,
-        jobs.max_workers = config.jobs.max_workers,
+        postgres.max_connections = config.postgres.max_connections.get(),
+        jobs.max_workers = config.jobs.max_workers.get(),
         jobs.kinds = %kinds,
         // template:end jobs:worker-bootstrap-log-jobs-fields
         log.level = %config.log.level,

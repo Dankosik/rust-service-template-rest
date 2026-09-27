@@ -14,7 +14,7 @@ use secrecy::SecretString;
 use serde::{Deserialize, Deserializer};
 
 // template:begin oidc-introspection:authn-occupied-secret-import
-use crate::secret_policy::occupied_secret;
+use crate::de::blank_secret_as_none;
 // template:end oidc-introspection:authn-occupied-secret-import
 use crate::ValidationError;
 
@@ -144,7 +144,7 @@ pub enum AuthnConfig {
         /// Client identifier for the fixed introspection credential.
         introspection_client_id: String,
         /// Environment-only client secret. Missing or blank is rejected.
-        #[serde(default, deserialize_with = "occupied_secret")]
+        #[serde(default, deserialize_with = "blank_secret_as_none")]
         introspection_client_secret: Option<SecretString>,
         /// Immediate provider-exchange capacity. Missing uses 32.
         #[serde(
