@@ -3,16 +3,78 @@ use std::time::Instant;
 use metrics::Unit;
 use tracing::Span;
 
-use crate::Unavailable;
+use crate::{ServerIdentity, Unavailable};
 
 const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
 
+/// The closed set of namespace operations.
+#[derive(Clone, Copy)]
+pub(crate) enum Operation {
+    Get,
+    Set,
+    Delete,
+}
+
+impl Operation {
+    /// The `operation` metric label.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Get => "get",
+            Self::Set => "set",
+            Self::Delete => "delete",
+        }
+    }
+
+    /// The Redis command, recorded as `db.operation.name`.
+    fn command(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Set => "SET",
+            Self::Delete => "DEL",
+        }
+    }
+}
+
+/// Why a command returned no reply.
+#[derive(Clone, Copy)]
+pub(crate) enum Failure {
+    /// `command_timeout` elapsed, or the client reported a timeout.
+    Timeout,
+    /// A Redis client error, as its bounded `error.type`.
+    Redis(&'static str),
+}
+
+impl Failure {
+    pub(crate) fn from_error(error: &redis::RedisError) -> Self {
+        if error.is_timeout() {
+            Self::Timeout
+        } else {
+            Self::Redis(error_type(error))
+        }
+    }
+
+    fn outcome(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Redis(_) => "error",
+        }
+    }
+
+    fn error_type(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Redis(error_type) => error_type,
+        }
+    }
+}
+
 /// One polled cache command. The guard keeps only the namespace label and
-/// the outcome, never the key, the value, or server text.
+/// the outcome, never the key, the value, or server text. Dropping it before
+/// an outcome records `cancelled`.
 pub(crate) struct OperationGuard {
     started: Instant,
     cache: &'static str,
-    operation: &'static str,
+    operation: Operation,
     span: Span,
     finalized: bool,
 }
@@ -20,20 +82,17 @@ pub(crate) struct OperationGuard {
 impl OperationGuard {
     pub(crate) fn start(
         cache: &'static str,
-        operation: &'static str,
-        redis_operation: &'static str,
-        server_address: &str,
-        server_port: u16,
+        operation: Operation,
+        server: &ServerIdentity,
     ) -> Self {
-        describe_histogram();
         let span = tracing::info_span!(
             "cache",
             otel.kind = "client",
             db.system.name = "redis",
-            db.operation.name = redis_operation,
+            db.operation.name = operation.command(),
             cache.name = cache,
-            server.address = server_address,
-            server.port = server_port,
+            server.address = server.host.as_str(),
+            server.port = server.port,
             cache.outcome = tracing::field::Empty,
             error.type = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
@@ -52,15 +111,18 @@ impl OperationGuard {
     }
 
     pub(crate) fn succeed(&mut self, outcome: &'static str) {
-        self.finish(outcome, None);
+        self.finish(outcome);
     }
 
-    pub(crate) fn fail(&mut self, outcome: &'static str, error_type: &'static str) -> Unavailable {
-        self.finish(outcome, Some(error_type));
+    pub(crate) fn fail(&mut self, failure: Failure) -> Unavailable {
+        let error_type = failure.error_type();
+        self.span.record("error.type", error_type);
+        self.span.record("otel.status_code", "ERROR");
+        self.finish(failure.outcome());
         self.span.in_scope(|| {
             tracing::debug!(
                 cache.name = self.cache,
-                cache.operation = self.operation,
+                cache.operation = self.operation.label(),
                 error.type = error_type,
                 "cache_operation_failed"
             );
@@ -68,20 +130,13 @@ impl OperationGuard {
         Unavailable
     }
 
-    fn finish(&mut self, outcome: &'static str, error_type: Option<&'static str>) {
-        if self.finalized {
-            return;
-        }
+    fn finish(&mut self, outcome: &'static str) {
         self.finalized = true;
         self.span.record("cache.outcome", outcome);
-        if let Some(error_type) = error_type {
-            self.span.record("error.type", error_type);
-            self.span.record("otel.status_code", "ERROR");
-        }
         metrics::histogram!(
             OPERATION_DURATION_METRIC,
             "cache" => self.cache,
-            "operation" => self.operation,
+            "operation" => self.operation.label(),
             "outcome" => outcome,
         )
         .record(self.started.elapsed().as_secs_f64());
@@ -91,20 +146,18 @@ impl OperationGuard {
 impl Drop for OperationGuard {
     fn drop(&mut self) {
         if !self.finalized {
-            self.finish("cancelled", None);
+            self.finish("cancelled");
         }
     }
 }
 
-fn describe_histogram() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        metrics::describe_histogram!(
-            OPERATION_DURATION_METRIC,
-            Unit::Seconds,
-            "Cache operation duration in seconds"
-        );
-    });
+/// Describes the histogram to the installed recorder. Repeating it is harmless.
+pub(crate) fn describe() {
+    metrics::describe_histogram!(
+        OPERATION_DURATION_METRIC,
+        Unit::Seconds,
+        "Cache operation duration in seconds"
+    );
 }
 
 /// Bounded `error.type` for a Redis client failure. Server text is not copied.
@@ -119,16 +172,5 @@ pub(crate) fn error_type(error: &redis::RedisError) -> &'static str {
         redis::ErrorKind::Parse => "parse",
         // InvalidClientConfig and every other kind stay `other`.
         _ => "other",
-    }
-}
-
-pub(crate) fn classify<T>(
-    result: Result<Result<T, redis::RedisError>, tokio::time::error::Elapsed>,
-) -> Result<T, (&'static str, &'static str)> {
-    match result {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(error)) if error.is_timeout() => Err(("timeout", "timeout")),
-        Ok(Err(error)) => Err(("error", error_type(&error))),
-        Err(_) => Err(("timeout", "timeout")),
     }
 }

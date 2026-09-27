@@ -15,15 +15,15 @@ mod observe;
 mod tests;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use redis::IntoConnectionInfo;
 use redis::aio::ConnectionManager;
+use redis::{IntoConnectionInfo, SetExpiry, SetOptions};
 use secrecy::{ExposeSecret, SecretString};
-use tracing::{Instrument, Span};
+use tracing::Instrument;
 
-use self::observe::{OperationGuard, classify};
+use self::observe::{Failure, Operation, OperationGuard};
 
 /// One reconnect attempt stays inside the startup check.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -92,9 +92,12 @@ pub enum CacheError {
     /// The file did not contain a PEM certificate.
     #[error("cache root CA is invalid")]
     InvalidCa,
+    /// [`Cache::connect`] was called outside a Tokio runtime.
+    #[error("cache requires a Tokio runtime")]
+    NoRuntime,
     /// The client or the lazy connection manager could not be built.
-    #[error("{0}")]
-    Client(&'static str),
+    #[error("cache client could not be built")]
+    Client,
 }
 
 /// A cache call that the caller should treat as a miss and continue without.
@@ -115,8 +118,8 @@ pub struct ServerIdentity {
 
 /// A lazy standalone Redis-compatible connection.
 ///
-/// [`Debug`] prints only host, port, and whether TLS is in use.
-#[derive(Clone)]
+/// [`Debug`] prints the server identity and the command timeout, never the DSN.
+#[derive(Clone, Debug)]
 pub struct Cache {
     link: Arc<Link>,
     server: ServerIdentity,
@@ -126,66 +129,66 @@ pub struct Cache {
 /// The replaceable connection manager.
 ///
 /// redis 1.7.1 reconnects a `ConnectionManager` only after an I/O error. Two
-/// failures leave it failing without dialing again: setup that
-/// fails without an I/O error (AUTH refused while a failover is saturating
-/// the server, a parse error), and `READONLY` from a primary demoted by
-/// failover. Replacing it from the retained client is the reconnect the
-/// manager does not perform. go-redis closes such connections for the same
-/// reason (go-redis issue #790). Replacement happens at most once per
-/// [`MAX_DELAY`], so a wrong password costs one reconnect chain per interval
-/// rather than one per call.
+/// failures leave it failing without dialing again: setup that fails without
+/// an I/O error (AUTH refused while a failover is saturating the server, a
+/// parse error), and `READONLY` from a primary demoted by failover. Replacing
+/// it from the retained client is the reconnect the manager does not perform.
+/// go-redis closes such connections for the same reason (go-redis issue
+/// #790). Replacement happens at most once per [`MAX_DELAY`], so a wrong
+/// password costs one reconnect chain per interval rather than one per call.
 struct Link {
     client: redis::Client,
     config: redis::aio::ConnectionManagerConfig,
-    current: RwLock<ConnectionManager>,
-    replaced_at: Mutex<Option<Instant>>,
+    state: Mutex<LinkState>,
+}
+
+struct LinkState {
+    manager: ConnectionManager,
+    replaced_at: Option<Instant>,
+}
+
+impl std::fmt::Debug for Link {
+    /// The client holds the DSN, so nothing of it is printed.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Link").finish_non_exhaustive()
+    }
 }
 
 impl Link {
-    fn current(&self) -> ConnectionManager {
-        self.current
-            .read()
+    fn manager(&self) -> ConnectionManager {
+        self.state
+            .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .manager
             .clone()
     }
 
-    fn replace_after(&self, error: &redis::RedisError) {
-        // I/O failures are the manager's own reconnect path. READONLY is not
-        // one, and redis does not treat it as unrecoverable, so standalone
-        // mode would keep writing to the demoted primary.
-        let readonly = error.kind() == redis::ErrorKind::Server(redis::ServerErrorKind::ReadOnly);
-        if !readonly && (error.is_io_error() || !error.is_unrecoverable_error()) {
+    fn replace_if_stuck(&self, error: &redis::RedisError) {
+        if !leaves_manager_stuck(error) {
             return;
         }
-        let mut replaced_at = self
-            .replaced_at
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if replaced_at.is_some_and(|at| at.elapsed() < MAX_DELAY) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.replaced_at.is_some_and(|at| at.elapsed() < MAX_DELAY) {
             return;
         }
         if let Ok(fresh) =
             ConnectionManager::new_lazy_with_config(self.client.clone(), self.config.clone())
         {
-            *self.current.write().unwrap_or_else(PoisonError::into_inner) = fresh;
-            *replaced_at = Some(Instant::now());
+            state.manager = fresh;
+            state.replaced_at = Some(Instant::now());
         }
     }
 }
 
-#[allow(
-    clippy::missing_fields_in_debug,
-    reason = "the connection can carry the DSN; Debug prints only host, port, and TLS"
-)]
-impl std::fmt::Debug for Cache {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Cache")
-            .field("host", &self.server.host)
-            .field("port", &self.server.port)
-            .field("tls", &self.server.tls)
-            .finish()
-    }
+/// Errors after which redis 1.7.1 keeps answering from the same manager.
+///
+/// An I/O error is the manager's own reconnect path. Any other unrecoverable
+/// error during setup is stored and returned forever. `READONLY` is not
+/// unrecoverable to redis, so standalone mode would keep writing to the
+/// demoted primary.
+fn leaves_manager_stuck(error: &redis::RedisError) -> bool {
+    let readonly = error.kind() == redis::ErrorKind::Server(redis::ServerErrorKind::ReadOnly);
+    readonly || (!error.is_io_error() && error.is_unrecoverable_error())
 }
 
 impl Cache {
@@ -207,17 +210,17 @@ impl Cache {
             allow_unauthenticated,
             command_timeout,
         } = options;
-        let mut info = dsn
+        let info = dsn
             .expose_secret()
             .into_connection_info()
             .map_err(|_| CacheError::InvalidDsn)?;
-        let (host, port, tls) = admit_address(&info, allow_plaintext, root_ca_path.is_some())?;
+        let server = admit_address(&info, allow_plaintext, root_ca_path.is_some())?;
         if info.redis_settings().password().is_none_or(str::is_empty) && !allow_unauthenticated {
             return Err(CacheError::UnauthenticatedRefused);
         }
-        let root_cert = read_root_ca(root_ca_path.as_deref(), tls)?;
-        info = info.set_tcp_settings(tcp_settings());
-        if tls {
+        let root_cert = root_ca_path.as_deref().map(read_root_ca).transpose()?;
+        let info = info.set_tcp_settings(tcp_settings());
+        if server.tls {
             install_tls_provider();
         }
         let client = match root_cert {
@@ -227,25 +230,27 @@ impl Cache {
                     client_tls: None,
                     root_cert: Some(pem),
                 },
-            )
-            .map_err(|_| CacheError::Client("cache client could not be built"))?,
-            None => redis::Client::open(info)
-                .map_err(|_| CacheError::Client("cache client could not be built"))?,
-        };
-        if tokio::runtime::Handle::try_current().is_err() {
-            return Err(CacheError::Client("cache connection could not be built"));
+            ),
+            None => redis::Client::open(info),
         }
-        let config = manager_config(command_timeout);
-        let connection = ConnectionManager::new_lazy_with_config(client.clone(), config.clone())
-            .map_err(|_| CacheError::Client("cache connection could not be built"))?;
+        .map_err(|_| CacheError::Client)?;
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(CacheError::NoRuntime);
+        }
+        let config = manager_config();
+        let manager = ConnectionManager::new_lazy_with_config(client.clone(), config.clone())
+            .map_err(|_| CacheError::Client)?;
+        observe::describe();
         Ok(Self {
             link: Arc::new(Link {
                 client,
                 config,
-                current: RwLock::new(connection),
-                replaced_at: Mutex::new(None),
+                state: Mutex::new(LinkState {
+                    manager,
+                    replaced_at: None,
+                }),
             }),
-            server: ServerIdentity { host, port, tls },
+            server,
             command_timeout,
         })
     }
@@ -278,64 +283,18 @@ impl Cache {
         }
     }
 
-    /// The underlying multiplexed connection, for a later rate-limit or lock feature.
-    ///
-    /// Commands sent here are not covered by [`CacheOptions::command_timeout`]
-    /// and are not recorded on the cache histogram. Take it per use rather than
-    /// holding it: the cache may replace a manager whose setup failed.
-    #[must_use]
-    pub fn connection(&self) -> ConnectionManager {
-        self.link.current()
-    }
-
     /// Admitted server identity for logs.
     #[must_use]
     pub fn server(&self) -> ServerIdentity {
         self.server.clone()
     }
-
-    /// One command under `command_timeout`, which also bounds the wait for a
-    /// (re)connect.
-    async fn query<T: redis::FromRedisValue>(
-        &self,
-        command: redis::Cmd,
-        span: Span,
-    ) -> Result<T, (&'static str, &'static str)> {
-        let mut connection = self.link.current();
-        let result = tokio::time::timeout(
-            self.command_timeout,
-            command.query_async::<T>(&mut connection),
-        )
-        .instrument(span)
-        .await;
-        if let Ok(Err(error)) = &result {
-            self.link.replace_after(error);
-        }
-        classify(result)
-    }
 }
 
 /// One feature's keys on a shared connection.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CacheNamespace {
     cache: Cache,
     name: &'static str,
-}
-
-#[allow(
-    clippy::missing_fields_in_debug,
-    reason = "the connection can carry the DSN; Debug prints only the namespace and server identity"
-)]
-impl std::fmt::Debug for CacheNamespace {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("CacheNamespace")
-            .field("name", &self.name)
-            .field("host", &self.cache.server.host)
-            .field("port", &self.cache.server.port)
-            .field("tls", &self.cache.server.tls)
-            .finish()
-    }
 }
 
 impl CacheNamespace {
@@ -345,20 +304,11 @@ impl CacheNamespace {
     ///
     /// Returns [`Unavailable`] when the command times out or the server cannot be used.
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Unavailable> {
-        let mut guard = self.guard("get", "GET");
-        let mut command = redis::cmd("GET");
-        command.arg(self.stored_key(key));
-        match self
-            .cache
-            .query::<Option<Vec<u8>>>(command, guard.span())
-            .await
-        {
-            Ok(value) => {
-                guard.succeed(if value.is_some() { "hit" } else { "miss" });
-                Ok(value)
-            }
-            Err((outcome, error_type)) => Err(guard.fail(outcome, error_type)),
-        }
+        let command = redis::Cmd::get(self.stored_key(key));
+        self.run(Operation::Get, command, |value: &Option<Vec<u8>>| {
+            if value.is_some() { "hit" } else { "miss" }
+        })
+        .await
     }
 
     /// `SET key value PX milliseconds`.
@@ -378,25 +328,10 @@ impl CacheNamespace {
             ttl >= Duration::from_millis(1),
             "cache ttl must be at least 1 ms"
         );
-        let mut guard = self.guard("set", "SET");
         let milliseconds = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
-        let mut command = redis::cmd("SET");
-        command
-            .arg(self.stored_key(key))
-            .arg(value)
-            .arg("PX")
-            .arg(milliseconds);
-        match self
-            .cache
-            .query::<redis::Value>(command, guard.span())
-            .await
-        {
-            Ok(_) => {
-                guard.succeed("ok");
-                Ok(())
-            }
-            Err((outcome, error_type)) => Err(guard.fail(outcome, error_type)),
-        }
+        let options = SetOptions::default().with_expiration(SetExpiry::PX(milliseconds));
+        let command = redis::Cmd::set_options(self.stored_key(key), value, options);
+        self.run(Operation::Set, command, |(): &()| "ok").await
     }
 
     /// `DEL`. The deleted-count is ignored; a missing key is still success.
@@ -405,30 +340,37 @@ impl CacheNamespace {
     ///
     /// Returns [`Unavailable`] when the command times out or the server cannot be used.
     pub async fn delete(&self, key: &str) -> Result<(), Unavailable> {
-        let mut guard = self.guard("delete", "DEL");
-        let mut command = redis::cmd("DEL");
-        command.arg(self.stored_key(key));
-        match self
-            .cache
-            .query::<redis::Value>(command, guard.span())
-            .await
-        {
-            Ok(_) => {
-                guard.succeed("ok");
-                Ok(())
-            }
-            Err((outcome, error_type)) => Err(guard.fail(outcome, error_type)),
-        }
+        let command = redis::Cmd::del(self.stored_key(key));
+        self.run(Operation::Delete, command, |(): &()| "ok").await
     }
 
-    fn guard(&self, operation: &'static str, redis_operation: &'static str) -> OperationGuard {
-        OperationGuard::start(
-            self.name,
-            operation,
-            redis_operation,
-            &self.cache.server.host,
-            self.cache.server.port,
+    /// One observed command under `command_timeout`, which also bounds the
+    /// wait for a (re)connect. `outcome` names a successful reply.
+    async fn run<T: redis::FromRedisValue>(
+        &self,
+        operation: Operation,
+        command: redis::Cmd,
+        outcome: fn(&T) -> &'static str,
+    ) -> Result<T, Unavailable> {
+        let mut guard = OperationGuard::start(self.name, operation, &self.cache.server);
+        let mut manager = self.cache.link.manager();
+        let reply = tokio::time::timeout(
+            self.cache.command_timeout,
+            command.query_async::<T>(&mut manager),
         )
+        .instrument(guard.span())
+        .await;
+        match reply {
+            Ok(Ok(value)) => {
+                guard.succeed(outcome(&value));
+                Ok(value)
+            }
+            Ok(Err(error)) => {
+                self.cache.link.replace_if_stuck(&error);
+                Err(guard.fail(Failure::from_error(&error)))
+            }
+            Err(_elapsed) => Err(guard.fail(Failure::Timeout)),
+        }
     }
 
     fn stored_key(&self, key: &str) -> String {
@@ -440,24 +382,9 @@ impl CacheNamespace {
 ///
 /// The check has no timeout of its own: the readiness refresher bounds every
 /// probe with its budget, and startup bounds its single check separately.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CacheProbe {
     cache: Cache,
-}
-
-#[allow(
-    clippy::missing_fields_in_debug,
-    reason = "the connection can carry the DSN; Debug prints only host, port, and TLS"
-)]
-impl std::fmt::Debug for CacheProbe {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("CacheProbe")
-            .field("host", &self.cache.server.host)
-            .field("port", &self.cache.server.port)
-            .field("tls", &self.cache.server.tls)
-            .finish()
-    }
 }
 
 #[async_trait::async_trait]
@@ -467,20 +394,17 @@ impl health::Probe for CacheProbe {
     }
 
     async fn check(&self) -> Result<(), health::ProbeError> {
-        let mut connection = self.cache.link.current();
-        match redis::cmd("PING")
-            .query_async::<redis::Value>(&mut connection)
+        let mut manager = self.cache.link.manager();
+        redis::Cmd::ping()
+            .query_async::<()>(&mut manager)
             .await
-        {
-            Ok(_) => Ok(()),
-            Err(error) => {
-                self.cache.link.replace_after(&error);
-                Err(health::ProbeError::new(format!(
+            .map_err(|error| {
+                self.cache.link.replace_if_stuck(&error);
+                health::ProbeError::new(format!(
                     "cache ping failed: {}",
                     observe::error_type(&error)
-                )))
-            }
-        }
+                ))
+            })
     }
 }
 
@@ -488,7 +412,7 @@ fn admit_address(
     info: &redis::ConnectionInfo,
     allow_plaintext: bool,
     has_root_ca: bool,
-) -> Result<(String, u16, bool), CacheError> {
+) -> Result<ServerIdentity, CacheError> {
     match info.addr() {
         redis::ConnectionAddr::Tcp(host, port) => {
             if !allow_plaintext {
@@ -497,7 +421,11 @@ fn admit_address(
             if has_root_ca {
                 return Err(CacheError::CaRequiresTls);
             }
-            Ok((host.clone(), *port, false))
+            Ok(ServerIdentity {
+                host: host.clone(),
+                port: *port,
+                tls: false,
+            })
         }
         redis::ConnectionAddr::TcpTls { insecure: true, .. } => Err(CacheError::InsecureTlsRefused),
         redis::ConnectionAddr::TcpTls {
@@ -505,21 +433,20 @@ fn admit_address(
             port,
             insecure: false,
             ..
-        } => Ok((host.clone(), *port, true)),
+        } => Ok(ServerIdentity {
+            host: host.clone(),
+            port: *port,
+            tls: true,
+        }),
         // Unix sockets and any future address class are outside standalone TCP.
         _ => Err(CacheError::UnsupportedAddress),
     }
 }
 
-fn read_root_ca(path: Option<&Path>, tls: bool) -> Result<Option<Vec<u8>>, CacheError> {
+/// Reads a PEM root CA. [`admit_address`] has already refused it on plaintext.
+fn read_root_ca(path: &Path) -> Result<Vec<u8>, CacheError> {
     use rustls::pki_types::pem::PemObject;
 
-    let Some(path) = path else {
-        return Ok(None);
-    };
-    if !tls {
-        return Err(CacheError::CaRequiresTls);
-    }
     let bytes = std::fs::read(path).map_err(|error| CacheError::CaFile { kind: error.kind() })?;
     let mut found = false;
     for certificate in rustls::pki_types::CertificateDer::pem_slice_iter(&bytes) {
@@ -529,7 +456,7 @@ fn read_root_ca(path: Option<&Path>, tls: bool) -> Result<Option<Vec<u8>>, Cache
     if !found {
         return Err(CacheError::InvalidCa);
     }
-    Ok(Some(bytes))
+    Ok(bytes)
 }
 
 fn tcp_settings() -> redis::io::tcp::TcpSettings {
@@ -545,9 +472,10 @@ fn tcp_settings() -> redis::io::tcp::TcpSettings {
     settings
 }
 
-fn manager_config(command_timeout: Duration) -> redis::aio::ConnectionManagerConfig {
+/// Reconnect bounds only. Commands are bounded by `command_timeout` in
+/// [`CacheNamespace::run`], which also covers the wait for a reconnect.
+fn manager_config() -> redis::aio::ConnectionManagerConfig {
     redis::aio::ConnectionManagerConfig::new()
-        .set_response_timeout(Some(command_timeout))
         .set_connection_timeout(Some(CONNECT_TIMEOUT))
         .set_min_delay(MIN_DELAY)
         .set_exponent_base(EXPONENT_BASE)
@@ -555,6 +483,8 @@ fn manager_config(command_timeout: Duration) -> redis::aio::ConnectionManagerCon
         .set_number_of_retries(NUMBER_OF_RETRIES)
 }
 
+/// redis-rs builds its TLS config from the process default provider. The
+/// workspace also compiles `ring`, so rustls cannot pick one on its own.
 fn install_tls_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }

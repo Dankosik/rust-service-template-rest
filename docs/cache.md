@@ -8,9 +8,9 @@ lifecycle choices.
 ## What the profile retains
 
 The pack is one standalone client. A feature calls `get`, `set`, and `delete`
-on a `CacheNamespace` and receives bytes. `Cache::connection` exposes the
-native `redis::aio::ConnectionManager` so a later feature can build rate limits
-or locks on the same connection. This profile does not build them.
+on a `CacheNamespace` and receives bytes. Rate limits and locks are not part
+of this profile; a feature that needs them adds its own operation beside
+`get`, `set`, and `delete` on the same connection.
 
 It does not add a generic `Cache<K, V>`, get-or-load, a serializer, a global
 TTL, or a lock API. The feature owns keys, serialization, TTL policy, and

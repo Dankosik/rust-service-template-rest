@@ -179,6 +179,12 @@ fn an_unparseable_dsn_does_not_echo_the_password() {
 }
 
 #[test]
+fn an_admitted_dsn_outside_a_runtime_is_refused() {
+    let err = Cache::connect(options("redis://127.0.0.1:6379", true, true, None)).unwrap_err();
+    assert_eq!(err, CacheError::NoRuntime);
+}
+
+#[test]
 fn options_debug_redacts_the_dsn() {
     let rendered = format!(
         "{:?}",
