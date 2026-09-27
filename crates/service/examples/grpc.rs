@@ -13,8 +13,8 @@ use grpc_contracts::example::v1::{
     ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
     echo_service_server::{EchoService, EchoServiceServer},
 };
-use infra_grpc::{Services, classified_status};
-use service_failure::{ClassifiedFailure, Code};
+use infra_grpc::{Services, failure_status};
+use service_failure::Code;
 use tonic::{Request, Response, Status};
 
 const MAX_MESSAGE_BYTES: usize = 1024;
@@ -42,9 +42,7 @@ impl EchoService for Echo {
         while let Some(next) = input.message().await? {
             let next = accepted(next.message)?;
             if message.len().saturating_add(next.len()) > MAX_AGGREGATE_BYTES {
-                return Err(classified_status(ClassifiedFailure::new(
-                    Code::RequestEntityTooLarge,
-                )));
+                return Err(failure_status(Code::RequestEntityTooLarge));
             }
             message.push_str(&next);
         }
@@ -86,7 +84,7 @@ fn accepted(message: String) -> Result<String, Status> {
     if (1..=MAX_MESSAGE_BYTES).contains(&message.len()) {
         Ok(message)
     } else {
-        Err(classified_status(ClassifiedFailure::new(Code::BadRequest)))
+        Err(failure_status(Code::BadRequest))
     }
 }
 

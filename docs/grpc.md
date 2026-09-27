@@ -95,8 +95,8 @@ Outermost to innermost:
    `UNAUTHENTICATED` / `authentication failed`. Provider unavailability is
    `UNAVAILABLE` / `authentication is unavailable`.
 4. Business routes only: a concurrency limit of 256. A shed call is
-   `RESOURCE_EXHAUSTED` / `server is at capacity`. Health is outside this
-   limit.
+   `UNAVAILABLE` / `service is unavailable` with a 1 s `RetryInfo`. Health
+   is outside this limit.
 5. Business routes only: deadline `min(grpc-timeout, 8s)`, measured until the
    handler returns response headers. Expiry is `DEADLINE_EXCEEDED` /
    `request deadline exceeded`. A malformed `grpc-timeout`, including more
@@ -140,7 +140,7 @@ fn accepted(message: String) -> Result<String, Status> {
     if (1..=1024).contains(&message.len()) {
         Ok(message)
     } else {
-        Err(classified_status(ClassifiedFailure::new(Code::BadRequest)))
+        Err(failure_status(Code::BadRequest))
     }
 }
 ```
@@ -151,23 +151,25 @@ cancellation limit. The transport does not cancel work a handler has spawned.
 
 ## Failures
 
-Use `infra_grpc::classified_status` for a shared domain failure.
-`google.rpc.ErrorInfo` carries the stable code in the fixed `service` domain.
-An optional policy-owned retry delay becomes `google.rpc.RetryInfo` and does
-not enable retries. The message is a fixed safe string. HTTP projects the
+Use `infra_grpc::failure_status` for a shared domain failure, and
+`failure_status_with_retry` when a policy owns a retry delay. That delay
+becomes `google.rpc.RetryInfo` and does not enable retries.
+`google.rpc.ErrorInfo` carries the code in `UPPER_SNAKE_CASE` (for example
+`BAD_REQUEST`) in the `infra_grpc::ERROR_DOMAIN` domain, which the initializer
+sets to the service name. The message is a fixed safe string. HTTP projects the
 same shared identity into its existing status, title, URI and payload.
 
 | Condition | gRPC code |
 | --- | --- |
-| Classified bad request | `INVALID_ARGUMENT` |
-| Missing, malformed or invalid bearer; classified unauthenticated | `UNAUTHENTICATED` |
-| Classified forbidden | `PERMISSION_DENIED` |
-| Classified not found | `NOT_FOUND` |
-| Classified already exists | `ALREADY_EXISTS` |
-| Classified conflict | `ABORTED` |
-| Classified unimplemented | `UNIMPLEMENTED` |
-| Concurrency shed; classified resource limits | `RESOURCE_EXHAUSTED` |
-| Authentication provider unavailable; classified unavailable | `UNAVAILABLE` |
+| Catalog bad request | `INVALID_ARGUMENT` |
+| Missing, malformed or invalid bearer; catalog unauthenticated | `UNAUTHENTICATED` |
+| Catalog forbidden | `PERMISSION_DENIED` |
+| Catalog not found | `NOT_FOUND` |
+| Catalog already exists | `ALREADY_EXISTS` |
+| Catalog conflict | `ABORTED` |
+| Catalog unimplemented | `UNIMPLEMENTED` |
+| Catalog resource limits | `RESOURCE_EXHAUSTED` |
+| Concurrency shed (1 s `RetryInfo`); authentication provider unavailable; catalog unavailable | `UNAVAILABLE` |
 | Header deadline elapsed | `DEADLINE_EXCEEDED` |
 | Recovered panic | `INTERNAL` |
 

@@ -6,8 +6,7 @@
 //! title, and type URI. A code with no matching response in a service's
 //! contract is
 //! unreachable, not wrong. Connection-layer outcomes (hyper 431, the
-//! accept-cap close, a silent first-byte close) are not `Problem` values
-//! even when a matching `Code` exists in the catalog.
+//! accept-cap close, a silent first-byte close) are not `Problem` values.
 //!
 //! The same types describe themselves in the OpenAPI document: `ToSchema`
 //! renders the `Problem` and `InvalidParam` schemas from the serializer, and
@@ -21,8 +20,13 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 pub use service_failure::Code;
-pub use service_failure::{AT_CAPACITY_DETAIL, SANITIZED_DETAIL};
 use utoipa::ToSchema;
+
+/// Caller-visible text for failures a transport refuses to describe.
+pub const SANITIZED_DETAIL: &str = "request failed";
+
+/// Caller-visible text when admission control sheds a request.
+pub const AT_CAPACITY_DETAIL: &str = "server is at capacity";
 
 /// HTTP's RFC 9457 projection of the shared failure identity.
 #[allow(
@@ -36,11 +40,6 @@ const fn http_meta(code: Code) -> HttpCodeMeta {
             status: StatusCode::BAD_REQUEST,
             title: "bad request",
             type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.1"),
-        },
-        Code::Unauthorized => HttpCodeMeta {
-            status: StatusCode::UNAUTHORIZED,
-            title: "unauthorized",
-            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.2"),
         },
         // template:begin authn:http-authentication-code-meta
         Code::AuthenticationRequired => HttpCodeMeta {
@@ -120,17 +119,12 @@ const fn http_meta(code: Code) -> HttpCodeMeta {
             title: "request entity too large",
             type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.14"),
         },
-        // RFC 9110 stops at 426; 431 and 429 are defined by RFC 6585.
-        Code::RequestHeaderFieldsTooLarge => HttpCodeMeta {
-            status: StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-            title: "request header fields too large",
-            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc6585", "#section-5"),
-        },
         Code::UnprocessableContent => HttpCodeMeta {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             title: "unprocessable content",
             type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.21"),
         },
+        // RFC 9110 stops at 426; 429 is defined by RFC 6585.
         Code::TooManyRequests => HttpCodeMeta {
             status: StatusCode::TOO_MANY_REQUESTS,
             title: "too many requests",
@@ -475,11 +469,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_code_has_a_distinct_wire_form_and_consistent_status() {
-        use itertools::Itertools;
-        assert!(Code::ALL.iter().map(|code| code.as_str()).all_unique());
+    fn every_code_has_an_http_projection_and_a_json_string_form() {
         for code in Code::ALL {
-            assert_eq!(code.to_string(), code.as_str());
             assert_eq!(
                 serde_json::to_string(code).unwrap(),
                 format!("\"{}\"", code.as_str())

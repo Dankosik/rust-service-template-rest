@@ -13,6 +13,9 @@ use crate::Error;
 /// Upper bound for one business call, also the floor for the process drain budget.
 pub const UNARY_DEADLINE: Duration = Duration::from_secs(8);
 
+/// Retry hint on a shed call; matches the HTTP listener's `Retry-After`.
+const SHED_RETRY_AFTER: Duration = Duration::from_secs(1);
+
 const BUSINESS_CONCURRENCY: usize = 256;
 const HEALTH_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const HEALTH_CHECK_PATH: &str = "/grpc.health.v1.Health/Check";
@@ -161,9 +164,12 @@ where
 
 async fn capacity_error(error: axum::BoxError) -> Response {
     let status = if error.is::<tower::load_shed::error::Overloaded>() {
-        tonic::Status::resource_exhausted(service_failure::AT_CAPACITY_DETAIL)
+        crate::status::failure_status_with_retry(
+            service_failure::Code::ServiceUnavailable,
+            SHED_RETRY_AFTER,
+        )
     } else {
-        tonic::Status::internal("request failed")
+        tonic::Status::internal(crate::status::REQUEST_FAILED)
     };
     status_response(status)
 }
@@ -181,7 +187,7 @@ async fn enforce_deadline(request: Request, next: Next) -> Response {
 }
 
 fn panic_response(_panic: Box<dyn std::any::Any + Send>) -> Response {
-    status_response(tonic::Status::internal("request failed"))
+    status_response(tonic::Status::internal(crate::status::REQUEST_FAILED))
 }
 
 pub(crate) fn status_response(status: tonic::Status) -> Response {

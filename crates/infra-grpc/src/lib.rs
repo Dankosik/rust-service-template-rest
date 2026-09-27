@@ -17,5 +17,5 @@ mod tls;
 pub use client::{Client, ClientSecurity, ClientTlsMaterial};
 pub use error::Error;
 pub use router::{Services, UNARY_DEADLINE, grpc_timeout, router, server_options};
-pub use status::classified_status;
+pub use status::{ERROR_DOMAIN, failure_status, failure_status_with_retry};
 pub use tls::{ServerTlsMaterial, server_tls_config};

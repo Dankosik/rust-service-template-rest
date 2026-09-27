@@ -35,7 +35,7 @@ use infra_bearerauthn::{
 };
 // template:end authn:grpc-transport-test-auth-imports
 use infra_grpc::{
-    ClientSecurity, ClientTlsMaterial, ServerTlsMaterial, Services, classified_status,
+    ClientSecurity, ClientTlsMaterial, ERROR_DOMAIN, ServerTlsMaterial, Services, failure_status,
     server_options, server_tls_config,
 };
 use infra_http::{Drained, Server};
@@ -50,7 +50,7 @@ use rustls::{
 // template:begin authn:grpc-transport-test-auth-secret
 use secrecy::SecretString;
 // template:end authn:grpc-transport-test-auth-secret
-use service_failure::{ClassifiedFailure, Code as FailureCode};
+use service_failure::Code as FailureCode;
 use tokio::{io::AsyncReadExt as _, net::TcpStream, sync::Notify, time::timeout};
 // template:begin authn:grpc-transport-test-auth-listener
 use tokio::net::TcpListener;
@@ -189,9 +189,7 @@ impl EchoService for Echo {
         self.observe(&request, Seen::Unary);
         match request.into_inner().message.as_str() {
             "panic" => panic!("panic detail: do not leak"),
-            "classified" => Err(classified_status(ClassifiedFailure::new(
-                FailureCode::BadRequest,
-            ))),
+            "classified" => Err(failure_status(FailureCode::BadRequest)),
             "hold" => {
                 self.hold.wait().await;
                 Ok(Response::new(UnaryResponse {
@@ -575,7 +573,7 @@ async fn business_limit_sheds_the_next_call_without_starving_health() {
     }
     fixture.echo.hold.wait_for(256).await;
 
-    let exhausted = timeout(
+    let shed = timeout(
         WAIT,
         fixture.echo_client().unary(request(UnaryRequest {
             message: "overflow".to_owned(),
@@ -584,8 +582,17 @@ async fn business_limit_sheds_the_next_call_without_starving_health() {
     .await
     .expect("overflow call")
     .unwrap_err();
-    assert_eq!(exhausted.code(), Code::ResourceExhausted);
-    assert_eq!(exhausted.message(), service_failure::AT_CAPACITY_DETAIL);
+    assert_eq!(shed.code(), Code::Unavailable);
+    assert_eq!(shed.message(), "service is unavailable");
+    let details = shed.get_error_details();
+    assert_eq!(
+        details.error_info().expect("error info").reason,
+        "SERVICE_UNAVAILABLE"
+    );
+    assert_eq!(
+        details.retry_info().expect("retry info").retry_delay,
+        Some(Duration::from_secs(1))
+    );
 
     let serving = timeout(
         WAIT,
@@ -726,7 +733,7 @@ async fn handler_panic_is_internal_and_the_server_keeps_serving() {
 }
 
 #[tokio::test]
-async fn classified_status_passes_through_with_error_info() {
+async fn failure_status_passes_through_with_error_info() {
     let fixture = Fixture::plaintext().await;
     let error = timeout(
         WAIT,
@@ -740,8 +747,8 @@ async fn classified_status_passes_through_with_error_info() {
     assert_eq!(error.code(), Code::InvalidArgument);
     let details = error.get_error_details();
     let info = details.error_info().expect("error info");
-    assert_eq!(info.reason, FailureCode::BadRequest.as_str());
-    assert_eq!(info.domain, "service");
+    assert_eq!(info.reason, "BAD_REQUEST");
+    assert_eq!(info.domain, ERROR_DOMAIN);
     fixture.stop().await;
 }
 

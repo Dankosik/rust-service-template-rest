@@ -316,10 +316,11 @@
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-authn-dependency"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-authn-module", "infra-http-authn-exports"]},
       {"path": "crates/infra-http/src/problem.rs", "ids": ["http-authentication-code-meta", "http-authentication-problem-responses", "http-authentication-problem-components"]},
-      {"path": "crates/service-failure/src/lib.rs", "ids": ["http-authentication-codes", "service-failure-authentication-code-all", "service-failure-authentication-code-wire", "service-failure-authentication-code-meaning", "service-failure-authentication-unauthenticated-meaning", "service-failure-authentication-unavailable-meaning"]},
+      {"path": "crates/service-failure/src/lib.rs", "ids": ["http-authentication-codes"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-authn-dependency", "service-authn-test-dependencies"]},
       {"path": "crates/infra-grpc/Cargo.toml", "ids": ["grpc-bearer-dependency", "grpc-bearer-test-dependency"]},
       {"path": "crates/infra-grpc/src/router.rs", "ids": ["grpc-router-verifier", "grpc-router-authenticate", "grpc-authenticate"]},
+      {"path": "crates/infra-grpc/src/status.rs", "ids": ["grpc-authentication-status-code"]},
       {"path": "crates/infra-grpc/tests/transport.rs", "ids": ["grpc-transport-test-auth-time", "grpc-transport-test-auth-imports", "grpc-transport-test-auth-secret", "grpc-transport-test-auth-listener", "grpc-transport-test-auth-io", "grpc-transport-test-auth-tls-acceptor", "grpc-transport-test-accepted-token", "grpc-transport-test-seen-identity-field", "grpc-transport-test-seen-principal", "grpc-transport-test-auth-provider-field", "grpc-transport-test-auth-fixture", "grpc-transport-test-router-verifier", "grpc-transport-test-auth-provider-init", "grpc-transport-test-auth-provider-stop", "grpc-transport-test-bearer", "grpc-transport-test-watch-bearer", "grpc-transport-test-seen-identity-assert", "grpc-transport-test-unauthenticated", "grpc-transport-test-deadline-bearer", "grpc-transport-test-auth-provider", "grpc-transport-test-auth-ca-der", "grpc-transport-test-auth-ca-der-init"]},
       {"path": "crates/service/src/api.rs", "ids": ["service-api-authn-imports", "service-api-authn-document-security", "service-api-authn-security-scheme", "service-api-protected-test-route"]},
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-authn-imports", "bootstrap-authn-config-import", "bootstrap-authn-errors", "bootstrap-authn-prepare", "bootstrap-prepare-auth-prefix", "bootstrap-prepare-auth-suffix", "bootstrap-auth-provider-url", "bootstrap-prepared-auth-enabled", "bootstrap-authn-finalize-enabled"]},
@@ -404,6 +405,13 @@
       "path": "crates/config/src/observability.rs",
       "old": "service_name: \"service\".to_owned(),",
       "template": "service_name: \"{service_name}\".to_owned(),",
+      "count": 1,
+      "encoding": "rust_string"
+    },
+    {
+      "path": "crates/infra-grpc/src/status.rs",
+      "old": "pub const ERROR_DOMAIN: &str = \"service\";",
+      "template": "pub const ERROR_DOMAIN: &str = \"{service_name}\";",
       "count": 1,
       "encoding": "rust_string"
     },
@@ -1071,7 +1079,8 @@
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-idempotency-dependencies"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-idempotency-module"]},
       {"path": "crates/infra-http/src/problem.rs", "ids": ["http-idempotency-code-meta"]},
-      {"path": "crates/service-failure/src/lib.rs", "ids": ["http-idempotency-codes", "service-failure-idempotency-code-all", "service-failure-idempotency-code-meaning", "service-failure-idempotency-code-wire", "service-failure-idempotency-conflict-meaning", "service-failure-idempotency-unavailable-meaning"]},
+      {"path": "crates/service-failure/src/lib.rs", "ids": ["http-idempotency-codes"]},
+      {"path": "crates/infra-grpc/src/status.rs", "ids": ["grpc-idempotency-status-code"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-http-idempotency-module", "config-http-idempotency-export", "config-http-idempotency-field", "config-http-idempotency-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-http-idempotency-environment"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-http-idempotency-dependency"]},
@@ -1517,7 +1526,8 @@
           "http-webhook-problem-components"
         ]
       },
-      {"path": "crates/service-failure/src/lib.rs", "ids": ["http-webhook-codes", "service-failure-webhook-code-all", "service-failure-webhook-code-meaning", "service-failure-webhook-code-wire"]},
+      {"path": "crates/service-failure/src/lib.rs", "ids": ["http-webhook-codes"]},
+      {"path": "crates/infra-grpc/src/status.rs", "ids": ["grpc-webhook-status-code"]},
       {
         "path": "crates/service/Cargo.toml",
         "ids": [

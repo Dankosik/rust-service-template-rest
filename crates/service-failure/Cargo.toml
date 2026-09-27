@@ -13,3 +13,4 @@ workspace = true
 
 [dependencies]
 serde = { workspace = true, features = ["std"] }
+strum = { workspace = true, features = ["derive"] }
