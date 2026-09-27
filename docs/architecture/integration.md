@@ -112,12 +112,13 @@ inside the command timeout. It does not certify a deployed memory policy.
 <!-- template:begin authn:docs-integration-authn-provider -->
 Inbound authentication's provider destination is fixed by configuration or an
 exact-issuer discovery response, never by the caller. The adapter's
-`ProviderUrl` admission requires HTTPS and host, with no userinfo, fragment,
-whitespace or controls. Issuers forbid queries; JWKS and introspection endpoint
-queries are preserved on requests and excluded from diagnostics. It retains normal TLS hostname/certificate
+`IssuerUrl` and `EndpointUrl` admission requires HTTPS and host, with no
+userinfo, fragment, whitespace or controls. `IssuerUrl` forbids queries; JWKS
+and introspection `EndpointUrl` queries are preserved on requests and excluded
+from diagnostics. It retains normal TLS hostname/certificate
 validation, permits configured private HTTPS providers, disables redirects,
-ambient proxy and retry, and caps a response at 1 MiB. Provider work has a
-three-second attempt cap through body completion. The outer HTTP timeout alone
+ambient proxy and retry, and caps a response at 1 MiB. Each provider attempt
+has reqwest's three-second total timeout, which covers body completion. The outer HTTP timeout alone
 owns request expiry; authentication has no request-deadline propagation.
 
 The adapter owns URL representation because discovery and direct adapter inputs

@@ -8,21 +8,23 @@ use jsonwebtoken::{
     Algorithm, DecodingKey, Validation,
     crypto::aws_lc::DEFAULT_PROVIDER,
     decode, decode_header,
+    errors::ErrorKind,
     jwk::{AlgorithmParameters, EllipticCurve, Jwk, KeyAlgorithm, KeyOperations, PublicKeyUse},
 };
 use serde::Deserialize;
+use serde_json::value::RawValue;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    BearerToken, Engine, Failure, PreparationError, PreparationPhase, PreparationReason, Principal,
-    ProviderUrl, VerificationError, VerificationReason, Verifier,
-    claims::{ClaimPolicy, JwtClaims, validate_jwt_claims},
-    provider::{ProviderClient, ProviderDeadline},
-    record_verification,
-    refresh::{SharedRefresh, UnknownKeyResult, run_refresh_worker},
+    BearerToken, EndpointUrl, Failure, IssuerUrl, PreparationError, PreparationPhase,
+    PreparationReason, Principal, VerificationError, VerificationReason, Verifier,
+    claims::{ClaimPolicy, validate_jwt_claims},
+    provider::ProviderClient,
+    refresh::{KeyStore, UnknownKeyRefresh, run_refresh_worker},
 };
 
+/// Discovery and the initial JWKS fetch share this budget.
 const STARTUP_BUDGET: Duration = Duration::from_secs(6);
 
 /// JWT profile rules selected before verifier preparation.
@@ -45,7 +47,7 @@ pub enum JwtAlgorithm {
 /// Bootstrap input for OIDC discovery and JWT verification.
 #[derive(Clone, Eq, PartialEq)]
 pub struct JwtOptions {
-    pub issuer: ProviderUrl,
+    pub issuer: IssuerUrl,
     pub audiences: Vec<String>,
     pub token_profile: TokenProfile,
     pub algorithms: Vec<JwtAlgorithm>,
@@ -60,12 +62,11 @@ impl fmt::Debug for JwtOptions {
 /// The process-owned task that keeps a JWT verifier's installed key set fresh.
 pub type RefreshTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
-#[derive(Clone)]
-struct JwtVerifier {
+pub(crate) struct JwtVerifier {
     claim_policy: ClaimPolicy,
     token_profile: TokenProfile,
     algorithms: Vec<JwtAlgorithm>,
-    refresh: Arc<SharedRefresh>,
+    keys: Arc<KeyStore>,
 }
 
 impl fmt::Debug for JwtVerifier {
@@ -74,17 +75,41 @@ impl fmt::Debug for JwtVerifier {
     }
 }
 
-impl Engine for JwtVerifier {
-    fn verify<'a>(
-        &'a self,
-        token: &'a BearerToken<'_>,
-    ) -> Pin<Box<dyn Future<Output = Result<Principal, Failure>> + Send + 'a>> {
-        Box::pin(async move { record_verification("jwt", self.verify_evidence(token).await) })
+/// Why no installed key yielded a verified payload.
+enum DecodeError {
+    /// No installed key has the token's `kid` and algorithm.
+    NoCandidate,
+    /// Candidate keys exist, but none verified the signature.
+    BadSignature,
+    /// A key verified the signature and the library rejected the claims.
+    Rejected(VerificationError),
+}
+
+impl DecodeError {
+    /// A new `kid`, or a kid-less token during key rotation, can need keys the
+    /// installed set lacks (the go-oidc rule). A known `kid` with a bad
+    /// signature cannot.
+    fn may_need_new_keys(&self, kid: Option<&str>) -> bool {
+        match self {
+            Self::NoCandidate => true,
+            Self::BadSignature => kid.is_none(),
+            Self::Rejected(_) => false,
+        }
+    }
+}
+
+impl From<DecodeError> for VerificationError {
+    fn from(error: DecodeError) -> Self {
+        match error {
+            DecodeError::NoCandidate => Self::invalid(VerificationReason::UnknownKey),
+            DecodeError::BadSignature => Self::invalid(VerificationReason::Signature),
+            DecodeError::Rejected(error) => error,
+        }
     }
 }
 
 impl JwtVerifier {
-    async fn verify_evidence(
+    pub(crate) async fn verify(
         &self,
         token: &BearerToken<'_>,
     ) -> Result<Principal, VerificationError> {
@@ -101,72 +126,72 @@ impl JwtVerifier {
         {
             return Err(VerificationError::invalid(VerificationReason::Profile));
         }
-        let (snapshot, index) = self.select_key(header.kid.as_deref(), algorithm).await?;
-        let key = &snapshot.keys[index];
-        let payload = decode::<Box<serde_json::value::RawValue>>(
-            token.as_bytes(),
-            &key.decoding_key,
-            &validation_for(algorithm, &self.claim_policy),
-        )
-        .map_err(|error| jwt_validation_error(error.kind()))?
-        .claims;
-        let claims: JwtClaims = serde_json::from_str(payload.get())
-            .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))?;
+        let kid = header.kid.as_deref();
+        let payload = match self.decode(&self.keys.keys(), token, kid, algorithm) {
+            Ok(payload) => payload,
+            Err(miss) if miss.may_need_new_keys(kid) => {
+                self.decode_after_refresh(token, kid, algorithm, miss)
+                    .await?
+            }
+            Err(error) => return Err(error.into()),
+        };
         validate_jwt_claims(
-            &claims,
+            payload.get(),
             &self.claim_policy,
             self.token_profile,
             jsonwebtoken::get_current_timestamp(),
-            Arc::from(payload.get()),
         )
     }
 
-    async fn select_key(
+    /// Tries every installed key that fits the token; the first valid signature wins.
+    fn decode(
         &self,
+        keys: &KeySet,
+        token: &BearerToken<'_>,
         kid: Option<&str>,
         algorithm: JwtAlgorithm,
-    ) -> Result<(Arc<KeySet>, usize), VerificationError> {
-        let initial = self.refresh.keys();
-        match initial.select(kid, algorithm) {
-            KeySelection::One(index) => return Ok((initial, index)),
-            KeySelection::Ambiguous => {
-                return Err(VerificationError::invalid(VerificationReason::AmbiguousKey));
-            }
-            KeySelection::Unknown => {}
-        }
-        drop(initial);
-        match self.refresh.refresh_unknown().await {
-            UnknownKeyResult::Refreshed => {
-                let snapshot = self.refresh.keys();
-                match snapshot.select(kid, algorithm) {
-                    KeySelection::One(index) => Ok((snapshot, index)),
-                    KeySelection::Unknown => {
-                        Err(VerificationError::invalid(VerificationReason::UnknownKey))
-                    }
-                    KeySelection::Ambiguous => {
-                        Err(VerificationError::invalid(VerificationReason::AmbiguousKey))
-                    }
+    ) -> Result<Box<RawValue>, DecodeError> {
+        let validation = validation_for(algorithm, &self.claim_policy);
+        let mut miss = DecodeError::NoCandidate;
+        for key in keys.candidates(kid, algorithm) {
+            match decode::<Box<RawValue>>(token.as_bytes(), &key.decoding_key, &validation) {
+                Ok(data) => return Ok(data.claims),
+                Err(error) if *error.kind() == ErrorKind::InvalidSignature => {
+                    miss = DecodeError::BadSignature;
+                }
+                Err(error) => {
+                    return Err(DecodeError::Rejected(jwt_validation_error(error.kind())));
                 }
             }
-            UnknownKeyResult::CooldownSuccess => {
-                Err(VerificationError::invalid(VerificationReason::UnknownKey))
-            }
-            UnknownKeyResult::RefreshFailed | UnknownKeyResult::CooldownFailure => Err(
-                VerificationError::new(Failure::Unavailable, VerificationReason::Refresh),
-            ),
+        }
+        Err(miss)
+    }
+
+    async fn decode_after_refresh(
+        &self,
+        token: &BearerToken<'_>,
+        kid: Option<&str>,
+        algorithm: JwtAlgorithm,
+        miss: DecodeError,
+    ) -> Result<Box<RawValue>, VerificationError> {
+        match self.keys.refresh_for_unknown_key().await {
+            UnknownKeyRefresh::Refreshed(keys) => Ok(self.decode(&keys, token, kid, algorithm)?),
+            UnknownKeyRefresh::StillUnknown => Err(miss.into()),
+            UnknownKeyRefresh::Unavailable => Err(VerificationError::new(
+                Failure::Unavailable,
+                VerificationReason::Refresh,
+            )),
         }
     }
 }
 
-fn jwt_validation_error(error: &jsonwebtoken::errors::ErrorKind) -> VerificationError {
-    use jsonwebtoken::errors::ErrorKind;
+fn jwt_validation_error(error: &ErrorKind) -> VerificationError {
     let reason = match error {
         ErrorKind::MissingRequiredClaim(_) => VerificationReason::MissingClaim,
         ErrorKind::ExpiredSignature => VerificationReason::Expired,
         ErrorKind::ImmatureSignature => VerificationReason::NotYetValid,
         ErrorKind::InvalidIssuer => VerificationReason::Issuer,
         ErrorKind::InvalidAudience => VerificationReason::Audience,
-        ErrorKind::InvalidSubject => VerificationReason::Identity,
         ErrorKind::InvalidAlgorithm
         | ErrorKind::InvalidAlgorithmName
         | ErrorKind::UnsupportedAlgorithm
@@ -198,7 +223,6 @@ async fn prepare_with_provider(
     provider: ProviderClient,
     cancel: CancellationToken,
 ) -> Result<(Verifier, RefreshTask), PreparationError> {
-    ProviderUrl::parse(options.issuer.as_str())?;
     crate::describe_verification();
     metrics::describe_counter!(
         "authn_jwks_key_rejections_total",
@@ -214,63 +238,54 @@ async fn prepare_with_provider(
         ));
     }
     let startup_deadline = Instant::now() + STARTUP_BUDGET;
-    let discovery_url = discovery_url(&options.issuer);
-    let discovery = fetch_discovery(&provider, &discovery_url, startup_deadline).await?;
+    let discovery = fetch_discovery(&provider, &options.issuer, startup_deadline).await?;
     if discovery.issuer != options.issuer.as_str() {
         return Err(PreparationError::issuer_mismatch(
             &options.issuer,
             &discovery.issuer,
         ));
     }
-    let jwks_uri = ProviderUrl::parse_endpoint(&discovery.jwks_uri).map_err(|_| {
+    let jwks_uri = EndpointUrl::parse(&discovery.jwks_uri).map_err(|_| {
         PreparationError::new(PreparationPhase::Discovery, PreparationReason::InvalidUrl)
     })?;
-    let bytes = provider
-        .get_json(
-            jwks_uri.url(),
-            startup_deadline_for(Instant::now(), startup_deadline, PreparationPhase::Jwks)?,
-        )
+    let jwks_error = |reason| PreparationError::new(PreparationPhase::Jwks, reason);
+    let bytes = tokio::time::timeout_at(startup_deadline, provider.get_json(jwks_uri.url()))
         .await
-        .map_err(|_| PreparationError::new(PreparationPhase::Jwks, PreparationReason::Fetch))?;
+        .map_err(|_| jwks_error(PreparationReason::Fetch))?
+        .map_err(|_| jwks_error(PreparationReason::Fetch))?;
     let keys = parse_key_set(&bytes, &options.algorithms).map_err(|error| {
-        PreparationError::new(
-            PreparationPhase::Jwks,
-            match error {
-                KeySetError::Parse => PreparationReason::Parse,
-                KeySetError::NoUsableKeys => PreparationReason::NoUsableKeys,
-            },
-        )
+        jwks_error(match error {
+            KeySetError::Parse => PreparationReason::Parse,
+            KeySetError::NoUsableKeys => PreparationReason::NoUsableKeys,
+        })
     })?;
-    let refresh = SharedRefresh::new(Arc::new(keys));
+    let keys = KeyStore::new(Arc::new(keys));
     let verifier = JwtVerifier {
         claim_policy: ClaimPolicy::new(options.issuer.as_str().to_owned(), options.audiences),
         token_profile: options.token_profile,
         algorithms: options.algorithms.clone(),
-        refresh: refresh.clone(),
+        keys: keys.clone(),
     };
     let algorithms = options.algorithms;
     let refresh_cancel = cancel.child_token();
     let refresh_task: RefreshTask = Box::pin(async move {
-        run_refresh_worker(refresh, provider, jwks_uri, algorithms, refresh_cancel).await;
+        run_refresh_worker(keys, provider, jwks_uri, algorithms, refresh_cancel).await;
     });
-    Ok((Verifier::new(verifier), refresh_task))
+    Ok((Verifier::jwt(verifier), refresh_task))
 }
 
 impl PreparationError {
     /// Discovery named another issuer. Both values are public issuer URLs; a
     /// discovered value outside the issuer grammar is not echoed.
-    fn issuer_mismatch(configured: &ProviderUrl, discovered: &str) -> Self {
-        let discovered = if discovered.len() <= 256 && ProviderUrl::parse(discovered).is_ok() {
+    fn issuer_mismatch(configured: &IssuerUrl, discovered: &str) -> Self {
+        let discovered = if discovered.len() <= 256 && IssuerUrl::parse(discovered).is_ok() {
             discovered.to_owned()
         } else {
             "<not an issuer URL>".to_owned()
         };
-        Self {
-            issuers: Some(Box::new((configured.as_str().to_owned(), discovered))),
-            ..Self::new(
-                PreparationPhase::Discovery,
-                PreparationReason::IssuerMismatch,
-            )
+        Self::IssuerMismatch {
+            configured: configured.as_str().to_owned(),
+            discovered,
         }
     }
 }
@@ -286,42 +301,20 @@ fn ensure_crypto_provider() -> Result<(), PreparationError> {
     }
 }
 
-fn discovery_url(issuer: &ProviderUrl) -> url::Url {
+async fn fetch_discovery(
+    provider: &ProviderClient,
+    issuer: &IssuerUrl,
+    deadline: Instant,
+) -> Result<Discovery, PreparationError> {
+    let error = |reason| PreparationError::new(PreparationPhase::Discovery, reason);
     let mut url = issuer.url().clone();
     let path = url.path().strip_suffix('/').unwrap_or(url.path());
     url.set_path(&format!("{path}/.well-known/openid-configuration"));
-    url
-}
-
-async fn fetch_discovery(
-    provider: &ProviderClient,
-    uri: &url::Url,
-    startup_deadline: Instant,
-) -> Result<Discovery, PreparationError> {
-    let bytes = provider
-        .get_json(
-            uri,
-            startup_deadline_for(
-                Instant::now(),
-                startup_deadline,
-                PreparationPhase::Discovery,
-            )?,
-        )
+    let bytes = tokio::time::timeout_at(deadline, provider.get_json(&url))
         .await
-        .map_err(|_| {
-            PreparationError::new(PreparationPhase::Discovery, PreparationReason::Fetch)
-        })?;
-    serde_json::from_slice(&bytes)
-        .map_err(|_| PreparationError::new(PreparationPhase::Discovery, PreparationReason::Parse))
-}
-
-fn startup_deadline_for(
-    now: Instant,
-    overall: Instant,
-    phase: PreparationPhase,
-) -> Result<ProviderDeadline, PreparationError> {
-    ProviderDeadline::startup(now, overall)
-        .ok_or(PreparationError::new(phase, PreparationReason::Fetch))
+        .map_err(|_| error(PreparationReason::Fetch))?
+        .map_err(|_| error(PreparationReason::Fetch))?;
+    serde_json::from_slice(&bytes).map_err(|_| error(PreparationReason::Parse))
 }
 
 #[derive(Deserialize)]
@@ -336,8 +329,18 @@ fn is_access_token_type(value: &str) -> bool {
 
 struct JwtKey {
     kid: Option<String>,
-    algorithm: JwtAlgorithm,
+    family: KeyFamily,
+    /// The JWK's own `alg`; without one the key serves every configured
+    /// algorithm of its family, as Nimbus and go-oidc do.
+    algorithm: Option<JwtAlgorithm>,
     decoding_key: DecodingKey,
+}
+
+impl JwtKey {
+    fn accepts(&self, algorithm: JwtAlgorithm) -> bool {
+        self.algorithm
+            .map_or(algorithm.matches(self.family), |bound| bound == algorithm)
+    }
 }
 
 pub(crate) struct KeySet {
@@ -345,28 +348,21 @@ pub(crate) struct KeySet {
 }
 
 impl KeySet {
-    fn select(&self, kid: Option<&str>, algorithm: JwtAlgorithm) -> KeySelection {
-        let mut matching = self.keys.iter().enumerate().filter_map(|(index, key)| {
-            (key.algorithm == algorithm && kid.is_none_or(|kid| key.kid.as_deref() == Some(kid)))
-                .then_some(index)
-        });
-        match (matching.next(), matching.next()) {
-            (Some(index), None) => KeySelection::One(index),
-            (None, _) => KeySelection::Unknown,
-            _ => KeySelection::Ambiguous,
-        }
+    /// Keys that fit the token: its algorithm and, when present, its `kid`.
+    fn candidates<'a>(
+        &'a self,
+        kid: Option<&'a str>,
+        algorithm: JwtAlgorithm,
+    ) -> impl Iterator<Item = &'a JwtKey> {
+        self.keys.iter().filter(move |key| {
+            key.accepts(algorithm) && kid.is_none_or(|kid| key.kid.as_deref() == Some(kid))
+        })
     }
 
     #[cfg(test)]
     pub(crate) fn has_kid(&self, kid: &str) -> bool {
         self.keys.iter().any(|key| key.kid.as_deref() == Some(kid))
     }
-}
-
-enum KeySelection {
-    One(usize),
-    Unknown,
-    Ambiguous,
 }
 
 #[derive(Deserialize)]
@@ -387,8 +383,8 @@ enum KeyRejection {
     UnsupportedFamily,
     AlgorithmBinding,
     InvalidMaterial,
-    ConflictingAlgorithm,
 }
+
 impl KeyRejection {
     fn label(self) -> &'static str {
         match self {
@@ -397,44 +393,26 @@ impl KeyRejection {
             Self::UnsupportedFamily => "unsupported_family",
             Self::AlgorithmBinding => "algorithm_binding",
             Self::InvalidMaterial => "invalid_material",
-            Self::ConflictingAlgorithm => "conflicting_algorithm",
         }
     }
 }
 
+/// Admits every usable signature key and skips the rest.
 pub(crate) fn parse_key_set(
     bytes: &[u8],
     configured: &[JwtAlgorithm],
 ) -> Result<KeySet, KeySetError> {
     let raw: RawJwks = serde_json::from_slice(bytes).map_err(|_| KeySetError::Parse)?;
     let mut rejected = std::collections::BTreeMap::<KeyRejection, u64>::new();
-    let mut candidates = Vec::new();
+    let mut keys = Vec::new();
     for value in raw.keys {
-        let candidate = serde_json::from_value::<Jwk>(value)
+        let key = serde_json::from_value::<Jwk>(value)
             .map_err(|_| KeyRejection::MalformedEntry)
-            .and_then(|jwk| Candidate::admit(jwk, configured));
-        match candidate {
-            Ok(candidate) => candidates.push(candidate),
+            .and_then(|jwk| admit_key(jwk, configured));
+        match key {
+            Ok(key) => keys.push(key),
             Err(reason) => *rejected.entry(reason).or_default() += 1,
         }
-    }
-    let conflicting = candidates
-        .iter()
-        .enumerate()
-        .filter_map(|(index, candidate)| {
-            candidates
-                .iter()
-                .enumerate()
-                .any(|(other, item)| {
-                    index != other
-                        && candidate.material == item.material
-                        && candidate.key.algorithm != item.key.algorithm
-                })
-                .then_some(index)
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    if !conflicting.is_empty() {
-        rejected.insert(KeyRejection::ConflictingAlgorithm, conflicting.len() as u64);
     }
     // Aggregate per-entry rejection evidence into one event per closed reason.
     // Neither provider-controlled entry count nor key identifiers multiply logs.
@@ -447,60 +425,34 @@ pub(crate) fn parse_key_set(
         metrics::counter!("authn_jwks_key_rejections_total", "reason" => reason.label())
             .increment(count);
     }
-    candidates = candidates
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, candidate)| (!conflicting.contains(&index)).then_some(candidate))
-        .collect();
-    if candidates.is_empty() {
+    if keys.is_empty() {
         return Err(KeySetError::NoUsableKeys);
     }
-    Ok(KeySet {
-        keys: candidates
-            .into_iter()
-            .map(|candidate| candidate.key)
-            .collect(),
-    })
+    Ok(KeySet { keys })
 }
 
-struct Candidate {
-    key: JwtKey,
-    material: PublicMaterial,
-}
-
-#[derive(Eq, PartialEq)]
-enum PublicMaterial {
-    Rsa(Vec<u8>, Vec<u8>),
-    Ec(Vec<u8>, Vec<u8>),
-    Ed(Vec<u8>),
-}
-
-impl Candidate {
-    fn admit(mut jwk: Jwk, configured: &[JwtAlgorithm]) -> Result<Self, KeyRejection> {
-        if !signature_usage(&jwk) {
-            return Err(KeyRejection::IncompatibleUsage);
-        }
-        let family = KeyFamily::from_jwk(&jwk).ok_or(KeyRejection::UnsupportedFamily)?;
-        let algorithm = bind_algorithm(jwk.common.key_algorithm, family, configured)
-            .ok_or(KeyRejection::AlgorithmBinding)?;
-        let material = admit_material(&jwk, algorithm).ok_or(KeyRejection::InvalidMaterial)?;
-        if let (PublicMaterial::Rsa(modulus, exponent), AlgorithmParameters::RSA(parameters)) =
-            (&material, &mut jwk.algorithm)
-        {
-            parameters.n = URL_SAFE_NO_PAD.encode(modulus);
-            parameters.e = URL_SAFE_NO_PAD.encode(exponent);
-        }
-        let decoding_key =
-            DecodingKey::from_jwk(&jwk).map_err(|_| KeyRejection::InvalidMaterial)?;
-        Ok(Self {
-            key: JwtKey {
-                kid: jwk.common.key_id.clone(),
-                algorithm,
-                decoding_key,
-            },
-            material,
-        })
+fn admit_key(mut jwk: Jwk, configured: &[JwtAlgorithm]) -> Result<JwtKey, KeyRejection> {
+    if !signature_usage(&jwk) {
+        return Err(KeyRejection::IncompatibleUsage);
     }
+    let family = KeyFamily::from_jwk(&jwk).ok_or(KeyRejection::UnsupportedFamily)?;
+    let algorithm = match jwk.common.key_algorithm {
+        Some(explicit) => Some(
+            JwtAlgorithm::from_key_algorithm(explicit)
+                .filter(|algorithm| configured.contains(algorithm) && algorithm.matches(family))
+                .ok_or(KeyRejection::AlgorithmBinding)?,
+        ),
+        None if configured.iter().any(|algorithm| algorithm.matches(family)) => None,
+        None => return Err(KeyRejection::AlgorithmBinding),
+    };
+    admit_material(&mut jwk).ok_or(KeyRejection::InvalidMaterial)?;
+    let decoding_key = DecodingKey::from_jwk(&jwk).map_err(|_| KeyRejection::InvalidMaterial)?;
+    Ok(JwtKey {
+        kid: jwk.common.key_id,
+        family,
+        algorithm,
+        decoding_key,
+    })
 }
 
 fn signature_usage(jwk: &Jwk) -> bool {
@@ -541,29 +493,6 @@ impl KeyFamily {
     }
 }
 
-fn bind_algorithm(
-    explicit: Option<KeyAlgorithm>,
-    family: KeyFamily,
-    configured: &[JwtAlgorithm],
-) -> Option<JwtAlgorithm> {
-    if let Some(explicit) = explicit {
-        let algorithm = match explicit {
-            KeyAlgorithm::RS256 => JwtAlgorithm::Rs256,
-            KeyAlgorithm::PS256 => JwtAlgorithm::Ps256,
-            KeyAlgorithm::ES256 => JwtAlgorithm::Es256,
-            KeyAlgorithm::EdDSA => JwtAlgorithm::EdDsa,
-            _ => return None,
-        };
-        return (configured.contains(&algorithm) && algorithm.matches(family)).then_some(algorithm);
-    }
-    let candidates = configured
-        .iter()
-        .copied()
-        .filter(|algorithm| algorithm.matches(family))
-        .collect::<Vec<_>>();
-    (candidates.len() == 1).then(|| candidates[0])
-}
-
 impl JwtAlgorithm {
     fn from_jsonwebtoken(algorithm: Algorithm) -> Option<Self> {
         match algorithm {
@@ -571,6 +500,16 @@ impl JwtAlgorithm {
             Algorithm::PS256 => Some(Self::Ps256),
             Algorithm::ES256 => Some(Self::Es256),
             Algorithm::EdDSA => Some(Self::EdDsa),
+            _ => None,
+        }
+    }
+
+    fn from_key_algorithm(algorithm: KeyAlgorithm) -> Option<Self> {
+        match algorithm {
+            KeyAlgorithm::RS256 => Some(Self::Rs256),
+            KeyAlgorithm::PS256 => Some(Self::Ps256),
+            KeyAlgorithm::ES256 => Some(Self::Es256),
+            KeyAlgorithm::EdDSA => Some(Self::EdDsa),
             _ => None,
         }
     }
@@ -594,64 +533,50 @@ impl JwtAlgorithm {
     }
 }
 
-fn admit_material(jwk: &Jwk, algorithm: JwtAlgorithm) -> Option<PublicMaterial> {
-    match &jwk.algorithm {
+/// Checks key material with aws-lc at admission, so an unusable entry is
+/// skipped instead of failing every token that names it.
+fn admit_material(jwk: &mut Jwk) -> Option<()> {
+    match &mut jwk.algorithm {
         AlgorithmParameters::RSA(parameters) => {
-            let modulus = normalized_positive(URL_SAFE_NO_PAD.decode(&parameters.n).ok()?)?;
-            let exponent = normalized_positive(URL_SAFE_NO_PAD.decode(&parameters.e).ok()?)?;
-            let bits = (modulus.len() - 1) * 8 + (8 - modulus[0].leading_zeros() as usize);
+            let modulus = without_leading_zeros(&URL_SAFE_NO_PAD.decode(&parameters.n).ok()?)?;
+            let exponent = without_leading_zeros(&URL_SAFE_NO_PAD.decode(&parameters.e).ok()?)?;
+            // aws-lc parsing does not bound the size; its verifiers accept 2048–8192 bits.
+            let bits = modulus.len() * 8 - modulus[0].leading_zeros() as usize;
             if !(2048..=8192).contains(&bits) {
                 return None;
             }
-            let params = match algorithm {
-                JwtAlgorithm::Rs256 => &signature::RSA_PKCS1_2048_8192_SHA256,
-                JwtAlgorithm::Ps256 => &signature::RSA_PSS_2048_8192_SHA256,
-                _ => return None,
-            };
             RsaPublicKeyComponents {
                 n: modulus.as_slice(),
                 e: exponent.as_slice(),
             }
-            .to_parsed_public_key(params)
+            .to_parsed_public_key(&signature::RSA_PKCS1_2048_8192_SHA256)
             .ok()?;
-            Some(PublicMaterial::Rsa(modulus, exponent))
+            // Some IdPs emit a leading zero byte; jsonwebtoken 11 with aws-lc then
+            // reports every signature as invalid, so install the minimal encoding.
+            parameters.n = URL_SAFE_NO_PAD.encode(&modulus);
+            parameters.e = URL_SAFE_NO_PAD.encode(&exponent);
         }
         AlgorithmParameters::EllipticCurve(parameters) => {
-            if algorithm != JwtAlgorithm::Es256 {
-                return None;
-            }
             let x = URL_SAFE_NO_PAD.decode(&parameters.x).ok()?;
             let y = URL_SAFE_NO_PAD.decode(&parameters.y).ok()?;
             if x.len() != 32 || y.len() != 32 {
                 return None;
             }
-            let mut point = Vec::with_capacity(65);
-            point.push(4);
-            point.extend_from_slice(&x);
-            point.extend_from_slice(&y);
+            let point = [[4].as_slice(), &x, &y].concat();
             ParsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, point).ok()?;
-            Some(PublicMaterial::Ec(x, y))
         }
         AlgorithmParameters::OctetKeyPair(parameters) => {
-            if algorithm != JwtAlgorithm::EdDsa {
-                return None;
-            }
             let x = URL_SAFE_NO_PAD.decode(&parameters.x).ok()?;
-            if x.len() != 32 {
-                return None;
-            }
             ParsedPublicKey::new(&signature::ED25519, &x).ok()?;
-            Some(PublicMaterial::Ed(x))
         }
-        _ => None,
+        _ => return None,
     }
+    Some(())
 }
 
-fn normalized_positive(mut bytes: Vec<u8>) -> Option<Vec<u8>> {
-    while bytes.first() == Some(&0) {
-        bytes.remove(0);
-    }
-    (!bytes.is_empty()).then_some(bytes)
+fn without_leading_zeros(bytes: &[u8]) -> Option<Vec<u8>> {
+    let start = bytes.iter().position(|byte| *byte != 0)?;
+    Some(bytes[start..].to_vec())
 }
 
 fn validation_for(algorithm: JwtAlgorithm, policy: &ClaimPolicy) -> Validation {
@@ -672,30 +597,75 @@ mod tests {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
 
     use super::{
-        ClaimPolicy, JwtAlgorithm, JwtVerifier, KeyFamily, SharedRefresh, TokenProfile,
-        bind_algorithm, ensure_crypto_provider, parse_key_set,
+        ClaimPolicy, JwtAlgorithm, JwtVerifier, KeyStore, TokenProfile, ensure_crypto_provider,
+        parse_key_set,
     };
-    use crate::{Engine, Failure, parse_bearer};
+    use crate::{Failure, VerificationReason, parse_bearer, refresh::UnknownKeyRefresh};
 
     const JWT_SIGNING_DER: &[u8] = include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
 
-    fn key_set(kid: &str) -> Arc<super::KeySet> {
-        ensure_crypto_provider().unwrap();
-        let signing = EncodingKey::from_rsa_der(JWT_SIGNING_DER);
-        let mut jwk = Jwk::from_encoding_key(&signing, Algorithm::RS256).unwrap();
-        jwk.common.key_id = Some(kid.to_owned());
-        Arc::new(
-            parse_key_set(
-                serde_json::to_vec(&serde_json::json!({"keys": [jwk]}))
-                    .unwrap()
-                    .as_slice(),
-                &[JwtAlgorithm::Rs256],
-            )
-            .unwrap(),
-        )
+    fn rsa_signing() -> EncodingKey {
+        EncodingKey::from_rsa_der(JWT_SIGNING_DER)
     }
 
-    fn signed_token(kid: &str, extra: &serde_json::Value) -> String {
+    fn ec_signing() -> EncodingKey {
+        EncodingKey::from_ec_der(&rcgen::KeyPair::generate().unwrap().serialize_der())
+    }
+
+    /// The public JWK of `signing`, with `kid` and `alg` set as given.
+    fn jwk(
+        signing: &EncodingKey,
+        algorithm: Algorithm,
+        kid: Option<&str>,
+        alg: bool,
+    ) -> serde_json::Value {
+        let mut jwk =
+            serde_json::to_value(Jwk::from_encoding_key(signing, algorithm).unwrap()).unwrap();
+        let object = jwk.as_object_mut().unwrap();
+        object.remove("kid");
+        if !alg {
+            object.remove("alg");
+        }
+        if let Some(kid) = kid {
+            object.insert("kid".to_owned(), kid.into());
+        }
+        jwk
+    }
+
+    fn key_set(keys: &[serde_json::Value], configured: &[JwtAlgorithm]) -> Arc<super::KeySet> {
+        ensure_crypto_provider().unwrap();
+        let bytes = serde_json::to_vec(&serde_json::json!({ "keys": keys })).unwrap();
+        Arc::new(parse_key_set(&bytes, configured).unwrap())
+    }
+
+    fn rsa_key_set(kid: &str, algorithm: Option<Algorithm>) -> Arc<super::KeySet> {
+        let key = jwk(
+            &rsa_signing(),
+            algorithm.unwrap_or(Algorithm::RS256),
+            Some(kid),
+            algorithm.is_some(),
+        );
+        key_set(&[key], &[JwtAlgorithm::Rs256])
+    }
+
+    fn verifier(keys: Arc<super::KeySet>, algorithms: &[JwtAlgorithm]) -> JwtVerifier {
+        JwtVerifier {
+            claim_policy: ClaimPolicy::new(
+                "https://issuer.example".to_owned(),
+                vec!["api".to_owned()],
+            ),
+            token_profile: TokenProfile::ResourceServer,
+            algorithms: algorithms.to_vec(),
+            keys: KeyStore::new(keys),
+        }
+    }
+
+    fn signed(
+        signing: &EncodingKey,
+        algorithm: Algorithm,
+        kid: Option<&str>,
+        extra: &serde_json::Value,
+    ) -> String {
         let mut claims = serde_json::json!({
             "iss": "https://issuer.example", "aud": "api",
             "exp": jsonwebtoken::get_current_timestamp() + 60, "sub": "subject",
@@ -704,58 +674,159 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
-        let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some(kid.to_owned());
-        encode(
-            &header,
-            &claims,
-            &EncodingKey::from_rsa_der(JWT_SIGNING_DER),
-        )
-        .unwrap()
+        let mut header = Header::new(algorithm);
+        header.kid = kid.map(ToOwned::to_owned);
+        encode(&header, &claims, signing).unwrap()
     }
 
-    #[test]
-    fn omitted_jwk_algorithm_requires_one_configured_family_match() {
-        assert_eq!(
-            bind_algorithm(None, KeyFamily::Rsa, &[JwtAlgorithm::Rs256]),
-            Some(JwtAlgorithm::Rs256)
+    async fn check(
+        verifier: &JwtVerifier,
+        token: &str,
+    ) -> Result<crate::Principal, VerificationReason> {
+        let header = format!("Bearer {token}");
+        let token = parse_bearer([header.as_bytes()]).unwrap();
+        verifier.verify(&token).await.map_err(|error| error.reason)
+    }
+
+    #[tokio::test]
+    async fn a_jwk_without_alg_serves_every_configured_algorithm_of_its_family() {
+        let both = [JwtAlgorithm::Rs256, JwtAlgorithm::Ps256];
+        let keys = key_set(
+            &[jwk(&rsa_signing(), Algorithm::RS256, Some("entra"), false)],
+            &both,
         );
+        let verifier = verifier(keys, &both);
+        for algorithm in [Algorithm::RS256, Algorithm::PS256] {
+            let token = signed(
+                &rsa_signing(),
+                algorithm,
+                Some("entra"),
+                &serde_json::json!({}),
+            );
+            check(&verifier, &token).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn an_explicit_jwk_alg_binds_the_key() {
+        let both = [JwtAlgorithm::Rs256, JwtAlgorithm::Ps256];
+        let keys = key_set(
+            &[jwk(&rsa_signing(), Algorithm::RS256, Some("bound"), true)],
+            &both,
+        );
+        let verifier = verifier(keys, &both);
+        let token = signed(
+            &rsa_signing(),
+            Algorithm::PS256,
+            Some("bound"),
+            &serde_json::json!({}),
+        );
+        // The only key refuses PS256; the refresh answer is "still unknown".
         assert_eq!(
-            bind_algorithm(
-                None,
-                KeyFamily::Rsa,
-                &[JwtAlgorithm::Rs256, JwtAlgorithm::Ps256]
-            ),
-            None
+            check(&verifier, &token).await.unwrap_err(),
+            VerificationReason::UnknownKey
         );
     }
 
     #[tokio::test]
-    async fn library_decode_rejects_bad_signatures_and_typed_null_nbf() {
-        let verifier = JwtVerifier {
-            claim_policy: ClaimPolicy::new(
-                "https://issuer.example".to_owned(),
-                vec!["api".to_owned()],
-            ),
-            token_profile: TokenProfile::ResourceServer,
-            algorithms: vec![JwtAlgorithm::Rs256],
-            refresh: SharedRefresh::new(key_set("fixture")),
-        };
-        let token = signed_token("fixture", &serde_json::json!({"nbf": null}));
-        let header = format!("Bearer {token}");
-        let token = parse_bearer([header.as_bytes()]).unwrap();
-        assert_eq!(verifier.verify(&token).await, Err(Failure::Invalid));
+    async fn kid_less_keys_are_tried_in_turn() {
+        let (old, new) = (ec_signing(), ec_signing());
+        let keys = key_set(
+            &[
+                jwk(&old, Algorithm::ES256, None, true),
+                jwk(&new, Algorithm::ES256, None, true),
+            ],
+            &[JwtAlgorithm::Es256],
+        );
+        let verifier = verifier(keys, &[JwtAlgorithm::Es256]);
+        for signing in [&old, &new] {
+            let token = signed(signing, Algorithm::ES256, None, &serde_json::json!({}));
+            check(&verifier, &token).await.unwrap();
+        }
+    }
 
-        let token = signed_token("fixture", &serde_json::json!({}));
-        let mut bytes = token.into_bytes();
-        *bytes.last_mut().unwrap() = if *bytes.last().unwrap() == b'A' {
-            b'B'
-        } else {
-            b'A'
-        };
-        let header = format!("Bearer {}", String::from_utf8(bytes).unwrap());
-        let token = parse_bearer([header.as_bytes()]).unwrap();
-        assert_eq!(verifier.verify(&token).await, Err(Failure::Invalid));
+    #[tokio::test(start_paused = true)]
+    async fn a_kid_less_signature_miss_waits_for_one_refresh() {
+        let (installed, rotated) = (ec_signing(), ec_signing());
+        let verifier = Arc::new(verifier(
+            key_set(
+                &[jwk(&installed, Algorithm::ES256, None, true)],
+                &[JwtAlgorithm::Es256],
+            ),
+            &[JwtAlgorithm::Es256],
+        ));
+        verifier.keys.permit_unknown_refresh_for_test();
+        let token = signed(&rotated, Algorithm::ES256, None, &serde_json::json!({}));
+        let call = tokio::spawn({
+            let verifier = Arc::clone(&verifier);
+            async move { check(&verifier, &token).await.map(|_| ()) }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(verifier.keys.pending(), Some(1));
+        let rotated_set = key_set(
+            &[jwk(&rotated, Algorithm::ES256, None, true)],
+            &[JwtAlgorithm::Es256],
+        );
+        verifier.keys.finish(1, Ok(rotated_set));
+        assert_eq!(call.await.unwrap(), Ok(()));
+        // Within the cooldown a second miss keeps the precise reason.
+        let stale = signed(&installed, Algorithm::ES256, None, &serde_json::json!({}));
+        assert_eq!(
+            check(&verifier, &stale).await.unwrap_err(),
+            VerificationReason::Signature
+        );
+        assert!(matches!(
+            verifier.keys.refresh_for_unknown_key().await,
+            UnknownKeyRefresh::StillUnknown
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_known_kid_with_a_bad_signature_does_not_refresh() {
+        let verifier = verifier(
+            rsa_key_set("fixture", Some(Algorithm::RS256)),
+            &[JwtAlgorithm::Rs256],
+        );
+        verifier.keys.permit_unknown_refresh_for_test();
+        let mut token = signed(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("fixture"),
+            &serde_json::json!({}),
+        )
+        .into_bytes();
+        let last = token.last_mut().unwrap();
+        *last = if *last == b'A' { b'B' } else { b'A' };
+        let token = String::from_utf8(token).unwrap();
+        assert_eq!(
+            check(&verifier, &token).await.unwrap_err(),
+            VerificationReason::Signature
+        );
+        assert_eq!(verifier.keys.pending(), None);
+    }
+
+    #[tokio::test]
+    async fn jsonwebtoken_owns_registered_claims_and_null_identity_is_absent() {
+        let verifier = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
+        for (extra, expected) in [
+            (
+                serde_json::json!({"nbf": null}),
+                Err(VerificationReason::MalformedClaims),
+            ),
+            (
+                serde_json::json!({"exp": null}),
+                Err(VerificationReason::MissingClaim),
+            ),
+            (
+                serde_json::json!({"sub": null, "azp": "client"}),
+                Ok(Some("client")),
+            ),
+        ] {
+            let token = signed(&rsa_signing(), Algorithm::RS256, Some("fixture"), &extra);
+            let result = check(&verifier, &token).await;
+            let client_id = result.as_ref().map(crate::Principal::client_id);
+            assert_eq!(client_id.map_err(|error| *error), expected, "{extra}");
+        }
     }
 
     #[tokio::test]
@@ -765,24 +836,14 @@ mod tests {
             tenant: String,
             permissions: Vec<String>,
         }
-        let verifier = JwtVerifier {
-            claim_policy: ClaimPolicy::new(
-                "https://issuer.example".to_owned(),
-                vec!["api".to_owned()],
-            ),
-            token_profile: TokenProfile::ResourceServer,
-            algorithms: vec![JwtAlgorithm::Rs256],
-            refresh: SharedRefresh::new(key_set("fixture")),
-        };
-        let token = signed_token(
-            "fixture",
-            &serde_json::json!({
-                "tenant": "verified-tenant", "permissions": ["read", "write"],
-            }),
+        let verifier = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
+        let token = signed(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("fixture"),
+            &serde_json::json!({"tenant": "verified-tenant", "permissions": ["read", "write"]}),
         );
-        let header = format!("Bearer {token}");
-        let token = parse_bearer([header.as_bytes()]).unwrap();
-        let principal = verifier.verify(&token).await.unwrap();
+        let principal = check(&verifier, &token).await.unwrap();
         let claims = principal.claims::<ApplicationClaims>().unwrap();
         assert_eq!(claims.tenant, "verified-tenant");
         assert_eq!(claims.permissions, ["read", "write"]);
@@ -799,79 +860,75 @@ mod tests {
     }
 
     #[test]
-    fn mixed_jwks_skips_a_backend_rejected_ec_point_without_losing_usable_material() {
-        ensure_crypto_provider().unwrap();
-        let signing = EncodingKey::from_rsa_der(JWT_SIGNING_DER);
-        let mut valid = Jwk::from_encoding_key(&signing, Algorithm::RS256).unwrap();
-        valid.common.key_id = Some("usable".to_owned());
+    fn mixed_jwks_skips_unusable_entries_without_losing_usable_material() {
         let invalid_point = URL_SAFE_NO_PAD.encode([0_u8; 32]);
-        let jwks = serde_json::json!({"keys": [
-            valid,
-            {"kty": "EC", "crv": "P-256", "kid": "bad-point", "alg": "ES256", "x": invalid_point, "y": invalid_point}
-        ]});
-        let keys = parse_key_set(
-            &serde_json::to_vec(&jwks).unwrap(),
-            &[JwtAlgorithm::Rs256, JwtAlgorithm::Es256],
-        )
-        .unwrap();
-        assert!(keys.has_kid("usable"));
-        assert!(!keys.has_kid("bad-point"));
-    }
-    #[tokio::test]
-    async fn alias_only_client_identity_is_verified() {
-        let verifier = JwtVerifier {
-            claim_policy: ClaimPolicy::new(
-                "https://issuer.example".to_owned(),
-                vec!["api".to_owned()],
-            ),
-            token_profile: TokenProfile::ResourceServer,
-            algorithms: vec![JwtAlgorithm::Rs256],
-            refresh: SharedRefresh::new(key_set("fixture")),
-        };
-        for alias in ["azp", "appid", "cid"] {
-            let token = signed_token("fixture", &serde_json::json!({"sub":null, alias:"client"}));
-            let header = format!("Bearer {token}");
-            let token = parse_bearer([header.as_bytes()]).unwrap();
-            let principal = verifier.verify(&token).await.unwrap();
-            assert_eq!(principal.subject(), None);
-            assert_eq!(principal.client_id(), Some("client"));
-        }
-        let token = signed_token(
-            "fixture",
-            &serde_json::json!({"sub":null,"azp":"client","cid":"other"}),
+        let mut padded = jwk(&rsa_signing(), Algorithm::RS256, Some("padded"), true);
+        let modulus = URL_SAFE_NO_PAD
+            .decode(padded["n"].as_str().unwrap())
+            .unwrap();
+        padded["n"] = URL_SAFE_NO_PAD
+            .encode([[0].as_slice(), &modulus].concat())
+            .into();
+        let keys = key_set(
+            &[
+                padded,
+                serde_json::json!({"kty": "EC", "crv": "P-256", "kid": "bad-point", "alg": "ES256", "x": invalid_point, "y": invalid_point}),
+                jwk(&ec_signing(), Algorithm::ES256, Some("unconfigured"), true),
+            ],
+            &[JwtAlgorithm::Rs256],
         );
-        let header = format!("Bearer {token}");
-        let token = parse_bearer([header.as_bytes()]).unwrap();
-        assert_eq!(verifier.verify(&token).await, Err(Failure::Invalid));
+        assert!(keys.has_kid("padded"));
+        assert!(!keys.has_kid("bad-point"));
+        assert!(!keys.has_kid("unconfigured"));
+    }
+
+    #[tokio::test]
+    async fn a_leading_zero_modulus_still_verifies() {
+        let mut padded = jwk(&rsa_signing(), Algorithm::RS256, Some("padded"), true);
+        let modulus = URL_SAFE_NO_PAD
+            .decode(padded["n"].as_str().unwrap())
+            .unwrap();
+        padded["n"] = URL_SAFE_NO_PAD
+            .encode([[0].as_slice(), &modulus].concat())
+            .into();
+        let verifier = verifier(
+            key_set(&[padded], &[JwtAlgorithm::Rs256]),
+            &[JwtAlgorithm::Rs256],
+        );
+        let token = signed(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("padded"),
+            &serde_json::json!({}),
+        );
+        check(&verifier, &token).await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
     async fn unconfigured_algorithm_does_not_wait_for_refresh() {
-        let refresh = SharedRefresh::new(key_set("fixture"));
-        refresh.permit_unknown_refresh_for_test().await;
-        let verifier = JwtVerifier {
-            claim_policy: ClaimPolicy::new(
-                "https://issuer.example".to_owned(),
-                vec!["api".to_owned()],
-            ),
-            token_profile: TokenProfile::ResourceServer,
-            algorithms: vec![JwtAlgorithm::Rs256],
-            refresh,
-        };
-        let token = encode(&Header::new(Algorithm::PS256), &serde_json::json!({"iss":"https://issuer.example","aud":"api","exp":jsonwebtoken::get_current_timestamp()+60,"sub":"subject"}), &EncodingKey::from_rsa_der(JWT_SIGNING_DER)).unwrap();
-        let header = format!("Bearer {token}");
-        let token = parse_bearer([header.as_bytes()]).unwrap();
-        assert_eq!(verifier.verify(&token).await, Err(Failure::Invalid));
+        let verifier = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
+        verifier.keys.permit_unknown_refresh_for_test();
+        let token = signed(
+            &rsa_signing(),
+            Algorithm::PS256,
+            Some("fixture"),
+            &serde_json::json!({}),
+        );
+        assert_eq!(
+            check(&verifier, &token).await.unwrap_err(),
+            VerificationReason::Algorithm
+        );
+        assert_eq!(verifier.keys.pending(), None);
     }
 
     #[test]
     fn preparation_errors_are_closed_and_an_issuer_mismatch_names_both_issuers() {
-        use crate::{PreparationError, PreparationPhase, PreparationReason, ProviderUrl};
+        use crate::{IssuerUrl, PreparationError, PreparationPhase, PreparationReason};
         assert_eq!(
             PreparationError::new(PreparationPhase::Jwks, PreparationReason::Fetch).to_string(),
             "authentication preparation failed during Jwks: Fetch"
         );
-        let configured = ProviderUrl::parse("https://issuer.example").unwrap();
+        let configured = IssuerUrl::parse("https://issuer.example").unwrap();
         let error = PreparationError::issuer_mismatch(&configured, "https://issuer.example/");
         assert_eq!(error.phase(), PreparationPhase::Discovery);
         assert_eq!(error.reason(), PreparationReason::IssuerMismatch);
@@ -1001,17 +1058,14 @@ mod tests {
         let _registration_anchor =
             tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let dispatch = tracing::Dispatch::new(diagnostics.clone());
-        let verifier = JwtVerifier {
-            claim_policy: ClaimPolicy::new(
-                "https://issuer.example".to_owned(),
-                vec!["api".to_owned()],
-            ),
-            token_profile: TokenProfile::ResourceServer,
-            algorithms: vec![JwtAlgorithm::Rs256],
-            refresh: SharedRefresh::new(key_set("fixture")),
-        };
-        let token = signed_token(
-            "fixture",
+        let verifier = crate::Verifier::jwt(verifier(
+            rsa_key_set("fixture", None),
+            &[JwtAlgorithm::Rs256],
+        ));
+        let token = signed(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("fixture"),
             &serde_json::json!({"sub":null,"jti":"private-claim-value"}),
         );
         let header = format!("Bearer {token}");

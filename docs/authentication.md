@@ -10,8 +10,8 @@ Authentication verifies caller identity and exposes the sealed principal's
 issuer, subject, client ID, `scopes()` and `expires_at()`. Its immutable
 `claims<T>()` accessor deserializes the same verified JSON payload into an
 application type, with a sanitized `ClaimAccessError` on incompatible shape.
-Custom duplicate members use last-member semantics; consumed standard duplicates
-still reject verification. Access never changes normalized identity or scopes,
+Custom duplicate members use last-member semantics; duplicates of a claim the
+verifier reads reject verification. Access never changes normalized identity or scopes,
 and Debug never exposes claims. Authentication does not create role or tenant policy. A handler may use `infra_http::authn::require_scope` for
 one explicit scope decision; a missing scope is `403 forbidden` with the
 standard insufficient-scope bearer challenge.
@@ -62,11 +62,15 @@ only mode, never issuer, audience, endpoint or credentials.
 
 For JWT and active introspection evidence, `scope` and `scp` each accept a
 space-delimited string or string array. Non-null `scope` wins, including an empty
-string or array; otherwise non-null `scp` wins. The unselected value shape is
-ignored, but duplicate consumed members still reject. Scopes retain exact case
-and become sorted and unique; string separators are ASCII spaces without empty
-internal elements. Malformed selected scope is invalid JWT evidence or
-unavailable introspection evidence.
+string or array; otherwise non-null `scp` wins. Scopes retain exact case and
+become sorted and unique; string separators are ASCII spaces without empty
+internal elements. A wrongly typed `scope` or `scp`, or a malformed selected
+scope, is invalid JWT evidence or unavailable introspection evidence.
+
+JSON `null` means absent for every claim the verifier reads. The client identity
+is the first non-empty `client_id`, `azp`, `appid` or `cid`; the subject is a
+non-empty `sub`. JWT registered claims (`iss`, `aud`, `exp`, `nbf`) follow
+`jsonwebtoken`: a null `exp` is missing and a null `nbf` is malformed.
 
 The repository [engineering policy](../AGENTS.md#engineering) governs normative
 protocol requirements and any stricter application rule.
@@ -93,17 +97,23 @@ its additional access-token claims are required.
 
 The verifier discovers only metadata whose issuer exactly equals configuration
 and installs usable JWKS before serving. Discovery and JWKS admit bounded
-HTTP 200 responses with valid expected JSON regardless of Content-Type. Each usable key has a configured,
-compatible algorithm binding; a token header never chooses one. Mixed key sets
-may retain usable entries while malformed or incompatible entries are skipped.
-Ambiguous eligible keys, an invalid signature, or invalid typed issuer,
-audience, expiry, not-before, or identity evidence are invalid tokens. The
-resource-server profile requires a subject or coherent client identity; RFC 9068
-also requires access-token `typ`, subject, `client_id`, `jti`, and `iat`.
+HTTP 200 responses with valid expected JSON regardless of Content-Type. A key
+with its own `alg` serves only that configured algorithm; a key without `alg`
+serves every configured algorithm of its type (RSA: `RS256` and `PS256`), as
+Nimbus and go-oidc do. The token header `alg` must be configured and fit the
+key. Mixed key sets retain usable entries while malformed or incompatible
+entries are skipped. Every installed key that matches the token's `kid` (or
+every key, when the token has none) and algorithm is tried in turn; the first
+valid signature wins. An invalid signature or invalid issuer, audience, expiry,
+not-before or identity evidence is an invalid token. The resource-server
+profile requires a subject or client identity; RFC 9068 also requires
+access-token `typ`, subject, `client_id`, `jti`, and `iat`.
 
 Discovery and initial keys share the six-second startup budget. Refresh runs
-every 15 minutes and may coalesce an unknown-key refresh with a 30-second
-cooldown. One process-owned fetch has its own three-second cap; each waiting
+every 15 minutes. A token whose `kid` names no installed key, or a kid-less
+token no installed key verifies, requests a refresh with a 30-second cooldown;
+during the cooldown the token is invalid after a successful fetch and
+unavailable after a failed one. One process-owned fetch has its own three-second cap; each waiting
 request may be cancelled by the outer HTTP timer without cancelling that work. A
 successful refresh atomically replaces keys, while a failed refresh preserves
 the last usable snapshot. Refresh is not immediate revocation and does not add
@@ -114,6 +124,12 @@ existing background tracker.
 with the selected aws-lc backend. Typed claims retain duplicate and malformed
 evidence rejection; no second signature verifier or generic claims visitor is
 used. Revisit this choice only for a new trust profile or token dialect.
+
+Discovery and JWKS refresh stay in this crate: `jwt-authorizer` 0.15 (last
+release 2024-08) targets `jsonwebtoken` 9, `reqwest` 0.12 and `axum` 0.7, and
+`tower-oauth2-resource-server` lacks unknown-key refresh and per-key skipping.
+Revisit when a maintained crate covers discovery, unknown-key refresh with a
+cooldown, and `jsonwebtoken` 11.
 <!-- template:end oidc-jwt:authentication-jwt -->
 
 <!-- template:begin oidc-introspection:authentication-introspection -->
@@ -149,9 +165,11 @@ The environment equivalents are `APP__AUTHN__CACHE_ENABLED`,
 `APP__AUTHN__CACHE_CAPACITY`, and `APP__AUTHN__CACHE_TTL`.
 
 A hit requires the exact token and the same prepared verifier's immutable trust
-context. Its lifetime is fixed at verification completion and ends at the
+context. Its lifetime is fixed when the result is stored and ends at the
 earlier of the configured TTL and token `exp`, without expiry leeway; hits
-never extend it. Current token temporal validity is rechecked on each hit. A valid hit avoids the provider exchange and its capacity permit.
+never extend it. Moka enforces that lifetime on its own monotonic clock, so a
+wall-clock step after storage does not shorten or extend it. A valid hit avoids
+the provider exchange and its capacity permit.
 Enabled caching deliberately delays detection of revocation and provider
 outages until the cached result expires. Disable it when every request must
 observe the provider, and recreate the verifier to discard retained state.
@@ -163,9 +181,10 @@ token within one verifier; live hits and coalesced waiters use no extra provider
 permit. Keys are SHA-256 digests rather than raw tokens and are never logged.
 Admission may evict entries, and best-effort capacity can temporarily exceed the
 configured count; there is no strict aggregate memory bound. Each entry's
-retained variable data, including custom claims, is at most 64 KiB. Larger valid
-results and successes with no remaining retention lifetime are returned without
-caching. Cancelling a waiter does not remove a live entry or strand other
+verified provider payload, including custom claims, is at most 64 KiB; the other
+retained fields are configuration or copies from it. Larger valid results and
+successes with no remaining retention lifetime are returned to every waiter
+without being stored. Cancelling a waiter does not remove a live entry or strand other
 waiters; a surviving caller may retry a cancelled population under the same
 provider limit. No cache-fill task is spawned; dropping the last verifier
 releases its store.
@@ -174,16 +193,15 @@ releases its store.
 excess work immediately rather than queueing it. An inactive token or active
 evidence with wrong issuer, audience, expiry, or not-before is an invalid-token
 response. Missing required issuer, audience, expiry, or subject/client identity
-also produces an invalid-token response. Wrongly typed supplied claims and
-malformed provider evidence are unavailable trust. Omitted `nbf` is allowed,
-while present `nbf: null` is
-unusable provider evidence.
+also produces an invalid-token response; a null claim counts as missing.
+Wrongly typed supplied claims, duplicate read claims and malformed provider
+evidence are unavailable trust.
 
-Credential components use standard form encoding before Basic authentication;
-the Authorization header is marked sensitive. The request
-body contains only `token` and `token_type_hint=access_token`; a response must
-be a bounded HTTP 200 JSON object with the existing JSON media-type policy. `active=false` ignores remaining claim
-meaning. The existing `url` and Base64 libraries supply the required encoding;
+Credential components use standard form encoding (RFC 6749 section 2.3.1)
+before `reqwest`'s Basic authentication, which marks the header sensitive. The
+request body contains only `token` and `token_type_hint=access_token`; a
+response must be a bounded HTTP 200 JSON object with the existing JSON
+media-type policy. `active=false` ignores the rest of the body. The existing `url` crate and `reqwest` Basic authentication supply the required encoding;
 an OAuth client library would not own these response and identity rules.
 <!-- template:end oidc-introspection:authentication-introspection -->
 
@@ -203,8 +221,9 @@ bodies and unfiltered provider errors are never diagnostic fields.
 Provider calls use only operator-configured or issuer-validated discovery HTTPS
 destinations. Normal certificate and hostname verification stay enabled; private
 HTTPS IdPs are supported. Caller input never selects a destination. Redirects,
-ambient proxies, and retries are disabled. Responses have a 1 MiB ceiling, each
-provider attempt has an independent three-second cap through body completion.
+ambient proxies, and retries are disabled. Responses have a 1 MiB ceiling, and
+each provider attempt has `reqwest`'s three-second total timeout, which covers
+body completion.
 Authentication accepts no request deadline and has no response reserve. Dropping
 a request cancels its introspection exchange; process-owned JWKS refresh remains
 independent and is cancelled and joined at shutdown.

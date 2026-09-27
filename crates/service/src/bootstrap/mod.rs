@@ -483,7 +483,7 @@ async fn prepare_auth(
             token_profile,
             algorithms,
         } => {
-            let issuer = provider_url("oidc-jwt", "authn.issuer", issuer)?;
+            let issuer = issuer_url("oidc-jwt", "authn.issuer", issuer)?;
             let (verifier, refresh) = infra_bearerauthn::prepare_jwt(
                 infra_bearerauthn::JwtOptions {
                     issuer,
@@ -520,8 +520,8 @@ async fn prepare_auth(
             cache_capacity,
             cache_ttl,
         } => {
-            let issuer = provider_url("oidc-introspection", "authn.issuer", issuer)?;
-            let endpoint = infra_bearerauthn::ProviderUrl::parse_endpoint(introspection_endpoint)
+            let issuer = issuer_url("oidc-introspection", "authn.issuer", issuer)?;
+            let endpoint = infra_bearerauthn::EndpointUrl::parse(introspection_endpoint)
                 .map_err(|source| BootstrapError::AuthenticationPreparation {
                 mode: "oidc-introspection",
                 key: "authn.introspection_endpoint",
@@ -572,12 +572,12 @@ async fn prepare_auth(
 // template:end authn:bootstrap-prepare-auth-suffix
 
 // template:begin authn:bootstrap-auth-provider-url
-fn provider_url(
+fn issuer_url(
     mode: &'static str,
     key: &'static str,
     value: &str,
-) -> Result<infra_bearerauthn::ProviderUrl, BootstrapError> {
-    infra_bearerauthn::ProviderUrl::parse(value)
+) -> Result<infra_bearerauthn::IssuerUrl, BootstrapError> {
+    infra_bearerauthn::IssuerUrl::parse(value)
         .map_err(|source| BootstrapError::AuthenticationPreparation { mode, key, source })
 }
 // template:end authn:bootstrap-auth-provider-url

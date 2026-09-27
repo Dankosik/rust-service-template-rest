@@ -3,7 +3,6 @@
 use std::{fmt, sync::Arc, time::Duration};
 
 use reqwest::{header, redirect::Policy};
-use tokio::time::Instant;
 #[cfg(any(test, feature = "test-support"))]
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -11,72 +10,61 @@ use url::Url;
 use crate::{Failure, PreparationError, PreparationPhase, PreparationReason};
 
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
+/// Total budget of one provider exchange; reqwest applies it until the body ends.
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// One adapter-owned admitted provider destination.
+/// An exact issuer identity: an HTTPS URL without a query or fragment.
 #[derive(Clone, Eq, PartialEq)]
-pub struct ProviderUrl {
-    exact: String,
-    url: Url,
-}
+pub struct IssuerUrl(EndpointUrl);
 
-impl ProviderUrl {
+impl IssuerUrl {
     /// Parses a strict issuer URL without a query or fragment.
     ///
     /// # Errors
     ///
     /// Returns [`PreparationError`] when the URL violates the provider grammar.
     pub fn parse(raw: &str) -> Result<Self, PreparationError> {
-        Self::parse_url(raw, false)
+        admit(raw, false).map(Self)
     }
 
+    /// The unmodified accepted spelling, used for exact issuer identity.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    // template:begin oidc-jwt:authn-provider-issuer-url
+    pub(crate) fn url(&self) -> &Url {
+        self.0.url()
+    }
+    // template:end oidc-jwt:authn-provider-issuer-url
+}
+
+impl fmt::Debug for IssuerUrl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("IssuerUrl([REDACTED])")
+    }
+}
+
+/// One admitted provider endpoint whose query ordering and escaping are preserved.
+#[derive(Clone, Eq, PartialEq)]
+pub struct EndpointUrl {
+    exact: String,
+    url: Url,
+}
+
+impl EndpointUrl {
     /// Parses a provider endpoint, preserving its query ordering and escaping.
     ///
     /// # Errors
     ///
     /// Returns [`PreparationError`] for a non-HTTPS URL, missing host, userinfo,
     /// fragment, whitespace or control characters.
-    pub fn parse_endpoint(raw: &str) -> Result<Self, PreparationError> {
-        Self::parse_url(raw, true)
+    pub fn parse(raw: &str) -> Result<Self, PreparationError> {
+        admit(raw, true)
     }
 
-    fn parse_url(raw: &str, allow_query: bool) -> Result<Self, PreparationError> {
-        if raw
-            .bytes()
-            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
-        {
-            return Err(PreparationError::new(
-                PreparationPhase::Options,
-                PreparationReason::InvalidUrl,
-            ));
-        }
-        let url = Url::parse(raw).map_err(|_| {
-            PreparationError::new(PreparationPhase::Options, PreparationReason::InvalidUrl)
-        })?;
-        let authority = raw
-            .split_once("://")
-            .map(|(_, value)| value.split(['/', '?', '#']).next().unwrap_or_default())
-            .unwrap_or_default();
-        if url.scheme() != "https"
-            || url.host().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.fragment().is_some()
-            || (!allow_query && url.query().is_some())
-            || authority.contains('@')
-        {
-            return Err(PreparationError::new(
-                PreparationPhase::Options,
-                PreparationReason::InvalidUrl,
-            ));
-        }
-        Ok(Self {
-            exact: raw.to_owned(),
-            url,
-        })
-    }
-
-    /// The unmodified accepted spelling, used for exact issuer identity.
+    /// The unmodified accepted spelling.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.exact
@@ -87,31 +75,42 @@ impl ProviderUrl {
     }
 }
 
-impl fmt::Debug for ProviderUrl {
+impl fmt::Debug for EndpointUrl {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ProviderUrl([REDACTED])")
+        formatter.write_str("EndpointUrl([REDACTED])")
     }
 }
 
-/// An absolute bound covering one provider exchange, including its body.
-#[derive(Clone, Copy)]
-pub(crate) struct ProviderDeadline {
-    deadline: Instant,
-}
-
-impl ProviderDeadline {
-    pub(crate) fn independent(now: Instant) -> Self {
-        Self {
-            deadline: now + PROVIDER_TIMEOUT,
-        }
+/// `Url::parse` silently drops whitespace and an empty userinfo, so the raw
+/// spelling is checked too.
+fn admit(raw: &str, allow_query: bool) -> Result<EndpointUrl, PreparationError> {
+    let invalid =
+        || PreparationError::new(PreparationPhase::Options, PreparationReason::InvalidUrl);
+    if raw
+        .bytes()
+        .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return Err(invalid());
     }
-
-    // template:begin oidc-jwt:authn-provider-jwt-deadlines
-    pub(crate) fn startup(now: Instant, overall_deadline: Instant) -> Option<Self> {
-        let deadline = (now + PROVIDER_TIMEOUT).min(overall_deadline);
-        (deadline > now).then_some(Self { deadline })
+    let url = Url::parse(raw).map_err(|_| invalid())?;
+    let authority = raw
+        .split_once("://")
+        .map(|(_, value)| value.split(['/', '?', '#']).next().unwrap_or_default())
+        .unwrap_or_default();
+    if url.scheme() != "https"
+        || url.host().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || (!allow_query && url.query().is_some())
+        || authority.contains('@')
+    {
+        return Err(invalid());
     }
-    // template:end oidc-jwt:authn-provider-jwt-deadlines
+    Ok(EndpointUrl {
+        exact: raw.to_owned(),
+        url,
+    })
 }
 
 /// The only outbound client authentication engines may use.
@@ -130,81 +129,56 @@ impl ProviderClient {
     }
 
     // template:begin oidc-jwt:authn-provider-get-json
-    pub(crate) async fn get_json(
-        &self,
-        url: &Url,
-        deadline: ProviderDeadline,
-    ) -> Result<Vec<u8>, Failure> {
-        self.exchange(self.client.get(url.clone()), deadline, false)
-            .await
+    pub(crate) async fn get_json(&self, url: &Url) -> Result<Vec<u8>, Failure> {
+        self.exchange(self.client.get(url.clone()), false).await
     }
     // template:end oidc-jwt:authn-provider-get-json
 
     // template:begin oidc-introspection:authn-provider-post-form-json
+    /// Posts a form with client-secret Basic authentication. The caller supplies
+    /// credential components already form-encoded as RFC 6749 section 2.3.1 requires.
     pub(crate) async fn post_form_json(
         &self,
         url: &Url,
-        basic_authorization: &[u8],
-        form_body: &[u8],
-        deadline: ProviderDeadline,
+        client_id: &str,
+        client_secret: &str,
+        form_body: String,
     ) -> Result<Vec<u8>, Failure> {
-        let mut authorization = header::HeaderValue::from_bytes(basic_authorization)
-            .map_err(|_| Failure::Unavailable)?;
-        authorization.set_sensitive(true);
-        self.exchange(
-            self.client
-                .post(url.clone())
-                .header(header::AUTHORIZATION, authorization)
-                .header(
-                    header::CONTENT_TYPE,
-                    header::HeaderValue::from_static("application/x-www-form-urlencoded"),
-                )
-                .body(form_body.to_vec()),
-            deadline,
-            true,
-        )
-        .await
+        let request = self
+            .client
+            .post(url.clone())
+            .basic_auth(client_id, Some(client_secret))
+            .header(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("application/x-www-form-urlencoded"),
+            )
+            .body(form_body);
+        self.exchange(request, true).await
     }
     // template:end oidc-introspection:authn-provider-post-form-json
 
     async fn exchange(
         &self,
         request: reqwest::RequestBuilder,
-        deadline: ProviderDeadline,
         require_json_media_type: bool,
     ) -> Result<Vec<u8>, Failure> {
-        if Instant::now() >= deadline.deadline {
-            return Err(Failure::Unavailable);
-        }
-        let response = tokio::time::timeout_at(deadline.deadline, request.send())
-            .await
-            .map_err(|_| Failure::Unavailable)?
-            .map_err(|_| Failure::Unavailable)?;
+        let mut response = request.send().await.map_err(|_| Failure::Unavailable)?;
         if response.status() != reqwest::StatusCode::OK
             || (require_json_media_type && !is_json_response(&response))
+            || response
+                .content_length()
+                .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
         {
             return Err(Failure::Unavailable);
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-        {
-            return Err(Failure::Unavailable);
-        }
-        let read = async move {
-            let mut response = response;
-            let mut body = Vec::new();
-            while let Some(chunk) = response.chunk().await.map_err(|_| Failure::Unavailable)? {
-                if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(body.len()) {
-                    return Err(Failure::Unavailable);
-                }
-                body.extend_from_slice(&chunk);
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| Failure::Unavailable)? {
+            if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(body.len()) {
+                return Err(Failure::Unavailable);
             }
-            Ok(body)
-        };
-        tokio::time::timeout_at(deadline.deadline, read)
-            .await
-            .map_err(|_| Failure::Unavailable)?
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
 }
 
@@ -219,10 +193,6 @@ fn build_client(
         .retry(reqwest::retry::never())
         .no_proxy()
         .referer(false)
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .no_zstd()
         .timeout(PROVIDER_TIMEOUT);
     let builder = if let Some(resolver) = resolver {
         builder.dns_resolver(resolver)
@@ -303,7 +273,6 @@ mod tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
         task::JoinHandle,
-        time::Instant,
     };
     use tokio_rustls::{
         TlsAcceptor,
@@ -315,14 +284,14 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use url::Url;
 
-    use super::{Failure, ProviderClient, ProviderDeadline, ProviderUrl, new_fixture_client};
+    use super::{EndpointUrl, Failure, IssuerUrl, ProviderClient, new_fixture_client};
     use crate::tls::TlsMaterial;
 
     const FIXTURE_HOST: &str = "authn.fixture.test";
 
     #[test]
     fn provider_url_retains_exact_spelling_and_rejects_unsafe_destinations() {
-        let url = ProviderUrl::parse("https://provider.example/path").unwrap();
+        let url = IssuerUrl::parse("https://provider.example/path").unwrap();
         assert_eq!(url.as_str(), "https://provider.example/path");
         for invalid in [
             "http://provider.example",
@@ -332,17 +301,17 @@ mod tests {
             " https://provider.example",
             "https://provider.example\n",
         ] {
-            assert!(ProviderUrl::parse(invalid).is_err(), "{invalid}");
+            assert!(IssuerUrl::parse(invalid).is_err(), "{invalid}");
         }
     }
 
     #[test]
     fn endpoint_queries_are_preserved_and_provider_debug_is_redacted() {
         let raw = "https://provider.example/keys?token=private%2Fvalue&x=1&x=2";
-        let endpoint = ProviderUrl::parse_endpoint(raw).unwrap();
+        let endpoint = EndpointUrl::parse(raw).unwrap();
         assert_eq!(endpoint.as_str(), raw);
         assert_eq!(endpoint.url().as_str(), raw);
-        assert!(ProviderUrl::parse(raw).is_err());
+        assert!(IssuerUrl::parse(raw).is_err());
         assert!(!format!("{endpoint:?}").contains("private"));
         for invalid in [
             "http://provider.example?token=private",
@@ -350,7 +319,7 @@ mod tests {
             "https://provider.example?token=private#fragment",
             "https://provider.example?token=private\n",
         ] {
-            let error = ProviderUrl::parse_endpoint(invalid).unwrap_err();
+            let error = EndpointUrl::parse(invalid).unwrap_err();
             assert!(!format!("{error:?}").contains("private"));
             assert!(!error.to_string().contains("private"));
         }
@@ -431,16 +400,13 @@ mod tests {
             )
             .into_bytes();
             let (address, root, server) = tls_server(response, false).await;
-            let endpoint = ProviderUrl::parse_endpoint(&format!(
+            let endpoint = EndpointUrl::parse(&format!(
                 "https://{FIXTURE_HOST}:{}/keys?token=private%2Fvalue&x=1&x=2",
                 address.port(),
             ))
             .unwrap();
             let body = fixture_client(address, &root)
-                .get_json(
-                    endpoint.url(),
-                    ProviderDeadline::independent(Instant::now()),
-                )
+                .get_json(endpoint.url())
                 .await
                 .unwrap();
             assert_eq!(
@@ -460,10 +426,7 @@ mod tests {
         let (address, root, server) = tls_server(oversized, false).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_json(
-                    &fixture_url(address),
-                    ProviderDeadline::independent(Instant::now())
-                )
+                .get_json(&fixture_url(address))
                 .await,
             Err(Failure::Unavailable)
         );
@@ -473,10 +436,7 @@ mod tests {
         let (address, root, server) = tls_server(response, true).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_json(
-                    &fixture_url(address),
-                    ProviderDeadline::independent(Instant::now()),
-                )
+                .get_json(&fixture_url(address))
                 .await,
             Err(Failure::Unavailable),
         );
@@ -492,18 +452,17 @@ mod tests {
         let body = fixture_client(address, &root)
             .post_form_json(
                 &fixture_url(address),
-                b"Basic Zml4dHVyZQ==",
-                b"token=opaque",
-                ProviderDeadline::independent(Instant::now()),
+                "a%3Ab",
+                "c+d",
+                "token=opaque".to_owned(),
             )
             .await
             .unwrap();
         assert_eq!(body, br#"{"active":false}"#);
-        assert!(
-            String::from_utf8(server.await.unwrap())
-                .unwrap()
-                .starts_with("POST /introspect HTTP/1.1\r\n")
-        );
+        let request = String::from_utf8(server.await.unwrap()).unwrap();
+        assert!(request.starts_with("POST /introspect HTTP/1.1\r\n"));
+        // reqwest's Basic scheme carries the pre-encoded components verbatim.
+        assert!(request.contains("authorization: Basic YSUzQWI6Yytk\r\n"));
 
         for content_type in ["", "content-type: text/plain\r\n"] {
             let response = format!(
@@ -515,9 +474,9 @@ mod tests {
                 fixture_client(address, &root)
                     .post_form_json(
                         &fixture_url(address),
-                        b"Basic Zml4dHVyZQ==",
-                        b"token=opaque",
-                        ProviderDeadline::independent(Instant::now()),
+                        "fixture",
+                        "secret",
+                        "token=opaque".to_owned(),
                     )
                     .await,
                 Err(Failure::Unavailable),

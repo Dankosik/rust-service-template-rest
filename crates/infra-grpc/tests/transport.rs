@@ -30,7 +30,7 @@ use grpc_contracts::generated::{
 use health::{Readiness, RefreshPolicy};
 // template:begin authn:grpc-transport-test-auth-imports
 use infra_bearerauthn::{
-    IntrospectionCacheOptions, IntrospectionOptions, ProviderUrl, Verifier,
+    EndpointUrl, IntrospectionCacheOptions, IntrospectionOptions, IssuerUrl, Verifier,
     test_support::{FixtureTransport, prepare_introspection_with_fixture},
 };
 // template:end authn:grpc-transport-test-auth-imports
@@ -995,9 +995,9 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
         FixtureTransport::new("provider.test", address, &pki.ca_der, cancel.child_token()).unwrap();
     let verifier = prepare_introspection_with_fixture(
         IntrospectionOptions {
-            issuer: ProviderUrl::parse("https://issuer.example").unwrap(),
+            issuer: IssuerUrl::parse("https://issuer.example").unwrap(),
             audiences: vec!["api".to_owned()],
-            endpoint: ProviderUrl::parse_endpoint(&format!(
+            endpoint: EndpointUrl::parse(&format!(
                 "https://provider.test:{}/introspect",
                 address.port()
             ))
