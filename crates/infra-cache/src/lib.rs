@@ -46,8 +46,6 @@ const KEEPALIVE_RETRIES: u32 = 3;
 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
 const USER_TIMEOUT: Duration = Duration::from_secs(10);
 
-const PEM_CERTIFICATE_MARKER: &str = "-----BEGIN CERTIFICATE-----";
-
 /// Admission input. The DSN is secret; [`Debug`] redacts it.
 #[derive(Debug)]
 pub struct CacheOptions {
@@ -127,13 +125,15 @@ pub struct Cache {
 
 /// The replaceable connection manager.
 ///
-/// redis 1.7.1 reconnects a `ConnectionManager` only after an I/O error. When
-/// connection setup fails otherwise (AUTH refused while a failover is
-/// saturating the server, a parse error), the manager keeps returning that
-/// failure without dialing again. Replacing it from the retained client is
-/// the reconnect the manager does not perform. Replacement happens at most
-/// once per [`MAX_DELAY`], so a wrong password costs one reconnect chain per
-/// interval rather than one per call.
+/// redis 1.7.1 reconnects a `ConnectionManager` only after an I/O error. Two
+/// failures leave it failing without dialing again: setup that
+/// fails without an I/O error (AUTH refused while a failover is saturating
+/// the server, a parse error), and `READONLY` from a primary demoted by
+/// failover. Replacing it from the retained client is the reconnect the
+/// manager does not perform. go-redis closes such connections for the same
+/// reason (go-redis issue #790). Replacement happens at most once per
+/// [`MAX_DELAY`], so a wrong password costs one reconnect chain per interval
+/// rather than one per call.
 struct Link {
     client: redis::Client,
     config: redis::aio::ConnectionManagerConfig,
@@ -150,8 +150,11 @@ impl Link {
     }
 
     fn replace_after(&self, error: &redis::RedisError) {
-        // I/O failures are the manager's own reconnect path.
-        if error.is_io_error() || !error.is_unrecoverable_error() {
+        // I/O failures are the manager's own reconnect path. READONLY is not
+        // one, and redis does not treat it as unrecoverable, so standalone
+        // mode would keep writing to the demoted primary.
+        let readonly = error.kind() == redis::ErrorKind::Server(redis::ServerErrorKind::ReadOnly);
+        if !readonly && (error.is_io_error() || !error.is_unrecoverable_error()) {
             return;
         }
         let mut replaced_at = self
@@ -360,16 +363,22 @@ impl CacheNamespace {
 
     /// `SET key value PX milliseconds`.
     ///
+    /// # Panics
+    ///
+    /// Panics if `ttl` is below 1 ms. A TTL is chosen by the feature author,
+    /// not by a caller.
+    ///
     /// # Errors
     ///
-    /// Returns [`Unavailable`] when `ttl` is below 1 ms, without sending a command,
-    /// and when the command times out or the server cannot be used. A timed-out
-    /// `SET` is not retried: the write may have landed, and the TTL bounds staleness.
+    /// Returns [`Unavailable`] when the command times out or the server cannot be
+    /// used. A timed-out `SET` is not retried: the write may have landed, and the
+    /// TTL bounds staleness.
     pub async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), Unavailable> {
+        assert!(
+            ttl >= Duration::from_millis(1),
+            "cache ttl must be at least 1 ms"
+        );
         let mut guard = self.guard("set", "SET");
-        if ttl < Duration::from_millis(1) {
-            return Err(guard.fail("error", "invalid_ttl"));
-        }
         let milliseconds = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
         let mut command = redis::cmd("SET");
         command
@@ -503,6 +512,8 @@ fn admit_address(
 }
 
 fn read_root_ca(path: Option<&Path>, tls: bool) -> Result<Option<Vec<u8>>, CacheError> {
+    use rustls::pki_types::pem::PemObject;
+
     let Some(path) = path else {
         return Ok(None);
     };
@@ -510,8 +521,12 @@ fn read_root_ca(path: Option<&Path>, tls: bool) -> Result<Option<Vec<u8>>, Cache
         return Err(CacheError::CaRequiresTls);
     }
     let bytes = std::fs::read(path).map_err(|error| CacheError::CaFile { kind: error.kind() })?;
-    let pem = String::from_utf8_lossy(&bytes);
-    if !pem.contains(PEM_CERTIFICATE_MARKER) {
+    let mut found = false;
+    for certificate in rustls::pki_types::CertificateDer::pem_slice_iter(&bytes) {
+        certificate.map_err(|_| CacheError::InvalidCa)?;
+        found = true;
+    }
+    if !found {
         return Err(CacheError::InvalidCa);
     }
     Ok(Some(bytes))

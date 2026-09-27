@@ -153,6 +153,25 @@ fn a_root_ca_without_a_pem_certificate_is_invalid() {
 }
 
 #[test]
+fn a_root_ca_with_a_certificate_header_and_invalid_base64_is_invalid() {
+    let file = tempfile::NamedTempFile::new().expect("temp ca");
+    std::fs::write(
+        file.path(),
+        b"-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n",
+    )
+    .expect("write ca");
+    let err = Cache::connect(options(
+        "rediss://:hunter2@127.0.0.1:6379",
+        false,
+        false,
+        Some(file.path().to_path_buf()),
+    ))
+    .unwrap_err();
+    assert_eq!(err, CacheError::InvalidCa);
+    assert!(!format!("{err} {err:?}").contains("hunter2"));
+}
+
+#[test]
 fn an_unparseable_dsn_does_not_echo_the_password() {
     let err = Cache::connect(options("not a url hunter2", true, true, None)).unwrap_err();
     assert_eq!(err, CacheError::InvalidDsn);
@@ -205,29 +224,19 @@ fn redis_errors_map_to_bounded_error_types() {
 }
 
 #[test]
-fn a_sub_millisecond_ttl_is_an_error_and_sends_no_command() {
-    let recorder = observation_recorder();
+#[should_panic(expected = "cache ttl must be at least 1 ms")]
+fn a_sub_millisecond_ttl_panics() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("test runtime");
-    metrics::with_local_recorder(&recorder, || {
-        runtime.block_on(async {
-            let cache = admitted("redis://127.0.0.1:1", true, true);
-            let namespace = cache.namespace("ttl");
-            let err = namespace
-                .set("hunter2-key", b"value", Duration::from_micros(500))
-                .await
-                .unwrap_err();
-            assert_eq!(err.to_string(), "cache unavailable");
-        });
+    runtime.block_on(async {
+        let cache = admitted("redis://127.0.0.1:1", true, true);
+        let namespace = cache.namespace("ttl");
+        let _ = namespace
+            .set("key", b"value", Duration::from_micros(500))
+            .await;
     });
-    let scrape = recorder.handle().render();
-    assert!(
-        scrape.contains("outcome=\"error\"") && scrape.contains("operation=\"set\""),
-        "{scrape}"
-    );
-    assert!(!scrape.contains("hunter2"), "{scrape}");
 }
 
 #[test]
@@ -329,37 +338,61 @@ fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
 
 /// A RESP2 server that refuses `AUTH` until told otherwise and answers every
 /// `GET` with a miss. It counts `AUTH` attempts so the test can wait for the
-/// client's own reconnect chain to give up.
-struct AuthGate {
+/// client's own reconnect chain to give up. Each accepted connection records
+/// the primary generation; a `SET` on an older generation is `READONLY`.
+struct FakeServer {
     address: std::net::SocketAddr,
     accept_auth: std::sync::Arc<std::sync::atomic::AtomicBool>,
     auth_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    primary: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-impl AuthGate {
+impl FakeServer {
     async fn start() -> Self {
-        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("auth gate bind");
-        let address = listener.local_addr().expect("auth gate address");
+            .expect("fake server bind");
+        let address = listener.local_addr().expect("fake server address");
         let accept_auth = std::sync::Arc::new(AtomicBool::new(false));
         let auth_attempts = std::sync::Arc::new(AtomicUsize::new(0));
-        let (accept, attempts) = (accept_auth.clone(), auth_attempts.clone());
+        let primary = std::sync::Arc::new(AtomicUsize::new(0));
+        let connections = std::sync::Arc::new(AtomicUsize::new(0));
+        let (accept, attempts, generation, accepted) = (
+            accept_auth.clone(),
+            auth_attempts.clone(),
+            primary.clone(),
+            connections.clone(),
+        );
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                tokio::spawn(serve_resp(stream, accept.clone(), attempts.clone()));
+                accepted.fetch_add(1, Ordering::SeqCst);
+                let recorded = generation.load(Ordering::SeqCst);
+                tokio::spawn(serve_resp(
+                    stream,
+                    accept.clone(),
+                    attempts.clone(),
+                    recorded,
+                    generation.clone(),
+                ));
             }
         });
         Self {
             address,
             accept_auth,
             auth_attempts,
+            primary,
+            connections,
         }
     }
 
     fn attempts(&self) -> usize {
         self.auth_attempts.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn connections(&self) -> usize {
+        self.connections.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -367,6 +400,8 @@ async fn serve_resp(
     stream: tokio::net::TcpStream,
     accept_auth: std::sync::Arc<std::sync::atomic::AtomicBool>,
     auth_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    generation: usize,
+    primary: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) {
     use std::sync::atomic::Ordering;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -417,6 +452,13 @@ async fn serve_resp(
             }
             Some("GET") => b"$-1\r\n",
             Some("PING") => b"+PONG\r\n",
+            Some("SET") => {
+                if generation == primary.load(Ordering::SeqCst) {
+                    b"+OK\r\n"
+                } else {
+                    b"-READONLY You can't write against a read only replica.\r\n"
+                }
+            }
             _ => b"+OK\r\n",
         };
         if write.write_all(reply).await.is_err() {
@@ -427,7 +469,7 @@ async fn serve_resp(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_auth_is_retried_after_the_client_gives_up() {
-    let gate = AuthGate::start().await;
+    let gate = FakeServer::start().await;
     let cache = Cache::connect(CacheOptions {
         dsn: SecretString::from(format!("redis://:secret@{}", gate.address)),
         root_ca_path: None,
@@ -465,4 +507,47 @@ async fn a_refused_auth_is_retried_after_the_client_gives_up() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_readonly_reply_reconnects_to_the_new_primary() {
+    let server = FakeServer::start().await;
+    let cache = Cache::connect(CacheOptions {
+        dsn: SecretString::from(format!("redis://{}", server.address)),
+        root_ca_path: None,
+        allow_plaintext: true,
+        allow_unauthenticated: true,
+        command_timeout: Duration::from_millis(200),
+    })
+    .expect("lazy connect");
+    let namespace = cache.namespace("failover");
+    let ttl = Duration::from_secs(1);
+
+    namespace
+        .set("key", b"value", ttl)
+        .await
+        .expect("set on the current primary");
+    server
+        .primary
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        namespace.set("key", b"value", ttl).await,
+        Err(crate::Unavailable)
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if namespace.set("key", b"value", ttl).await.is_ok() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the cache stayed unavailable after the primary generation advanced"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        server.connections() >= 2,
+        "READONLY must open a connection to the new primary"
+    );
 }

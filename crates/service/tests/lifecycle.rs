@@ -253,7 +253,9 @@ fn a_cache_outage_at_startup_still_becomes_ready() {
         ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
         ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
     ]);
-    service.await_record("cache_unavailable_at_startup");
+    let startup = service.await_record("cache_unavailable_at_startup");
+    let reason = startup["reason"].as_str().expect("reason field");
+    assert!(!reason.is_empty(), "{startup}");
     let api = service.await_record("http listener bound")["addr"]
         .as_str()
         .expect("addr field")

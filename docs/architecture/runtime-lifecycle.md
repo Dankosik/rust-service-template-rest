@@ -284,9 +284,10 @@ pushes `cache.probe()` into the probe list. It is never a liveness check. A
 gate would turn an outage into total unavailability.
 
 Shutdown drops `Option<Cache>` inside `close_dependencies`, in the dependency
-stage after HTTP drain. The drop closes the socket and does not add to
-`DEPENDENCY_CLOSE`. The same drop runs on the startup-failure and
-stopped-startup paths. The [guide](../cache.md) shows the readiness opt-in.
+stage after HTTP drain. The connection closes when its last clone drops, and
+the drop does not add to `DEPENDENCY_CLOSE`. The same drop runs on the
+startup-failure and stopped-startup paths. The [guide](../cache.md) shows the
+readiness opt-in.
 <!-- template:end cache:docs-lifecycle-cache -->
 <!-- template:begin outbox:docs-lifecycle-outbox -->
 With the outbox profile retained, worker startup admits the mode-aware pool

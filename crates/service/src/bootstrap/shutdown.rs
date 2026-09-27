@@ -107,10 +107,8 @@ pub(crate) async fn close_dependencies(
     deadline: Instant,
 ) -> bool {
     // template:begin cache:service-shutdown-dependency-cache-close
-    if let Some(cache) = cache {
-        drop(cache);
-        tracing::info!("cache_closed");
-    }
+    // The connection closes when its last clone drops.
+    drop(cache);
     // template:end cache:service-shutdown-dependency-cache-close
     let postgres_close = async {
         // template:begin postgres:shutdown-dependency-pool-close

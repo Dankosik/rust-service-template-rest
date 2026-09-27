@@ -15,7 +15,7 @@ or locks on the same connection. This profile does not build them.
 It does not add a generic `Cache<K, V>`, get-or-load, a serializer, a global
 TTL, or a lock API. The feature owns keys, serialization, TTL policy, and
 invalidation. `set` stores the given bytes with `SET` and `PX`. A TTL below
-1 ms returns `Unavailable` and sends no command.
+1 ms panics. That is a programmer error.
 
 ## When process-local moka is enough
 
@@ -74,10 +74,10 @@ let bytes = match profiles.get(&key).await {
 let _ = profiles.set(&key, &bytes, ttl).await;
 ```
 
-`Ok(None)` is a miss. `Err(Unavailable)` is an outage, a timeout, or a refused
-TTL. Both take the source of truth. A best-effort `set` may ignore
-`Unavailable`. An operation that cannot run without the cache maps
-`Unavailable` to HTTP 503 in that handler. The adapter does not choose the
+`Ok(None)` is a miss. `Err(Unavailable)` is an outage or a timeout. Both take
+the source of truth. A best-effort `set` may ignore `Unavailable`. An
+operation that cannot run without the cache maps `Unavailable` to HTTP 503 in
+that handler. The adapter does not choose the
 status.
 
 ## Failure and budgets
@@ -108,10 +108,12 @@ redis 1.7.1 reconnects only after an I/O error. A connection whose setup
 fails otherwise, for example `AUTH` refused while a failover saturates the
 server, would stay failed until the process restarts. The cache replaces that
 connection from the retained client, at most once per 2 s, so it recovers
-when the server accepts it again. The first connection, and each reconnect
-chain, advances only while a call is waiting on it; with sparse traffic
-recovery can take a few calls. A command timeout does not by itself
-reconnect.
+when the server accepts it again. A `READONLY` reply (a demoted primary after
+a failover) replaces the connection the same way, at most once per 2 s. The
+first lazy connection, and a manager the cache replaced, advance only while a
+call is waiting on it; the manager's own reconnect after an I/O error runs in
+the background. With sparse traffic, recovery can take a few calls. A command
+timeout does not by itself reconnect.
 
 ## Readiness and shutdown
 
@@ -159,9 +161,8 @@ The client span is `cache`, with `otel.kind` `client`, `db.system.name`
 `cache_operation_failed` carries `cache.name`, `cache.operation`, and
 `error.type`; it is not a warning because an outage would log it at the
 request rate. Alert on the `error` and `timeout` outcomes of the histogram
-instead. `error.type` is `timeout`, `io`, `auth`, `response`, `parse`,
-`invalid_ttl`, or `other`; a TLS handshake failure surfaces as `io`. Metrics,
-spans, and logs never carry keys, values, the DSN, or raw server text. `CacheError` Display follows the same
+instead. `error.type` is `timeout`, `io`, `auth`, `response`, `parse`, or
+`other`; a TLS handshake failure surfaces as `io`. Metrics, spans, and logs never carry keys, values, the DSN, or raw server text. `CacheError` Display follows the same
 rule.
 
 ## Operate the server

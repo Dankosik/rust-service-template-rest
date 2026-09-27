@@ -735,11 +735,21 @@ async fn prepare_cache(config: &Config) -> Result<Option<Cache>, BootstrapError>
                 "cache_connected"
             );
         }
-        Ok(Err(_)) | Err(_) => {
+        Ok(Err(error)) => {
             tracing::warn!(
                 server.address = %server.host,
                 server.port = server.port,
                 cache.tls = server.tls,
+                reason = %error.0,
+                "cache_unavailable_at_startup"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                server.address = %server.host,
+                server.port = server.port,
+                cache.tls = server.tls,
+                reason = "startup check timed out",
                 "cache_unavailable_at_startup"
             );
         }
