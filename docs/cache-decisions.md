@@ -37,9 +37,10 @@ edges.
 
 ## Supported extension points
 
-`Cache::connection` returns `redis::aio::ConnectionManager` so a later feature
-can build rate limits or locks without a second client. Those capabilities are
-not in this profile. Readiness is an opt-in: composition pushes `cache.probe()`
+A later rate-limit or lock feature adds its operation to `infra-cache` beside
+`get`, `set`, and `delete`, so it shares the connection, `command_timeout`,
+observation, and manager replacement instead of holding a raw
+`ConnectionManager`. Those capabilities are not in this profile. Readiness is an opt-in: composition pushes `cache.probe()`
 into the probes in `crates/service/src/bootstrap/mod.rs`. Sentinel, Cluster,
 and a connection pool stay closed. Reopen a pool with `deadpool-redis` when a
 feature needs `WATCH`, `MULTI`, or a blocking command. Reopen Sentinel or
