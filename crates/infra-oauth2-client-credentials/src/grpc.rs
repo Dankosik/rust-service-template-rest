@@ -4,9 +4,10 @@ use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
-use http::{Request, Response, StatusCode, header::AUTHORIZATION};
+use http::{HeaderValue, Request, Response, StatusCode, header::AUTHORIZATION};
 use infra_grpc::Client;
 use tokio::time::Instant;
 use tonic::{Code, Status, body::Body};
@@ -56,25 +57,20 @@ impl Service<Request<Body>> for AuthenticatedClient {
                     "authorization conflicts with client credentials",
                 ));
             }
-            let deadline = Instant::now()
-                + infra_grpc::grpc_timeout(request.headers()).unwrap_or(FETCH_TIMEOUT);
-            let value = credentials
-                .acquire(deadline)
+            let budget = infra_grpc::grpc_timeout(request.headers());
+            let deadline = Instant::now() + budget.unwrap_or(FETCH_TIMEOUT);
+            let token = credentials
+                .authorize(request.headers_mut(), deadline)
                 .await
                 .map_err(acquisition_status)?;
-            if Instant::now() >= deadline {
-                return Err(Status::deadline_exceeded("request deadline exceeded"));
+            if budget.is_some() {
+                // Propagate what the token wait left of the caller's budget,
+                // as gRPC clients do for a context deadline.
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                request
+                    .headers_mut()
+                    .insert("grpc-timeout", grpc_timeout_value(remaining)?);
             }
-            if value
-                .hard_expiry
-                .is_some_and(|expiry| Instant::now() >= expiry)
-            {
-                return Err(acquisition_status(AcquisitionError::Timeout));
-            }
-            // The cache owner validates the bearer grammar and marks this value sensitive.
-            request
-                .headers_mut()
-                .insert(AUTHORIZATION, value.header.clone());
             let response = resource.call(request).await?;
             let unauthenticated =
                 response.headers().get("grpc-status").is_some_and(|status| {
@@ -82,7 +78,7 @@ impl Service<Request<Body>> for AuthenticatedClient {
                 }) || (response.status() == StatusCode::UNAUTHORIZED
                     && !response.headers().contains_key("grpc-status"));
             if unauthenticated {
-                let _ = tokio::time::timeout_at(deadline, credentials.invalidate(&value)).await;
+                credentials.reject(&token);
             }
             Ok(response)
         })
@@ -92,11 +88,20 @@ impl Service<Request<Body>> for AuthenticatedClient {
 fn acquisition_status(error: AcquisitionError) -> Status {
     match error {
         AcquisitionError::Timeout => Status::deadline_exceeded("request deadline exceeded"),
-        AcquisitionError::Transport
-        | AcquisitionError::ResponseLimit
-        | AcquisitionError::Rejected
-        | AcquisitionError::InvalidResponse => {
-            Status::unavailable("client credentials unavailable")
-        }
+        _ => Status::unavailable("client credentials unavailable"),
     }
+}
+
+/// Encodes whole milliseconds, or whole seconds beyond eight millisecond digits.
+fn grpc_timeout_value(remaining: Duration) -> Result<HeaderValue, Status> {
+    let millis = remaining.as_millis();
+    if millis == 0 {
+        return Err(Status::deadline_exceeded("request deadline exceeded"));
+    }
+    let value = if millis < 100_000_000 {
+        format!("{millis}m")
+    } else {
+        format!("{}S", remaining.as_secs().min(99_999_999))
+    };
+    HeaderValue::try_from(value).map_err(|_| Status::internal("invalid grpc-timeout"))
 }

@@ -115,7 +115,7 @@ impl Fixture {
         };
         Credentials::prepare(
             options,
-            self.endpoint.clone(),
+            &self.endpoint,
             Client::new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
         )
         .unwrap()
@@ -438,9 +438,9 @@ async fn optional_scope_and_audience_are_omitted_from_the_form() {
 }
 
 #[tokio::test]
-async fn bearer_grammar_refuses_unsafe_tokens_before_resource_dispatch() {
+async fn tokens_that_cannot_form_a_header_are_refused_before_resource_dispatch() {
     let fixture = Fixture::new().await;
-    for token in ["", "contains space", "token=middle=padding"] {
+    for token in ["", "control\u{7f}character"] {
         fixture.token_json(
             "200 OK",
             &serde_json::json!({"access_token": token, "token_type": "BEARER", "expires_in": 60}),
@@ -455,34 +455,85 @@ async fn bearer_grammar_refuses_unsafe_tokens_before_resource_dispatch() {
             Err(Error::Acquisition(AcquisitionError::InvalidResponse))
         ));
     }
-    assert_eq!(fixture.token_requests().len(), 3);
+    assert_eq!(fixture.token_requests().len(), 2);
     assert!(fixture.resource_requests().is_empty());
     fixture.finish().await;
 }
 
 #[tokio::test]
-async fn short_lived_and_missing_expiry_tokens_are_not_retained() {
+async fn short_lived_tokens_are_not_reused_but_tokens_without_expiry_are_until_a_401() {
     let fixture = Fixture::new().await;
-    for body in [
-        &serde_json::json!({"access_token": "short", "token_type": "Bearer", "expires_in": 10}),
-        &serde_json::json!({"access_token": "no-expiry", "token_type": "Bearer"}),
-        &serde_json::json!({"access_token": "overflow", "token_type": "Bearer", "expires_in": u64::MAX}),
+    for (body, fetches_for_two_calls) in [
+        (
+            serde_json::json!({"access_token": "short", "token_type": "Bearer", "expires_in": 10}),
+            2,
+        ),
+        (
+            serde_json::json!({"access_token": "no-expiry", "token_type": "Bearer"}),
+            1,
+        ),
+        (
+            serde_json::json!({"access_token": "overflow", "token_type": "Bearer", "expires_in": u64::MAX}),
+            1,
+        ),
     ] {
-        fixture.token_json("200 OK", body);
+        fixture.token_json("200 OK", &body);
         let client = fixture
             .credentials(&[], None)
             .http(fixture.resource_client());
-        client
-            .execute(request(), operation(Duration::from_secs(10)))
-            .await
-            .unwrap();
+        let before = fixture.token_requests().len();
+        for _ in 0..2 {
+            client
+                .execute(request(), operation(Duration::from_secs(10)))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            fixture.token_requests().len(),
+            before + fetches_for_two_calls
+        );
+    }
+
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    fixture.resource_status("401 Unauthorized");
+    client
+        .execute(request(), operation(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    fixture.resource_status("200 OK");
+    let before = fixture.token_requests().len();
+    client
+        .execute(request(), operation(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    assert_eq!(fixture.token_requests().len(), before + 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn a_cached_token_is_refreshed_after_its_reuse_cutoff() {
+    let fixture = Fixture::new().await;
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    for _ in 0..2 {
         client
             .execute(request(), operation(Duration::from_secs(10)))
             .await
             .unwrap();
     }
-    assert_eq!(fixture.token_requests().len(), 6);
-    assert_eq!(fixture.resource_requests().len(), 6);
+    assert_eq!(fixture.token_requests().len(), 1);
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(51)).await;
+    tokio::time::resume();
+    client
+        .execute(request(), operation(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.resource_requests().len(), 3);
     fixture.finish().await;
 }
 
@@ -564,23 +615,23 @@ async fn clones_reuse_one_owner_cache_but_independent_owners_do_not_share() {
 }
 
 #[tokio::test]
-async fn concurrent_callers_coalesce_success_failure_and_nonretained_results() {
+async fn a_waiter_shares_a_reusable_token_but_retries_a_failure_after_the_leader() {
     let fixture = Fixture::new().await;
-    for (body, expected_error, retained) in [
+    for (body, expected_error, waiter_fetches) in [
         (
             &serde_json::json!({"access_token": "retained", "token_type": "Bearer", "expires_in": 60}),
             None,
-            true,
+            0,
         ),
         (
             &serde_json::json!({"access_token": "short", "token_type": "Bearer", "expires_in": 10}),
             None,
-            false,
+            1,
         ),
         (
             &serde_json::json!({"error": "provider-secret"}),
             Some(AcquisitionError::InvalidResponse),
-            false,
+            1,
         ),
     ] {
         fixture.token_json("200 OK", body);
@@ -589,12 +640,13 @@ async fn concurrent_callers_coalesce_success_failure_and_nonretained_results() {
             .http(fixture.resource_client());
         let gate = fixture.block_tokens();
         let before_tokens = fixture.token_requests().len();
-        let before_resources = fixture.resource_requests().len();
         let mut leader = Box::pin(client.execute(request(), operation(Duration::from_secs(10))));
         tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
         let mut waiter = Box::pin(client.execute(request(), operation(Duration::from_secs(10))));
         poll_pending(waiter.as_mut()).await;
-        gate.add_permits(1);
+        // The waiter queues behind the leader instead of sending its own request.
+        assert_eq!(fixture.token_requests().len(), before_tokens + 1);
+        gate.add_permits(2);
         let (leader, waiter) = tokio::time::timeout(Duration::from_secs(2), async {
             tokio::join!(leader, waiter)
         })
@@ -608,24 +660,9 @@ async fn concurrent_callers_coalesce_success_failure_and_nonretained_results() {
                 None => assert!(result.is_ok()),
             }
         }
-        assert_eq!(fixture.token_requests().len(), before_tokens + 1);
-        assert_eq!(
-            fixture.resource_requests().len(),
-            before_resources + usize::from(expected_error.is_none()) * 2
-        );
-        *fixture.state.token_gate.lock().unwrap() = None;
-        let follow_up = client
-            .execute(request(), operation(Duration::from_secs(10)))
-            .await;
-        match expected_error {
-            Some(expected) => {
-                assert!(matches!(follow_up, Err(Error::Acquisition(error)) if error == expected));
-            }
-            None => assert!(follow_up.is_ok()),
-        }
         assert_eq!(
             fixture.token_requests().len(),
-            before_tokens + if retained { 1 } else { 2 }
+            before_tokens + 1 + waiter_fetches
         );
         *fixture.state.token_gate.lock().unwrap() = None;
     }
@@ -708,6 +745,10 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
         (
             b"HTTP/1.1 302 Found\r\nlocation: http://redirected.example/token\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec(),
             AcquisitionError::Rejected,
+        ),
+        (
+            response("503 Service Unavailable", b"provider-secret-body"),
+            AcquisitionError::Unavailable,
         ),
         (
             b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1048577\r\nconnection: close\r\n\r\n".to_vec(),
@@ -819,13 +860,13 @@ async fn a_late_401_does_not_evict_a_newer_token() {
     let mut stale = Box::pin(client.execute(request(), operation(Duration::from_secs(10))));
     tokio::select! { () = fixture.resource_received() => {}, result = &mut stale => panic!("response must be gated: {result:?}"), }
 
-    credentials.0.cache.invalidate(&()).await;
+    *credentials.cached() = None;
     fixture.token_json(
         "200 OK",
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
     );
     credentials
-        .acquire(Instant::now() + Duration::from_secs(10))
+        .token(Instant::now() + Duration::from_secs(10))
         .await
         .unwrap();
 

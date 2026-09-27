@@ -27,7 +27,6 @@ bytes = { workspace = true, features = ["std"] }
 http = { workspace = true }
 infra-outbound-http = { workspace = true }
 metrics = { workspace = true }
-moka = { workspace = true, features = ["future"] }
 oauth2 = { workspace = true }
 secrecy = { workspace = true }
 thiserror = { workspace = true }

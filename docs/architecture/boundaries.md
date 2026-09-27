@@ -119,7 +119,7 @@ infra-messaging::outbox -> domain-events, infra-jobs, infra-postgres, base64
 infra-outbound-http -> reqwest, http, bytes, url, tokio, metrics, tracing
 <!-- template:end outbound-http:docs-boundaries-outbound-edges -->
 <!-- template:begin outbound-auth:docs-boundaries-outbound-auth-edges -->
-infra-oauth2-client-credentials -> infra-outbound-http, oauth2, moka, http, bytes, tokio, secrecy
+infra-oauth2-client-credentials -> infra-outbound-http, oauth2, http, bytes, tokio, secrecy
 <!-- template:end outbound-auth:docs-boundaries-outbound-auth-edges -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-edges -->
 main binary -> infra-idempotency-store

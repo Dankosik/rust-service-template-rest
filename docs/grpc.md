@@ -229,17 +229,17 @@ let client = EchoServiceClient::new(authenticated);
 A caller-supplied `Authorization` is `INVALID_ARGUMENT` before any token or
 resource I/O. The acquisition deadline is `grpc-timeout` when that header is
 present and well formed; otherwise it is the owner's five-second fetch
-timeout. Acquisition failure prevents dispatch. One bearer is inserted at
+timeout. Token wait spends that deadline: `grpc-timeout` is rewritten to the
+remaining budget before dispatch. Acquisition failure prevents dispatch. One bearer is inserted at
 opening and is not refreshed mid-stream.
 
 Eviction runs only on the initial response: `grpc-status` `UNAUTHENTICATED`,
 or HTTP 401 with no `grpc-status`. Trailers are not inspected. The response
-is returned unchanged. Conditional invalidation of that exact credential
-spends only the remaining deadline and starts no background work. A newer
-cached replacement survives. `PERMISSION_DENIED` keeps the credential. Hard
-expiry before dispatch is a timeout and sends no resource request. The
+is returned unchanged. Conditional eviction of that exact token is an in-memory
+update and starts no background work. A newer cached replacement survives.
+`PERMISSION_DENIED` keeps the credential. The
 [OAuth owner](outbound-machine-authentication.md) keeps the token, cache and
-coalescing policy.
+reuse policy.
 <!-- template:end outbound-auth-grpc:docs-grpc-oauth -->
 
 ## Health, shutdown and observation
