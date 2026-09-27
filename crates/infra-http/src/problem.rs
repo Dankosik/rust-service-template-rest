@@ -269,9 +269,10 @@ impl Problem {
         self
     }
 
+    /// Filled by problem completion; callers do not thread the id.
     #[must_use]
-    pub fn request_id(mut self, request_id: Option<String>) -> Self {
-        self.request_id = request_id;
+    pub(crate) fn with_request_id(mut self, id: String) -> Self {
+        self.request_id = Some(id);
         self
     }
 
@@ -297,14 +298,15 @@ impl IntoResponse for Problem {
         let code = self.code;
         let retry_after = self.retry_after;
         // Problem contains only infallibly serializable strings and integers.
-        // The extension lets the access log distinguish codes sharing a status.
+        // The extension lets the transport complete the body (request id) and
+        // lets the access log read the code.
         let mut response = (
             http_status(code),
             [(
                 CONTENT_TYPE,
                 HeaderValue::from_static("application/problem+json"),
             )],
-            axum::Extension(code),
+            axum::Extension(self.clone()),
             axum::Json(self),
         )
             .into_response();
@@ -503,7 +505,7 @@ mod tests {
     async fn renders_problem_json_with_optional_members() {
         let problem = Problem::new(Code::ServiceUnavailable)
             .detail(AT_CAPACITY_DETAIL)
-            .request_id(Some("req-1".to_owned()))
+            .with_request_id("req-1".to_owned())
             .retry_after(Duration::from_millis(200));
         let expected = serde_json::to_vec(&problem).unwrap();
         let response = problem.into_response();
@@ -514,8 +516,8 @@ mod tests {
         );
         assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
         assert_eq!(
-            response.extensions().get::<Code>(),
-            Some(&Code::ServiceUnavailable)
+            response.extensions().get::<Problem>().map(Problem::code),
+            Some(Code::ServiceUnavailable)
         );
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body.as_ref(), expected.as_slice());
