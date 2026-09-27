@@ -35,20 +35,32 @@ pub fn commit_definitely_failed(code: &str) -> bool {
     code.starts_with("23") || (code.starts_with("40") && code != "40003")
 }
 
-/// Whether a SQLSTATE reports a transient condition that a later attempt may
-/// not meet: a lost connection (class `08`), exhausted resources (class
-/// `53`), a serialization failure, deadlock, or uncertain statement completion
-/// (`40001`, `40P01`, `40003`), a server shutting down or starting (`57P01`,
-/// `57P02`, `57P03`), a cancelled statement (`57014`), or a read-only session
-/// (`25006`).
+/// Whether `err` reports a transient condition that a later attempt may not
+/// meet. With a valid SQLSTATE: a lost connection (class `08`), exhausted
+/// resources (class `53`), a serialization failure, deadlock, or uncertain
+/// statement completion (`40001`, `40P01`, `40003`), a server shutting down or
+/// starting (`57P01`, `57P02`, `57P03`), a cancelled statement (`57014`), or a
+/// read-only session (`25006`). Without one: a pool that timed out or closed,
+/// or a failed socket or TLS session.
 #[must_use]
-pub fn transient(code: &str) -> bool {
-    code.starts_with("08")
-        || code.starts_with("53")
-        || matches!(
-            code,
-            "40001" | "40003" | "40P01" | "57P01" | "57P02" | "57P03" | "57014" | "25006"
-        )
+pub fn transient(err: &sqlx::Error) -> bool {
+    match sqlstate(err) {
+        Some(code) => {
+            code.starts_with("08")
+                || code.starts_with("53")
+                || matches!(
+                    code.as_ref(),
+                    "40001" | "40003" | "40P01" | "57P01" | "57P02" | "57P03" | "57014" | "25006"
+                )
+        }
+        None => matches!(
+            err,
+            sqlx::Error::PoolTimedOut
+                | sqlx::Error::PoolClosed
+                | sqlx::Error::Io(_)
+                | sqlx::Error::Tls(_)
+        ),
+    }
 }
 
 /// A bounded class for a driver error that has no valid SQLSTATE.
@@ -79,9 +91,11 @@ mod tests {
         assert!(commit_definitely_failed("23505"));
         assert!(commit_definitely_failed("40P01"));
         assert!(!commit_definitely_failed("40003"));
-        assert!(transient("08006"));
-        assert!(transient("57014"));
-        assert!(!transient("25P02"));
+        assert!(transient(&database("08006")));
+        assert!(transient(&database("57014")));
+        assert!(transient(&sqlx::Error::PoolTimedOut));
+        assert!(!transient(&database("25P02")));
+        assert!(!transient(&sqlx::Error::Protocol("driver misuse".into())));
     }
 
     #[test]

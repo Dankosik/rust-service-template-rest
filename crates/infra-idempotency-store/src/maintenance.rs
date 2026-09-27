@@ -2,38 +2,36 @@
 
 use std::time::Duration;
 
-use infra_postgres::{TxError, connection, in_tx, in_tx_with};
-use sqlx::Row;
+use infra_postgres::{TxError, connection, in_tx};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
-use crate::{READ_COMMITTED, Store};
+use crate::Store;
 
-/// Bound on the whole startup check, from the acquire to the transaction's
-/// end.
+/// Bound on the whole startup check, from the acquire to the result.
 const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 
 /// Cleanup cadence; the first run starts at once.
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
-/// The most rows one cleanup batch deletes: the `LIMIT` in [`CLEANUP_BATCH`].
-const CLEANUP_BATCH_ROWS: u64 = 500;
+/// The most rows one cleanup batch deletes.
+const CLEANUP_BATCH_ROWS: u32 = 500;
 
 /// Whether the current session can write. Migration-history admission owns
 /// schema compatibility; this check keeps only the live writer property.
 const STARTUP_CHECK: &str = "SELECT NOT pg_is_in_recovery() \
-    AND current_setting('transaction_read_only') = 'off' AS writable";
+    AND current_setting('transaction_read_only') = 'off'";
 
 /// Bounds a cleanup batch on the server, so a batch whose client has gone
 /// still ends within 1 s.
 const CLEANUP_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '1000ms'";
 
-/// One batch of expired records. It skips rows a running attempt holds, and
-/// re-checks expiry, so it never deletes a live record.
+/// One batch of at most `$1` expired records. It skips rows a running attempt
+/// holds, and re-checks expiry, so it never deletes a live record.
 const CLEANUP_BATCH: &str = "DELETE FROM http_idempotency_records WHERE scope_key IN \
     (SELECT scope_key FROM http_idempotency_records \
     WHERE expires_at <= statement_timestamp() \
-    ORDER BY expires_at LIMIT 500 FOR UPDATE SKIP LOCKED) \
+    ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED) \
     AND expires_at <= statement_timestamp()";
 
 /// Why an active idempotency boundary cannot start.
@@ -60,6 +58,16 @@ pub enum CleanupError {
     Commit,
 }
 
+impl From<TxError> for CleanupError {
+    fn from(err: TxError) -> Self {
+        match err {
+            TxError::Acquire(_) => Self::Acquire,
+            TxError::Begin(_) => Self::Begin,
+            TxError::CommitFailed(_) | TxError::CommitUnknown(_) => Self::Commit,
+        }
+    }
+}
+
 impl Store {
     /// Check that the current session is writable, bounded to 5 s.
     ///
@@ -67,30 +75,13 @@ impl Store {
     ///
     /// [`StartupError::NotWritable`] for a read-only or recovering session,
     /// and [`StartupError::Unavailable`] for anything else, including the
-    /// bound and an inert store.
+    /// bound.
     pub async fn check_startup(&self) -> Result<(), StartupError> {
-        let Some(inner) = &self.inner else {
-            return Err(StartupError::Unavailable);
-        };
-        let check = in_tx_with(
-            &inner.pool,
-            READ_COMMITTED,
-            async |tx| -> Result<(), Refused> {
-                let row = sqlx::query(STARTUP_CHECK)
-                    .fetch_one(connection(tx))
-                    .await
-                    .map_err(|_| Refused(StartupError::Unavailable))?;
-                match row.try_get::<bool, _>("writable") {
-                    Ok(true) => Ok(()),
-                    Ok(false) => Err(Refused(StartupError::NotWritable)),
-                    Err(_) => Err(Refused(StartupError::Unavailable)),
-                }
-            },
-        );
-        match tokio::time::timeout(STARTUP_CHECK_BUDGET, check).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(Refused(refusal))) => Err(refusal),
-            Err(_elapsed) => Err(StartupError::Unavailable),
+        let writable = sqlx::query_scalar::<_, bool>(STARTUP_CHECK).fetch_one(&self.pool);
+        match tokio::time::timeout(STARTUP_CHECK_BUDGET, writable).await {
+            Ok(Ok(true)) => Ok(()),
+            Ok(Ok(false)) => Err(StartupError::NotWritable),
+            Ok(Err(_)) | Err(_) => Err(StartupError::Unavailable),
         }
     }
 
@@ -102,28 +93,25 @@ impl Store {
     /// # Errors
     ///
     /// The failure class of the batch that failed; earlier batches stay
-    /// committed. An inert store fails as [`CleanupError::Acquire`].
+    /// committed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
-        let Some(inner) = &self.inner else {
-            return Err(CleanupError::Acquire);
-        };
         let mut removed = 0;
         loop {
-            let batch = in_tx(&inner.pool, async |tx| -> Result<u64, Failed> {
+            let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupError> {
                 sqlx::query(CLEANUP_STATEMENT_TIMEOUT)
                     .execute(connection(tx))
                     .await
-                    .map_err(|_| Failed(CleanupError::Statement))?;
+                    .map_err(|_| CleanupError::Statement)?;
                 let deleted = sqlx::query(CLEANUP_BATCH)
+                    .bind(i64::from(CLEANUP_BATCH_ROWS))
                     .execute(connection(tx))
                     .await
-                    .map_err(|_| Failed(CleanupError::Statement))?;
+                    .map_err(|_| CleanupError::Statement)?;
                 Ok(deleted.rows_affected())
             })
-            .await
-            .map_err(|Failed(failure)| failure)?;
+            .await?;
             removed += batch;
-            if batch < CLEANUP_BATCH_ROWS {
+            if batch < u64::from(CLEANUP_BATCH_ROWS) {
                 return Ok(removed);
             }
         }
@@ -132,12 +120,8 @@ impl Store {
     /// The periodic cleanup task body: one [`Store::remove_expired`] run
     /// every 60 s, the first at once. A failed run logs its class and waits
     /// for the next tick; it changes neither readiness nor serving. Returns
-    /// when `cancel` fires, dropping a run in flight, and at once for an
-    /// inert store.
+    /// when `cancel` fires, dropping a run in flight.
     pub async fn run_cleanup(self, cancel: CancellationToken) {
-        if self.inner.is_none() {
-            return;
-        }
         // An already cancelled token never polls the loop.
         let _ = cancel
             .run_until_cancelled(async {
@@ -151,29 +135,5 @@ impl Store {
                 }
             })
             .await;
-    }
-}
-
-/// A startup refusal, which leaves the check's transaction as an error. A
-/// transaction error refuses as [`StartupError::Unavailable`].
-struct Refused(StartupError);
-
-impl From<TxError> for Refused {
-    fn from(_: TxError) -> Self {
-        Self(StartupError::Unavailable)
-    }
-}
-
-/// A failed cleanup batch, by class, which leaves the batch's transaction as
-/// an error.
-struct Failed(CleanupError);
-
-impl From<TxError> for Failed {
-    fn from(err: TxError) -> Self {
-        Self(match err {
-            TxError::Acquire(_) => CleanupError::Acquire,
-            TxError::Begin(_) => CleanupError::Begin,
-            TxError::CommitFailed(_) | TxError::CommitUnknown(_) => CleanupError::Commit,
-        })
     }
 }

@@ -2,9 +2,9 @@
 //!
 //! Owns the one profile table, `http_idempotency_records`: arbitration of a
 //! scoped key at the writer, the one execution transaction that commits the
-//! work together with its success record, the startup check, and the bounded cleanup of expired
-//! records. It knows nothing about HTTP: the inbound seam in
-//! `infra_http::idempotency` derives scopes and fingerprints, captures and
+//! work together with its success record, the startup check, and the bounded
+//! cleanup of expired records. It knows nothing about HTTP: the inbound seam
+//! in `infra_http::idempotency` derives scopes and fingerprints, captures and
 //! decodes stored successes, and maps [`Attempted`] to responses.
 //!
 //! No other crate names the table. A feature's persistence adapter reaches
@@ -14,35 +14,18 @@
 mod attempt;
 mod maintenance;
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use infra_postgres::{Isolation, TxOptions};
 use sqlx::postgres::PgPool;
 
 pub use attempt::{
-    Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey, WorkOutput,
+    AttemptError, Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey,
 };
 pub use maintenance::{CleanupError, StartupError};
 
-/// Every transaction that checks the writer: explicit read committed and no
-/// access mode, so `transaction_read_only` reports the session's default
-/// rather than a mode the store chose.
-const READ_COMMITTED: TxOptions = TxOptions {
-    isolation: Isolation::ReadCommitted,
-    read_only: false,
-};
-
 /// Handle on the record store. Cloning shares the pool.
-///
-/// An inert store ([`Store::inert`]) holds no pool and never does I/O.
 #[derive(Clone, Debug)]
 pub struct Store {
-    inner: Option<Arc<Inner>>,
-}
-
-#[derive(Debug)]
-struct Inner {
     pool: PgPool,
     /// Whole microseconds ([`whole_micros`]).
     retention: Duration,
@@ -56,18 +39,9 @@ impl Store {
     #[must_use]
     pub fn new(pool: PgPool, retention: Duration) -> Self {
         Self {
-            inner: Some(Arc::new(Inner {
-                pool,
-                retention: whole_micros(retention),
-            })),
+            pool,
+            retention: whole_micros(retention),
         }
-    }
-
-    /// A store without a pool: every operation reports unavailability and
-    /// performs no I/O.
-    #[must_use]
-    pub fn inert() -> Self {
-        Self { inner: None }
     }
 }
 

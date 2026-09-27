@@ -757,16 +757,14 @@ fn cache_options(config: &Config) -> Result<CacheOptions, BootstrapError> {
 // template:end cache:service-bootstrap-cache-functions
 
 // template:begin http-idempotency:bootstrap-http-idempotency-functions
-/// The composer through which idempotent operations join the contract. Its
-/// store uses the pool only when a retention is set as well; otherwise the
-/// store is inert, and activation refuses the missing value before any
-/// store call if an idempotent operation is served.
+/// The composer through which idempotent operations join the contract. It
+/// has a store only when both the pool and a retention are set; otherwise
+/// activation refuses the missing value if an idempotent operation is served.
 fn prepare_http_idempotency(config: &Config, postgres_pool: Option<&PgPool>) -> Composer {
-    let store = match (postgres_pool, config.http_idempotency.retention) {
-        (Some(pool), Some(retention)) => Store::new(pool.clone(), retention),
-        _ => Store::inert(),
-    };
-    Composer::new(store)
+    match (postgres_pool, config.http_idempotency.retention) {
+        (Some(pool), Some(retention)) => Composer::new(Store::new(pool.clone(), retention)),
+        _ => Composer::inert(),
+    }
 }
 
 /// Start the composed boundary when it serves at least one. An inactive
@@ -789,7 +787,7 @@ async fn activate_http_idempotency(
 /// `postgres.enabled`, a set `http_idempotency.retention`, and the store's
 /// schema on a writable session; the cleanup task then joins the tracker.
 async fn start_http_idempotency(
-    store: Store,
+    store: Option<Store>,
     operations: std::num::NonZeroUsize,
     config: &Config,
     tracker: &TaskTracker,
@@ -798,6 +796,9 @@ async fn start_http_idempotency(
     let retention = config
         .http_idempotency
         .required_retention(&config.postgres)?;
+    let Some(store) = store else {
+        return Err(infra_idempotency_store::StartupError::Unavailable.into());
+    };
     store.check_startup().await?;
     tracker.spawn(store.run_cleanup(cancel.child_token()));
     tracing::info!(
@@ -1167,15 +1168,12 @@ mod tests {
     // template:end oidc-introspection:bootstrap-introspection-cache-tests
 
     // template:begin http-idempotency:bootstrap-http-idempotency-tests
-    /// Start an active boundary of one operation over `store`, on a fresh
+    /// Start an active boundary of one operation without a store, on a fresh
     /// tracker the caller can inspect for a spawned task.
-    async fn start_one_operation(
-        store: Store,
-        config: &Config,
-    ) -> (Result<(), BootstrapError>, TaskTracker) {
+    async fn start_one_operation(config: &Config) -> (Result<(), BootstrapError>, TaskTracker) {
         let tracker = TaskTracker::new();
         let started = start_http_idempotency(
-            store,
+            None,
             std::num::NonZeroUsize::MIN,
             config,
             &tracker,
@@ -1206,7 +1204,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_active_boundary_refuses_disabled_postgres_naming_the_key() {
-        let (started, tracker) = start_one_operation(Store::inert(), &Config::default()).await;
+        let (started, tracker) = start_one_operation(&Config::default()).await;
         assert!(
             matches!(&started, Err(BootstrapError::Config(invalid)) if invalid.key == "postgres.enabled"),
             "{started:?}"
@@ -1218,7 +1216,7 @@ mod tests {
     async fn an_active_boundary_refuses_an_unset_retention_naming_the_key() {
         let mut config = Config::default();
         config.postgres.enabled = true;
-        let (started, tracker) = start_one_operation(Store::inert(), &config).await;
+        let (started, tracker) = start_one_operation(&config).await;
         assert!(
             matches!(&started, Err(BootstrapError::Config(invalid)) if invalid.key == "http_idempotency.retention"),
             "{started:?}"
@@ -1231,7 +1229,7 @@ mod tests {
         let mut config = Config::default();
         config.postgres.enabled = true;
         config.http_idempotency.retention = Some(Duration::from_secs(3600));
-        let (started, tracker) = start_one_operation(Store::inert(), &config).await;
+        let (started, tracker) = start_one_operation(&config).await;
         assert!(
             matches!(
                 &started,

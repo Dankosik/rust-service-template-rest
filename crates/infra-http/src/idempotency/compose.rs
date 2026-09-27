@@ -40,7 +40,8 @@ const BODY_LIMIT_DETAIL: &str = "request body exceeds the configured limit";
 /// carriers.
 #[derive(Debug)]
 pub struct Composer {
-    store: Store,
+    /// `None` for a composer that only renders the contract.
+    store: Option<Store>,
     operations: usize,
 }
 
@@ -50,9 +51,10 @@ pub enum Activation {
     /// No idempotent operation needs a store or maintenance task.
     Inactive,
     /// The store must be checked and maintained before readiness admission.
+    /// `None` when the composer had no store, which startup must refuse.
     #[non_exhaustive]
     Active {
-        store: Store,
+        store: Option<Store>,
         operations: NonZeroUsize,
     },
 }
@@ -62,16 +64,19 @@ impl Composer {
     #[must_use]
     pub fn new(store: Store) -> Self {
         Self {
-            store,
+            store: Some(store),
             operations: 0,
         }
     }
 
-    /// A composer over an inert store for rendering the document and tests.
-    /// It performs no I/O.
+    /// A composer without a store, for rendering the document and tests.
+    /// Its routes answer a sanitized 500 and it performs no I/O.
     #[must_use]
     pub fn inert() -> Self {
-        Self::new(Store::inert())
+        Self {
+            store: None,
+            operations: 0,
+        }
     }
 
     /// Make one annotated route carrier idempotent and generate its served
@@ -134,7 +139,7 @@ impl Composer {
 
 #[derive(Clone)]
 struct KeyLayer {
-    store: Store,
+    store: Option<Store>,
     operation: Arc<str>,
 }
 
@@ -142,6 +147,9 @@ struct KeyLayer {
 /// extraction.
 async fn handle_key(State(keys): State<KeyLayer>, request: Request, next: Next) -> Response {
     let request_id = request_id::request_id(request.extensions());
+    let Some(store) = keys.store else {
+        return wiring_failure(&keys.operation, "store_missing", request_id);
+    };
     let request = request.with_limited_body();
     let (mut parts, body) = request.into_parts();
     let Some(deadline) = parts
@@ -203,7 +211,7 @@ async fn handle_key(State(keys): State<KeyLayer>, request: Request, next: Next) 
     };
     let operation = Arc::clone(&keys.operation);
     parts.extensions.insert(Attempt {
-        store: keys.store,
+        store,
         scope,
         caller,
         fingerprint,
