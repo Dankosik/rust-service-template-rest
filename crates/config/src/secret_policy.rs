@@ -97,8 +97,9 @@ mod tests {
             // template:end oidc-introspection:secret-key-introspection-vector
             "cache.token_profile",
             "observability.otel.exporter.otlp_headers",
-            "webhooks.static_secrets",
-            "webhooks.secrets.partner_v2",
+            "webhooks.endpoints.partner.secret",
+            "webhooks.endpoints.partner.previous_secret",
+            "inbound_webhooks.secrets.partner_v2",
             "outbound.api_key",
             "signing.private-key",
             "auth.token",

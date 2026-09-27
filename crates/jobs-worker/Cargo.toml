@@ -37,6 +37,9 @@ infra-messaging = { workspace = true }
 # template:begin webhooks-common:worker-webhooks-dependency
 infra-webhooks = { workspace = true }
 # template:end webhooks-common:worker-webhooks-dependency
+# template:begin inbound-webhooks:worker-webhook-consumers-dependency
+webhook-consumers = { workspace = true }
+# template:end inbound-webhooks:worker-webhook-consumers-dependency
 infra-telemetry = { workspace = true }
 secrecy = { workspace = true }
 service-config = { workspace = true }

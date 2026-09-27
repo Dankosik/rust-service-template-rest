@@ -2308,6 +2308,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
+ "tower",
  "unicode-normalization",
  "unicode-segmentation",
  "ureq",
@@ -2491,6 +2492,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "webhook-consumers",
 ]
 
 [[package]]
@@ -4207,6 +4209,7 @@ dependencies = [
  "ureq",
  "utoipa",
  "utoipa-axum",
+ "webhook-consumers",
 ]
 
 [[package]]
@@ -5587,6 +5590,13 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webhook-consumers"
+version = "0.1.0"
+dependencies = [
+ "infra-webhooks",
 ]
 
 [[package]]

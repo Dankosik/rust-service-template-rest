@@ -5,7 +5,7 @@ The `INBOUND_WEBHOOKS=standard-webhooks` profile exposes durable receipt and
 processing for authenticated Standard Webhooks v1 notifications. It requires
 `DATABASE=postgres` and `JOBS=postgres`; every profile defaults to `none`. An
 empty endpoint map is inert. An active endpoint needs a pool and an explicit
-consumer binding in the composition root, so partial wiring fails startup rather
+consumer binding in the shared adopter registry, so partial wiring fails startup rather
 than accepting work into a successful no-op.
 
 ## Static receiving bindings
@@ -57,7 +57,9 @@ original message-ID bytes, ASCII dot, parsed timestamp rendered as canonical i64
 decimal, ASCII dot, and original body bytes. The parser accepts optional sign
 and leading zeroes, rejects whitespace/out-of-range values, compares in a wider
 integer domain, and accepts the inclusive 300-second clock window. A message ID
-is nonempty and cannot contain the signing dot. Conflicting identity/timestamp
+is 1–255 bytes for new receiver admission and cannot contain the signing dot.
+The 255-byte bound is an application storage constraint, not a protocol limit.
+Historical jobs with longer IDs remain processable. Conflicting identity/timestamp
 headers reject; identical repeats are allowed. Candidates are space-delimited:
 unknown versions and mismatches do not prevent another valid v1 candidate with a
 current or predecessor key.
@@ -73,14 +75,14 @@ is the fixed 128 KiB boundary. Key material is redacted after construction.
 | Unknown endpoint | `404` problem; no receipt/job |
 | Missing, malformed, stale/future, or invalid evidence | `400 webhook_rejected`; no durable effect |
 | Body above 128 KiB | `413`; no durable effect |
-| First verified endpoint/message ID/body | one receipt and one processing job commit atomically, then `204` |
-| Same endpoint/message ID/exact body | `204`; no extra job, even after processing |
-| Same endpoint/message ID/different body | `409 webhook_conflict`; original receipt/job unchanged |
+| Other body-read failure or message ID over 255 bytes | `400 webhook_rejected`; no durable effect |
+| First verified endpoint/message ID | one receipt and one processing job commit atomically, then `204` |
+| Same endpoint/message ID, including changed body or content type | `204`; no extra job, original payload stays authoritative, even after processing |
 | Database or commit acknowledgement unavailable/unknown | `503`; no false `204`, sender retries same identity/body |
 
 A duplicate still passes current signature/timestamp verification; deduplication
-is not authentication bypass. Identity is raw bytes, so JSON whitespace differs;
-content type alone does not. Existing overload, timeout, header-limit, panic,
+is not authentication bypass. Identity is the exact endpoint and raw message-ID
+bytes; replay never replaces the first accepted body or content type. Existing overload, timeout, header-limit, panic,
 method, and server outcomes remain effective contract behavior.
 
 ## Receipt and consumer processing
@@ -89,41 +91,42 @@ The provider API is `infra_webhooks::inbound::{Receiver, ReceiptOutcome,
 ReceiveError, Incoming, Consumer, Consumers, Processor}`. Construction uses
 `Receiver::new(PgPool, endpoint_key_rings)`; admission is
 `receive(endpoint_id, &HeaderMap, body, SystemTime)` and returns Accepted,
-Duplicate, or Conflict, or closed UnknownEndpoint, Rejected, or Unavailable
+or Duplicate, or closed UnknownEndpoint, Rejected, or Unavailable
 errors. `Incoming` exposes original endpoint, message-ID, body, and optional
 byte-safe content type. A registered `Consumer` receives `(&mut Tx, &Incoming)`
 and returns a boxed Send future of `Result<(), JobError>`; `Processor` owns the
 binding lookup, transaction, and fenced completion.
 
-A derived service builds one explicit registry constructor with its
-`Arc<dyn Consumer>` adapters and uses that constructor in both roots: the service
-checks the configured endpoint binding before listener admission, and the worker
-moves its result into `Processor::new` before registering `webhooks.process`.
+A derived service edits `consumers()` in `crates/webhook-consumers/src/lib.rs`
+to register its `Arc<dyn Consumer>` adapters. Both roots call that one constructor
+and check every configured endpoint before serving or claiming. The worker
+moves that same registry into `Processor::new` when registering
+`webhooks.process`; it does not construct a second registry.
 
 ```rust,ignore
-let mut consumers = Consumers::new();
-consumers.insert(endpoint_id, Arc::clone(&consumer));
-// service: verify consumers.contains(endpoint_id) before admitting ingress
-// worker: Processor::new(consumers) registers the processing kind
+pub fn consumers() -> Consumers {
+    let mut consumers = Consumers::new();
+    consumers.insert(endpoint_id, Arc::clone(&consumer));
+    consumers
+}
 ```
 
 The template deliberately supplies an empty registry because it has no business
 consumer. It is not a successful default: active ingress without the derived
-service's binding fails startup, and a rolling worker configuration gap snoozes
-the durable job without consuming an attempt.
+service's binding fails startup in both processes. A historical queued job whose
+binding is no longer configured retries and spends its normal attempt budget.
 
-PostgreSQL arbitrates concurrent deliveries. In one transaction it inserts a
-receipt and enqueues `webhooks.process`. Receipt identity hashes a domain tag and
-length-prefixed endpoint/message identifiers, while stored full identity remains
-the comparison authority. A conflict compares that identity and body SHA-256:
-equal body is duplicate, different body is conflict, and an identity-hash
-collision with a distinct full identity is a sanitized `503` integrity outcome.
-The receipt keeps only endpoint, message identity, and body fingerprint; the job
-holds raw body.
+PostgreSQL arbitrates concurrent deliveries. In one explicit READ COMMITTED
+transaction it inserts a receipt and enqueues `webhooks.process`. The composite
+primary key uses C-collated endpoint text and binary message IDs. Only the first
+insert enqueues a job; an authenticated duplicate leaves the original job body
+and content type unchanged. A new receipt's database-default `received_at`
+records its first admission and never refreshes on replay. Its time index
+supports future maintenance, without introducing a TTL or cleanup task.
 
 The worker uses existing jobs policy (25 attempts, 60 seconds), resolves a
-consumer before opening a transaction, and snoozes a missing binding for 60
-seconds without spending an attempt. Database effects and
+consumer before opening a transaction, and retries a missing binding until
+the normal attempt budget is exhausted. Database effects and
 `complete_in_tx(&mut Tx)` share a transaction, so a stale claim or consumer
 error rolls back business effects. An unknown commit becomes ordinary retryable
 failure without replaying that transaction closure; a fenced later outcome
@@ -138,14 +141,23 @@ operation. Terminal job retention remains jobs-owned and cannot delete live work
 
 ## Rollout and observation
 
-Apply the additive migration, deploy compatible workers with bindings, then
-enable ingress. Rollback stops ingress/producers and drains affected live work
-before removing capable workers; pending work or unknown commit state means roll
-forward. PostgreSQL stays the readiness/shutdown dependency; no sender network
-probe gates startup.
+This forward migration requires a coordinated cutover: stop inbound admission,
+all producers, and old workers; drain them and disable old restart controllers
+before applying it. Keep the existing migration bytes unchanged. The migration
+locks the receipt table, refuses duplicate exact pairs with a static diagnostic,
+and constructs the actual composite index before dropping hash columns. An
+unindexable historical pair aborts the complete migration without deleting or
+truncating history; stop the rollout and revisit storage design. Historical
+`received_at` values approximate migration time, not original arrival time.
+
+Start only new workers with configured bindings, then new service/producers,
+and reopen ingress. After migration success, old binaries cannot resume: repair
+forward. An uncommitted failed migration leaves the old schema available for
+restoring the previous binaries/configuration. PostgreSQL remains the readiness
+and shutdown dependency; no sender network probe gates startup.
 
 Incoming telemetry has bounded outcomes: accepted, duplicate, rejected,
-conflict, unavailable, and unknown endpoint. Logs have closed missing-binding,
+unavailable, and unknown endpoint. Logs have closed missing-binding,
 missing-secret, and delivery-classification reasons. Never use endpoint IDs,
 webhook IDs, URLs, payloads, signatures, secrets, or arbitrary errors as labels
 or diagnostic values. Jobs owns queue/attempt telemetry; no second webhook

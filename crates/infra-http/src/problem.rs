@@ -87,11 +87,6 @@ const fn http_meta(code: Code) -> HttpCodeMeta {
             title: "webhook rejected",
             type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.1"),
         },
-        Code::WebhookConflict => HttpCodeMeta {
-            status: StatusCode::CONFLICT,
-            title: "webhook conflict",
-            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.10"),
-        },
         // template:end inbound-webhooks:http-webhook-code-meta
         Code::Forbidden => HttpCodeMeta {
             status: StatusCode::FORBIDDEN,
@@ -362,15 +357,10 @@ pub mod responses {
     #[response(content_type = "application/problem+json")]
     pub struct NotFound(pub Problem);
 
-    /// webhook signature evidence is missing, malformed, stale, or invalid
+    /// webhook body, message identity, or signature evidence is unacceptable
     #[derive(Debug, ToResponse)]
     #[response(content_type = "application/problem+json")]
     pub struct WebhookRejected(pub Problem);
-
-    /// a repeated webhook identity supplied different bytes
-    #[derive(Debug, ToResponse)]
-    #[response(content_type = "application/problem+json")]
-    pub struct WebhookConflict(pub Problem);
 
     /// durable webhook receipt storage is unavailable
     #[derive(Debug, ToResponse)]
@@ -386,8 +376,6 @@ pub mod responses {
         Rejected(#[ref_response] WebhookRejected),
         #[response(status = 404)]
         NotFound(#[ref_response] NotFound),
-        #[response(status = 409)]
-        Conflict(#[ref_response] WebhookConflict),
         #[response(status = 413)]
         RequestEntityTooLarge(#[ref_response] RequestEntityTooLarge),
         #[response(status = 500)]
@@ -469,7 +457,7 @@ pub mod responses {
         schemas(Problem, InvalidParam),
         responses(BadRequest, RequestEntityTooLarge, InternalServerError
             // template:begin inbound-webhooks:http-webhook-problem-components
-            , NotFound, WebhookRejected, WebhookConflict, ServiceUnavailable
+            , NotFound, WebhookRejected, ServiceUnavailable
             // template:end inbound-webhooks:http-webhook-problem-components
             // template:begin authn:http-authentication-problem-components
             , AuthenticationMalformed, AuthenticationUnauthorized, AuthenticationForbidden,

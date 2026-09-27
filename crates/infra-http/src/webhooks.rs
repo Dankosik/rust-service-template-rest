@@ -5,6 +5,7 @@
 //! outcomes into the service Problem catalog.  Signature verification and the
 //! receipt transaction remain in `infra-webhooks`.
 
+use std::error::Error as _;
 use std::fmt;
 use std::time::SystemTime;
 
@@ -95,7 +96,7 @@ pub fn with_webhook_state(
     description = "The required Standard Webhooks signature headers authenticate this public endpoint. A successful response acknowledges durable asynchronous ownership only.",
     params(
         ("endpoint_id" = String, Path, description = "operator-configured receiving endpoint ID"),
-        ("webhook-id" = String, Header, description = "required Standard Webhooks message ID"),
+        ("webhook-id" = String, Header, description = "required Standard Webhooks message ID, 1–255 bytes without a dot"),
         ("webhook-timestamp" = String, Header, description = "required Standard Webhooks timestamp"),
         ("webhook-signature" = String, Header, description = "required Standard Webhooks signature candidates")
     ),
@@ -118,8 +119,18 @@ async fn receive(
         return outcome_problem(Code::NotFound, "unknown_endpoint");
     }
     let (parts, body) = request.into_parts();
-    let Ok(body) = to_bytes(body, MAX_BODY_BYTES).await else {
-        return outcome_problem(Code::RequestEntityTooLarge, "rejected");
+    let body = match to_bytes(body, MAX_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(error) => {
+            let mut source = error.source();
+            while let Some(cause) = source {
+                if cause.is::<http_body_util::LengthLimitError>() {
+                    return outcome_problem(Code::RequestEntityTooLarge, "rejected");
+                }
+                source = cause.source();
+            }
+            return outcome_problem(Code::WebhookRejected, "rejected");
+        }
     };
     match receiver
         .receive(&endpoint_id, &parts.headers, &body, SystemTime::now())
@@ -127,7 +138,6 @@ async fn receive(
     {
         Ok(ReceiptOutcome::Accepted) => outcome_no_content("accepted"),
         Ok(ReceiptOutcome::Duplicate) => outcome_no_content("duplicate"),
-        Ok(ReceiptOutcome::Conflict) => outcome_problem(Code::WebhookConflict, "conflict"),
         Err(ReceiveError::UnknownEndpoint) => outcome_problem(Code::NotFound, "unknown_endpoint"),
         Err(ReceiveError::Rejected) => outcome_problem(Code::WebhookRejected, "rejected"),
         Err(ReceiveError::Unavailable) => outcome_problem(Code::ServiceUnavailable, "unavailable"),

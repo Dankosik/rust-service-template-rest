@@ -1,0 +1,15 @@
+[package]
+name = "webhook-consumers"
+description = "Shared adopter-owned inbound webhook consumer registration."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+infra-webhooks = { workspace = true }

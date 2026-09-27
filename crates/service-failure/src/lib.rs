@@ -26,7 +26,6 @@ pub enum Code {
     // template:end http-idempotency:http-idempotency-codes
     // template:begin inbound-webhooks:http-webhook-codes
     WebhookRejected,
-    WebhookConflict,
     // template:end inbound-webhooks:http-webhook-codes
     Forbidden,
     NotFound,
@@ -120,7 +119,6 @@ impl Code {
         // template:end http-idempotency:service-failure-idempotency-code-all
         // template:begin inbound-webhooks:service-failure-webhook-code-all
         Self::WebhookRejected,
-        Self::WebhookConflict,
         // template:end inbound-webhooks:service-failure-webhook-code-all
         Self::Forbidden,
         Self::NotFound,
@@ -154,7 +152,6 @@ impl Code {
             // template:end http-idempotency:service-failure-idempotency-code-wire
             // template:begin inbound-webhooks:service-failure-webhook-code-wire
             Self::WebhookRejected => "webhook_rejected",
-            Self::WebhookConflict => "webhook_conflict",
             // template:end inbound-webhooks:service-failure-webhook-code-wire
             Self::Forbidden => "forbidden",
             Self::NotFound => "not_found",
@@ -199,9 +196,6 @@ impl Code {
             // template:begin http-idempotency:service-failure-idempotency-conflict-meaning
             Self::IdempotencyRequestInProgress => Meaning::Conflict,
             // template:end http-idempotency:service-failure-idempotency-conflict-meaning
-            // template:begin inbound-webhooks:service-failure-webhook-conflict-meaning
-            Self::WebhookConflict => Meaning::Conflict,
-            // template:end inbound-webhooks:service-failure-webhook-conflict-meaning
             Self::MethodNotAllowed => Meaning::Unimplemented,
             Self::RequestEntityTooLarge
             | Self::RequestHeaderFieldsTooLarge

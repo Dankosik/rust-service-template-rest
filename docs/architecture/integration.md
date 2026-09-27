@@ -29,8 +29,10 @@ Cargo graphs show a concrete aws-lc backend drawback.
 
 <!-- template:begin webhooks:docs-integration-webhooks-outbound -->
 Outbound webhook delivery reuses `infra-outbound-http` as one bounded,
-fixed-authority client per cached origin. The provider passes an admitted saved
-origin and original path/query; it does not introduce raw reqwest calls, a
+fixed-authority client per configured endpoint in a fixed startup map. Every
+attempt resolves its endpoint ID to that map's current URL and key ring,
+including historical payloads whose saved routing fields are ignored. The
+provider passes the admitted current origin and path/query; it does not introduce raw reqwest calls, a
 general many-authority transport, proxy handling, redirects, or an inner retry.
 <!-- template:end webhooks:docs-integration-webhooks-outbound -->
 
@@ -38,7 +40,10 @@ general many-authority transport, proxy handling, redirects, or an inner retry.
 Inbound webhook processing crosses to adopter code through a registered consumer
 that receives immutable incoming bytes and `&mut Tx`. Database effects and
 fenced completion share that transaction; external recipients must be
-idempotent. A missing binding snoozes rather than acknowledging work.
+idempotent. Adopters register real adapters once in
+`webhook_consumers::consumers()`, which both roots use for startup admission.
+A historical job with a missing binding retries, consumes attempts, and
+eventually exhausts.
 <!-- template:end inbound-webhooks:docs-integration-webhooks-inbound -->
 
 Provider adapters live in `crates/infra-<provider>` and own admission,

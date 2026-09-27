@@ -10,9 +10,8 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
-use aws_lc_rs::digest;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use http::HeaderMap;
@@ -23,36 +22,28 @@ use infra_jobs::{
 use infra_postgres::{Isolation, Tx, TxError, TxOptions, connection, in_tx, in_tx_with};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use sqlx::Row;
 use sqlx::postgres::PgPool;
 
 use crate::protocol::{KeyRing, MAX_BODY_BYTES, verify};
 
-const RECEIPT_DOMAIN: &[u8] = b"standard-webhooks-receipt-v1";
 const INCOMING_VERSION: u8 = 1;
-const MISSING_CONSUMER_SNOOZE: Duration = Duration::from_secs(60);
 const READ_COMMITTED: TxOptions = TxOptions {
     isolation: Isolation::ReadCommitted,
     read_only: false,
 };
 
-const INSERT_RECEIPT: &str = "INSERT INTO webhook_receipts \
-    (identity_hash, endpoint_id, message_id, body_sha256) \
-    VALUES ($1, $2, $3, $4) \
-    ON CONFLICT (identity_hash) DO NOTHING \
-    RETURNING identity_hash";
-const READ_RECEIPT: &str = "SELECT endpoint_id, message_id, body_sha256 \
-    FROM webhook_receipts WHERE identity_hash = $1";
+const INSERT_RECEIPT: &str = "INSERT INTO webhook_receipts (endpoint_id, message_id) \
+    VALUES ($1, $2) \
+    ON CONFLICT (endpoint_id, message_id) DO NOTHING \
+    RETURNING message_id";
 
 /// The durable admission result for one verified delivery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiptOutcome {
     /// The receipt and processing job committed together.
     Accepted,
-    /// The same endpoint, message identity, and raw body were already retained.
+    /// The endpoint and message identity were already retained; first admission wins.
     Duplicate,
-    /// The endpoint and message identity exist with different body bytes.
-    Conflict,
 }
 
 /// A closed inbound admission failure for the HTTP adapter.
@@ -114,8 +105,9 @@ impl Receiver {
             return Err(ReceiveError::UnknownEndpoint);
         };
         let verified = verify(keys, headers, body, now).map_err(|_| ReceiveError::Rejected)?;
-        let body_sha256 = sha256(body);
-        let identity_hash = receipt_identity_hash(endpoint_id, verified.message_id());
+        if verified.message_id().len() > 255 {
+            return Err(ReceiveError::Rejected);
+        }
         let content_type = headers
             .get(CONTENT_TYPE)
             .map(|value| value.as_bytes().to_vec());
@@ -124,10 +116,8 @@ impl Receiver {
             READ_COMMITTED,
             async |tx| -> Result<ReceiptOutcome, ReceiptFailure> {
                 let inserted = sqlx::query_scalar::<_, Vec<u8>>(INSERT_RECEIPT)
-                    .bind(identity_hash.as_slice())
                     .bind(endpoint_id)
                     .bind(verified.message_id().as_ref())
-                    .bind(body_sha256.as_slice())
                     .fetch_optional(&mut *connection(tx))
                     .await?;
                 if inserted.is_some() {
@@ -146,24 +136,7 @@ impl Receiver {
                     return Ok(ReceiptOutcome::Accepted);
                 }
 
-                let row = sqlx::query(READ_RECEIPT)
-                    .bind(identity_hash.as_slice())
-                    .fetch_optional(&mut *connection(tx))
-                    .await?
-                    .ok_or(ReceiptFailure::Integrity)?;
-                let stored_endpoint: String = row.try_get("endpoint_id")?;
-                let stored_message: Vec<u8> = row.try_get("message_id")?;
-                let stored_body_sha256: Vec<u8> = row.try_get("body_sha256")?;
-                if stored_endpoint != endpoint_id
-                    || stored_message != verified.message_id().as_ref()
-                {
-                    return Err(ReceiptFailure::Integrity);
-                }
-                if stored_body_sha256.as_slice() == body_sha256.as_slice() {
-                    Ok(ReceiptOutcome::Duplicate)
-                } else {
-                    Ok(ReceiptOutcome::Conflict)
-                }
+                Ok(ReceiptOutcome::Duplicate)
             },
         )
         .await;
@@ -368,7 +341,9 @@ impl Handler<Incoming> for Processor {
                     event = "webhook_processor_missing_binding",
                     reason = "missing_binding"
                 );
-                return Err(JobError::snooze(MISSING_CONSUMER_SNOOZE)?);
+                return Err(JobError::retryable(
+                    "inbound webhook consumer is unavailable",
+                ));
             };
             let pool = job.pool().clone();
             let completed = in_tx(&pool, async |tx| -> Result<(), ProcessFailure> {
@@ -459,31 +434,4 @@ mod optional_base64_bytes {
             .map(|encoded| STANDARD.decode(encoded).map_err(D::Error::custom))
             .transpose()
     }
-}
-
-fn receipt_identity_hash(endpoint_id: &str, message_id: &[u8]) -> [u8; 32] {
-    let mut framed = Vec::with_capacity(
-        RECEIPT_DOMAIN
-            .len()
-            .saturating_add(16)
-            .saturating_add(endpoint_id.len())
-            .saturating_add(message_id.len()),
-    );
-    framed.extend_from_slice(RECEIPT_DOMAIN);
-    frame(&mut framed, endpoint_id.as_bytes());
-    frame(&mut framed, message_id);
-    sha256(&framed)
-}
-
-fn sha256(data: &[u8]) -> [u8; 32] {
-    let digest = digest::digest(&digest::SHA256, data);
-    let mut result = [0; 32];
-    result.copy_from_slice(digest.as_ref());
-    result
-}
-
-fn frame(output: &mut Vec<u8>, value: &[u8]) {
-    let length = u64::try_from(value.len()).unwrap_or(u64::MAX);
-    output.extend_from_slice(&length.to_be_bytes());
-    output.extend_from_slice(value);
 }

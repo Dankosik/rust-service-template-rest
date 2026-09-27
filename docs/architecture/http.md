@@ -239,7 +239,7 @@ OpenAPI expression means bearer is not required; it does not waive the required
 Standard Webhooks header/signature verification performed before persistence.
 
 The handler receives bounded raw bytes, maps receiver outcomes to 204/400/404/
-409/413/503 problems, and preserves existing hardened-chain outcomes. The
+413/503 problems, and preserves existing hardened-chain outcomes. The
 generated OpenAPI document remains handler-derived and must not be hand-edited.
 <!-- template:end inbound-webhooks:docs-http-inbound-webhooks -->
 
