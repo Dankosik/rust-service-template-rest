@@ -2230,8 +2230,11 @@ dependencies = [
  "infra-postgres",
  "serde",
  "serde_json",
+ "serde_with",
  "sqlx",
  "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
  "tracing",
  "url",
 ]

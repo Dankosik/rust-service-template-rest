@@ -5,15 +5,11 @@ use std::process::ExitCode;
 
 // template:begin inbound-webhooks:worker-webhooks-inbound-imports
 use infra_webhooks::inbound::Processor;
-
-#[derive(Debug, thiserror::Error)]
-#[error("inbound webhook endpoint {endpoint} has no consumer binding")]
-struct MissingInboundConsumer {
-    endpoint: String,
-}
 // template:end inbound-webhooks:worker-webhooks-inbound-imports
 // template:begin webhooks:worker-webhooks-outbound-imports
-use infra_webhooks::outbound::{Endpoint, Outbound};
+use std::collections::BTreeMap;
+
+use infra_webhooks::outbound::{Dispatcher, Endpoint};
 use infra_webhooks::protocol::KeyRing;
 use secrecy::ExposeSecret;
 // template:end webhooks:worker-webhooks-outbound-imports
@@ -21,8 +17,9 @@ use secrecy::ExposeSecret;
 // template:begin webhooks:worker-webhooks-outbound-registration
 #[derive(Debug, thiserror::Error)]
 enum RegistrationError {
-    #[error("outbound webhook signing key is invalid: {source}")]
+    #[error("outbound webhook endpoint {endpoint} signing key is invalid: {source}")]
     OutboundKey {
+        endpoint: String,
         #[source]
         source: infra_webhooks::protocol::ProtocolError,
     },
@@ -33,33 +30,26 @@ fn register_outbound(
     support: &jobs_worker::Support<'_>,
 ) -> Result<(), jobs_worker::BuildError> {
     let config = support.config();
-    let endpoints = config
-        .webhooks
-        .endpoints
-        .iter()
-        .map(|(endpoint_id, endpoint)| (endpoint_id.clone(), Endpoint::new(endpoint.url.clone())))
-        .collect();
-    let outbound = Outbound::new(endpoints)?;
-    let keys = config
-        .webhooks
-        .endpoints
-        .iter()
-        .map(|(endpoint_id, endpoint)| {
-            KeyRing::from_encoded(
-                endpoint.secret.expose_secret(),
-                endpoint
-                    .previous_secret
-                    .as_ref()
-                    .map(ExposeSecret::expose_secret),
-            )
-            .map(|ring| (endpoint_id.clone(), ring))
-            .map_err(|source| RegistrationError::OutboundKey { source })
-        })
-        .collect::<Result<_, _>>()?;
-    outbound
-        .dispatcher(keys, config.jobs.max_workers()?)?
-        .register(kinds);
-
+    let max_workers = config.jobs.max_workers()?;
+    let mut endpoints = BTreeMap::new();
+    for (endpoint_id, endpoint) in &config.webhooks.endpoints {
+        let keys = KeyRing::from_encoded(
+            endpoint.secret.expose_secret(),
+            endpoint
+                .previous_secret
+                .as_ref()
+                .map(ExposeSecret::expose_secret),
+        )
+        .map_err(|source| RegistrationError::OutboundKey {
+            endpoint: endpoint_id.clone(),
+            source,
+        })?;
+        endpoints.insert(
+            endpoint_id.clone(),
+            Endpoint::new(&endpoint.url, keys, max_workers)?,
+        );
+    }
+    Dispatcher::new(endpoints).register(kinds);
     Ok(())
 }
 // template:end webhooks:worker-webhooks-outbound-registration
@@ -84,15 +74,15 @@ fn register(
     // template:end webhooks:worker-webhooks-register-outbound
     // template:begin inbound-webhooks:worker-webhooks-register-inbound
     let consumers = webhook_consumers::consumers();
-    for endpoint_id in support.config().inbound_webhooks.endpoints.keys() {
-        if !consumers.contains(endpoint_id) {
-            return Err(MissingInboundConsumer {
-                endpoint: endpoint_id.clone(),
-            }
-            .into());
-        }
-    }
-    kinds.register(infra_jobs::Policy::default(), Processor::new(consumers));
+    consumers.require(
+        support
+            .config()
+            .inbound_webhooks
+            .endpoints
+            .keys()
+            .map(String::as_str),
+    )?;
+    Processor::new(consumers).register(kinds);
     // template:end inbound-webhooks:worker-webhooks-register-inbound
     Ok(())
 }

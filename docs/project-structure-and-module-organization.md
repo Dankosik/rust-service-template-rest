@@ -102,7 +102,7 @@ receipt-store, DTO, cache, or lifecycle crate.
 <!-- template:end webhooks-common:docs-structure-webhooks-common -->
 
 <!-- template:begin webhooks:docs-structure-webhooks-outbound -->
-`crates/infra-webhooks/src/outbound.rs` owns prepared delivery, durable payload,
+`crates/infra-webhooks/src/outbound.rs` owns enqueue, durable payload,
 and a fixed startup map of endpoint clients and key rings. It is the only webhook consumer of
 `infra-outbound-http`; business feature modules stay outside this dependency path.
 <!-- template:end webhooks:docs-structure-webhooks-outbound -->

@@ -321,9 +321,9 @@ and optional `previous_secret`. There is no outbound `webhooks.secrets` map or
 reference field. Those values are supplied through
 `APP__WEBHOOKS__ENDPOINTS__<ID>__SECRET` and `...__PREVIOUS_SECRET`; the
 required secret and an explicit predecessor cannot be blank. Provider
-construction owns URL and decoded Standard Webhooks key admission. Outgoing
-producers receive only prepared non-secret endpoint metadata and final bytes;
-workers decode the current startup snapshot before claiming jobs. A restart with
+construction owns URL admission and decoded Standard Webhooks keys of 24--64
+bytes. Outgoing producers receive only configured endpoint IDs and final bytes;
+workers build each endpoint's client and keys before claiming jobs. A restart with
 changed URL or keys applies to pending work. Keep the predecessor secret through
 the rotation cutover, then remove it and restart.
 <!-- template:end webhooks:docs-config-webhooks-outbound -->

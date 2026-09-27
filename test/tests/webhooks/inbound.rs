@@ -21,7 +21,7 @@ use url::Url;
 use super::commit_proxy::{CommitProxy, Fault};
 
 const ENDPOINT: &str = "partner/a?#";
-const KEY: &str = "whsec_d2ViaG9va19zZWNyZXQ=";
+const KEY: &str = "whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=";
 
 fn receiver(pool: PgPool) -> Receiver {
     Receiver::new(
@@ -595,6 +595,32 @@ async fn receipt_identity_preserves_binary_ids_and_endpoint_scope(pool: PgPool) 
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn remove_expired_deletes_only_receipts_older_than_retention(pool: PgPool) {
+    sqlx::query(
+        "INSERT INTO webhook_receipts (endpoint_id, message_id, received_at) \
+         VALUES ($1, $2, now() - interval '8 days'), ($1, $3, now())",
+    )
+    .bind("partner")
+    .bind(vec![1_u8])
+    .bind(vec![2_u8])
+    .execute(&pool)
+    .await
+    .expect("receipt fixtures");
+    let removed = receiver(pool.clone())
+        .remove_expired()
+        .await
+        .expect("cleanup");
+    assert_eq!(removed, 1);
+    let remaining: Vec<Vec<u8>> =
+        sqlx::query_scalar("SELECT message_id FROM webhook_receipts ORDER BY message_id")
+            .fetch_all(&pool)
+            .await
+            .expect("remaining receipts");
+    assert_eq!(remaining, vec![vec![2]]);
+    super::close(&[&pool]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool: PgPool) {
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt as _;
@@ -628,7 +654,18 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
         let mut request = http::Request::post("/webhooks/partner%2Fa%3F%23")
             .body(Body::from(body))
             .expect("request");
-        *request.headers_mut() = signed_headers(&keys, &id, body);
+        *request.headers_mut() = if id.len() > 255 {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "webhook-id",
+                HeaderValue::from_bytes(&id).expect("message id"),
+            );
+            headers.insert("webhook-timestamp", HeaderValue::from_static("0"));
+            headers.insert("webhook-signature", HeaderValue::from_static("v1,invalid"));
+            headers
+        } else {
+            signed_headers(&keys, &id, body)
+        };
         request
             .headers_mut()
             .insert("content-type", HeaderValue::from_static(content_type));

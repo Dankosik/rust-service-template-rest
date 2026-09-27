@@ -11,12 +11,6 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# template:begin webhooks:webhooks-outbound-test-feature
-[features]
-default = []
-test-support = ["infra-outbound-http/test-support"]
-# template:end webhooks:webhooks-outbound-test-feature
-
 [dependencies]
 aws-lc-rs = { workspace = true, features = ["alloc", "aws-lc-sys", "prebuilt-nasm"] }
 base64 = { workspace = true, features = ["std"] }
@@ -25,6 +19,7 @@ http = { workspace = true, features = ["std"] }
 infra-jobs = { workspace = true }
 infra-postgres = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
+serde_with = { workspace = true, features = ["std", "macros", "base64"] }
 thiserror = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 # template:begin webhooks:webhooks-outbound-dependencies
@@ -35,4 +30,6 @@ url = { workspace = true, features = ["std"] }
 # template:end webhooks:webhooks-outbound-dependencies
 # template:begin inbound-webhooks:webhooks-inbound-dependencies
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs"] }
+tokio = { workspace = true, features = ["time"] }
+tokio-util = { workspace = true }
 # template:end inbound-webhooks:webhooks-inbound-dependencies

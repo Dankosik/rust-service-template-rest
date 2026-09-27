@@ -322,7 +322,8 @@ async fn serve(
         let composer = prepare_http_idempotency(&config, postgres_pool.as_ref());
         // template:end http-idempotency:bootstrap-http-idempotency-composer
         // template:begin inbound-webhooks:bootstrap-webhooks-prepare
-        let webhook_state = prepare_inbound_webhooks(&config, postgres_pool.as_ref())?;
+        let webhook_state =
+            prepare_inbound_webhooks(&config, postgres_pool.as_ref(), &tracker, &cancel)?;
         // template:end inbound-webhooks:bootstrap-webhooks-prepare
 
         // Admission runs even without probes so the first probe after bind
@@ -396,70 +397,51 @@ async fn serve(
 fn prepare_inbound_webhooks(
     config: &Config,
     postgres_pool: Option<&PgPool>,
+    tracker: &TaskTracker,
+    cancel: &CancellationToken,
 ) -> Result<WebhookState, BootstrapError> {
     if config.inbound_webhooks.endpoints.is_empty() {
         return Ok(WebhookState::inert());
     }
     let pool = postgres_pool.ok_or(BootstrapError::InboundWebhooksPostgresRequired)?;
     let consumers = webhook_consumers::consumers();
-    for endpoint_id in config.inbound_webhooks.endpoints.keys() {
-        if !consumers.contains(endpoint_id) {
-            return Err(BootstrapError::InboundWebhookConsumerMissing {
-                endpoint: endpoint_id.clone(),
-            });
-        }
-    }
+    consumers
+        .require(config.inbound_webhooks.endpoints.keys().map(String::as_str))
+        .map_err(|missing| BootstrapError::InboundWebhookConsumerMissing {
+            endpoint: missing.endpoint,
+        })?;
     let bindings = config
         .inbound_webhooks
         .endpoints
         .iter()
         .map(|(endpoint_id, endpoint)| {
-            let active = config
-                .inbound_webhooks
-                .secrets
-                .get(&endpoint.active_key)
-                .ok_or_else(|| BootstrapError::InboundWebhookKeyReference {
-                    endpoint: endpoint_id.clone(),
-                    key: endpoint.active_key.clone(),
-                })?;
-            let previous = endpoint
-                .previous_key
-                .as_ref()
-                .map(|key| {
-                    config.inbound_webhooks.secrets.get(key).ok_or_else(|| {
-                        BootstrapError::InboundWebhookKeyReference {
-                            endpoint: endpoint_id.clone(),
-                            key: key.clone(),
-                        }
-                    })
+            let decode = |key_ref: &str| -> Result<SigningKey, BootstrapError> {
+                let secret = config
+                    .inbound_webhooks
+                    .secrets
+                    .get(key_ref)
+                    .ok_or_else(|| BootstrapError::InboundWebhookKeyReference {
+                        endpoint: endpoint_id.clone(),
+                        key: key_ref.to_owned(),
+                    })?;
+                SigningKey::from_encoded(secret.expose_secret()).map_err(|source| {
+                    BootstrapError::InboundWebhookKey {
+                        endpoint: endpoint_id.clone(),
+                        key: key_ref.to_owned(),
+                        source,
+                    }
                 })
-                .transpose()?;
-            let active = SigningKey::from_encoded(active.expose_secret()).map_err(|source| {
-                BootstrapError::InboundWebhookKey {
-                    endpoint: endpoint_id.clone(),
-                    key: endpoint.active_key.clone(),
-                    source,
-                }
-            })?;
-            let previous = endpoint
-                .previous_key
-                .as_ref()
-                .zip(previous)
-                .map(|(key, value)| {
-                    SigningKey::from_encoded(value.expose_secret()).map_err(|source| {
-                        BootstrapError::InboundWebhookKey {
-                            endpoint: endpoint_id.clone(),
-                            key: key.clone(),
-                            source,
-                        }
-                    })
-                })
-                .transpose()?;
-            let key = KeyRing::new(active, previous);
+            };
+            let key = KeyRing::new(
+                decode(&endpoint.active_key)?,
+                endpoint.previous_key.as_deref().map(decode).transpose()?,
+            );
             Ok((endpoint_id.clone(), key))
         })
         .collect::<Result<Vec<_>, BootstrapError>>()?;
-    Ok(WebhookState::active(Receiver::new(pool.clone(), bindings)))
+    let receiver = Receiver::new(pool.clone(), bindings);
+    tracker.spawn(receiver.clone().run_cleanup(cancel.child_token()));
+    Ok(WebhookState::active(receiver))
 }
 // template:end inbound-webhooks:bootstrap-webhooks-constructor
 
@@ -1105,7 +1087,9 @@ mod tests {
         );
         let pool = PgPool::connect_lazy("postgres://localhost/unused")
             .expect("lazy pool does not connect");
-        let result = prepare_inbound_webhooks(&config, Some(&pool));
+        let tracker = TaskTracker::new();
+        let cancel = CancellationToken::new();
+        let result = prepare_inbound_webhooks(&config, Some(&pool), &tracker, &cancel);
         assert!(matches!(
             result,
             Err(BootstrapError::InboundWebhookConsumerMissing { endpoint })
