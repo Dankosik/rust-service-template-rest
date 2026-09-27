@@ -100,7 +100,7 @@ tonic-prost = { version = "=0.14.6", default-features = false }
 tonic-health = { version = "=0.14.6", default-features = false }
 tonic-types = { version = "=0.14.6", default-features = false }
 prost = { version = "=0.14.4", default-features = false }
-tracing-opentelemetry-instrumentation-sdk = { version = "=0.38.3", default-features = false, features = ["http"] }
+tracing-opentelemetry-instrumentation-sdk = { version = "=0.42.1", default-features = false, features = ["http"] }
 hyper = { version = "1.11.1", default-features = false }
 tokio-stream = { version = "0.1.19", default-features = false }
 # template:end grpc:workspace-grpc-dependencies
@@ -130,12 +130,12 @@ gethostname = "1.1.0"
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false }
 json-subscriber = { version = "0.3.0", default-features = false }
-opentelemetry = { version = "0.32.0", default-features = false }
-opentelemetry_sdk = { version = "0.32.1", default-features = false }
-opentelemetry-otlp = { version = "0.32.0", default-features = false }
-opentelemetry-semantic-conventions = { version = "0.32.1", default-features = false }
-tracing-opentelemetry = { version = "0.33.0", default-features = false }
-axum-tracing-opentelemetry = { version = "0.39.1", default-features = false }
+opentelemetry = { version = "0.33.0", default-features = false }
+opentelemetry_sdk = { version = "0.33.0", default-features = false }
+opentelemetry-otlp = { version = "0.33.0", default-features = false }
+opentelemetry-semantic-conventions = { version = "0.33.0", default-features = false }
+tracing-opentelemetry = { version = "0.34.0", default-features = false }
+axum-tracing-opentelemetry = { version = "0.42.1", default-features = false }
 metrics = { version = "0.24.6", default-features = false }
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 axum-prometheus = { version = "0.10.1", default-features = false }

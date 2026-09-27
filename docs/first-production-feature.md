@@ -24,7 +24,7 @@ and cleanup on partial startup ([Integration Boundaries](architecture/integratio
 For an operator-selected fixed HTTPS dependency, the retained [outbound profile](outbound-http.md)
 provides bounded transport. Put the concrete adapter under `crates/infra-<provider>`;
 keep its endpoint, credentials, response reserve, parsing and business errors
-there. Read the inbound deadline and pass it as `Operation::deadline` rather
+there. Read the inbound deadline and pass it to `Client::execute` rather
 than starting a fresh request budget. The adapter builds a standard
 `http::Request<bytes::Bytes>` and awaits the exchange; bootstrap supplies no
 tracker or cancellation token to this library-owned resolver/pool work.

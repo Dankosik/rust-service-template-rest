@@ -12,10 +12,8 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{
-    HeaderMap, HeaderValue, Request, Response, StatusCode, header::AUTHORIZATION, uri::PathAndQuery,
-};
-use infra_outbound_http::{Client, Limits, Operation};
+use http::{HeaderMap, HeaderValue, Request, Response, StatusCode, header::AUTHORIZATION};
+use infra_outbound_http::{Client, Limits};
 use oauth2::{
     AuthType, ClientId, ClientSecret, EndpointNotSet, EndpointSet, Scope, TokenResponse, TokenUrl,
     basic::BasicClient,
@@ -36,7 +34,6 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// A token stops being reused this long before it expires, as in Go's `oauth2`.
 const REUSE_MARGIN: Duration = Duration::from_secs(10);
 const TOKEN_LIMITS: Limits = Limits {
-    max_active: 1,
     operation_timeout: FETCH_TIMEOUT,
     response_header_count: 64,
     response_body_bytes: 1024 * 1024,
@@ -122,7 +119,7 @@ impl fmt::Debug for Credentials {
 
 struct Inner {
     oauth: OAuthClient,
-    token_path: PathAndQuery,
+    token_endpoint: Url,
     token_http: Client,
     scopes: Vec<String>,
     audience: Option<String>,
@@ -158,7 +155,7 @@ impl Credentials {
     /// Returns a sanitized option or transport-construction failure.
     pub fn new(options: Options) -> Result<Self, ConfigurationError> {
         let endpoint = admit_options(&options)?;
-        let token_http = Client::new(&endpoint.origin().ascii_serialization(), TOKEN_LIMITS)
+        let token_http = Client::new(&endpoint, TOKEN_LIMITS)
             .map_err(|_| ConfigurationError {
                 key: "token_url",
                 reason: "transport construction failed",
@@ -176,9 +173,6 @@ impl Credentials {
             reason: "invalid endpoint",
         };
         let token_url = TokenUrl::new(endpoint.to_string()).map_err(|_| invalid_endpoint)?;
-        let token_path = endpoint[url::Position::BeforePath..]
-            .parse()
-            .map_err(|_| invalid_endpoint)?;
         let oauth = BasicClient::new(ClientId::new(options.client_id))
             .set_client_secret(ClientSecret::new(
                 options.client_secret.expose_secret().to_owned(),
@@ -191,7 +185,7 @@ impl Credentials {
         );
         Ok(Self(Arc::new(Inner {
             oauth,
-            token_path,
+            token_endpoint: endpoint.clone(),
             token_http,
             scopes: options.scopes,
             audience: options.audience,
@@ -289,16 +283,16 @@ impl AuthenticatedClient {
     pub async fn execute(
         &self,
         mut request: Request<Bytes>,
-        operation: Operation,
+        deadline: Instant,
     ) -> Result<Response<Bytes>, Error> {
         if request.headers().contains_key(AUTHORIZATION) {
             return Err(Error::AuthorizationConflict);
         }
         let token = self
             .credentials
-            .authorize(request.headers_mut(), operation.deadline)
+            .authorize(request.headers_mut(), deadline)
             .await?;
-        let response = self.resource.execute(request, operation).await?;
+        let response = self.resource.execute(request, deadline).await?;
         if response.status() == StatusCode::UNAUTHORIZED {
             self.credentials.reject(&token);
         }
@@ -339,7 +333,7 @@ impl Inner {
             exchange = exchange.add_extra_param("audience", audience.as_str());
         }
         let http = TokenHttp {
-            path: self.token_path.clone(),
+            endpoint: self.token_endpoint.clone(),
             client: self.token_http.clone(),
             deadline,
         };
@@ -387,7 +381,7 @@ impl Inner {
 
 /// Sends oauth2's token request through the bounded token client.
 struct TokenHttp {
-    path: PathAndQuery,
+    endpoint: Url,
     client: Client,
     deadline: Instant,
 }
@@ -399,23 +393,19 @@ impl<'client> oauth2::AsyncHttpClient<'client> for TokenHttp {
 
     fn call(&'client self, request: oauth2::HttpRequest) -> Self::Future {
         Box::pin(async move {
-            // oauth2 builds the absolute token URL; the bounded client owns the
-            // fixed origin and takes only the path.
+            if request.uri() != self.endpoint.as_str() {
+                return Err(AcquisitionError::InvalidResponse);
+            }
             let (mut parts, body) = request.into_parts();
-            parts.uri = self.path.clone().into();
             if let Some(header) = parts.headers.get_mut(AUTHORIZATION) {
                 header.set_sensitive(true);
             }
-            let operation = Operation {
-                deadline: self.deadline,
-                response_body_bytes: None,
-            };
             let response = self
                 .client
-                .execute(Request::from_parts(parts, Bytes::from(body)), operation)
+                .execute(Request::from_parts(parts, Bytes::from(body)), self.deadline)
                 .await
                 .map_err(|error| match error {
-                    infra_outbound_http::Error::Timeout { .. } => AcquisitionError::Timeout,
+                    infra_outbound_http::Error::Timeout => AcquisitionError::Timeout,
                     infra_outbound_http::Error::ResponseBodyTooLarge => {
                         AcquisitionError::ResponseLimit
                     }

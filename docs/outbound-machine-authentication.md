@@ -62,8 +62,8 @@ in its own `[dependencies]`.
 `infra-oauth2-client-credentials` owns an opaque cloneable `Credentials`, prepared
 from its `Options`. Composition code translates one named config into options,
 constructs credentials, and binds them with `credentials.http(resource_client)`.
-The resulting cloneable `AuthenticatedClient::execute(request, operation)` takes
-the existing `http::Request<Bytes>` and `infra_outbound_http::Operation` and
+The resulting cloneable `AuthenticatedClient::execute(request, deadline)` takes
+the existing `http::Request<Bytes>` and an absolute `tokio::time::Instant` and
 returns the existing bounded response or the OAuth adapter's sanitized error.
 There is no public token getter, generic token-source trait, or business client
 generator. Each concrete provider adapter receives its own authenticated client;
@@ -79,7 +79,7 @@ independent public boundary rather than trusting arbitrary caller options.
 
 An existing Authorization header is refused before token or resource I/O.
 Otherwise acquisition supplies exactly one sensitive Bearer header. The
-resource client's target, admission, body limit, transport policy, and original
+resource client's origin check, body limit, transport policy, and original
 absolute caller deadline remain authoritative. Token wait consumes that deadline;
 it never resets it. Completed resource results, including 401 and 403, pass
 through without replay. A 401 evicts the credential that request used, unless a

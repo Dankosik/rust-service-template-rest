@@ -3,6 +3,7 @@ use std::time::Instant;
 use http::{Method, StatusCode};
 use metrics::{Label, Unit};
 use tracing::Span;
+use url::Origin;
 
 use crate::Error;
 
@@ -22,10 +23,12 @@ pub(crate) struct Attempt {
 }
 
 impl Attempt {
-    pub(crate) fn start(method: &Method, base: &url::Url) -> Self {
+    pub(crate) fn start(method: &Method, origin: &Origin) -> Self {
         let method = bounded_method(method);
-        let server_address = base.host_str().unwrap_or_default().to_owned();
-        let server_port = base.port_or_known_default().unwrap_or_default().to_string();
+        let (server_address, server_port) = match origin {
+            Origin::Tuple(_, host, port) => (host.to_string(), port.to_string()),
+            Origin::Opaque(_) => (String::new(), String::new()),
+        };
         let span = tracing::info_span!(
             "outbound_http",
             otel.kind = "client",
@@ -81,11 +84,7 @@ impl Attempt {
             self.span.record("otel.status_code", "ERROR");
         }
 
-        metrics::describe_histogram!(
-            REQUEST_DURATION_METRIC,
-            Unit::Seconds,
-            "Outbound HTTP attempt duration in seconds"
-        );
+        describe_histogram();
         let mut labels = vec![
             Label::new("http.request.method", self.method),
             Label::new("server.address", self.server_address.clone()),
@@ -112,6 +111,17 @@ impl Drop for Attempt {
             self.emit("cancelled", None);
         }
     }
+}
+
+fn describe_histogram() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        metrics::describe_histogram!(
+            REQUEST_DURATION_METRIC,
+            Unit::Seconds,
+            "Outbound HTTP attempt duration in seconds"
+        );
+    });
 }
 
 fn bounded_method(method: &Method) -> &'static str {
@@ -142,8 +152,7 @@ fn error_type(error: &Error) -> &'static str {
     match error {
         Error::InvalidConfiguration => "invalid_configuration",
         Error::InvalidTarget => "invalid_target",
-        Error::AtCapacity => "at_capacity",
-        Error::Timeout { .. } => "timeout",
+        Error::Timeout => "timeout",
         Error::ResponseBodyTooLarge => "response_body_too_large",
         Error::ClientBuild { .. } | Error::Transport { .. } => "transport",
     }

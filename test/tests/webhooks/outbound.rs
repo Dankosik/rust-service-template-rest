@@ -15,7 +15,6 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-const FIXTURE_HOST: &str = "authn.fixture.test";
 const CURRENT_KEY: &str = "whsec_QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=";
 const PREVIOUS_KEY: &str = "whsec_QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=";
 
@@ -46,7 +45,6 @@ fn outbound(endpoint_ids: &[&str]) -> Outbound {
 
 fn limits() -> infra_outbound_http::Limits {
     infra_outbound_http::Limits {
-        max_active: 1,
         operation_timeout: infra_webhooks::outbound::DELIVERY_POLICY.timeout,
         response_header_count: 64,
         response_body_bytes: 64 * 1024,
@@ -59,9 +57,10 @@ fn dispatcher(endpoints: &[(&str, &str)], address: std::net::SocketAddr) -> Disp
         endpoints
             .iter()
             .map(|(id, path)| {
-                let destination = format!("https://{FIXTURE_HOST}{path}");
+                let destination = url::Url::parse(&format!("http://{address}{path}"))
+                    .expect("fixture destination");
                 let client = infra_outbound_http::Client::new_for_test_http(
-                    &format!("http://{address}/"),
+                    &destination,
                     limits,
                 )
                 .expect("fixture client");
@@ -69,7 +68,7 @@ fn dispatcher(endpoints: &[(&str, &str)], address: std::net::SocketAddr) -> Disp
                     KeyRing::from_encoded(CURRENT_KEY, Some(PREVIOUS_KEY)).expect("fixture keys");
                 (
                     (*id).to_owned(),
-                    Endpoint::with_client(&destination, client, keys).expect("fixture endpoint"),
+                    Endpoint::with_client(destination, client, keys).expect("fixture endpoint"),
                 )
             })
             .collect(),

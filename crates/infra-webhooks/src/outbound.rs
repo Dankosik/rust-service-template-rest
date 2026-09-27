@@ -7,15 +7,14 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    num::NonZeroU32,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
-use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header};
+use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use infra_jobs::{EnqueueOptions, Enqueued, Job, JobError, JobId, JobKind, Kinds, Policy};
-use infra_outbound_http::{Client, Error as HttpError, Limits, Operation};
+use infra_outbound_http::{Client, Error as HttpError, Limits};
 use infra_postgres::Tx;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -33,6 +32,12 @@ const RESPONSE_BODY_BYTES: usize = 64 * 1024;
 pub const DELIVERY_POLICY: Policy = Policy {
     max_attempts: 20,
     timeout: Duration::from_secs(30),
+};
+
+const LIMITS: Limits = Limits {
+    operation_timeout: DELIVERY_POLICY.timeout,
+    response_header_count: RESPONSE_HEADER_COUNT,
+    response_body_bytes: RESPONSE_BODY_BYTES,
 };
 
 /// Producer side: the configured endpoint IDs a delivery may target.
@@ -105,23 +110,13 @@ pub struct Endpoint {
 impl Endpoint {
     /// Parse the HTTPS destination (no credentials, no fragment) and build its client.
     ///
-    /// `max_workers` sizes the client so the jobs slots stay the only concurrency bound.
-    ///
     /// # Errors
     ///
     /// Returns [`OutboundError::InvalidEndpoint`] for an unusable destination or
     /// client limit, and [`OutboundError::Client`] when client construction fails.
-    pub fn new(
-        destination: &str,
-        keys: KeyRing,
-        max_workers: NonZeroU32,
-    ) -> Result<Self, OutboundError> {
+    pub fn new(destination: &str, keys: KeyRing) -> Result<Self, OutboundError> {
         let destination = parse_destination(destination)?;
-        let client = Client::new(
-            &destination.origin().ascii_serialization(),
-            limits(max_workers)?,
-        )
-        .map_err(OutboundError::Client)?;
+        let client = Client::new(&destination, LIMITS).map_err(OutboundError::Client)?;
         Ok(Self {
             destination,
             client,
@@ -129,22 +124,24 @@ impl Endpoint {
         })
     }
 
-    /// Use a caller-built client (tests, custom transport).
+    /// Use a caller-built local test client.
     ///
-    /// The client's configured authority receives the request; `destination`
-    /// supplies path and query.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`OutboundError::InvalidEndpoint`] when `destination` is not an
-    /// HTTPS URL with a host and without credentials or a fragment.
+    /// The caller supplies the absolute destination admitted by its client.
     pub fn with_client(
-        destination: &str,
+        destination: Url,
         client: Client,
         keys: KeyRing,
     ) -> Result<Self, OutboundError> {
+        if !matches!(destination.scheme(), "http" | "https")
+            || destination.host().is_none()
+            || !destination.username().is_empty()
+            || destination.password().is_some()
+            || destination.fragment().is_some()
+        {
+            return Err(OutboundError::InvalidEndpoint);
+        }
         Ok(Self {
-            destination: parse_destination(destination)?,
+            destination,
             client,
             keys,
         })
@@ -206,16 +203,7 @@ impl Dispatcher {
             &signature,
         )
         .map_err(|_| JobError::permanent(DeliveryOutcome::InvalidPayload))?;
-        let response = endpoint
-            .client
-            .execute(
-                request,
-                Operation {
-                    deadline: job.deadline(),
-                    response_body_bytes: Some(RESPONSE_BODY_BYTES),
-                },
-            )
-            .await;
+        let response = endpoint.client.execute(request, job.deadline()).await;
         classify_response(response, SystemTime::now())
     }
 }
@@ -293,17 +281,6 @@ impl fmt::Display for DeliveryOutcome {
     }
 }
 
-fn limits(max_workers: NonZeroU32) -> Result<Limits, OutboundError> {
-    let max_active =
-        usize::try_from(max_workers.get()).map_err(|_| OutboundError::InvalidEndpoint)?;
-    Ok(Limits {
-        max_active,
-        operation_timeout: DELIVERY_POLICY.timeout,
-        response_header_count: RESPONSE_HEADER_COUNT,
-        response_body_bytes: RESPONSE_BODY_BYTES,
-    })
-}
-
 fn parse_destination(raw: &str) -> Result<Url, OutboundError> {
     let destination = Url::parse(raw).map_err(|_| OutboundError::InvalidEndpoint)?;
     if destination.scheme() != "https"
@@ -324,14 +301,9 @@ fn request(
     timestamp: i64,
     signature: &str,
 ) -> Result<Request<Bytes>, OutboundError> {
-    let target = &destination[url::Position::BeforePath..url::Position::AfterQuery];
     Request::builder()
         .method(Method::POST)
-        .uri(
-            target
-                .parse::<Uri>()
-                .map_err(|_| OutboundError::InvalidEndpoint)?,
-        )
+        .uri(destination.as_str())
         .header(header::CONTENT_TYPE, &delivery.content_type)
         .header("webhook-id", message_id)
         .header("webhook-timestamp", timestamp.to_string())
@@ -406,10 +378,7 @@ fn unix_timestamp(now: SystemTime) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        num::NonZeroU32,
-        time::{Duration, UNIX_EPOCH},
-    };
+    use std::time::{Duration, UNIX_EPOCH};
 
     use http::{HeaderMap, HeaderValue, header};
 
@@ -440,7 +409,7 @@ mod tests {
         // is not an SSRF boundary and does not classify addresses.
         let destination = "https://10.0.0.5/events";
         assert!(parse_destination(destination).is_ok());
-        assert!(Endpoint::new(destination, ring(), NonZeroU32::MIN).is_ok());
+        assert!(Endpoint::new(destination, ring()).is_ok());
     }
 
     #[test]
@@ -515,7 +484,7 @@ mod tests {
     #[test]
     fn endpoint_construction_failure_is_a_closed_error() {
         assert!(matches!(
-            Endpoint::new("http://partner.example/events", ring(), NonZeroU32::MIN),
+            Endpoint::new("http://partner.example/events", ring()),
             Err(OutboundError::InvalidEndpoint)
         ));
     }

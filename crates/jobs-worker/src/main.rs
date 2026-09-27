@@ -30,7 +30,6 @@ fn register_outbound(
     support: &jobs_worker::Support<'_>,
 ) -> Result<(), jobs_worker::BuildError> {
     let config = support.config();
-    let max_workers = config.jobs.max_workers()?;
     let mut endpoints = BTreeMap::new();
     for (endpoint_id, endpoint) in &config.webhooks.endpoints {
         let keys = KeyRing::from_encoded(
@@ -46,7 +45,7 @@ fn register_outbound(
         })?;
         endpoints.insert(
             endpoint_id.clone(),
-            Endpoint::new(&endpoint.url, keys, max_workers)?,
+            Endpoint::new(&endpoint.url, keys)?,
         );
     }
     Dispatcher::new(endpoints).register(kinds);

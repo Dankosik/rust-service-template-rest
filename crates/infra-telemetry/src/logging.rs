@@ -7,6 +7,8 @@
 //! `tracing-subscriber`'s `tracing-log` feature during `try_init`.
 
 use crate::traces::TracerProviderHandle;
+use std::sync::{Arc, OnceLock};
+use opentelemetry::trace::TraceContextExt as _;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
@@ -59,23 +61,41 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
     let otel = options.tracer_provider.map(|handle| {
         tracing_opentelemetry::layer().with_tracer(handle.tracer(options.service_name))
     });
+    let trace_dispatch = Arc::new(OnceLock::new());
     let format: Box<dyn Layer<_> + Send + Sync> = match options.format {
-        LoggingFormat::Json => Box::new(
-            json_subscriber::layer()
+        LoggingFormat::Json => {
+            let mut layer = json_subscriber::layer()
                 .flatten_event(true)
-                // Nested current-span objects are outside the documented JSON
-                // shape; span fields flatten at the top level and trace/span
-                // ids come from `with_opentelemetry_ids`.
                 .with_current_span(false)
-                .flatten_span_list_on_top_level(true)
-                .with_opentelemetry_ids(true),
-        ),
+                .flatten_span_list_on_top_level(true);
+            add_trace_ids(layer.inner_layer_mut(), Arc::clone(&trace_dispatch));
+            Box::new(layer)
+        }
         LoggingFormat::Text => Box::new(tracing_subscriber::fmt::layer().with_target(false)),
     };
-    Registry::default()
-        .with(filter)
-        .with(otel)
-        .with(format)
-        .try_init()
-        .map_err(|_| LoggingError::AlreadyInstalled)
+    let dispatch = tracing::Dispatch::new(Registry::default().with(filter).with(otel).with(format));
+    let _ = trace_dispatch.set(dispatch.downgrade());
+    dispatch.try_init().map_err(|_| LoggingError::AlreadyInstalled)
+}
+
+// json-subscriber's built-in bridge currently ends at tracing-opentelemetry
+// 0.33. Its dynamic-field API preserves the same wire shape with our 0.34
+// bridge. A weak dispatch avoids both subscriber recursion and a reference cycle.
+fn add_trace_ids<S, W>(
+    layer: &mut json_subscriber::JsonLayer<S, W>,
+    dispatch: Arc<OnceLock<tracing::dispatcher::WeakDispatch>>,
+) where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    layer.add_dynamic_field("openTelemetry", move |event, context| {
+        let span = context.event_span(event)?;
+        let dispatch = dispatch.get()?.upgrade()?;
+        let otel = tracing_opentelemetry::get_otel_context(&span.id(), &dispatch)?;
+        let span = otel.span();
+        let ids = span.span_context();
+        Some(std::collections::BTreeMap::from([
+            ("traceId", ids.trace_id().to_string()),
+            ("spanId", ids.span_id().to_string()),
+        ]))
+    });
 }

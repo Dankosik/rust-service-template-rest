@@ -63,7 +63,7 @@ with its HTTPS URL, fixed-authority client, and decoded key ring, then consumes
 a `Dispatcher` into the existing kind registry:
 
 ```rust,ignore
-let endpoint = Endpoint::new(&url, keys, max_workers)?;
+let endpoint = Endpoint::new(&url, keys)?;
 Dispatcher::new(endpoints).register(kinds);
 ```
 
@@ -113,7 +113,7 @@ named gaps or the retained Cargo graphs expose a concrete aws-lc backend drawbac
 The interoperable wire authority is the [Standard Webhooks
 specification](https://github.com/standard-webhooks/standard-webhooks/blob/bece768d960f09e242f5cd5686d859e475d6b478/spec/standard-webhooks.md).
 
-The outbound snapshot builds one fixed-authority client and one decoded key ring
+The outbound snapshot builds one fixed-origin client and one decoded key ring
 for each configured endpoint before claims. The client owns hostname TLS
 verification, pooling, no proxy/redirect, and response bounds. Its attempt
 telemetry carries the method, receiver host and port, status, and a static
@@ -129,15 +129,10 @@ A complete bounded 2xx completes delivery; 410 is a permanent `endpoint_gone`
 outcome with an operator warning. Every other HTTP status, plus network,
 timeout, DNS, and response-read failures, retries with the stable ID. Valid
 `Retry-After` delta-seconds or HTTP-date is a jobs delay floor capped at 24h;
-malformed, elapsed, or zero advice uses ordinary backoff. Each endpoint
-client admits as many exchanges as the worker has jobs slots, so an attempt
-never fails locally for capacity. There is no per-endpoint concurrency limit: a
-refused attempt would be claimed again at once while the queue has due work, so
-a slow endpoint with a backlog would turn into a claim/snooze loop against
-PostgreSQL. Slow endpoints can therefore occupy worker slots until their
-30-second deadline. Isolating them needs a claim-time concurrency limit in the
-jobs owner, not a webhook-side refusal. Jobs alone owns jitter, leases, delay,
-exhaustion, and retry.
+malformed, elapsed, or zero advice uses ordinary backoff. Slow endpoints can
+occupy worker slots until their 30-second deadline. Isolating them needs a
+claim-time concurrency limit in the jobs owner, not a webhook-side refusal.
+Jobs alone owns jitter, leases, delay, exhaustion, and retry.
 
 ## Raw-byte interoperability vector
 
