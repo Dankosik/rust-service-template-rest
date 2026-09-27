@@ -410,6 +410,20 @@ mod tests {
             "{err}"
         );
     }
+
+    #[test]
+    fn webhooks_secrets_without_a_reference_are_not_echoed() {
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__WEBHOOKS__SECRETS", "fixture-secret-value")]),
+        )
+        .unwrap_err();
+        let rendered = err.to_string();
+        assert!(matches!(&err, Error::Deserialize(_)), "{rendered}");
+        assert!(rendered.contains("webhooks.secrets"), "{rendered}");
+        assert!(!rendered.contains("fixture-secret-value"), "{rendered}");
+    }
     // template:end webhooks:load-webhooks-environment
 
     // template:begin messaging:load-messaging-environment
@@ -916,6 +930,20 @@ mod tests {
             "fixture-secret"
         );
         assert!(!format!("{cfg:?}").contains("fixture-secret"));
+    }
+
+    #[test]
+    fn inbound_webhooks_secrets_without_a_reference_are_not_echoed() {
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__INBOUND_WEBHOOKS__SECRETS", "fixture-secret-value")]),
+        )
+        .unwrap_err();
+        let rendered = err.to_string();
+        assert!(matches!(&err, Error::Deserialize(_)), "{rendered}");
+        assert!(rendered.contains("inbound_webhooks.secrets"), "{rendered}");
+        assert!(!rendered.contains("fixture-secret-value"), "{rendered}");
     }
     // template:end inbound-webhooks:load-inbound-webhooks-environment
 

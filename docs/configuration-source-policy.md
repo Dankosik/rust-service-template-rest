@@ -46,6 +46,9 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   allowed so a file can document the key.
 - Secret fields are `secrecy::SecretString`: `Debug` output and the startup
   summary print `[REDACTED]`, and the value is zeroed on drop.
+- A secret map given a scalar (`APP__WEBHOOKS__SECRETS=value`, the reference
+  segment omitted) fails with its key and a static reason; config-rs's default
+  type diagnostic would echo the value.
 - Files are read as the process user; relative paths and symlinks are
   accepted because Kubernetes projected volumes depend on symlinks for atomic
   updates. Each file is bounded to 1 MiB before parsing.

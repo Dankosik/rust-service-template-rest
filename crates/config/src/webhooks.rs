@@ -6,7 +6,8 @@
 use std::collections::BTreeMap;
 
 use secrecy::SecretString;
-use serde::Deserialize;
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer};
 
 use crate::ValidationError;
 
@@ -17,7 +18,18 @@ pub struct WebhooksConfig {
     /// Stable endpoint IDs bound to destination and immutable key references.
     pub endpoints: BTreeMap<String, WebhookEndpointConfig>,
     /// Environment-only Standard Webhooks secrets, keyed by immutable reference.
+    #[serde(deserialize_with = "secret_map")]
     pub secrets: BTreeMap<String, SecretString>,
+}
+
+/// A scalar here is usually a secret whose reference segment was omitted
+/// (`APP__..._SECRETS=value`); the default diagnostic would echo it.
+fn secret_map<'de, D>(deserializer: D) -> Result<BTreeMap<String, SecretString>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    BTreeMap::deserialize(deserializer)
+        .map_err(|_| D::Error::custom("must map key references to secret values"))
 }
 
 /// One configured outbound destination and its current key references.
