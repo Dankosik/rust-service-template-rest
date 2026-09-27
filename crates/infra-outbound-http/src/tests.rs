@@ -78,8 +78,8 @@ impl tracing::Subscriber for SpanDiagnostics {
 fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
     PrometheusBuilder::new()
         .set_buckets_for_metric(
-            Matcher::Full("http_client_request_duration_seconds".to_owned()),
-            &[0.005, 0.01, 0.025, 0.05, 0.1, 1.0],
+            Matcher::Full(crate::REQUEST_DURATION_METRIC.to_owned()),
+            crate::REQUEST_DURATION_BUCKETS,
         )
         .expect("observation buckets are valid")
         .build_recorder()

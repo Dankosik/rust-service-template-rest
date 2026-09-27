@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use health::{Probe, Readiness, RefreshPolicy};
-use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
+use infra_http::{HTTP_REQUESTS_DURATION_BUCKETS, HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
 // template:begin cache:service-bootstrap-cache-imports
 use infra_cache::{Cache, CacheError, CacheOptions};
 // template:end cache:service-bootstrap-cache-imports
@@ -39,7 +39,7 @@ use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe};
 // template:end postgres:bootstrap-imports
 use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, ResolvedSampler, TracingOptions,
-    diagnostics_router, install_subscriber, install_tracer_provider,
+    diagnostics_router, install_subscriber, install_tracer_provider, runtime_metrics,
 };
 // template:begin integration:bootstrap-postgres-secret-import
 use secrecy::ExposeSecret;
@@ -208,9 +208,25 @@ async fn serve(
             LogFormat::Text => LoggingFormat::Text,
         },
         tracer_provider: Some(&tracer_provider),
-        service_name: &config.observability.otel.service_name,
     })?;
-    let metrics = Metrics::install(HTTP_REQUESTS_DURATION_SECONDS)?;
+    let metrics = Metrics::install(&[
+        (
+            HTTP_REQUESTS_DURATION_SECONDS,
+            HTTP_REQUESTS_DURATION_BUCKETS,
+        ),
+        // template:begin outbound-http:service-bootstrap-outbound-histogram
+        (
+            infra_outbound_http::REQUEST_DURATION_METRIC,
+            infra_outbound_http::REQUEST_DURATION_BUCKETS,
+        ),
+        // template:end outbound-http:service-bootstrap-outbound-histogram
+        // template:begin cache:service-bootstrap-cache-histogram
+        (
+            infra_cache::OPERATION_DURATION_METRIC,
+            infra_cache::OPERATION_DURATION_BUCKETS,
+        ),
+        // template:end cache:service-bootstrap-cache-histogram
+    ])?;
     metrics.record_trace_exporter_initialized(matches!(
         tracer_provider.exporter_state,
         ExporterState::Initialized { .. }
@@ -224,7 +240,7 @@ async fn serve(
             .clone()
             .upkeep(METRICS_MAINTENANCE_INTERVAL, cancel.child_token()),
     );
-    tracker.spawn(Metrics::runtime_metrics(
+    tracker.spawn(runtime_metrics(
         METRICS_MAINTENANCE_INTERVAL,
         cancel.child_token(),
     ));
@@ -834,19 +850,7 @@ fn tracing_options(config: &Config, instance_id: String) -> TracingOptions {
 
 /// One record with the non-secret facts an operator needs on every boot.
 fn log_startup_summary(config: &Config, exporter: &ExporterState) {
-    match exporter {
-        ExporterState::Degraded { reason } => tracing::warn!(
-            reason = %reason,
-            "trace exporter degraded; spans are recorded but not exported"
-        ),
-        ExporterState::Initialized { endpoint_source } => {
-            tracing::info!(
-                endpoint_source = endpoint_source.as_str(),
-                "trace exporter initialized"
-            );
-        }
-        ExporterState::Disabled => {}
-    }
+    exporter.log();
     tracing::info!(
         app.env = %config.app.env,
         app.version = %config.app.version,

@@ -31,8 +31,6 @@ pub struct LoggingOptions<'a> {
     /// Installed tracer provider; `None` leaves spans without an
     /// OpenTelemetry context.
     pub tracer_provider: Option<&'a TracerProviderHandle>,
-    /// Service name passed to the OpenTelemetry tracer.
-    pub service_name: &'a str,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -59,7 +57,7 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
         source,
     })?;
     let otel = options.tracer_provider.map(|handle| {
-        tracing_opentelemetry::layer().with_tracer(handle.tracer(options.service_name))
+        tracing_opentelemetry::layer().with_tracer(handle.tracer())
     });
     let trace_dispatch = Arc::new(OnceLock::new());
     let format: Box<dyn Layer<_> + Send + Sync> = match options.format {

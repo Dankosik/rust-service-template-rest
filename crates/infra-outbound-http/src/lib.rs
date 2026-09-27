@@ -21,6 +21,7 @@ use tracing::Instrument as _;
 pub use bytes::Bytes;
 pub use http::{HeaderMap, Method, Request, Response, StatusCode, Version, header};
 pub use url::Url;
+pub use observe::{REQUEST_DURATION_BUCKETS, REQUEST_DURATION_METRIC};
 
 /// Fixed client ceilings. Every field is required and positive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

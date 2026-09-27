@@ -84,8 +84,8 @@ pub struct OtelExporterConfig {
     /// OTLP/HTTP traces endpoint. A collector root without a path resolves
     /// to `/v1/traces`. Missing, empty, or whitespace-only (after trim) is
     /// vacant and falls back to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` then
-    /// `OTEL_EXPORTER_OTLP_ENDPOINT` presence, including empty; when those
-    /// variables are unset the exporter stays disabled.
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT`; when neither holds a non-blank value
+    /// the exporter stays disabled.
     #[serde(default, deserialize_with = "crate::de::blank_as_none")]
     pub otlp_endpoint: Option<String>,
     /// Collector credential as `key=value,key=value`. Environment only.

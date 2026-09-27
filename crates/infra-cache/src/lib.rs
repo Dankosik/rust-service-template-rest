@@ -24,6 +24,7 @@ use secrecy::{ExposeSecret, SecretString};
 use tracing::Instrument;
 
 use self::observe::{Failure, Operation, OperationGuard};
+pub use self::observe::{OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
 
 /// One reconnect attempt stays inside the startup check.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);

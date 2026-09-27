@@ -61,7 +61,6 @@ fn main() -> ExitCode {
             service_config::LogFormat::Text => LoggingFormat::Text,
         },
         tracer_provider: None,
-        service_name: &config.observability.otel.service_name,
     }) {
         return process_failure(&err.to_string());
     }

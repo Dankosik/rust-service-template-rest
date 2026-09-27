@@ -30,7 +30,8 @@ mod server;
 
 pub use contract::{FinalizeError, finalize_public};
 pub use harden::{
-    HTTP_METRICS_NAMES, HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, SHED_REQUESTS_METRIC, harden,
+    HTTP_METRICS_NAMES, HTTP_REQUESTS_DURATION_BUCKETS, HTTP_REQUESTS_DURATION_SECONDS,
+    HardenOptions, SHED_REQUESTS_METRIC, harden,
 };
 // template:begin authn:infra-http-authn-exports
 pub use authn::{VerifiedPrincipal, require_scope};

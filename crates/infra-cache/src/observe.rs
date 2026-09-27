@@ -5,7 +5,15 @@ use tracing::Span;
 
 use crate::{ServerIdentity, Unavailable};
 
-const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
+/// Cache command duration histogram.
+pub const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
+
+/// Buckets in seconds for [`OPERATION_DURATION_METRIC`], including a
+/// degraded timeout; the composition root passes both to the Prometheus
+/// recorder.
+pub const OPERATION_DURATION_BUCKETS: &[f64] = &[
+    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1.0,
+];
 
 /// The closed set of namespace operations.
 #[derive(Clone, Copy)]

@@ -2,8 +2,9 @@
 //! provider, Prometheus metrics, and the diagnostics router.
 //!
 //! Setup never blocks the service: OTLP exporter construction degrades to a
-//! logged reason and a no-op; ambient-credential conflicts, unparsable log
-//! directives, and recorder install failures still fail startup. Shutdown is
+//! logged reason and a no-op; ambient-credential conflicts, malformed typed
+//! OTLP headers, unparsable log directives, and recorder install failures
+//! still fail startup. Shutdown is
 //! bounded by the caller's budget. The crate decisions are recorded in
 //! `docs/configuration-source-policy.md`.
 
@@ -12,7 +13,9 @@ pub mod metrics;
 pub mod traces;
 
 pub use logging::{LoggingError, LoggingFormat, LoggingOptions, install_subscriber};
-pub use metrics::{Metrics, MetricsError, TRACE_EXPORTER_ACTIVE_METRIC, diagnostics_router};
+pub use metrics::{
+    Metrics, MetricsError, TRACE_EXPORTER_ACTIVE_METRIC, diagnostics_router, runtime_metrics,
+};
 pub use traces::{
     EndpointSource, ExporterState, ProviderShutdown, ResolvedSampler, TracerProviderHandle,
     TracingError, TracingOptions, install_tracer_provider,
