@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::process::ExitCode;
 
 use futures_util::{Stream, StreamExt as _};
-use grpc_contracts::generated::{
+use grpc_contracts::example::v1::{
     BidiStreamRequest, BidiStreamResponse, ClientStreamRequest, ClientStreamResponse,
     ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
     echo_service_server::{EchoService, EchoServiceServer},

@@ -1,21 +1,14 @@
-//! Committed native gRPC contract generated from the owned protobuf schema.
+//! Committed native gRPC contracts generated from `api/proto` by
+//! `make grpc-generate`. Modules mirror protobuf packages, so `example.v1` is
+//! `example::v1`.
 
-#![forbid(unsafe_code)]
-
-/// Generated protobuf messages and native tonic contracts.
-#[allow(
-    clippy::default_trait_access,
-    clippy::doc_markdown,
-    clippy::missing_const_for_fn,
-    clippy::missing_errors_doc,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::similar_names,
-    clippy::too_many_lines,
-    clippy::use_self,
-    clippy::wildcard_imports,
-    reason = "prost and tonic generator output is checked for drift and is not manually edited"
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::restriction,
+    rustdoc::all,
+    reason = "prost and tonic output is regenerated, checked for drift and never edited by hand"
 )]
-pub mod generated {
-    include!("generated/example.v1.rs");
-}
+
+include!("generated/_includes.rs");
