@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use infra_postgres::{Dsn, SessionOptions, connect_session, raw_sqlstate};
+use infra_postgres::{Dsn, SessionOptions, connect_session, sqlstate};
 use sqlx::Connection;
 use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migration, Migrator};
 use sqlx::postgres::{PgConnection, PgPool};
@@ -75,7 +75,7 @@ pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
         Ok(Err(MigrateError::Dirty(_))) => return Err(HistoryError::Mismatch),
         // An absent history table means nothing is applied yet.
         Ok(Err(MigrateError::Execute(err)))
-            if raw_sqlstate(&err).as_deref() == Some(UNDEFINED_TABLE) =>
+            if sqlstate(&err).as_deref() == Some(UNDEFINED_TABLE) =>
         {
             Vec::new()
         }

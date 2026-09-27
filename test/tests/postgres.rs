@@ -262,6 +262,31 @@ async fn a_commit_the_server_rejects_is_commit_failed(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = false)]
+async fn a_swallowed_statement_failure_is_commit_failed_not_success(pool: PgPool) {
+    pool.execute("CREATE TABLE t (id int PRIMARY KEY)")
+        .await
+        .unwrap();
+    let result: Result<(), AppError> = in_tx(&pool, async |tx| {
+        connection(tx).execute("INSERT INTO t VALUES (1)").await?;
+        // The duplicate aborts the transaction; the closure ignores that.
+        let _ = connection(tx).execute("INSERT INTO t VALUES (1)").await;
+        Ok(())
+    })
+    .await;
+    match result {
+        Err(AppError::Tx(TxError::CommitFailed(err))) => {
+            assert_eq!(err.as_database_error().unwrap().code().unwrap(), "25P02");
+        }
+        other => panic!("expected CommitFailed, got {other:?}"),
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM t")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[sqlx::test(migrations = false)]
 async fn a_serialization_failure_is_retryable(pool: PgPool) {
     pool.execute("CREATE TABLE counters (id int PRIMARY KEY, n int NOT NULL)")
         .await

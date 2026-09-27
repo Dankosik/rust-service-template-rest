@@ -143,7 +143,6 @@ metrics-process = { version = "2.4.3", default-features = false }
 tokio-metrics = { version = "0.5.2", default-features = false }
 thiserror = { version = "2.0.20", default-features = false }
 
-strum = { version = "0.28.0", default-features = false }
 
 # Utility toolkit (docs/backend-utility-recipes.md).
 # Declarations are not runtime dependencies; each owner opts in below.

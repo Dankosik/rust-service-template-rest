@@ -55,10 +55,12 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
 <!-- template:begin postgres:docs-config-postgres-source -->
 - `postgres.dsn` is the only PostgreSQL connection source. It must be a
   `postgres://` URL with explicit host, port, user, password, database, and
-  `sslmode` (`disable`, `require`, `verify-ca`, `verify-full`) and nothing
-  else; the libpq environment (`PGHOST`, `PGPASSWORD`, `PGSSLMODE`, ...),
-  `.pgpass`, service files, socket paths, and TLS key or certificate files
-  are refused at startup, and the diagnostic never carries the value
+  `sslmode` (`disable`, `require`, `verify-ca`, `verify-full`), plus an
+  optional absolute `sslrootcert` CA file under `verify-ca`/`verify-full`,
+  and nothing else; libpq variables that would still merge into it
+  (`PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, `PGOPTIONS`), `.pgpass`,
+  service files, socket paths, and client key or certificate files are
+  refused at startup, and the diagnostic never carries the value
   ([Persistence](architecture/persistence.md#connection-admission)).
 <!-- template:end postgres:docs-config-postgres-source -->
 <!-- template:begin messaging:docs-config-messaging-source -->

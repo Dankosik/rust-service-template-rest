@@ -2,20 +2,13 @@
 
 use std::borrow::Cow;
 
-/// Extract the driver's unmodified SQLSTATE, when it supplied one.
-#[must_use]
-pub fn raw_sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
-    err.as_database_error()?.code()
-}
-
-/// Extract a SQLSTATE safe to expose in structured diagnostics.
+/// The SQLSTATE of a database error, when the driver supplied a valid one.
 ///
-/// Driver-provided text remains a raw classification input for transaction
-/// policy, but logs and consumer mappings accept only the PostgreSQL five-byte
-/// uppercase-alphanumeric code format.
+/// Only the PostgreSQL five-byte uppercase-alphanumeric format is returned,
+/// so the value is safe as a structured log field or a metric label.
 #[must_use]
 pub fn sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
-    raw_sqlstate(err).filter(|code| {
+    err.as_database_error()?.code().filter(|code| {
         code.len() == 5
             && code
                 .bytes()
@@ -26,13 +19,7 @@ pub fn sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
 /// Whether the same transaction work could succeed if rerun by its caller.
 #[must_use]
 pub fn retryable(err: &sqlx::Error) -> bool {
-    raw_sqlstate(err).is_some_and(|code| code == "40001" || code == "40P01")
-}
-
-/// Whether PostgreSQL definitely rejected a transaction commit.
-#[must_use]
-pub fn commit_definitely_failed(code: &str) -> bool {
-    code.starts_with("23") || (code.starts_with("40") && code != "40003")
+    sqlstate(err).is_some_and(|code| code == "40001" || code == "40P01")
 }
 
 /// Whether `err` reports a transient condition that a later attempt may not
@@ -80,7 +67,7 @@ pub const fn failure_cause(err: &sqlx::Error) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -88,9 +75,6 @@ mod tests {
         assert!(retryable(&database("40001")));
         assert!(retryable(&database("40P01")));
         assert!(!retryable(&database("40003")));
-        assert!(commit_definitely_failed("23505"));
-        assert!(commit_definitely_failed("40P01"));
-        assert!(!commit_definitely_failed("40003"));
         assert!(transient(&database("08006")));
         assert!(transient(&database("57014")));
         assert!(transient(&sqlx::Error::PoolTimedOut));
@@ -108,7 +92,7 @@ mod tests {
         );
     }
 
-    fn database(code: &'static str) -> sqlx::Error {
+    pub(crate) fn database(code: &'static str) -> sqlx::Error {
         sqlx::Error::Database(Box::new(TestDatabaseError { code }))
     }
 
