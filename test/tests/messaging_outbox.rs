@@ -134,6 +134,16 @@ impl Fixture {
             .expect("test administrator removes the source stream");
     }
 
+    async fn restore_source(&self) {
+        create_source(
+            &self.jetstream,
+            &self.stream,
+            &self.subject,
+            self.duplicate_window,
+        )
+        .await;
+    }
+
     async fn published(&self) -> u64 {
         self.jetstream
             .get_stream(&self.stream)
@@ -423,7 +433,7 @@ async fn until<T>(what: &str, mut check: impl AsyncFnMut() -> Option<T>) -> T {
 
 async fn job(pool: &PgPool, key: &str) -> JobRow {
     let row = sqlx::query(
-        "SELECT id::text AS id, state, attempts, failure_reason \
+        "SELECT id::text AS id, state, attempts, failure_reason, error_summary \
          FROM background_jobs WHERE kind = $1 AND unique_key = $2",
     )
     .bind(OUTBOX_KIND)
@@ -436,6 +446,7 @@ async fn job(pool: &PgPool, key: &str) -> JobRow {
         state: row.try_get("state").expect("job state"),
         attempts: row.try_get("attempts").expect("job attempts"),
         failure_reason: row.try_get("failure_reason").expect("failure reason"),
+        error_summary: row.try_get("error_summary").expect("error summary"),
     }
 }
 
@@ -444,6 +455,7 @@ struct JobRow {
     state: String,
     attempts: i16,
     failure_reason: Option<String>,
+    error_summary: Option<String>,
 }
 
 async fn outbox_count(pool: &PgPool) -> i64 {
@@ -727,7 +739,7 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
             (relay.dropped_ack.load(Ordering::SeqCst)
                 && row.state == "pending"
                 && row.attempts >= 1
-                && row.failure_reason.is_some())
+                && row.error_summary.is_some())
             .then_some(row)
         },
     )
@@ -832,6 +844,7 @@ async fn final_attempt_publication_failure_leaves_a_visible_failed_job(pool: PgP
     assert!(failed.failure_reason.is_some());
 
     finish(run, &[&publisher, &jobs]).await;
+    fixture.restore_source().await;
     close(messaging).await;
     fixture.cleanup().await;
 }
