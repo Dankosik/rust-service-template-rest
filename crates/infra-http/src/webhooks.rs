@@ -173,14 +173,15 @@ mod tests {
 
     #[tokio::test]
     async fn inert_receiver_returns_a_problem_before_reading_or_authenticating_the_body() {
-        let readiness = Readiness::new(Vec::new());
-        readiness
-            .refresh(RefreshPolicy {
+        let readiness = Readiness::new(
+            Vec::new(),
+            RefreshPolicy {
                 interval: std::time::Duration::from_secs(1),
                 probe_budget: std::time::Duration::from_secs(1),
                 failure_threshold: 1,
-            })
-            .await;
+            },
+        );
+        readiness.refresh().await;
         let app = crate::finalize_public(router())
             .expect("the webhook operation is explicitly public")
             .with_state(readiness.reader())

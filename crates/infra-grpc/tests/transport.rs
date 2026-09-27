@@ -278,7 +278,14 @@ impl Fixture {
         // template:begin authn:grpc-transport-test-auth-fixture
         let (verifier, provider) = verifier_fixture().await;
         // template:end authn:grpc-transport-test-auth-fixture
-        let readiness = Readiness::new(Vec::new());
+        let readiness = Readiness::new(
+            Vec::new(),
+            RefreshPolicy {
+                interval: Duration::from_secs(60),
+                probe_budget: Duration::from_secs(1),
+                failure_threshold: 1,
+            },
+        );
         if seed {
             seed_ready(&readiness).await;
         }
@@ -378,13 +385,7 @@ fn watch_request(service: &str) -> Request<HealthCheckRequest> {
 }
 
 async fn seed_ready(readiness: &Readiness) {
-    readiness
-        .refresh(RefreshPolicy {
-            interval: Duration::from_secs(60),
-            probe_budget: Duration::from_secs(1),
-            failure_threshold: 1,
-        })
-        .await;
+    readiness.refresh().await;
 }
 
 fn assert_seen(echo: &Echo, expected: &[Seen]) {

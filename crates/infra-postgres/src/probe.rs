@@ -36,16 +36,24 @@ impl Probe for PostgresProbe {
 }
 
 /// The verdict message names the failure class without dependency
-/// internals; the driver's own text can quote server details.
+/// internals; the driver's own text can quote server details. A server
+/// rejection carries its SQLSTATE, a bounded code that tells an
+/// authentication failure (`28P01`) from other rejections.
 fn probe_error(err: &sqlx::Error) -> ProbeError {
-    ProbeError::new(match err {
+    let class = match err {
         sqlx::Error::PoolTimedOut => "no connection available inside the acquire budget",
         sqlx::Error::PoolClosed => "pool is closed",
         sqlx::Error::Io(_) => "connection failed",
         sqlx::Error::Tls(_) => "tls handshake failed",
-        sqlx::Error::Database(_) => "server rejected the ping",
+        sqlx::Error::Database(error) => {
+            if let Some(code) = error.code() {
+                return ProbeError::new(format!("server rejected the ping (SQLSTATE {code})"));
+            }
+            "server rejected the ping"
+        }
         _ => "ping failed",
-    })
+    };
+    ProbeError::new(class)
 }
 
 #[cfg(test)]
@@ -55,14 +63,14 @@ mod tests {
     #[test]
     fn messages_stay_generic() {
         assert_eq!(
-            probe_error(&sqlx::Error::PoolTimedOut).0,
+            probe_error(&sqlx::Error::PoolTimedOut).to_string(),
             "no connection available inside the acquire budget"
         );
         assert_eq!(
             probe_error(&sqlx::Error::Io(std::io::Error::other(
                 "host db.internal refused"
             )))
-            .0,
+            .to_string(),
             "connection failed"
         );
     }

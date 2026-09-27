@@ -200,7 +200,7 @@ every record inside a request) or `text` (local development).
   cadence. It also closes a client that connects and sends nothing.
 - `health.probe_budget` (default `4s`) bounds one background readiness
   evaluation across every probe; `/health/ready` itself never runs a probe.
-  The previous operator key `health.readiness_timeout` is still accepted.
+  The verdict names the probe that ran out of the budget.
 - `http.drain_timeout` (default `25s`) bounds the HTTP drain, including
   the `http.readiness_propagation_delay` (default `15s`) in front of it.
   The previous operator key `http.shutdown_timeout` is still accepted.
@@ -236,9 +236,9 @@ every record inside a request) or `text` (local development).
   merely resembles a probe is still recorded.
 - `health.refresh_interval` (default `2s`), `health.probe_budget`
   (default `4s`), and `health.failure_threshold` (default `3`) drive the
-  background readiness refresher. A cached verdict older than three refresh
-  periods plus one probe budget is refused, so a dead refresher cannot leave
-  a stale "healthy" standing.
+  background readiness refresher. A cached verdict older than the staleness
+  bound is refused, so a dead refresher cannot leave a stale "healthy"
+  standing; `health::RefreshPolicy::stale_after` owns the formula.
 <!-- template:begin postgres:docs-config-postgres-budget -->
 - `postgres.enabled` (default `false`) selects the PostgreSQL profile;
   `postgres.max_connections` (default `4`, `1..500`) is the pool's upper
