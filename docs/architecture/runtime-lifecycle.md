@@ -90,9 +90,11 @@ adds a readiness probe or a shutdown stage of its own.
 
 Configuration and dependency admission precede traffic acceptance.
 Bootstrap, not handlers or feature code, owns process lifecycle and the
-cleanup of a partial startup: a pool opened before a later stage failed is
-closed explicitly under the dependency-close budget before the process
-exits `1`.
+cleanup of a partial startup. Startup records every opened dependency in one
+`Dependencies` value, and a failed or stopped startup runs the same staged
+teardown as a stop signal without the listener stages: background tasks
+join, opened dependencies close under the dependency-close budget, and
+telemetry flushes. A failed startup then exits `1`.
 
 ## Readiness and liveness
 
@@ -295,7 +297,7 @@ and startup continues. The cache is not a readiness probe unless composition
 pushes `cache.probe()` into the probe list. It is never a liveness check. A
 gate would turn an outage into total unavailability.
 
-Shutdown drops `Option<Cache>` inside `close_dependencies`, in the dependency
+Shutdown drops `Option<Cache>` inside `Dependencies::close`, in the dependency
 stage after HTTP drain. The connection closes when its last clone drops, and
 the drop does not add to `DEPENDENCY_CLOSE`. The same drop runs on the
 startup-failure and stopped-startup paths. The [guide](../cache.md) shows the

@@ -90,12 +90,21 @@ impl MessagingConfig {
             ));
         }
         self.required_credentials(app_env)?;
+        self.required_source_stream()?;
+        Ok(())
+    }
+
+    /// The stream an active producer publishes to.
+    ///
+    /// # Errors
+    ///
+    /// Returns `messaging.source_stream` when the value is absent.
+    pub fn required_source_stream(&self) -> Result<&str, ValidationError> {
         required(
             "messaging.source_stream",
             self.source_stream.as_deref(),
             "an active producer",
-        )?;
-        Ok(())
+        )
     }
 
     /// Validate the inputs required by a consuming worker.

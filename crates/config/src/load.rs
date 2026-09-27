@@ -939,6 +939,8 @@ mod tests {
                     "APP__INBOUND_WEBHOOKS__SECRETS__PARTNER_V2",
                     "fixture-secret",
                 ),
+                ("APP__POSTGRES__ENABLED", "true"),
+                ("APP__POSTGRES__DSN", "postgres://localhost/app"),
             ]),
         )
         .unwrap();

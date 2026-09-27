@@ -70,6 +70,11 @@ impl Modify for BearerAuth {
 /// Bootstrap finalizes it, supplies the state, and hardens the routes;
 /// [`document`] consumes the document-only path.
 ///
+/// The template composes nothing fallible yet. The `Result` is the seam for
+/// the first idempotent operation, added here as
+/// `.routes(idempotency.route(routes!(handler))?)`, so neither this signature
+/// nor bootstrap changes when it arrives.
+///
 /// # Errors
 ///
 /// Returns a local idempotency composition error when a participating route

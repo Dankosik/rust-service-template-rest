@@ -163,7 +163,7 @@ impl Config {
         self.grpc.validate()?;
         // template:end grpc:config-validate
         // template:begin inbound-webhooks:config-inbound-webhooks-validate
-        self.inbound_webhooks.validate()?;
+        self.inbound_webhooks.validate(self.postgres.enabled)?;
         // template:end inbound-webhooks:config-inbound-webhooks-validate
         self.health.validate()?;
         self.log.validate()?;
