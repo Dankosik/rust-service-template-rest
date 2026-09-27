@@ -1058,6 +1058,7 @@ fn leaf(
     )
 }
 
+// template:begin authn:grpc-transport-test-auth-provider-tls
 fn server_tls_config(pki: &Pki, client_auth: bool) -> rustls::ServerConfig {
     // PEM parsing here follows the production parser through the public material.
     let certs = rustls::pki_types::CertificateDer::pem_slice_iter(&pki.server_certificate)
@@ -1087,6 +1088,7 @@ fn server_tls_config(pki: &Pki, client_auth: bool) -> rustls::ServerConfig {
     config.alpn_protocols = vec![b"h2".to_vec()];
     config
 }
+// template:end authn:grpc-transport-test-auth-provider-tls
 
 async fn assert_tls_denied(
     address: SocketAddr,
