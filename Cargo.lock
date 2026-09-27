@@ -4184,7 +4184,6 @@ dependencies = [
  "infra-grpc",
  "infra-http",
  "infra-idempotency-store",
- "infra-messaging",
  "infra-postgres",
  "infra-telemetry",
  "infra-webhooks",

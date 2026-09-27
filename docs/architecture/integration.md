@@ -83,8 +83,9 @@ bounded native-client calls, expected-stream ACK classification, and consumer
 settlement. Bootstrap owns connection admission, cached readiness, and close;
 features supply only registered typed payloads and handlers. Streams, replicas,
 retention, storage, capacity, and consumer names remain operator topology.
-The adapter can reconcile only delivery-coupled fields of its named consumer;
-it never creates streams or deletes/recreates a cursor to hide incompatibility.
+The adapter declares its named consumer (create or update) and the broker
+refuses an incompatible change; it never creates streams or deletes/recreates a
+cursor to hide incompatibility.
 
 The integration proof uses an actual NATS server plus actual Go source in both
 wire directions. It proves an ACK, rejection, and ambiguity are distinct;

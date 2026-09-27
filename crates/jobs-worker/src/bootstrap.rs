@@ -766,7 +766,6 @@ fn messaging_options(
             .map(|value| value.expose_secret().to_owned()),
         root_ca_path: messaging.root_ca_path.clone(),
         allow_plaintext: messaging.allow_plaintext,
-        allow_unauthenticated: messaging.allow_unauthenticated,
         source_stream,
         dlq_stream: None,
         max_payload_bytes: usize::try_from(messaging.max_payload_bytes.as_u64())

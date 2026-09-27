@@ -259,16 +259,17 @@ stopping the worker. [Async Architecture](async.md) records the mechanism.
 
 Messaging startup installs process signals before broker I/O, admits the NATS
 connection within the existing startup budget, requires JetStream and server
-version >=2.12.3, then checks operator-created source/DLQ topology and the
-named consumer. The API admits only a producer; the worker admits a consumer
-only after a handler registry exists. Readiness refreshes bounded client and
-topology state in the existing `health` owner, so HTTP and metrics read a
-cached verdict and connection loss cannot leave stale health indefinitely.
+version >=2.12.3, then checks operator-created source/DLQ streams and declares
+the named consumer. Only `jobs-worker` connects; the API publishes through the
+outbox. The worker admits a consumer only after a handler registry exists.
+Readiness refreshes local connection state in the existing `health` owner, so
+HTTP and metrics read a cached verdict and connection loss cannot leave stale
+health indefinitely.
 
 At the first stop signal, readiness drains and no new NATS pull starts.
 Handlers, DLQ transfer, and source settlement share the worker's remaining
-drain deadline. At expiry, unfinished handler tasks are cancelled, aborted and
-joined, leaving their source records for redelivery. Dependency close submits
+drain deadline. At expiry, unfinished delivery tasks are aborted, leaving their
+source records for redelivery. Dependency close submits
 NATS drain and waits for its native Closed notification within the existing
 close budget; an absent notification, unjoined application work, or forced
 drain yields the established degraded exit code rather than clean shutdown.

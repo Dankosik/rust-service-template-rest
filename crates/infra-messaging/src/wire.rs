@@ -1,10 +1,12 @@
 //! Go-compatible NATS envelope headers and bounded decoding.
 
+use std::fmt::Write as _;
+
 use async_nats::HeaderMap;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
-use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::error::MessagingError;
 use crate::prepared::PreparedEvent;
@@ -191,35 +193,21 @@ pub(crate) fn valid_subject(subject: &str) -> bool {
         })
 }
 
-pub(crate) fn valid_filter(filter: &str) -> bool {
-    let mut tokens = filter.split('.').peekable();
-    while let Some(token) = tokens.next() {
-        if token == ">" {
-            return tokens.peek().is_none();
-        }
-        if token != "*" && !valid_subject(token) {
-            return false;
-        }
+/// Whether the concrete `subject` is selected by the NATS `filter`.
+pub(crate) fn subject_matches(filter: &str, subject: &str) -> bool {
+    if !valid_subject(subject) {
+        return false;
     }
-    !filter.is_empty()
-}
-
-/// Whether every subject selected by `filter` is included by `pattern`.
-pub(crate) fn filter_covers(pattern: &str, filter: &str) -> bool {
-    let mut source = pattern.split('.');
-    let mut selected = filter.split('.');
+    let mut filter_tokens = filter.split('.');
+    let mut subject_tokens = subject.split('.');
     loop {
-        match (source.next(), selected.next()) {
+        match (filter_tokens.next(), subject_tokens.next()) {
             (Some(">"), Some(_)) | (None, None) => return true,
-            (Some("*"), Some(token)) if token != ">" => {}
-            (Some(left), Some(right)) if left == right => {}
+            (Some("*"), Some(_)) => {}
+            (Some(expected), Some(actual)) if expected == actual => {}
             _ => return false,
         }
     }
-}
-
-pub(crate) fn subject_matches(filter: &str, subject: &str) -> bool {
-    valid_subject(subject) && filter_covers(filter, subject)
 }
 
 pub(crate) fn header_value<'a>(headers: &'a HeaderMap, name: &'static str) -> &'a str {
@@ -278,94 +266,18 @@ fn validate_header_bytes(headers: &HeaderMap) -> Result<(), MessagingError> {
     Ok(())
 }
 
-pub(crate) fn validate_encoded_message(
-    subject: &str,
-    headers: &HeaderMap,
-    payload_bytes: usize,
-    max_payload_bytes: usize,
-) -> Result<(), MessagingError> {
-    validate_header_bytes(headers)?;
-    if payload_bytes > max_payload_bytes
-        || subject
-            .len()
-            .saturating_add(encoded_header_bytes(headers))
-            .saturating_add(payload_bytes)
-            > max_payload_bytes.saturating_add(HEADER_LIMIT_BYTES)
-    {
-        return Err(MessagingError::Bounds);
-    }
-    Ok(())
-}
-
 fn format_timestamp(value: OffsetDateTime) -> Result<String, MessagingError> {
-    let value = value
-        .checked_to_offset(time::UtcOffset::UTC)
-        .ok_or(MessagingError::Envelope("creation time is out of range"))?;
-    // Go formats even a normalized UTC year outside RFC3339's four-digit
-    // parse range. Preserve that asymmetry rather than panicking or truncating.
-    let year = if value.year() < 0 {
-        format!("-{:04}", value.year().unsigned_abs())
-    } else {
-        format!("{:04}", value.year())
-    };
-    let mut encoded = format!(
-        "{year}-{:02}-{:02}T{:02}:{:02}:{:02}",
-        u8::from(value.month()),
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second(),
-    );
-    if value.nanosecond() != 0 {
-        let fraction = format!("{:09}", value.nanosecond());
-        encoded.push('.');
-        encoded.push_str(fraction.trim_end_matches('0'));
-    }
-    encoded.push('Z');
-    Ok(encoded)
+    value
+        .checked_to_offset(UtcOffset::UTC)
+        .and_then(|value| value.format(&Rfc3339).ok())
+        .ok_or(MessagingError::Envelope("creation time is out of range"))
 }
 
 fn parse_timestamp(value: &str) -> Result<OffsetDateTime, MessagingError> {
-    let invalid = || MessagingError::Envelope("creation time is invalid");
-    if !value.is_ascii() || value.as_bytes().get(10) != Some(&b'T') {
-        return Err(invalid());
-    }
-    // Go's RFC3339Nano fallback accepts a one-digit hour and comma fractions.
-    // Normalize only those spellings; time remains the date/time parser.
-    let mut normalized = value.replace(',', ".");
-    if normalized.as_bytes().get(12) == Some(&b':') {
-        normalized.insert(11, '0');
-    }
-    if normalized.get(17..19) == Some("60") {
-        return Err(invalid()); // Go rejects leap seconds; time accepts them.
-    }
-    let offset_seconds = if normalized.ends_with('Z') {
-        0
-    } else {
-        let start = normalized.len().checked_sub(6).ok_or_else(invalid)?;
-        let suffix = normalized.get(start..).ok_or_else(invalid)?;
-        if !matches!(suffix.as_bytes()[0], b'+' | b'-')
-            || suffix.as_bytes()[3] != b':'
-            || !suffix.as_bytes()[1..3].iter().all(u8::is_ascii_digit)
-            || !suffix.as_bytes()[4..6].iter().all(u8::is_ascii_digit)
-        {
-            return Err(invalid());
-        }
-        let hour: i64 = suffix[1..3].parse().map_err(|_| invalid())?;
-        let minute: i64 = suffix[4..6].parse().map_err(|_| invalid())?;
-        if hour > 24 || minute > 60 {
-            return Err(invalid());
-        }
-        let sign = if suffix.starts_with('-') { -1 } else { 1 };
-        let seconds = sign * (hour * 3600 + minute * 60);
-        normalized.truncate(start);
-        normalized.push('Z');
-        seconds
-    };
-    OffsetDateTime::parse(&normalized, &Rfc3339)
-        .map_err(|_| invalid())?
-        .checked_sub(time::Duration::seconds(offset_seconds))
-        .ok_or_else(invalid)
+    OffsetDateTime::parse(value, &Rfc3339)
+        .ok()
+        .and_then(|value| value.checked_to_offset(UtcOffset::UTC))
+        .ok_or(MessagingError::Envelope("creation time is invalid"))
 }
 
 fn record_id(
@@ -375,7 +287,6 @@ fn record_id(
     stored_at: OffsetDateTime,
     publication_id: &str,
 ) -> Result<String, MessagingError> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let stored_at = format_timestamp(stored_at)?;
     let sequence = stream_sequence.to_string();
     let input = [
@@ -385,14 +296,17 @@ fn record_id(
         publication_id,
     ]
     .join("\0");
-    let digest = Sha256::digest(input.as_bytes());
-    let mut id = String::with_capacity(prefix.len() + digest.len() * 2);
+    Ok(prefixed_sha256_hex(prefix, input.as_bytes()))
+}
+
+/// `prefix` followed by the lowercase hex SHA-256 of `input`.
+pub(crate) fn prefixed_sha256_hex(prefix: &str, input: &[u8]) -> String {
+    let mut id = String::with_capacity(prefix.len() + 64);
     id.push_str(prefix);
-    for byte in digest.iter().copied() {
-        id.push(char::from(HEX[usize::from(byte >> 4)]));
-        id.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    for byte in Sha256::digest(input) {
+        let _ = write!(id, "{byte:02x}");
     }
-    Ok(id)
+    id
 }
 
 fn is_zero_time(value: OffsetDateTime) -> bool {

@@ -88,10 +88,12 @@ completion: do not replay the business closure after an unknown commit.
 
 The reserved publisher has 25 maximum attempts and a 30-second handler budget.
 Each broker operation is bounded by the lesser of the caller's remaining time
-and five seconds. Unavailable or ambiguous publication, and recoverable broker
-topology or configuration refusal, returns a 30-second snooze. Snooze refunds
-the attempt, including the final one, so a long broker outage retains pending
-intent instead of exhausting it. Malformed stored intent is a visible terminal
+and five seconds. Any failed publication, rejected or ambiguous, is a retryable
+jobs failure: it spends an attempt and waits for the jobs backoff (`attempt^4`
+seconds), so 25 attempts cover roughly 20 days of broker outage. Retrying an
+ambiguous publication is safe because the broker deduplicates the unchanged
+publication ID. After the last attempt the job stays visible in the `failed`
+state for an operator to retry. Malformed stored intent is a visible terminal
 job failure, never a completed publication.
 
 Operators retain the pending job when recovering or rolling back an application
@@ -116,7 +118,7 @@ receive a full grace period each. At a forced drain, existing jobs release and
 fencing rules retain recoverable publication intent.
 
 The assembled validation plan must use real PostgreSQL and NATS to cover
-commit/rollback, same/different/lost live-key outcomes, final-attempt snooze,
+commit/rollback, same/different/lost live-key outcomes, final-attempt failure,
 outage recovery, uncertain ACK/completion, durable consumer effects, and
 publication while webhook slots are occupied. It also retains meaningful
 outbox-only, combined, and neighboring-profile representatives plus locked

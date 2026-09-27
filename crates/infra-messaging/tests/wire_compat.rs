@@ -105,13 +105,7 @@ impl EventPayload for BridgePayload {
 fn rust_production_wire_exports_for_go() {
     let fixtures = fixtures();
     assert_eq!(fixtures.version, 1, "unsupported Go-wire fixture version");
-    for name in [
-        "fractional_raw_bytes",
-        "identity_schema_boundary",
-        "go_permissive_fraction_offset",
-        "go_offset_minute_sixty",
-        "go_utc_year_boundary",
-    ] {
+    for name in ["fractional_raw_bytes", "identity_schema_boundary"] {
         assert!(
             fixtures.cases.iter().any(|fixture| fixture.name == name),
             "fixture must retain the {name} actual-Go observation"

@@ -9,9 +9,6 @@ use std::time::Duration;
 
 use health::Readiness;
 use infra_http::{Drained, Server};
-// template:begin messaging:service-shutdown-messaging-imports
-use infra_messaging::{CloseOutcome, Messaging};
-// template:end messaging:service-shutdown-messaging-imports
 // template:begin cache:service-shutdown-cache-imports
 use infra_cache::Cache;
 // template:end cache:service-shutdown-cache-imports
@@ -94,9 +91,6 @@ pub(crate) async fn close_dependencies(
     // template:begin postgres:shutdown-startup-pool-close
     pool: Option<&PgPool>,
     // template:end postgres:shutdown-startup-pool-close
-    // template:begin messaging:service-shutdown-startup-messaging-close
-    messaging: Option<Messaging>,
-    // template:end messaging:service-shutdown-startup-messaging-close
     // template:begin cache:service-shutdown-startup-cache-close
     cache: Option<Cache>,
     // template:end cache:service-shutdown-startup-cache-close
@@ -129,25 +123,7 @@ pub(crate) async fn close_dependencies(
         // template:end postgres:shutdown-dependency-pool-close
         false
     };
-    let messaging_close = async {
-        // template:begin messaging:service-shutdown-dependency-messaging-close
-        if let Some(messaging) = messaging {
-            return match messaging.close(deadline, &CancellationToken::new()).await {
-                CloseOutcome::Complete => {
-                    tracing::info!("messaging_closed");
-                    false
-                }
-                CloseOutcome::TimedOut | CloseOutcome::UnobservedClose => {
-                    tracing::warn!("messaging resource outlived its close budget");
-                    true
-                }
-            };
-        }
-        // template:end messaging:service-shutdown-dependency-messaging-close
-        false
-    };
-    let (postgres_overran, messaging_overran) = tokio::join!(postgres_close, messaging_close);
-    postgres_overran || messaging_overran
+    postgres_close.await
 }
 
 /// A startup stop has no admitted listener, but owns the usual bounded tail.
@@ -157,9 +133,6 @@ pub(crate) async fn finish_stopped_startup(
     // template:begin postgres:shutdown-stopped-startup-pool-parameter
     pool: Option<&PgPool>,
     // template:end postgres:shutdown-stopped-startup-pool-parameter
-    // template:begin messaging:service-shutdown-stopped-startup-messaging-parameter
-    messaging: Option<Messaging>,
-    // template:end messaging:service-shutdown-stopped-startup-messaging-parameter
     // template:begin cache:service-shutdown-stopped-startup-cache-parameter
     cache: Option<Cache>,
     // template:end cache:service-shutdown-stopped-startup-cache-parameter
@@ -173,9 +146,6 @@ pub(crate) async fn finish_stopped_startup(
         // template:begin postgres:shutdown-stopped-startup-pool-argument
         pool,
         // template:end postgres:shutdown-stopped-startup-pool-argument
-        // template:begin messaging:service-shutdown-stopped-startup-messaging-argument
-        messaging,
-        // template:end messaging:service-shutdown-stopped-startup-messaging-argument
         // template:begin cache:service-shutdown-stopped-startup-cache-argument
         cache,
         // template:end cache:service-shutdown-stopped-startup-cache-argument
@@ -299,9 +269,6 @@ pub(crate) struct Plan<'a> {
     // template:begin postgres:shutdown-plan-pool
     pub(crate) postgres_pool: Option<PgPool>,
     // template:end postgres:shutdown-plan-pool
-    // template:begin messaging:service-shutdown-plan-messaging
-    pub(crate) messaging: Option<Messaging>,
-    // template:end messaging:service-shutdown-plan-messaging
     // template:begin cache:service-shutdown-plan-cache
     pub(crate) cache: Option<Cache>,
     // template:end cache:service-shutdown-plan-cache
@@ -427,9 +394,6 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         // template:begin postgres:shutdown-pool-close-prefix
         plan.postgres_pool.as_ref(),
         // template:end postgres:shutdown-pool-close-prefix
-        // template:begin messaging:service-shutdown-close-messaging-argument
-        plan.messaging,
-        // template:end messaging:service-shutdown-close-messaging-argument
         // template:begin cache:service-shutdown-close-cache-argument
         plan.cache,
         // template:end cache:service-shutdown-close-cache-argument

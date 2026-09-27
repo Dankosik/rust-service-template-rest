@@ -47,13 +47,7 @@ impl PreparedEvent {
             occurred_at: event.occurred_at(),
             payload: payload.into(),
         };
-        let headers = crate::wire::encode_prepared(&prepared)?;
-        crate::wire::validate_encoded_message(
-            &prepared.subject,
-            &headers,
-            prepared.payload.len(),
-            max_payload_bytes,
-        )?;
+        crate::wire::encode_prepared(&prepared)?;
         Ok(prepared)
     }
     #[must_use]
