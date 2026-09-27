@@ -52,7 +52,10 @@ pub struct Tx<'c> {
 /// A connection that must not return to the pool while a `BEGIN` future is
 /// pending. sqlx cannot know whether a cancelled `BEGIN` reached PostgreSQL,
 /// so cancellation discards this physical connection. Once a transaction is
-/// returned, sqlx owns its existing drop/rollback behavior again.
+/// returned, sqlx owns its existing drop/rollback behavior again. The guard
+/// can be removed once the pinned sqlx release contains launchbadge/sqlx
+/// f1e94ec ("roll back a transaction cancelled during BEGIN", merged
+/// 2026-09-09, not in 0.9.0).
 struct PendingBegin {
     connection: PoolConnection<Postgres>,
     armed: Cell<bool>,

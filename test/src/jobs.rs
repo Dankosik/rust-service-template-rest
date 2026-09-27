@@ -32,9 +32,9 @@ pub enum ProbeAction {
     FailRetryable,
     /// Fail with a permanent error.
     FailPermanent,
-    /// Request a caller-selected retry delay.
-    RetryAfter {
-        /// The requested delay in milliseconds.
+    /// Retry no sooner than a caller-selected delay.
+    RetryAfterAtLeast {
+        /// The floor, in milliseconds.
         millis: u64,
     },
     /// Defer once, then complete on the next delivery.
@@ -83,7 +83,7 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
         ProbeAction::Succeed => Ok(()),
         ProbeAction::FailRetryable => Err(JobError::retryable("probe failed retryably")),
         ProbeAction::FailPermanent => Err(JobError::permanent("probe failed permanently")),
-        ProbeAction::RetryAfter { millis } => Err(JobError::retry_after(
+        ProbeAction::RetryAfterAtLeast { millis } => Err(JobError::retry_after_at_least(
             "probe requested retry delay",
             Duration::from_millis(millis),
         )

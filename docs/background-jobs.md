@@ -160,12 +160,12 @@ as unchanged, can retry after rollback, and otherwise leaves ownership to lease
 expiry. An external effect still needs provider or business idempotency: this
 API makes only the supplied PostgreSQL effect atomic.
 
-`JobError::retry_after(error, delay)` and `JobError::snooze(delay)` return
-`Result<JobError, InvalidDelay>` and use enqueue's checked delay domain.
-Retry-after spends an attempt and schedules exactly the supplied delay without
-jitter. Snooze takes precedence over exhaustion, returns the job to pending at
-database time, clears the claim, and refunds one attempt; a repeated fenced
-transition cannot refund twice.
+`JobError::retry_after_at_least(error, delay)` and `JobError::snooze(delay)`
+return `Result<JobError, InvalidDelay>` and use enqueue's checked delay domain.
+`retry_after_at_least` spends an attempt and is a floor under the normal
+jittered backoff. Snooze takes precedence over exhaustion, returns the job to
+pending at database time, clears the claim, and refunds one attempt; a repeated
+fenced transition cannot refund twice.
 
 ## Register kinds and retain terminal history
 
@@ -186,11 +186,11 @@ Registration rejects an empty set, duplicate/invalid names, and out-of-range
 policies. Defaults are 25 attempts and a 60-second timeout; accepted ranges
 are 1–25 attempts and 1 second–1 hour. The claiming worker's policy owns both.
 
-Ordinary retry delay is `attempt^4 * (0.9 + 0.2 * draw)` seconds, rounded down
-to microseconds once. The worker draws it only when it prepares a normal retry,
-then reuses that captured delay for persistence retries. Exhaustion
-and permanent failure are terminal. Summaries replace controls with spaces
-and are limited to 1024 UTF-8 bytes; handlers must not include secrets in them.
+PostgreSQL computes `attempt^4 * (0.9 + 0.2 * random())` seconds (floored by
+`retry_after_at_least`) when it writes the retry; a re-sent fenced write may
+redraw. Exhaustion and permanent failure are terminal. Summaries replace
+controls with spaces and are limited to 1024 UTF-8 bytes; handlers must not
+include secrets in them.
 Successful jobs remain for 24 hours and failed jobs for seven days. Retention
 runs every minute in batches of 500 and never deletes live jobs. Unknown kinds
 remain unclaimed; terminal retention is independent of registered kinds.
@@ -233,7 +233,7 @@ handler result once and gives that result precedence over force or timeout.
 After the cancellation only success is known: an error, snooze, or panic that
 answers it is recorded as the timeout or, in a forced drain, as a release.
 Once known, a result is persisted and never replaced with release. Failed
-or unavailable outcome acknowledgements retry the identical transition at
+or unavailable outcome acknowledgements retry the fenced write at
 one-second intervals within the local/cleanup deadline; a zero-row
 acknowledgement is merely unchanged, never durable attribution. At the
 deadline, leave recovery to lease expiry.
@@ -282,7 +282,8 @@ Records never carry the payload: `job_failed` (`warn`), `job_attempt_failed`
 `job_attempt_completed` and `job_persistence_finished` (`debug`, or `warn`
 when unknown), and
 `jobs_operation_failed` / `jobs_operation_recovered` on the first failure
-and the first recovery of each operation.
+and the first recovery of each operation. `jobs_operation_failed` carries
+`sqlstate` or `cause`.
 
 Every worker samples only registered kinds every ten seconds. For each kind and
 `available`, `scheduled`, or `running` state, it counts at most 1000 indexed

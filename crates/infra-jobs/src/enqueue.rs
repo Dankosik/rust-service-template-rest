@@ -12,7 +12,7 @@ use crate::trace_context;
 /// The longest JSON payload enqueue accepts: 256 KiB.
 pub const MAX_PAYLOAD_BYTES: usize = 262_144;
 /// The longest unique key enqueue accepts.
-pub const MAX_UNIQUE_KEY_BYTES: usize = 255;
+pub(crate) const MAX_UNIQUE_KEY_BYTES: usize = 255;
 /// The longest delay enqueue accepts: 36500 days.
 pub const MAX_DELAY: Duration = Duration::from_hours(36_500 * 24);
 
