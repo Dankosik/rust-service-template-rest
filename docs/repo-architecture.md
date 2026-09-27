@@ -89,6 +89,9 @@ only for stable domain decisions.
 <!-- template:begin messaging:docs-architecture-messaging-leaf -->
 | Durable JetStream event transport, Go wire, consumer settlement, DLQ, or operator topology | [Durable JetStream messaging](durable-messaging.md) and [Component Boundaries](architecture/boundaries.md) |
 <!-- template:end messaging:docs-architecture-messaging-leaf -->
+<!-- template:begin cache:docs-architecture-cache-leaf -->
+| Distributed cache, Valkey or Redis operation, or cache degradation | [Cache](cache.md) and [Component Boundaries](architecture/boundaries.md) |
+<!-- template:end cache:docs-architecture-cache-leaf -->
 
 Queue, job, outbox, and event architecture (`architecture/async.md`) exists
 only where a profile that owns it is retained; otherwise there is no owner to

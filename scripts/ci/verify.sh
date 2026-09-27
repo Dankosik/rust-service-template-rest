@@ -688,6 +688,9 @@ fi
 if is_true messaging_integration; then
 	add_command make test-integration-messaging "JetStream adapter, bridge, Compose, or messaging proof changed" "make test-integration-messaging" docker true true
 fi
+if is_true cache_integration; then
+	add_command make test-integration-cache "cache adapter, Compose, or cache proof changed" "make test-integration-cache" docker true true
+fi
 if is_true runtime_image || is_true migrations; then
 	image=${VERIFY_RUNTIME_IMAGE:-service:verify}
 	if is_true runtime_image; then

@@ -150,6 +150,15 @@ test-integration-messaging` is the real NATS proof when the current Make owner
 retains that target; it requires Docker and does not certify a deployment.
 Use `make help` for the exact retained command surface.
 <!-- template:end messaging:docs-commands-messaging -->
+<!-- template:begin cache:docs-commands-cache -->
+With `CACHE=redis`, `infra-cache` is a package name for `make test-package`.
+`ALLOW_HEAVY=1 make test-integration-cache` is the Valkey proof when the
+current Make owner retains that target; it requires Docker and does not
+certify a deployment. A local server is
+`docker compose -f env/docker-compose.yml up -d valkey`.
+Use `make help` for the exact retained command surface. See the
+[guide](cache.md).
+<!-- template:end cache:docs-commands-cache -->
 
 ## Guards and variables
 

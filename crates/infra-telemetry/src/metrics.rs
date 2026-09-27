@@ -32,6 +32,14 @@ const OUTBOUND_HTTP_DURATION_BUCKETS: &[f64] = &[
 const OUTBOUND_HTTP_DURATION_METRIC: &str = "http_client_request_duration_seconds";
 // template:end outbound-http:telemetry-outbound-buckets-constants
 
+// template:begin cache:telemetry-cache-buckets-constants
+/// Explicit seconds buckets for cache commands, including a degraded timeout.
+const CACHE_OPERATION_DURATION_BUCKETS: &[f64] = &[
+    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1.0,
+];
+const CACHE_OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
+// template:end cache:telemetry-cache-buckets-constants
+
 #[derive(Debug, thiserror::Error)]
 pub enum MetricsError {
     #[error("install metrics recorder: {0}")]
@@ -68,6 +76,9 @@ impl Metrics {
         // template:begin outbound-http:telemetry-outbound-buckets-install
         let builder = outbound_histogram_builder(builder).map_err(MetricsError::Install)?;
         // template:end outbound-http:telemetry-outbound-buckets-install
+        // template:begin cache:telemetry-cache-buckets-install
+        let builder = cache_histogram_builder(builder).map_err(MetricsError::Install)?;
+        // template:end cache:telemetry-cache-buckets-install
         let handle = builder.install_recorder().map_err(MetricsError::Install)?;
         let process = metrics_process::Collector::default();
         process.describe();
@@ -155,6 +166,15 @@ fn outbound_histogram_builder(builder: PrometheusBuilder) -> Result<PrometheusBu
 }
 // template:end outbound-http:telemetry-outbound-buckets-helper
 
+// template:begin cache:telemetry-cache-buckets-helper
+fn cache_histogram_builder(builder: PrometheusBuilder) -> Result<PrometheusBuilder, BuildError> {
+    builder.set_buckets_for_metric(
+        Matcher::Full(CACHE_OPERATION_DURATION_METRIC.to_owned()),
+        CACHE_OPERATION_DURATION_BUCKETS,
+    )
+}
+// template:end cache:telemetry-cache-buckets-helper
+
 /// The diagnostics router: `GET /metrics` only. Serve it on the private
 /// diagnostics listener, never on the application listener.
 ///
@@ -205,3 +225,28 @@ mod tests {
     }
 }
 // template:end outbound-http:telemetry-outbound-histogram-test
+
+// template:begin cache:telemetry-cache-histogram-test
+#[cfg(test)]
+mod cache_histogram_tests {
+    use super::*;
+
+    #[test]
+    fn cache_operation_duration_uses_the_selected_prometheus_buckets() {
+        let recorder = cache_histogram_builder(PrometheusBuilder::new())
+            .expect("cache histogram buckets are valid")
+            .build_recorder();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        metrics::describe_histogram!(
+            CACHE_OPERATION_DURATION_METRIC,
+            metrics::Unit::Seconds,
+            "Cache operation duration in seconds"
+        );
+        metrics::histogram!(CACHE_OPERATION_DURATION_METRIC, "cache" => "obs", "operation" => "get", "outcome" => "miss")
+            .record(0.01);
+        let scrape = recorder.handle().render();
+        assert!(scrape.contains("cache_operation_duration_seconds_bucket"));
+        assert!(scrape.contains("le=\"0.01\""));
+    }
+}
+// template:end cache:telemetry-cache-histogram-test

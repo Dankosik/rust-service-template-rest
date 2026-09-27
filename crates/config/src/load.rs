@@ -528,6 +528,67 @@ mod tests {
     }
     // template:end messaging:load-messaging-environment
 
+    // template:begin cache:load-cache-environment
+    #[test]
+    fn cache_environment_reads_the_dsn_and_redacts_it() {
+        use secrecy::ExposeSecret as _;
+
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__CACHE__DSN", "redis://:hunter2@127.0.0.1:6379"),
+                ("APP__CACHE__COMMAND_TIMEOUT", "200ms"),
+                ("APP__APP__ENV", "local"),
+                ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
+                ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.cache.dsn.as_ref().unwrap().expose_secret(),
+            "redis://:hunter2@127.0.0.1:6379"
+        );
+        assert_eq!(cfg.cache.command_timeout, Duration::from_millis(200));
+        assert!(!format!("{cfg:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn cache_dsn_in_a_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let leaked = write(
+            &dir,
+            "leaked.toml",
+            "[cache]\ndsn = \"redis://:hunter2@127.0.0.1:6379\"\n",
+        );
+        let err = load_from(
+            &LoadOptions {
+                config: Some(leaked),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::SecretInFile { key, .. } if key == "cache.dsn"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn cache_unknown_environment_key_fails_loading() {
+        assert!(matches!(
+            load_from(
+                &LoadOptions::default(),
+                BUILD,
+                env(&[("APP__CACHE__UNKNOWN", "x")]),
+            ),
+            Err(Error::Deserialize(_))
+        ));
+    }
+    // template:end cache:load-cache-environment
+
     // template:begin outbound-auth:load-integrations-environment
     #[test]
     fn oauth_environment_builds_a_named_tuple_and_redacts_its_values() {

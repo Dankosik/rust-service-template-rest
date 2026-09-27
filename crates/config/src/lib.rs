@@ -24,6 +24,9 @@ pub mod observability;
 // template:begin messaging:config-module
 pub mod messaging;
 // template:end messaging:config-module
+// template:begin cache:config-module
+pub mod cache;
+// template:end cache:config-module
 // template:begin client-integrations:config-module
 pub mod integrations;
 // template:end client-integrations:config-module
@@ -80,6 +83,9 @@ pub use observability::{
 // template:begin messaging:config-export
 pub use messaging::MessagingConfig;
 // template:end messaging:config-export
+// template:begin cache:config-export
+pub use cache::CacheConfig;
+// template:end cache:config-export
 // template:begin authn:config-export
 pub use authn::{Audiences, AuthnConfig};
 // template:end authn:config-export
@@ -119,6 +125,9 @@ pub struct Config {
     // template:begin messaging:config-field
     pub messaging: MessagingConfig,
     // template:end messaging:config-field
+    // template:begin cache:config-field
+    pub cache: CacheConfig,
+    // template:end cache:config-field
     // template:begin client-integrations:config-field
     #[serde(default, deserialize_with = "integrations::deserialize_integrations")]
     pub integrations: std::collections::BTreeMap<String, IntegrationConfig>,
@@ -162,6 +171,25 @@ impl Config {
         // template:begin messaging:config-validate
         self.messaging.validate(&self.app.env)?;
         // template:end messaging:config-validate
+        // template:begin cache:config-validate
+        self.cache.validate(&self.app.env)?;
+        // template:end cache:config-validate
+        // template:begin cache:config-request-budget
+        if self.cache.is_active() {
+            let doubled = self.cache.command_timeout.checked_mul(2).ok_or_else(|| {
+                ValidationError::new(
+                    "cache.command_timeout",
+                    "must be at most half of http.request_timeout",
+                )
+            })?;
+            if doubled > self.http.request_timeout {
+                return Err(ValidationError::new(
+                    "cache.command_timeout",
+                    "must be at most half of http.request_timeout",
+                ));
+            }
+        }
+        // template:end cache:config-request-budget
         // template:begin client-integrations:config-validate
         integrations::validate_integrations(&self.integrations)?;
         // template:end client-integrations:config-validate
