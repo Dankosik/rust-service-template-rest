@@ -39,8 +39,8 @@ authority.
 | `crates/health` | The readiness verdict `/health/ready` serves and the drain flag teardown flips |
 | `crates/service-failure` | Closed transport-neutral failure codes and meanings; each transport owns its wire projection |
 <!-- template:begin grpc:docs-architecture-grpc-source -->
-| `api/proto/`, `buf.lock`, `tools/grpc-codegen` | Committed prost/tonic contracts and descriptors under `crates/grpc-contracts`, checked against the PR base |
-| `crates/infra-grpc` | Governed native RPC registration, codecs, clients, health projection and listener lifetime ([guide](grpc.md)) |
+| `api/proto/`, `tools/grpc-codegen` | Committed prost/tonic contracts under `crates/grpc-contracts`, checked against the PR base |
+| `crates/infra-grpc` | Tonic routes on the shared listener, clients, health projection and server TLS ([guide](grpc.md)) |
 <!-- template:end grpc:docs-architecture-grpc-source -->
 | `crates/service/src/bootstrap` | Startup order, the shutdown plan, exit codes |
 | `crates/<feature>` (none yet) | Behavior consumed by transports and future binaries |

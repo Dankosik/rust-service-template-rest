@@ -16,9 +16,6 @@ use std::time::Duration;
 
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
-// template:begin grpc:bootstrap-grpc-imports
-use infra_grpc::Server as GrpcServer;
-// template:end grpc:bootstrap-grpc-imports
 // template:begin messaging:service-bootstrap-messaging-imports
 use infra_messaging::{Messaging, MessagingError, MessagingOptions};
 // template:end messaging:service-bootstrap-messaging-imports
@@ -166,7 +163,12 @@ pub(crate) enum BootstrapError {
 /// Parse flags, load configuration, run the service, and map the result to
 /// an exit code. Never calls `process::exit`, so destructors run. `--help`
 /// exits 0; other clap errors exit 1. Version is not a loader flag.
-pub(crate) fn run<I>(args: I, grpc_registration: Option<crate::GrpcRegistration>) -> ExitCode
+pub(crate) fn run<I>(
+    args: I,
+    // template:begin grpc:bootstrap-run-registration-parameter
+    grpc_registration: Option<crate::GrpcRegistration>,
+    // template:end grpc:bootstrap-run-registration-parameter
+) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
@@ -189,24 +191,14 @@ where
         Err(err) => return process_failure(&format!("build tokio runtime: {err}")),
     };
 
-    // template:begin grpc:bootstrap-grpc-runtime-owner
-    let mut grpc_runtime_owner = None;
-    // template:end grpc:bootstrap-grpc-runtime-owner
     let outcome = runtime.block_on(serve(
         config,
         // template:begin grpc:bootstrap-grpc-serve-registration-argument
         grpc_registration,
         // template:end grpc:bootstrap-grpc-serve-registration-argument
-        // template:begin grpc:bootstrap-grpc-runtime-owner-argument
-        &mut grpc_runtime_owner,
-        // template:end grpc:bootstrap-grpc-runtime-owner-argument
     ));
     // Drops connection tasks that outlived the drain and any blocking work.
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
-    // template:begin grpc:bootstrap-grpc-runtime-owner-release
-    // Keep any timed-out transport handles until the runtime's final cleanup.
-    drop(grpc_runtime_owner);
-    // template:end grpc:bootstrap-grpc-runtime-owner-release
 
     match outcome {
         Ok(Outcome::Graceful) => ExitCode::SUCCESS,
@@ -228,9 +220,6 @@ async fn serve(
     // template:begin grpc:bootstrap-grpc-serve-registration-parameter
     grpc_registration: Option<crate::GrpcRegistration>,
     // template:end grpc:bootstrap-grpc-serve-registration-parameter
-    // template:begin grpc:bootstrap-grpc-runtime-owner-parameter
-    grpc_runtime_owner: &mut Option<infra_grpc::RunningServer>,
-    // template:end grpc:bootstrap-grpc-runtime-owner-parameter
 ) -> Result<Outcome, BootstrapError> {
     // Before this point SIGTERM has its default disposition and kills the
     // process; install the handlers first and keep them for the lifetime.
@@ -357,7 +346,6 @@ async fn serve(
             auth,
             // template:begin grpc:bootstrap-registration
             grpc_registration,
-            grpc_runtime_owner,
             // template:end grpc:bootstrap-registration
             // template:begin postgres:bootstrap-prepared-pool
             postgres_pool: postgres_pool.clone(),
@@ -842,7 +830,6 @@ struct Prepared<'a> {
     auth: PreparedAuth,
     // template:begin grpc:bootstrap-prepared-registration
     grpc_registration: Option<crate::GrpcRegistration>,
-    grpc_runtime_owner: &'a mut Option<infra_grpc::RunningServer>,
     // template:end grpc:bootstrap-prepared-registration
     // template:begin postgres:bootstrap-prepared-field
     postgres_pool: Option<PgPool>,
@@ -882,7 +869,6 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         auth,
         // template:begin grpc:bootstrap-destructure-registration
         grpc_registration,
-        grpc_runtime_owner,
         // template:end grpc:bootstrap-destructure-registration
         // template:begin postgres:bootstrap-destructure-pool
         postgres_pool,
@@ -910,16 +896,21 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         };
         // template:end grpc-authn:bootstrap-grpc-verifier
         // template:begin grpc:bootstrap-grpc-prepare-call
-        Some(GrpcServer::prepare(
-            crate::grpc::services(grpc_registration)?,
-            readiness.reader(),
-            // template:end grpc:bootstrap-grpc-prepare-call
-            // template:begin grpc-authn:bootstrap-grpc-verifier-argument
-            verifier,
-            // template:end grpc-authn:bootstrap-grpc-verifier-argument
-            // template:begin grpc:bootstrap-grpc-prepare-finish
-            crate::grpc::server_options(config)?,
-        )?)
+        if config.http.effective_drain_budget() < infra_grpc::UNARY_DEADLINE {
+            return Err(infra_grpc::Error::InvalidConfiguration.into());
+        }
+        Some((
+            infra_grpc::router(
+                crate::grpc::services(grpc_registration)?,
+                readiness.reader(),
+                // template:end grpc:bootstrap-grpc-prepare-call
+                // template:begin grpc-authn:bootstrap-grpc-verifier-argument
+                verifier,
+                // template:end grpc-authn:bootstrap-grpc-verifier-argument
+                // template:begin grpc:bootstrap-grpc-prepare-finish
+            ),
+            crate::grpc::tls(config)?,
+        ))
     } else {
         None
     };
@@ -987,21 +978,21 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
     };
 
     // template:begin grpc:bootstrap-grpc-bind
-    *grpc_runtime_owner = match grpc_prepared {
-        Some(prepared) => {
-            let bound = prepared.bind(config.grpc.listen_addr()?).await?;
+    let grpc_listener = match grpc_prepared {
+        Some((grpc_router, tls)) => {
+            let addr = config.grpc.listen_addr()?;
+            let bound = match tls {
+                Some(tls) => {
+                    Server::bind_tls(addr, grpc_router, infra_grpc::server_options(), tls).await?
+                }
+                None => Server::bind(addr, grpc_router, infra_grpc::server_options()).await?,
+            };
             tracing::info!(addr = %bound.local_addr(), "grpc listener bound");
-            Some(bound.start())
+            Some(bound)
         }
         None => None,
     };
     // template:end grpc:bootstrap-grpc-bind
-
-    // template:begin grpc:bootstrap-grpc-open-admission
-    if let Some(listener) = grpc_runtime_owner.as_ref() {
-        listener.open_admission();
-    }
-    // template:end grpc:bootstrap-grpc-open-admission
 
     tracing::info!("service_ready");
     signals.wait().await;
@@ -1012,7 +1003,7 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         app_listener,
         diagnostics,
         // template:begin grpc:shutdown-plan-grpc
-        grpc_listener: grpc_runtime_owner,
+        grpc_listener,
         // template:end grpc:shutdown-plan-grpc
         cancel,
         tracker,

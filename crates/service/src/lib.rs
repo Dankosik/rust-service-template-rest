@@ -22,9 +22,15 @@ pub fn run<I>(args: I) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
-    bootstrap::run(args, None)
+    bootstrap::run(
+        args,
+        // template:begin grpc:service-run-registration-argument
+        None,
+        // template:end grpc:service-run-registration-argument
+    )
 }
 
+// template:begin grpc:service-run-with-grpc
 /// Run the service with one generated gRPC registration hook.
 pub fn run_with_grpc<I>(args: I, registration: GrpcRegistration) -> ExitCode
 where
@@ -32,3 +38,4 @@ where
 {
     bootstrap::run(args, Some(registration))
 }
+// template:end grpc:service-run-with-grpc

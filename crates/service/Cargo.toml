@@ -31,6 +31,7 @@ health = { workspace = true }
 infra-http = { workspace = true }
 # template:begin grpc:service-grpc-dependencies
 infra-grpc = { workspace = true }
+rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 # template:end grpc:service-grpc-dependencies
 # template:begin messaging:service-messaging-dependency
 infra-messaging = { workspace = true }

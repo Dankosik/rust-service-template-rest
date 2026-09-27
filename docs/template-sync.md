@@ -74,12 +74,13 @@ token call, task, listener, or readiness dependency.
 <!-- template:end outbound-auth:docs-template-init-outbound-auth -->
 <!-- template:begin grpc:docs-template-init-grpc -->
 `GRPC` defaults to `none` and accepts `none` or `enabled`; the direct entry takes
-`--grpc`. It retains the native transport, committed schemas/generated contracts,
-managed compiler/generation tools, configuration, example and [guide](grpc.md).
-Selection starts no listener or client. Old locks lacking `grpc` normalize to
-`none`; exact replay records and preserves the selection. `none` removes all
-exclusive surfaces while shared HTTP failure and retained prost/TLS ownership
-survive. The concrete OAuth bridge remains only when both profiles are selected.
+`--grpc`. It retains the native transport, committed schemas and generated
+contracts, the generation tool, configuration, the example and the
+[guide](grpc.md). Selection starts no listener or client. Old locks lacking
+`grpc` normalize to `none`; exact replay records and preserves the selection.
+`none` removes exclusive surfaces while shared HTTP failure and retained
+prost/TLS ownership survive. The concrete OAuth bridge remains only when both
+profiles are selected.
 <!-- template:end grpc:docs-template-init-grpc -->
 <!-- template:begin http-idempotency:docs-template-init-http-idempotency -->
 `HTTP_IDEMPOTENCY` defaults to `none` and accepts `none` or `postgres`; the

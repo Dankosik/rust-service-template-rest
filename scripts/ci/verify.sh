@@ -539,7 +539,7 @@ if grep -n '[[:space:]]' "${files_path}" >/dev/null; then
 fi
 
 surfaces_path=${tmp}/surfaces
-bash ./scripts/ci/changed-surfaces.sh <"${files_path}" >"${surfaces_path}"
+bash ./scripts/ci/changed-surfaces.sh --union "${merge_base_sha}" <"${files_path}" >"${surfaces_path}"
 while IFS='=' read -r name value; do
 	printf -v "surface_${name}" '%s' "${value}"
 done <"${surfaces_path}"

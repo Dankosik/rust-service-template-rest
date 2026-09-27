@@ -9,9 +9,6 @@ use std::time::Duration;
 
 use health::Readiness;
 use infra_http::{Drained, Server};
-// template:begin grpc:shutdown-imports
-use infra_grpc::RunningServer;
-// template:end grpc:shutdown-imports
 // template:begin messaging:service-shutdown-messaging-imports
 use infra_messaging::{CloseOutcome, Messaging};
 // template:end messaging:service-shutdown-messaging-imports
@@ -291,7 +288,7 @@ pub(crate) struct Plan<'a> {
     pub(crate) app_listener: Server,
     pub(crate) diagnostics: Option<Server>,
     // template:begin grpc:shutdown-plan-grpc
-    pub(crate) grpc_listener: &'a mut Option<RunningServer>,
+    pub(crate) grpc_listener: Option<Server>,
     // template:end grpc:shutdown-plan-grpc
     pub(crate) cancel: CancellationToken,
     pub(crate) tracker: TaskTracker,
@@ -322,11 +319,6 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
 
     plan.readiness.start_drain();
     tracing::info!("readiness_disabled");
-    // template:begin grpc:shutdown-begin-grpc-drain
-    if let Some(listener) = plan.grpc_listener.as_ref() {
-        listener.begin_drain();
-    }
-    // template:end grpc:shutdown-begin-grpc-drain
 
     // Keep serving while load balancers notice readiness failing. A second
     // stop signal skips the wait: the operator has decided to hurry.
@@ -339,9 +331,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         }
     }
 
-    let drain_deadline =
-        Instant::now() + budget.remaining(plan.http_config.effective_drain_budget());
-    let http_drain_budget = drain_deadline.saturating_duration_since(Instant::now());
+    let http_drain_budget = budget.remaining(plan.http_config.effective_drain_budget());
     tracing::info!(budget = ?http_drain_budget, "drain_started");
     let http_drain = async {
         match plan.app_listener.drain(http_drain_budget).await {
@@ -370,20 +360,36 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     };
     // template:begin grpc:shutdown-concurrent-grpc-drain
     let grpc_drain = async {
-        match plan.grpc_listener.as_mut() {
-            Some(listener) => match listener.drain(drain_deadline).await {
-                Ok(()) => false,
+        match plan.grpc_listener {
+            Some(listener) => match listener.drain(http_drain_budget).await {
+                Ok(Drained::Complete) => {
+                    tracing::info!("grpc_drain_completed");
+                    false
+                }
+                Ok(Drained::TimedOut {
+                    remaining_connections: remaining,
+                }) => {
+                    tracing::warn!(
+                        remaining,
+                        reason = "in_flight_requests_outlived_drain_budget",
+                        "grpc_drain_forced"
+                    );
+                    true
+                }
                 Err(error) => {
-                    tracing::warn!(error = %error, "grpc_drain_forced");
+                    tracing::error!(error = %error, "grpc_drain_failed");
                     true
                 }
             },
             None => false,
         }
     };
-    let (http_drain_overran, grpc_drain_overran) = tokio::join!(http_drain, grpc_drain);
-    let drain_overran = http_drain_overran || grpc_drain_overran;
+    let http_drain = async {
+        let (http_overran, grpc_overran) = tokio::join!(http_drain, grpc_drain);
+        http_overran || grpc_overran
+    };
     // template:end grpc:shutdown-concurrent-grpc-drain
+    let drain_overran = http_drain.await;
 
     if let Some(diagnostics) = plan.diagnostics {
         // An in-flight scrape must not park the process past the telemetry
@@ -404,31 +410,12 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         }
     }
 
-    let join_deadline = Instant::now() + budget.remaining(BACKGROUND_JOIN);
     let joined = join_background_then_close(
         &plan.cancel,
         &plan.tracker,
-        join_deadline.saturating_duration_since(Instant::now()),
-    );
-    // template:begin grpc:shutdown-grpc-cleanup-join
-    let joined = async {
-        let grpc_join = async {
-            match plan.grpc_listener.as_mut() {
-                Some(listener) => match listener.join_shutdown(join_deadline).await {
-                    Ok(()) => true,
-                    Err(error) => {
-                        tracing::warn!(error = %error, "grpc_cleanup_incomplete");
-                        false
-                    }
-                },
-                None => true,
-            }
-        };
-        let (background_joined, grpc_joined) = tokio::join!(joined, grpc_join);
-        background_joined && grpc_joined
-    };
-    // template:end grpc:shutdown-grpc-cleanup-join
-    let joined = joined.await;
+        budget.remaining(BACKGROUND_JOIN),
+    )
+    .await;
     let join_overran = if joined {
         tracing::info!("background_joined");
         false

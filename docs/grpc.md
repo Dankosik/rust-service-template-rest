@@ -1,14 +1,15 @@
 # Native gRPC
 
-`GRPC=enabled` retains native unary, client-streaming, server-streaming and bidi
-RPCs on a separate HTTP/2 listener. Selection alone starts no listener, client
-connection, provider request or background task. `GRPC=none` is the initializer
-default and removes the transport, contracts, schema, generation tools,
-configuration, example and their exclusive dependencies.
+`GRPC=enabled` keeps native unary, client-streaming, server-streaming and bidi
+RPCs on a separate listener. That listener is `infra_http::Server`, not a
+second transport. Selection alone starts no listener, client connection,
+provider request or background task. `GRPC=none` is the initializer default
+and removes the transport, contracts, schema, generator, configuration,
+example and their exclusive dependencies.
 
-The [decision record](grpc-decisions.md) explains the library and policy seams.
-HTTP keeps its existing OpenAPI and RFC 9457 contract. Neither transport owns
-feature business rules.
+The [decision record](grpc-decisions.md) records why those boundaries exist.
+HTTP keeps its OpenAPI and RFC 9457 contract. Neither transport owns feature
+business rules.
 
 ## Select and enable
 
@@ -30,40 +31,42 @@ addr = "0.0.0.0:50051"
 security = "plaintext"
 ```
 
-Plaintext is an operator trust decision, including platform TLS termination or
-mesh mTLS. Retaining bearer authentication does not require in-process TLS.
-With an authentication profile retained, configure its real verifier before
-enabling gRPC. Runtime `authn.mode = "none"` cannot expose protected RPCs.
-Only exact `grpc.health.v1.Health/Check` is public and ignores supplied
-credentials. Watch, application methods and other utilities require the
-opening bearer identity. Selecting `AUTHN=none` removes that requirement.
+Plaintext is an operator trust decision, including platform TLS termination
+or mesh mTLS. Retaining bearer authentication does not require in-process
+TLS. With an authentication profile retained, configure its real verifier
+before enabling gRPC. Runtime `authn.mode = "none"` cannot expose the
+listener. Only exact `/grpc.health.v1.Health/Check` is public and ignores
+supplied credentials. Watch and every application method require the opening
+bearer. Selecting `AUTHN=none` removes that requirement.
 
-For process TLS, select `security = "tls"`, supply the PEM certificate chain in
-`grpc.certificate`, and provide `APP__GRPC__PRIVATE_KEY` through the environment.
-The private key is rejected in configuration files. `grpc.client_ca` makes
-verified client certificates mandatory. The listener admits TLS 1.3 only;
-invalid identities or trust roots refuse startup. Certificates reload on
-process restart. Configuration Debug omits certificate, CA and key material.
+Process TLS uses the same accept loop. `security = "tls"` builds a rustls
+`ServerConfig` in `infra_grpc` and passes it to
+`infra_http::Server::bind_tls`. The handshake runs after the first-byte peek.
+Supply the PEM certificate chain in `grpc.certificate` and
+`APP__GRPC__PRIVATE_KEY` through the environment. The private key is rejected
+in configuration files. `grpc.client_ca` makes verified client certificates
+mandatory. The server admits TLS 1.3 only, with `h2` ALPN. Invalid material
+refuses startup. Certificates reload on process restart. Configuration Debug
+omits certificate, CA and key material.
 
-The existing effective HTTP drain budget must be at least eight seconds when
-gRPC is enabled. Disabled gRPC does not bind, read TLS material or require a
-verifier. [Configuration source policy](configuration-source-policy.md) owns
-precedence and secret custody.
+The effective HTTP drain budget must be at least eight seconds when gRPC is
+enabled. A shorter budget refuses startup. Disabled gRPC does not bind, read
+TLS material or require a verifier. [Configuration source
+policy](configuration-source-policy.md) owns precedence and secret custody.
 
-## Implement and register a service
+## Register a service
 
-Own schemas under `api/proto/<package>/v1`, use versioned packages, and reserve
-removed field numbers and names. `api/proto/example/v1/echo.proto` is an isolated
-transport example with all four cardinalities; it is not registered by the
-default service and does not define a business API.
+Own schemas under `api/proto/<package>/v1`. Use versioned packages and reserve
+removed field numbers and names. `api/proto/example/v1/echo.proto` is an
+isolated transport example with all four cardinalities. The default service
+does not register it.
 
-Implement the generated native tonic server trait. Its streaming requests stay
-`tonic::Streaming<T>` and responses stay native `tonic::Response<T>` or streams
-of `Result<T, tonic::Status>`. Register through the generated helper once:
+Implement the generated tonic server trait. Register the generated server
+once and run it through the service bootstrap:
 
 ```rust,ignore
 fn register(services: &mut infra_grpc::Services) -> Result<(), infra_grpc::Error> {
-    grpc_contracts::generated::register_echo_service(services, Echo)
+    services.add(EchoServiceServer::new(Echo))
 }
 
 fn main() -> std::process::ExitCode {
@@ -71,195 +74,210 @@ fn main() -> std::process::ExitCode {
 }
 ```
 
-See the complete [example](../crates/service/examples/grpc.rs). It uses the
-shipped service bootstrap, readiness and shutdown. Registration checks exact
-descriptor identity, method cardinality and validation programs before serving;
-duplicate or unusable registrations fail startup. Do not build another tonic
-server, raw registration path or per-handler middleware stack.
+See the complete [example](../crates/service/examples/grpc.rs). `Services::add`
+records `NamedService::NAME` for health and adds the server to tonic
+`Routes`. A duplicate name fails startup. Do not build another listener or
+per-handler middleware stack. Handler `Status` values pass through unchanged.
 
-The central policy rejects process/capacity admission before authentication or
-feature work, removes raw Authorization, and exposes only the sealed verified
-principal. It validates every decoded request message before the feature sees
-it, including messages received later in a stream. A swallowed validation error
-still terminates the call; earlier valid effects are not rolled back.
-Protovalidate rule errors carry schema field/rule identifiers without submitted
-values or CEL text. Unsupported owned constraints refuse startup rather than
-silently skipping validation. Adding a schema annotation also adds a
-discriminating valid/invalid contract example.
+With authentication retained, a successful verify inserts
+`infra_bearerauthn::Principal` into the request extensions and removes
+`Authorization`.
 
-Features own bounded aggregate collection, additional business idle/duration
-limits and cancellation of work they spawn. The transport owns the RPC future,
-body and admission permit, not arbitrary detached feature tasks.
+## Middleware
 
-## Failures and limits
+Outermost to innermost:
 
-Use `infra_grpc::classified_status(service_failure::ClassifiedFailure::new(code))`
-for a shared domain failure. An optional policy-owned retry delay becomes
-`google.rpc.RetryInfo`; it does not enable retries. `google.rpc.ErrorInfo` carries
-the stable shared code in the fixed `service` domain. HTTP continues to project
-the same shared identity into its existing status, title, URI and payload.
+1. Observation.
+2. Panic recovery. The response is `INTERNAL` / `request failed`. The payload
+   goes to the normal panic hook, as on HTTP. There is no suppressing hook.
+3. Bearer authentication, when that profile is retained. Exact
+   `Health/Check` is public. Missing, malformed and invalid bearers are
+   `UNAUTHENTICATED` / `authentication failed`. Provider unavailability is
+   `UNAVAILABLE` / `authentication is unavailable`.
+4. Business routes only: a concurrency limit of 256. A shed call is
+   `RESOURCE_EXHAUSTED` / `server is at capacity`. Health is outside this
+   limit.
+5. Business routes only: deadline `min(grpc-timeout, 8s)`, measured until the
+   handler returns response headers. Expiry is `DEADLINE_EXCEEDED` /
+   `request deadline exceeded`. A malformed `grpc-timeout`, including more
+   than eight digits, counts as absent and the eight-second cap applies.
 
-| Shared meaning | gRPC code |
+## Deadlines
+
+The eight-second cap is tonic `Server::timeout` placement with a
+`DEADLINE_EXCEEDED` status. It is not a body-lifetime timer.
+
+- Unary: the whole call, because the handler returns the response.
+- Client-streaming: the upload must finish and the handler must return within
+  the budget.
+- Server-streaming and bidi: the handler must return its stream within the
+  budget. After response headers, the stream is bounded by the caller and by
+  process drain, not by this timer.
+
+Health is outside the deadline.
+
+## Listener bounds
+
+Fixed listener options, shared with HTTP except for the values below:
+
+- 4096 connections. Excess connections are closed without a response.
+- 5 seconds to the first byte, then a separate 5 second TLS handshake bound.
+  A handshake error or timeout closes the connection without a response.
+- 16 KiB of request metadata.
+- HTTP/2 PING keepalive every 20 seconds, with a 20 second timeout.
+- Hyper's default concurrent-stream limit, 200 in locked hyper 1.11.1. This
+  listener does not set its own, and hyper does not treat that number as stable.
+- Tonic's default 4 MiB decode limit on business RPCs. The transport sets no
+  encode cap. Health messages are capped at 4 MiB in both directions.
+
+## Handler validation
+
+The transport does not validate protobuf fields. Handlers reject their own
+input. The example refuses an empty or oversized message before any effect:
+
+```rust,ignore
+fn accepted(message: String) -> Result<String, Status> {
+    if (1..=1024).contains(&message.len()) {
+        Ok(message)
+    } else {
+        Err(classified_status(ClassifiedFailure::new(Code::BadRequest)))
+    }
+}
+```
+
+Its client-streaming method also rejects an aggregate over 1024 bytes with
+`Code::RequestEntityTooLarge`. Features own any further aggregate, idle or
+cancellation limit. The transport does not cancel work a handler has spawned.
+
+## Failures
+
+Use `infra_grpc::classified_status` for a shared domain failure.
+`google.rpc.ErrorInfo` carries the stable code in the fixed `service` domain.
+An optional policy-owned retry delay becomes `google.rpc.RetryInfo` and does
+not enable retries. The message is a fixed safe string. HTTP projects the
+same shared identity into its existing status, title, URI and payload.
+
+| Condition | gRPC code |
 | --- | --- |
-| Bad request, invalid input, malformed authentication | `INVALID_ARGUMENT` |
-| Missing/invalid credentials or unauthorized | `UNAUTHENTICATED` |
-| Forbidden | `PERMISSION_DENIED` |
-| Not found | `NOT_FOUND` |
-| Already exists | `ALREADY_EXISTS` |
-| Conflict | `ABORTED` |
-| Unsupported method | `UNIMPLEMENTED` |
-| Classified limits and admission capacity | `RESOURCE_EXHAUSTED` |
-| Unavailable dependency, trust or draining service | `UNAVAILABLE` |
-| Expired request budget | `DEADLINE_EXCEEDED` |
-| Unexpected error or recovered panic | `INTERNAL` |
+| Classified bad request | `INVALID_ARGUMENT` |
+| Missing, malformed or invalid bearer; classified unauthenticated | `UNAUTHENTICATED` |
+| Classified forbidden | `PERMISSION_DENIED` |
+| Classified not found | `NOT_FOUND` |
+| Classified already exists | `ALREADY_EXISTS` |
+| Classified conflict | `ABORTED` |
+| Classified unimplemented | `UNIMPLEMENTED` |
+| Concurrency shed; classified resource limits | `RESOURCE_EXHAUSTED` |
+| Authentication provider unavailable; classified unavailable | `UNAVAILABLE` |
+| Header deadline elapsed | `DEADLINE_EXCEEDED` |
+| Recovered panic | `INTERNAL` |
 
-Arbitrary handler statuses and panics become `INTERNAL` / `request failed`,
-including faults after partial stream output. Private Rust provenance
-distinguishes classified and framework failures; wire metadata cannot forge it.
-Scoped panic recovery suppresses the panic payload before the process hook can
-print it, while unrelated HTTP/background panics keep their existing behavior.
-
-Fixed transport bounds are 256 concurrent business RPCs, a separate 4096-call
-health pool, 4096 connections, 100 HTTP/2 streams per connection, 16 KiB aggregate
-request metadata and 4 MiB per message in both directions. Admission never
-waits for a business permit. A returned stream holds its permit through terminal
-status or cancellation. A deadline takes and drops the actual suspended body
-before releasing that permit, even when the peer stops reading.
-
-The failure table describes classified service and admission failures.
-Native tonic receive-size rejection uses `OUT_OF_RANGE`; native streaming
-framing errors forwarded through a feature's raw `Status` still pass through
-the handler privacy guard and can become sanitized `INTERNAL`. Semantic
-Protovalidate rejection is independently sticky and cannot be swallowed.
-Client-local encoding overflow follows tonic 0.14.6: the stateless codec rejects
-the oversized message before serialization, while the native send path reports
-`INTERNAL` with a fixed safe description. Classified resource/admission mapping
-remains `RESOURCE_EXHAUSTED`. The bound applies to each unary or streaming
-message and never enables retry or replay.
-
-Unary RPCs have an eight-second safety deadline; an earlier caller deadline wins.
-Authentication and validation spend that same deadline. Streams have no imposed
-unary backstop: caller deadlines/cancellation and the shared process drain still
-apply. A malformed `grpc-timeout` follows tonic's compatible ignore-as-absent
-semantics without logging its raw value.
+A handler `Status` is not rewritten. Only the rows above are transport-owned
+or catalog-owned. Tonic's own decode-limit status is unchanged.
 
 ## Reuse clients and original deadlines
 
-Create one lazy `infra_grpc::Client` per trusted operator destination. Explicitly
-choose `ClientSecurity::Plaintext` or TLS with normal certificate/hostname
-verification, optional CA and optional client identity. Construction performs no
-DNS or socket I/O. Clones share the channel's connection/reconnect resources.
+Create one lazy `infra_grpc::Client` per trusted operator destination.
+`Client::new(destination, ClientSecurity)` performs no DNS or socket I/O.
+`ClientSecurity::Plaintext` or `ClientSecurity::Tls(ClientTlsMaterial)` is
+explicit. TLS uses tonic `ClientTlsConfig`: normal certificate and hostname
+verification, native roots unless a CA is supplied, and an optional client
+identity. The server remains TLS 1.3-only; the client does not. Construction
+sets a 5 second connect timeout, a 60 second TCP keepalive, and HTTP/2
+keepalive at 20 seconds with a 20 second timeout. Clones share the lazy
+channel.
 
-Attach the generated immutable method catalog before constructing a native stub:
+Set the call budget with tonic `Request::set_timeout`. That writes
+`grpc-timeout`. The server still applies `min(grpc-timeout, 8s)`.
 
 ```rust,ignore
-let transport = infra_grpc::Client::new(destination, security)?;
-let transport = grpc_contracts::generated::echo_service_client_transport(transport)?;
-let mut client = grpc_contracts::generated::echo_service_client::EchoServiceClient::new(transport);
-let mut request = tonic::Request::new(grpc_contracts::generated::UnaryRequest {
-    message: "hello".into(),
-});
-request.extensions_mut().insert(infra_grpc::Operation { deadline });
+let channel = infra_grpc::Client::new(destination, security)?;
+let mut client = EchoServiceClient::new(channel);
+let mut request = tonic::Request::new(UnaryRequest { message: "hello".into() });
+request.set_timeout(std::time::Duration::from_secs(2));
 let response = client.unary(request).await?;
 ```
 
-The absolute operation deadline is required, bounded by any current parent and
-spent across readiness, connect, dispatch and the response's terminal lifetime.
-The governed server reports its expired deadline as `DEADLINE_EXCEEDED`.
-Before response headers, tonic's native `Channel` also enforces `grpc-timeout`
-and can report `CANCELLED` when its timer wins. Client timeout codes therefore
-retain native tonic behavior while spending the same operation budget.
-The stateless generated client codec enforces per-message size without capturing
-an inbound call, so nested outbound calls remain independent. No automatic
-application retry, replay, hedging, discovery or client health polling is added.
+The client injects the current trace context and records its span and metrics
+from response headers. A transport failure is `UNAVAILABLE` /
+`transport unavailable`. There is no application retry, replay, hedging,
+discovery or client health polling.
 
 <!-- template:begin outbound-auth-grpc:docs-grpc-oauth -->
-When OAuth is also selected, bind the configured transport inside its existing
-private credential owner before giving it to the native generated client:
+When OAuth is also selected, bind the channel inside the private credential
+owner before giving it to the generated client:
 
 ```rust,ignore
-let transport = grpc_contracts::generated::echo_service_client_transport(transport)?;
-let authenticated = credentials.grpc(transport);
-let client = grpc_contracts::generated::echo_service_client::EchoServiceClient::new(authenticated);
+let channel = infra_grpc::Client::new(destination, security)?;
+let authenticated = credentials.grpc(channel);
+let client = EchoServiceClient::new(authenticated);
 ```
 
-Preexisting Authorization is rejected before token or resource I/O. Acquisition
-and hard-expiry checks spend the original deadline; failure prevents dispatch.
-One sensitive bearer value is injected at opening. A stream does not refresh it
-mid-call. An observed resource `UNAUTHENTICATED` conditionally removes only the
-exact credential used by that call while it is still cached; a newer replacement
-survives. This covers native status in initial headers or terminal trailers, and
-HTTP 401 whose clean transport completion is observed without `grpc-status`.
-`PERMISSION_DENIED`,
-including native HTTP 403 fallback, keeps the credential. Explicit `grpc-status`
-takes precedence over HTTP status, including malformed values mapping to `UNKNOWN`.
+A caller-supplied `Authorization` is `INVALID_ARGUMENT` before any token or
+resource I/O. The acquisition deadline is `grpc-timeout` when that header is
+present and well formed; otherwise it is the owner's five-second fetch
+timeout. Acquisition failure prevents dispatch. One bearer is inserted at
+opening and is not refreshed mid-stream.
 
-A completed HTTP 401 is rejection evidence independently of later protobuf or
-gRPC framing decoding. A truncated payload can therefore yield native `INTERNAL`
-after conditional eviction. Transport body errors or cancellation before
-completion do not trigger this fallback; a decoder that stops consumption early
-also supplies no completed-response evidence. The decoder result is never
-rewritten.
-
-Cleanup spends only the original remaining deadline and never changes the
-response or replays the RPC. Eviction is not guaranteed after budget exhaustion
-or when the caller drops before observing the terminal rejection; no background
-cleanup is started. Hard expiry before dispatch is a timeout and sends no
-resource request. The [OAuth owner](outbound-machine-authentication.md) keeps
-the token, cache and coalescing policy; there is no public token getter.
+Eviction runs only on the initial response: `grpc-status` `UNAUTHENTICATED`,
+or HTTP 401 with no `grpc-status`. Trailers are not inspected. The response
+is returned unchanged. Conditional invalidation of that exact credential
+spends only the remaining deadline and starts no background work. A newer
+cached replacement survives. `PERMISSION_DENIED` keeps the credential. Hard
+expiry before dispatch is a timeout and sends no resource request. The
+[OAuth owner](outbound-machine-authentication.md) keeps the token, cache and
+coalescing policy.
 <!-- template:end outbound-auth-grpc:docs-grpc-oauth -->
 
 ## Health, shutdown and observation
 
-Standard Check and Watch read the existing cached readiness verdict for the
-overall service and registered service names. They never probe dependencies.
-Before startup admission, on stale/failed readiness and after stopping, known
-services are `NOT_SERVING`. Unknown Check is `NOT_FOUND`; unknown Watch publishes
-`SERVICE_UNKNOWN` and remains open. A readiness update cannot undo shutdown.
+`Check` reads the cached readiness verdict. It does not probe dependencies.
+The empty service name means the overall service. A name registered with
+`Services::add`, plus `grpc.health.v1.Health`, is known. Any other `Check`
+name is `NOT_FOUND`. A known service is `SERVING` only while the verdict is
+ready, and `NOT_SERVING` otherwise, including before the first successful
+admission.
 
-The first signal closes business admission and publishes terminal health before
-the propagation delay. HTTP and gRPC then drain concurrently under the one
-remaining process deadline. Existing business RPCs may finish; health watchers
-do not prevent exit. Forced expiry drops calls and joins transport-owned
-connection, HTTP/2 stream and deadline tasks. The existing 17-second cleanup tail,
-second-signal handling and exit meanings remain: 0 clean, 3 overrun, 1 startup
-failure. Partial startup resources enter the same bounded cleanup path.
+`Watch` streams changes and does not spawn a task. A known service emits the
+current status, then each change. When readiness is draining it emits
+`NOT_SERVING` if that was not already the last status, then ends, so the
+stream does not hold drain. An unknown `Watch` emits `SERVICE_UNKNOWN` once
+and ends when readiness is draining, without a later `NOT_SERVING`.
 
-Tracing uses the existing providers and W3C propagation. Known generated methods
-have one outcome and duration through final stream status or drop. Server
-outcomes cover the governed RPC path. Client outcomes cover initial wire status,
-trailers or observed HTTP fallback, transport failure, deadline and cancellation
-at the governed body boundary; they do not classify every downstream typed
-decoder result. Thus a completed HTTP 401 can be observed as authentication
-rejection while a malformed payload produces native `INTERNAL` for the caller.
-Routine health polling and unknown peer paths create no method series. Counters
-and histograms are `grpc_calls_total` and `grpc_call_duration_seconds`, with
-finite method/direction/outcome labels. Payloads, metadata values, bearer tokens,
-identities and raw errors are never transport attributes.
+Shutdown starts readiness drain first, so health becomes `NOT_SERVING` during
+the propagation delay. HTTP and gRPC then drain concurrently, each with the
+same remaining drain budget. The budget must be at least eight seconds.
+In-flight calls may finish; health watchers do not hold the drain. An overrun
+votes in the existing degraded shutdown. There is no second budget and no
+separate gRPC cleanup stage.
+
+Server spans come from
+`tracing_opentelemetry_instrumentation_sdk` gRPC helpers. The parent is the
+extracted incoming context. Counters and histograms are `grpc_calls_total`
+(`method`, `direction`, `outcome`) and `grpc_call_duration_seconds`
+(`method`, `direction`). `direction` is `server` or `client`. `outcome` is the
+closed status name: `ok`, `cancelled`, `deadline_exceeded`,
+`invalid_argument`, `unauthenticated`, `permission_denied`, `not_found`,
+`already_exists`, `aborted`, `unimplemented`, `resource_exhausted`,
+`unavailable`, or `internal` (which also covers `UNKNOWN`, `DATA_LOSS`,
+`FAILED_PRECONDITION` and `OUT_OF_RANGE`).
+
+On the server, `method` is the request path only when the call was dispatched
+to a registered service or to health and the header status is not
+`UNIMPLEMENTED`. Otherwise `method` is `"unknown"`. Spans and metrics use the
+response-header status. A missing `grpc-status` header is recorded as ok, so
+a streaming error sent only in trailers is not reflected. Payloads, metadata
+values, bearer tokens and raw errors are not transport attributes.
 
 ## Generate and verify
 
-`make grpc-generate` uses pinned Buf descriptors and the separately locked
-development generator. Commit schema, `buf.lock`, descriptors and generated Rust
-together. Never edit generated Rust. Application contracts are not generated by
-normal service builds or runtime images.
+`make grpc-generate` asks pinned Buf 1.73.0 for a temporary file descriptor
+set, then runs stock `tonic_prost_build` over the owned files. Generation
+does not invoke protoc and does not commit a descriptor set. Commit schema
+and generated Rust together. Never edit generated Rust. Application contracts
+are not generated by normal service builds or by the runtime image.
 
-The maintained validator dependency compiles its own packaged schemas. Run
-`make grpc-tools` once before direct Cargo use; normal build/test make targets
-do that preflight automatically. Provisioning downloads a pinned, checksum-checked
-official compiler into the managed tool cache. After provisioning, compiler
-invocation is cache-only and offline builds require no system `protoc` or
-generation network. The final runtime image contains no compiler.
-
-`make grpc-check` runs actual Buf format/lint, repeats generation, compares
-committed bytes and checks breaking changes against `GRPC_BASE_REF` (the exact
-pull-request base in CI). An initial addition reports that the valid base has no
-old protobuf contract; an unreadable base fails. Buf STANDARD lint and FILE
-compatibility remain enabled. The generator is not a runtime workspace member.
-
-CI owns the heavyweight build, protocol/process tests and retained initializer
-graphs. Five gRPC graphs cover none/JWT/introspection/OAuth and the maximal
-compatible OAuth/NATS/outbox tuple without multiplying harnesses or database
-suites. `GRPC=none` preserves shared failure, telemetry/prost and TLS dependencies
-that surviving profiles still own. Profile choices and replay are recorded in
-`template.lock`; old locks without gRPC select `none`.
+`make grpc-check` runs Buf format and STANDARD lint, repeats generation,
+compares committed Rust, and checks FILE compatibility against
+`GRPC_BASE_REF` (the pull-request base in CI). An initial addition reports
+that the base has no protobuf contract; an unreadable base fails. The
+generator is not a runtime workspace member. CI owns that heavy check.

@@ -319,9 +319,8 @@
       {"path": "crates/service-failure/src/lib.rs", "ids": ["http-authentication-codes", "service-failure-authentication-code-all", "service-failure-authentication-code-wire", "service-failure-authentication-code-meaning", "service-failure-authentication-unauthenticated-meaning", "service-failure-authentication-unavailable-meaning"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-authn-dependency", "service-authn-test-dependencies"]},
       {"path": "crates/infra-grpc/Cargo.toml", "ids": ["grpc-bearer-dependency", "grpc-bearer-test-dependency"]},
-      {"path": "crates/infra-grpc/src/server.rs", "ids": ["grpc-server-prepared-verifier-field", "grpc-server-prepare-verifier", "grpc-server-prepared-verifier-init", "grpc-server-inbound-verifier-field", "grpc-server-bound-verifier-move", "grpc-server-authn-verifier-clone", "grpc-server-authn-verify", "grpc-server-authentication-status"]},
-      {"path": "crates/infra-grpc/tests/transport.rs", "id": "grpc-transport-test-unknown-provider"},
-      {"path": "crates/infra-grpc/tests/transport.rs", "ids": ["grpc-transport-test-auth-imports", "grpc-transport-test-auth-secret", "grpc-transport-test-auth-time", "grpc-transport-test-auth-io", "grpc-transport-test-auth-tls-acceptor", "grpc-transport-test-auth-provider-field", "grpc-transport-test-auth-fixture", "grpc-transport-test-auth-server-argument", "grpc-transport-test-auth-provider-init", "grpc-transport-test-auth-provider-stop", "grpc-transport-test-auth-cardinalities", "grpc-transport-test-auth-stream-identity", "grpc-transport-test-auth-provider", "grpc-transport-test-auth-provider-tls", "grpc-transport-test-auth-listener", "grpc-transport-test-auth-ca-der", "grpc-transport-test-auth-ca-der-init", "grpc-transport-test-seen-identity-field", "grpc-transport-test-seen-principal", "grpc-transport-test-drain-provider-before", "grpc-transport-test-drain-provider-after"]},
+      {"path": "crates/infra-grpc/src/router.rs", "ids": ["grpc-router-verifier", "grpc-router-authenticate", "grpc-authenticate"]},
+      {"path": "crates/infra-grpc/tests/transport.rs", "ids": ["grpc-transport-test-auth-time", "grpc-transport-test-auth-imports", "grpc-transport-test-auth-secret", "grpc-transport-test-auth-listener", "grpc-transport-test-auth-io", "grpc-transport-test-auth-tls-acceptor", "grpc-transport-test-accepted-token", "grpc-transport-test-seen-identity-field", "grpc-transport-test-seen-principal", "grpc-transport-test-auth-provider-field", "grpc-transport-test-auth-fixture", "grpc-transport-test-router-verifier", "grpc-transport-test-auth-provider-init", "grpc-transport-test-auth-provider-stop", "grpc-transport-test-bearer", "grpc-transport-test-watch-bearer", "grpc-transport-test-seen-identity-assert", "grpc-transport-test-unauthenticated", "grpc-transport-test-deadline-bearer", "grpc-transport-test-auth-provider", "grpc-transport-test-auth-ca-der", "grpc-transport-test-auth-ca-der-init"]},
       {"path": "crates/service/src/api.rs", "ids": ["service-api-authn-imports", "service-api-authn-document-security", "service-api-authn-security-scheme", "service-api-protected-test-route"]},
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-authn-imports", "bootstrap-authn-config-import", "bootstrap-authn-errors", "bootstrap-authn-prepare", "bootstrap-prepare-auth-prefix", "bootstrap-prepare-auth-suffix", "bootstrap-auth-provider-url", "bootstrap-prepared-auth-enabled", "bootstrap-authn-finalize-enabled"]},
       {"path": "crates/service/tests/lifecycle.rs", "ids": ["service-lifecycle-disabled-authn"]},
@@ -561,9 +560,7 @@
   },
   "grpc": {
     "remove_when_unselected": [
-      ".cargo/config.toml",
       "api/proto/",
-      "buf.lock",
       "buf.yaml",
       "crates/config/src/grpc.rs",
       "crates/grpc-contracts/",
@@ -574,8 +571,6 @@
       "docs/grpc-decisions.md",
       "scripts/ci/grpc-check.sh",
       "scripts/grpc-generate.sh",
-      "scripts/grpc-protoc.py",
-      "scripts/tests/grpc-protoc.py",
       "tools/grpc-codegen/"
     ],
     "markers": [
@@ -584,17 +579,16 @@
         "ids": [
           "workspace-grpc-generator",
           "workspace-grpc-crates",
-          "workspace-grpc-dependencies",
-          "workspace-grpc-tls-clients"
+          "workspace-grpc-dependencies"
         ]
       },
       {
-        "path": ".github/workflows/codeql.yml",
-        "id": "codeql-grpc-compiler"
-      },
-      {
         "path": "crates/service/src/lib.rs",
-        "id": "service-registration-module"
+        "ids": [
+          "service-registration-module",
+          "service-run-registration-argument",
+          "service-run-with-grpc"
+        ]
       },
       {
         "path": "crates/service/src/bootstrap/mod.rs",
@@ -602,30 +596,22 @@
           "bootstrap-registration",
           "bootstrap-prepared-registration",
           "bootstrap-destructure-registration",
-          "bootstrap-grpc-imports",
           "bootstrap-grpc-error",
-          "bootstrap-grpc-runtime-owner",
-          "bootstrap-grpc-runtime-owner-argument",
-          "bootstrap-grpc-runtime-owner-release",
-          "bootstrap-grpc-runtime-owner-parameter",
+          "bootstrap-run-registration-parameter",
           "bootstrap-grpc-serve-registration-argument",
           "bootstrap-grpc-serve-registration-parameter",
           "bootstrap-grpc-prepare-start",
           "bootstrap-grpc-prepare-call",
           "bootstrap-grpc-prepare-finish",
           "bootstrap-grpc-bind",
-          "bootstrap-grpc-open-admission",
           "shutdown-plan-grpc"
         ]
       },
       {
         "path": "crates/service/src/bootstrap/shutdown.rs",
         "ids": [
-          "shutdown-imports",
           "shutdown-plan-grpc",
-          "shutdown-begin-grpc-drain",
-          "shutdown-concurrent-grpc-drain",
-          "shutdown-grpc-cleanup-join"
+          "shutdown-concurrent-grpc-drain"
         ]
       },
       {
@@ -676,12 +662,18 @@
         ]
       },
       {
-        "path": ".cargo/config.toml",
-        "id": "protoc-environment"
+        "path": "crates/infra-http/src/server.rs",
+        "ids": [
+          "http-server-tls",
+          "http-server-tls-test"
+        ]
       },
       {
-        "path": "build/docker/Dockerfile",
-        "id": "docker-protoc-build-deps"
+        "path": "crates/infra-http/Cargo.toml",
+        "ids": [
+          "http-tls-dependencies",
+          "http-tls-test-dependencies"
+        ]
       },
       {
         "path": "make/template.mk",
@@ -701,10 +693,6 @@
         "id": "verify-grpc-schema"
       },
       {
-        "path": "scripts/ci/tools-check.sh",
-        "id": "tools-check-protoc"
-      },
-      {
         "path": ".github/workflows/ci.yml",
         "ids": [
           "ci-grpc-output",
@@ -717,8 +705,7 @@
       {
         "path": "tools/versions.env",
         "ids": [
-          "tools-buf-version",
-          "tools-protoc-version"
+          "tools-buf-version"
         ]
       },
       {
@@ -767,10 +754,6 @@
       {
         "path": "make/template.mk",
         "id": "make-grpc-standard-targets"
-      },
-      {
-        "path": "deny.toml",
-        "id": "grpc-validator-license"
       }
     ]
   },
