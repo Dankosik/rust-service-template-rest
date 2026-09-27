@@ -4,28 +4,12 @@
 //! in a file only as an empty placeholder that documents the key; a non-empty
 //! value there is a leaked credential waiting to be committed.
 
-use secrecy::SecretString;
-use serde::Deserialize;
-
-/// Missing, empty, or whitespace-only secret is absent (`None`).
-///
-/// Trim decides vacancy only; a present secret keeps the deserialized
-/// bytes, including padding. Downstream parsers (DSN, OTLP headers) trim
-/// their own input.
-pub(crate) fn occupied_secret<'de, D>(deserializer: D) -> Result<Option<SecretString>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = Option::<String>::deserialize(deserializer)?;
-    Ok(raw.and_then(|s| (!s.trim().is_empty()).then(|| SecretString::from(s))))
-}
-
 /// Whether a dotted key names a credential.
 ///
 /// Segments are split on `.`, `_`, and `-`, so `otlp_headers`, `api_key`,
 /// and `private-key` all match; `token_url` remains a non-credential URL name.
 #[must_use]
-pub fn is_secret_like_key(key: &str) -> bool {
+pub(crate) fn is_secret_like_key(key: &str) -> bool {
     let lowered = key.trim().to_ascii_lowercase();
     // template:begin oidc-jwt:secret-policy-token-profile-exception
     if lowered == "authn.token_profile" {

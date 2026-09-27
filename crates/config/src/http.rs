@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytesize::ByteSize;
 use serde::Deserialize;
 
-use crate::validate::{ValidationError, duration_range, int_range, non_empty, socket_addr};
+use crate::validate::{ValidationError, duration_range, int_range};
 
 /// Operator-facing floor for `http.max_header_bytes`. hyper refuses an HTTP/1
 /// read buffer below this size; the adapter still clamps independently so
@@ -20,7 +20,8 @@ pub struct HttpConfig {
     /// Listen address as an IP `host:port`, or `:port` for IPv4
     /// all-interfaces (`0.0.0.0`). Hostnames are refused; load does not
     /// look them up.
-    pub addr: String,
+    #[serde(deserialize_with = "crate::de::listen_addr")]
+    pub addr: SocketAddr,
     /// Total time the platform allows between SIGTERM and SIGKILL. Every
     /// teardown stage draws from it; `drain_timeout` bounds only the HTTP
     /// drain envelope.
@@ -34,9 +35,7 @@ pub struct HttpConfig {
     /// Bound for the HTTP drain, including the readiness propagation delay
     /// in front of it. Not the process SIGTERM-to-exit window (`grace_period`)
     /// and not Tokio's leftover-task drop (`runtime.shutdown_timeout`).
-    ///
-    /// The previous operator key `http.shutdown_timeout` is still accepted.
-    #[serde(alias = "shutdown_timeout", with = "humantime_serde")]
+    #[serde(with = "humantime_serde")]
     pub drain_timeout: Duration,
     /// How long the listener keeps serving after readiness flips off, so a
     /// load balancer notices `/health/ready` failing before connections stop
@@ -75,7 +74,7 @@ pub struct HttpConfig {
 impl Default for HttpConfig {
     fn default() -> Self {
         Self {
-            addr: ":8080".to_owned(),
+            addr: SocketAddr::from(([0, 0, 0, 0], 8080)),
             grace_period: Duration::from_secs(45),
             // 25s rather than the whole grace period: the teardown after the
             // drain (diagnostics, background join, dependency close,
@@ -98,15 +97,6 @@ impl Default for HttpConfig {
 }
 
 impl HttpConfig {
-    /// The parsed listen address.
-    ///
-    /// # Errors
-    ///
-    /// Returns the validation error for a malformed `http.addr`.
-    pub fn listen_addr(&self) -> Result<SocketAddr, ValidationError> {
-        socket_addr("http.addr", &self.addr)
-    }
-
     /// Adapter form of `http.max_connections`: `None` means unbounded.
     #[must_use]
     pub fn connection_cap(&self) -> Option<NonZeroU32> {
@@ -127,8 +117,6 @@ impl HttpConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        non_empty("http.addr", &self.addr)?;
-        self.listen_addr()?;
         let second = Duration::from_secs(1);
         let ten_minutes = Duration::from_secs(600);
         let hundred_ms = Duration::from_millis(100);

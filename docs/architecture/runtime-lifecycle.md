@@ -7,10 +7,11 @@ it against the built binary.
 
 ## Startup
 
-1. `main` hands `argv` to `bootstrap::run`, which parses the loader flags,
+1. `main` hands `argv` to `bootstrap::run`, which parses the loader flags
+   (`LoadOptions::parse_from`; `--help` exits `0`, a flag error exits `2`),
    loads the configuration snapshot, and validates the grace budget before a
-   runtime exists. A failure here prints one readable message to stderr and
-   exits `1`.
+   runtime exists. A later failure here prints one readable message to stderr
+   and exits `1`.
 2. Inside the Tokio runtime, the signal streams are installed first, so a
    `SIGTERM` that arrives during startup is handled rather than killing the
    process.
@@ -48,8 +49,8 @@ Authentication neither adds a readiness probe nor changes public health behavior
 <!-- template:end authn:docs-lifecycle-authn -->
 <!-- template:begin outbound-http:docs-lifecycle-outbound -->
 A retained [outbound client](../outbound-http.md) is inert until a concrete
-provider is wired. Operations are caller-owned futures and future drop releases
-their admission permit. Resolver, connection-pool, and HTTP library tasks are
+provider is wired. Operations are caller-owned futures; dropping one ends its
+exchange. Resolver, connection-pool, and HTTP library tasks are
 library-owned; bootstrap neither gives them a tracker/token nor joins them in a
 shutdown stage. The client adds no readiness probe or teardown stage. JWT refresh
 remains the separate process-owned task that the existing tracker cancels and
@@ -90,19 +91,33 @@ adds a readiness probe or a shutdown stage of its own.
 
 Configuration and dependency admission precede traffic acceptance.
 Bootstrap, not handlers or feature code, owns process lifecycle and the
-cleanup of a partial startup: a pool opened before a later stage failed is
-closed explicitly under the dependency-close budget before the process
-exits `1`.
+cleanup of a partial startup. Startup records every opened dependency in one
+`Dependencies` value, and a failed or stopped startup runs the same staged
+teardown as a stop signal without the listener stages: background tasks
+join, opened dependencies close under the dependency-close budget, and
+telemetry flushes. A failed startup then exits `1`.
 
 ## Readiness and liveness
 
 `/health/live` is process-only and always `200 ok` while the process runs.
 `/health/ready` reads the cached verdict published by the `health` crate's
-refresher: healthy after every probe passed, unhealthy after
-`health.failure_threshold` consecutive failures, not ready when the snapshot
-is older than the staleness guard allows (a dead refresher fails closed),
-and not ready as soon as teardown starts. The handler never runs a probe, so
-its latency is independent of dependency latency.
+refresher: ready after every probe passed; a failure is published at once
+while the instance is not ready yet, and after a ready verdict only once
+`health.failure_threshold` checks in a row have failed. A verdict older than
+the staleness bound is refused (a dead or hung refresher fails closed), and
+the instance is not ready as soon as teardown starts. The handler never runs
+a probe, so its latency is independent of dependency latency, and an
+unauthenticated caller cannot turn a probe request into a dependency
+round-trip. A probe that runs out of `health.probe_budget` is named in the
+verdict.
+
+Dependency probes are a trade-off. Registering a shared dependency such as
+PostgreSQL makes every instance unready together when that dependency fails,
+so the load balancer has no backend and clients see its error instead of the
+service's own `503` Problem. The template registers the probes because an
+instance that cannot reach its database cannot serve any route; a service
+whose routes degrade gracefully without a dependency should leave that
+dependency's probe out and watch it through metrics.
 
 ## Shutdown
 
@@ -126,8 +141,8 @@ The retained PostgreSQL pool closes in the dependency-close stage and records
 <!-- template:end postgres:docs-lifecycle-postgres-close -->
 
 <!-- template:begin oidc-jwt:docs-lifecycle-jwt-refresh -->
-JWT refresh is periodic and may be triggered by an unknown key; one shared
-fetch is coalesced and canceled/joined with background work during shutdown.
+JWT refresh is periodic and may be triggered by an unknown key or a kid-less
+signature miss; one shared fetch is coalesced and canceled/joined with background work during shutdown.
 Failed refresh keeps the last usable keys. There is no maximum cached-key age
 and this is not an immediate-revocation mechanism.
 <!-- template:end oidc-jwt:docs-lifecycle-jwt-refresh -->
@@ -167,40 +182,38 @@ with its refusals; signals, the stage budget, the shutdown plan, and
 for the shipped binary, and the test-only `jobs-worker-fixture` suite in
 `test/tests/jobs/`.
 
-**Startup.** Each refusal below exits `1`.
+**Startup.** Each refusal below exits `1`, except step 1, which exits `2`.
 
 | Step | What | Refusal (exit 1) |
 | --- | --- | --- |
-| 1 | `FromArgs::from_argv` (`--help` exits `0`) | clap error |
-| 2 | Registration function is `None` | `no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs` |
-| 3 | `service_config::load` (same sources, precedence, unknown-key and secret rules as the service) | `configuration is invalid: ...` |
-| 4 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)` |
-| 5 | Build the multi-thread runtime | `build tokio runtime: ...` |
-| 6 | Install `Signals` (SIGINT, then SIGTERM) | `install stop signal handlers: ...` |
-| 7 | Tracer provider with the worker identity, subscriber, recorder, and the retained messaging panic hook | the telemetry errors, as in the service |
-| 8 | Register optional jobs and typed-message capabilities through `register(&mut kinds, &mut messages, &support)`; validate each nonempty registry | `job kind registration failed: ...`; `job kinds are invalid: ...`; `typed message handlers are invalid: ...`; no retained capability refuses with the step-2 message |
-| 9 | `jobs_worker_starting` record; metrics upkeep and Tokio runtime metrics join the tracker | |
-| 10 | After registration, determine whether retained capabilities need PostgreSQL; validate `postgres.enabled` and mode-aware pool capacity, then admit the DSN/pool and migration history | `postgres.enabled must be true to run the jobs worker`; capacity, DSN, pool, or history refusal |
-| 11 | When messaging or outbox is retained, validate producer/consumer configuration, connect NATS under its startup budget, and admit a consumer only for registered typed handlers | messaging configuration, connection, topology, bounds, or consumer refusal |
-| 12 | Construct every required ordinary and reserved publication `Engine`, then run each `Engine::check_startup` | `jobs startup check: ...` |
-| 13 | Bind the health listener (`http.addr`), then the diagnostics listener (`observability.metrics.addr`, when set); `http listener bound`, `diagnostics listener bound` | `bind http listener ...` |
-| 14 | Readiness admission (`refresh`, then cached verdict over retained PostgreSQL and messaging probes), raced against stop signals | `startup admission: ...` |
-| 15 | Only after admission, start every `Engine` and the admitted consumer; `jobs_claiming_started` and `messaging_consuming_started` | |
-| 16 | Refresher task; `jobs_worker_ready` | |
-| 17 | Wait for a stop signal, an engine failure, or a consumer failure | |
+| 1 | `LoadOptions::parse_from` (`--help` exits `0`) | clap usage error (exit 2) |
+| 2 | `service_config::load` (same sources, precedence, unknown-key and secret rules as the service) | `configuration is invalid: ...` |
+| 3 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)` |
+| 4 | Build the multi-thread runtime | `build tokio runtime: ...` |
+| 5 | Install `Signals` (SIGINT, then SIGTERM) | `install stop signal handlers: ...` |
+| 6 | Tracer provider with the worker identity, subscriber, recorder, and the retained messaging panic hook | the telemetry errors, as in the service |
+| 7 | Register optional jobs and typed-message capabilities through `register(&mut kinds, &mut messages, &support)`; validate each nonempty registry. A composition with no retained capability refuses after configuration is loaded | `job kind registration failed: ...`; `job kinds are invalid: ...`; `typed message handlers are invalid: ...`; `no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs` |
+| 8 | `jobs_worker_starting` record; metrics upkeep and Tokio runtime metrics join the tracker | |
+| 9 | After registration, determine whether retained capabilities need PostgreSQL; validate `postgres.enabled` and mode-aware pool capacity, then admit the DSN/pool and migration history | `postgres.enabled must be true to run the jobs worker`; capacity, DSN, pool, or history refusal |
+| 10 | When messaging or outbox is retained, validate producer/consumer configuration, connect NATS under its startup budget, and admit a consumer only for registered typed handlers | messaging configuration, connection, topology, bounds, or consumer refusal |
+| 11 | Construct every required ordinary and reserved publication `Engine`, then run each `Engine::check_startup` | `jobs startup check: ...` |
+| 12 | Bind the health listener (`http.addr`), then the diagnostics listener (`observability.metrics.addr`, when set); `http listener bound`, `diagnostics listener bound` | `bind http listener ...` |
+| 13 | Readiness admission (`refresh`, then cached verdict over retained PostgreSQL and messaging probes), raced against stop signals | `startup admission: ...` |
+| 14 | Only after admission, start every `Engine` and the admitted consumer; `jobs_claiming_started` and `messaging_consuming_started` | |
+| 15 | Refresher task; `jobs_worker_ready` | |
+| 16 | Wait for a stop signal, an engine failure, or a consumer failure | |
 
-Steps 1-8 open no dependency. Step 2 precedes configuration so the shipped
-binary refuses the same way everywhere; registration itself follows
-configuration and constructs only local registries. Signal streams exist from
-step 6, so a stop during admission remains observable. A signal while NATS
-connects or admits a consumer, before readiness admission, or immediately
-before step 15 starts no engine and no consumer; the staged plan still closes
-any resource already opened. Before admission, `/health/ready` answers `503
-not ready` (not evaluated). Every refusal after the runtime started goes
-through one `abort_startup` teardown: it finishes all started engines and
-consumer work within 2 s, closes bound listeners within 2 s, joins background
-tasks within 3 s, and closes retained pool and messaging resources within 5 s.
-It flushes no telemetry.
+Steps 1-7 open no dependency. Registration follows configuration and
+constructs only local registries. Signal streams exist from step 5, so a
+stop during admission remains observable. A signal while NATS connects or
+admits a consumer, before readiness admission, or immediately before step
+14 starts no engine and no consumer; the staged plan still closes any
+resource already opened. Before admission, `/health/ready` answers `503
+not ready` (not evaluated). A failed signal install returns before anything
+is open. Every later refusal goes through one `abort_startup` teardown: it
+finishes all started engines and consumer work within 2 s, closes bound
+listeners within 2 s, joins background tasks within 3 s, and closes
+retained pool and messaging resources within 5 s. It flushes no telemetry.
 
 **Readiness.** `/health/ready` uses the service's cached-verdict semantics
 with the retained PostgreSQL and messaging probes. The worker is ready only
@@ -231,7 +244,7 @@ that votes degraded makes the exit code `3`.
 | Close retained pool and messaging dependency | 5 s | `postgres_pool_closed` and messaging close outcome | either close overruns or messaging close is unobserved |
 | Flush telemetry | 5 s | `telemetry_flushed`, `shutdown_completed` | the flush is incomplete |
 
-When a stop signal ends startup before step 15, no engine or consumer starts;
+When a stop signal ends startup before step 14, no engine or consumer starts;
 the plan still closes resources already admitted. The tail after the drain is
 2 + 2 + 3 + 5 + 5 = 17 s. `validate_grace_budget` refuses a grace period
 below `http.drain_timeout` plus 17 s. The default worst case is
@@ -259,16 +272,17 @@ stopping the worker. [Async Architecture](async.md) records the mechanism.
 
 Messaging startup installs process signals before broker I/O, admits the NATS
 connection within the existing startup budget, requires JetStream and server
-version >=2.12.3, then checks operator-created source/DLQ topology and the
-named consumer. The API admits only a producer; the worker admits a consumer
-only after a handler registry exists. Readiness refreshes bounded client and
-topology state in the existing `health` owner, so HTTP and metrics read a
-cached verdict and connection loss cannot leave stale health indefinitely.
+version >=2.12.3, then checks operator-created source/DLQ streams and declares
+the named consumer. Only `jobs-worker` connects; the API publishes through the
+outbox. The worker admits a consumer only after a handler registry exists.
+Readiness refreshes local connection state in the existing `health` owner, so
+HTTP and metrics read a cached verdict and connection loss cannot leave stale
+health indefinitely.
 
 At the first stop signal, readiness drains and no new NATS pull starts.
 Handlers, DLQ transfer, and source settlement share the worker's remaining
-drain deadline. At expiry, unfinished handler tasks are cancelled, aborted and
-joined, leaving their source records for redelivery. Dependency close submits
+drain deadline. At expiry, unfinished delivery tasks are aborted, leaving their
+source records for redelivery. Dependency close submits
 NATS drain and waits for its native Closed notification within the existing
 close budget; an absent notification, unjoined application work, or forced
 drain yields the established degraded exit code rather than clean shutdown.
@@ -283,7 +297,7 @@ and startup continues. The cache is not a readiness probe unless composition
 pushes `cache.probe()` into the probe list. It is never a liveness check. A
 gate would turn an outage into total unavailability.
 
-Shutdown drops `Option<Cache>` inside `close_dependencies`, in the dependency
+Shutdown drops `Option<Cache>` inside `Dependencies::close`, in the dependency
 stage after HTTP drain. The connection closes when its last clone drops, and
 the drop does not add to `DEPENDENCY_CLOSE`. The same drop runs on the
 startup-failure and stopped-startup paths. The [guide](../cache.md) shows the
@@ -326,8 +340,8 @@ not add a second budget or change NATS/provider shutdown ownership. See
   Go template's single error code, so an expired drain budget is not read as
   a crash.
 - **Readiness over `tokio::sync::watch`** rather than a per-request probe or
-  a mutex: tests await `changed()` instead of sleeping, and the handler is an
-  O(1) read.
+  a mutex: a streaming reader such as the gRPC health `Watch` wakes on each
+  publication, and the handler is an O(1) read.
 - **Build metadata**: `app.version` is `CARGO_PKG_VERSION` of the calling
   binary; `app.commit` is `vergen-gitcl` in `crates/config/build.rs` with
   `default_on_error()`, overridable through `VERGEN_GIT_SHA`, which the image

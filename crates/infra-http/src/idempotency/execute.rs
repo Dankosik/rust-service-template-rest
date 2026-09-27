@@ -8,7 +8,7 @@ use std::time::Duration;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use infra_idempotency_store::{Attempted, CallerIdentity, Digest, ScopeKey, Store, WorkOutput};
+use infra_idempotency_store::{AttemptError, Attempted, CallerIdentity, Digest, ScopeKey, Store};
 use tokio::time::Instant;
 
 use super::Tx;
@@ -16,7 +16,6 @@ use super::stored::{self, Stored};
 #[cfg(test)]
 use crate::problem::http_status;
 use crate::problem::{Code, Problem, SANITIZED_DETAIL};
-use crate::request_id;
 
 /// Idempotent request outcomes at the HTTP idempotency boundary.
 pub const HTTP_IDEMPOTENCY_OUTCOMES_METRIC: &str = "http_idempotency_outcomes_total";
@@ -69,7 +68,6 @@ pub(super) struct Attempt {
     pub(super) fingerprint: Digest,
     pub(super) operation: Arc<str>,
     pub(super) deadline: Instant,
-    pub(super) request_id: Option<String>,
 }
 
 /// Private provenance sealed onto the successful response returned from the
@@ -111,7 +109,7 @@ where
                 failure = "attempt_missing",
                 "http_idempotency_wiring_failed"
             );
-            sanitized(request_id::request_id(&parts.extensions))
+            sanitized()
         }))
     }
 }
@@ -134,42 +132,28 @@ impl Idempotency {
             fingerprint,
             operation,
             deadline,
-            request_id,
         } = self.attempt;
         let outcome = OutcomeGuard::new();
-        let mut captured = None;
-        let slot = &mut captured;
-        let operation_for_work = Arc::clone(&operation);
         let attempted = store
-            .attempt(
-                &scope,
-                &caller,
-                &fingerprint,
-                async move |tx: &mut Tx<'_>| {
-                    let response = work(tx).await.into_response();
-                    if !response.status().is_success() {
-                        return WorkOutput::Rollback(Rollback::Response(response));
-                    }
-                    match stored::capture(response).await.and_then(|stored| {
-                        stored.record(fingerprint).map(|record| (stored, record))
-                    }) {
-                        Ok((stored, record)) => {
-                            *slot = Some(stored);
-                            WorkOutput::Commit(record)
-                        }
-                        Err(unstorable) => {
-                            tracing::warn!(
-                                operation = %operation_for_work,
-                                failure = unstorable.class(),
-                                "http_idempotency_success_not_stored"
-                            );
-                            WorkOutput::Rollback(Rollback::Unstorable)
-                        }
-                    }
-                },
-            )
+            .attempt(&scope, &caller, &fingerprint, async |tx: &mut Tx<'_>| {
+                let response = work(tx).await.into_response();
+                if !response.status().is_success() {
+                    return Err(Rollback::Response(response));
+                }
+                stored::capture(response)
+                    .await
+                    .and_then(|stored| Ok((stored.record(fingerprint)?, stored)))
+                    .map_err(|unstorable| {
+                        tracing::warn!(
+                            operation = %operation,
+                            failure = unstorable.class(),
+                            "http_idempotency_success_not_stored"
+                        );
+                        Rollback::Unstorable
+                    })
+            })
             .await;
-        map_attempted(attempted, captured, request_id, &scope, &operation)
+        map_attempted(attempted, &scope, &operation)
             .send(deadline, outcome)
             .await
     }
@@ -216,46 +200,35 @@ impl Answer {
 }
 
 fn map_attempted(
-    attempted: Attempted<Rollback>,
-    captured: Option<Stored>,
-    request_id: Option<String>,
+    attempted: Result<Attempted<Stored, Rollback>, AttemptError>,
     scope: &ScopeKey,
     operation: &str,
 ) -> Answer {
     match attempted {
-        Attempted::Unavailable => Answer::problem(unavailable(request_id), Outcome::Unavailable),
-        Attempted::Internal => Answer::problem(sanitized(request_id), Outcome::NotStored),
-        Attempted::Integrity => integrity_failure(request_id),
-        Attempted::Live { matched: false, .. } => {
-            Answer::problem(key_mismatch(request_id), Outcome::KeyMismatch)
-        }
-        Attempted::Live {
-            matched: true,
-            record,
-        } => match stored::decode(record) {
+        Err(AttemptError::Unavailable) => Answer::problem(unavailable(), Outcome::Unavailable),
+        Err(AttemptError::Internal) => Answer::problem(sanitized(), Outcome::NotStored),
+        Err(AttemptError::Integrity) => integrity_failure(),
+        Ok(Attempted::Mismatch) => Answer::problem(key_mismatch(), Outcome::KeyMismatch),
+        Ok(Attempted::Replay(record)) => match stored::decode(record) {
             Ok(stored) => Answer::computed(
                 mark_provenance(stored.into_response(), Provenance::Replayed),
                 Outcome::Replayed,
             ),
-            Err(stored::Undecodable) => integrity_failure(request_id),
+            Err(stored::Undecodable) => integrity_failure(),
         },
-        Attempted::InProgress => Answer::problem(
-            in_progress(request_id, scope, operation),
-            Outcome::InProgress,
-        ),
-        Attempted::RolledBack(Rollback::Response(response)) => {
+        Ok(Attempted::InProgress) => {
+            Answer::problem(in_progress(scope, operation), Outcome::InProgress)
+        }
+        Ok(Attempted::RolledBack(Rollback::Response(response))) => {
             Answer::computed(response, Outcome::NotStored)
         }
-        Attempted::RolledBack(Rollback::Unstorable) => {
-            Answer::problem(sanitized(request_id), Outcome::NotStored)
+        Ok(Attempted::RolledBack(Rollback::Unstorable)) => {
+            Answer::problem(sanitized(), Outcome::NotStored)
         }
-        Attempted::Committed(_) => match captured {
-            Some(stored) => Answer::computed(
-                mark_provenance(stored.into_response(), Provenance::Executed),
-                Outcome::Executed,
-            ),
-            None => integrity_failure(request_id),
-        },
+        Ok(Attempted::Committed(stored)) => Answer::computed(
+            mark_provenance(stored.into_response(), Provenance::Executed),
+            Outcome::Executed,
+        ),
     }
 }
 
@@ -264,35 +237,32 @@ pub(super) fn mark_provenance(mut response: Response, provenance: Provenance) ->
     response
 }
 
-fn integrity_failure(request_id: Option<String>) -> Answer {
+fn integrity_failure() -> Answer {
     tracing::error!(failure = "integrity", "http_idempotency_integrity_failed");
-    Answer::problem(sanitized(request_id), Outcome::Integrity)
+    Answer::problem(sanitized(), Outcome::Integrity)
 }
 
 /// The sanitized 500 for wiring, persistence, and record faults.
-pub(super) fn sanitized(request_id: Option<String>) -> Response {
+pub(super) fn sanitized() -> Response {
     Problem::new(Code::InternalServerError)
         .detail(SANITIZED_DETAIL)
-        .request_id(request_id)
         .into_response()
 }
 
-fn unavailable(request_id: Option<String>) -> Response {
+fn unavailable() -> Response {
     Problem::new(Code::IdempotencyUnavailable)
         .detail(UNAVAILABLE_DETAIL)
         .retry_after(RETRY_AFTER)
-        .request_id(request_id)
         .into_response()
 }
 
-fn key_mismatch(request_id: Option<String>) -> Response {
+fn key_mismatch() -> Response {
     Problem::new(Code::IdempotencyKeyMismatch)
         .detail(KEY_MISMATCH_DETAIL)
-        .request_id(request_id)
         .into_response()
 }
 
-fn in_progress(request_id: Option<String>, scope: &ScopeKey, operation: &str) -> Response {
+fn in_progress(scope: &ScopeKey, operation: &str) -> Response {
     // An expected answer to a concurrent retry; the request span carries the request id.
     tracing::info!(
         scope_digest = %ScopeDigest(scope.digest()),
@@ -302,7 +272,6 @@ fn in_progress(request_id: Option<String>, scope: &ScopeKey, operation: &str) ->
     Problem::new(Code::IdempotencyRequestInProgress)
         .detail(IN_PROGRESS_DETAIL)
         .retry_after(RETRY_AFTER)
-        .request_id(request_id)
         .into_response()
 }
 
@@ -350,12 +319,6 @@ mod tests {
 
     use super::*;
 
-    const REQUEST_ID: &str = "req-1";
-
-    fn request_id() -> String {
-        REQUEST_ID.to_owned()
-    }
-
     fn scope() -> ScopeKey {
         ScopeKey::from_digest([1; 32])
     }
@@ -402,52 +365,28 @@ mod tests {
     #[tokio::test]
     async fn store_outcomes_keep_retry_and_integrity_semantics_distinct() {
         assert_problem(
-            map_attempted(
-                Attempted::Unavailable,
-                None,
-                Some(request_id()),
-                &scope(),
-                "test",
-            ),
+            map_attempted(Err(AttemptError::Unavailable), &scope(), "test"),
             Outcome::Unavailable,
             Code::IdempotencyUnavailable,
             true,
         )
         .await;
         assert_problem(
-            map_attempted(
-                Attempted::Internal,
-                None,
-                Some(request_id()),
-                &scope(),
-                "test",
-            ),
+            map_attempted(Err(AttemptError::Internal), &scope(), "test"),
             Outcome::NotStored,
             Code::InternalServerError,
             false,
         )
         .await;
         assert_problem(
-            map_attempted(
-                Attempted::Integrity,
-                None,
-                Some(request_id()),
-                &scope(),
-                "test",
-            ),
+            map_attempted(Err(AttemptError::Integrity), &scope(), "test"),
             Outcome::Integrity,
             Code::InternalServerError,
             false,
         )
         .await;
         assert_problem(
-            map_attempted(
-                Attempted::InProgress,
-                None,
-                Some(request_id()),
-                &scope(),
-                "test",
-            ),
+            map_attempted(Ok(Attempted::InProgress), &scope(), "test"),
             Outcome::InProgress,
             Code::IdempotencyRequestInProgress,
             true,
@@ -456,17 +395,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_record_replays_only_for_an_exact_fingerprint() {
-        let replay = map_attempted(
-            Attempted::Live {
-                matched: true,
-                record: stored_record(),
-            },
-            None,
-            Some(request_id()),
-            &scope(),
-            "test",
-        );
+    async fn a_live_record_replays_or_refuses_a_different_request() {
+        let replay = map_attempted(Ok(Attempted::Replay(stored_record())), &scope(), "test");
         assert_eq!(replay.outcome, Outcome::Replayed);
         assert_eq!(replay.response.status(), StatusCode::CREATED);
         assert_eq!(
@@ -484,16 +414,7 @@ mod tests {
             "stored"
         );
         assert_problem(
-            map_attempted(
-                Attempted::Live {
-                    matched: false,
-                    record: stored_record(),
-                },
-                None,
-                Some(request_id()),
-                &scope(),
-                "test",
-            ),
+            map_attempted(Ok(Attempted::Mismatch), &scope(), "test"),
             Outcome::KeyMismatch,
             Code::IdempotencyKeyMismatch,
             false,
@@ -504,9 +425,9 @@ mod tests {
     #[test]
     fn committed_success_carries_executed_provenance() {
         let answer = map_attempted(
-            Attempted::Committed(stored_record()),
-            Some(stored::decode(stored_record()).expect("stored success")),
-            Some(request_id()),
+            Ok(Attempted::Committed(
+                stored::decode(stored_record()).expect("stored success"),
+            )),
             &scope(),
             "test",
         );

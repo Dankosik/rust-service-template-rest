@@ -44,7 +44,16 @@ pub struct InboundWebhookEndpointConfig {
 }
 
 impl InboundWebhooksConfig {
-    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+    /// Receipts are durable, so a configured endpoint needs PostgreSQL.
+    /// Secret presence is checked by the receiving root: the worker shares
+    /// this section but never holds verification secrets.
+    pub(crate) fn validate(&self, postgres_enabled: bool) -> Result<(), ValidationError> {
+        if !self.endpoints.is_empty() && !postgres_enabled {
+            return Err(ValidationError::new(
+                "postgres.enabled",
+                "must be true when inbound webhook endpoints are configured",
+            ));
+        }
         for (endpoint_id, endpoint) in &self.endpoints {
             validate_endpoint_id("inbound_webhooks.endpoints", endpoint_id)?;
             let key = format!("inbound_webhooks.endpoints.{endpoint_id}.active_key");
@@ -91,43 +100,45 @@ fn validate_key_ref(key: &str, reference: &str) -> Result<(), ValidationError> {
 mod tests {
     use super::{InboundWebhookEndpointConfig, InboundWebhooksConfig};
 
+    fn with_endpoint(active_key: &str, previous_key: Option<&str>) -> InboundWebhooksConfig {
+        let mut config = InboundWebhooksConfig::default();
+        config.endpoints.insert(
+            "partner".to_owned(),
+            InboundWebhookEndpointConfig {
+                active_key: active_key.to_owned(),
+                previous_key: previous_key.map(str::to_owned),
+            },
+        );
+        config
+    }
+
     #[test]
     fn defaults_are_inert() {
         let config = InboundWebhooksConfig::default();
         assert!(config.endpoints.is_empty());
         assert!(config.secrets.is_empty());
-        config.validate().unwrap();
+        config.validate(false).unwrap();
+    }
+
+    #[test]
+    fn a_configured_endpoint_requires_postgres() {
+        let config = with_endpoint("partner_v2", None);
+        assert_eq!(config.validate(false).unwrap_err().key, "postgres.enabled");
+        config.validate(true).unwrap();
     }
 
     #[test]
     fn rejects_an_empty_key_reference() {
-        let mut config = InboundWebhooksConfig::default();
-        config.endpoints.insert(
-            "partner/a?#".to_owned(),
-            InboundWebhookEndpointConfig {
-                active_key: String::new(),
-                previous_key: None,
-            },
-        );
-
-        let err = config.validate().unwrap_err();
-        assert_eq!(err.key, "inbound_webhooks.endpoints.partner/a?#.active_key");
-        config.endpoints.get_mut("partner/a?#").unwrap().active_key = "partner_v2".to_owned();
-        config.validate().unwrap();
+        let err = with_endpoint("", None).validate(true).unwrap_err();
+        assert_eq!(err.key, "inbound_webhooks.endpoints.partner.active_key");
     }
 
     #[test]
     fn rejects_reused_active_and_previous_references() {
-        let mut config = InboundWebhooksConfig::default();
-        config.endpoints.insert(
-            "partner".to_owned(),
-            InboundWebhookEndpointConfig {
-                active_key: "partner_v2".to_owned(),
-                previous_key: Some("partner_v2".to_owned()),
-            },
-        );
-
-        let err = config.validate().unwrap_err();
+        let err = with_endpoint("partner_v2", Some("partner_v2"))
+            .validate(true)
+            .unwrap_err();
         assert_eq!(err.key, "inbound_webhooks.endpoints.partner.previous_key");
+        assert!(err.message.contains("must differ"), "{err}");
     }
 }

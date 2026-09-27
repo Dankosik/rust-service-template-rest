@@ -36,7 +36,7 @@ use std::time::Duration;
 use futures_util::FutureExt as _;
 use infra_postgres::{Closed, Dsn, Isolation, PgPool, PoolOptions};
 
-pub(crate) use infra_postgres::raw_sqlstate as sqlstate;
+pub(crate) use infra_postgres::sqlstate;
 
 const APP: &str = "integration-tests-jobs";
 /// Bound on every wait in this suite.

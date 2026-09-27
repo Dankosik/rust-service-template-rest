@@ -33,7 +33,7 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | `jobs-worker` (`crates/jobs-worker`) | The worker's composition root and binary. | Engine mechanics, feature behavior. |
 <!-- template:end jobs:docs-boundaries-jobs-owners -->
 <!-- template:begin messaging:docs-boundaries-messaging-owner -->
-| `domain-events` (`crates/domain-events`) | Immutable typed event identity, type/version, occurrence time, and payload contract. | Subjects, broker metadata, ID minting, clocks, configuration, or tasks. |
+| `domain-events` (`crates/domain-events`) | Typed event payload contract (type/version) and the event value: logical ID, occurrence time, and payload. Wire limits and validation live in `infra-messaging`. | Subjects, broker metadata, ID minting, clocks, configuration, or tasks. |
 | `infra-messaging` (`crates/infra-messaging`) | Go-compatible wire admission, prepared publication, typed registry, bounded JetStream consumer, deterministic DLQ/restore, and connection/probe mapping ([guide](../durable-messaging.md)). | Business events, feature policy, queue SQL or commits, stream administration, configuration loading, signals, or a generic bus. |
 <!-- template:end messaging:docs-boundaries-messaging-owner -->
 <!-- template:begin cache:docs-boundaries-cache-owner -->
@@ -119,7 +119,7 @@ infra-messaging::outbox -> domain-events, infra-jobs, infra-postgres, base64
 infra-outbound-http -> reqwest, http, bytes, url, tokio, metrics, tracing
 <!-- template:end outbound-http:docs-boundaries-outbound-edges -->
 <!-- template:begin outbound-auth:docs-boundaries-outbound-auth-edges -->
-infra-oauth2-client-credentials -> infra-outbound-http, oauth2, moka, http, bytes, tokio, secrecy
+infra-oauth2-client-credentials -> infra-outbound-http, oauth2, http, bytes, tokio, secrecy
 <!-- template:end outbound-auth:docs-boundaries-outbound-auth-edges -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-edges -->
 main binary -> infra-idempotency-store

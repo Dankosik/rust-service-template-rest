@@ -4,6 +4,7 @@
 //! verified identity. HTTP routing, configuration loading, and authorization
 //! policy remain with their existing owners.
 
+mod authenticate;
 mod bearer;
 mod claims;
 // template:begin oidc-introspection:authn-introspection-module
@@ -21,8 +22,9 @@ mod refresh;
 #[path = "../../../test/fixtures/tls.rs"]
 mod tls;
 
-use std::{fmt, future::Future, pin::Pin, sync::Arc};
+use std::{fmt, sync::Arc};
 
+pub use authenticate::AUTHN_VERIFICATIONS_METRIC;
 pub use bearer::{BearerToken, parse_bearer};
 // template:begin oidc-introspection:authn-introspection-prepare-export
 pub use introspection::{IntrospectionCacheOptions, IntrospectionOptions, prepare_introspection};
@@ -30,7 +32,7 @@ pub use introspection::{IntrospectionCacheOptions, IntrospectionOptions, prepare
 // template:begin oidc-jwt:authn-jwt-prepare-export
 pub use jwt::{JwtAlgorithm, JwtOptions, RefreshTask, TokenProfile, prepare_jwt};
 // template:end oidc-jwt:authn-jwt-prepare-export
-pub use provider::ProviderUrl;
+pub use provider::{EndpointUrl, IssuerUrl};
 
 /// The fixed authentication outcomes exposed to the HTTP adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -65,49 +67,46 @@ pub enum PreparationReason {
     NoUsableKeys,
 }
 
-/// A safe preparation error with closed diagnostics. An issuer mismatch also
-/// names the configured and discovered issuer URLs.
+/// A safe preparation error with closed diagnostics. Only an issuer mismatch
+/// names values: the configured and the discovered issuer URLs.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("authentication preparation failed during {phase:?}: {reason:?}{}", IssuerContext(.issuers.as_deref()))]
-pub struct PreparationError {
-    phase: PreparationPhase,
-    reason: PreparationReason,
-    issuers: Option<Box<(String, String)>>,
-}
-
-struct IssuerContext<'a>(Option<&'a (String, String)>);
-
-impl fmt::Display for IssuerContext<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            Some((configured, discovered)) => write!(
-                formatter,
-                " (configured issuer {configured:?}, discovered issuer {discovered:?})"
-            ),
-            None => Ok(()),
-        }
-    }
+pub enum PreparationError {
+    #[error("authentication preparation failed during {phase:?}: {reason:?}")]
+    Failed {
+        phase: PreparationPhase,
+        reason: PreparationReason,
+    },
+    #[error(
+        "authentication preparation failed during Discovery: IssuerMismatch \
+         (configured issuer {configured:?}, discovered issuer {discovered:?})"
+    )]
+    IssuerMismatch {
+        configured: String,
+        discovered: String,
+    },
 }
 
 impl PreparationError {
     pub(crate) const fn new(phase: PreparationPhase, reason: PreparationReason) -> Self {
-        Self {
-            phase,
-            reason,
-            issuers: None,
-        }
+        Self::Failed { phase, reason }
     }
 
     /// The failed preparation stage.
     #[must_use]
     pub const fn phase(&self) -> PreparationPhase {
-        self.phase
+        match self {
+            Self::Failed { phase, .. } => *phase,
+            Self::IssuerMismatch { .. } => PreparationPhase::Discovery,
+        }
     }
 
     /// The closed reason for the failed stage.
     #[must_use]
     pub const fn reason(&self) -> PreparationReason {
-        self.reason
+        match self {
+            Self::Failed { reason, .. } => *reason,
+            Self::IssuerMismatch { .. } => PreparationReason::IssuerMismatch,
+        }
     }
 }
 
@@ -119,7 +118,6 @@ pub(crate) enum VerificationReason {
     Audience,
     Expired,
     NotYetValid,
-    Identity,
     Scope,
     // template:begin oidc-jwt:authn-jwt-reasons
     Header,
@@ -127,7 +125,6 @@ pub(crate) enum VerificationReason {
     Profile,
     Signature,
     UnknownKey,
-    AmbiguousKey,
     Refresh,
     // template:end oidc-jwt:authn-jwt-reasons
     // template:begin oidc-introspection:authn-introspection-reasons
@@ -146,7 +143,6 @@ impl VerificationReason {
             Self::Audience => "audience",
             Self::Expired => "expired",
             Self::NotYetValid => "not_yet_valid",
-            Self::Identity => "identity",
             Self::Scope => "scope",
             // template:begin oidc-jwt:authn-jwt-reason-labels
             Self::Header => "header",
@@ -154,7 +150,6 @@ impl VerificationReason {
             Self::Profile => "profile",
             Self::Signature => "signature",
             Self::UnknownKey => "unknown_key",
-            Self::AmbiguousKey => "ambiguous_key",
             Self::Refresh => "refresh",
             // template:end oidc-jwt:authn-jwt-reason-labels
             // template:begin oidc-introspection:authn-introspection-reason-labels
@@ -290,21 +285,10 @@ pub enum ClaimAccessError {
 
 // template:begin oidc-introspection:authn-retained-payload
 impl Principal {
-    pub(crate) fn retained_bytes(&self) -> Option<usize> {
-        let bytes = self
-            .payload
-            .len()
-            .checked_add(self.issuer.capacity())?
-            .checked_add(self.subject.as_ref().map_or(0, String::capacity))?
-            .checked_add(self.client_id.as_ref().map_or(0, String::capacity))?
-            .checked_add(
-                self.scopes
-                    .capacity()
-                    .checked_mul(std::mem::size_of::<String>())?,
-            )?;
-        self.scopes
-            .iter()
-            .try_fold(bytes, |bytes, scope| bytes.checked_add(scope.capacity()))
+    /// The verified provider evidence this principal retains. Its other fields
+    /// are configuration or copies of values inside this payload.
+    pub(crate) fn payload_len(&self) -> usize {
+        self.payload.len()
     }
 }
 // template:end oidc-introspection:authn-retained-payload
@@ -355,28 +339,47 @@ pub mod test_support {
     }
 }
 
-pub(crate) trait Engine: Send + Sync {
-    fn verify<'a>(
-        &'a self,
-        token: &'a BearerToken<'_>,
-    ) -> Pin<Box<dyn Future<Output = Result<Principal, Failure>> + Send + 'a>>;
-}
-
 /// A prepared real authentication engine.
 #[derive(Clone)]
-pub struct Verifier(Arc<dyn Engine>);
+pub struct Verifier(Engine);
+
+#[derive(Clone)]
+enum Engine {
+    // template:begin oidc-jwt:authn-jwt-engine
+    Jwt(Arc<jwt::JwtVerifier>),
+    // template:end oidc-jwt:authn-jwt-engine
+    // template:begin oidc-introspection:authn-introspection-engine
+    Introspection(Arc<introspection::IntrospectionVerifier>),
+    // template:end oidc-introspection:authn-introspection-engine
+}
 
 impl Verifier {
-    pub(crate) fn new(engine: impl Engine + 'static) -> Self {
-        Self(Arc::new(engine))
+    // template:begin oidc-jwt:authn-jwt-verifier
+    pub(crate) fn jwt(engine: jwt::JwtVerifier) -> Self {
+        Self(Engine::Jwt(Arc::new(engine)))
     }
+    // template:end oidc-jwt:authn-jwt-verifier
+
+    // template:begin oidc-introspection:authn-introspection-verifier
+    pub(crate) fn introspection(engine: introspection::IntrospectionVerifier) -> Self {
+        Self(Engine::Introspection(Arc::new(engine)))
+    }
+    // template:end oidc-introspection:authn-introspection-verifier
 
     /// Verifies a syntactically accepted bearer token.
     ///
     /// # Errors
     /// Returns [`Failure`] for invalid token evidence or an unavailable provider.
     pub async fn verify(&self, token: &BearerToken<'_>) -> Result<Principal, Failure> {
-        self.0.verify(token).await
+        let (mode, result) = match &self.0 {
+            // template:begin oidc-jwt:authn-jwt-verify
+            Engine::Jwt(engine) => ("jwt", engine.verify(token).await),
+            // template:end oidc-jwt:authn-jwt-verify
+            // template:begin oidc-introspection:authn-introspection-verify
+            Engine::Introspection(engine) => ("introspection", engine.verify(token).await),
+            // template:end oidc-introspection:authn-introspection-verify
+        };
+        record_verification(mode, result)
     }
 }
 

@@ -2,33 +2,31 @@
 
 use std::{
     fmt,
-    future::Future,
     num::NonZeroUsize,
-    pin::Pin,
-    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use moka::{Expiry, future::Cache};
 use secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};
-use tokio::{sync::Semaphore, time::Instant};
+use tokio::sync::Semaphore;
 
 use crate::{
-    BearerToken, Engine, Failure, PreparationError, Principal, VerificationError,
-    VerificationReason, Verifier,
-    claims::{ClaimPolicy, VerifiedIntrospection, validate_introspection_claims},
-    provider::{ProviderClient, ProviderDeadline},
-    record_verification,
+    BearerToken, Failure, PreparationError, Principal, VerificationError, VerificationReason,
+    Verifier,
+    claims::{ClaimPolicy, validate_introspection_claims},
+    provider::ProviderClient,
 };
+
+/// The largest verified provider payload one cache entry retains.
+const MAX_ENTRY_BYTES: usize = 64 * 1024;
 
 /// Bootstrap input for RFC 7662 token introspection.
 #[derive(Clone)]
 pub struct IntrospectionOptions {
-    pub issuer: crate::ProviderUrl,
+    pub issuer: crate::IssuerUrl,
     pub audiences: Vec<String>,
-    pub endpoint: crate::ProviderUrl,
+    pub endpoint: crate::EndpointUrl,
     pub client_id: String,
     pub client_secret: secrecy::SecretString,
     pub provider_concurrency: NonZeroUsize,
@@ -85,7 +83,7 @@ impl IntrospectionCacheOptions {
 ///
 /// Returns [`PreparationError`] for invalid options or client preparation failure.
 pub fn prepare_introspection(options: IntrospectionOptions) -> Result<Verifier, PreparationError> {
-    prepare_with_provider(options, ProviderClient::new()?)
+    IntrospectionVerifier::new(options, ProviderClient::new()?).map(Verifier::introspection)
 }
 
 /// Prepares a verifier through fixture-only local TLS transport.
@@ -98,45 +96,19 @@ pub fn prepare_introspection_with_fixture(
     options: IntrospectionOptions,
     fixture: crate::test_support::FixtureTransport,
 ) -> Result<Verifier, PreparationError> {
-    prepare_with_provider(options, fixture.into_provider())
+    IntrospectionVerifier::new(options, fixture.into_provider()).map(Verifier::introspection)
 }
 
-fn prepare_with_provider(
-    options: IntrospectionOptions,
-    provider: ProviderClient,
-) -> Result<Verifier, PreparationError> {
-    Ok(Verifier::new(IntrospectionVerifier::new(
-        options, provider,
-    )?))
-}
-
-/// A bounded client with optional positive retention for one immutable trust context.
-#[derive(Clone)]
-struct IntrospectionVerifier {
-    endpoint: crate::ProviderUrl,
+/// A bounded provider client with optional positive retention for one
+/// immutable trust context.
+pub(crate) struct IntrospectionVerifier {
+    endpoint: crate::EndpointUrl,
     client_id: String,
     client_secret: secrecy::SecretString,
-    policy: Arc<ClaimPolicy>,
+    policy: ClaimPolicy,
     provider: ProviderClient,
-    permits: Arc<Semaphore>,
-    cache: Option<IntrospectionCache>,
-}
-
-impl fmt::Debug for IntrospectionVerifier {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("IntrospectionVerifier([REDACTED])")
-    }
-}
-
-impl Engine for IntrospectionVerifier {
-    fn verify<'a>(
-        &'a self,
-        token: &'a BearerToken<'_>,
-    ) -> Pin<Box<dyn Future<Output = Result<Principal, Failure>> + Send + 'a>> {
-        Box::pin(
-            async move { record_verification("introspection", self.verify_evidence(token).await) },
-        )
-    }
+    permits: Semaphore,
+    cache: Option<Cache<[u8; 32], Principal>>,
 }
 
 impl IntrospectionVerifier {
@@ -144,7 +116,6 @@ impl IntrospectionVerifier {
         options: IntrospectionOptions,
         provider: ProviderClient,
     ) -> Result<Self, PreparationError> {
-        crate::ProviderUrl::parse(options.issuer.as_str())?;
         if options.audiences.is_empty() || options.audiences.iter().any(String::is_empty) {
             return Err(PreparationError::new(
                 crate::PreparationPhase::Options,
@@ -156,206 +127,93 @@ impl IntrospectionVerifier {
             endpoint: options.endpoint,
             client_id: options.client_id,
             client_secret: options.client_secret,
-            policy: Arc::new(ClaimPolicy::new(
-                options.issuer.as_str().to_owned(),
-                options.audiences,
-            )),
+            policy: ClaimPolicy::new(options.issuer.as_str().to_owned(), options.audiences),
             provider,
-            permits: Arc::new(Semaphore::new(options.provider_concurrency.get())),
-            cache: options.cache.map(IntrospectionCache::new),
+            permits: Semaphore::new(options.provider_concurrency.get()),
+            cache: options.cache.map(|cache| {
+                Cache::builder()
+                    .max_capacity(cache.capacity as u64)
+                    .expire_after(Retention { ttl: cache.ttl })
+                    .build()
+            }),
         })
     }
 
-    async fn verify_evidence(
+    /// Returns a live cached principal or introspects the token. Moka lets
+    /// concurrent misses for one token share a single provider exchange.
+    pub(crate) async fn verify(
         &self,
         token: &BearerToken<'_>,
     ) -> Result<Principal, VerificationError> {
         let Some(cache) = &self.cache else {
-            return self
-                .fetch(token)
-                .await
-                .map(VerifiedIntrospection::into_principal);
+            return self.introspect(token).await;
         };
         let key: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-        loop {
-            let result = cache
-                .entries
-                .try_get_with(key, async {
-                    let evidence = self.fetch(token).await.map_err(FillError::Verification)?;
-                    CachedIntrospection::new(
-                        evidence,
-                        cache.options.ttl,
-                        Instant::now(),
-                        SystemTime::now(),
-                    )
-                    .map(Arc::new)
-                })
-                .await;
-            match result {
-                Ok(candidate) => {
-                    if candidate.is_live(Instant::now(), SystemTime::now()) {
-                        return Ok(candidate.evidence.clone().into_principal());
-                    }
-                    cache.entries.invalidate(&key).await;
-                }
-                Err(error) => {
-                    return match error.as_ref() {
-                        FillError::Verification(error) => Err(*error),
-                        FillError::NotRetained(evidence) => {
-                            Ok(evidence.as_ref().clone().into_principal())
-                        }
-                    };
-                }
-            }
-        }
+        cache
+            .try_get_with(key, self.introspect(token))
+            .await
+            .map_err(|error| *error)
     }
 
-    async fn fetch(
-        &self,
-        token: &BearerToken<'_>,
-    ) -> Result<VerifiedIntrospection, VerificationError> {
-        let _permit = self.permits.clone().try_acquire_owned().map_err(|_| {
+    async fn introspect(&self, token: &BearerToken<'_>) -> Result<Principal, VerificationError> {
+        let provider_error =
+            |failure| VerificationError::new(failure, VerificationReason::Provider);
+        let _permit = self.permits.try_acquire().map_err(|_| {
             VerificationError::new(Failure::Unavailable, VerificationReason::Capacity)
         })?;
-        let body = form_body(token).map_err(provider_error)?;
-        let authorization =
-            basic_authorization(&self.client_id, self.client_secret.expose_secret());
         let response = self
             .provider
             .post_form_json(
                 self.endpoint.url(),
-                &authorization,
-                body.as_bytes(),
-                ProviderDeadline::independent(Instant::now()),
+                &form_encode(&self.client_id),
+                &form_encode(self.client_secret.expose_secret()),
+                form_body(token).map_err(provider_error)?,
             )
             .await
             .map_err(provider_error)?;
-        validate_introspection_claims(
-            &response,
-            &self.policy,
-            now_epoch_seconds().map_err(provider_error)?,
-        )
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| provider_error(Failure::Unavailable))?;
+        validate_introspection_claims(&response, &self.policy, now.as_secs())
     }
 }
 
-const MAX_ENTRY_BYTES: usize = 64 * 1024;
-
-enum FillError {
-    Verification(VerificationError),
-    NotRetained(Arc<VerifiedIntrospection>),
-}
-
-#[derive(Clone)]
-struct CachedIntrospection {
-    evidence: VerifiedIntrospection,
-    expires_at: Instant,
-    token_expires_at: SystemTime,
-}
-
-impl CachedIntrospection {
-    fn new(
-        evidence: VerifiedIntrospection,
-        ttl: Duration,
-        now: Instant,
-        wall: SystemTime,
-    ) -> Result<Self, FillError> {
-        let expiry = UNIX_EPOCH
-            .checked_add(Duration::from_secs(evidence.principal().expires_at()))
-            .and_then(|token_expires_at| {
-                let remaining = token_expires_at.duration_since(wall).ok()?;
-                if remaining.is_zero() {
-                    return None;
-                }
-                Some((now.checked_add(ttl.min(remaining))?, token_expires_at))
-            });
-        if let Some((expires_at, token_expires_at)) = expiry
-            && evidence
-                .principal()
-                .retained_bytes()
-                .is_some_and(|bytes| bytes <= MAX_ENTRY_BYTES)
-        {
-            Ok(Self {
-                evidence,
-                expires_at,
-                token_expires_at,
-            })
-        } else {
-            Err(FillError::NotRetained(Arc::new(evidence)))
-        }
-    }
-
-    fn is_live(&self, now: Instant, wall: SystemTime) -> bool {
-        now < self.expires_at
-            && wall < self.token_expires_at
-            && wall
-                .duration_since(UNIX_EPOCH)
-                .is_ok_and(|elapsed| self.evidence.validate_time(elapsed.as_secs()).is_ok())
-    }
-}
-
-impl fmt::Debug for CachedIntrospection {
+impl fmt::Debug for IntrospectionVerifier {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("CachedIntrospection([REDACTED])")
+        formatter.write_str("IntrospectionVerifier([REDACTED])")
     }
 }
 
-struct CompletionExpiry;
+/// Fixes each entry's lifetime when it is inserted; reads never extend it.
+struct Retention {
+    ttl: Duration,
+}
 
-impl Expiry<[u8; 32], Arc<CachedIntrospection>> for CompletionExpiry {
+impl Expiry<[u8; 32], Principal> for Retention {
     fn expire_after_create(
         &self,
         _: &[u8; 32],
-        value: &Arc<CachedIntrospection>,
+        principal: &Principal,
         _: std::time::Instant,
     ) -> Option<Duration> {
-        Some(value.expires_at.saturating_duration_since(Instant::now()))
-    }
-
-    fn expire_after_update(
-        &self,
-        _: &[u8; 32],
-        value: &Arc<CachedIntrospection>,
-        _: std::time::Instant,
-        _: Option<Duration>,
-    ) -> Option<Duration> {
-        Some(value.expires_at.saturating_duration_since(Instant::now()))
-    }
-    // Moka's default read callback preserves the remaining duration.
-}
-
-#[derive(Clone)]
-struct IntrospectionCache {
-    entries: Cache<[u8; 32], Arc<CachedIntrospection>>,
-    options: IntrospectionCacheOptions,
-}
-
-impl IntrospectionCache {
-    fn new(options: IntrospectionCacheOptions) -> Self {
-        Self {
-            entries: Cache::builder()
-                .max_capacity(options.capacity as u64)
-                .expire_after(CompletionExpiry)
-                .build(),
-            options,
-        }
+        Some(retention(principal, self.ttl, SystemTime::now()))
     }
 }
 
-impl fmt::Debug for IntrospectionCache {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("IntrospectionCache([REDACTED])")
+/// The earlier of the configured TTL and token expiry, without leeway. Zero
+/// means the result is returned to its waiters but not retained.
+fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration {
+    if principal.payload_len() > MAX_ENTRY_BYTES {
+        return Duration::ZERO;
     }
-}
-
-fn provider_error(failure: Failure) -> VerificationError {
-    VerificationError::new(failure, VerificationReason::Provider)
-}
-
-fn now_epoch_seconds() -> Result<u64, Failure> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .map_err(|_| Failure::Unavailable)
+    // An expiry beyond what `SystemTime` represents is simply far away.
+    let Some(token_expiry) = UNIX_EPOCH.checked_add(Duration::from_secs(principal.expires_at()))
+    else {
+        return ttl;
+    };
+    token_expiry
+        .duration_since(now)
+        .map_or(Duration::ZERO, |remaining| remaining.min(ttl))
 }
 
 fn form_body(token: &BearerToken<'_>) -> Result<String, Failure> {
@@ -366,16 +224,9 @@ fn form_body(token: &BearerToken<'_>) -> Result<String, Failure> {
         .finish())
 }
 
-fn basic_authorization(client_id: &str, client_secret: &str) -> Vec<u8> {
-    let credential = format!(
-        "{}:{}",
-        url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect::<String>(),
-        url::form_urlencoded::byte_serialize(client_secret.as_bytes()).collect::<String>()
-    );
-    let encoded = STANDARD.encode(credential);
-    let mut authorization = b"Basic ".to_vec();
-    authorization.extend_from_slice(encoded.as_bytes());
-    authorization
+/// RFC 6749 section 2.3.1 form-encodes client credentials before Basic encoding.
+fn form_encode(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 #[cfg(test)]
@@ -396,7 +247,6 @@ mod tests {
         net::TcpListener,
         sync::Semaphore,
         task::{JoinHandle, JoinSet},
-        time::Instant,
     };
     use tokio_rustls::{
         TlsAcceptor,
@@ -408,11 +258,11 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        CachedIntrospection, FillError, IntrospectionCacheOptions, IntrospectionOptions,
-        IntrospectionVerifier, basic_authorization, form_body, prepare_with_provider,
+        IntrospectionCacheOptions, IntrospectionOptions, IntrospectionVerifier, MAX_ENTRY_BYTES,
+        form_body, form_encode, retention,
     };
     use crate::{
-        Engine, Failure, ProviderUrl,
+        EndpointUrl, Failure, IssuerUrl,
         claims::{ClaimPolicy, validate_introspection_claims},
         parse_bearer,
         provider::{ProviderClient, new_fixture_client},
@@ -422,7 +272,7 @@ mod tests {
     const FIXTURE_HOST: &str = "provider.test";
 
     struct Fixture {
-        endpoint: ProviderUrl,
+        endpoint: EndpointUrl,
         provider: ProviderClient,
         calls: Arc<AtomicUsize>,
         received: Arc<Semaphore>,
@@ -511,7 +361,7 @@ mod tests {
                 }
             });
             let fixture = Self {
-                endpoint: ProviderUrl::parse_endpoint(&format!(
+                endpoint: EndpointUrl::parse(&format!(
                     "https://{FIXTURE_HOST}:{}/introspect",
                     address.port()
                 ))
@@ -556,7 +406,7 @@ mod tests {
 
         fn options(&self, cache: Option<IntrospectionCacheOptions>) -> IntrospectionOptions {
             IntrospectionOptions {
-                issuer: ProviderUrl::parse("https://issuer.example").unwrap(),
+                issuer: IssuerUrl::parse("https://issuer.example").unwrap(),
                 audiences: vec!["api".to_owned()],
                 endpoint: self.endpoint.clone(),
                 client_id: "fixture-client".to_owned(),
@@ -566,8 +416,10 @@ mod tests {
             }
         }
 
-        fn verifier(&self, cache: Option<IntrospectionCacheOptions>) -> IntrospectionVerifier {
-            IntrospectionVerifier::new(self.options(cache), self.provider.clone()).unwrap()
+        fn verifier(&self, cache: Option<IntrospectionCacheOptions>) -> Arc<IntrospectionVerifier> {
+            Arc::new(
+                IntrospectionVerifier::new(self.options(cache), self.provider.clone()).unwrap(),
+            )
         }
 
         fn calls(&self) -> usize {
@@ -600,7 +452,7 @@ mod tests {
         value: &[u8],
     ) -> Result<crate::Principal, Failure> {
         let token = parse_bearer([value]).unwrap();
-        verifier.verify(&token).await
+        verifier.verify(&token).await.map_err(|error| error.failure)
     }
     async fn poll_pending<T>(mut future: Pin<&mut impl Future<Output = T>>) {
         assert!(
@@ -609,15 +461,11 @@ mod tests {
                 .is_pending()
         );
     }
-    async fn advance_cache_time(duration: Duration) {
-        tokio::time::pause();
-        tokio::time::advance(duration).await;
-        tokio::time::resume();
-    }
 
     #[test]
-    fn client_secret_basic_encodes_each_component_before_base64() {
-        assert_eq!(basic_authorization("a:b", "c d"), b"Basic YSUzQWI6Yytk");
+    fn client_credentials_are_form_encoded_before_basic_authentication() {
+        assert_eq!(form_encode("a:b"), "a%3Ab");
+        assert_eq!(form_encode("c d"), "c+d");
     }
 
     #[test]
@@ -639,9 +487,9 @@ mod tests {
         let cached = fixture.verifier(Some(cache_options(2)));
         let principal = verify(&cached, b"Bearer first").await.unwrap();
         assert_eq!(principal.scopes(), ["read", "write"]);
-        let permit = cached.permits.clone().acquire_owned().await.unwrap();
+        let permit = cached.permits.acquire().await.unwrap();
         assert_eq!(
-            verify(&cached.clone(), b"Bearer first").await.unwrap(),
+            verify(&Arc::clone(&cached), b"Bearer first").await.unwrap(),
             principal
         );
         assert_eq!(fixture.calls(), 3);
@@ -668,23 +516,28 @@ mod tests {
         assert_eq!(fixture.calls(), 5);
         let mut options = fixture.options(Some(cache_options(2)));
         options.audiences = vec!["other".to_owned()];
-        let changed_context = prepare_with_provider(options, fixture.provider.clone()).unwrap();
-        let token = parse_bearer([b"Bearer first".as_slice()]).unwrap();
-        assert_eq!(changed_context.verify(&token).await, Err(Failure::Invalid));
+        let changed_context =
+            IntrospectionVerifier::new(options, fixture.provider.clone()).unwrap();
+        assert_eq!(
+            verify(&changed_context, b"Bearer first").await,
+            Err(Failure::Invalid)
+        );
         assert_eq!(fixture.calls(), 6);
         fixture.finish().await;
     }
 
+    // Moka keeps its own clock, so this one test waits in real time.
     #[tokio::test]
     async fn lifetime_does_not_slide_and_expired_entries_never_mask_provider_failure() {
         let fixture = Fixture::new().await;
-        let verifier = fixture.verifier(Some(cache_options(1)));
+        let options = IntrospectionCacheOptions::new(1, Duration::from_secs(2)).unwrap();
+        let verifier = fixture.verifier(Some(options));
         verify(&verifier, b"Bearer first").await.unwrap();
-        advance_cache_time(Duration::from_secs(15)).await;
+        tokio::time::sleep(Duration::from_millis(1200)).await;
         fixture.respond("503 Service Unavailable", b"{}");
         verify(&verifier, b"Bearer first").await.unwrap();
         assert_eq!(fixture.calls(), 1);
-        advance_cache_time(Duration::from_secs(15)).await;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
         for _ in 0..2 {
             assert_eq!(
                 verify(&verifier, b"Bearer first").await,
@@ -787,7 +640,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let permit = verifier.permits.clone().acquire_owned().await.unwrap();
+        let permit = verifier.permits.acquire().await.unwrap();
         verify(&verifier, b"Bearer shared").await.unwrap();
         assert_eq!(fixture.calls(), 2);
         drop(permit);
@@ -809,7 +662,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let permit = verifier.permits.clone().acquire_owned().await.unwrap();
+        let permit = verifier.permits.acquire().await.unwrap();
         verify(&verifier, b"Bearer shared").await.unwrap();
         assert_eq!(fixture.calls(), 1);
         drop(permit);
@@ -831,17 +684,6 @@ mod tests {
             );
         }
         assert_eq!(fixture.calls(), 3);
-        fixture.finish().await;
-    }
-
-    #[tokio::test]
-    async fn endpoint_query_permission_cannot_weaken_issuer_preparation() {
-        let fixture = Fixture::new().await;
-        let mut options = fixture.options(None);
-        options.issuer =
-            ProviderUrl::parse_endpoint("https://issuer.example?tenant=secret").unwrap();
-        assert!(prepare_with_provider(options, fixture.provider.clone()).is_err());
-        assert_eq!(fixture.calls(), 0);
         fixture.finish().await;
     }
 
@@ -871,27 +713,35 @@ mod tests {
     }
 
     #[test]
-    fn cache_expiry_rechecks_subseconds_wall_clock_and_not_before() {
+    fn retention_ends_at_the_earlier_of_ttl_and_token_expiry() {
         let policy = ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()]);
-        let evidence = validate_introspection_claims(br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"nbf":120,"sub":"subject"}"#, &policy, 100).unwrap();
-        let now = Instant::now();
-        let wall = UNIX_EPOCH + Duration::from_millis(100_500);
-        let entry = CachedIntrospection::new(evidence.clone(), Duration::from_secs(60), now, wall)
-            .unwrap_or_else(|_| panic!("valid cache evidence"));
-        assert!(entry.is_live(now, wall));
-        assert!(!entry.is_live(now + Duration::from_millis(30_500), wall));
-        assert!(!entry.is_live(now, UNIX_EPOCH + Duration::from_secs(131)));
-        assert!(!entry.is_live(now, UNIX_EPOCH + Duration::from_secs(89)));
-        assert!(!entry.is_live(now, UNIX_EPOCH - Duration::from_secs(1)));
-        assert!(matches!(
-            CachedIntrospection::new(
-                evidence,
-                Duration::from_secs(60),
-                now,
-                UNIX_EPOCH + Duration::from_secs(131)
-            ),
-            Err(FillError::NotRetained(_))
-        ));
-        assert!(!format!("{entry:?}").contains("subject"));
+        let principal = |custom: &str| {
+            let response = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"sub":"subject","custom":custom});
+            validate_introspection_claims(response.to_string().as_bytes(), &policy, 100).unwrap()
+        };
+        let small = principal("");
+        let at = |millis| UNIX_EPOCH + Duration::from_millis(millis);
+        let ttl = Duration::from_secs(60);
+        assert_eq!(
+            retention(&small, Duration::from_secs(5), at(100_500)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            retention(&small, ttl, at(100_500)),
+            Duration::from_millis(30_500)
+        );
+        assert_eq!(retention(&small, ttl, at(131_000)), Duration::ZERO);
+        assert_eq!(retention(&small, ttl, at(140_000)), Duration::ZERO);
+        let unbounded = validate_introspection_claims(
+            format!(r#"{{"active":true,"iss":"https://issuer.example","aud":"api","exp":{},"sub":"subject"}}"#, u64::MAX).as_bytes(),
+            &policy,
+            100,
+        )
+        .unwrap();
+        assert_eq!(retention(&unbounded, ttl, at(100_500)), ttl);
+        assert_eq!(
+            retention(&principal(&"x".repeat(MAX_ENTRY_BYTES)), ttl, at(100_500)),
+            Duration::ZERO
+        );
     }
 }

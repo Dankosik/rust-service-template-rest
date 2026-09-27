@@ -14,8 +14,8 @@ mod router;
 mod status;
 mod tls;
 
-pub use client::{Client, ClientSecurity, ClientTlsMaterial};
+pub use client::{Client, ClientIdentity, ClientSecurity, ClientTlsMaterial};
 pub use error::Error;
-pub use router::{Services, UNARY_DEADLINE, grpc_timeout, router, server_options};
+pub use router::{CALL_DEADLINE_CAP, Services, grpc_timeout, router, server_options};
 pub use status::classified_status;
 pub use tls::{ServerTlsMaterial, server_tls_config};

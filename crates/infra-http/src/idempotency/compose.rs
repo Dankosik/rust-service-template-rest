@@ -27,7 +27,6 @@ use super::openapi::{IdempotencyComponents, KEY_HEADER, REPLAYED_HEADER};
 use crate::authn::VerifiedPrincipal;
 use crate::harden::RequestDeadline;
 use crate::problem::{Code, Problem};
-use crate::request_id;
 use utoipa_axum::router::UtoipaMethodRouter;
 
 const INVALID_KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
@@ -40,7 +39,8 @@ const BODY_LIMIT_DETAIL: &str = "request body exceeds the configured limit";
 /// carriers.
 #[derive(Debug)]
 pub struct Composer {
-    store: Store,
+    /// `None` for a composer that only renders the contract.
+    store: Option<Store>,
     operations: usize,
 }
 
@@ -50,9 +50,10 @@ pub enum Activation {
     /// No idempotent operation needs a store or maintenance task.
     Inactive,
     /// The store must be checked and maintained before readiness admission.
+    /// `None` when the composer had no store, which startup must refuse.
     #[non_exhaustive]
     Active {
-        store: Store,
+        store: Option<Store>,
         operations: NonZeroUsize,
     },
 }
@@ -62,16 +63,19 @@ impl Composer {
     #[must_use]
     pub fn new(store: Store) -> Self {
         Self {
-            store,
+            store: Some(store),
             operations: 0,
         }
     }
 
-    /// A composer over an inert store for rendering the document and tests.
-    /// It performs no I/O.
+    /// A composer without a store, for rendering the document and tests.
+    /// Its routes answer a sanitized 500 and it performs no I/O.
     #[must_use]
     pub fn inert() -> Self {
-        Self::new(Store::inert())
+        Self {
+            store: None,
+            operations: 0,
+        }
     }
 
     /// Make one annotated route carrier idempotent and generate its served
@@ -134,14 +138,16 @@ impl Composer {
 
 #[derive(Clone)]
 struct KeyLayer {
-    store: Store,
+    store: Option<Store>,
     operation: Arc<str>,
 }
 
 /// Capture identity after final contract authentication and before ordinary
 /// extraction.
 async fn handle_key(State(keys): State<KeyLayer>, request: Request, next: Next) -> Response {
-    let request_id = request_id::request_id(request.extensions());
+    let Some(store) = keys.store else {
+        return wiring_failure(&keys.operation, "store_missing");
+    };
     let request = request.with_limited_body();
     let (mut parts, body) = request.into_parts();
     let Some(deadline) = parts
@@ -149,17 +155,17 @@ async fn handle_key(State(keys): State<KeyLayer>, request: Request, next: Next) 
         .get::<RequestDeadline>()
         .map(RequestDeadline::at)
     else {
-        return wiring_failure(&keys.operation, "deadline_missing", request_id);
+        return wiring_failure(&keys.operation, "deadline_missing");
     };
     let Ok(principal) = VerifiedPrincipal::from_request_parts(&mut parts, &()).await else {
-        return wiring_failure(&keys.operation, "principal_missing", request_id);
+        return wiring_failure(&keys.operation, "principal_missing");
     };
     let Some(caller) = identity::caller_identity(
         principal.issuer(),
         principal.subject(),
         principal.client_id(),
     ) else {
-        return wiring_failure(&keys.operation, "caller_missing", request_id);
+        return wiring_failure(&keys.operation, "caller_missing");
     };
     let Some(key) = identity::valid_key(
         parts
@@ -169,10 +175,10 @@ async fn handle_key(State(keys): State<KeyLayer>, request: Request, next: Next) 
             .map(axum::http::HeaderValue::as_bytes),
     ) else {
         Outcome::InvalidKey.record();
-        return invalid_key(request_id);
+        return invalid_key();
     };
     let Some(scope) = identity::scope_key(&caller, &key) else {
-        return wiring_failure(&keys.operation, "scope_unencodable", request_id);
+        return wiring_failure(&keys.operation, "scope_unencodable");
     };
     let uri = parts
         .extensions
@@ -189,9 +195,9 @@ async fn handle_key(State(keys): State<KeyLayer>, request: Request, next: Next) 
         Err(error) => {
             Outcome::NotStored.record();
             return if caused_by_length_limit(&error) {
-                payload_too_large(request_id)
+                payload_too_large()
             } else {
-                unreadable_body(request_id)
+                unreadable_body()
             };
         }
     };
@@ -199,22 +205,21 @@ async fn handle_key(State(keys): State<KeyLayer>, request: Request, next: Next) 
     let body = collected.to_bytes();
     let Some(fingerprint) = identity::request_digest(&parts.method, &uri, &content_types, &body)
     else {
-        return wiring_failure(&keys.operation, "fingerprint_unencodable", request_id);
+        return wiring_failure(&keys.operation, "fingerprint_unencodable");
     };
     let operation = Arc::clone(&keys.operation);
     parts.extensions.insert(Attempt {
-        store: keys.store,
+        store,
         scope,
         caller,
         fingerprint,
         operation: keys.operation,
         deadline,
-        request_id: request_id.clone(),
     });
     let response = next
         .run(Request::from_parts(parts, restore_body(body, trailers)))
         .await;
-    normalize_response(response, &operation, request_id)
+    normalize_response(response, &operation)
 }
 
 fn restore_body(body: Bytes, trailers: Option<axum::http::HeaderMap>) -> Body {
@@ -242,33 +247,26 @@ fn caused_by_length_limit(error: &axum::Error) -> bool {
     }
 }
 
-fn invalid_key(request_id: Option<String>) -> Response {
+fn invalid_key() -> Response {
     Problem::new(Code::BadRequest)
         .detail(INVALID_KEY_DETAIL)
         .invalid_param(format!("header.{KEY_HEADER}"), INVALID_KEY_REASON)
-        .request_id(request_id)
         .into_response()
 }
 
-fn payload_too_large(request_id: Option<String>) -> Response {
+fn payload_too_large() -> Response {
     Problem::new(Code::RequestEntityTooLarge)
         .detail(BODY_LIMIT_DETAIL)
-        .request_id(request_id)
         .into_response()
 }
 
-fn unreadable_body(request_id: Option<String>) -> Response {
+fn unreadable_body() -> Response {
     Problem::new(Code::BadRequest)
         .detail(BODY_READ_DETAIL)
-        .request_id(request_id)
         .into_response()
 }
 
-fn normalize_response(
-    mut response: Response,
-    operation: &str,
-    request_id: Option<String>,
-) -> Response {
+fn normalize_response(mut response: Response, operation: &str) -> Response {
     let provenance = response.extensions_mut().remove::<Provenance>();
     response.headers_mut().remove(REPLAYED_HEADER);
     if !response.status().is_success() {
@@ -282,13 +280,13 @@ fn normalize_response(
                 .insert(REPLAYED_HEADER, HeaderValue::from_static("true"));
             response
         }
-        None => wiring_failure(operation, "seam_unused", request_id),
+        None => wiring_failure(operation, "seam_unused"),
     }
 }
 
-fn wiring_failure(operation: &str, failure: &'static str, request_id: Option<String>) -> Response {
+fn wiring_failure(operation: &str, failure: &'static str) -> Response {
     tracing::error!(operation, failure, "http_idempotency_wiring_failed");
-    sanitized(request_id)
+    sanitized()
 }
 
 #[cfg(test)]
@@ -318,7 +316,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_key_is_sanitized_and_never_echoes_input() {
-        let body = invalid_key(Some("req-1".to_owned()))
+        let body = invalid_key()
             .into_body()
             .collect()
             .await
@@ -338,7 +336,7 @@ mod tests {
             .headers_mut()
             .insert(REPLAYED_HEADER, HeaderValue::from_static("forged"));
         let replay = super::super::execute::mark_provenance(replay, Provenance::Replayed);
-        let replay = normalize_response(replay, "test", None);
+        let replay = normalize_response(replay, "test");
         assert_eq!(
             replay.headers().get(REPLAYED_HEADER),
             Some(&HeaderValue::from_static("true"))
@@ -351,7 +349,7 @@ mod tests {
             .headers_mut()
             .insert(REPLAYED_HEADER, HeaderValue::from_static("forged"));
         let executed = super::super::execute::mark_provenance(executed, Provenance::Executed);
-        let executed = normalize_response(executed, "test", None);
+        let executed = normalize_response(executed, "test");
         assert!(!executed.headers().contains_key(REPLAYED_HEADER));
 
         let mut failure = Response::new(Body::empty());
@@ -359,11 +357,11 @@ mod tests {
         failure
             .headers_mut()
             .insert(REPLAYED_HEADER, HeaderValue::from_static("forged"));
-        let failure = normalize_response(failure, "test", None);
+        let failure = normalize_response(failure, "test");
         assert_eq!(failure.status(), StatusCode::BAD_REQUEST);
         assert!(!failure.headers().contains_key(REPLAYED_HEADER));
 
-        let missing = normalize_response(Response::new(Body::empty()), "test", None);
+        let missing = normalize_response(Response::new(Body::empty()), "test");
         assert_eq!(missing.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(!missing.headers().contains_key(REPLAYED_HEADER));
     }

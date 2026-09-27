@@ -4,14 +4,13 @@
 //! join background tasks → close dependencies → flush telemetry. Every stage
 //! draws from what is left of the platform grace period, so a slow stage
 //! shortens the ones after it instead of pushing the process into SIGKILL.
+//! A startup that failed or was stopped runs the same teardown without the
+//! listener stages.
 
 use std::time::Duration;
 
 use health::Readiness;
 use infra_http::{Drained, Server};
-// template:begin messaging:service-shutdown-messaging-imports
-use infra_messaging::{CloseOutcome, Messaging};
-// template:end messaging:service-shutdown-messaging-imports
 // template:begin cache:service-shutdown-cache-imports
 use infra_cache::Cache;
 // template:end cache:service-shutdown-cache-imports
@@ -27,7 +26,7 @@ use tokio_util::task::TaskTracker;
 /// Ceilings for the stages after the HTTP drain. They are process
 /// structure, not configuration, so they live here.
 const DIAGNOSTICS_SHUTDOWN: Duration = Duration::from_secs(2);
-pub(crate) const BACKGROUND_JOIN: Duration = Duration::from_secs(5);
+const BACKGROUND_JOIN: Duration = Duration::from_secs(5);
 /// Dependency-close ceiling retained in the common grace-period contract.
 pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
 const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
@@ -65,134 +64,6 @@ pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudget
     Ok(())
 }
 
-/// Cancel and join background work. Used on partial startup so the same
-/// owner story as [`run`] applies.
-pub(crate) async fn cancel_and_join_background_tasks(
-    cancel: &CancellationToken,
-    tracker: &TaskTracker,
-) {
-    let _ = join_background_then_close(cancel, tracker, BACKGROUND_JOIN).await;
-}
-
-/// Cancel tracked work and wait for it.
-///
-/// Returns whether the join finished in time.
-async fn join_background_then_close(
-    cancel: &CancellationToken,
-    tracker: &TaskTracker,
-    join_budget: Duration,
-) -> bool {
-    cancel.cancel();
-    tracker.close();
-    tokio::time::timeout(join_budget, tracker.wait())
-        .await
-        .is_ok()
-}
-
-/// Close every opened dependency under one deadline, including partial startup.
-pub(crate) async fn close_dependencies(
-    // template:begin postgres:shutdown-startup-pool-close
-    pool: Option<&PgPool>,
-    // template:end postgres:shutdown-startup-pool-close
-    // template:begin messaging:service-shutdown-startup-messaging-close
-    messaging: Option<Messaging>,
-    // template:end messaging:service-shutdown-startup-messaging-close
-    // template:begin cache:service-shutdown-startup-cache-close
-    cache: Option<Cache>,
-    // template:end cache:service-shutdown-startup-cache-close
-    #[allow(unused_variables, reason = "dependency-free profiles perform no close")]
-    deadline: Instant,
-) -> bool {
-    // template:begin cache:service-shutdown-dependency-cache-close
-    // The connection closes when its last clone drops.
-    drop(cache);
-    // template:end cache:service-shutdown-dependency-cache-close
-    let postgres_close = async {
-        // template:begin postgres:shutdown-dependency-pool-close
-        if let Some(pool) = pool {
-            return match infra_postgres::close(
-                pool,
-                deadline.saturating_duration_since(Instant::now()),
-            )
-            .await
-            {
-                Closed::Complete => {
-                    tracing::info!("postgres_pool_closed");
-                    false
-                }
-                Closed::TimedOut => {
-                    tracing::warn!("postgres pool outlived its close budget");
-                    true
-                }
-            };
-        }
-        // template:end postgres:shutdown-dependency-pool-close
-        false
-    };
-    let messaging_close = async {
-        // template:begin messaging:service-shutdown-dependency-messaging-close
-        if let Some(messaging) = messaging {
-            return match messaging.close(deadline, &CancellationToken::new()).await {
-                CloseOutcome::Complete => {
-                    tracing::info!("messaging_closed");
-                    false
-                }
-                CloseOutcome::TimedOut | CloseOutcome::UnobservedClose => {
-                    tracing::warn!("messaging resource outlived its close budget");
-                    true
-                }
-            };
-        }
-        // template:end messaging:service-shutdown-dependency-messaging-close
-        false
-    };
-    let (postgres_overran, messaging_overran) = tokio::join!(postgres_close, messaging_close);
-    postgres_overran || messaging_overran
-}
-
-/// A startup stop has no admitted listener, but owns the usual bounded tail.
-pub(crate) async fn finish_stopped_startup(
-    cancel: &CancellationToken,
-    tracker: &TaskTracker,
-    // template:begin postgres:shutdown-stopped-startup-pool-parameter
-    pool: Option<&PgPool>,
-    // template:end postgres:shutdown-stopped-startup-pool-parameter
-    // template:begin messaging:service-shutdown-stopped-startup-messaging-parameter
-    messaging: Option<Messaging>,
-    // template:end messaging:service-shutdown-stopped-startup-messaging-parameter
-    // template:begin cache:service-shutdown-stopped-startup-cache-parameter
-    cache: Option<Cache>,
-    // template:end cache:service-shutdown-stopped-startup-cache-parameter
-    provider: TracerProviderHandle,
-    deadline: Instant,
-) -> Outcome {
-    let budget = Budget { deadline };
-    let joined =
-        join_background_then_close(cancel, tracker, budget.remaining(BACKGROUND_JOIN)).await;
-    let close_overran = close_dependencies(
-        // template:begin postgres:shutdown-stopped-startup-pool-argument
-        pool,
-        // template:end postgres:shutdown-stopped-startup-pool-argument
-        // template:begin messaging:service-shutdown-stopped-startup-messaging-argument
-        messaging,
-        // template:end messaging:service-shutdown-stopped-startup-messaging-argument
-        // template:begin cache:service-shutdown-stopped-startup-cache-argument
-        cache,
-        // template:end cache:service-shutdown-stopped-startup-cache-argument
-        Instant::now() + budget.remaining(DEPENDENCY_CLOSE),
-    )
-    .await;
-    let flushed = matches!(
-        provider.shutdown(budget.remaining(TELEMETRY_FLUSH)).await,
-        ProviderShutdown::Flushed
-    );
-    if joined && !close_overran && flushed {
-        Outcome::Graceful
-    } else {
-        Outcome::Degraded
-    }
-}
-
 /// How the teardown ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -217,6 +88,11 @@ impl Budget {
 
     fn remaining(&self, want: Duration) -> Duration {
         want.min(self.deadline.saturating_duration_since(Instant::now()))
+    }
+
+    /// The deadline of a stage that may take at most `want`.
+    fn stage_deadline(&self, want: Duration) -> Instant {
+        Instant::now() + self.remaining(want)
     }
 }
 
@@ -252,10 +128,6 @@ impl Signals {
                 ctrl_c: tokio::signal::windows::ctrl_c()?,
             })
         }
-        #[cfg(not(any(unix, windows)))]
-        {
-            Ok(Self {})
-        }
     }
 
     /// Resolve on the next SIGTERM or SIGINT (Ctrl-C elsewhere).
@@ -272,69 +144,180 @@ impl Signals {
             let _ = self.ctrl_c.recv().await;
             tracing::info!(signal = "ctrl-c", "stop requested");
         }
-        #[cfg(not(any(unix, windows)))]
-        {
-            match tokio::signal::ctrl_c().await {
-                Ok(()) => tracing::info!(signal = "ctrl-c", "stop requested"),
-                Err(err) => tracing::error!(error = %err, "failed to listen for ctrl-c"),
-            }
-        }
     }
 }
 
-pub(crate) struct Plan<'a> {
-    pub(crate) http_config: &'a HttpConfig,
-    pub(crate) readiness: &'a Readiness,
-    pub(crate) app_listener: Server,
-    pub(crate) diagnostics: Option<Server>,
-    // template:begin grpc:shutdown-plan-grpc
-    pub(crate) grpc_listener: Option<Server>,
-    // template:end grpc:shutdown-plan-grpc
-    pub(crate) cancel: CancellationToken,
-    pub(crate) tracker: TaskTracker,
-    /// Closed after tracked background tasks joined. HTTP connection tasks
-    /// are not in the tracker; `close` waits for any pooled connections they
-    /// still hold. Work that outlives close is dropped by
-    /// `runtime.shutdown_timeout`.
-    // template:begin postgres:shutdown-plan-pool
-    pub(crate) postgres_pool: Option<PgPool>,
-    // template:end postgres:shutdown-plan-pool
-    // template:begin messaging:service-shutdown-plan-messaging
-    pub(crate) messaging: Option<Messaging>,
-    // template:end messaging:service-shutdown-plan-messaging
-    // template:begin cache:service-shutdown-plan-cache
+/// Dependencies startup opened. Teardown closes them after the background
+/// tasks that use them have joined, on every exit path.
+#[derive(Default)]
+pub(crate) struct Dependencies {
+    // template:begin postgres:shutdown-dependencies-postgres-field
+    /// HTTP connection tasks are not in the tracker; `close` waits for any
+    /// pooled connections they still hold. Work that outlives close is
+    /// dropped by `runtime.shutdown_timeout`.
+    pub(crate) postgres: Option<PgPool>,
+    // template:end postgres:shutdown-dependencies-postgres-field
+    // template:begin cache:service-shutdown-dependencies-cache-field
+    /// Not a readiness probe; the connection closes when it drops.
     pub(crate) cache: Option<Cache>,
-    // template:end cache:service-shutdown-plan-cache
-    pub(crate) tracer_provider: TracerProviderHandle,
-    pub(crate) signals: &'a mut Signals,
+    // template:end cache:service-shutdown-dependencies-cache-field
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the ordered shutdown stages share one deadline and retain their task owners"
-)]
-pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
-    let budget = Budget::start(plan.http_config.grace_period);
-    tracing::info!(grace = ?plan.http_config.grace_period, "shutdown_started");
+impl Dependencies {
+    /// Close every opened dependency concurrently. Returns whether one
+    /// outlived `deadline`.
+    async fn close(
+        self,
+        #[allow(unused_variables, reason = "dependency-free profiles perform no close")]
+        deadline: Instant,
+    ) -> bool {
+        let Self {
+            // template:begin postgres:shutdown-dependencies-postgres-destructure
+            postgres,
+            // template:end postgres:shutdown-dependencies-postgres-destructure
+            // template:begin cache:service-shutdown-dependencies-cache-destructure
+            cache,
+            // template:end cache:service-shutdown-dependencies-cache-destructure
+        } = self;
+        // template:begin cache:service-shutdown-dependencies-cache-close
+        drop(cache);
+        // template:end cache:service-shutdown-dependencies-cache-close
+        let postgres_close = async {
+            // template:begin postgres:shutdown-dependencies-postgres-close
+            if let Some(pool) = postgres {
+                return match infra_postgres::close(
+                    &pool,
+                    deadline.saturating_duration_since(Instant::now()),
+                )
+                .await
+                {
+                    Closed::Complete => {
+                        tracing::info!("postgres_pool_closed");
+                        false
+                    }
+                    Closed::TimedOut => {
+                        tracing::warn!("postgres pool outlived its close budget");
+                        true
+                    }
+                };
+            }
+            // template:end postgres:shutdown-dependencies-postgres-close
+            false
+        };
+        postgres_close.await
+    }
+}
 
-    plan.readiness.start_drain();
+/// The listeners of an admitted startup.
+pub(crate) struct Serving {
+    pub(crate) readiness: Readiness,
+    pub(crate) app_listener: Server,
+    pub(crate) diagnostics: Option<Server>,
+    // template:begin grpc:shutdown-serving-grpc-field
+    pub(crate) grpc_listener: Option<Server>,
+    // template:end grpc:shutdown-serving-grpc-field
+}
+
+/// Everything teardown releases.
+pub(crate) struct Plan<'a> {
+    pub(crate) http_config: &'a HttpConfig,
+    pub(crate) signals: &'a mut Signals,
+    /// `None` when startup failed or a stop signal ended it before the
+    /// listeners were admitted: teardown then skips the listener stages.
+    pub(crate) serving: Option<Serving>,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) tracker: TaskTracker,
+    pub(crate) dependencies: Dependencies,
+    pub(crate) tracer_provider: TracerProviderHandle,
+}
+
+pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
+    let Plan {
+        http_config,
+        signals,
+        serving,
+        cancel,
+        tracker,
+        dependencies,
+        tracer_provider,
+    } = plan;
+    let budget = Budget::start(http_config.grace_period);
+    tracing::info!(grace = ?http_config.grace_period, "shutdown_started");
+
+    let drain_overran = match serving {
+        Some(serving) => stop_serving(serving, http_config, signals, &budget).await,
+        None => false,
+    };
+
+    cancel.cancel();
+    tracker.close();
+    let joined = tokio::time::timeout(budget.remaining(BACKGROUND_JOIN), tracker.wait())
+        .await
+        .is_ok();
+    if joined {
+        tracing::info!("background_joined");
+    } else {
+        tracing::warn!("background tasks outlived their join budget");
+    }
+
+    let dependency_overran = dependencies
+        .close(budget.stage_deadline(DEPENDENCY_CLOSE))
+        .await;
+
+    let telemetry_overran = match tracer_provider
+        .shutdown(budget.remaining(TELEMETRY_FLUSH))
+        .await
+    {
+        ProviderShutdown::Flushed => {
+            tracing::info!("telemetry_flushed");
+            false
+        }
+        ProviderShutdown::Incomplete => true,
+    };
+
+    let outcome = if drain_overran || !joined || dependency_overran || telemetry_overran {
+        Outcome::Degraded
+    } else {
+        Outcome::Graceful
+    };
+    tracing::info!(outcome = ?outcome, "shutdown_completed");
+    outcome
+}
+
+/// Take the service out of rotation and drain its listeners. Returns whether
+/// the drain overran; a diagnostics overrun is forced closed without a vote.
+async fn stop_serving(
+    serving: Serving,
+    http_config: &HttpConfig,
+    signals: &mut Signals,
+    budget: &Budget,
+) -> bool {
+    let Serving {
+        readiness,
+        app_listener,
+        diagnostics,
+        // template:begin grpc:shutdown-serving-grpc-destructure
+        grpc_listener,
+        // template:end grpc:shutdown-serving-grpc-destructure
+    } = serving;
+    readiness.start_drain();
     tracing::info!("readiness_disabled");
 
     // Keep serving while load balancers notice readiness failing. A second
     // stop signal skips the wait: the operator has decided to hurry.
-    let delay = budget.remaining(plan.http_config.readiness_propagation_delay);
+    let delay = budget.remaining(http_config.readiness_propagation_delay);
     if !delay.is_zero() {
         tracing::info!(delay = ?delay, "readiness_propagation_wait");
         tokio::select! {
             () = tokio::time::sleep(delay) => {},
-            () = plan.signals.wait() => tracing::warn!("second stop signal: skipping propagation delay"),
+            () = signals.wait() => tracing::warn!("second stop signal: skipping propagation delay"),
         }
     }
 
-    let http_drain_budget = budget.remaining(plan.http_config.effective_drain_budget());
+    let http_drain_budget = budget.remaining(http_config.effective_drain_budget());
     tracing::info!(budget = ?http_drain_budget, "drain_started");
     let http_drain = async {
-        match plan.app_listener.drain(http_drain_budget).await {
+        match app_listener.drain(http_drain_budget).await {
             Ok(Drained::Complete) => {
                 tracing::info!("drain_completed");
                 false
@@ -360,7 +343,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     };
     // template:begin grpc:shutdown-concurrent-grpc-drain
     let grpc_drain = async {
-        match plan.grpc_listener {
+        match grpc_listener {
             Some(listener) => match listener.drain(http_drain_budget).await {
                 Ok(Drained::Complete) => {
                     tracing::info!("grpc_drain_completed");
@@ -391,7 +374,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     // template:end grpc:shutdown-concurrent-grpc-drain
     let drain_overran = http_drain.await;
 
-    if let Some(diagnostics) = plan.diagnostics {
+    if let Some(diagnostics) = diagnostics {
         // An in-flight scrape must not park the process past the telemetry
         // flush. A scrape overrun is forced closed so telemetry can flush;
         // it does not vote `degraded`.
@@ -409,53 +392,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
             Err(err) => tracing::warn!(error = %err, "diagnostics_shutdown_failed"),
         }
     }
-
-    let joined = join_background_then_close(
-        &plan.cancel,
-        &plan.tracker,
-        budget.remaining(BACKGROUND_JOIN),
-    )
-    .await;
-    let join_overran = if joined {
-        tracing::info!("background_joined");
-        false
-    } else {
-        tracing::warn!("background tasks outlived their join budget");
-        true
-    };
-    let dependency_overran = close_dependencies(
-        // template:begin postgres:shutdown-pool-close-prefix
-        plan.postgres_pool.as_ref(),
-        // template:end postgres:shutdown-pool-close-prefix
-        // template:begin messaging:service-shutdown-close-messaging-argument
-        plan.messaging,
-        // template:end messaging:service-shutdown-close-messaging-argument
-        // template:begin cache:service-shutdown-close-cache-argument
-        plan.cache,
-        // template:end cache:service-shutdown-close-cache-argument
-        Instant::now() + budget.remaining(DEPENDENCY_CLOSE),
-    )
-    .await;
-
-    let telemetry_overran = match plan
-        .tracer_provider
-        .shutdown(budget.remaining(TELEMETRY_FLUSH))
-        .await
-    {
-        ProviderShutdown::Flushed => {
-            tracing::info!("telemetry_flushed");
-            false
-        }
-        ProviderShutdown::Incomplete => true,
-    };
-
-    let outcome = if drain_overran || join_overran || dependency_overran || telemetry_overran {
-        Outcome::Degraded
-    } else {
-        Outcome::Graceful
-    };
-    tracing::info!(outcome = ?outcome, "shutdown_completed");
-    outcome
+    drain_overran
 }
 
 #[cfg(test)]

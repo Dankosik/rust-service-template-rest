@@ -1,5 +1,6 @@
 //! One supervisor owns its handler and fixed queue outcome through cleanup.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -14,17 +15,16 @@ use crate::engine::{
     Operation, OperationError, RECORD_RETRY_INTERVAL, Shared, backstop, observe_failure,
     observe_recovery,
 };
-use crate::kind::{Disposition, HandlerFuture, JobError, JobId, Policy};
-use crate::trace_context;
+use crate::kind::{Attempt, Disposition, HandlerFuture, JobError, JobId, Policy};
 
 const COOPERATIVE_GRACE: Duration = Duration::from_millis(100);
 
 /// The longest stored failure summary, in bytes.
-pub const ERROR_SUMMARY_MAX_BYTES: usize = 1024;
+pub(crate) const ERROR_SUMMARY_MAX_BYTES: usize = 1024;
 /// Observed handler results and claim-time exhaustions. Labels `kind`, `outcome`.
-pub const ATTEMPTS_METRIC: &str = "jobs_attempts_total";
+pub(crate) const ATTEMPTS_METRIC: &str = "jobs_attempts_total";
 /// Queue-write acknowledgement, not attribution. Labels `kind`, `disposition`.
-pub const PERSISTENCE_METRIC: &str = "jobs_persistence_total";
+pub(crate) const PERSISTENCE_METRIC: &str = "jobs_persistence_total";
 /// Handler run time. Label `kind`.
 pub const ATTEMPT_DURATION_METRIC: &str = "jobs_attempt_duration_seconds";
 /// Histogram buckets for [`ATTEMPT_DURATION_METRIC`], in seconds.
@@ -37,8 +37,9 @@ pub(crate) const COMPLETE: &str = "UPDATE background_jobs \
      SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
      WHERE id = $1::uuid AND claim_generation = $2 AND state = 'running'";
 const RETRY: &str = "UPDATE background_jobs \
-     SET state = 'pending', not_before = statement_timestamp() + $3, claim_expires_at = NULL, \
-         error_summary = $4 \
+     SET state = 'pending', not_before = statement_timestamp() + \
+         GREATEST($3::double precision * (0.9 + 0.2 * random()), $4::bigint) * interval '1 microsecond', \
+         claim_expires_at = NULL, error_summary = $5 \
      WHERE id = $1::uuid AND claim_generation = $2 AND state = 'running'";
 const FAIL: &str = "UPDATE background_jobs \
      SET state = 'failed', failure_reason = $3, finished_at = statement_timestamp(), \
@@ -54,27 +55,51 @@ const RELEASE: &str = "UPDATE background_jobs \
      SET state = 'pending', claim_expires_at = NULL, attempts = attempts - 1 \
      WHERE id = $1::uuid AND claim_generation = $2 AND state = 'running'";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Outcome {
-    Completed,
-    Retry,
-    Timeout,
-    Exhausted,
-    Permanent,
-    Snoozed,
-    Cancelled,
+/// The queue transition a known attempt result asks for.
+enum Transition {
+    Complete,
+    Retry {
+        summary: String,
+        base_micros: f64,
+        floor_micros: i64,
+        timed_out: bool,
+    },
+    Fail {
+        reason: Failure,
+        summary: String,
+    },
+    Snooze {
+        delay_micros: i64,
+    },
+    Release,
 }
 
-impl Outcome {
-    const fn as_str(self) -> &'static str {
+#[derive(Clone, Copy, Debug)]
+enum Failure {
+    Exhausted,
+    Permanent,
+}
+
+impl Failure {
+    const fn label(self) -> &'static str {
         match self {
-            Self::Completed => "completed",
-            Self::Retry => "retry",
-            Self::Timeout => "timeout",
             Self::Exhausted => "exhausted",
             Self::Permanent => "permanent",
-            Self::Snoozed => "snoozed",
-            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl Transition {
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Complete => "completed",
+            Self::Retry {
+                timed_out: true, ..
+            } => "timeout",
+            Self::Retry { .. } => "retry",
+            Self::Fail { reason, .. } => reason.label(),
+            Self::Snooze { .. } => "snoozed",
+            Self::Release => "cancelled",
         }
     }
 }
@@ -95,11 +120,6 @@ pub(crate) fn describe_metrics() {
     );
 }
 
-struct Intended {
-    outcome: Outcome,
-    summary: Option<String>,
-    delay_micros: i64,
-}
 struct AttemptId {
     id: JobId,
     generation: i64,
@@ -116,33 +136,33 @@ pub(crate) fn record_exhausted(id: JobId, kind: &'static str, attempt: u16, summ
             kind,
             attempt,
         },
-        &Intended {
-            outcome: Outcome::Exhausted,
-            summary: summary.map(str::to_owned),
-            delay_micros: 0,
+        &Transition::Fail {
+            reason: Failure::Exhausted,
+            summary: summary.unwrap_or("").to_owned(),
         },
         None,
     );
 }
 
-fn record(attempt: &AttemptId, intended: &Intended, ran: Option<Duration>) {
-    metrics::counter!(ATTEMPTS_METRIC, "kind" => attempt.kind, "outcome" => intended.outcome.as_str()).increment(1);
+fn record(attempt: &AttemptId, transition: &Transition, ran: Option<Duration>) {
+    metrics::counter!(ATTEMPTS_METRIC, "kind" => attempt.kind, "outcome" => transition.label())
+        .increment(1);
     if let Some(ran) = ran {
         metrics::histogram!(ATTEMPT_DURATION_METRIC, "kind" => attempt.kind)
             .record(ran.as_secs_f64());
     }
-    match intended.outcome {
-        Outcome::Completed => {
+    match transition {
+        Transition::Complete => {
             tracing::debug!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.attempt, "job_attempt_completed");
         }
-        Outcome::Snoozed | Outcome::Cancelled => {
-            tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, outcome = intended.outcome.as_str(), "job_attempt_finished");
+        Transition::Snooze { .. } | Transition::Release => {
+            tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, outcome = transition.label(), "job_attempt_finished");
         }
-        Outcome::Retry | Outcome::Timeout => {
-            tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.attempt, retry_in_micros = intended.delay_micros, error = intended.summary.as_deref().unwrap_or(""), "job_attempt_failed");
+        Transition::Retry { summary, .. } => {
+            tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.attempt, error = summary.as_str(), "job_attempt_failed");
         }
-        Outcome::Exhausted | Outcome::Permanent => {
-            tracing::warn!(job.id = %attempt.id, job.kind = attempt.kind, job.attempts = attempt.attempt, job.failure_reason = intended.outcome.as_str(), error = intended.summary.as_deref().unwrap_or(""), "job_failed");
+        Transition::Fail { summary, .. } => {
+            tracing::warn!(job.id = %attempt.id, job.kind = attempt.kind, job.attempts = attempt.attempt, job.failure_reason = transition.label(), error = summary.as_str(), "job_failed");
         }
     }
 }
@@ -164,7 +184,7 @@ pub(crate) async fn supervise(
     } = claimed;
     let _slot = slot;
     let span = tracing::info_span!("job_attempt", job.id = %id, job.kind = kind, job.attempt = u64::from(attempt), otel.kind = "consumer");
-    trace_context::link(&span, parent.as_deref(), trace_state.as_deref());
+    crate::trace_context::link(&span, parent.as_deref(), trace_state.as_deref());
     run_attempt(
         &shared,
         AttemptId {
@@ -181,7 +201,7 @@ pub(crate) async fn supervise(
 }
 
 async fn run_attempt(shared: &Shared, attempt: AttemptId, payload: Vec<u8>, deadline: Instant) {
-    if Instant::now() >= shared.deadline(deadline) {
+    if expired(shared, deadline) {
         uncertain(shared, &attempt);
         return;
     }
@@ -195,13 +215,15 @@ async fn run_attempt(shared: &Shared, attempt: AttemptId, payload: Vec<u8>, dead
         .min(deadline);
     let cancel = CancellationToken::new();
     let prepared = registered.dispatch.prepare(
-        attempt.id,
-        attempt.attempt,
-        attempt.generation,
-        attempt_deadline,
+        Attempt {
+            id: attempt.id,
+            number: attempt.attempt,
+            generation: attempt.generation,
+            deadline: attempt_deadline,
+            cancellation: cancel.clone(),
+            pool: shared.pool.clone(),
+        },
         &payload,
-        cancel.clone(),
-        shared.pool.clone(),
     );
     let (ended, ran) = match prepared {
         Err(error) => (Ended::Payload(error), None),
@@ -215,8 +237,8 @@ async fn run_attempt(shared: &Shared, attempt: AttemptId, payload: Vec<u8>, dead
             (ended, Some(started.elapsed()))
         }
     };
-    let intended = map_outcome(attempt.kind, attempt.attempt, policy, ended);
-    if intended.outcome == Outcome::Cancelled {
+    let transition = map_outcome(attempt.kind, attempt.attempt, policy, ended);
+    if matches!(transition, Transition::Release) {
         shared.counters.cancelled.fetch_add(1, Ordering::Relaxed);
     } else {
         shared
@@ -224,8 +246,22 @@ async fn run_attempt(shared: &Shared, attempt: AttemptId, payload: Vec<u8>, dead
             .known_results
             .fetch_add(1, Ordering::Relaxed);
     }
-    record(&attempt, &intended, ran);
-    persist(shared, &attempt, &intended, deadline).await;
+    record(&attempt, &transition, ran);
+    persist(shared, &attempt, &transition, deadline).await;
+}
+
+/// `future`'s output, or `None` once the attempt's local deadline passes or cleanup ends.
+async fn within<T>(shared: &Shared, local: Instant, future: impl Future<Output = T>) -> Option<T> {
+    tokio::select! {
+        biased;
+        value = future => Some(value),
+        () = shared.hard_stop.cancelled() => None,
+        () = tokio::time::sleep_until(local) => None,
+    }
+}
+
+fn expired(shared: &Shared, local: Instant) -> bool {
+    Instant::now() >= local || shared.hard_stop.is_cancelled()
 }
 
 /// Poll a ready result before cancellation; it wins as is. After cancellation
@@ -234,7 +270,7 @@ async fn drive(
     shared: &Shared,
     future: HandlerFuture,
     cancel: CancellationToken,
-    deadline: Instant,
+    attempt_deadline: Instant,
     local: Instant,
 ) -> Option<Ended> {
     let mut join = tokio::spawn(future.instrument(tracing::Span::current()));
@@ -242,38 +278,20 @@ async fn drive(
         biased;
         result = &mut join => return Some(ended_from(result)),
         () = shared.force.cancelled() => Ended::Cancelled,
-        () = tokio::time::sleep_until(deadline) => Ended::Timeout,
+        () = tokio::time::sleep_until(attempt_deadline) => Ended::Timeout,
     };
     cancel.cancel();
-    let grace_deadline = Instant::now()
+    let grace = Instant::now()
         .checked_add(COOPERATIVE_GRACE)
         .unwrap_or(local)
-        .min(shared.deadline(local));
-    loop {
-        let forced = shared.force.is_cancelled();
-        let deadline = shared.deadline(local);
-        tokio::select! {
-            biased;
-            result = &mut join => return Some(ended_after_cancel(&result, reason)),
-            () = shared.force.cancelled(), if !forced => {},
-            () = tokio::time::sleep_until(grace_deadline.min(deadline)) => break,
-        }
-    }
-    if Instant::now() >= shared.deadline(local) {
-        join.abort();
-        return None;
+        .min(local);
+    if let Some(result) = within(shared, grace, &mut join).await {
+        return Some(ended_after_cancel(&result, reason));
     }
     join.abort();
-    loop {
-        let forced = shared.force.is_cancelled();
-        let deadline = shared.deadline(local);
-        tokio::select! {
-            biased;
-            result = &mut join => return Some(ended_after_cancel(&result, reason)),
-            () = shared.force.cancelled(), if !forced => {},
-            () = tokio::time::sleep_until(deadline) => return None,
-        }
-    }
+    within(shared, local, &mut join)
+        .await
+        .map(|result| ended_after_cancel(&result, reason))
 }
 
 /// A result that joins after the supervisor cancelled the handler. Success
@@ -297,29 +315,18 @@ fn ended_from(result: Result<Result<(), JobError>, JoinError>) -> Ended {
     }
 }
 
-async fn persist(shared: &Shared, attempt: &AttemptId, intended: &Intended, local: Instant) {
-    let operation = if intended.outcome == Outcome::Cancelled {
+async fn persist(shared: &Shared, attempt: &AttemptId, transition: &Transition, local: Instant) {
+    let operation = if matches!(transition, Transition::Release) {
         Operation::Release
     } else {
         Operation::Record
     };
     loop {
-        if Instant::now() >= shared.deadline(local) {
+        if expired(shared, local) {
             break;
         }
-        let send = send_outcome(shared, attempt, intended);
-        tokio::pin!(send);
-        let result = loop {
-            let forced = shared.force.is_cancelled();
-            let deadline = shared.deadline(local);
-            tokio::select! {
-                biased;
-                result = &mut send => break Some(result),
-                () = shared.force.cancelled(), if !forced => {},
-                () = tokio::time::sleep_until(deadline) => break None,
-            }
-        };
-        match result {
+        match within(shared, local, send_outcome(shared, attempt, transition)).await {
+            None => break,
             Some(Ok(rows)) => {
                 observe_recovery(shared, operation);
                 let disposition = if rows == 1 { "applied" } else { "unchanged" };
@@ -329,22 +336,21 @@ async fn persist(shared: &Shared, attempt: &AttemptId, intended: &Intended, loca
                     disposition,
                     "job_persistence_finished"
                 );
-                if rows == 1 && intended.outcome == Outcome::Cancelled {
+                if rows == 1 && matches!(transition, Transition::Release) {
                     shared.counters.released.fetch_add(1, Ordering::Relaxed);
                 }
                 return;
             }
-            Some(Err(error)) => observe_failure(shared, operation, error),
-            None => break,
+            Some(Err(error)) => observe_failure(shared, operation, &error),
         }
-        let forced = shared.force.is_cancelled();
         let until = Instant::now()
             .checked_add(RECORD_RETRY_INTERVAL)
-            .unwrap_or(local)
-            .min(shared.deadline(local));
-        tokio::select! {
-            () = tokio::time::sleep_until(until) => {},
-            () = shared.force.cancelled(), if !forced => {},
+            .unwrap_or(local);
+        if within(shared, local, tokio::time::sleep_until(until))
+            .await
+            .is_none()
+        {
+            break;
         }
     }
     uncertain(shared, attempt);
@@ -370,23 +376,24 @@ fn uncertain(shared: &Shared, attempt: &AttemptId) {
 async fn send_outcome(
     shared: &Shared,
     attempt: &AttemptId,
-    intended: &Intended,
+    transition: &Transition,
 ) -> Result<u64, OperationError> {
-    backstop(async {
+    // An sqlx statement future is about 16 KiB; box it once so the supervisor stays small.
+    backstop(Box::pin(async {
         let mut connection = shared
             .pool
             .acquire()
             .await
-            .map_err(|_| OperationError::Acquire)?;
+            .map_err(OperationError::Acquire)?;
         execute(
             &mut connection,
             &attempt.id.to_string(),
             attempt.generation,
-            intended,
+            transition,
         )
         .await
-        .map_err(statement_error)
-    })
+        .map_err(OperationError::from)
+    }))
     .await
 }
 
@@ -394,33 +401,37 @@ async fn execute(
     connection: &mut PgConnection,
     id: &str,
     generation: i64,
-    intended: &Intended,
+    transition: &Transition,
 ) -> Result<u64, sqlx::Error> {
-    let delay = sqlx::postgres::types::PgInterval {
-        months: 0,
-        days: 0,
-        microseconds: intended.delay_micros,
-    };
-    let query = match intended.outcome {
-        Outcome::Completed => sqlx::query(COMPLETE).bind(id).bind(generation),
-        Outcome::Retry | Outcome::Timeout => sqlx::query(RETRY)
+    let query = match transition {
+        Transition::Complete => sqlx::query(COMPLETE).bind(id).bind(generation),
+        Transition::Retry {
+            summary,
+            base_micros,
+            floor_micros,
+            ..
+        } => sqlx::query(RETRY)
             .bind(id)
             .bind(generation)
-            .bind(delay)
-            .bind(intended.summary.as_deref().unwrap_or("")),
-        Outcome::Snoozed => sqlx::query(SNOOZE).bind(id).bind(generation).bind(delay),
-        Outcome::Cancelled => sqlx::query(RELEASE).bind(id).bind(generation),
-        Outcome::Exhausted | Outcome::Permanent => sqlx::query(FAIL)
+            .bind(base_micros)
+            .bind(floor_micros)
+            .bind(summary.as_str()),
+        Transition::Snooze { delay_micros } => {
+            let delay = sqlx::postgres::types::PgInterval {
+                months: 0,
+                days: 0,
+                microseconds: *delay_micros,
+            };
+            sqlx::query(SNOOZE).bind(id).bind(generation).bind(delay)
+        }
+        Transition::Release => sqlx::query(RELEASE).bind(id).bind(generation),
+        Transition::Fail { reason, summary } => sqlx::query(FAIL)
             .bind(id)
             .bind(generation)
-            .bind(intended.outcome.as_str())
-            .bind(intended.summary.as_deref().unwrap_or("")),
+            .bind(reason.label())
+            .bind(summary.as_str()),
     };
     Ok(query.execute(connection).await?.rows_affected())
-}
-
-fn statement_error(_error: sqlx::Error) -> OperationError {
-    OperationError::Statement
 }
 
 enum Ended {
@@ -432,73 +443,57 @@ enum Ended {
     Cancelled,
 }
 
-fn map_outcome(kind: &'static str, attempt: u16, policy: Policy, ended: Ended) -> Intended {
-    let empty = |outcome| Intended {
-        outcome,
-        summary: None,
-        delay_micros: 0,
-    };
-    let (text, delay, floor, timed_out) = match ended {
-        Ended::Success => return empty(Outcome::Completed),
-        Ended::Cancelled => return empty(Outcome::Cancelled),
+fn map_outcome(kind: &'static str, attempt: u16, policy: Policy, ended: Ended) -> Transition {
+    match ended {
+        Ended::Success => Transition::Complete,
+        Ended::Cancelled => Transition::Release,
         Ended::Error(error) => match error.disposition {
-            Disposition::Snooze(delay_micros) => {
-                return Intended {
-                    outcome: Outcome::Snoozed,
-                    summary: None,
-                    delay_micros,
-                };
+            Disposition::Snooze(delay_micros) => Transition::Snooze { delay_micros },
+            Disposition::Permanent => Transition::Fail {
+                reason: Failure::Permanent,
+                summary: summary(&error.to_string()),
+            },
+            Disposition::RetryAfterAtLeast(floor_micros) => {
+                retry(attempt, policy, &error.to_string(), floor_micros, false)
             }
-            Disposition::Permanent => {
-                return Intended {
-                    outcome: Outcome::Permanent,
-                    summary: Some(summary(&error.to_string())),
-                    delay_micros: 0,
-                };
-            }
-            Disposition::RetryAfter(delay) => (error.to_string(), Some(delay), None, false),
-            Disposition::RetryAfterAtLeast(delay) => (error.to_string(), None, Some(delay), false),
-            Disposition::Retry => (error.to_string(), None, None, false),
+            Disposition::Retry => retry(attempt, policy, &error.to_string(), 0, false),
         },
-        Ended::Panic => ("handler panicked".to_owned(), None, None, false),
-        Ended::Payload(error) => (payload_summary(kind, &error), None, None, false),
-        Ended::Timeout => (
-            format!(
+        Ended::Panic => retry(attempt, policy, "handler panicked", 0, false),
+        Ended::Payload(error) => retry(attempt, policy, &payload_summary(kind, &error), 0, false),
+        Ended::Timeout => retry(
+            attempt,
+            policy,
+            &format!(
                 "attempt timed out after {}",
                 humantime::format_duration(policy.timeout)
             ),
-            None,
-            None,
+            0,
             true,
         ),
-    };
-    let exhausted = attempt >= policy.max_attempts;
-    Intended {
-        outcome: if exhausted {
-            Outcome::Exhausted
-        } else if timed_out {
-            Outcome::Timeout
-        } else {
-            Outcome::Retry
-        },
-        summary: Some(summary(&text)),
-        delay_micros: if exhausted {
-            0
-        } else {
-            delay.unwrap_or_else(|| backoff(attempt, retry_jitter()).max(floor.unwrap_or_default()))
-        },
     }
 }
 
-fn retry_jitter() -> f64 {
-    const RANDOM_BITS: u128 = (1_u128 << 53) - 1;
-    const RANDOM_RANGE: f64 = 9_007_199_254_740_992.0;
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "the selected 53 random bits fit exactly in an f64 mantissa"
-    )]
-    let draw = (uuid::Uuid::new_v4().as_u128() & RANDOM_BITS) as f64;
-    draw / RANDOM_RANGE
+fn retry(
+    attempt: u16,
+    policy: Policy,
+    text: &str,
+    floor_micros: i64,
+    timed_out: bool,
+) -> Transition {
+    let summary = summary(text);
+    if attempt >= policy.max_attempts {
+        Transition::Fail {
+            reason: Failure::Exhausted,
+            summary,
+        }
+    } else {
+        Transition::Retry {
+            summary,
+            base_micros: f64::from(attempt).powi(4) * 1_000_000.0,
+            floor_micros,
+            timed_out,
+        }
+    }
 }
 
 fn payload_summary(kind: &str, error: &serde_json::Error) -> String {
@@ -520,88 +515,87 @@ fn summary(text: &str) -> String {
         .chars()
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect();
-    let mut end = sanitized.len().min(ERROR_SUMMARY_MAX_BYTES);
-    while !sanitized.is_char_boundary(end) {
-        end -= 1;
-    }
-    sanitized.truncate(end);
+    sanitized.truncate(sanitized.floor_char_boundary(ERROR_SUMMARY_MAX_BYTES));
     sanitized
-}
-
-fn backoff(attempt: u16, draw: f64) -> i64 {
-    // Registered policies cap attempts at 25, so the finite UUID draw fits i64 microseconds.
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "accepted jitter rounds down to microseconds; the policy bound fits i64"
-    )]
-    let micros = (f64::from(attempt).powi(4) * (0.9 + 0.2 * draw) * 1_000_000.0).floor() as i64;
-    micros
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn outcome(ended: Ended, attempt: u16) -> Intended {
+    fn outcome(ended: Ended, attempt: u16) -> Transition {
         map_outcome("sample", attempt, Policy::default(), ended)
     }
 
     #[test]
+    #[allow(clippy::float_cmp, reason = "attempt^4 * 1e6 is exact in f64")]
     fn dispositions_preserve_cap_and_snooze() {
-        assert_eq!(outcome(Ended::Success, 25).outcome, Outcome::Completed);
-        assert_eq!(
-            outcome(Ended::Error(JobError::retryable("fail")), 25).outcome,
-            Outcome::Exhausted
-        );
-        let retry = outcome(
-            Ended::Error(JobError::retry_after("later", Duration::from_micros(9)).unwrap()),
-            1,
-        );
-        assert_eq!(retry.delay_micros, 9);
-        let floor = outcome(
-            Ended::Error(
-                JobError::retry_after_at_least("at least", Duration::from_secs(2)).unwrap(),
+        assert!(matches!(outcome(Ended::Success, 25), Transition::Complete));
+        assert!(matches!(
+            outcome(Ended::Error(JobError::retryable("fail")), 25),
+            Transition::Fail {
+                reason: Failure::Exhausted,
+                ..
+            }
+        ));
+        assert!(matches!(
+            outcome(
+                Ended::Error(
+                    JobError::retry_after_at_least("at least", Duration::from_secs(2)).unwrap()
+                ),
+                1,
             ),
-            1,
-        );
-        assert_eq!(floor.delay_micros, 2_000_000);
-        let backoff = outcome(
-            Ended::Error(
-                JobError::retry_after_at_least("at least", Duration::from_secs(2)).unwrap(),
+            Transition::Retry {
+                base_micros,
+                floor_micros: 2_000_000,
+                timed_out: false,
+                ..
+            } if base_micros == 1_000_000.0
+        ));
+        assert!(matches!(
+            outcome(
+                Ended::Error(
+                    JobError::retry_after_at_least("at least", Duration::from_secs(2)).unwrap()
+                ),
+                3,
             ),
-            3,
-        );
-        assert!((72_900_000..89_100_000).contains(&backoff.delay_micros));
-        let snooze = outcome(
-            Ended::Error(JobError::snooze(Duration::from_micros(7)).unwrap()),
-            25,
-        );
-        assert_eq!(snooze.outcome, Outcome::Snoozed);
-        assert_eq!(snooze.delay_micros, 7);
-        assert!(snooze.summary.is_none());
-        assert_eq!(
-            outcome(Ended::Panic, 1).summary.as_deref(),
-            Some("handler panicked")
-        );
-        assert_eq!(outcome(Ended::Timeout, 1).outcome, Outcome::Timeout);
-        assert_eq!(
-            outcome(Ended::Error(JobError::permanent("stop")), 1).outcome,
-            Outcome::Permanent
-        );
-    }
-
-    #[test]
-    fn retry_jitter_stays_in_the_accepted_range() {
-        for _ in 0..100 {
-            let draw = retry_jitter();
-            assert!((0.0..1.0).contains(&draw));
-        }
-        for attempt in 1..=25 {
-            let base = i64::from(attempt).pow(4) * 1_000_000;
-            assert_eq!(backoff(attempt, 0.5), base);
-            assert_eq!(backoff(attempt, 0.0), base * 9 / 10);
-            assert!(backoff(attempt, 0.999_999) < base * 11 / 10);
-        }
+            Transition::Retry {
+                base_micros,
+                floor_micros: 2_000_000,
+                timed_out: false,
+                ..
+            } if base_micros == 81_000_000.0
+        ));
+        assert!(matches!(
+            outcome(
+                Ended::Error(JobError::snooze(Duration::from_micros(7)).unwrap()),
+                25,
+            ),
+            Transition::Snooze { delay_micros: 7 }
+        ));
+        assert!(matches!(
+            outcome(Ended::Panic, 1),
+            Transition::Retry {
+                ref summary,
+                timed_out: false,
+                floor_micros: 0,
+                ..
+            } if summary == "handler panicked"
+        ));
+        assert!(matches!(
+            outcome(Ended::Timeout, 1),
+            Transition::Retry {
+                timed_out: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            outcome(Ended::Error(JobError::permanent("stop")), 1),
+            Transition::Fail {
+                reason: Failure::Permanent,
+                ..
+            }
+        ));
     }
 
     #[test]

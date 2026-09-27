@@ -21,8 +21,6 @@ pub enum MessagingError {
     Envelope(&'static str),
     #[error("messaging resource bounds are invalid")]
     Bounds,
-    #[error("messaging resource closed before completion")]
-    Closed,
 }
 
 /// A conclusive or uncertain publication outcome.
@@ -65,16 +63,4 @@ pub enum HandlerError {
     Retryable,
     #[error("event handler permanently rejected the event")]
     Permanent,
-}
-
-impl HandlerError {
-    #[must_use]
-    pub const fn retryable() -> Self {
-        Self::Retryable
-    }
-
-    #[must_use]
-    pub const fn permanent() -> Self {
-        Self::Permanent
-    }
 }

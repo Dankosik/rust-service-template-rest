@@ -7,8 +7,7 @@ use std::sync::Arc;
 
 use infra_grpc::ServerTlsMaterial;
 use rustls::ServerConfig;
-use secrecy::ExposeSecret as _;
-use service_config::{Config, GrpcSecurity};
+use service_config::{Config, GrpcSecurity, ValidationError};
 
 /// Registers this service's generated native gRPC adapters.
 pub type GrpcRegistration = fn(&mut infra_grpc::Services) -> Result<(), infra_grpc::Error>;
@@ -30,41 +29,56 @@ pub(crate) fn services(
 /// Convert admitted TLS material into a listener config.
 ///
 /// Configuration validates presence and source policy before this runs. The
-/// conversion does not read paths or perform network I/O. Plaintext has no
-/// server config.
+/// conversion does not read paths or perform network I/O, and borrows the
+/// private key without copying it. Plaintext has no server config.
 ///
 /// # Errors
 ///
-/// Returns [`infra_grpc::Error::InvalidConfiguration`] when security is unset
-/// or the TLS material cannot be used.
-pub(crate) fn tls(config: &Config) -> Result<Option<Arc<ServerConfig>>, infra_grpc::Error> {
+/// Returns the configuration key whose value is missing, or the TLS keys
+/// when the material cannot form a server config.
+pub(crate) fn tls(config: &Config) -> Result<Option<Arc<ServerConfig>>, ValidationError> {
     let grpc = &config.grpc;
-    match grpc
-        .security
-        .ok_or(infra_grpc::Error::InvalidConfiguration)?
-    {
+    let tls_required = |key| ValidationError::new(key, "is required when grpc.security is tls");
+    match grpc.security.ok_or_else(|| {
+        ValidationError::new("grpc.security", "is required when grpc.enabled is true")
+    })? {
         GrpcSecurity::Plaintext => Ok(None),
         GrpcSecurity::Tls => {
             let material = ServerTlsMaterial {
                 certificate_pem: grpc
                     .certificate
                     .as_deref()
-                    .ok_or(infra_grpc::Error::InvalidConfiguration)?
-                    .as_bytes()
-                    .to_vec(),
+                    .ok_or_else(|| tls_required("grpc.certificate"))?,
                 private_key_pem: grpc
                     .private_key
                     .as_ref()
-                    .ok_or(infra_grpc::Error::InvalidConfiguration)?
-                    .expose_secret()
-                    .as_bytes()
-                    .to_vec(),
-                client_ca_pem: grpc
-                    .client_ca
-                    .as_deref()
-                    .map(|value| value.as_bytes().to_vec()),
+                    .ok_or_else(|| tls_required("grpc.private_key"))?,
+                client_ca_pem: grpc.client_ca.as_deref(),
             };
-            Ok(Some(infra_grpc::server_tls_config(&material)?))
+            let server_config = infra_grpc::server_tls_config(material).map_err(|error| {
+                let key = match error {
+                    infra_grpc::Error::InvalidPrivateKey => "grpc.private_key",
+                    infra_grpc::Error::InvalidCaCertificate => "grpc.client_ca",
+                    _ => "grpc.certificate",
+                };
+                ValidationError::new(key, error.to_string())
+            })?;
+            Ok(Some(server_config))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unusable_tls_material_names_its_configuration_key() {
+        let mut config = Config::default();
+        config.grpc.security = Some(GrpcSecurity::Tls);
+        config.grpc.certificate = Some("not a certificate".to_owned());
+        config.grpc.private_key = Some("not a key".into());
+        let err = tls(&config).expect_err("garbage PEM must not form a server config");
+        assert_eq!(err.key, "grpc.certificate");
     }
 }

@@ -16,7 +16,7 @@ should weigh before reopening them.
 | Owner | Owns | Does not own |
 | --- | --- | --- |
 | `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`), the pool with the template's session budgets (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), pool gauges, the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`, `retryable`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
-| `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), read-only embedded-history verification (`verify_history`), the source rules beyond the resolver's, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
+| `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), read-only embedded-history verification (`verify_history`), the shared history rule, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
 | `migrations/` | Forward-only SQL files, one transaction each, `<version>_<snake_case>.sql` ([rules](../../migrations/README.md)). | Access code; a repository adapts to the schema, never the reverse. |
 | `service-config` (`postgres` section) | `postgres.enabled`, `postgres.dsn` (secret, environment only), `postgres.max_connections`. | DSN shape (the adapter refuses what the driver would accept). |
 | `service` bootstrap | Opening the pool before readiness admission when the profile is enabled, verifying the embedded migration history, registering the probe and the gauge task, partial-startup cleanup, closing the pool in the dependency-close stage. | Pool mechanics, migration execution. |
@@ -34,15 +34,19 @@ access code from that schema.
 
 `postgres.dsn` is a `postgres://` or `postgresql://` URL with an explicit
 host, port, user, password, database, and `sslmode` in `disable`, `require`,
-`verify-ca`, or `verify-full`, and no other parameter. `Dsn::admit` refuses,
-in this order and without ever quoting the value: an empty string, another
-scheme, an unparsable URL, a URL fragment, a missing component, a Unix socket
-host, a comma-separated host list, `allow`/`prefer`, a service or passfile
-parameter, a TLS certificate or key file parameter, any other parameter, a
-non-empty libpq variable (`PGHOST`, `PGPASSWORD`, `PGSSLMODE`, ... the
-thirteen names in `AMBIENT_ENVIRONMENT`), and a string the driver still
-cannot turn into connect options. The result is exactly what the
-operator wrote; `application_name` is added by the template from
+`verify-ca`, or `verify-full`. The only other parameter is an optional
+`sslrootcert` with an absolute path to the CA bundle of a private
+certificate authority (RDS, Cloud SQL, Azure, an in-house CA); it is
+admitted only with `verify-ca` or `verify-full`, because `sqlx` ignores it
+under `require`, and it adds to the bundled webpki roots. `Dsn::admit`
+refuses, without ever quoting the value: an empty string, a non-empty
+`PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, or `PGOPTIONS` (the libpq
+variables `sqlx` would still merge into an explicit URL; the others are
+overwritten by a required component), another scheme, an unparsable URL, a
+URL fragment, a missing component, `allow`/`prefer`, any other parameter, a
+string the driver cannot turn into connect options, and, read back from
+the driver's own parse, a Unix socket host or a comma-separated host list.
+The result is exactly what the operator wrote; `application_name` is added by the template from
 `observability.otel.service_name` (the same identity traces publish) so
 `pg_stat_activity` attributes sessions. A distinct database session label
 is not a configuration axis.
@@ -58,7 +62,7 @@ different ones changes them in one reviewed place.
 | `statement_timeout` | 8 s | Session default in the startup packet of every pooled connection |
 | `idle_in_transaction_session_timeout` | 8 s | Same duration as `statement_timeout` by policy; a separate constant |
 | Slow statement warning | 1 s | `warn` with SQL text and duration; statement logging is otherwise off |
-| Rollback after a failed closure | 3 s | `tokio::time::timeout` around `Transaction::rollback` |
+| Rollback after a failed closure | 3 s | `tokio::time::timeout` around `Transaction::rollback`; a failed or late rollback discards the connection |
 | Readiness probe | health `probe_budget` | The refresher bounds the acquire plus ping |
 | Pool close at shutdown | 5 s (`DEPENDENCY_CLOSE`) | After background tasks joined, before the telemetry flush |
 | Migration `statement_timeout`, idle-in-transaction | 2 min | Session defaults of the one migration connection |
@@ -85,8 +89,22 @@ failure class (`no connection available inside the acquire budget`,
 opaque `&mut Tx`. The provider adapter obtains a scoped connection through
 `infra_postgres::connection(tx)`; the handle exposes no constructor or
 transaction-control methods. The boundary commits on `Ok` and rolls back on
-`Err` inside the rollback budget, returning the closure's error. Rollback
-failure logs contain only a bounded cause category and sanitized SQLSTATE.
+`Err` inside the rollback budget, returning the closure's error. A rollback
+that fails or overruns the budget closes the physical connection instead of
+returning it to the pool in an unknown state; the same guard discards a
+connection whose `BEGIN` future was cancelled, which sqlx 0.9 would return
+to the pool inside an open transaction. Rollback failure logs contain only
+a bounded cause category and sanitized SQLSTATE.
+
+Before `COMMIT` of a read-write transaction the boundary runs `SELECT 1`.
+PostgreSQL answers `COMMIT` in an aborted transaction with a silent
+`ROLLBACK` and `sqlx` does not check the command tag, so a closure that
+swallowed a failed statement and returned `Ok` would look committed (pgx
+reports the same case as `ErrTxCommitRollback`). The probe turns it into
+`TxError::CommitFailed` with SQLSTATE `25P02` for one extra round trip.
+Read-only transactions skip it: nothing they did can be lost. A closure
+that expects a statement to fail runs it under a savepoint
+(`connection(tx).begin()`).
 `in_tx_with(&pool, TxOptions { isolation, read_only }, work)` renders the `BEGIN`
 statement for `Connection::begin_with`. `Isolation::ServerDefault` omits the
 isolation clause (server `default_transaction_isolation`);
@@ -106,40 +124,43 @@ already did.
 ## Migrations
 
 `crates/migrate` embeds `migrations/` with `sqlx::migrate!` (the image needs
-no migration directory) and runs `sqlx::migrate::Migrator` over one
-connection whose session defaults are the migration budgets above, under a
-`tokio::time::timeout`. The runner takes the `pg_advisory_lock` (key derived
-from the database name) before it reads the history, so `before` and
-`applied` describe this run and not a concurrent one; `Migrator::run` takes
-the same re-entrant lock again and releases its own count. `sqlx` owns the
-append-only history: a checksum mismatch (`VersionMismatch`) or an applied
-version missing from the source (`VersionMissing`) fails the run before
-anything is applied, and each migration shares one transaction with its
-history row. On any failure the connection is dropped, which ends the
-session, the lock, and any open transaction.
+no migration directory). The runner follows the `sqlx migrate run` sequence
+over the `Migrate` trait on one connection whose session defaults are the
+migration budgets above, under a `tokio::time::timeout`: lock before reading
+history, ensure the history table, refuse a failed row, compare, apply each
+pending migration in one transaction with its history row, unlock. A changed
+checksum (`VersionMismatch`) or an unknown applied version inside the
+embedded range (`VersionMissing`) fails before anything is applied. A
+version above the newest embedded one is admitted by both the runner and
+startup (the same rule), so a rolled-back release's migrate job and service
+both succeed. On failure the connection is dropped;
+`client_connection_check_interval = 1s` makes the server end the session,
+its lock and transaction promptly.
 
 Source rules beyond the resolver's are a unit test over the embedded set
-(`cargo test -p migrate`, part of `make migration-check`) and a runtime
-gate in `run`: positive version, simple forward-only files (no `.up.sql`/
-`.down.sql`), no `-- no-transaction`, lowercase `snake_case` description.
+(`cargo test -p migrate`, part of `make migration-check`): positive version,
+simple forward-only files (no `.up.sql`/`.down.sql`), no
+`-- no-transaction`, lowercase `snake_case` description.
 `scripts/ci/migration-history-check.sh`
 refuses a pull request that modifies, deletes, or renames an existing
 migration or adds one older than the newest the base has.
 
 The `migrate` binary loads the same configuration as the service, requires
-`postgres.enabled = true`, writes `migration_starting` and one terminal
+`postgres.enabled = true`, and writes `migration_starting` and one terminal
 `migration_run` record (`before`, `target`, `after`, `applied_count`,
-`duration_ms`, `outcome` in `success`/`no_change`/`error`, and on error
-`stage` in `config`/`source`/`connect`/`lock`/`state`/`execute`/`deadline`/
-`interrupted` with the `target` and any `before` the run had observed), and
-exits 1 on failure. In the image it runs as
+`duration_ms`, `outcome` in `success`/`no_change`/`error`). A version field
+is omitted when there is none or it was not observed. On error the record
+adds `stage` in `config`/`signals`/`connect`/`lock`/`history`/`execute`/
+`deadline`/`interrupted` and `error`, which names the failing migration
+version for `execute`. It exits 1 on failure. In the image it runs as
 `--entrypoint /migrate`; a stop signal drops the run.
 
 The service, and the jobs worker when that pack is retained, never run
 migrations at startup. After the pool opens they call
-`migrate::verify_history`: one read-only statement, bounded with its acquire
-to five seconds, that requires every embedded migration to be applied
-successfully with its checksum. An absent or incomplete history is `Pending`
+`migrate::verify_history`, which applies the same rule as the runner:
+read-only history reads, bounded with its acquire to five seconds, that
+require every embedded migration to be applied successfully with its
+checksum. An absent or incomplete history is `Pending`
 (run the migrator first); a failed row, a checksum mismatch, or an applied
 version inside the embedded range that the binary does not embed is
 `Mismatch`. A version above the newest embedded migration belongs to a later
@@ -157,7 +178,8 @@ classification, source rules, stage mapping. Database-backed proof lives in
 `test/tests/postgres.rs` behind the `integration` feature and runs through
 `ALLOW_HEAVY=1 make test-integration-db`: session defaults observed with
 `SHOW`, probe verdicts including pool exhaustion, commit and rollback,
-`CommitFailed` from a deferred constraint, a serialization failure,
+`CommitFailed` from a deferred constraint and from a swallowed statement
+failure, a serialization failure,
 read-only refusal, apply-then-no-change, edited and removed history, lock
 contention, the deadline, source and connect failures. Each test gets its
 own database from `#[sqlx::test]`. `ALLOW_HEAVY=1 make migration-validate`
@@ -258,8 +280,8 @@ scratch project against `postgres:18.4`):
   process-default provider is `aws-lc-rs`, the same one `reqwest` uses for
   OTLP HTTPS; enabling both providers leaves rustls without a default and
   panics at first use. sqlx 0.9's aws-lc-rs feature only ships
-  `webpki-roots` (no native-roots variant); the DSN policy admits no
-  root-certificate file. `aws-lc-sys` lists `cmake` as a build dependency,
+  `webpki-roots` (no native-roots variant); a private CA is added through
+  the DSN's `sslrootcert`. `aws-lc-sys` lists `cmake` as a build dependency,
   but Linux `gnu`/`aarch64` and `x86_64` use the `cc` builder with
   pregenerated bindings, not cmake-the-tool. The slim builder already
   compiles C through `cc`. `ring` stays in the lockfile as an optional
@@ -269,8 +291,11 @@ scratch project against `postgres:18.4`):
 - **`Dsn` is template-owned** because no crate refuses what the policy
   refuses: `sqlx` seeds every `PgConnectOptions` from the libpq environment
   (there is no environment-free constructor), reads `.pgpass` when the URL
-  has no password, accepts sockets, `allow`/`prefer`, TLS files, and warns
-  with key and value on an unknown parameter.
+  has no password, accepts sockets, `allow`/`prefer`, and client key files,
+  and warns with key and value on an unknown parameter. `Dsn` checks the
+  URL text only for what must be refused before `sqlx` parses it and reads
+  the rest back through `PgConnectOptions` getters instead of repeating the
+  driver's parser.
 - **Session defaults through `PgConnectOptions::options`**: `SHOW` returned
   the published values, `lock_timeout` cancels a waiting `pg_advisory_lock`
   with `55P03`, `statement_timeout` cancels with `57014`.

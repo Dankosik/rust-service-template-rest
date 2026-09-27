@@ -1,56 +1,60 @@
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_nats::HeaderMap;
-use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, FromConsumer, ReplayPolicy};
-use async_nats::jetstream::context::ConsumerInfoErrorKind;
+use async_nats::jetstream::consumer::pull::MessagesErrorKind;
+use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, PullConsumer, ReplayPolicy};
 use async_nats::jetstream::{AckKind, Message};
-use futures_util::StreamExt;
+use futures_util::{FutureExt as _, StreamExt as _, TryStreamExt as _};
 use tokio::sync::watch;
-use tokio::task::{JoinError, JoinHandle, JoinSet};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
-use crate::error::{HandlerError, MessagingError, PublishError};
+use crate::error::{HandlerError, MessagingError};
 use crate::messaging::{BROKER_OPERATION_BUDGET, ConsumerOptions, Shared};
-use crate::producer::publish_raw;
+use crate::producer::publish;
 use crate::registry::Registry;
 use crate::wire::{self, HEADER_LIMIT_BYTES};
 
 const HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
-const UNCERTAIN_REDELIVERY: Duration = Duration::from_secs(30);
+/// Delays before the second to fifth delivery; the fifth failure dead-letters.
 const RETRY_DELAYS: [Duration; 4] = [
     Duration::from_secs(1),
     Duration::from_secs(5),
     Duration::from_secs(30),
     Duration::from_secs(120),
 ];
+const MAX_DELIVERIES: usize = RETRY_DELAYS.len() + 1;
+/// Redelivery delay after a dead-letter publication fails.
+const SETTLEMENT_RETRY_DELAY: Duration = Duration::from_secs(30);
+/// The broker redelivers an unsettled message after the handler budget and
+/// both settlement round trips.
+const ACK_WAIT: Duration = HANDLER_TIMEOUT
+    .saturating_add(BROKER_OPERATION_BUDGET)
+    .saturating_add(BROKER_OPERATION_BUDGET)
+    .saturating_add(Duration::from_secs(1));
+/// Pause after a recoverable pull-stream error before polling again.
+const STREAM_ERROR_BACKOFF: Duration = Duration::from_secs(1);
 
 /// A bounded pull consumer admitted against an existing source stream.
 #[derive(Debug)]
 pub struct Consumer {
-    shared: Arc<Shared>,
-    options: ConsumerOptions,
-    registry: Registry,
-    pull: async_nats::jetstream::consumer::PullConsumer,
+    pull: PullConsumer,
+    concurrency: usize,
+    delivery: Arc<Delivery>,
 }
 
 /// Terminal worker failure or incomplete shutdown. Reasons never contain input.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ConsumerError {
-    #[error("messaging consumer could not read source delivery")]
-    Terminal,
-    #[error("messaging source exceeds the admitted delivery bound")]
-    SourceOversized,
-    #[error("messaging source cannot fit the dead-letter envelope")]
-    DeadLetterOversized,
-    #[error("messaging dead-letter publication was refused")]
-    DeadLetterRejected,
-    #[error("messaging delayed source redelivery could not be requested")]
-    RedeliveryFailed,
-    #[error("messaging handler panicked")]
-    HandlerPanicked,
+    #[error("messaging consumer could not start its pull stream")]
+    Start,
+    #[error("messaging durable consumer was deleted or replaced")]
+    ConsumerLost,
     #[error("messaging consumer drain exceeded its shared deadline")]
     DrainTimedOut,
     #[error("messaging consumer task exited unexpectedly")]
@@ -67,7 +71,36 @@ pub struct ConsumerHandle {
     completed: Option<Result<(), ConsumerError>>,
 }
 
-type Deliveries = JoinSet<Result<(), ConsumerError>>;
+/// Everything one delivery needs to run its handler and settle the source.
+#[derive(Debug)]
+struct Delivery {
+    shared: Arc<Shared>,
+    registry: Registry,
+    dlq_subject: String,
+    dlq_stream: String,
+}
+
+/// How one handler invocation ended.
+#[derive(Clone, Copy)]
+enum Outcome {
+    Success,
+    Permanent,
+    Retryable,
+    TimedOut,
+    Panicked,
+}
+
+impl Outcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Permanent => "permanent",
+            Self::Retryable => "retryable",
+            Self::TimedOut => "timeout",
+            Self::Panicked => "panic",
+        }
+    }
+}
 
 impl Consumer {
     pub(crate) async fn admit(
@@ -83,67 +116,34 @@ impl Consumer {
                 "registered subject is outside the consumer filter",
             ));
         }
-        let max_ack_pending =
-            i64::try_from(options.concurrency).map_err(|_| MessagingError::Bounds)?;
+        let dlq_stream = shared.dlq_stream.clone().ok_or(MessagingError::Topology)?;
         let deadline = shared
             .startup_deadline
             .min(Instant::now() + BROKER_OPERATION_BUDGET);
+        // The durable consumer is application-declared: `create_consumer`
+        // creates it or updates its editable fields, and the broker refuses an
+        // incompatible change. `max_ack_pending` keeps the broker default,
+        // which bounds the durable across all replicas.
+        let config = async_nats::jetstream::consumer::pull::Config {
+            durable_name: Some(options.durable_name.clone()),
+            filter_subject: options.filter_subject.clone(),
+            deliver_policy: DeliverPolicy::All,
+            ack_policy: AckPolicy::Explicit,
+            ack_wait: ACK_WAIT,
+            max_deliver: -1,
+            replay_policy: ReplayPolicy::Instant,
+            ..Default::default()
+        };
         let admission = async {
             let stream = shared
                 .jetstream
                 .get_stream(&shared.source_stream)
                 .await
                 .map_err(|_| MessagingError::Topology)?;
-            let mut config = match stream.consumer_info(&options.durable_name).await {
-                Ok(info) => {
-                    async_nats::jetstream::consumer::pull::Config::try_from_consumer_config(
-                        info.config,
-                    )
-                    .map_err(|_| MessagingError::Topology)?
-                }
-                Err(error) if error.kind() == ConsumerInfoErrorKind::NotFound => {
-                    async_nats::jetstream::consumer::pull::Config::default()
-                }
-                Err(_) => return Err(MessagingError::Topology),
-            };
-            if config.headers_only || !config.backoff.is_empty() {
-                return Err(MessagingError::Topology);
-            }
-            config.name = Some(options.durable_name.clone());
-            config.durable_name = Some(options.durable_name.clone());
-            config.deliver_policy = DeliverPolicy::All;
-            config.ack_policy = AckPolicy::Explicit;
-            config.ack_wait = Duration::from_secs(41);
-            config.max_deliver = -1;
-            config.replay_policy = ReplayPolicy::Instant;
-            config.filter_subject.clone_from(&options.filter_subject);
-            config.max_ack_pending = max_ack_pending;
-            // Create-or-update only this named consumer. An incompatible cursor
-            // is refused by the broker; it is never deleted and recreated.
             stream
                 .create_consumer(config)
                 .await
-                .map_err(|_| MessagingError::Topology)?;
-            let pull: async_nats::jetstream::consumer::PullConsumer = stream
-                .get_consumer(&options.durable_name)
-                .await
-                .map_err(|_| MessagingError::Topology)?;
-            let actual = &pull.cached_info().config;
-            if actual.durable_name.as_deref() != Some(options.durable_name.as_str())
-                || actual.name.as_deref() != Some(options.durable_name.as_str())
-                || actual.deliver_policy != DeliverPolicy::All
-                || actual.ack_policy != AckPolicy::Explicit
-                || actual.ack_wait != Duration::from_secs(41)
-                || actual.max_deliver != -1
-                || actual.replay_policy != ReplayPolicy::Instant
-                || actual.filter_subject != options.filter_subject
-                || actual.max_ack_pending != max_ack_pending
-                || !actual.backoff.is_empty()
-                || actual.headers_only
-            {
-                return Err(MessagingError::Topology);
-            }
-            Ok(pull)
+                .map_err(|_| MessagingError::Topology)
         };
         let pull = tokio::select! {
             biased;
@@ -152,10 +152,14 @@ impl Consumer {
                 .map_err(|_| MessagingError::TimedOut { budget: BROKER_OPERATION_BUDGET })??,
         };
         Ok(Self {
-            shared,
-            options,
-            registry,
             pull,
+            concurrency: options.concurrency,
+            delivery: Arc::new(Delivery {
+                shared,
+                registry,
+                dlq_subject: options.dlq_subject,
+                dlq_stream,
+            }),
         })
     }
 
@@ -168,7 +172,7 @@ impl Consumer {
         let task_force = force.clone();
         let (failure_tx, failure) = watch::channel(None);
         let task = tokio::spawn(async move {
-            let shared = Arc::clone(&self.shared);
+            let shared = Arc::clone(&self.delivery.shared);
             let result = self.run(task_stop, task_force).await;
             if let Err(error) = &result {
                 shared.failed.store(true, Ordering::Release);
@@ -186,103 +190,219 @@ impl Consumer {
         }
     }
 
+    /// Pulls until `stop`, then lets admitted deliveries settle. `force`
+    /// drops the pipeline, which aborts every in-flight delivery task.
     async fn run(
         self,
         stop: CancellationToken,
         force: CancellationToken,
     ) -> Result<(), ConsumerError> {
-        let mut tasks = JoinSet::new();
-        let mut result = self.pull_until_stopped(&stop, &force, &mut tasks).await;
-        if result.is_ok() {
-            while !tasks.is_empty() {
-                let next = tokio::select! {
-                    biased;
-                    () = force.cancelled() => Err(ConsumerError::DrainTimedOut),
-                    next = tasks.join_next() => joined(next),
-                };
-                if let Err(error) = next {
-                    result = Err(error);
-                    break;
-                }
-            }
-        }
-        if result.is_err() {
-            // Cancellation propagates before abort; joining observes every
-            // task's destruction and retains no detached handler/settlement.
-            self.shared.failed.store(true, Ordering::Release);
-            force.cancel();
-            tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
-        }
-        result
-    }
-
-    async fn pull_until_stopped(
-        &self,
-        stop: &CancellationToken,
-        force: &CancellationToken,
-        tasks: &mut Deliveries,
-    ) -> Result<(), ConsumerError> {
-        loop {
-            if stop.is_cancelled() || self.shared.draining.load(Ordering::Acquire) {
-                return Ok(());
-            }
-            while let Some(result) = tasks.try_join_next() {
-                joined(Some(result))?;
-            }
-            let free = self.options.concurrency - tasks.len();
-            if free == 0 {
-                tokio::select! {
-                    biased;
-                    () = force.cancelled() => return Err(ConsumerError::DrainTimedOut),
-                    () = stop.cancelled() => return Ok(()),
-                    next = tasks.join_next() => joined(next)?,
-                }
-                continue;
-            }
-            // Reserving `free` slots also reserves every raw message that the
-            // finite batch can buffer. No replenishing stream or extra queue.
-            let fetch = self
-                .pull
-                .batch()
-                .max_messages(free)
-                .max_bytes(free * (self.shared.max_payload_bytes + HEADER_LIMIT_BYTES))
-                .expires(Duration::from_secs(1))
-                .messages();
-            let fetch = tokio::time::timeout(BROKER_OPERATION_BUDGET, fetch);
-            tokio::pin!(fetch);
-            let mut batch = loop {
-                tokio::select! {
-                    biased;
-                    () = force.cancelled() => return Err(ConsumerError::DrainTimedOut),
-                    () = stop.cancelled() => return Ok(()),
-                    next = tasks.join_next(), if !tasks.is_empty() => joined(next)?,
-                    result = &mut fetch => break result.map_err(|_| ConsumerError::Terminal)?
-                        .map_err(|_| ConsumerError::Terminal)?,
-                }
-            };
-            loop {
-                tokio::select! {
-                    biased;
-                    () = force.cancelled() => return Err(ConsumerError::DrainTimedOut),
-                    () = stop.cancelled() => return Ok(()),
-                    next = tasks.join_next(), if !tasks.is_empty() => joined(next)?,
-                    next = batch.next() => {
-                        let Some(next) = next else { break; };
-                        // Includes broker refusal when a retained record cannot
-                        // fit the bounded pull: source remains unacknowledged.
-                        let message = next.map_err(|_| ConsumerError::Terminal)?;
-                        let shared = Arc::clone(&self.shared);
-                        let registry = self.registry.clone();
-                        let options = self.options.clone();
-                        let cancel = force.child_token();
-                        tasks.spawn(async move {
-                            handle_delivery(&shared, &options, &registry, message, &cancel).await
-                        });
+        let envelope_bytes = self.delivery.shared.max_payload_bytes + HEADER_LIMIT_BYTES;
+        let messages = self
+            .pull
+            .stream()
+            .max_messages_per_batch(self.concurrency)
+            .max_bytes_per_batch(self.concurrency * envelope_bytes)
+            .messages()
+            .await
+            .map_err(|_| ConsumerError::Start)?;
+        let consume = messages
+            .take_until(stop.cancelled_owned())
+            .map(Ok)
+            .try_for_each_concurrent(self.concurrency, |next| {
+                let delivery = Arc::clone(&self.delivery);
+                let cancel = force.child_token();
+                async move {
+                    match next {
+                        Ok(message) => {
+                            AbortOnDropHandle::new(tokio::spawn(async move {
+                                delivery.handle(message, cancel).await;
+                            }))
+                            .await
+                            .map_err(|_| ConsumerError::Close)
+                        }
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                MessagesErrorKind::ConsumerDeleted
+                                    | MessagesErrorKind::PushBasedConsumer
+                            ) =>
+                        {
+                            Err(ConsumerError::ConsumerLost)
+                        }
+                        Err(error) => {
+                            tracing::warn!(error.kind = %error.kind(), "messaging pull stream error");
+                            metrics::counter!("messaging_consumer_stream_errors_total")
+                                .increment(1);
+                            tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
+                            Ok(())
+                        }
                     }
                 }
+            });
+        tokio::select! {
+            biased;
+            () = force.cancelled() => Err(ConsumerError::DrainTimedOut),
+            result = consume => result,
+        }
+    }
+}
+
+impl Delivery {
+    /// Runs the handler for one delivery and settles it. Failures stay with
+    /// this delivery: they are logged, counted and retried by the broker.
+    async fn handle(&self, message: Message, cancel: CancellationToken) {
+        let Some(delivered) = message
+            .info()
+            .ok()
+            .and_then(|info| usize::try_from(info.delivered).ok())
+        else {
+            tracing::warn!("messaging delivery has no JetStream metadata");
+            return;
+        };
+        let empty = HeaderMap::new();
+        let headers = message.headers.as_ref().unwrap_or(&empty);
+        let envelope = if message.payload.len() > self.shared.max_payload_bytes {
+            Err(MessagingError::Bounds)
+        } else {
+            wire::decode_envelope(message.subject.as_ref(), headers, message.payload.clone())
+        };
+        let Ok(envelope) = envelope else {
+            return self.dead_letter(&message, "malformed", &cancel).await;
+        };
+        if delivered > MAX_DELIVERIES {
+            return self.dead_letter(&message, "exhausted", &cancel).await;
+        }
+
+        let started = Instant::now();
+        let dispatch =
+            self.registry
+                .dispatch(message.subject.as_ref(), envelope, cancel.child_token());
+        let outcome =
+            match tokio::time::timeout(HANDLER_TIMEOUT, AssertUnwindSafe(dispatch).catch_unwind())
+                .await
+            {
+                Ok(Ok(Ok(()))) => Outcome::Success,
+                Ok(Ok(Err(HandlerError::Permanent))) => Outcome::Permanent,
+                Ok(Ok(Err(HandlerError::Retryable))) => Outcome::Retryable,
+                Ok(Err(_)) => Outcome::Panicked,
+                Err(_) => Outcome::TimedOut,
+            };
+        let label = outcome.label();
+        metrics::counter!("messaging_handler_total", "outcome" => label).increment(1);
+        metrics::histogram!("messaging_handler_duration_seconds", "outcome" => label)
+            .record(started.elapsed().as_secs_f64());
+        if matches!(outcome, Outcome::Panicked) {
+            tracing::error!("messaging handler panicked");
+        }
+
+        match outcome {
+            Outcome::Success => acknowledge(&message).await,
+            Outcome::Permanent => self.dead_letter(&message, "permanent", &cancel).await,
+            _ if delivered >= MAX_DELIVERIES => {
+                self.dead_letter(&message, "exhausted", &cancel).await;
+            }
+            _ => {
+                let delay = RETRY_DELAYS
+                    .get(delivered.saturating_sub(1))
+                    .copied()
+                    .unwrap_or(SETTLEMENT_RETRY_DELAY);
+                redeliver_after(&message, delay).await;
             }
         }
+    }
+
+    /// Copies the source to the dead-letter stream, then acknowledges it.
+    /// A failed transfer keeps the source for a later redelivery.
+    async fn dead_letter(
+        &self,
+        source: &Message,
+        reason: &'static str,
+        cancel: &CancellationToken,
+    ) {
+        let empty = HeaderMap::new();
+        let original = source.headers.as_ref().unwrap_or(&empty);
+        let transfer_id = source.info().ok().and_then(|info| {
+            wire::dead_letter_id(
+                info.stream,
+                info.stream_sequence,
+                info.published,
+                wire::header_value(original, wire::NATS_MSG_ID),
+            )
+            .ok()
+        });
+        let Some(transfer_id) = transfer_id else {
+            tracing::error!(reason, "messaging dead-letter identity is unavailable");
+            return redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
+        };
+        let mut headers = HeaderMap::new();
+        for name in [
+            wire::MESSAGE_ID,
+            wire::EVENT_TYPE,
+            wire::EVENT_SCHEMA,
+            wire::CREATED_AT,
+            "traceparent",
+            "tracestate",
+        ] {
+            let value = wire::header_value(original, name);
+            if !value.is_empty() {
+                headers.insert(name, value);
+            }
+        }
+        if wire::header_value(&headers, wire::MESSAGE_ID).is_empty() {
+            headers.insert(wire::MESSAGE_ID, transfer_id.as_str());
+        }
+        headers.insert(wire::NATS_MSG_ID, transfer_id.as_str());
+        headers.insert(wire::ORIGINAL_SUBJECT, source.subject.as_str());
+        headers.insert(wire::DEAD_LETTER_REASON, reason);
+
+        let result = publish(
+            &self.shared,
+            &self.dlq_subject,
+            headers,
+            source.payload.clone(),
+            &self.dlq_stream,
+            Instant::now() + BROKER_OPERATION_BUDGET,
+            cancel,
+        )
+        .await;
+        let outcome = match &result {
+            Ok(_) => "accepted",
+            Err(crate::PublishError::Ambiguous) => "ambiguous",
+            Err(crate::PublishError::Rejected) => "rejected",
+        };
+        metrics::counter!("messaging_dead_letter_total", "reason" => reason, "outcome" => outcome)
+            .increment(1);
+        if result.is_ok() {
+            acknowledge(source).await;
+        } else {
+            tracing::error!(reason, outcome, "messaging dead-letter transfer failed");
+            redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
+        }
+    }
+}
+
+/// Confirms the source. A lost confirmation is redelivered after ack wait,
+/// which idempotent handlers tolerate.
+async fn acknowledge(source: &Message) {
+    let confirmed = tokio::time::timeout(BROKER_OPERATION_BUDGET, source.double_ack()).await;
+    if !matches!(confirmed, Ok(Ok(()))) {
+        tracing::warn!("messaging source acknowledgement is unconfirmed");
+        metrics::counter!("messaging_settlement_failures_total", "operation" => "ack").increment(1);
+    }
+}
+
+/// Asks the broker to redeliver the source after `delay`; if that request is
+/// lost, ack wait redelivers it anyway.
+async fn redeliver_after(source: &Message, delay: Duration) {
+    let requested = tokio::time::timeout(
+        BROKER_OPERATION_BUDGET,
+        source.ack_with(AckKind::Nak(Some(delay))),
+    )
+    .await;
+    if !matches!(requested, Ok(Ok(()))) {
+        tracing::warn!("messaging delayed redelivery request failed");
+        metrics::counter!("messaging_settlement_failures_total", "operation" => "nak").increment(1);
     }
 }
 
@@ -305,16 +425,7 @@ impl ConsumerHandle {
         }
     }
 
-    /// Drains and joins until the supplied deadline.
-    /// On timeout, dropping this owner requests abort without claiming a join.
-    ///
-    /// # Errors
-    /// Returns a terminal consumer fault or a forced-drain outcome.
-    pub async fn join(mut self, deadline: Instant) -> Result<(), ConsumerError> {
-        self.finish(deadline).await
-    }
-
-    /// Cancels unfinished work; the supervisor aborts and joins every delivery.
+    /// Cancels unfinished work; the supervisor aborts every delivery.
     pub fn abort(&self) {
         self.stop.cancel();
         self.force.cancel();
@@ -349,213 +460,9 @@ impl Drop for ConsumerHandle {
         self.abort();
         if let Some(task) = &self.task {
             // Exhausted cleanup has no budget left to observe a join. Aborting
-            // the supervisor drops its JoinSet, which aborts every delivery;
+            // the supervisor drops its pipeline, which aborts every delivery;
             // runtime shutdown remains the final resource owner.
             task.abort();
-        }
-    }
-}
-
-fn joined(
-    result: Option<Result<Result<(), ConsumerError>, JoinError>>,
-) -> Result<(), ConsumerError> {
-    match result {
-        Some(Ok(result)) => result,
-        Some(Err(error)) if error.is_panic() => Err(ConsumerError::HandlerPanicked),
-        Some(Err(_)) | None => Err(ConsumerError::Close),
-    }
-}
-
-async fn handle_delivery(
-    shared: &Shared,
-    options: &ConsumerOptions,
-    registry: &Registry,
-    source: Message,
-    cancel: &CancellationToken,
-) -> Result<(), ConsumerError> {
-    let info = source.info().map_err(|_| ConsumerError::Terminal)?;
-    if info.delivered < 1 {
-        return Err(ConsumerError::Terminal);
-    }
-    let empty = HeaderMap::new();
-    let headers = source.headers.as_ref().unwrap_or(&empty);
-    let wire_size = source
-        .subject
-        .len()
-        .saturating_add(wire::encoded_header_bytes(headers))
-        .saturating_add(source.payload.len());
-    if source.payload.len() > shared.max_payload_bytes
-        || wire_size > shared.max_payload_bytes + HEADER_LIMIT_BYTES
-    {
-        return Err(ConsumerError::SourceOversized);
-    }
-    let Ok(envelope) =
-        wire::decode_envelope(source.subject.as_ref(), headers, source.payload.clone())
-    else {
-        return dead_letter(shared, options, &source, "malformed", cancel).await;
-    };
-    if info.delivered > 5 {
-        return dead_letter(shared, options, &source, "exhausted", cancel).await;
-    }
-    let handler_cancel = cancel.child_token();
-    let mut observation = HandlerObservation {
-        started: Instant::now(),
-        outcome: "terminal",
-        cancel: handler_cancel.clone(),
-    };
-    let result = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return Ok(()),
-        result = tokio::time::timeout(HANDLER_TIMEOUT,
-            registry.dispatch(source.subject.as_ref(), envelope, handler_cancel.clone())) => result,
-    };
-    observation.outcome = match &result {
-        Ok(Ok(())) => "success",
-        Ok(Err(HandlerError::Permanent)) => "permanent",
-        Ok(Err(HandlerError::Retryable)) => "retryable",
-        Err(_) => "timeout",
-    };
-    drop(observation);
-    if cancel.is_cancelled() {
-        return Ok(());
-    }
-    match result {
-        Ok(Ok(())) => acknowledge(&source, cancel).await,
-        Ok(Err(HandlerError::Permanent)) => {
-            dead_letter(shared, options, &source, "permanent", cancel).await
-        }
-        Ok(Err(HandlerError::Retryable)) | Err(_) if info.delivered >= 5 => {
-            dead_letter(shared, options, &source, "exhausted", cancel).await
-        }
-        Ok(Err(HandlerError::Retryable)) | Err(_) => {
-            let index = usize::try_from(info.delivered - 1).map_err(|_| ConsumerError::Terminal)?;
-            request_redelivery(&source, RETRY_DELAYS[index], cancel).await
-        }
-    }
-}
-
-struct HandlerObservation {
-    started: Instant,
-    outcome: &'static str,
-    cancel: CancellationToken,
-}
-
-impl Drop for HandlerObservation {
-    fn drop(&mut self) {
-        let outcome = if self.cancel.is_cancelled() {
-            "canceled"
-        } else {
-            self.outcome
-        };
-        self.cancel.cancel();
-        metrics::counter!("messaging_handler_total", "outcome" => outcome).increment(1);
-        metrics::histogram!("messaging_handler_duration_seconds", "outcome" => outcome)
-            .record(self.started.elapsed().as_secs_f64());
-    }
-}
-
-async fn dead_letter(
-    shared: &Shared,
-    options: &ConsumerOptions,
-    source: &Message,
-    reason: &'static str,
-    cancel: &CancellationToken,
-) -> Result<(), ConsumerError> {
-    let info = source.info().map_err(|_| ConsumerError::Terminal)?;
-    let empty = HeaderMap::new();
-    let original = source.headers.as_ref().unwrap_or(&empty);
-    let transfer_id = wire::dead_letter_id(
-        info.stream,
-        info.stream_sequence,
-        info.published,
-        wire::header_value(original, wire::NATS_MSG_ID),
-    )
-    .map_err(|_| ConsumerError::Terminal)?;
-    let mut headers = HeaderMap::new();
-    for name in [
-        wire::MESSAGE_ID,
-        wire::EVENT_TYPE,
-        wire::EVENT_SCHEMA,
-        wire::CREATED_AT,
-        "traceparent",
-        "tracestate",
-    ] {
-        let value = wire::header_value(original, name);
-        if !value.is_empty() {
-            headers.insert(name, value);
-        }
-    }
-    if wire::header_value(&headers, wire::MESSAGE_ID).is_empty() {
-        headers.insert(wire::MESSAGE_ID, transfer_id.as_str());
-    }
-    headers.insert(wire::NATS_MSG_ID, transfer_id.as_str());
-    headers.insert(wire::ORIGINAL_SUBJECT, source.subject.as_str());
-    headers.insert(wire::DEAD_LETTER_REASON, reason);
-    let dlq_stream = shared
-        .dlq_stream
-        .as_deref()
-        .ok_or(ConsumerError::DeadLetterRejected)?;
-    headers.insert(async_nats::header::NATS_EXPECTED_STREAM, dlq_stream);
-    wire::validate_encoded_message(
-        &options.dlq_subject,
-        &headers,
-        source.payload.len(),
-        shared.max_payload_bytes,
-    )
-    .map_err(|_| ConsumerError::DeadLetterOversized)?;
-    let result = publish_raw(
-        shared,
-        &options.dlq_subject,
-        headers,
-        source.payload.clone(),
-        dlq_stream,
-        Instant::now() + BROKER_OPERATION_BUDGET,
-        cancel,
-    )
-    .await;
-    let outcome = match &result {
-        Ok(_) => "accepted",
-        Err(PublishError::Ambiguous) => "ambiguous",
-        Err(PublishError::Rejected) => "rejected",
-    };
-    metrics::counter!("messaging_dead_letter_total", "reason" => reason, "outcome" => outcome)
-        .increment(1);
-    match result {
-        Ok(_) => acknowledge(source, cancel).await,
-        Err(PublishError::Ambiguous) => {
-            request_redelivery(source, UNCERTAIN_REDELIVERY, cancel).await
-        }
-        Err(PublishError::Rejected) if cancel.is_cancelled() => Ok(()),
-        Err(PublishError::Rejected) => Err(ConsumerError::DeadLetterRejected),
-    }
-}
-
-async fn acknowledge(source: &Message, cancel: &CancellationToken) -> Result<(), ConsumerError> {
-    let result = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return Ok(()),
-        result = tokio::time::timeout(BROKER_OPERATION_BUDGET, source.double_ack()) => result,
-    };
-    if matches!(result, Ok(Ok(()))) {
-        Ok(())
-    } else {
-        // The domain effect is already successful. Retry delivery only, never
-        // invoke the handler again in this process after ACK uncertainty.
-        request_redelivery(source, UNCERTAIN_REDELIVERY, cancel).await
-    }
-}
-
-async fn request_redelivery(
-    source: &Message,
-    delay: Duration,
-    cancel: &CancellationToken,
-) -> Result<(), ConsumerError> {
-    tokio::select! {
-        biased;
-        () = cancel.cancelled() => Ok(()),
-        result = tokio::time::timeout(BROKER_OPERATION_BUDGET, source.ack_with(AckKind::Nak(Some(delay)))) => {
-            result.map_err(|_| ConsumerError::RedeliveryFailed)?
-                .map_err(|_| ConsumerError::RedeliveryFailed)
         }
     }
 }

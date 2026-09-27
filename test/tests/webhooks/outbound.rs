@@ -15,9 +15,8 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-const FIXTURE_HOST: &str = "authn.fixture.test";
-const CURRENT_KEY: &str = "whsec_Y3VycmVudA==";
-const PREVIOUS_KEY: &str = "whsec_cHJldmlvdXM=";
+const CURRENT_KEY: &str = "whsec_QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=";
+const PREVIOUS_KEY: &str = "whsec_QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=";
 
 #[derive(Debug)]
 enum Step {
@@ -40,52 +39,50 @@ fn explain(error: &Step) -> String {
     }
 }
 
-fn endpoint(path_and_query: &str) -> Endpoint {
-    Endpoint::new(format!("https://{FIXTURE_HOST}{path_and_query}"))
+fn outbound(endpoint_ids: &[&str]) -> Outbound {
+    Outbound::new(endpoint_ids.iter().map(|id| (*id).to_owned()))
 }
 
-fn outbound(endpoints: &[(&str, &str)]) -> Outbound {
-    Outbound::new(
+fn limits() -> infra_outbound_http::Limits {
+    infra_outbound_http::Limits {
+        operation_timeout: infra_webhooks::outbound::DELIVERY_POLICY.timeout,
+        response_header_count: 64,
+        response_body_bytes: 64 * 1024,
+    }
+}
+
+fn dispatcher(endpoints: &[(&str, &str)], address: std::net::SocketAddr) -> Dispatcher {
+    let limits = limits();
+    Dispatcher::new(
         endpoints
             .iter()
-            .map(|(id, path)| ((*id).to_owned(), endpoint(path)))
+            .map(|(id, path)| {
+                let destination = url::Url::parse(&format!("http://{address}{path}"))
+                    .expect("fixture destination");
+                let client = infra_outbound_http::Client::new_for_test_http(&destination, limits)
+                    .expect("fixture client");
+                let keys =
+                    KeyRing::from_encoded(CURRENT_KEY, Some(PREVIOUS_KEY)).expect("fixture keys");
+                (
+                    (*id).to_owned(),
+                    Endpoint::with_client(destination, client, keys).expect("fixture endpoint"),
+                )
+            })
             .collect(),
     )
-    .expect("fixture endpoint is admitted")
-}
-
-fn keys(endpoints: &[&str]) -> BTreeMap<String, KeyRing> {
-    endpoints
-        .iter()
-        .map(|endpoint| {
-            (
-                (*endpoint).to_owned(),
-                KeyRing::from_encoded(CURRENT_KEY, Some(PREVIOUS_KEY)).expect("fixture keys"),
-            )
-        })
-        .collect()
-}
-
-fn dispatcher(
-    outbound: &Outbound,
-    endpoints: &[&str],
-    address: std::net::SocketAddr,
-) -> Dispatcher {
-    outbound
-        .dispatcher_for_test_http(keys(endpoints), NonZeroU32::MIN, address)
-        .expect("fixture dispatcher")
 }
 
 async fn enqueue(pool: &PgPool, outbound: &Outbound, endpoint: &str, body: &[u8]) -> String {
-    let prepared = outbound
-        .prepare(
-            endpoint,
-            body.to_vec(),
-            Some("application/webhook+json".to_owned()),
-        )
-        .expect("delivery is prepared");
     let id = in_tx(pool, async |tx| -> Result<_, Step> {
-        prepared.enqueue(tx).await.map_err(Step::Delivery)
+        outbound
+            .enqueue(
+                tx,
+                endpoint,
+                body.to_vec(),
+                Some("application/webhook+json"),
+            )
+            .await
+            .map_err(Step::Delivery)
     })
     .await
     .unwrap_or_else(|error| panic!("delivery commits: {}", explain(&error)));
@@ -244,8 +241,8 @@ fn request_body(request: &[u8]) -> &[u8] {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn producer_commits_only_v2_common_fields_and_preserves_raw_body(pool: PgPool) {
-    let configured = outbound(&[("partner", "/events?source=producer")]);
+async fn producer_commits_only_common_fields_and_preserves_raw_body(pool: PgPool) {
+    let configured = outbound(&["partner"]);
     let body = b"\0{\"event\":\"created\"}\xff";
     let id = enqueue(&pool, &configured, "partner", body).await;
     let row = sqlx::query(
@@ -259,7 +256,11 @@ async fn producer_commits_only_v2_common_fields_and_preserves_raw_body(pool: PgP
     .await
     .expect("delivery row");
     assert_eq!(row.try_get::<String, _>("id").expect("id"), id);
-    assert_eq!(row.try_get::<String, _>("version").expect("version"), "2");
+    assert_eq!(
+        row.try_get::<Option<String>, _>("version")
+            .expect("version"),
+        Some("2".to_owned())
+    );
     assert_eq!(
         row.try_get::<String, _>("endpoint_id").expect("endpoint"),
         "partner"
@@ -290,12 +291,12 @@ async fn producer_commits_only_v2_common_fields_and_preserves_raw_body(pool: PgP
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn caller_rollback_leaves_no_delivery(pool: PgPool) {
-    let configured = outbound(&[("partner", "/events?source=rollback")]);
-    let prepared = configured
-        .prepare("partner", b"{\"event\":\"rolled-back\"}".to_vec(), None)
-        .expect("prepared delivery");
+    let configured = outbound(&["partner"]);
     let result = in_tx(&pool, async |tx| -> Result<(), Step> {
-        let _id = prepared.enqueue(tx).await.map_err(Step::Delivery)?;
+        let _id = configured
+            .enqueue(tx, "partner", b"{\"event\":\"rolled-back\"}".to_vec(), None)
+            .await
+            .map_err(Step::Delivery)?;
         Err(Step::Rejected)
     })
     .await;
@@ -313,10 +314,13 @@ async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgP
         (204, "completed"),
     ] {
         let (address, captured, peer) = reply_peer(status).await;
-        let configured = outbound(&[("partner", "/events?source=queue")]);
+        let configured = outbound(&["partner"]);
         let id = enqueue(&pool, &configured, "partner", b"{\"event\":\"status\"}").await;
-        let running =
-            RunningDispatcher::start(&pool, dispatcher(&configured, &["partner"], address), 1);
+        let running = RunningDispatcher::start(
+            &pool,
+            dispatcher(&[("partner", "/events?source=queue")], address),
+            1,
+        );
 
         job_is(&pool, &id, expected_state, 1).await;
         let row = sqlx::query(
@@ -389,7 +393,7 @@ async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgP
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_routing(pool: PgPool) {
     let body = b"\0{\"event\":\"legacy\"}\xff";
-    let configured = outbound(&[("partner", "/current?binding=live")]);
+    let configured = outbound(&["partner"]);
     let id = enqueue(&pool, &configured, "partner", body).await;
     sqlx::query(
         "UPDATE background_jobs SET payload = jsonb_build_object(\
@@ -403,8 +407,11 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
     .expect("obsolete routing values do not constrain the legacy common payload");
 
     let (address, captured, peer) = reply_peer(200).await;
-    let running =
-        RunningDispatcher::start(&pool, dispatcher(&configured, &["partner"], address), 1);
+    let running = RunningDispatcher::start(
+        &pool,
+        dispatcher(&[("partner", "/current?binding=live")], address),
+        1,
+    );
     job_is(&pool, &id, "completed", 1).await;
     let request = super::bounded("fixture request capture", captured)
         .await
@@ -431,7 +438,7 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn missing_current_endpoint_spends_the_final_attempt_and_exhausts(pool: PgPool) {
-    let producer = outbound(&[("removed", "/removed")]);
+    let producer = outbound(&["removed"]);
     let id = enqueue(&pool, &producer, "removed", b"{\"event\":\"missing\"}").await;
     sqlx::query("UPDATE background_jobs SET attempts = 19 WHERE id::text = $1")
         .bind(&id)
@@ -439,11 +446,7 @@ async fn missing_current_endpoint_spends_the_final_attempt_and_exhausts(pool: Pg
         .await
         .expect("historical retry position");
 
-    let current = outbound(&[]);
-    let dispatcher = current
-        .dispatcher(BTreeMap::new(), NonZeroU32::MIN)
-        .expect("empty current dispatcher");
-    let running = RunningDispatcher::start(&pool, dispatcher, 1);
+    let running = RunningDispatcher::start(&pool, Dispatcher::new(BTreeMap::new()), 1);
     job_is(&pool, &id, "failed", 20).await;
     let row = sqlx::query(
         "SELECT failure_reason, error_summary FROM background_jobs WHERE id::text = $1",
@@ -469,48 +472,41 @@ async fn missing_current_endpoint_spends_the_final_attempt_and_exhausts(pool: Pg
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn invalid_or_unsupported_common_payloads_fail_permanently_before_transport(pool: PgPool) {
-    let configured = outbound(&[("partner", "/never-called")]);
-    for payload in [
-        r#"{"version":3,"endpoint_id":"partner","content_type":"application/json","body":"AA=="}"#,
-        r#"{"version":2,"endpoint_id":"partner","content_type":false,"body":"AA=="}"#,
-        r#"{"version":2,"endpoint_id":"partner","content_type":"application/json","body":"%%%"}"#,
-    ] {
-        let id = enqueue(&pool, &configured, "partner", b"{}").await;
-        sqlx::query("UPDATE background_jobs SET payload = $2::jsonb WHERE id::text = $1")
-            .bind(&id)
-            .bind(payload)
-            .execute(&pool)
-            .await
-            .expect("invalid historical payload is stored");
-        let running = RunningDispatcher::start(
-            &pool,
-            configured
-                .dispatcher(keys(&["partner"]), NonZeroU32::MIN)
-                .expect("current dispatcher"),
-            1,
-        );
-        job_is(&pool, &id, "failed", 1).await;
-        let row = sqlx::query(
-            "SELECT failure_reason, error_summary FROM background_jobs WHERE id::text = $1",
-        )
+async fn an_undecodable_payload_is_retried_not_failed_permanently(pool: PgPool) {
+    let configured = outbound(&["partner"]);
+    let id = enqueue(&pool, &configured, "partner", b"{}").await;
+    sqlx::query("UPDATE background_jobs SET payload = $2::jsonb WHERE id::text = $1")
         .bind(&id)
-        .fetch_one(&pool)
+        .bind(r#"{"endpoint_id":"partner","content_type":"application/json","body":"%%%"}"#)
+        .execute(&pool)
         .await
-        .expect("invalid payload outcome");
-        assert_eq!(
-            row.try_get::<Option<String>, _>("failure_reason")
-                .expect("failure reason")
-                .as_deref(),
-            Some("permanent")
-        );
-        assert_eq!(
-            row.try_get::<Option<String>, _>("error_summary")
-                .expect("error summary")
-                .as_deref(),
-            Some("invalid_payload")
-        );
-        running.stop().await;
-    }
+        .expect("undecodable payload is stored");
+    let running = RunningDispatcher::start(
+        &pool,
+        dispatcher(
+            &[("partner", "/never-called")],
+            "127.0.0.1:1".parse().unwrap(),
+        ),
+        1,
+    );
+    job_is(&pool, &id, "pending", 1).await;
+    let row = sqlx::query(
+        "SELECT failure_reason, error_summary FROM background_jobs WHERE id::text = $1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .expect("decode outcome");
+    assert!(
+        row.try_get::<Option<String>, _>("failure_reason")
+            .expect("failure reason")
+            .is_none()
+    );
+    assert!(
+        row.try_get::<Option<String>, _>("error_summary")
+            .expect("error summary")
+            .is_some_and(|summary| summary.contains("does not decode"))
+    );
+    running.stop().await;
     super::close(&[&pool]).await;
 }

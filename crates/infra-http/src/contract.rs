@@ -11,7 +11,6 @@ use utoipa::openapi::{OpenApi, path::Operation};
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::problem::{Code, Problem, SANITIZED_DETAIL};
-use crate::request_id;
 
 /// A closed finalization error; no partially served contract is returned.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -101,7 +100,6 @@ async fn enforce_public(State(policy): State<Policy>, request: Request, next: Ne
     } else {
         Problem::new(Code::InternalServerError)
             .detail(SANITIZED_DETAIL)
-            .request_id(request_id::request_id(request.extensions()))
             .into_response()
     }
 }

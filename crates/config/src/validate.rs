@@ -13,7 +13,10 @@ pub struct ValidationError {
 }
 
 impl ValidationError {
-    pub(crate) fn new(key: &str, message: impl Into<String>) -> Self {
+    /// A violated rule for `key`. Composition roots use it for rules that
+    /// depend on a transport constant this crate does not know.
+    #[must_use]
+    pub fn new(key: &str, message: impl Into<String>) -> Self {
         Self {
             key: key.to_owned(),
             message: message.into(),
@@ -58,40 +61,9 @@ pub(crate) fn non_empty(key: &str, value: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Parse an IP listen address: `ip:port`, or the Go-style `:port` meaning
-/// IPv4 all-interfaces (`0.0.0.0`). Hostnames are refused; load does not
-/// do DNS. Explicit IPv6 forms such as `[::1]:9000` are unchanged.
-pub(crate) fn socket_addr(key: &str, value: &str) -> Result<std::net::SocketAddr, ValidationError> {
-    let trimmed = value.trim();
-    let candidate = match trimmed.strip_prefix(':') {
-        Some(port) => format!("0.0.0.0:{port}"),
-        None => trimmed.to_owned(),
-    };
-    candidate.parse().map_err(|_| {
-        ValidationError::new(
-            key,
-            format!(
-                "{value:?} is not a socket address (expected an IP address and port, or :port; hostnames are not resolved)"
-            ),
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[rstest::rstest]
-    #[case::port_only(":8080", "0.0.0.0:8080")]
-    #[case::ipv6("[::1]:9000", "[::1]:9000")]
-    #[case::ipv4("127.0.0.1:8080", "127.0.0.1:8080")]
-    #[case::trimmed("  :8080  ", "0.0.0.0:8080")]
-    fn socket_addr_accepts_supported_forms(#[case] input: &str, #[case] expected: &str) {
-        assert_eq!(
-            socket_addr("k", input).unwrap(),
-            expected.parse::<std::net::SocketAddr>().unwrap()
-        );
-    }
 
     #[rstest::rstest]
     #[case::below_minimum(0, false)]
@@ -115,13 +87,6 @@ mod tests {
             Duration::from_secs(600),
         );
         assert_eq!(result.is_ok(), valid);
-    }
-
-    #[test]
-    fn socket_addr_rejects_hostnames() {
-        let err = socket_addr("http.addr", "localhost:8080").unwrap_err();
-        assert_eq!(err.key, "http.addr");
-        assert!(err.message.contains("not a socket address"));
     }
 
     #[test]

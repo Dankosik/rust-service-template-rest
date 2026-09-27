@@ -1457,10 +1457,10 @@ async fn x7_x8_retryable_failure_waits_about_one_second_then_runs_again(pool: Pg
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn x8_retry_after_uses_the_requested_database_delay(pool: PgPool) {
+async fn x8_retry_after_at_least_uses_the_floor(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     prepare(&jobs).await;
-    let id = enqueue_one(&jobs, ProbeAction::RetryAfter { millis: 2_000 }).await;
+    let id = enqueue_one(&jobs, ProbeAction::RetryAfterAtLeast { millis: 2_000 }).await;
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
     let started = until("the retry-after attempt starts", super::WAIT, async || {
         attempt_started_us(&jobs, &id, 1).await
@@ -1490,10 +1490,10 @@ async fn x8_retry_after_uses_the_requested_database_delay(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn x8_retry_after_still_exhausts(pool: PgPool) {
+async fn x8_retry_after_at_least_still_exhausts(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     prepare(&jobs).await;
-    let id = enqueue_one(&jobs, ProbeAction::RetryAfter { millis: 2_000 }).await;
+    let id = enqueue_one(&jobs, ProbeAction::RetryAfterAtLeast { millis: 2_000 }).await;
     let run = start(&jobs, probe_registry(1, DEFAULT_TIMEOUT), 1);
 
     let failed = until(

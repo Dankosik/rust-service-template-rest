@@ -2,9 +2,10 @@
 //! process lifecycle.
 //!
 //! Startup order: flags → config → signal handlers → tracer provider →
-//! subscriber → metrics recorder → background tasks → dependency pools →
-//! API contract → readiness admission → HTTP listeners → ready. Shutdown
-//! order lives in [`shutdown`]. Handlers and feature code never own this
+//! subscriber → metrics recorder → background tasks → dependencies → API
+//! contract → readiness admission → listeners → ready. Every exit after the
+//! signal handlers, including a failed or stopped startup, runs the one
+//! teardown in [`shutdown`]. Handlers and feature code never own this
 //! sequence.
 
 mod shutdown;
@@ -15,10 +16,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use health::{Probe, Readiness, RefreshPolicy};
-use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
-// template:begin messaging:service-bootstrap-messaging-imports
-use infra_messaging::{Messaging, MessagingError, MessagingOptions};
-// template:end messaging:service-bootstrap-messaging-imports
+use infra_http::{
+    HTTP_REQUESTS_DURATION_BUCKETS, HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server,
+    ServerOptions,
+};
 // template:begin cache:service-bootstrap-cache-imports
 use infra_cache::{Cache, CacheError, CacheOptions};
 // template:end cache:service-bootstrap-cache-imports
@@ -26,6 +27,7 @@ use infra_cache::{Cache, CacheError, CacheOptions};
 use infra_http::webhooks::WebhookState;
 use infra_webhooks::inbound::Receiver;
 use infra_webhooks::protocol::{KeyRing, SigningKey};
+use service_config::InboundWebhooksConfig;
 // template:end inbound-webhooks:bootstrap-webhooks-imports
 // template:begin authn:bootstrap-authn-imports
 use infra_bearerauthn::Verifier;
@@ -39,13 +41,13 @@ use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe};
 // template:end postgres:bootstrap-imports
 use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, ResolvedSampler, TracingOptions,
-    diagnostics_router, install_subscriber, install_tracer_provider,
+    diagnostics_router, install_subscriber, install_tracer_provider, runtime_metrics,
 };
 // template:begin integration:bootstrap-postgres-secret-import
 use secrecy::ExposeSecret;
 // template:end integration:bootstrap-postgres-secret-import
 use service_config::{
-    AppConfig, BuildInfo, Config, FromArgs, LogFormat, TracesSampler, process_failure,
+    AppConfig, BuildInfo, Config, LoadOptions, LogFormat, TracesSampler, process_failure,
 };
 // template:begin authn:bootstrap-authn-config-import
 use service_config::AuthnConfig;
@@ -56,7 +58,7 @@ use service_config::{JwtAlgorithm, TokenProfile};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use self::shutdown::{Outcome, Signals};
+use self::shutdown::{Dependencies, Outcome, Serving, Signals};
 
 /// Version and revision stamped into this binary.
 pub(crate) const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
@@ -72,9 +74,6 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Interval for Prometheus histogram upkeep and Tokio runtime metrics.
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
-// template:begin messaging:service-bootstrap-messaging-startup-budget
-const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
-// template:end messaging:service-bootstrap-messaging-startup-budget
 // template:begin cache:service-bootstrap-cache-startup-budget
 const CACHE_STARTUP_CHECK: Duration = Duration::from_secs(1);
 // template:end cache:service-bootstrap-cache-startup-budget
@@ -89,14 +88,6 @@ pub(crate) enum BootstrapError {
     Logging(#[from] infra_telemetry::LoggingError),
     #[error(transparent)]
     Metrics(#[from] infra_telemetry::MetricsError),
-    // template:begin messaging:service-bootstrap-messaging-errors
-    #[error("messaging startup: {0}")]
-    Messaging(#[from] MessagingError),
-    #[error("messaging configuration requires {key}")]
-    MessagingConfigRequired { key: &'static str },
-    #[error("messaging.max_payload_bytes cannot fit this platform")]
-    MessagingPayloadBound,
-    // template:end messaging:service-bootstrap-messaging-errors
     // template:begin cache:service-bootstrap-cache-errors
     #[error("cache startup: {0}")]
     Cache(#[from] CacheError),
@@ -112,11 +103,6 @@ pub(crate) enum BootstrapError {
         key: &'static str,
         #[source]
         source: infra_bearerauthn::PreparationError,
-    },
-    #[error("authentication preparation input is unavailable for {mode}: {key}")]
-    AuthenticationInput {
-        mode: &'static str,
-        key: &'static str,
     },
     // template:end authn:bootstrap-authn-errors
     #[error(transparent)]
@@ -136,10 +122,6 @@ pub(crate) enum BootstrapError {
     HttpIdempotencyStartup(#[from] infra_idempotency_store::StartupError),
     // template:end http-idempotency:bootstrap-http-idempotency-errors
     // template:begin inbound-webhooks:bootstrap-webhooks-errors
-    #[error(
-        "configuration is invalid: postgres.enabled must be true when inbound webhook endpoints are configured"
-    )]
-    InboundWebhooksPostgresRequired,
     #[error("inbound webhook endpoint {endpoint} references unavailable key {key}")]
     InboundWebhookKeyReference { endpoint: String, key: String },
     #[error("inbound webhook endpoint {endpoint} key {key} is invalid: {source}")]
@@ -161,8 +143,9 @@ pub(crate) enum BootstrapError {
 }
 
 /// Parse flags, load configuration, run the service, and map the result to
-/// an exit code. Never calls `process::exit`, so destructors run. `--help`
-/// exits 0; other clap errors exit 1. Version is not a loader flag.
+/// an exit code. `--help` exits 0 and a flag error exits 2, both printed by
+/// clap. Later failures do not call `process::exit`, so destructors run.
+/// Version is not a loader flag.
 pub(crate) fn run<I>(
     args: I,
     // template:begin grpc:bootstrap-run-registration-parameter
@@ -172,10 +155,7 @@ pub(crate) fn run<I>(
 where
     I: IntoIterator<Item = OsString>,
 {
-    let options = match FromArgs::from_argv(args) {
-        FromArgs::Run(options) => options,
-        FromArgs::Exit(code) => return code,
-    };
+    let options = LoadOptions::parse_from(args);
     let config = match service_config::load(&options, BUILD_INFO) {
         Ok(config) => config,
         Err(err) => return process_failure(&err.to_string()),
@@ -211,10 +191,6 @@ where
     }
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "keep acquired startup resources, admission, and their shared error cleanup in one composition scope"
-)]
 async fn serve(
     config: Config,
     // template:begin grpc:bootstrap-grpc-serve-registration-parameter
@@ -234,9 +210,25 @@ async fn serve(
             LogFormat::Text => LoggingFormat::Text,
         },
         tracer_provider: Some(&tracer_provider),
-        service_name: &config.observability.otel.service_name,
     })?;
-    let metrics = Metrics::install(HTTP_REQUESTS_DURATION_SECONDS)?;
+    let metrics = Metrics::install(&[
+        (
+            HTTP_REQUESTS_DURATION_SECONDS,
+            HTTP_REQUESTS_DURATION_BUCKETS,
+        ),
+        // template:begin outbound-http:service-bootstrap-outbound-histogram
+        (
+            infra_outbound_http::REQUEST_DURATION_METRIC,
+            infra_outbound_http::REQUEST_DURATION_BUCKETS,
+        ),
+        // template:end outbound-http:service-bootstrap-outbound-histogram
+        // template:begin cache:service-bootstrap-cache-histogram
+        (
+            infra_cache::OPERATION_DURATION_METRIC,
+            infra_cache::OPERATION_DURATION_BUCKETS,
+        ),
+        // template:end cache:service-bootstrap-cache-histogram
+    ])?;
     metrics.record_trace_exporter_initialized(matches!(
         tracer_provider.exporter_state,
         ExporterState::Initialized { .. }
@@ -250,216 +242,304 @@ async fn serve(
             .clone()
             .upkeep(METRICS_MAINTENANCE_INTERVAL, cancel.child_token()),
     );
-    tracker.spawn(Metrics::runtime_metrics(
+    tracker.spawn(runtime_metrics(
         METRICS_MAINTENANCE_INTERVAL,
         cancel.child_token(),
     ));
 
-    // Dependency pools open before admission so the first readiness
-    // evaluation already includes them. The PostgreSQL profile is inert
-    // unless selected; a selected profile whose database is unreachable
-    // fails startup here rather than serving a readiness that never passes.
-    // One error exit owns cancel/join/close, including the path where the
-    // pool never opened (`postgres_pool` stays `None`).
-    // template:begin postgres:bootstrap-startup-pool
-    let mut postgres_pool = None;
-    // template:end postgres:bootstrap-startup-pool
-    // template:begin messaging:service-bootstrap-messaging-opened
-    let mut messaging = None;
-    // template:end messaging:service-bootstrap-messaging-opened
-    // template:begin cache:service-bootstrap-cache-opened
-    let mut cache = None;
-    // template:end cache:service-bootstrap-cache-opened
-    let outcome = Box::pin(async {
-        let probes: Vec<Box<dyn Probe>> = Vec::new();
-        #[allow(
-            unused_variables,
-            reason = "the no-auth projection uses this fallback; retained authentication shadows it"
-        )]
-        let auth = PreparedAuth::None;
-        // template:begin authn:bootstrap-authn-prepare
-        let auth = prepare_auth(&config, &tracker, &cancel).await?;
-        // template:end authn:bootstrap-authn-prepare
-        // template:begin postgres:bootstrap-postgres-startup
-        let (probes, pool) = prepare_postgres(probes, &config, &tracker, &cancel).await?;
-        postgres_pool = pool;
-        if let Some(pool) = &postgres_pool {
-            migrate::verify_history(pool).await?;
-        }
-        // template:end postgres:bootstrap-postgres-startup
-        #[allow(
-            unused_variables,
-            reason = "retained messaging shadows the startup stop result"
-        )]
-        let startup_stop: Option<tokio::time::Instant> = None;
-        // template:begin messaging:service-bootstrap-messaging-startup
-        let (probes, opened_messaging, startup_stop) =
-            Box::pin(prepare_messaging(probes, &config, &cancel, &mut signals)).await?;
-        messaging = opened_messaging;
-        // template:end messaging:service-bootstrap-messaging-startup
-        if let Some(deadline) = startup_stop {
-            return Ok(shutdown::finish_stopped_startup(
-                &cancel,
-                &tracker,
-                // template:begin postgres:bootstrap-stopped-startup-pool
-                postgres_pool.as_ref(),
-                // template:end postgres:bootstrap-stopped-startup-pool
-                // template:begin messaging:service-bootstrap-stopped-startup-messaging
-                messaging.take(),
-                // template:end messaging:service-bootstrap-stopped-startup-messaging
-                // template:begin cache:service-bootstrap-stopped-startup-cache
-                cache.take(),
-                // template:end cache:service-bootstrap-stopped-startup-cache
-                tracer_provider,
-                deadline,
-            )
-            .await);
-        }
-        // template:begin cache:service-bootstrap-cache-startup
-        cache = prepare_cache(&config).await?;
-        // template:end cache:service-bootstrap-cache-startup
-        // template:begin http-idempotency:bootstrap-http-idempotency-composer
-        let composer = prepare_http_idempotency(&config, postgres_pool.as_ref());
-        // template:end http-idempotency:bootstrap-http-idempotency-composer
-        // template:begin inbound-webhooks:bootstrap-webhooks-prepare
-        let webhook_state = prepare_inbound_webhooks(&config, postgres_pool.as_ref())?;
-        // template:end inbound-webhooks:bootstrap-webhooks-prepare
+    let mut dependencies = Dependencies::default();
+    let started = Box::pin(serve_until_stopped(
+        &config,
+        // template:begin grpc:bootstrap-grpc-start-registration-argument
+        grpc_registration,
+        // template:end grpc:bootstrap-grpc-start-registration-argument
+        &metrics,
+        &mut signals,
+        &cancel,
+        &tracker,
+        &mut dependencies,
+    ))
+    .await;
+    let (serving, failure) = match started {
+        Ok(serving) => (serving, None),
+        Err(err) => (None, Some(err)),
+    };
+    // Dropping `TracerProviderHandle` is not last-ref: the global SDK clone
+    // remains until process teardown, so a failed startup flushes too.
+    let outcome = shutdown::run(shutdown::Plan {
+        http_config: &config.http,
+        signals: &mut signals,
+        serving,
+        cancel,
+        tracker,
+        dependencies,
+        tracer_provider,
+    })
+    .await;
+    match failure {
+        Some(err) => Err(err),
+        None => Ok(outcome),
+    }
+}
 
-        // Admission runs even without probes so the first probe after bind
-        // answers from an evaluation.
-        let readiness = Readiness::new(probes);
-        let policy = RefreshPolicy {
+/// Open dependencies, compose and admit the routes, bind the listeners, and
+/// serve until a stop signal. Returns the listeners for teardown, or `None`
+/// when the signal arrived before admission. What startup opens lands in
+/// `dependencies` or `tracker`, so teardown releases it on every path.
+#[allow(
+    clippy::too_many_lines,
+    reason = "startup is one ordered sequence; each step names the profile that owns it"
+)]
+async fn serve_until_stopped(
+    config: &Config,
+    // template:begin grpc:bootstrap-grpc-start-registration-parameter
+    grpc_registration: Option<crate::GrpcRegistration>,
+    // template:end grpc:bootstrap-grpc-start-registration-parameter
+    metrics: &Metrics,
+    signals: &mut Signals,
+    cancel: &CancellationToken,
+    tracker: &TaskTracker,
+    #[allow(unused_variables, reason = "dependency-free profiles open nothing")]
+    dependencies: &mut Dependencies,
+) -> Result<Option<Serving>, BootstrapError> {
+    #[allow(
+        unused_mut,
+        reason = "profiles without PostgreSQL or messaging have no probe"
+    )]
+    let mut probes: Vec<Box<dyn Probe>> = Vec::new();
+    #[allow(
+        unused_variables,
+        reason = "the no-auth projection uses this fallback; retained authentication shadows it"
+    )]
+    let auth = PreparedAuth::None;
+    // template:begin authn:bootstrap-authn-prepare
+    let auth = prepare_auth(config, tracker, cancel).await?;
+    // template:end authn:bootstrap-authn-prepare
+    // template:begin postgres:bootstrap-postgres-startup
+    dependencies.postgres = open_postgres(config, tracker, cancel).await?;
+    if let Some(pool) = &dependencies.postgres {
+        probes.push(Box::new(PostgresProbe::new(pool.clone())));
+        migrate::verify_history(pool).await?;
+    }
+    // template:end postgres:bootstrap-postgres-startup
+    // template:begin cache:service-bootstrap-cache-startup
+    dependencies.cache = open_cache(config).await?;
+    // template:end cache:service-bootstrap-cache-startup
+    // template:begin http-idempotency:bootstrap-http-idempotency-composer
+    let mut composer = prepare_http_idempotency(config, dependencies.postgres.as_ref());
+    // template:end http-idempotency:bootstrap-http-idempotency-composer
+    // template:begin inbound-webhooks:bootstrap-webhooks-prepare
+    let webhook_state =
+        prepare_inbound_webhooks(config, dependencies.postgres.as_ref(), tracker, cancel)?;
+    // template:end inbound-webhooks:bootstrap-webhooks-prepare
+    let readiness = Readiness::new(
+        probes,
+        RefreshPolicy {
             interval: config.health.refresh_interval,
             probe_budget: config.health.probe_budget,
             failure_threshold: config.health.failure_threshold,
-        };
+        },
+    );
 
-        admit_and_serve(Prepared {
-            config: &config,
-            signals: &mut signals,
-            tracer_provider,
-            metrics,
-            cancel: cancel.clone(),
-            tracker: tracker.clone(),
-            readiness,
-            policy,
-            auth,
-            // template:begin grpc:bootstrap-registration
-            grpc_registration,
-            // template:end grpc:bootstrap-registration
-            // template:begin postgres:bootstrap-prepared-pool
-            postgres_pool: postgres_pool.clone(),
-            // template:end postgres:bootstrap-prepared-pool
-            // template:begin messaging:service-bootstrap-prepared-messaging-value
-            messaging: &mut messaging,
-            // template:end messaging:service-bootstrap-prepared-messaging-value
-            // template:begin cache:service-bootstrap-prepared-cache-value
-            cache: &mut cache,
-            // template:end cache:service-bootstrap-prepared-cache-value
-            // template:begin http-idempotency:bootstrap-http-idempotency-prepared-value
-            composer,
-            // template:end http-idempotency:bootstrap-http-idempotency-prepared-value
-            // template:begin inbound-webhooks:bootstrap-webhooks-prepared-value
-            webhook_state,
-            // template:end inbound-webhooks:bootstrap-webhooks-prepared-value
-        })
-        .await
-    })
-    .await;
-    // Bind, admission, or connect failure: cancel and join tracked tasks,
-    // then close any opened pool. `Server` only cancels accept. Dropping
-    // `TracerProviderHandle` is not last-ref: the global SDK clone remains
-    // until process teardown.
-    if outcome.is_err() {
-        shutdown::cancel_and_join_background_tasks(&cancel, &tracker).await;
-        let _ = shutdown::close_dependencies(
-            // template:begin postgres:bootstrap-startup-pool-close
-            postgres_pool.as_ref(),
-            // template:end postgres:bootstrap-startup-pool-close
-            // template:begin messaging:service-bootstrap-messaging-startup-close
-            messaging.take(),
-            // template:end messaging:service-bootstrap-messaging-startup-close
-            // template:begin cache:service-bootstrap-cache-startup-close
-            cache.take(),
-            // template:end cache:service-bootstrap-cache-startup-close
-            tokio::time::Instant::now() + shutdown::DEPENDENCY_CLOSE,
-        )
-        .await;
-    }
-    outcome
+    // template:begin grpc:bootstrap-grpc-prepare-start
+    let grpc_prepared = if config.grpc.enabled {
+        // template:end grpc:bootstrap-grpc-prepare-start
+        // template:begin grpc-authn:bootstrap-grpc-verifier
+        let verifier = match &auth {
+            PreparedAuth::None => {
+                return Err(service_config::ValidationError::new(
+                    "grpc.enabled",
+                    "requires authn.mode = oidc-jwt or oidc-introspection",
+                )
+                .into());
+            }
+            PreparedAuth::Enabled(verifier) => (**verifier).clone(),
+        };
+        // template:end grpc-authn:bootstrap-grpc-verifier
+        // template:begin grpc:bootstrap-grpc-prepare-call
+        if config.http.effective_drain_budget() < infra_grpc::CALL_DEADLINE_CAP {
+            return Err(service_config::ValidationError::new(
+                "http.drain_timeout",
+                format!(
+                    "minus http.readiness_propagation_delay must cover the {:?} gRPC unary deadline",
+                    infra_grpc::CALL_DEADLINE_CAP
+                ),
+            )
+            .into());
+        }
+        Some((
+            infra_grpc::router(
+                crate::grpc::services(grpc_registration)?,
+                readiness.reader(),
+                // template:end grpc:bootstrap-grpc-prepare-call
+                // template:begin grpc-authn:bootstrap-grpc-verifier-argument
+                verifier,
+                // template:end grpc-authn:bootstrap-grpc-verifier-argument
+                // template:begin grpc:bootstrap-grpc-prepare-finish
+            ),
+            crate::grpc::tls(config)?,
+        ))
+    } else {
+        None
+    };
+    // template:end grpc:bootstrap-grpc-prepare-finish
+    // The routes and the committed OpenAPI document are the two halves of
+    // one contract. Assembly is pure, so it runs before readiness admission.
+    let contract = crate::api::contract(
+        // template:begin http-idempotency:bootstrap-http-idempotency-contract-composer
+        &mut composer,
+        // template:end http-idempotency:bootstrap-http-idempotency-contract-composer
+    )
+    .map_err(BootstrapError::HttpComposition)?;
+    let routes = match auth {
+        PreparedAuth::None => infra_http::finalize_public(contract)?,
+        // template:begin authn:bootstrap-authn-finalize-enabled
+        PreparedAuth::Enabled(verifier) => infra_http::authn::finalize(contract, *verifier)?,
+        // template:end authn:bootstrap-authn-finalize-enabled
+    };
+    // template:begin http-idempotency:bootstrap-http-idempotency-activation
+    activate_http_idempotency(composer, config, tracker, cancel).await?;
+    // template:end http-idempotency:bootstrap-http-idempotency-activation
+    // Admission runs even without probes so the first probe after bind
+    // answers from an evaluation.
+    readiness.refresh().await;
+    readiness
+        .reader()
+        .verdict()
+        .map_err(BootstrapError::Admission)?;
+    tracker.spawn({
+        let readiness = readiness.clone();
+        let cancel = cancel.child_token();
+        async move { readiness.refresh_until(cancel).await }
+    });
+
+    let server_options = ServerOptions {
+        header_read_timeout: config.http.header_read_timeout,
+        max_header_bytes: usize::try_from(config.http.max_header_bytes.as_u64())
+            .unwrap_or(usize::MAX),
+        max_connections: config.http.connection_cap(),
+    };
+    // template:begin inbound-webhooks:bootstrap-webhooks-route-state
+    let routes = infra_http::webhooks::with_webhook_state(routes, webhook_state);
+    // template:end inbound-webhooks:bootstrap-webhooks-route-state
+    let app = infra_http::harden(
+        routes.with_state(readiness.reader()),
+        &HardenOptions {
+            max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64())
+                .unwrap_or(usize::MAX),
+            request_timeout: config.http.request_timeout,
+            max_in_flight: config.http.in_flight_cap(),
+            log_health_probes: config.http.access_log_health_probes,
+        },
+    );
+    let app_listener = Server::bind(config.http.addr, app, server_options).await?;
+    tracing::info!(addr = %app_listener.local_addr(), "http listener bound");
+
+    let diagnostics = match config.observability.metrics.addr {
+        None => None,
+        Some(addr) => {
+            // Intentionally unhardened: Prometheus text on a private listener.
+            // `server_options` is shared HTTP transport policy, not `harden`.
+            let server =
+                Server::bind(addr, diagnostics_router(metrics.clone()), server_options).await?;
+            tracing::info!(addr = %server.local_addr(), "diagnostics listener bound");
+            Some(server)
+        }
+    };
+
+    // template:begin grpc:bootstrap-grpc-bind
+    let grpc_listener = match grpc_prepared {
+        Some((grpc_router, tls)) => {
+            let addr = config.grpc.listen_addr()?;
+            let bound = match tls {
+                Some(tls) => {
+                    Server::bind_tls(addr, grpc_router, infra_grpc::server_options(), tls).await?
+                }
+                None => Server::bind(addr, grpc_router, infra_grpc::server_options()).await?,
+            };
+            tracing::info!(addr = %bound.local_addr(), "grpc listener bound");
+            Some(bound)
+        }
+        None => None,
+    };
+    // template:end grpc:bootstrap-grpc-bind
+
+    tracing::info!("service_ready");
+    signals.wait().await;
+    Ok(Some(Serving {
+        readiness,
+        app_listener,
+        diagnostics,
+        // template:begin grpc:bootstrap-serving-grpc
+        grpc_listener,
+        // template:end grpc:bootstrap-serving-grpc
+    }))
 }
 
 // template:begin inbound-webhooks:bootstrap-webhooks-constructor
-/// Build a receiver from the immutable startup snapshot.  An empty configured
-/// endpoint map is a retained, inert route; an active endpoint cannot reach
-/// listener admission without PostgreSQL and every referenced key.
+/// Build a receiver from the immutable startup snapshot. An empty endpoint
+/// map is a retained, inert route; an active endpoint cannot reach listener
+/// admission without PostgreSQL, a bound consumer, and every referenced key.
 fn prepare_inbound_webhooks(
     config: &Config,
     postgres_pool: Option<&PgPool>,
+    tracker: &TaskTracker,
+    cancel: &CancellationToken,
 ) -> Result<WebhookState, BootstrapError> {
-    if config.inbound_webhooks.endpoints.is_empty() {
+    let webhooks = &config.inbound_webhooks;
+    if webhooks.endpoints.is_empty() {
         return Ok(WebhookState::inert());
     }
-    let pool = postgres_pool.ok_or(BootstrapError::InboundWebhooksPostgresRequired)?;
+    // Configuration validation already requires `postgres.enabled` here.
+    let pool = postgres_pool.ok_or_else(|| {
+        service_config::ValidationError::new(
+            "postgres.enabled",
+            "must be true when inbound webhook endpoints are configured",
+        )
+    })?;
     let consumers = webhook_consumers::consumers();
-    for endpoint_id in config.inbound_webhooks.endpoints.keys() {
-        if !consumers.contains(endpoint_id) {
-            return Err(BootstrapError::InboundWebhookConsumerMissing {
-                endpoint: endpoint_id.clone(),
-            });
-        }
+    consumers
+        .require(webhooks.endpoints.keys().map(String::as_str))
+        .map_err(|missing| BootstrapError::InboundWebhookConsumerMissing {
+            endpoint: missing.endpoint,
+        })?;
+    let mut bindings = Vec::with_capacity(webhooks.endpoints.len());
+    for (endpoint_id, endpoint) in &webhooks.endpoints {
+        let active = signing_key(webhooks, endpoint_id, &endpoint.active_key)?;
+        let previous = endpoint
+            .previous_key
+            .as_deref()
+            .map(|key| signing_key(webhooks, endpoint_id, key))
+            .transpose()?;
+        bindings.push((endpoint_id.clone(), KeyRing::new(active, previous)));
     }
-    let bindings = config
-        .inbound_webhooks
-        .endpoints
-        .iter()
-        .map(|(endpoint_id, endpoint)| {
-            let active = config
-                .inbound_webhooks
-                .secrets
-                .get(&endpoint.active_key)
-                .ok_or_else(|| BootstrapError::InboundWebhookKeyReference {
-                    endpoint: endpoint_id.clone(),
-                    key: endpoint.active_key.clone(),
-                })?;
-            let previous = endpoint
-                .previous_key
-                .as_ref()
-                .map(|key| {
-                    config.inbound_webhooks.secrets.get(key).ok_or_else(|| {
-                        BootstrapError::InboundWebhookKeyReference {
-                            endpoint: endpoint_id.clone(),
-                            key: key.clone(),
-                        }
-                    })
-                })
-                .transpose()?;
-            let active = SigningKey::from_encoded(active.expose_secret()).map_err(|source| {
-                BootstrapError::InboundWebhookKey {
-                    endpoint: endpoint_id.clone(),
-                    key: endpoint.active_key.clone(),
-                    source,
-                }
+    let receiver = Receiver::new(pool.clone(), bindings);
+    tracker.spawn(receiver.clone().run_cleanup(cancel.child_token()));
+    Ok(WebhookState::active(receiver))
+}
+
+/// Decode the secret that one endpoint's key reference names. The worker
+/// shares the endpoint section but holds no secrets, so this check is ours.
+fn signing_key(
+    webhooks: &InboundWebhooksConfig,
+    endpoint: &str,
+    key: &str,
+) -> Result<SigningKey, BootstrapError> {
+    let secret =
+        webhooks
+            .secrets
+            .get(key)
+            .ok_or_else(|| BootstrapError::InboundWebhookKeyReference {
+                endpoint: endpoint.to_owned(),
+                key: key.to_owned(),
             })?;
-            let previous = endpoint
-                .previous_key
-                .as_ref()
-                .zip(previous)
-                .map(|(key, value)| {
-                    SigningKey::from_encoded(value.expose_secret()).map_err(|source| {
-                        BootstrapError::InboundWebhookKey {
-                            endpoint: endpoint_id.clone(),
-                            key: key.clone(),
-                            source,
-                        }
-                    })
-                })
-                .transpose()?;
-            let key = KeyRing::new(active, previous);
-            Ok((endpoint_id.clone(), key))
-        })
-        .collect::<Result<Vec<_>, BootstrapError>>()?;
-    Ok(WebhookState::active(Receiver::new(pool.clone(), bindings)))
+    SigningKey::from_encoded(secret.expose_secret()).map_err(|source| {
+        BootstrapError::InboundWebhookKey {
+            endpoint: endpoint.to_owned(),
+            key: key.to_owned(),
+            source,
+        }
+    })
 }
 // template:end inbound-webhooks:bootstrap-webhooks-constructor
 
@@ -483,7 +563,7 @@ async fn prepare_auth(
             token_profile,
             algorithms,
         } => {
-            let issuer = provider_url("oidc-jwt", "authn.issuer", issuer)?;
+            let issuer = issuer_url("oidc-jwt", "authn.issuer", issuer)?;
             let (verifier, refresh) = infra_bearerauthn::prepare_jwt(
                 infra_bearerauthn::JwtOptions {
                     issuer,
@@ -520,26 +600,27 @@ async fn prepare_auth(
             cache_capacity,
             cache_ttl,
         } => {
-            let issuer = provider_url("oidc-introspection", "authn.issuer", issuer)?;
-            let endpoint = infra_bearerauthn::ProviderUrl::parse_endpoint(introspection_endpoint)
-                .map_err(|source| BootstrapError::AuthenticationPreparation {
-                mode: "oidc-introspection",
-                key: "authn.introspection_endpoint",
-                source,
-            })?;
-            let client_secret =
-                introspection_client_secret
-                    .clone()
-                    .ok_or(BootstrapError::AuthenticationInput {
-                        mode: "oidc-introspection",
-                        key: "authn.introspection_client_secret",
-                    })?;
-            let provider_concurrency = usize::try_from(provider_concurrency.get())
-                .ok()
-                .and_then(std::num::NonZeroUsize::new)
-                .ok_or(BootstrapError::AuthenticationInput {
+            let issuer = issuer_url("oidc-introspection", "authn.issuer", issuer)?;
+            let endpoint = infra_bearerauthn::EndpointUrl::parse(introspection_endpoint).map_err(
+                |source| BootstrapError::AuthenticationPreparation {
                     mode: "oidc-introspection",
-                    key: "authn.provider_concurrency",
+                    key: "authn.introspection_endpoint",
+                    source,
+                },
+            )?;
+            // Configuration validation requires the secret in this mode.
+            let client_secret = introspection_client_secret.clone().ok_or_else(|| {
+                service_config::ValidationError::new(
+                    "authn.introspection_client_secret",
+                    "is required when authn.mode = oidc-introspection",
+                )
+            })?;
+            let provider_concurrency = std::num::NonZeroUsize::try_from(*provider_concurrency)
+                .map_err(|_| {
+                    service_config::ValidationError::new(
+                        "authn.provider_concurrency",
+                        "does not fit this platform",
+                    )
                 })?;
             let cache =
                 infra_bearerauthn::IntrospectionCacheOptions::new(*cache_capacity, *cache_ttl)
@@ -572,12 +653,12 @@ async fn prepare_auth(
 // template:end authn:bootstrap-prepare-auth-suffix
 
 // template:begin authn:bootstrap-auth-provider-url
-fn provider_url(
+fn issuer_url(
     mode: &'static str,
     key: &'static str,
     value: &str,
-) -> Result<infra_bearerauthn::ProviderUrl, BootstrapError> {
-    infra_bearerauthn::ProviderUrl::parse(value)
+) -> Result<infra_bearerauthn::IssuerUrl, BootstrapError> {
+    infra_bearerauthn::IssuerUrl::parse(value)
         .map_err(|source| BootstrapError::AuthenticationPreparation { mode, key, source })
 }
 // template:end authn:bootstrap-auth-provider-url
@@ -594,32 +675,21 @@ const fn jwt_algorithm(algorithm: JwtAlgorithm) -> infra_bearerauthn::JwtAlgorit
 // template:end oidc-jwt:bootstrap-auth-jwt-algorithm-converter
 
 // template:begin postgres:bootstrap-open-postgres
-async fn prepare_postgres(
-    mut probes: Vec<Box<dyn Probe>>,
+/// Open the pool when the profile is enabled. An unreachable database fails
+/// startup here rather than serving a readiness that never passes.
+async fn open_postgres(
     config: &Config,
     tracker: &TaskTracker,
     cancel: &CancellationToken,
-) -> Result<(Vec<Box<dyn Probe>>, Option<PgPool>), BootstrapError> {
-    let mut postgres_pool = None;
-    if config.postgres.enabled {
-        let pool = open_postgres(config).await?;
-        probes.push(Box::new(PostgresProbe::new(pool.clone())));
-        tracker.spawn(infra_postgres::record_metrics_periodically(
-            pool.clone(),
-            METRICS_MAINTENANCE_INTERVAL,
-            cancel.child_token(),
-        ));
-        postgres_pool = Some(pool);
+) -> Result<Option<PgPool>, BootstrapError> {
+    if !config.postgres.enabled {
+        return Ok(None);
     }
-    Ok((probes, postgres_pool))
-}
-
-async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
     let dsn = Dsn::admit(config.postgres.required_dsn()?.expose_secret())?;
     let pool = infra_postgres::connect(
         &dsn,
         &PoolOptions {
-            max_connections: config.postgres.pool_max_connections()?,
+            max_connections: config.postgres.max_connections,
             // Same process identity as traces (`service.name`).
             application_name: &config.observability.otel.service_name,
             default_isolation: infra_postgres::Isolation::ServerDefault,
@@ -634,82 +704,30 @@ async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
         postgres.max_connections = config.postgres.max_connections,
         "postgres_pool_opened"
     );
-    Ok(pool)
+    tracker.spawn(infra_postgres::record_metrics_periodically(
+        pool.clone(),
+        METRICS_MAINTENANCE_INTERVAL,
+        cancel.child_token(),
+    ));
+    Ok(Some(pool))
 }
 // template:end postgres:bootstrap-open-postgres
 
-/// Open the optional API producer before readiness admission. The API owns no
-/// consumer; HTTP and metrics later read the cached probe through `health`.
-// template:begin messaging:service-bootstrap-messaging-functions
-async fn prepare_messaging(
-    mut probes: Vec<Box<dyn Probe>>,
-    config: &Config,
-    cancel: &CancellationToken,
-    signals: &mut Signals,
-) -> Result<
-    (
-        Vec<Box<dyn Probe>>,
-        Option<Messaging>,
-        Option<tokio::time::Instant>,
-    ),
-    BootstrapError,
-> {
-    if !config.messaging.is_active() {
-        return Ok((probes, None, None));
-    }
-    config.messaging.validate_producer(&config.app.env)?;
-    let deadline = tokio::time::Instant::now() + MESSAGING_STARTUP_TIMEOUT;
-    let startup_cancel = cancel.child_token();
-    let connect = Messaging::connect(messaging_options(config)?, deadline, startup_cancel.clone());
-    tokio::pin!(connect);
-    let messaging = tokio::select! {
-        biased;
-        () = signals.wait() => {
-            let deadline = tokio::time::Instant::now() + config.http.grace_period;
-            startup_cancel.cancel();
-            return Ok((probes, connect.await.ok(), Some(deadline)));
-        }
-        result = &mut connect => result?,
-    };
-    probes.push(Box::new(messaging.probe()));
-    Ok((probes, Some(messaging), None))
-}
-// template:end messaging:service-bootstrap-messaging-functions
-
-// template:begin messaging:service-bootstrap-messaging-options
-fn messaging_options(config: &Config) -> Result<MessagingOptions, BootstrapError> {
-    let messaging = &config.messaging;
-    let source_stream =
-        messaging
-            .source_stream
-            .clone()
-            .ok_or(BootstrapError::MessagingConfigRequired {
-                key: "messaging.source_stream",
-            })?;
-    Ok(MessagingOptions {
-        servers: messaging.urls.clone(),
-        credentials: messaging
-            .credentials
-            .as_ref()
-            .map(|value| value.expose_secret().to_owned()),
-        root_ca_path: messaging.root_ca_path.clone(),
-        allow_plaintext: messaging.allow_plaintext,
-        allow_unauthenticated: messaging.allow_unauthenticated,
-        source_stream,
-        dlq_stream: None,
-        max_payload_bytes: usize::try_from(messaging.max_payload_bytes.as_u64())
-            .map_err(|_| BootstrapError::MessagingPayloadBound)?,
-        consumer: None,
-    })
-}
-// template:end messaging:service-bootstrap-messaging-options
-
 // template:begin cache:service-bootstrap-cache-functions
-async fn prepare_cache(config: &Config) -> Result<Option<Cache>, BootstrapError> {
-    if !config.cache.is_active() {
+/// Connect the optional cache. An outage at startup is logged, not fatal:
+/// the cache is not a readiness probe, and callers fall back to the source
+/// of truth.
+async fn open_cache(config: &Config) -> Result<Option<Cache>, BootstrapError> {
+    let Some(dsn) = &config.cache.dsn else {
         return Ok(None);
-    }
-    let cache = Cache::connect(cache_options(config)?)?;
+    };
+    let cache = Cache::connect(CacheOptions {
+        dsn: dsn.clone(),
+        root_ca_path: config.cache.root_ca_path.clone(),
+        allow_plaintext: config.cache.allow_plaintext,
+        allow_unauthenticated: config.cache.allow_unauthenticated,
+        command_timeout: config.cache.command_timeout,
+    })?;
     let server = cache.server();
     match tokio::time::timeout(CACHE_STARTUP_CHECK, cache.probe().check()).await {
         Ok(Ok(())) => {
@@ -725,7 +743,7 @@ async fn prepare_cache(config: &Config) -> Result<Option<Cache>, BootstrapError>
                 server.address = %server.host,
                 server.port = server.port,
                 cache.tls = server.tls,
-                reason = %error.0,
+                reason = %error,
                 "cache_unavailable_at_startup"
             );
         }
@@ -741,32 +759,17 @@ async fn prepare_cache(config: &Config) -> Result<Option<Cache>, BootstrapError>
     }
     Ok(Some(cache))
 }
-
-fn cache_options(config: &Config) -> Result<CacheOptions, BootstrapError> {
-    let Some(dsn) = config.cache.dsn.as_ref() else {
-        return Err(CacheError::InvalidDsn.into());
-    };
-    Ok(CacheOptions {
-        dsn: secrecy::SecretString::from(dsn.expose_secret().to_owned()),
-        root_ca_path: config.cache.root_ca_path.clone(),
-        allow_plaintext: config.cache.allow_plaintext,
-        allow_unauthenticated: config.cache.allow_unauthenticated,
-        command_timeout: config.cache.command_timeout,
-    })
-}
 // template:end cache:service-bootstrap-cache-functions
 
 // template:begin http-idempotency:bootstrap-http-idempotency-functions
-/// The composer through which idempotent operations join the contract. Its
-/// store uses the pool only when a retention is set as well; otherwise the
-/// store is inert, and activation refuses the missing value before any
-/// store call if an idempotent operation is served.
+/// The composer through which idempotent operations join the contract. It
+/// has a store only when both the pool and a retention are set; otherwise
+/// activation refuses the missing value if an idempotent operation is served.
 fn prepare_http_idempotency(config: &Config, postgres_pool: Option<&PgPool>) -> Composer {
-    let store = match (postgres_pool, config.http_idempotency.retention) {
-        (Some(pool), Some(retention)) => Store::new(pool.clone(), retention),
-        _ => Store::inert(),
-    };
-    Composer::new(store)
+    match (postgres_pool, config.http_idempotency.retention) {
+        (Some(pool), Some(retention)) => Composer::new(Store::new(pool.clone(), retention)),
+        _ => Composer::inert(),
+    }
 }
 
 /// Start the composed boundary when it serves at least one. An inactive
@@ -789,7 +792,7 @@ async fn activate_http_idempotency(
 /// `postgres.enabled`, a set `http_idempotency.retention`, and the store's
 /// schema on a writable session; the cleanup task then joins the tracker.
 async fn start_http_idempotency(
-    store: Store,
+    store: Option<Store>,
     operations: std::num::NonZeroUsize,
     config: &Config,
     tracker: &TaskTracker,
@@ -798,6 +801,9 @@ async fn start_http_idempotency(
     let retention = config
         .http_idempotency
         .required_retention(&config.postgres)?;
+    let Some(store) = store else {
+        return Err(infra_idempotency_store::StartupError::Unavailable.into());
+    };
     store.check_startup().await?;
     tracker.spawn(store.run_cleanup(cancel.child_token()));
     tracing::info!(
@@ -808,216 +814,6 @@ async fn start_http_idempotency(
     Ok(())
 }
 // template:end http-idempotency:bootstrap-http-idempotency-functions
-
-/// Runtime pieces built before listeners bind: admission, then serve.
-///
-/// `cancel`, `tracker`, and `postgres_pool` are shared clones: `serve` still
-/// owns `cancel_and_join_background_tasks` on the error path. `tracer_provider` and
-/// `metrics` are unique moves; Drop in this callee is enough on `Err`, and
-/// success transfers them into [`shutdown::Plan`].
-struct Prepared<'a> {
-    config: &'a Config,
-    signals: &'a mut Signals,
-    tracer_provider: infra_telemetry::TracerProviderHandle,
-    metrics: Metrics,
-    cancel: CancellationToken,
-    tracker: TaskTracker,
-    readiness: Readiness,
-    policy: RefreshPolicy,
-    auth: PreparedAuth,
-    // template:begin grpc:bootstrap-prepared-registration
-    grpc_registration: Option<crate::GrpcRegistration>,
-    // template:end grpc:bootstrap-prepared-registration
-    // template:begin postgres:bootstrap-prepared-field
-    postgres_pool: Option<PgPool>,
-    // template:end postgres:bootstrap-prepared-field
-    // template:begin messaging:service-bootstrap-prepared-messaging-field
-    /// The optional producer remains outside the request path and transfers
-    /// to the dependency-close stage only after listener admission succeeds.
-    messaging: &'a mut Option<Messaging>,
-    // template:end messaging:service-bootstrap-prepared-messaging-field
-    // template:begin cache:service-bootstrap-prepared-cache-field
-    /// Dropped in the dependency-close stage. Not a readiness probe.
-    cache: &'a mut Option<Cache>,
-    // template:end cache:service-bootstrap-prepared-cache-field
-    // template:begin http-idempotency:bootstrap-http-idempotency-prepared-field
-    /// A unique move: activation consumes it after route assembly.
-    composer: Composer,
-    // template:end http-idempotency:bootstrap-http-idempotency-prepared-field
-    // template:begin inbound-webhooks:bootstrap-webhooks-prepared-field
-    webhook_state: WebhookState,
-    // template:end inbound-webhooks:bootstrap-webhooks-prepared-field
-}
-
-#[allow(
-    clippy::too_many_lines,
-    reason = "listener admission and ownership transfer form one ordered startup transaction"
-)]
-async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapError> {
-    let Prepared {
-        config,
-        signals,
-        tracer_provider,
-        metrics,
-        cancel,
-        tracker,
-        readiness,
-        policy,
-        auth,
-        // template:begin grpc:bootstrap-destructure-registration
-        grpc_registration,
-        // template:end grpc:bootstrap-destructure-registration
-        // template:begin postgres:bootstrap-destructure-pool
-        postgres_pool,
-        // template:end postgres:bootstrap-destructure-pool
-        // template:begin messaging:service-bootstrap-destructure-messaging
-        messaging,
-        // template:end messaging:service-bootstrap-destructure-messaging
-        // template:begin cache:service-bootstrap-destructure-cache
-        cache,
-        // template:end cache:service-bootstrap-destructure-cache
-        // template:begin http-idempotency:bootstrap-http-idempotency-destructure
-        mut composer,
-        // template:end http-idempotency:bootstrap-http-idempotency-destructure
-        // template:begin inbound-webhooks:bootstrap-webhooks-destructure
-        webhook_state,
-        // template:end inbound-webhooks:bootstrap-webhooks-destructure
-    } = prepared;
-    // template:begin grpc:bootstrap-grpc-prepare-start
-    let grpc_prepared = if config.grpc.enabled {
-        // template:end grpc:bootstrap-grpc-prepare-start
-        // template:begin grpc-authn:bootstrap-grpc-verifier
-        let verifier = match &auth {
-            PreparedAuth::None => return Err(infra_grpc::Error::InvalidConfiguration.into()),
-            PreparedAuth::Enabled(verifier) => (**verifier).clone(),
-        };
-        // template:end grpc-authn:bootstrap-grpc-verifier
-        // template:begin grpc:bootstrap-grpc-prepare-call
-        if config.http.effective_drain_budget() < infra_grpc::UNARY_DEADLINE {
-            return Err(infra_grpc::Error::InvalidConfiguration.into());
-        }
-        Some((
-            infra_grpc::router(
-                crate::grpc::services(grpc_registration)?,
-                readiness.reader(),
-                // template:end grpc:bootstrap-grpc-prepare-call
-                // template:begin grpc-authn:bootstrap-grpc-verifier-argument
-                verifier,
-                // template:end grpc-authn:bootstrap-grpc-verifier-argument
-                // template:begin grpc:bootstrap-grpc-prepare-finish
-            ),
-            crate::grpc::tls(config)?,
-        ))
-    } else {
-        None
-    };
-    // template:end grpc:bootstrap-grpc-prepare-finish
-    // The routes and the committed OpenAPI document are the two halves of
-    // one contract. Assembly is pure, so it runs before readiness admission.
-    let contract = crate::api::contract(
-        // template:begin http-idempotency:bootstrap-http-idempotency-contract-composer
-        &mut composer,
-        // template:end http-idempotency:bootstrap-http-idempotency-contract-composer
-    )
-    .map_err(BootstrapError::HttpComposition)?;
-    let routes = match auth {
-        PreparedAuth::None => infra_http::finalize_public(contract)?,
-        // template:begin authn:bootstrap-authn-finalize-enabled
-        PreparedAuth::Enabled(verifier) => infra_http::authn::finalize(contract, *verifier)?,
-        // template:end authn:bootstrap-authn-finalize-enabled
-    };
-    // template:begin http-idempotency:bootstrap-http-idempotency-activation
-    activate_http_idempotency(composer, config, &tracker, &cancel).await?;
-    // template:end http-idempotency:bootstrap-http-idempotency-activation
-    readiness.refresh(policy).await;
-    readiness
-        .reader()
-        .verdict()
-        .map_err(BootstrapError::Admission)?;
-    tracker.spawn({
-        let readiness = readiness.clone();
-        let cancel = cancel.child_token();
-        async move { readiness.refresh_until(policy, cancel).await }
-    });
-
-    let server_options = ServerOptions {
-        header_read_timeout: config.http.header_read_timeout,
-        max_header_bytes: usize::try_from(config.http.max_header_bytes.as_u64())
-            .unwrap_or(usize::MAX),
-        max_connections: config.http.connection_cap(),
-    };
-    // template:begin inbound-webhooks:bootstrap-webhooks-route-state
-    let routes = infra_http::webhooks::with_webhook_state(routes, webhook_state);
-    // template:end inbound-webhooks:bootstrap-webhooks-route-state
-    let app = infra_http::harden(
-        routes.with_state(readiness.reader()),
-        &HardenOptions {
-            max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64())
-                .unwrap_or(usize::MAX),
-            request_timeout: config.http.request_timeout,
-            max_in_flight: config.http.in_flight_cap(),
-            log_health_probes: config.http.access_log_health_probes,
-        },
-    );
-    let app_listener = Server::bind(config.http.listen_addr()?, app, server_options).await?;
-    tracing::info!(addr = %app_listener.local_addr(), "http listener bound");
-
-    let diagnostics = match config.observability.metrics.listen_addr()? {
-        None => None,
-        Some(addr) => {
-            // Intentionally unhardened: Prometheus text on a private listener.
-            // `server_options` is shared HTTP transport policy, not `harden`.
-            let server =
-                Server::bind(addr, diagnostics_router(metrics.clone()), server_options).await?;
-            tracing::info!(addr = %server.local_addr(), "diagnostics listener bound");
-            Some(server)
-        }
-    };
-
-    // template:begin grpc:bootstrap-grpc-bind
-    let grpc_listener = match grpc_prepared {
-        Some((grpc_router, tls)) => {
-            let addr = config.grpc.listen_addr()?;
-            let bound = match tls {
-                Some(tls) => {
-                    Server::bind_tls(addr, grpc_router, infra_grpc::server_options(), tls).await?
-                }
-                None => Server::bind(addr, grpc_router, infra_grpc::server_options()).await?,
-            };
-            tracing::info!(addr = %bound.local_addr(), "grpc listener bound");
-            Some(bound)
-        }
-        None => None,
-    };
-    // template:end grpc:bootstrap-grpc-bind
-
-    tracing::info!("service_ready");
-    signals.wait().await;
-
-    Ok(shutdown::run(shutdown::Plan {
-        http_config: &config.http,
-        readiness: &readiness,
-        app_listener,
-        diagnostics,
-        // template:begin grpc:shutdown-plan-grpc
-        grpc_listener,
-        // template:end grpc:shutdown-plan-grpc
-        cancel,
-        tracker,
-        // template:begin postgres:bootstrap-shutdown-plan-pool
-        postgres_pool,
-        // template:end postgres:bootstrap-shutdown-plan-pool
-        // template:begin messaging:service-bootstrap-shutdown-messaging
-        messaging: messaging.take(),
-        // template:end messaging:service-bootstrap-shutdown-messaging
-        // template:begin cache:service-bootstrap-shutdown-cache
-        cache: cache.take(),
-        // template:end cache:service-bootstrap-shutdown-cache
-        tracer_provider,
-        signals,
-    })
-    .await)
-}
 
 enum PreparedAuth {
     None,
@@ -1056,19 +852,7 @@ fn tracing_options(config: &Config, instance_id: String) -> TracingOptions {
 
 /// One record with the non-secret facts an operator needs on every boot.
 fn log_startup_summary(config: &Config, exporter: &ExporterState) {
-    match exporter {
-        ExporterState::Degraded { reason } => tracing::warn!(
-            reason = %reason,
-            "trace exporter degraded; spans are recorded but not exported"
-        ),
-        ExporterState::Initialized { endpoint_source } => {
-            tracing::info!(
-                endpoint_source = endpoint_source.as_str(),
-                "trace exporter initialized"
-            );
-        }
-        ExporterState::Disabled => {}
-    }
+    exporter.log();
     tracing::info!(
         app.env = %config.app.env,
         app.version = %config.app.version,
@@ -1077,7 +861,7 @@ fn log_startup_summary(config: &Config, exporter: &ExporterState) {
         http.request_timeout = ?config.http.request_timeout,
         http.drain_timeout = ?config.http.drain_timeout,
         http.grace_period = ?config.http.grace_period,
-        observability.metrics.addr = %config.observability.metrics.addr,
+        observability.metrics.addr = ?config.observability.metrics.addr,
         // template:begin postgres:bootstrap-startup-log-postgres
         postgres.enabled = config.postgres.enabled,
         // template:end postgres:bootstrap-startup-log-postgres
@@ -1105,7 +889,9 @@ mod tests {
         );
         let pool = PgPool::connect_lazy("postgres://localhost/unused")
             .expect("lazy pool does not connect");
-        let result = prepare_inbound_webhooks(&config, Some(&pool));
+        let tracker = TaskTracker::new();
+        let cancel = CancellationToken::new();
+        let result = prepare_inbound_webhooks(&config, Some(&pool), &tracker, &cancel);
         assert!(matches!(
             result,
             Err(BootstrapError::InboundWebhookConsumerMissing { endpoint })
@@ -1167,15 +953,12 @@ mod tests {
     // template:end oidc-introspection:bootstrap-introspection-cache-tests
 
     // template:begin http-idempotency:bootstrap-http-idempotency-tests
-    /// Start an active boundary of one operation over `store`, on a fresh
+    /// Start an active boundary of one operation without a store, on a fresh
     /// tracker the caller can inspect for a spawned task.
-    async fn start_one_operation(
-        store: Store,
-        config: &Config,
-    ) -> (Result<(), BootstrapError>, TaskTracker) {
+    async fn start_one_operation(config: &Config) -> (Result<(), BootstrapError>, TaskTracker) {
         let tracker = TaskTracker::new();
         let started = start_http_idempotency(
-            store,
+            None,
             std::num::NonZeroUsize::MIN,
             config,
             &tracker,
@@ -1206,7 +989,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_active_boundary_refuses_disabled_postgres_naming_the_key() {
-        let (started, tracker) = start_one_operation(Store::inert(), &Config::default()).await;
+        let (started, tracker) = start_one_operation(&Config::default()).await;
         assert!(
             matches!(&started, Err(BootstrapError::Config(invalid)) if invalid.key == "postgres.enabled"),
             "{started:?}"
@@ -1218,7 +1001,7 @@ mod tests {
     async fn an_active_boundary_refuses_an_unset_retention_naming_the_key() {
         let mut config = Config::default();
         config.postgres.enabled = true;
-        let (started, tracker) = start_one_operation(Store::inert(), &config).await;
+        let (started, tracker) = start_one_operation(&config).await;
         assert!(
             matches!(&started, Err(BootstrapError::Config(invalid)) if invalid.key == "http_idempotency.retention"),
             "{started:?}"
@@ -1231,7 +1014,7 @@ mod tests {
         let mut config = Config::default();
         config.postgres.enabled = true;
         config.http_idempotency.retention = Some(Duration::from_secs(3600));
-        let (started, tracker) = start_one_operation(Store::inert(), &config).await;
+        let (started, tracker) = start_one_operation(&config).await;
         assert!(
             matches!(
                 &started,

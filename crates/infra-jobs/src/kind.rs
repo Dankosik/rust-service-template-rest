@@ -17,17 +17,17 @@ use crate::enqueue::{InvalidDelay, checked_delay_micros};
 use tokio_util::sync::CancellationToken;
 
 /// The longest kind name, in bytes.
-pub const MAX_KIND_LEN: usize = 64;
+pub(crate) const MAX_KIND_LEN: usize = 64;
 /// The attempt budget a kind gets when its policy does not say otherwise.
-pub const DEFAULT_MAX_ATTEMPTS: u16 = 25;
+pub(crate) const DEFAULT_MAX_ATTEMPTS: u16 = 25;
 /// The largest attempt budget a policy may set.
-pub const MAX_ATTEMPTS: u16 = 25;
+pub(crate) const MAX_ATTEMPTS: u16 = 25;
 /// The attempt timeout a kind gets when its policy does not say otherwise.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 /// The shortest attempt timeout a policy may set.
 pub const MIN_TIMEOUT: Duration = Duration::from_secs(1);
 /// The longest attempt timeout a policy may set.
-pub const MAX_TIMEOUT: Duration = Duration::from_secs(3600);
+pub(crate) const MAX_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// A payload type a worker can run.
 pub trait JobKind: Serialize + DeserializeOwned + Send + Sync + 'static {
@@ -65,22 +65,28 @@ impl fmt::Debug for JobId {
     }
 }
 
+/// Custody of one claimed attempt, assembled before the handler runs.
+pub(crate) struct Attempt {
+    pub(crate) id: JobId,
+    /// Attempts used, including this one.
+    pub(crate) number: u16,
+    pub(crate) generation: i64,
+    pub(crate) deadline: Instant,
+    pub(crate) cancellation: CancellationToken,
+    pub(crate) pool: PgPool,
+}
+
 /// One claimed attempt, as the handler receives it.
 pub struct Job<K> {
-    id: JobId,
-    attempt: u16,
-    generation: i64,
+    attempt: Attempt,
     payload: K,
-    cancellation: CancellationToken,
-    pool: PgPool,
-    deadline: Instant,
 }
 
 impl<K: JobKind> Job<K> {
     /// The job's stable identifier.
     #[must_use]
     pub const fn id(&self) -> JobId {
-        self.id
+        self.attempt.id
     }
 
     /// The kind name.
@@ -92,7 +98,7 @@ impl<K: JobKind> Job<K> {
     /// Attempts used, including this one.
     #[must_use]
     pub const fn attempt(&self) -> u16 {
-        self.attempt
+        self.attempt.number
     }
 
     /// The decoded payload.
@@ -104,13 +110,13 @@ impl<K: JobKind> Job<K> {
     /// Fires at timeout or at the end of the drain.
     #[must_use]
     pub fn cancellation(&self) -> CancellationToken {
-        self.cancellation.clone()
+        self.attempt.cancellation.clone()
     }
 
     /// The supervisor's fixed deadline for this attempt.
     #[must_use]
     pub const fn deadline(&self) -> Instant {
-        self.deadline
+        self.attempt.deadline
     }
 
     /// Complete this fenced claim on the caller's already-open transaction.
@@ -124,8 +130,8 @@ impl<K: JobKind> Job<K> {
     /// or [`CompleteError::Database`] when the statement fails.
     pub async fn complete_in_tx(&self, tx: &mut Tx<'_>) -> Result<(), CompleteError> {
         let affected = sqlx::query(crate::attempt::COMPLETE)
-            .bind(self.id.to_string())
-            .bind(self.generation)
+            .bind(self.attempt.id.to_string())
+            .bind(self.attempt.generation)
             .execute(&mut *connection(tx))
             .await?
             .rows_affected();
@@ -139,7 +145,7 @@ impl<K: JobKind> Job<K> {
     /// The worker's pool.
     #[must_use]
     pub const fn pool(&self) -> &PgPool {
-        &self.pool
+        &self.attempt.pool
     }
 }
 
@@ -147,9 +153,9 @@ impl<K: JobKind> fmt::Debug for Job<K> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Job")
-            .field("id", &self.id)
+            .field("id", &self.attempt.id)
             .field("kind", &K::NAME)
-            .field("attempt", &self.attempt)
+            .field("attempt", &self.attempt.number)
             .finish_non_exhaustive()
     }
 }
@@ -169,7 +175,6 @@ pub enum CompleteError {
 pub(crate) enum Disposition {
     Retry,
     Permanent,
-    RetryAfter(i64),
     RetryAfterAtLeast(i64),
     Snooze(i64),
 }
@@ -200,21 +205,10 @@ impl JobError {
         }
     }
 
-    /// Retry after an explicit database-time delay, spending this attempt.
+    /// Retry no sooner than `delay`, spending this attempt.
     ///
-    /// # Errors
-    /// [`InvalidDelay`] if the delay exceeds [`crate::MAX_DELAY`].
-    pub fn retry_after(error: impl fmt::Display, delay: Duration) -> Result<Self, InvalidDelay> {
-        Ok(Self {
-            disposition: Disposition::RetryAfter(checked_delay_micros(delay)?),
-            summary: error.to_string(),
-        })
-    }
-
-    /// Retry after at least `delay`, spending this attempt.
-    ///
-    /// Jobs retains its normal jittered backoff and stores whichever delay is
-    /// longer. The floor never bypasses exhaustion.
+    /// The queue keeps its jittered backoff and uses this delay as a floor.
+    /// The floor never bypasses exhaustion.
     ///
     /// # Errors
     ///
@@ -482,20 +476,8 @@ pub(crate) type HandlerFuture =
 
 pub(crate) trait Dispatch: Send + Sync {
     /// Decode `payload` and build the handler's future.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "dispatch assembles one Job from the claim and its fixed attempt custody"
-    )]
-    fn prepare(
-        &self,
-        id: JobId,
-        attempt: u16,
-        generation: i64,
-        deadline: Instant,
-        payload: &[u8],
-        cancellation: CancellationToken,
-        pool: PgPool,
-    ) -> Result<HandlerFuture, serde_json::Error>;
+    fn prepare(&self, attempt: Attempt, payload: &[u8])
+    -> Result<HandlerFuture, serde_json::Error>;
 }
 
 struct Typed<K, H> {
@@ -510,23 +492,13 @@ where
 {
     fn prepare(
         &self,
-        id: JobId,
-        attempt: u16,
-        generation: i64,
-        deadline: Instant,
+        attempt: Attempt,
         payload: &[u8],
-        cancellation: CancellationToken,
-        pool: PgPool,
     ) -> Result<HandlerFuture, serde_json::Error> {
         let decoded = serde_json::from_slice::<K>(payload)?;
         let job = Job {
-            id,
             attempt,
-            generation,
             payload: decoded,
-            cancellation,
-            pool,
-            deadline,
         };
         let handler = Arc::clone(&self.handler);
         Ok(Box::pin(async move { handler.run(job).await }))
@@ -733,25 +705,29 @@ mod tests {
         let future = registered
             .dispatch
             .prepare(
-                id,
-                3,
-                99,
-                deadline,
+                Attempt {
+                    id,
+                    number: 3,
+                    generation: 99,
+                    deadline,
+                    cancellation: token,
+                    pool: lazy_pool(),
+                },
                 br#"{"n":7,"secret":"payload-secret"}"#,
-                token,
-                lazy_pool(),
             )
             .unwrap();
         future.await.unwrap();
 
         let err = registered.dispatch.prepare(
-            id,
-            1,
-            99,
-            Instant::now(),
+            Attempt {
+                id,
+                number: 1,
+                generation: 99,
+                deadline: Instant::now(),
+                cancellation: CancellationToken::new(),
+                pool: lazy_pool(),
+            },
             b"null",
-            CancellationToken::new(),
-            lazy_pool(),
         );
         assert!(err.is_err());
     }
@@ -759,16 +735,18 @@ mod tests {
     #[tokio::test]
     async fn job_debug_omits_payload() {
         let job = Job {
-            id: JobId::parse("01234567-89ab-cdef-fedc-ba9876543210").unwrap(),
-            attempt: 4,
-            generation: 99,
+            attempt: Attempt {
+                id: JobId::parse("01234567-89ab-cdef-fedc-ba9876543210").unwrap(),
+                number: 4,
+                generation: 99,
+                deadline: Instant::now(),
+                cancellation: CancellationToken::new(),
+                pool: lazy_pool(),
+            },
             payload: Sample {
                 n: 7,
                 secret: "payload-secret".to_owned(),
             },
-            cancellation: CancellationToken::new(),
-            pool: lazy_pool(),
-            deadline: Instant::now(),
         };
         let text = format!("{job:?}");
         assert!(!text.contains("payload-secret"));

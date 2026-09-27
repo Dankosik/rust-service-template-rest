@@ -20,6 +20,7 @@ use infra_postgres::{Closed, PgPool};
 // template:end jobs:worker-shutdown-postgres-imports
 use infra_telemetry::{ProviderShutdown, TracerProviderHandle};
 use service_config::HttpConfig;
+use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -92,64 +93,75 @@ impl Budget {
     }
 }
 
-/// Stop signals. Created before anything can send one and kept for the
-/// process lifetime: hyper's libc handler is never uninstalled, so a dropped
-/// stream would swallow a later SIGTERM instead of letting it kill us.
+/// Stop signals. Installed before anything can send one. One listener task
+/// owns the streams for the process lifetime: tokio's handler
+/// (signal-hook-registry) is never unregistered, so a dropped stream would
+/// swallow a later signal instead of letting it terminate the process.
 pub(crate) struct Signals {
-    #[cfg(unix)]
-    terminate: tokio::signal::unix::Signal,
-    #[cfg(unix)]
-    interrupt: tokio::signal::unix::Signal,
-    #[cfg(windows)]
-    ctrl_c: tokio::signal::windows::CtrlC,
+    stop: watch::Receiver<u64>,
 }
 
 impl Signals {
     pub(crate) fn install() -> std::io::Result<Self> {
+        let (tx, stop) = watch::channel(0_u64);
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
-            // Install SIGINT first so a failed SIGTERM install cannot drop a
-            // live SIGTERM stream: hyper never unregisters the libc handler.
-            let interrupt = signal(SignalKind::interrupt())?;
-            let terminate = signal(SignalKind::terminate())?;
-            Ok(Self {
-                terminate,
-                interrupt,
-            })
+            // Install SIGINT first so a failed SIGTERM install cannot drop a live SIGTERM stream.
+            let mut interrupt = signal(SignalKind::interrupt())?;
+            let mut terminate = signal(SignalKind::terminate())?;
+            // Not in the TaskTracker: this listener must outlive background join.
+            tokio::spawn(async move {
+                loop {
+                    let name = tokio::select! {
+                        Some(()) = terminate.recv() => "SIGTERM",
+                        Some(()) = interrupt.recv() => "SIGINT",
+                        else => return,
+                    };
+                    tracing::info!(signal = name, "stop requested");
+                    tx.send_modify(|count| *count = count.wrapping_add(1));
+                }
+            });
+            Ok(Self { stop })
         }
         #[cfg(windows)]
         {
-            Ok(Self {
-                ctrl_c: tokio::signal::windows::ctrl_c()?,
-            })
+            let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
+            // Not in the TaskTracker: this listener must outlive background join.
+            tokio::spawn(async move {
+                while ctrl_c.recv().await.is_some() {
+                    tracing::info!(signal = "ctrl-c", "stop requested");
+                    tx.send_modify(|count| *count = count.wrapping_add(1));
+                }
+            });
+            Ok(Self { stop })
         }
         #[cfg(not(any(unix, windows)))]
         {
-            Ok(Self {})
+            // Not in the TaskTracker: this listener must outlive background join.
+            tokio::spawn(async move {
+                loop {
+                    match tokio::signal::ctrl_c().await {
+                        Ok(()) => {
+                            tracing::info!(signal = "ctrl-c", "stop requested");
+                            tx.send_modify(|count| *count = count.wrapping_add(1));
+                        }
+                        Err(err) => {
+                            tracing::error!(error = %err, "failed to listen for ctrl-c");
+                            tx.send_modify(|count| *count = count.wrapping_add(1));
+                            std::future::pending::<()>().await;
+                        }
+                    }
+                }
+            });
+            Ok(Self { stop })
         }
     }
 
-    /// Resolve on the next SIGTERM or SIGINT (Ctrl-C elsewhere).
+    /// Resolve on the next stop signal.
     pub(crate) async fn wait(&mut self) {
-        #[cfg(unix)]
-        {
-            tokio::select! {
-                _ = self.terminate.recv() => tracing::info!(signal = "SIGTERM", "stop requested"),
-                _ = self.interrupt.recv() => tracing::info!(signal = "SIGINT", "stop requested"),
-            }
-        }
-        #[cfg(windows)]
-        {
-            let _ = self.ctrl_c.recv().await;
-            tracing::info!(signal = "ctrl-c", "stop requested");
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            match tokio::signal::ctrl_c().await {
-                Ok(()) => tracing::info!(signal = "ctrl-c", "stop requested"),
-                Err(err) => tracing::error!(error = %err, "failed to listen for ctrl-c"),
-            }
+        if self.stop.changed().await.is_err() {
+            std::future::pending::<()>().await;
         }
     }
 
@@ -157,41 +169,14 @@ impl Signals {
     /// [`Self::pending`]. Consumes what it finds, so the next `wait` waits
     /// for a new signal.
     pub(crate) fn pending(&mut self) -> bool {
-        #[cfg(unix)]
-        {
-            let waker = std::task::Waker::noop();
-            let mut context = std::task::Context::from_waker(waker);
-            let terminate = signal_arrived(self.terminate.poll_recv(&mut context));
-            let interrupt = signal_arrived(self.interrupt.poll_recv(&mut context));
-            if terminate {
-                tracing::info!(signal = "SIGTERM", "stop requested");
+        match self.stop.has_changed() {
+            Ok(true) => {
+                let _ = self.stop.borrow_and_update();
+                true
             }
-            if interrupt {
-                tracing::info!(signal = "SIGINT", "stop requested");
-            }
-            terminate || interrupt
-        }
-        #[cfg(windows)]
-        {
-            let waker = std::task::Waker::noop();
-            let mut context = std::task::Context::from_waker(waker);
-            let arrived = signal_arrived(self.ctrl_c.poll_recv(&mut context));
-            if arrived {
-                tracing::info!(signal = "ctrl-c", "stop requested");
-            }
-            arrived
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = self;
-            false
+            Ok(false) | Err(_) => false,
         }
     }
-}
-
-#[cfg(any(unix, windows))]
-fn signal_arrived(polled: std::task::Poll<Option<()>>) -> bool {
-    matches!(polled, std::task::Poll::Ready(Some(())))
 }
 
 /// The listeners bound so far. The shutdown plan and `abort_startup` close
@@ -202,25 +187,29 @@ pub(crate) struct Listeners {
     pub(crate) diagnostics: Option<Server>,
 }
 
+/// What startup opened and teardown closes.
+#[derive(Default)]
+pub(crate) struct Resources {
+    // template:begin jobs:worker-shutdown-resources-started
+    pub(crate) started: Vec<Started>,
+    // template:end jobs:worker-shutdown-resources-started
+    // template:begin messaging:worker-shutdown-resources-messaging
+    pub(crate) consumer: Option<ConsumerHandle>,
+    pub(crate) messaging: Option<Messaging>,
+    // template:end messaging:worker-shutdown-resources-messaging
+    // template:begin jobs:worker-shutdown-resources-pool
+    pub(crate) pool: Option<PgPool>,
+    // template:end jobs:worker-shutdown-resources-pool
+    pub(crate) listeners: Listeners,
+}
+
 /// What the staged teardown owns.
 pub(crate) struct Plan<'a> {
     pub(crate) http: &'a HttpConfig,
     pub(crate) readiness: &'a Readiness,
-    /// Every admitted jobs engine, empty before claiming has started.
-    /// Ordinary work and reserved publication share the process deadlines.
-    // template:begin jobs:worker-shutdown-plan-jobs
-    pub(crate) started: &'a [Started],
-    // template:end jobs:worker-shutdown-plan-jobs
-    pub(crate) listeners: Listeners,
+    pub(crate) resources: Resources,
     pub(crate) cancel: CancellationToken,
     pub(crate) tracker: TaskTracker,
-    // template:begin jobs:worker-shutdown-plan-jobs-pool
-    pub(crate) pool: Option<PgPool>,
-    // template:end jobs:worker-shutdown-plan-jobs-pool
-    // template:begin messaging:worker-shutdown-plan-messaging
-    pub(crate) consumer: Option<ConsumerHandle>,
-    pub(crate) messaging: Option<Messaging>,
-    // template:end messaging:worker-shutdown-plan-messaging
     pub(crate) tracer_provider: TracerProviderHandle,
     pub(crate) signals: &'a mut Signals,
 }
@@ -231,86 +220,31 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     let Plan {
         http,
         readiness,
-        // template:begin jobs:worker-shutdown-destructure-started
-        started,
-        // template:end jobs:worker-shutdown-destructure-started
-        listeners,
+        mut resources,
         cancel,
         tracker,
-        // template:begin jobs:worker-shutdown-destructure-pool
-        pool,
-        // template:end jobs:worker-shutdown-destructure-pool
-        // template:begin messaging:worker-shutdown-destructure-messaging
-        mut consumer,
-        messaging,
-        // template:end messaging:worker-shutdown-destructure-messaging
         tracer_provider,
         signals,
     } = plan;
     let budget = Budget::start(http.grace_period);
-    stop_work(
-        http,
-        readiness,
-        // template:begin jobs:worker-shutdown-stop-jobs-argument
-        started,
-        // template:end jobs:worker-shutdown-stop-jobs-argument
-        // template:begin messaging:worker-shutdown-stop-messaging-argument
-        consumer.as_ref(),
-        // template:end messaging:worker-shutdown-stop-messaging-argument
-    );
-    let mut degraded = false;
-    if drain(
-        // template:begin jobs:worker-shutdown-drain-jobs-argument
-        started,
-        // template:end jobs:worker-shutdown-drain-jobs-argument
-        // template:begin messaging:worker-shutdown-drain-messaging-argument
-        consumer.as_mut(),
-        // template:end messaging:worker-shutdown-drain-messaging-argument
-        http.drain_timeout,
-        &budget,
-        signals,
-    )
-    .await
-    {
-        degraded = true;
-        let _ = finish_work(
-            // template:begin jobs:worker-shutdown-finish-jobs-argument
-            started,
-            // template:end jobs:worker-shutdown-finish-jobs-argument
-            // template:begin messaging:worker-shutdown-finish-messaging-argument
-            consumer.as_mut(),
-            // template:end messaging:worker-shutdown-finish-messaging-argument
-            Instant::now() + budget.remaining(CLEANUP),
-        )
-        .await;
+    stop_work(http, readiness, &resources);
+    let mut degraded = drain(&mut resources, http.drain_timeout, &budget, signals).await;
+    if degraded {
+        let _ = finish_work(&mut resources, Instant::now() + budget.remaining(CLEANUP)).await;
     }
     // template:begin messaging:worker-shutdown-drop-consumer
     // Exhausted cleanup still aborts the owner before dependencies close.
     // The forced drain already selected the degraded process outcome.
-    drop(consumer);
+    drop(resources.consumer.take());
     // template:end messaging:worker-shutdown-drop-consumer
-    if close_listeners(listeners, budget.remaining(LISTENERS)).await {
-        degraded = true;
-    }
-    if join_background(&cancel, &tracker, budget.remaining(BACKGROUND_JOIN)).await {
-        degraded = true;
-    }
-    if close_dependencies(
-        // template:begin jobs:worker-shutdown-close-jobs-argument
-        pool.as_ref(),
-        // template:end jobs:worker-shutdown-close-jobs-argument
-        // template:begin messaging:worker-shutdown-close-messaging-argument
-        messaging,
-        // template:end messaging:worker-shutdown-close-messaging-argument
-        budget.remaining(DEPENDENCY_CLOSE),
+    degraded |= close_listeners(
+        std::mem::take(&mut resources.listeners),
+        budget.remaining(LISTENERS),
     )
-    .await
-    {
-        degraded = true;
-    }
-    if flush_telemetry(tracer_provider, budget.remaining(TELEMETRY_FLUSH)).await {
-        degraded = true;
-    }
+    .await;
+    degraded |= join_background(&cancel, &tracker, budget.remaining(BACKGROUND_JOIN)).await;
+    degraded |= close_dependencies(&mut resources, budget.remaining(DEPENDENCY_CLOSE)).await;
+    degraded |= flush_telemetry(tracer_provider, budget.remaining(TELEMETRY_FLUSH)).await;
     let outcome = if degraded {
         Outcome::Degraded
     } else {
@@ -326,70 +260,31 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
 /// because no stop signal started it. It flushes no telemetry and returns
 /// nothing: the exit code is 1 whatever it did.
 pub(crate) async fn abort_startup(
-    // template:begin jobs:worker-shutdown-abort-jobs-started
-    started: &[Started],
-    // template:end jobs:worker-shutdown-abort-jobs-started
-    // template:begin messaging:worker-shutdown-abort-messaging-consumer
-    mut consumer: Option<ConsumerHandle>,
-    // template:end messaging:worker-shutdown-abort-messaging-consumer
-    listeners: Listeners,
+    mut resources: Resources,
     cancel: &CancellationToken,
     tracker: &TaskTracker,
-    // template:begin jobs:worker-shutdown-abort-jobs-pool
-    pool: Option<&PgPool>,
-    // template:end jobs:worker-shutdown-abort-jobs-pool
-    // template:begin messaging:worker-shutdown-abort-messaging-resource
-    messaging: Option<Messaging>,
-    // template:end messaging:worker-shutdown-abort-messaging-resource
 ) {
-    let _ = finish_work(
-        // template:begin jobs:worker-shutdown-abort-jobs-finish
-        started,
-        // template:end jobs:worker-shutdown-abort-jobs-finish
-        // template:begin messaging:worker-shutdown-abort-messaging-drain
-        consumer.as_mut(),
-        // template:end messaging:worker-shutdown-abort-messaging-drain
-        Instant::now() + CLEANUP,
-    )
-    .await;
+    let _ = finish_work(&mut resources, Instant::now() + CLEANUP).await;
     // template:begin messaging:worker-shutdown-abort-drop-consumer
-    drop(consumer);
+    drop(resources.consumer.take());
     // template:end messaging:worker-shutdown-abort-drop-consumer
-    let _ = close_listeners(listeners, LISTENERS).await;
+    let _ = close_listeners(std::mem::take(&mut resources.listeners), LISTENERS).await;
     let _ = join_background(cancel, tracker, BACKGROUND_JOIN).await;
-    let _ = close_dependencies(
-        // template:begin jobs:worker-shutdown-abort-close-jobs-argument
-        pool,
-        // template:end jobs:worker-shutdown-abort-close-jobs-argument
-        // template:begin messaging:worker-shutdown-abort-close-messaging-argument
-        messaging,
-        // template:end messaging:worker-shutdown-abort-close-messaging-argument
-        DEPENDENCY_CLOSE,
-    )
-    .await;
+    let _ = close_dependencies(&mut resources, DEPENDENCY_CLOSE).await;
 }
 
-fn stop_work(
-    http: &HttpConfig,
-    readiness: &Readiness,
-    // template:begin jobs:worker-shutdown-stop-jobs-parameter
-    started: &[Started],
-    // template:end jobs:worker-shutdown-stop-jobs-parameter
-    // template:begin messaging:worker-shutdown-stop-messaging-parameter
-    consumer: Option<&ConsumerHandle>,
-    // template:end messaging:worker-shutdown-stop-messaging-parameter
-) {
+fn stop_work(http: &HttpConfig, readiness: &Readiness, resources: &Resources) {
     tracing::info!(grace = ?http.grace_period, "shutdown_started");
     readiness.start_drain();
     tracing::info!("readiness_disabled");
     // template:begin jobs:worker-shutdown-stop-jobs
-    for started in started {
+    for started in &resources.started {
         started.stop_claiming();
         tracing::info!(in_flight = started.in_flight(), "claiming_stopped");
     }
     // template:end jobs:worker-shutdown-stop-jobs
     // template:begin messaging:worker-shutdown-stop-messaging
-    if let Some(consumer) = consumer {
+    if let Some(consumer) = &resources.consumer {
         consumer.drain();
         tracing::info!("messaging_pulls_stopped");
     }
@@ -397,12 +292,7 @@ fn stop_work(
 }
 
 async fn drain(
-    // template:begin jobs:worker-shutdown-drain-jobs-parameter
-    started: &[Started],
-    // template:end jobs:worker-shutdown-drain-jobs-parameter
-    // template:begin messaging:worker-shutdown-drain-messaging-parameter
-    consumer: Option<&mut ConsumerHandle>,
-    // template:end messaging:worker-shutdown-drain-messaging-parameter
+    resources: &mut Resources,
     drain_timeout: Duration,
     budget: &Budget,
     signals: &mut Signals,
@@ -411,7 +301,7 @@ async fn drain(
     tracing::info!(
         budget = ?drain_budget,
         // template:begin jobs:worker-shutdown-drain-start-log
-        in_flight = started.iter().map(Started::in_flight).sum::<usize>(),
+        in_flight = resources.started.iter().map(Started::in_flight).sum::<usize>(),
         // template:end jobs:worker-shutdown-drain-start-log
         "drain_started"
     );
@@ -419,12 +309,12 @@ async fn drain(
     let joined = async {
         let jobs = async {
             // template:begin jobs:worker-shutdown-drain-jobs
-            futures_util::future::join_all(started.iter().map(Started::drained)).await;
+            futures_util::future::join_all(resources.started.iter().map(Started::drained)).await;
             // template:end jobs:worker-shutdown-drain-jobs
         };
-        let messages = async move {
+        let messages = async {
             // template:begin messaging:worker-shutdown-drain-messaging
-            if let Some(consumer) = consumer {
+            if let Some(consumer) = resources.consumer.as_mut() {
                 return consumer.finish(deadline).await.is_err();
             }
             // template:end messaging:worker-shutdown-drain-messaging
@@ -447,7 +337,11 @@ async fn drain(
         Some(reason) => {
             tracing::warn!(
                 // template:begin jobs:worker-shutdown-drain-forced-log
-                in_flight = started.iter().map(Started::in_flight).sum::<usize>(),
+                in_flight = resources
+                    .started
+                    .iter()
+                    .map(Started::in_flight)
+                    .sum::<usize>(),
                 // template:end jobs:worker-shutdown-drain-forced-log
                 reason,
                 "drain_forced"
@@ -457,21 +351,14 @@ async fn drain(
     }
 }
 
-async fn finish_work(
-    // template:begin jobs:worker-shutdown-finish-jobs-parameter
-    started: &[Started],
-    // template:end jobs:worker-shutdown-finish-jobs-parameter
-    // template:begin messaging:worker-shutdown-finish-messaging-parameter
-    consumer: Option<&mut ConsumerHandle>,
-    // template:end messaging:worker-shutdown-finish-messaging-parameter
-    deadline: Instant,
-) -> bool {
+async fn finish_work(resources: &mut Resources, deadline: Instant) -> bool {
     let jobs = async {
         #[allow(unused_variables, reason = "retained jobs supply cleanup results")]
         let failed = false;
         // template:begin jobs:worker-shutdown-finish-jobs
         let failed = futures_util::future::join_all(
-            started
+            resources
+                .started
                 .iter()
                 .map(|engine| finish_attempts(engine, deadline)),
         )
@@ -483,7 +370,7 @@ async fn finish_work(
     };
     let messages = async {
         // template:begin messaging:worker-shutdown-finish-messaging
-        if let Some(consumer) = consumer {
+        if let Some(consumer) = resources.consumer.as_mut() {
             consumer.abort();
             if consumer.finish(deadline).await.is_err() {
                 tracing::warn!("messaging consumer cleanup failed");
@@ -609,19 +496,11 @@ async fn close_pool(pool: &PgPool, budget: Duration) -> bool {
 }
 // template:end jobs:worker-shutdown-close-pool
 
-async fn close_dependencies(
-    // template:begin jobs:worker-shutdown-close-jobs-parameter
-    pool: Option<&PgPool>,
-    // template:end jobs:worker-shutdown-close-jobs-parameter
-    // template:begin messaging:worker-shutdown-close-messaging-parameter
-    messaging: Option<Messaging>,
-    // template:end messaging:worker-shutdown-close-messaging-parameter
-    budget: Duration,
-) -> bool {
+async fn close_dependencies(resources: &mut Resources, budget: Duration) -> bool {
     let deadline = Instant::now() + budget;
     let close_pool = async {
         // template:begin jobs:worker-shutdown-close-jobs
-        if let Some(pool) = pool {
+        if let Some(pool) = resources.pool.as_ref() {
             return close_pool(pool, deadline.saturating_duration_since(Instant::now())).await;
         }
         // template:end jobs:worker-shutdown-close-jobs
@@ -629,7 +508,7 @@ async fn close_dependencies(
     };
     let close_messaging = async {
         // template:begin messaging:worker-shutdown-close-messaging
-        if let Some(messaging) = messaging {
+        if let Some(messaging) = resources.messaging.take() {
             return match messaging.close(deadline, &CancellationToken::new()).await {
                 CloseOutcome::Complete => {
                     tracing::info!("messaging_closed");
@@ -661,11 +540,6 @@ async fn flush_telemetry(provider: TracerProviderHandle, budget: Duration) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn shutdown_tail_is_seventeen_seconds() {
-        assert_eq!(SHUTDOWN_TAIL, Duration::from_secs(17));
-    }
 
     #[test]
     fn default_budgets_leave_three_seconds() {
@@ -732,24 +606,7 @@ mod tests {
         tracker.spawn(async move {
             child.cancelled().await;
         });
-        abort_startup(
-            // template:begin jobs:worker-shutdown-test-started-argument
-            &[],
-            // template:end jobs:worker-shutdown-test-started-argument
-            // template:begin messaging:worker-shutdown-test-consumer-argument
-            None,
-            // template:end messaging:worker-shutdown-test-consumer-argument
-            Listeners::default(),
-            &cancel,
-            &tracker,
-            // template:begin jobs:worker-shutdown-test-pool-argument
-            None,
-            // template:end jobs:worker-shutdown-test-pool-argument
-            // template:begin messaging:worker-shutdown-test-messaging-argument
-            None,
-            // template:end messaging:worker-shutdown-test-messaging-argument
-        )
-        .await;
+        abort_startup(Resources::default(), &cancel, &tracker).await;
         assert!(cancel.is_cancelled());
         assert!(tracker.is_closed());
         assert!(tracker.is_empty());

@@ -49,7 +49,7 @@ const CLOSE_BUDGET: Duration = Duration::from_secs(5);
 const APP: &str = "integration-tests-outbox";
 const OUTBOX_KIND: &str = "publish_domain_event";
 const WEBHOOK_ENDPOINT: &str = "partner/a?#";
-const WEBHOOK_KEY: &str = "whsec_d2ViaG9va19zZWNyZXQ=";
+const WEBHOOK_KEY: &str = "whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=";
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
@@ -192,15 +192,14 @@ fn nats_url() -> String {
 }
 
 fn event(id: &str, value: &str) -> Event<Created> {
-    Event::new(
-        id,
-        time::OffsetDateTime::from_unix_timestamp(1_700_000_000)
+    Event {
+        id: id.to_owned(),
+        occurred_at: time::OffsetDateTime::from_unix_timestamp(1_700_000_000)
             .expect("fixed occurrence is valid"),
-        Created {
+        payload: Created {
             value: value.to_owned(),
         },
-    )
-    .expect("fixture event is valid")
+    }
 }
 
 fn messaging_options(fixture: &Fixture) -> MessagingOptions {
@@ -213,7 +212,6 @@ fn messaging_options_with_servers(fixture: &Fixture, servers: Vec<String>) -> Me
         credentials: None,
         root_ca_path: None,
         allow_plaintext: true,
-        allow_unauthenticated: true,
         source_stream: fixture.stream.clone(),
         dlq_stream: None,
         max_payload_bytes: 1024,
@@ -434,8 +432,7 @@ async fn until<T>(what: &str, mut check: impl AsyncFnMut() -> Option<T>) -> T {
 
 async fn job(pool: &PgPool, key: &str) -> JobRow {
     let row = sqlx::query(
-        "SELECT id::text AS id, state, attempts, claim_generation, failure_reason, \
-         EXTRACT(EPOCH FROM (not_before - clock_timestamp()))::double precision AS snooze_delay_seconds \
+        "SELECT id::text AS id, state, attempts, failure_reason, error_summary \
          FROM background_jobs WHERE kind = $1 AND unique_key = $2",
     )
     .bind(OUTBOX_KIND)
@@ -447,9 +444,8 @@ async fn job(pool: &PgPool, key: &str) -> JobRow {
         id: row.try_get("id").expect("job id"),
         state: row.try_get("state").expect("job state"),
         attempts: row.try_get("attempts").expect("job attempts"),
-        claim_generation: row.try_get("claim_generation").expect("claim generation"),
         failure_reason: row.try_get("failure_reason").expect("failure reason"),
-        snooze_delay_seconds: row.try_get("snooze_delay_seconds").expect("snooze delay"),
+        error_summary: row.try_get("error_summary").expect("error summary"),
     }
 }
 
@@ -457,9 +453,8 @@ struct JobRow {
     id: String,
     state: String,
     attempts: i16,
-    claim_generation: i64,
     failure_reason: Option<String>,
-    snooze_delay_seconds: f64,
+    error_summary: Option<String>,
 }
 
 async fn outbox_count(pool: &PgPool) -> i64 {
@@ -708,7 +703,7 @@ async fn live_event_identity_is_idempotent_only_for_equal_immutable_intent(pool:
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn lost_broker_ack_snoozes_then_republishes_the_same_immutable_identity(pool: PgPool) {
+async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(pool: PgPool) {
     let fixture = Fixture::create().await;
     let relay = AckDroppingRelay::start(&fixture.stream).await;
     let first_messaging = Box::pin(Messaging::connect(
@@ -736,16 +731,15 @@ async fn lost_broker_ack_snoozes_then_republishes_the_same_immutable_identity(po
             .expect("outbox publisher registry is valid"),
     )
     .await;
-    let snoozed = until(
-        "lost broker ACK retains a pending outbox intent",
+    let retrying = until(
+        "lost broker ACK spends an attempt and retains a pending outbox intent",
         async || {
             let row = job(&jobs, &key).await;
             (relay.dropped_ack.load(Ordering::SeqCst)
                 && row.state == "pending"
-                && row.attempts == 0
-                && row.claim_generation > 0
-                && row.snooze_delay_seconds > 20.0)
-                .then_some(row)
+                && row.attempts >= 1
+                && row.error_summary.is_some())
+            .then_some(row)
         },
     )
     .await;
@@ -767,7 +761,7 @@ async fn lost_broker_ack_snoozes_then_republishes_the_same_immutable_identity(po
     relay.join().await;
 
     sqlx::query("UPDATE background_jobs SET not_before = statement_timestamp() - interval '1 second' WHERE id::text = $1")
-        .bind(&snoozed.id)
+        .bind(&retrying.id)
         .execute(&jobs)
         .await
         .expect("ambiguous intent is made due for its same-ID retry");
@@ -793,7 +787,7 @@ async fn lost_broker_ack_snoozes_then_republishes_the_same_immutable_identity(po
         },
     )
     .await;
-    assert_eq!(completed.attempts, 1);
+    assert!(completed.attempts >= 2);
     assert_eq!(fixture.published().await, 1);
 
     finish(retry_run, &[&retry_pool, &jobs]).await;
@@ -802,9 +796,7 @@ async fn lost_broker_ack_snoozes_then_republishes_the_same_immutable_identity(po
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn final_attempt_topology_refusal_snoozes_then_recovery_keeps_publication_identity(
-    pool: PgPool,
-) {
+async fn final_attempt_publication_failure_leaves_a_visible_failed_job(pool: PgPool) {
     let fixture = Fixture::create().await;
     let messaging = Box::pin(Messaging::connect(
         messaging_options(&fixture),
@@ -814,7 +806,7 @@ async fn final_attempt_topology_refusal_snoozes_then_recovery_keeps_publication_
     .await
     .expect("producer-only messaging admits before the controlled outage");
     let jobs = template_pool(&pool, 3).await;
-    let intent = prepared(&fixture, "event-recovery", "recoverable");
+    let intent = prepared(&fixture, "event-exhausted", "unpublished");
     assert_eq!(
         in_tx(&jobs, async |tx| -> Result<_, Step> {
             intent.enqueue(tx).await.map_err(Step::from)
@@ -823,7 +815,7 @@ async fn final_attempt_topology_refusal_snoozes_then_recovery_keeps_publication_
         .expect("outbox intent commits"),
         OutboxEnqueued::Created
     );
-    let key = event_key("event-recovery");
+    let key = event_key("event-exhausted");
     sqlx::query("UPDATE background_jobs SET attempts = 24 WHERE kind = $1 AND unique_key = $2")
         .bind(OUTBOX_KIND)
         .bind(&key)
@@ -839,54 +831,19 @@ async fn final_attempt_topology_refusal_snoozes_then_recovery_keeps_publication_
             .expect("outbox publisher registry is valid"),
     )
     .await;
-    let snoozed = until(
-        "recoverable topology refusal snoozes and refunds the final attempt",
+    let failed = until(
+        "a refused final attempt leaves the job visibly failed",
         async || {
             let row = job(&jobs, &key).await;
-            (row.state == "pending"
-                && row.attempts == 24
-                && row.claim_generation > 0
-                && row.snooze_delay_seconds > 20.0)
-                .then_some(row)
+            (row.state == "failed").then_some(row)
         },
     )
     .await;
-    assert!(snoozed.failure_reason.is_none());
-    sqlx::query("UPDATE background_jobs SET not_before = statement_timestamp() - interval '1 second' WHERE id::text = $1")
-        .bind(&snoozed.id).execute(&jobs).await.expect("second outage attempt becomes due");
-    let repeated = until(
-        "repeated outage snoozes and refunds the final attempt again",
-        async || {
-            let row = job(&jobs, &key).await;
-            (row.state == "pending"
-                && row.attempts == 24
-                && row.claim_generation > snoozed.claim_generation
-                && row.snooze_delay_seconds > 20.0)
-                .then_some(row)
-        },
-    )
-    .await;
-    fixture.restore_source().await;
-    sqlx::query("UPDATE background_jobs SET not_before = statement_timestamp() - interval '1 second' WHERE id::text = $1")
-        .bind(&repeated.id)
-        .execute(&jobs)
-        .await
-        .expect("recovered intent is made due without changing its identity");
-    until("recovered immutable intent is published", async || {
-        (fixture.published().await == 1).then_some(())
-    })
-    .await;
-    let completed = until(
-        "recovered outbox job completes after broker ACK",
-        async || {
-            let row = job(&jobs, &key).await;
-            (row.state == "completed").then_some(row)
-        },
-    )
-    .await;
-    assert_eq!(completed.attempts, 25);
+    assert_eq!(failed.attempts, 25);
+    assert!(failed.failure_reason.is_some());
 
     finish(run, &[&publisher, &jobs]).await;
+    fixture.restore_source().await;
     close(messaging).await;
     fixture.cleanup().await;
 }
@@ -971,7 +928,7 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
         .register::<Created, _, _>(move |event, _| {
             let pool = effect_pool.clone();
             let invoked = Arc::clone(&invoked_handler);
-            let logical_id = event.id().to_owned();
+            let logical_id = event.id.clone();
             async move {
                 sqlx::query(
                     "INSERT INTO messaging_effects (logical_id) VALUES ($1) ON CONFLICT DO NOTHING",
@@ -1079,23 +1036,21 @@ struct HeldWebhookConsumer {
     release: Notify,
 }
 
+#[infra_webhooks::inbound::async_trait]
 impl WebhookConsumer for HeldWebhookConsumer {
-    fn process<'a>(
-        &'a self,
-        tx: &'a mut infra_postgres::Tx<'_>,
-        incoming: &'a Incoming,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            sqlx::query("INSERT INTO webhook_effects (message_id) VALUES ($1)")
-                .bind(incoming.message_id())
-                .execute(connection(tx))
-                .await
-                .map_err(JobError::from)?;
-            self.entered.notify_one();
-            self.release.notified().await;
-            Ok(())
-        })
+    async fn process(
+        &self,
+        tx: &mut infra_postgres::Tx<'_>,
+        incoming: &Incoming,
+    ) -> Result<(), JobError> {
+        sqlx::query("INSERT INTO webhook_effects (message_id) VALUES ($1)")
+            .bind(incoming.message_id())
+            .execute(connection(tx))
+            .await
+            .map_err(JobError::from)?;
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
     }
 }
 // template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-fixture

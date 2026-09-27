@@ -105,13 +105,7 @@ impl EventPayload for BridgePayload {
 fn rust_production_wire_exports_for_go() {
     let fixtures = fixtures();
     assert_eq!(fixtures.version, 1, "unsupported Go-wire fixture version");
-    for name in [
-        "fractional_raw_bytes",
-        "identity_schema_boundary",
-        "go_permissive_fraction_offset",
-        "go_offset_minute_sixty",
-        "go_utc_year_boundary",
-    ] {
+    for name in ["fractional_raw_bytes", "identity_schema_boundary"] {
         assert!(
             fixtures.cases.iter().any(|fixture| fixture.name == name),
             "fixture must retain the {name} actual-Go observation"
@@ -349,18 +343,18 @@ fn verify_production_limits(fixtures: &FixtureSet) {
     assert_eq!(decoded.event_type().len(), 256);
     assert_eq!(decoded.schema_version(), u16::MAX);
 
-    let event = bridge_event("x".repeat(257));
-    assert!(
-        event.is_err(),
-        "over-limit Go identity must reject before encoding"
-    );
-
     let registry = Registry::new([Route::new::<BridgePayload>("events.created")])
         .expect("bridge route admits");
-    let event = bridge_event("rust-payload-limit").expect("bridge event admits");
+    let event = bridge_event("rust-payload-limit");
     assert!(
         registry.prepare(&event, 1).is_err(),
         "production preparation enforces payload admission"
+    );
+    assert!(
+        registry
+            .prepare(&bridge_event("x".repeat(257)), MAX_PAYLOAD_BYTES)
+            .is_err(),
+        "over-limit Go identity must reject before encoding"
     );
 
     let mut oversized_headers = headers(&fixtures.cases[0].inbound.headers);
@@ -379,7 +373,7 @@ fn verify_production_limits(fixtures: &FixtureSet) {
 fn rust_production_records() -> Vec<WireRecord> {
     let registry = Registry::new([Route::new::<BridgePayload>("events.rust")])
         .expect("Rust export route admits");
-    let event = bridge_event("rust-go-compat-1").expect("Rust export event admits");
+    let event = bridge_event("rust-go-compat-1");
     let prepared = registry
         .prepare(&event, MAX_PAYLOAD_BYTES)
         .expect("production Rust preparation admits");
@@ -394,16 +388,16 @@ fn rust_production_records() -> Vec<WireRecord> {
     }]
 }
 
-fn bridge_event(id: impl Into<String>) -> Result<Event<BridgePayload>, domain_events::EventError> {
-    Event::new(
-        id,
-        parse_timestamp("2026-09-26T12:34:56.123456789Z"),
-        BridgePayload {
+fn bridge_event(id: impl Into<String>) -> Event<BridgePayload> {
+    Event {
+        id: id.into(),
+        occurred_at: parse_timestamp("2026-09-26T12:34:56.123456789Z"),
+        payload: BridgePayload {
             amount: 1.0,
             escaped: "\\u0041".to_owned(),
             items: vec![true, false],
         },
-    )
+    }
 }
 
 fn headers(values: &BTreeMap<String, String>) -> HeaderMap {

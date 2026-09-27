@@ -1,9 +1,11 @@
 //! Diagnostics listener and OpenTelemetry trace export.
 
+use std::net::SocketAddr;
+
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::validate::{ValidationError, non_empty, socket_addr};
+use crate::validate::{ValidationError, non_empty};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -19,28 +21,15 @@ pub struct MetricsConfig {
     /// all-interfaces (`0.0.0.0`) because the scraper runs in another pod;
     /// deployment network policy must keep it private. Hostnames are
     /// refused; load does not look them up. Empty disables HTTP exposition.
-    pub addr: String,
+    #[serde(deserialize_with = "crate::de::optional_listen_addr")]
+    pub addr: Option<SocketAddr>,
 }
 
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
-            addr: ":9090".to_owned(),
+            addr: Some(SocketAddr::from(([0, 0, 0, 0], 9090))),
         }
-    }
-}
-
-impl MetricsConfig {
-    /// The diagnostics listen address, or `None` when exposition is disabled.
-    ///
-    /// # Errors
-    ///
-    /// Returns the validation error for a malformed address.
-    pub fn listen_addr(&self) -> Result<Option<std::net::SocketAddr>, ValidationError> {
-        if self.addr.trim().is_empty() {
-            return Ok(None);
-        }
-        socket_addr("observability.metrics.addr", &self.addr).map(Some)
     }
 }
 
@@ -95,13 +84,13 @@ pub struct OtelExporterConfig {
     /// OTLP/HTTP traces endpoint. A collector root without a path resolves
     /// to `/v1/traces`. Missing, empty, or whitespace-only (after trim) is
     /// vacant and falls back to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` then
-    /// `OTEL_EXPORTER_OTLP_ENDPOINT` presence, including empty; when those
-    /// variables are unset the exporter stays disabled.
-    #[serde(default, deserialize_with = "crate::app::occupied_string")]
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT`; when neither holds a non-blank value
+    /// the exporter stays disabled.
+    #[serde(default, deserialize_with = "crate::de::blank_as_none")]
     pub otlp_endpoint: Option<String>,
     /// Collector credential as `key=value,key=value`. Environment only.
     /// Missing, empty, or whitespace-only is absent (`None`).
-    #[serde(default, deserialize_with = "crate::secret_policy::occupied_secret")]
+    #[serde(default, deserialize_with = "crate::de::blank_secret_as_none")]
     pub otlp_headers: Option<SecretString>,
 }
 
@@ -115,7 +104,6 @@ impl OtelExporterConfig {
 
 impl ObservabilityConfig {
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        self.metrics.listen_addr()?;
         non_empty("observability.otel.service_name", &self.otel.service_name)?;
         let arg = self.otel.traces_sampler_arg;
         if !arg.is_finite() {
@@ -195,9 +183,18 @@ mod tests {
 
     #[test]
     fn empty_metrics_addr_disables_the_listener() {
-        let mut cfg = ObservabilityConfig::default();
-        cfg.metrics.addr = String::new();
-        cfg.validate().unwrap();
+        assert_eq!(
+            ObservabilityConfig::default().metrics.addr,
+            Some(SocketAddr::from(([0, 0, 0, 0], 9090)))
+        );
+        let blank: ObservabilityConfig = toml::from_str("[metrics]\naddr = \"\"\n").unwrap();
+        assert_eq!(blank.metrics.addr, None);
+        blank.validate().unwrap();
+        let omitted: ObservabilityConfig = toml::from_str("[metrics]\n").unwrap();
+        assert_eq!(
+            omitted.metrics.addr,
+            Some(SocketAddr::from(([0, 0, 0, 0], 9090)))
+        );
     }
 
     #[test]

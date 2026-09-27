@@ -30,15 +30,16 @@ mod server;
 
 pub use contract::{FinalizeError, finalize_public};
 pub use harden::{
-    HTTP_METRICS_NAMES, HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, SHED_REQUESTS_METRIC, harden,
+    HTTP_METRICS_NAMES, HTTP_REQUESTS_DURATION_BUCKETS, HTTP_REQUESTS_DURATION_SECONDS,
+    HardenOptions, SHED_REQUESTS_METRIC, harden,
 };
 // template:begin authn:infra-http-authn-exports
-pub use authn::{AUTHN_VERIFICATIONS_METRIC, VerifiedPrincipal, require_scope};
+pub use authn::{VerifiedPrincipal, require_scope};
 // template:end authn:infra-http-authn-exports
 // template:begin request-budget:infra-http-request-deadline-export
 pub use harden::RequestDeadline;
 // template:end request-budget:infra-http-request-deadline-export
 pub use problem::{Code, InvalidParam, Problem};
-pub use request_id::{REQUEST_ID_HEADER, request_id};
+pub use request_id::REQUEST_ID_HEADER;
 pub use router::router;
 pub use server::{CONNECTIONS_REFUSED_METRIC, Drained, Server, ServerError, ServerOptions};

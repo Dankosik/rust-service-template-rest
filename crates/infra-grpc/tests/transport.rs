@@ -30,13 +30,13 @@ use grpc_contracts::example::v1::{
 use health::{Readiness, RefreshPolicy};
 // template:begin authn:grpc-transport-test-auth-imports
 use infra_bearerauthn::{
-    IntrospectionCacheOptions, IntrospectionOptions, ProviderUrl, Verifier,
+    EndpointUrl, IntrospectionCacheOptions, IntrospectionOptions, IssuerUrl, Verifier,
     test_support::{FixtureTransport, prepare_introspection_with_fixture},
 };
 // template:end authn:grpc-transport-test-auth-imports
 use infra_grpc::{
-    ClientSecurity, ClientTlsMaterial, ServerTlsMaterial, Services, classified_status,
-    server_options, server_tls_config,
+    ClientIdentity, ClientSecurity, ClientTlsMaterial, Error, ServerTlsMaterial, Services,
+    classified_status, server_options, server_tls_config,
 };
 use infra_http::{Drained, Server};
 use rcgen::{
@@ -270,15 +270,23 @@ impl Fixture {
         Self::open(false, None).await
     }
 
-    async fn tls(material: ServerTlsMaterial) -> Self {
-        Self::open(true, Some(material)).await
+    /// A TLS listener for `pki`; `mtls` requires a client certificate.
+    async fn tls(pki: &Pki, mtls: bool) -> Self {
+        Self::open(true, Some((pki, mtls))).await
     }
 
-    async fn open(seed: bool, tls: Option<ServerTlsMaterial>) -> Self {
+    async fn open(seed: bool, tls: Option<(&Pki, bool)>) -> Self {
         // template:begin authn:grpc-transport-test-auth-fixture
         let (verifier, provider) = verifier_fixture().await;
         // template:end authn:grpc-transport-test-auth-fixture
-        let readiness = Readiness::new(Vec::new());
+        let readiness = Readiness::new(
+            Vec::new(),
+            RefreshPolicy {
+                interval: Duration::from_secs(60),
+                probe_budget: Duration::from_secs(1),
+                failure_threshold: 1,
+            },
+        );
         if seed {
             seed_ready(&readiness).await;
         }
@@ -295,8 +303,16 @@ impl Fixture {
             // template:end authn:grpc-transport-test-router-verifier
         );
         let bound = match tls {
-            Some(material) => {
-                let config = server_tls_config(&material).expect("server TLS config");
+            Some((pki, mtls)) => {
+                let certificate = pem(&pki.server_certificate);
+                let key = secrecy::SecretString::from(pem(&pki.server_key));
+                let ca = pem(&pki.ca_certificate);
+                let config = server_tls_config(ServerTlsMaterial {
+                    certificate_pem: &certificate,
+                    private_key_pem: &key,
+                    client_ca_pem: mtls.then_some(ca.as_str()),
+                })
+                .expect("server TLS config");
                 Server::bind_tls(loopback(), app, server_options(), config)
                     .await
                     .expect("tls listener binds")
@@ -378,13 +394,7 @@ fn watch_request(service: &str) -> Request<HealthCheckRequest> {
 }
 
 async fn seed_ready(readiness: &Readiness) {
-    readiness
-        .refresh(RefreshPolicy {
-            interval: Duration::from_secs(60),
-            probe_budget: Duration::from_secs(1),
-            failure_threshold: 1,
-        })
-        .await;
+    readiness.refresh().await;
 }
 
 fn assert_seen(echo: &Echo, expected: &[Seen]) {
@@ -485,7 +495,7 @@ fn tokio_stream_once<T>(item: T) -> impl tonic::codegen::tokio_stream::Stream<It
 
 // template:begin authn:grpc-transport-test-unauthenticated
 #[tokio::test]
-async fn missing_and_malformed_bearers_are_unauthenticated_and_only_health_check_is_public() {
+async fn missing_and_malformed_bearers_are_unauthenticated_and_health_is_public() {
     let fixture = Fixture::plaintext().await;
     let mut echo = fixture.echo_client();
     let missing = timeout(
@@ -533,10 +543,14 @@ async fn missing_and_malformed_bearers_are_unauthenticated_and_only_health_check
         })),
     )
     .await
-    .expect("health watch")
-    .unwrap_err();
-    assert_eq!(watch.code(), Code::Unauthenticated);
-    assert_eq!(watch.message(), "authentication failed");
+    .expect("public health watch")
+    .unwrap()
+    .into_inner()
+    .message()
+    .await
+    .expect("watch message")
+    .expect("first watch status");
+    assert_eq!(watch.status, ServingStatus::Serving as i32);
     drop(echo);
     drop(health);
     fixture.stop().await;
@@ -841,18 +855,12 @@ async fn health_watch_ends_on_drain_and_the_listener_drain_completes() {
 #[tokio::test]
 async fn tls13_with_a_trusted_ca_succeeds_and_tls12_is_refused() {
     let pki = Pki::new(&["127.0.0.1", "localhost"]);
-    let fixture = Fixture::tls(ServerTlsMaterial {
-        certificate_pem: pki.server_certificate.clone(),
-        private_key_pem: pki.server_key.clone(),
-        client_ca_pem: None,
-    })
-    .await;
+    let fixture = Fixture::tls(&pki, false).await;
     let mut client = EchoServiceClient::new(tls_client(
         fixture.address,
         ClientTlsMaterial {
-            ca_certificate_pem: Some(pki.ca_certificate.clone()),
-            certificate_pem: None,
-            private_key_pem: None,
+            ca_certificate_pem: Some(pem(&pki.ca_certificate)),
+            identity: None,
         },
     ));
     let response = timeout(
@@ -873,12 +881,7 @@ async fn tls13_with_a_trusted_ca_succeeds_and_tls12_is_refused() {
 #[tokio::test]
 async fn mtls_refuses_a_client_without_a_trusted_certificate() {
     let pki = Pki::new(&["127.0.0.1", "localhost"]);
-    let fixture = Fixture::tls(ServerTlsMaterial {
-        certificate_pem: pki.server_certificate.clone(),
-        private_key_pem: pki.server_key.clone(),
-        client_ca_pem: Some(pki.ca_certificate.clone()),
-    })
-    .await;
+    let fixture = Fixture::tls(&pki, true).await;
     assert_tls_denied(fixture.address, &pki, None, false).await;
     let wrong = Pki::new(&["127.0.0.1"]);
     assert_tls_denied(
@@ -893,9 +896,11 @@ async fn mtls_refuses_a_client_without_a_trusted_certificate() {
     let mut client = EchoServiceClient::new(tls_client(
         fixture.address,
         ClientTlsMaterial {
-            ca_certificate_pem: Some(pki.ca_certificate.clone()),
-            certificate_pem: Some(pki.client_certificate.clone()),
-            private_key_pem: Some(pki.client_key.clone()),
+            ca_certificate_pem: Some(pem(&pki.ca_certificate)),
+            identity: Some(ClientIdentity {
+                certificate_pem: pem(&pki.client_certificate),
+                private_key_pem: pem(&pki.client_key).into(),
+            }),
         },
     ));
     let response = timeout(
@@ -910,6 +915,35 @@ async fn mtls_refuses_a_client_without_a_trusted_certificate() {
     assert_eq!(response.into_inner().message, "mtls");
     drop(client);
     fixture.stop().await;
+}
+
+#[test]
+fn a_destination_scheme_that_disagrees_with_security_is_rejected() {
+    let tls = ClientSecurity::Tls(ClientTlsMaterial::default());
+    assert_eq!(
+        infra_grpc::Client::new("http://127.0.0.1:1", tls).unwrap_err(),
+        Error::DestinationSecurityMismatch
+    );
+    assert_eq!(
+        infra_grpc::Client::new("https://127.0.0.1:1", ClientSecurity::Plaintext).unwrap_err(),
+        Error::DestinationSecurityMismatch
+    );
+}
+
+#[test]
+fn a_service_registered_twice_is_rejected() {
+    let mut services = Services::new();
+    services
+        .add(EchoServiceServer::new(Echo::new()))
+        .expect("first registration");
+    assert_eq!(
+        services.add(EchoServiceServer::new(Echo::new())),
+        Err(Error::DuplicateService("example.v1.EchoService"))
+    );
+}
+
+fn pem(bytes: &[u8]) -> String {
+    String::from_utf8(bytes.to_vec()).expect("rcgen emits ASCII PEM")
 }
 
 fn tls_client(address: SocketAddr, material: ClientTlsMaterial) -> infra_grpc::Client {
@@ -995,9 +1029,9 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
         FixtureTransport::new("provider.test", address, &pki.ca_der, cancel.child_token()).unwrap();
     let verifier = prepare_introspection_with_fixture(
         IntrospectionOptions {
-            issuer: ProviderUrl::parse("https://issuer.example").unwrap(),
+            issuer: IssuerUrl::parse("https://issuer.example").unwrap(),
             audiences: vec!["api".to_owned()],
-            endpoint: ProviderUrl::parse_endpoint(&format!(
+            endpoint: EndpointUrl::parse(&format!(
                 "https://provider.test:{}/introspect",
                 address.port()
             ))

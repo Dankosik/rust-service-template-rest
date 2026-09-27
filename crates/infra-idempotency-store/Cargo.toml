@@ -15,6 +15,6 @@ workspace = true
 infra-postgres = { workspace = true }
 sqlx = { workspace = true, features = ["derive", "postgres", "runtime-tokio", "tls-rustls-aws-lc-rs"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["time", "macros"] }
+tokio = { workspace = true, features = ["time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true, features = ["std"] }

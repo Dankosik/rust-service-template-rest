@@ -34,6 +34,7 @@ use super::{Credentials, Fixture};
 struct Peer {
     calls: Arc<AtomicUsize>,
     authorizations: Arc<Mutex<Vec<String>>>,
+    timeouts: Arc<Mutex<Vec<String>>>,
     started: Arc<Notify>,
     release: Arc<Notify>,
     released: Arc<std::sync::atomic::AtomicBool>,
@@ -44,6 +45,7 @@ impl Peer {
         Self {
             calls: Arc::new(AtomicUsize::new(0)),
             authorizations: Arc::new(Mutex::new(Vec::new())),
+            timeouts: Arc::new(Mutex::new(Vec::new())),
             started: Arc::new(Notify::new()),
             release: Arc::new(Notify::new()),
             released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -204,6 +206,9 @@ async fn route(request: HyperRequest<Incoming>, peer: Peer) -> HyperResponse<Bod
         return response.body(Body::empty()).unwrap();
     }
     if request.uri().path() == "/example.v1.EchoService/Unary" {
+        if let Some(timeout) = header_string(request.headers(), "grpc-timeout") {
+            peer.timeouts.lock().unwrap().push(timeout);
+        }
         return tonic::server::Grpc::new(
             tonic_prost::ProstCodec::<UnaryResponse, UnaryRequest>::default(),
         )
@@ -348,7 +353,7 @@ async fn one_cached_bearer_is_sent_and_reused() {
 }
 
 #[tokio::test]
-async fn hard_expiry_before_dispatch_refuses_the_call() {
+async fn a_token_past_its_reuse_cutoff_is_refreshed_before_dispatch() {
     let tokens = Fixture::new().await;
     tokens.token_json(
         "200 OK",
@@ -356,35 +361,63 @@ async fn hard_expiry_before_dispatch_refuses_the_call() {
     );
     let resource = Resource::new().await;
     let mut client = resource.client(&tokens.credentials(&[], None));
-    assert_eq!(
+    for message in ["warm", "reused"] {
         client
             .unary(rpc(
                 UnaryRequest {
-                    message: "warm".to_owned(),
+                    message: message.to_owned(),
                 },
                 Duration::from_secs(10),
             ))
             .await
-            .unwrap()
-            .into_inner()
-            .message,
-        "warm"
-    );
+            .unwrap();
+    }
+    assert_eq!(tokens.token_requests().len(), 1);
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::time::advance(Duration::from_secs(51)).await;
     tokio::time::resume();
-    let error = client
+    client
         .unary(rpc(
             UnaryRequest {
-                message: "expired".to_owned(),
+                message: "refreshed".to_owned(),
             },
             Duration::from_secs(10),
         ))
         .await
-        .unwrap_err();
-    assert_eq!(error.code(), Code::DeadlineExceeded);
-    assert_eq!(tokens.token_requests().len(), 1);
-    assert_eq!(resource.calls(), 1);
+        .unwrap();
+    assert_eq!(tokens.token_requests().len(), 2);
+    assert_eq!(resource.calls(), 3);
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
+async fn token_wait_is_subtracted_from_the_propagated_grpc_timeout() {
+    let tokens = Fixture::new().await;
+    let resource = Resource::new().await;
+    let gate = tokens.block_tokens();
+    let mut client = resource.client(&tokens.credentials(&[], None));
+    let mut call = Box::pin(client.unary(rpc(
+        UnaryRequest {
+            message: "budget".to_owned(),
+        },
+        Duration::from_secs(1),
+    )));
+    tokio::select! {
+        () = tokens.token_received() => {}
+        result = &mut call => panic!("call finished before the token arrived: {result:?}"),
+    }
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(600)).await;
+    tokio::time::resume();
+    gate.add_permits(1);
+    call.await.unwrap();
+    let timeouts = resource.peer.timeouts.lock().unwrap().clone();
+    let [timeout] = timeouts.as_slice() else {
+        panic!("expected one propagated timeout: {timeouts:?}");
+    };
+    let millis = timeout.strip_suffix('m').unwrap().parse::<u64>().unwrap();
+    assert!((1..=400).contains(&millis), "propagated {timeout}");
     resource.finish().await;
     tokens.finish().await;
 }
@@ -453,13 +486,13 @@ async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
         () = resource.started() => {}
         result = &mut delayed => panic!("delayed call finished before the gate: {result:?}"),
     }
-    credentials.0.cache.invalidate(&()).await;
+    *credentials.cached() = None;
     tokens.token_json(
         "200 OK",
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
     );
     credentials
-        .acquire(Instant::now() + Duration::from_secs(10))
+        .token(Instant::now() + Duration::from_secs(10))
         .await
         .unwrap();
     resource.release();

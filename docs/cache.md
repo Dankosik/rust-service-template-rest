@@ -8,9 +8,9 @@ lifecycle choices.
 ## What the profile retains
 
 The pack is one standalone client. A feature calls `get`, `set`, and `delete`
-on a `CacheNamespace` and receives bytes. `Cache::connection` exposes the
-native `redis::aio::ConnectionManager` so a later feature can build rate limits
-or locks on the same connection. This profile does not build them.
+on a `CacheNamespace` and receives bytes. Rate limits and locks are not part
+of this profile; a feature that needs them adds its own operation beside
+`get`, `set`, and `delete` on the same connection.
 
 It does not add a generic `Cache<K, V>`, get-or-load, a serializer, a global
 TTL, or a lock API. The feature owns keys, serialization, TTL policy, and
@@ -136,8 +136,8 @@ The probe name is `cache`. It sends `PING` and has no timeout of its own: the
 readiness refresher bounds it with `health.probe_budget`. Do not add it to liveness.
 
 Dropping the last `ConnectionManager` clone closes the socket. Bootstrap
-carries `Option<Cache>` into the shutdown plan and drops it inside
-`close_dependencies`, in the dependency stage after HTTP drain. The drop is
+records `Option<Cache>` in the startup `Dependencies` and drops it inside
+`Dependencies::close`, in the dependency stage after HTTP drain. The drop is
 synchronous, so it does not add to `DEPENDENCY_CLOSE`. The same drop runs on
 the startup-failure and stopped-startup paths.
 

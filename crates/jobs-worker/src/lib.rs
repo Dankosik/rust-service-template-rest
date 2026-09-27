@@ -1,12 +1,12 @@
 //! The jobs worker's entry point and registration contract.
 //!
 //! A composition root registers its retained job kinds in `src/main.rs` by
-//! passing a [`Register`] function to [`run`]. The shipped binary supplies its
-//! retained profile registrations; a composition with no registrations still
-//! refuses. The synchronous startup phases and the one exit-code mapping live
-//! here, the asynchronous startup in `bootstrap`, and the staged teardown in
-//! `shutdown`. The full order is in
-//! docs/architecture/runtime-lifecycle.md (section "Jobs worker").
+//! passing a [`Register`] function to [`run`]. The shipped binary supplies
+//! its retained profile registrations; a composition with no retained
+//! capability refuses after configuration is loaded. The synchronous startup
+//! phases and the one exit-code mapping live here, the asynchronous startup
+//! in `bootstrap`, and the staged teardown in `shutdown`. The full order is
+//! in docs/architecture/runtime-lifecycle.md (section "Jobs worker").
 
 mod bootstrap;
 mod shutdown;
@@ -16,7 +16,7 @@ use std::fmt;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use service_config::{BuildInfo, FromArgs, LoadOptions, process_failure};
+use service_config::{BuildInfo, LoadOptions, process_failure};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -81,19 +81,17 @@ const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Parse flags, load configuration, run the worker, and map the result to an
-/// exit code. `None` refuses with the no-kind message before configuration is
-/// loaded. `--help` exits 0 and a flag error exits 1 through [`FromArgs`], as
-/// in the service. A failure is reported once. Never calls `process::exit`.
+/// exit code. A composition with no retained capability refuses after
+/// configuration is loaded. `--help` exits 0 and a flag error exits 2 through
+/// clap, as in the service. A failure is reported once. Later failures do not call
+/// `process::exit`.
 #[must_use]
-pub fn run<I>(args: I, register: Option<Register>) -> ExitCode
+pub fn run<I>(args: I, register: Register) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
-    let options = match FromArgs::from_argv(args) {
-        FromArgs::Exit(code) => return code,
-        FromArgs::Run(options) => options,
-    };
-    let result = start(options, register);
+    let options = LoadOptions::parse_from(args);
+    let result = start(&options, register);
     if let Err(err) = &result {
         tracing::error!(error = %err, "jobs worker failed");
         let _ = process_failure(&err.to_string());
@@ -111,21 +109,14 @@ fn exit_code(result: &Result<shutdown::Outcome, bootstrap::WorkerError>) -> u8 {
     }
 }
 
-/// Everything [`run`] does after flag parsing: the no-kind refusal before
-/// configuration is read, configuration, the preconditions, the runtime, and
-/// `bootstrap::serve`, with the runtime shut down within [`RUNTIME_SHUTDOWN_TIMEOUT`].
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "run hands over the options it parsed; the signature is the fixed synchronous startup entry"
-)]
+/// Everything [`run`] does after flag parsing: configuration, the
+/// preconditions, the runtime, and `bootstrap::serve`, with the runtime shut
+/// down within [`RUNTIME_SHUTDOWN_TIMEOUT`].
 fn start(
-    options: LoadOptions,
-    register: Option<Register>,
+    options: &LoadOptions,
+    register: Register,
 ) -> Result<shutdown::Outcome, bootstrap::WorkerError> {
-    let Some(register) = register else {
-        return Err(bootstrap::WorkerError::NoRegistrations);
-    };
-    let config = service_config::load(&options, BUILD_INFO)?;
+    let config = service_config::load(options, BUILD_INFO)?;
     bootstrap::check_preconditions(&config)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -144,7 +135,7 @@ mod tests {
 
     use super::bootstrap::WorkerError;
     use super::shutdown::Outcome;
-    use super::{BUILD_INFO, Support, exit_code, start};
+    use super::{Support, exit_code, start};
 
     #[test]
     fn exit_code_maps_the_three_rows() {
@@ -167,21 +158,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn start_without_registration_refuses_before_configuration() {
-        let options = missing_file();
-        let loaded = service_config::load(&options, BUILD_INFO);
-        assert!(
-            matches!(loaded, Err(service_config::Error::ReadFile { .. })),
-            "loading the missing file must refuse, got {loaded:?}"
-        );
-        let started = start(options, None);
-        assert!(
-            matches!(started, Err(WorkerError::NoRegistrations)),
-            "{started:?}"
-        );
-    }
-
     fn refuse(
         // template:begin jobs:worker-register-test-jobs-parameter
         _: &mut infra_jobs::Kinds,
@@ -196,7 +172,7 @@ mod tests {
 
     #[test]
     fn start_with_registration_reads_configuration_first() {
-        let started = start(missing_file(), Some(refuse));
+        let started = start(&missing_file(), refuse);
         assert!(matches!(started, Err(WorkerError::Load(_))), "{started:?}");
     }
 }

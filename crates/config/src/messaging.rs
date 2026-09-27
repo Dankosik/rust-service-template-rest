@@ -3,6 +3,7 @@
 //! This section owns startup input only. It never contacts a broker or
 //! reconciles operator-owned streams.
 
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use bytesize::ByteSize;
@@ -10,8 +11,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use url::Url;
 
-use crate::app::occupied_string;
-use crate::secret_policy::occupied_secret;
+use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::validate::{ValidationError, int_range, non_empty};
 
 const DELIVERY_OVERHEAD_BYTES: u64 = 8 * 1024;
@@ -24,7 +24,7 @@ pub struct MessagingConfig {
     /// NATS server URLs. An empty list keeps messaging inactive in the API.
     pub urls: Vec<String>,
     /// Inline NATS credentials. This environment-only value is redacted.
-    #[serde(default, deserialize_with = "occupied_secret")]
+    #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub credentials: Option<SecretString>,
     /// Optional PEM root CA path for the operator-selected broker.
     pub root_ca_path: Option<PathBuf>,
@@ -34,21 +34,21 @@ pub struct MessagingConfig {
     /// development process.
     pub allow_unauthenticated: bool,
     /// Operator-owned source stream for publication and consumption.
-    #[serde(default, deserialize_with = "occupied_string")]
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub source_stream: Option<String>,
     /// Largest payload admitted before handler allocation.
     pub max_payload_bytes: ByteSize,
     /// Durable consumer name, required only by a consuming worker.
-    #[serde(default, deserialize_with = "occupied_string")]
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub consumer_durable: Option<String>,
     /// Filter subject, required only by a consuming worker.
-    #[serde(default, deserialize_with = "occupied_string")]
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub consumer_filter_subject: Option<String>,
     /// DLQ subject, required only by a consuming worker.
-    #[serde(default, deserialize_with = "occupied_string")]
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub dlq_subject: Option<String>,
     /// Maximum deliveries held through handling and settlement.
-    pub consumer_concurrency: u32,
+    pub consumer_concurrency: NonZeroU32,
 }
 
 impl Default for MessagingConfig {
@@ -64,7 +64,7 @@ impl Default for MessagingConfig {
             consumer_durable: None,
             consumer_filter_subject: None,
             dlq_subject: None,
-            consumer_concurrency: 1,
+            consumer_concurrency: NonZeroU32::MIN,
         }
     }
 }
@@ -90,12 +90,21 @@ impl MessagingConfig {
             ));
         }
         self.required_credentials(app_env)?;
+        self.required_source_stream()?;
+        Ok(())
+    }
+
+    /// The stream an active producer publishes to.
+    ///
+    /// # Errors
+    ///
+    /// Returns `messaging.source_stream` when the value is absent.
+    pub fn required_source_stream(&self) -> Result<&str, ValidationError> {
         required(
             "messaging.source_stream",
             self.source_stream.as_deref(),
             "an active producer",
-        )?;
-        Ok(())
+        )
     }
 
     /// Validate the inputs required by a consuming worker.
@@ -184,13 +193,7 @@ impl MessagingConfig {
             1,
             MAX_RESIDENT_DELIVERY_BYTES - DELIVERY_OVERHEAD_BYTES,
         )?;
-        int_range(
-            "messaging.consumer_concurrency",
-            u64::from(self.consumer_concurrency),
-            1,
-            u64::from(u32::MAX),
-        )?;
-        let resident = u64::from(self.consumer_concurrency)
+        let resident = u64::from(self.consumer_concurrency.get())
             .checked_mul(
                 self.max_payload_bytes
                     .as_u64()
@@ -246,6 +249,8 @@ fn is_local_development(app_env: &str) -> bool {
     reason = "focused configuration tests use unwrap only after the asserted contract succeeds"
 )]
 mod tests {
+    use std::num::NonZeroU32;
+
     use super::*;
 
     #[test]
@@ -253,7 +258,7 @@ mod tests {
         let config = MessagingConfig::default();
         assert!(!config.is_active());
         assert_eq!(config.max_payload_bytes, ByteSize::mib(1));
-        assert_eq!(config.consumer_concurrency, 1);
+        assert_eq!(config.consumer_concurrency, NonZeroU32::MIN);
         config.validate("production").unwrap();
     }
 
@@ -326,7 +331,7 @@ mod tests {
     fn resident_delivery_memory_is_bounded() {
         let config = MessagingConfig {
             max_payload_bytes: ByteSize::mib(1),
-            consumer_concurrency: 64,
+            consumer_concurrency: NonZeroU32::new(64).unwrap(),
             ..MessagingConfig::default()
         };
         assert_eq!(

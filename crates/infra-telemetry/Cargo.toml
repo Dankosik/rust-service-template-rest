@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 axum = { workspace = true, features = ["http1", "tokio"] }
-json-subscriber = { workspace = true, features = ["tracing-opentelemetry-0-33", "tracing-log"] }
+json-subscriber = { workspace = true, features = ["tracing-log"] }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 metrics-process = { workspace = true, features = ["metrics-rs"] }

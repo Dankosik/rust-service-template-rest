@@ -21,8 +21,8 @@ default = []
 test-support = []
 
 [dependencies]
-base64 = { workspace = true, features = ["alloc"] }
 # template:begin oidc-jwt:authn-jwt-dependency
+base64 = { workspace = true, features = ["alloc"] }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 aws-lc-rs = { workspace = true, features = ["alloc", "aws-lc-sys", "prebuilt-nasm"] }
 # template:end oidc-jwt:authn-jwt-dependency
@@ -35,7 +35,6 @@ sha2 = { workspace = true }
 # template:end oidc-introspection:authn-secret-dependency
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std", "raw_value"] }
-serde_with = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros", "io-util"] }

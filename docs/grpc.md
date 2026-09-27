@@ -35,9 +35,10 @@ Plaintext is an operator trust decision, including platform TLS termination
 or mesh mTLS. Retaining bearer authentication does not require in-process
 TLS. With an authentication profile retained, configure its real verifier
 before enabling gRPC. Runtime `authn.mode = "none"` cannot expose the
-listener. Only exact `/grpc.health.v1.Health/Check` is public and ignores
-supplied credentials. Watch and every application method require the opening
-bearer. Selecting `AUTHN=none` removes that requirement.
+listener. The standard health service, `Check` and `Watch`, is public and
+ignores supplied credentials, as load balancers and Kubernetes gRPC probes
+expect. Every application method requires the opening bearer. Selecting
+`AUTHN=none` removes that requirement.
 
 Process TLS uses the same accept loop. `security = "tls"` builds a rustls
 `ServerConfig` in `infra_grpc` and passes it to
@@ -46,11 +47,13 @@ Supply the PEM certificate chain in `grpc.certificate` and
 `APP__GRPC__PRIVATE_KEY` through the environment. The private key is rejected
 in configuration files. `grpc.client_ca` makes verified client certificates
 mandatory. The server admits TLS 1.3 only, with `h2` ALPN. Invalid material
-refuses startup. Certificates reload on process restart. Configuration Debug
+refuses startup with an error that names the certificate, private key or CA,
+never its value. The key is borrowed from its secret wrapper, not copied. Certificates reload on process restart. Configuration Debug
 omits certificate, CA and key material.
 
-The effective HTTP drain budget must be at least eight seconds when gRPC is
-enabled. A shorter budget refuses startup. Disabled gRPC does not bind, read
+The effective HTTP drain budget must be at least eight seconds
+(`infra_grpc::CALL_DEADLINE_CAP`) when gRPC is enabled. A shorter budget
+refuses startup and says so. Disabled gRPC does not bind, read
 TLS material or require a verifier. [Configuration source
 policy](configuration-source-policy.md) owns precedence and secret custody.
 
@@ -76,7 +79,7 @@ fn main() -> std::process::ExitCode {
 
 See the complete [example](../crates/service/examples/grpc.rs). `Services::add`
 records `NamedService::NAME` for health and adds the server to tonic
-`Routes`. A duplicate name fails startup. Do not build another listener or
+`Routes`. A duplicate name fails startup with `Error::DuplicateService`. Do not build another listener or
 per-handler middleware stack. Handler `Status` values pass through unchanged.
 
 With authentication retained, a successful verify inserts
@@ -90,13 +93,18 @@ Outermost to innermost:
 1. Observation.
 2. Panic recovery. The response is `INTERNAL` / `request failed`. The payload
    goes to the normal panic hook, as on HTTP. There is no suppressing hook.
-3. Bearer authentication, when that profile is retained. Exact
-   `Health/Check` is public. Missing, malformed and invalid bearers are
+3. Business routes only: bearer authentication, when that profile is
+   retained. Health is outside it. Missing, malformed and invalid bearers are
    `UNAUTHENTICATED` / `authentication failed`. Provider unavailability is
-   `UNAVAILABLE` / `authentication is unavailable`.
+   `UNAVAILABLE` / `authentication is unavailable`. Each outcome is counted
+   in `authn_verifications_total{transport="grpc"}` by the same
+   `Verifier::authenticate` the HTTP boundary uses.
 4. Business routes only: a concurrency limit of 256. A shed call is
-   `RESOURCE_EXHAUSTED` / `server is at capacity`. Health is outside this
-   limit.
+   `RESOURCE_EXHAUSTED` / `server is at capacity` and increments
+   `grpc_server_shed_requests_total`. Health is outside this limit. A permit
+   is held until response headers, so it bounds unary and client-streaming
+   calls; server-streaming and bidi streams that are already open are bounded
+   by the connection cap and the HTTP/2 stream limit instead.
 5. Business routes only: deadline `min(grpc-timeout, 8s)`, measured until the
    handler returns response headers. Expiry is `DEADLINE_EXCEEDED` /
    `request deadline exceeded`. A malformed `grpc-timeout`, including more
@@ -104,7 +112,7 @@ Outermost to innermost:
 
 ## Deadlines
 
-The eight-second cap is tonic `Server::timeout` placement with a
+The eight-second cap (`CALL_DEADLINE_CAP`) is tonic `Server::timeout` placement with a
 `DEADLINE_EXCEEDED` status. It is not a body-lifetime timer.
 
 - Unary: the whole call, because the handler returns the response.
@@ -127,8 +135,8 @@ Fixed listener options, shared with HTTP except for the values below:
 - HTTP/2 PING keepalive every 20 seconds, with a 20 second timeout.
 - Hyper's default concurrent-stream limit, 200 in locked hyper 1.11.1. This
   listener does not set its own, and hyper does not treat that number as stable.
-- Tonic's default 4 MiB decode limit on business RPCs. The transport sets no
-  encode cap. Health messages are capped at 4 MiB in both directions.
+- Tonic's default 4 MiB decode limit on business RPCs and health. The
+  transport sets no encode cap.
 
 ## Handler validation
 
@@ -179,9 +187,13 @@ or catalog-owned. Tonic's own decode-limit status is unchanged.
 Create one lazy `infra_grpc::Client` per trusted operator destination.
 `Client::new(destination, ClientSecurity)` performs no DNS or socket I/O.
 `ClientSecurity::Plaintext` or `ClientSecurity::Tls(ClientTlsMaterial)` is
-explicit. TLS uses tonic `ClientTlsConfig`: normal certificate and hostname
-verification, native roots unless a CA is supplied, and an optional client
-identity. The server remains TLS 1.3-only; the client does not. Construction
+explicit, and the destination scheme must agree: `http` for plaintext,
+`https` for TLS. Tonic applies TLS only to `https`, so a mismatch is
+`Error::DestinationSecurityMismatch` rather than a silent plaintext
+connection. TLS uses tonic `ClientTlsConfig`: normal certificate and hostname
+verification, native roots unless a CA is supplied, and an optional
+`ClientIdentity` whose key is a `SecretString`. Unusable PEM input fails
+construction with the variant that names it. The server remains TLS 1.3-only; the client does not. Construction
 sets a 5 second connect timeout, a 60 second TCP keepalive, and HTTP/2
 keepalive at 20 seconds with a 20 second timeout. Clones share the lazy
 channel.
@@ -199,7 +211,9 @@ let response = client.unary(request).await?;
 
 The client injects the current trace context and records its span and metrics
 from response headers. A transport failure is `UNAVAILABLE` /
-`transport unavailable`. There is no application retry, replay, hedging,
+`transport unavailable` to the caller, because a handler may forward that
+status; the cause is logged as `grpc_client_transport_failed` inside the
+client span. There is no application retry, replay, hedging,
 discovery or client health polling.
 
 <!-- template:begin outbound-auth-grpc:docs-grpc-oauth -->
@@ -215,17 +229,17 @@ let client = EchoServiceClient::new(authenticated);
 A caller-supplied `Authorization` is `INVALID_ARGUMENT` before any token or
 resource I/O. The acquisition deadline is `grpc-timeout` when that header is
 present and well formed; otherwise it is the owner's five-second fetch
-timeout. Acquisition failure prevents dispatch. One bearer is inserted at
+timeout. Token wait spends that deadline: `grpc-timeout` is rewritten to the
+remaining budget before dispatch. Acquisition failure prevents dispatch. One bearer is inserted at
 opening and is not refreshed mid-stream.
 
 Eviction runs only on the initial response: `grpc-status` `UNAUTHENTICATED`,
 or HTTP 401 with no `grpc-status`. Trailers are not inspected. The response
-is returned unchanged. Conditional invalidation of that exact credential
-spends only the remaining deadline and starts no background work. A newer
-cached replacement survives. `PERMISSION_DENIED` keeps the credential. Hard
-expiry before dispatch is a timeout and sends no resource request. The
+is returned unchanged. Conditional eviction of that exact token is an in-memory
+update and starts no background work. A newer cached replacement survives.
+`PERMISSION_DENIED` keeps the credential. The
 [OAuth owner](outbound-machine-authentication.md) keeps the token, cache and
-coalescing policy.
+reuse policy.
 <!-- template:end outbound-auth-grpc:docs-grpc-oauth -->
 
 ## Health, shutdown and observation
@@ -252,18 +266,20 @@ separate gRPC cleanup stage.
 
 Server spans come from
 `tracing_opentelemetry_instrumentation_sdk` gRPC helpers. The parent is the
-extracted incoming context. Counters and histograms are `grpc_calls_total`
-(`method`, `direction`, `outcome`) and `grpc_call_duration_seconds`
-(`method`, `direction`). `direction` is `server` or `client`. `outcome` is the
-closed status name: `ok`, `cancelled`, `deadline_exceeded`,
-`invalid_argument`, `unauthenticated`, `permission_denied`, `not_found`,
-`already_exists`, `aborted`, `unimplemented`, `resource_exhausted`,
-`unavailable`, or `internal` (which also covers `UNKNOWN`, `DATA_LOSS`,
-`FAILED_PRECONDITION` and `OUT_OF_RANGE`).
+extracted incoming context. Metrics follow the grpc-ecosystem Prometheus
+names, so standard gRPC dashboards and alerts apply:
+`grpc_server_handled_total` and `grpc_client_handled_total`
+(`grpc_service`, `grpc_method`, `grpc_code`), the histograms
+`grpc_server_handling_seconds` and `grpc_client_handling_seconds`
+(`grpc_service`, `grpc_method`), and `grpc_server_shed_requests_total`.
+`grpc_code` is the grpc-go code name, one of all 17: `OK`, `Canceled`,
+`InvalidArgument`, `FailedPrecondition` and so on. The histograms measure time
+to response headers.
 
-On the server, `method` is the request path only when the call was dispatched
-to a registered service or to health and the header status is not
-`UNIMPLEMENTED`. Otherwise `method` is `"unknown"`. Spans and metrics use the
+On the server, `grpc_service` and `grpc_method` come from the request path
+only when the call was dispatched to a registered service or to health and the
+header status is not `UNIMPLEMENTED`. Otherwise both are `"unknown"`, so a
+caller-chosen path cannot create a series. Spans and metrics use the
 response-header status. A missing `grpc-status` header is recorded as ok, so
 a streaming error sent only in trailers is not reflected. Payloads, metadata
 values, bearer tokens and raw errors are not transport attributes.

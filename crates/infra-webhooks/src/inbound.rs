@@ -7,26 +7,31 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use http::HeaderMap;
 use http::header::CONTENT_TYPE;
 use infra_jobs::{
-    CompleteError, EnqueueError, EnqueueOptions, Handler, Job, JobError, JobKind, enqueue,
+    CompleteError, EnqueueError, EnqueueOptions, Handler, Job, JobError, JobKind, Kinds, Policy,
+    enqueue,
 };
 use infra_postgres::{Isolation, Tx, TxError, TxOptions, connection, in_tx, in_tx_with};
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
+use serde_with::base64::Base64;
+use serde_with::serde_as;
 use sqlx::postgres::PgPool;
+use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
 
-use crate::protocol::{KeyRing, MAX_BODY_BYTES, verify};
+use crate::protocol::KeyRing;
 
-const INCOMING_VERSION: u8 = 1;
+/// Re-exported so a consumer crate implements [`Consumer`] without its own
+/// `async-trait` dependency, as `tonic::async_trait` does for services.
+pub use async_trait::async_trait;
+
+// Under REPEATABLE READ a concurrent `ON CONFLICT DO NOTHING` fails with 40001
+// instead of reporting the duplicate, so admission pins READ COMMITTED.
 const READ_COMMITTED: TxOptions = TxOptions {
     isolation: Isolation::ReadCommitted,
     read_only: false,
@@ -36,6 +41,31 @@ const INSERT_RECEIPT: &str = "INSERT INTO webhook_receipts (endpoint_id, message
     VALUES ($1, $2) \
     ON CONFLICT (endpoint_id, message_id) DO NOTHING \
     RETURNING message_id";
+
+/// A sender retries one message ID with fresh timestamps for its whole retry
+/// horizon. Standard Webhooks senders retry for more than a day; this
+/// template's own outbound schedule runs about six days, so receipts must
+/// outlive that horizon. The spec's 5-minute example only covers replay of
+/// one signed request.
+const RECEIPT_RETENTION: Duration = Duration::from_hours(7 * 24);
+
+/// Cleanup cadence; the first run starts at once.
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// The most rows one cleanup batch deletes: the `LIMIT` in [`CLEANUP_BATCH`].
+const CLEANUP_BATCH_ROWS: u64 = 500;
+
+/// Bounds a cleanup batch on the server, so a batch whose client has gone
+/// still ends within 1 s.
+const CLEANUP_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '1000ms'";
+
+/// One batch of expired receipts. The `interval '7 days'` is [`RECEIPT_RETENTION`].
+const CLEANUP_BATCH: &str = "DELETE FROM webhook_receipts WHERE (endpoint_id, message_id) IN \
+    (SELECT endpoint_id, message_id FROM webhook_receipts \
+    WHERE received_at < statement_timestamp() - interval '7 days' \
+    ORDER BY received_at LIMIT 500 FOR UPDATE SKIP LOCKED)";
+
+const _: () = assert!(RECEIPT_RETENTION.as_secs() == 7 * 24 * 60 * 60);
 
 /// The durable admission result for one verified delivery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,11 +119,6 @@ impl Receiver {
     ///
     /// Returns a closed rejection for an unknown endpoint or invalid signature,
     /// or unavailable when receipt ownership could not be acknowledged.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed error when the endpoint is unknown, verification is
-    /// rejected, or the durable transaction is unavailable or uncertain.
     pub async fn receive(
         &self,
         endpoint_id: &str,
@@ -104,10 +129,9 @@ impl Receiver {
         let Some(keys) = self.endpoints.get(endpoint_id) else {
             return Err(ReceiveError::UnknownEndpoint);
         };
-        let verified = verify(keys, headers, body, now).map_err(|_| ReceiveError::Rejected)?;
-        if verified.message_id().len() > 255 {
-            return Err(ReceiveError::Rejected);
-        }
+        let verified = keys
+            .verify(headers, body, now)
+            .map_err(|_| ReceiveError::Rejected)?;
         let content_type = headers
             .get(CONTENT_TYPE)
             .map(|value| value.as_bytes().to_vec());
@@ -155,6 +179,57 @@ impl Receiver {
             }
         }
     }
+
+    /// Delete expired receipts in batches of at most 500 until a batch
+    /// deletes fewer, and return how many were deleted. Each batch is its
+    /// own transaction with a 1 s statement timeout, and skips receipts a
+    /// concurrent admission holds.
+    ///
+    /// # Errors
+    ///
+    /// The failure class of the batch that failed; earlier batches stay
+    /// committed.
+    pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
+        let mut removed = 0;
+        loop {
+            let batch = in_tx(&self.pool, async |tx| -> Result<u64, Failed> {
+                sqlx::query(CLEANUP_STATEMENT_TIMEOUT)
+                    .execute(connection(tx))
+                    .await
+                    .map_err(|_| Failed(CleanupError::Statement))?;
+                let deleted = sqlx::query(CLEANUP_BATCH)
+                    .execute(connection(tx))
+                    .await
+                    .map_err(|_| Failed(CleanupError::Statement))?;
+                Ok(deleted.rows_affected())
+            })
+            .await
+            .map_err(|Failed(failure)| failure)?;
+            removed += batch;
+            if batch < CLEANUP_BATCH_ROWS {
+                return Ok(removed);
+            }
+        }
+    }
+
+    /// The periodic cleanup task body: one [`Self::remove_expired`] run
+    /// every 60 s, the first at once. A failed run logs its class and waits
+    /// for the next tick; it changes neither readiness nor serving. Returns
+    /// when `cancel` fires, dropping a run in flight.
+    pub async fn run_cleanup(self, cancel: CancellationToken) {
+        let _ = cancel
+            .run_until_cancelled(async {
+                let mut ticker = tokio::time::interval(CLEANUP_INTERVAL);
+                ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+                loop {
+                    ticker.tick().await;
+                    if let Err(failure) = self.remove_expired().await {
+                        tracing::warn!(failure = %failure, "webhook_receipt_cleanup_failed");
+                    }
+                }
+            })
+            .await;
+    }
 }
 
 impl fmt::Debug for Receiver {
@@ -179,22 +254,31 @@ enum ReceiptFailure {
 }
 
 /// The retained payload of a verified inbound delivery.
+///
+/// Unknown fields are ignored so a queued row written with `"version": 1`
+/// still decodes.
+#[serde_as]
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Incoming {
+    #[serde(skip_deserializing, default = "incoming_version")]
     version: u8,
     endpoint_id: String,
-    #[serde(with = "base64_bytes")]
+    #[serde_as(as = "Base64")]
     message_id: Vec<u8>,
-    #[serde(with = "optional_base64_bytes")]
+    #[serde_as(as = "Option<Base64>")]
     content_type: Option<Vec<u8>>,
-    #[serde(with = "base64_bytes")]
+    #[serde_as(as = "Base64")]
     body: Vec<u8>,
+}
+
+const fn incoming_version() -> u8 {
+    1
 }
 
 impl Incoming {
     fn new(endpoint_id: &str, message_id: &[u8], content_type: Option<&[u8]>, body: &[u8]) -> Self {
         Self {
-            version: INCOMING_VERSION,
+            version: incoming_version(),
             endpoint_id: endpoint_id.to_owned(),
             message_id: message_id.to_vec(),
             content_type: content_type.map(ToOwned::to_owned),
@@ -225,14 +309,6 @@ impl Incoming {
     pub fn body(&self) -> &[u8] {
         &self.body
     }
-
-    fn is_valid(&self) -> bool {
-        self.version == INCOMING_VERSION
-            && !self.endpoint_id.is_empty()
-            && !self.endpoint_id.contains('\0')
-            && !self.message_id.is_empty()
-            && self.body.len() <= MAX_BODY_BYTES
-    }
 }
 
 impl fmt::Debug for Incoming {
@@ -255,13 +331,13 @@ impl JobKind for Incoming {
 const _: () = infra_jobs::assert_valid_kind_name(Incoming::NAME);
 
 /// A provider adapter that applies one retained delivery inside its transaction.
+///
+/// Implement it under [`async_trait`](macro@async_trait), the workspace idiom
+/// for object-safe async traits.
+#[async_trait]
 pub trait Consumer: Send + Sync + 'static {
     /// Apply `incoming` through the adopter's business boundary.
-    fn process<'a>(
-        &'a self,
-        tx: &'a mut Tx<'_>,
-        incoming: &'a Incoming,
-    ) -> Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'a>>;
+    async fn process(&self, tx: &mut Tx<'_>, incoming: &Incoming) -> Result<(), JobError>;
 }
 
 /// Explicit endpoint-to-consumer bindings for a processing worker.
@@ -286,15 +362,36 @@ impl Consumers {
         self.entries.insert(endpoint_id.into(), consumer)
     }
 
-    /// Whether an explicit consumer binding exists for `endpoint_id`.
-    #[must_use]
-    pub fn contains(&self, endpoint_id: &str) -> bool {
-        self.entries.contains_key(endpoint_id)
+    /// Fail when a configured endpoint has no consumer binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MissingConsumer`] for the first unbound endpoint.
+    pub fn require<'a>(
+        &self,
+        endpoint_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), MissingConsumer> {
+        for endpoint in endpoint_ids {
+            if !self.entries.contains_key(endpoint) {
+                return Err(MissingConsumer {
+                    endpoint: endpoint.to_owned(),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn get(&self, endpoint_id: &str) -> Option<Arc<dyn Consumer>> {
         self.entries.get(endpoint_id).cloned()
     }
+}
+
+/// A configured inbound endpoint with no consumer binding.
+#[derive(Debug, thiserror::Error)]
+#[error("inbound webhook endpoint {endpoint} has no consumer binding")]
+pub struct MissingConsumer {
+    /// The unbound endpoint ID.
+    pub endpoint: String,
 }
 
 impl fmt::Debug for Consumers {
@@ -317,6 +414,11 @@ impl Processor {
     pub fn new(consumers: Consumers) -> Self {
         Self { consumers }
     }
+
+    /// Register `webhooks.process` with the default jobs policy.
+    pub fn register(self, kinds: &mut Kinds) -> &mut Kinds {
+        kinds.register(Policy::default(), self)
+    }
 }
 
 impl fmt::Debug for Processor {
@@ -330,12 +432,8 @@ impl fmt::Debug for Processor {
 
 impl Handler<Incoming> for Processor {
     fn run(&self, job: Job<Incoming>) -> impl Future<Output = Result<(), JobError>> + Send {
-        let incoming = job.payload().clone();
-        let consumer = self.consumers.get(incoming.endpoint_id());
+        let consumer = self.consumers.get(job.payload().endpoint_id());
         async move {
-            if !incoming.is_valid() {
-                return Err(JobError::permanent("invalid inbound webhook payload"));
-            }
             let Some(consumer) = consumer else {
                 tracing::warn!(
                     event = "webhook_processor_missing_binding",
@@ -348,7 +446,7 @@ impl Handler<Incoming> for Processor {
             let pool = job.pool().clone();
             let completed = in_tx(&pool, async |tx| -> Result<(), ProcessFailure> {
                 consumer
-                    .process(tx, &incoming)
+                    .process(tx, job.payload())
                     .await
                     .map_err(ProcessFailure::Consumer)?;
                 job.complete_in_tx(tx)
@@ -360,27 +458,19 @@ impl Handler<Incoming> for Processor {
             match completed {
                 Ok(()) => Ok(()),
                 Err(ProcessFailure::Consumer(error)) => Err(error),
-                Err(ProcessFailure::Completion(CompleteError::StaleClaim)) => Err(
-                    JobError::retryable("inbound webhook completion became stale"),
-                ),
-                Err(ProcessFailure::Completion(CompleteError::Database(_))) => Err(
-                    JobError::retryable("inbound webhook completion is unavailable"),
-                ),
-                Err(ProcessFailure::Transaction(TxError::CommitUnknown(_))) => Err(
-                    JobError::retryable("inbound webhook processing commit outcome is unknown"),
-                ),
-                Err(ProcessFailure::Transaction(_)) => Err(JobError::retryable(
-                    "inbound webhook processing is unavailable",
-                )),
+                Err(other) => Err(JobError::retryable(other)),
             }
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum ProcessFailure {
+    #[error("inbound webhook consumer failed")]
     Consumer(JobError),
+    #[error("inbound webhook completion failed")]
     Completion(CompleteError),
+    #[error("inbound webhook processing is unavailable")]
     Transaction(TxError),
 }
 
@@ -390,48 +480,29 @@ impl From<TxError> for ProcessFailure {
     }
 }
 
-mod base64_bytes {
-    use super::*;
-
-    pub(super) fn serialize<S>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&STANDARD.encode(value))
-    }
-
-    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let encoded = String::deserialize(deserializer)?;
-        STANDARD.decode(encoded).map_err(D::Error::custom)
-    }
+/// The failure class of one receipt cleanup run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CleanupError {
+    #[error("acquire")]
+    Acquire,
+    #[error("begin")]
+    Begin,
+    #[error("statement")]
+    Statement,
+    #[error("commit")]
+    Commit,
 }
 
-mod optional_base64_bytes {
-    use super::*;
+/// A failed cleanup batch, by class, which leaves the batch's transaction as
+/// an error.
+struct Failed(CleanupError);
 
-    #[allow(
-        clippy::ref_option,
-        reason = "serde passes a reference to the optional field"
-    )]
-    pub(super) fn serialize<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match value {
-            Some(value) => serializer.serialize_some(&STANDARD.encode(value)),
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Option::<String>::deserialize(deserializer)?
-            .map(|encoded| STANDARD.decode(encoded).map_err(D::Error::custom))
-            .transpose()
+impl From<TxError> for Failed {
+    fn from(err: TxError) -> Self {
+        Self(match err {
+            TxError::Acquire(_) => CleanupError::Acquire,
+            TxError::Begin(_) => CleanupError::Begin,
+            TxError::CommitFailed(_) | TxError::CommitUnknown(_) => CleanupError::Commit,
+        })
     }
 }

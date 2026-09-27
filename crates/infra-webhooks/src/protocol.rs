@@ -18,6 +18,11 @@ use http::{HeaderMap, HeaderValue};
 pub const MAX_BODY_BYTES: usize = 128 * 1024;
 const TIMESTAMP_TOLERANCE_SECONDS: i128 = 300;
 const SIGNATURE_PREFIX: &[u8] = b"v1,";
+const MIN_KEY_BYTES: usize = 24;
+const MAX_KEY_BYTES: usize = 64;
+
+/// The longest `webhook-id` accepted by verification.
+pub const MAX_MESSAGE_ID_BYTES: usize = 255;
 
 /// A decoded HMAC-SHA256 signing key.
 ///
@@ -32,13 +37,13 @@ impl SigningKey {
     /// # Errors
     ///
     /// Returns [`ProtocolError::InvalidKey`] when the value is not standard
-    /// base64 or decodes to no bytes.
+    /// base64 or decodes to fewer than 24 or more than 64 bytes.
     pub fn from_encoded(encoded: &str) -> Result<Self, ProtocolError> {
         let encoded = encoded.strip_prefix("whsec_").unwrap_or(encoded);
         let decoded = STANDARD
             .decode(encoded)
             .map_err(|_| ProtocolError::InvalidKey)?;
-        if decoded.is_empty() {
+        if !(MIN_KEY_BYTES..=MAX_KEY_BYTES).contains(&decoded.len()) {
             return Err(ProtocolError::InvalidKey);
         }
         Ok(Self(hmac::Key::new(hmac::HMAC_SHA256, &decoded)))
@@ -74,7 +79,7 @@ impl KeyRing {
     /// # Errors
     ///
     /// Returns [`ProtocolError::InvalidKey`] when either supplied secret is
-    /// malformed or empty after decoding.
+    /// malformed or outside the 24–64 byte range.
     pub fn from_encoded(active: &str, previous: Option<&str>) -> Result<Self, ProtocolError> {
         let active = SigningKey::from_encoded(active)?;
         let previous = previous.map(SigningKey::from_encoded).transpose()?;
@@ -118,7 +123,32 @@ impl KeyRing {
         body: &[u8],
         now: SystemTime,
     ) -> Result<VerifiedMessage, ProtocolError> {
-        verify(self, headers, body, now)
+        ensure_body_size(body)?;
+        let message_id = single_header(headers, "webhook-id")?;
+        ensure_message_id(message_id.as_bytes())?;
+        let timestamp = parse_timestamp(single_header(headers, "webhook-timestamp")?)?;
+        ensure_timestamp_window(timestamp, now)?;
+        let message = signed_message(message_id.as_bytes(), timestamp, body)?;
+
+        let mut saw_signature = false;
+        for value in &headers.get_all("webhook-signature") {
+            saw_signature = true;
+            if signature_matches(&self.active, &message, value)
+                || self
+                    .previous
+                    .as_ref()
+                    .is_some_and(|key| signature_matches(key, &message, value))
+            {
+                return Ok(VerifiedMessage {
+                    message_id: Bytes::copy_from_slice(message_id.as_bytes()),
+                    timestamp,
+                });
+            }
+        }
+        if !saw_signature {
+            return Err(ProtocolError::MissingHeader);
+        }
+        Err(ProtocolError::InvalidSignature)
     }
 }
 
@@ -152,7 +182,7 @@ impl VerifiedMessage {
 /// Closed reasons for key construction or webhook verification failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ProtocolError {
-    /// The configured key is not decodable Standard Webhooks base64 or is empty.
+    /// The configured key is not decodable Standard Webhooks base64, or is outside 24–64 bytes.
     #[error("webhook signing key is invalid")]
     InvalidKey,
     /// The raw body exceeds [`MAX_BODY_BYTES`].
@@ -164,7 +194,7 @@ pub enum ProtocolError {
     /// Repeated identity or timestamp headers disagree.
     #[error("webhook signature evidence is ambiguous")]
     ConflictingHeader,
-    /// The message identifier is empty or contains the signed delimiter.
+    /// The message identifier is empty, contains the signed delimiter, or exceeds [`MAX_MESSAGE_ID_BYTES`].
     #[error("webhook message identifier is invalid")]
     InvalidMessageId,
     /// The timestamp is not a signed i64 decimal value.
@@ -176,49 +206,6 @@ pub enum ProtocolError {
     /// No supplied v1 signature matched a configured key.
     #[error("webhook signature is invalid")]
     InvalidSignature,
-}
-
-/// Verify the Standard Webhooks v1 evidence carried by `headers` and `body`.
-///
-/// The function bounds the raw body before inspecting any header or parsing any
-/// higher-level representation. It accepts any valid v1 candidate across the
-/// active and optional predecessor keys.
-///
-/// # Errors
-///
-/// Returns a closed [`ProtocolError`] with no submitted or secret material.
-pub fn verify(
-    keys: &KeyRing,
-    headers: &HeaderMap,
-    body: &[u8],
-    now: SystemTime,
-) -> Result<VerifiedMessage, ProtocolError> {
-    ensure_body_size(body)?;
-    let message_id = single_header(headers, "webhook-id")?;
-    ensure_message_id(message_id.as_bytes())?;
-    let timestamp = parse_timestamp(single_header(headers, "webhook-timestamp")?)?;
-    ensure_timestamp_window(timestamp, now)?;
-    let message = signed_message(message_id.as_bytes(), timestamp, body)?;
-
-    let mut saw_signature = false;
-    for value in &headers.get_all("webhook-signature") {
-        saw_signature = true;
-        if signature_matches(&keys.active, &message, value)
-            || keys
-                .previous
-                .as_ref()
-                .is_some_and(|key| signature_matches(key, &message, value))
-        {
-            return Ok(VerifiedMessage {
-                message_id: Bytes::copy_from_slice(message_id.as_bytes()),
-                timestamp,
-            });
-        }
-    }
-    if !saw_signature {
-        return Err(ProtocolError::MissingHeader);
-    }
-    Err(ProtocolError::InvalidSignature)
 }
 
 fn ensure_body_size(body: &[u8]) -> Result<(), ProtocolError> {
@@ -240,9 +227,11 @@ fn single_header<'a>(
 }
 
 fn ensure_message_id(message_id: &[u8]) -> Result<(), ProtocolError> {
-    (!message_id.is_empty() && !message_id.contains(&b'.'))
-        .then_some(())
-        .ok_or(ProtocolError::InvalidMessageId)
+    (!message_id.is_empty()
+        && message_id.len() <= MAX_MESSAGE_ID_BYTES
+        && !message_id.contains(&b'.'))
+    .then_some(())
+    .ok_or(ProtocolError::InvalidMessageId)
 }
 
 fn parse_timestamp(value: &HeaderValue) -> Result<i64, ProtocolError> {
@@ -304,7 +293,9 @@ mod tests {
 
     use http::{HeaderMap, HeaderValue};
 
-    use super::{KeyRing, MAX_BODY_BYTES, ProtocolError};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    use super::{KeyRing, MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES, ProtocolError, SigningKey};
 
     // Published Rust reference vector at
     // https://github.com/standard-webhooks/standard-webhooks/blob/59104160f10908d80ee571a81460e1c9c0c05355/libraries/rust/src/lib.rs#L175-L185
@@ -328,6 +319,44 @@ mod tests {
             HeaderValue::from_str(signature).unwrap(),
         );
         headers
+    }
+
+    #[test]
+    fn accepts_keys_from_24_through_64_bytes_and_rejects_the_adjacent_lengths() {
+        for (len, accepted) in [(23, false), (24, true), (64, true), (65, false)] {
+            let encoded = STANDARD.encode(vec![0x11; len]);
+            assert_eq!(
+                SigningKey::from_encoded(&encoded).is_ok(),
+                accepted,
+                "{len} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_a_255_byte_message_id_and_rejects_256_on_verify() {
+        let keys = KeyRing::from_encoded(ARBITRARY_BYTES_KEY, None).unwrap();
+        let body = b"x";
+        let accepted = "a".repeat(MAX_MESSAGE_ID_BYTES);
+        let signature = keys.signatures(accepted.as_bytes(), 1, body).unwrap();
+        assert!(
+            keys.verify(
+                &headers(&accepted, "1", &signature),
+                body,
+                UNIX_EPOCH + Duration::from_secs(1),
+            )
+            .is_ok()
+        );
+
+        let rejected = "a".repeat(MAX_MESSAGE_ID_BYTES + 1);
+        assert_eq!(
+            keys.verify(
+                &headers(&rejected, "1", "v1,not-base64"),
+                body,
+                UNIX_EPOCH + Duration::from_secs(1),
+            ),
+            Err(ProtocolError::InvalidMessageId)
+        );
     }
 
     #[test]

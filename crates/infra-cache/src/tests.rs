@@ -179,6 +179,12 @@ fn an_unparseable_dsn_does_not_echo_the_password() {
 }
 
 #[test]
+fn an_admitted_dsn_outside_a_runtime_is_refused() {
+    let err = Cache::connect(options("redis://127.0.0.1:6379", true, true, None)).unwrap_err();
+    assert_eq!(err, CacheError::NoRuntime);
+}
+
+#[test]
 fn options_debug_redacts_the_dsn() {
     let rendered = format!(
         "{:?}",
@@ -329,8 +335,8 @@ fn a_silent_server_records_timeout() {
 fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
     PrometheusBuilder::new()
         .set_buckets_for_metric(
-            Matcher::Full("cache_operation_duration_seconds".to_owned()),
-            &[0.0005, 0.001, 0.01, 0.05, 0.1, 0.25, 1.0],
+            Matcher::Full(crate::OPERATION_DURATION_METRIC.to_owned()),
+            crate::OPERATION_DURATION_BUCKETS,
         )
         .expect("observation buckets are valid")
         .build_recorder()

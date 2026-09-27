@@ -31,9 +31,11 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json, Router};
 use axum_test::{TestRequest, TestResponse, TestServer};
-use health::Readiness;
+use health::{Readiness, RefreshPolicy};
 use infra_bearerauthn::test_support::{FixtureTransport, prepare_introspection_with_fixture};
-use infra_bearerauthn::{IntrospectionCacheOptions, IntrospectionOptions, ProviderUrl, Verifier};
+use infra_bearerauthn::{
+    EndpointUrl, IntrospectionCacheOptions, IntrospectionOptions, IssuerUrl, Verifier,
+};
 use infra_http::idempotency::{
     Activation, Composer, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, Tx,
 };
@@ -368,9 +370,9 @@ impl Provider {
         .expect("the fixture transport");
         prepare_introspection_with_fixture(
             IntrospectionOptions {
-                issuer: ProviderUrl::parse(ISSUER).expect("fixture issuer URL"),
+                issuer: IssuerUrl::parse(ISSUER).expect("fixture issuer URL"),
                 audiences: vec![AUDIENCE.to_owned()],
-                endpoint: ProviderUrl::parse(&format!("https://{FIXTURE_HOST}/introspect"))
+                endpoint: EndpointUrl::parse(&format!("https://{FIXTURE_HOST}/introspect"))
                     .expect("fixture endpoint URL"),
                 client_id: "fixture-client".to_owned(),
                 client_secret: SecretString::from("fixture-secret"),
@@ -592,7 +594,7 @@ impl Mounted {
         let app = harden(
             mounted
                 .layer(Extension(widgets))
-                .with_state(Readiness::new(Vec::new()).reader()),
+                .with_state(readiness_reader()),
             &HardenOptions {
                 max_body_bytes: MAX_BODY_BYTES,
                 request_timeout: budget,
@@ -873,7 +875,7 @@ async fn final_document_controls_head_policy_and_preserves_native_fallbacks() {
     // runtime startup owns security, while the OpenAPI gate owns completeness.
     let router = infra_http::authn::finalize(contract, provider.verifier())
         .unwrap()
-        .with_state(Readiness::new(Vec::new()).reader());
+        .with_state(readiness_reader());
     let server = TestServer::new(harden(
         router,
         &HardenOptions {
@@ -1024,7 +1026,7 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
     let router = infra_http::authn::finalize(contract, provider.verifier())
         .expect("the protected contract finalizes without an idempotency composer");
     let server = TestServer::new(harden(
-        router.with_state(Readiness::new(Vec::new()).reader()),
+        router.with_state(readiness_reader()),
         &HardenOptions {
             max_body_bytes: MAX_BODY_BYTES,
             request_timeout: BUDGET,
@@ -1589,4 +1591,17 @@ async fn p9_a_read_only_writer_answers_unavailable(pool: PgPool) {
     assert_eq!(outcomes(&recorder), counts(&[("unavailable", 1)]));
     assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
     mounted.finish().await;
+}
+
+/// Router state only: these tests never read the readiness verdict.
+fn readiness_reader() -> health::ReadinessReader {
+    Readiness::new(
+        Vec::new(),
+        RefreshPolicy {
+            interval: Duration::from_secs(1),
+            probe_budget: Duration::from_secs(1),
+            failure_threshold: 1,
+        },
+    )
+    .reader()
 }

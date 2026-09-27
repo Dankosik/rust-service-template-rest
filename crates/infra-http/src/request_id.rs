@@ -35,16 +35,12 @@ pub(crate) fn strip_invalid<B>(mut request: Request<B>) -> Request<B> {
     request
 }
 
-/// The accepted request id, if the correlation layer ran.
-#[must_use]
-pub(crate) fn from_request_id(id: &RequestId) -> Option<String> {
-    id.header_value().to_str().ok().map(str::to_owned)
-}
-
 /// The accepted request id for this request, if the correlation layer ran.
 #[must_use]
-pub fn request_id(extensions: &axum::http::Extensions) -> Option<String> {
-    extensions.get::<RequestId>().and_then(from_request_id)
+pub(crate) fn request_id(extensions: &axum::http::Extensions) -> Option<String> {
+    extensions
+        .get::<RequestId>()
+        .and_then(|id| id.header_value().to_str().ok().map(str::to_owned))
 }
 
 #[cfg(test)]

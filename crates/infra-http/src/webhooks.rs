@@ -5,16 +5,15 @@
 //! outcomes into the service Problem catalog.  Signature verification and the
 //! receipt transaction remain in `infra-webhooks`.
 
-use std::error::Error as _;
 use std::fmt;
 use std::time::SystemTime;
 
 use axum::Router;
-use axum::body::to_bytes;
 use axum::extract::{Extension, Path, Request};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use health::ReadinessReader;
+use http_body_util::{BodyExt, Limited};
 use infra_webhooks::inbound::{ReceiptOutcome, ReceiveError, Receiver};
 use infra_webhooks::protocol::MAX_BODY_BYTES;
 use utoipa::OpenApi;
@@ -119,18 +118,12 @@ async fn receive(
         return outcome_problem(Code::NotFound, "unknown_endpoint");
     }
     let (parts, body) = request.into_parts();
-    let body = match to_bytes(body, MAX_BODY_BYTES).await {
-        Ok(body) => body,
-        Err(error) => {
-            let mut source = error.source();
-            while let Some(cause) = source {
-                if cause.is::<http_body_util::LengthLimitError>() {
-                    return outcome_problem(Code::RequestEntityTooLarge, "rejected");
-                }
-                source = cause.source();
-            }
-            return outcome_problem(Code::WebhookRejected, "rejected");
+    let body = match Limited::new(body, MAX_BODY_BYTES).collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(error) if error.is::<http_body_util::LengthLimitError>() => {
+            return outcome_problem(Code::RequestEntityTooLarge, "rejected");
         }
+        Err(_) => return outcome_problem(Code::WebhookRejected, "rejected"),
     };
     match receiver
         .receive(&endpoint_id, &parts.headers, &body, SystemTime::now())
@@ -173,14 +166,15 @@ mod tests {
 
     #[tokio::test]
     async fn inert_receiver_returns_a_problem_before_reading_or_authenticating_the_body() {
-        let readiness = Readiness::new(Vec::new());
-        readiness
-            .refresh(RefreshPolicy {
+        let readiness = Readiness::new(
+            Vec::new(),
+            RefreshPolicy {
                 interval: std::time::Duration::from_secs(1),
                 probe_budget: std::time::Duration::from_secs(1),
                 failure_threshold: 1,
-            })
-            .await;
+            },
+        );
+        readiness.refresh().await;
         let app = crate::finalize_public(router())
             .expect("the webhook operation is explicitly public")
             .with_state(readiness.reader())

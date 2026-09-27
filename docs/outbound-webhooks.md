@@ -24,11 +24,9 @@ APP__WEBHOOKS__ENDPOINTS__PARTNER__PREVIOUS_SECRET=whsec_<base64-key>
 ```
 
 Endpoint IDs are non-secret, nonempty, NUL-free values. The required secret and
-an explicitly supplied predecessor cannot be blank. Provider construction
-admits the URL and a nonempty decoded Standard Webhooks base64 key, with
-optional `whsec_` prefix. The
-recommended 24--64 random-byte range is provisioning guidance, not a second
-trusted-input rule; a 32-byte random key is an appropriate example.
+an explicitly supplied predecessor cannot be blank. `SigningKey::from_encoded`
+admits Standard Webhooks base64, with an optional `whsec_` prefix, only when the
+decoded key is 24--64 bytes. A 32-byte random key is an appropriate example.
 
 No secret belongs in TOML, a job payload, metrics, logs, URL parameters, or an
 application endpoint manifest. There is no management API, remote secret
@@ -38,45 +36,44 @@ as `previous_secret` while receivers accept both, then remove it and restart.
 
 ## Transactional acceptance and delivery
 
-An adopter resolves one endpoint and supplies final body bytes and a content
-type before its business transaction. The default content type is
-`application/json`. The caller enqueues through its current
-`&mut infra_postgres::Tx` and propagates an enqueue failure, so its business
-effect and job insert commit or roll back together. An acknowledged commit is
-the acceptance boundary. Unknown commit acknowledgement is uncertainty for the
-business owner, never permission to replay a transaction or claim no delivery.
-There is no webhook acceptance ledger, fan-out replay API, or business
-idempotency owner.
+An adopter resolves one endpoint ID and supplies final body bytes and an
+optional content type inside its business transaction. The default content type
+is `application/json`. Validation (unknown endpoint, body over 128 KiB, or a
+content type that is not a visible-ASCII header value) happens before any
+insert. The caller enqueues through its current `&mut infra_postgres::Tx` and
+propagates an enqueue failure, so its business effect and job insert commit or
+roll back together. An acknowledged commit is the acceptance boundary. Unknown
+commit acknowledgement is uncertainty for the business owner, never permission
+to replay a transaction or claim no delivery. There is no webhook acceptance
+ledger, fan-out replay API, or business idempotency owner.
 
-Construct `Outbound` once from the non-secret configured endpoint map. A
-producer prepares before entering its business transaction, then stages only
-the already-prepared delivery on the supplied transaction:
+Construct `Outbound` once from the configured endpoint IDs. No I/O; endpoint ID
+syntax is owned by configuration validation:
 
 ```rust,ignore
-let outbound = Outbound::new(endpoints)?;
-let delivery = outbound.prepare(endpoint_id, body, content_type)?;
-let job_id = delivery.enqueue(tx).await?;
+let outbound = Outbound::new(endpoint_ids);
+let job_id = outbound.enqueue(tx, endpoint_id, body, content_type).await?;
 ```
 
-Here `endpoints` is `BTreeMap<String, Endpoint>` containing admitted destination
-metadata only. The returned `JobId` is the stable Standard Webhooks message ID.
-This is provider wiring, not a template business event or consumer.
+The returned `JobId` is the stable Standard Webhooks message ID. This is
+provider wiring, not a template business event or consumer.
 
-The worker decodes each endpoint's current and optional predecessor keys before
-claims, builds one dispatcher from that current snapshot and its nonzero
-`jobs.max_workers`, and consumes it into the existing kind registry:
+The worker builds one `Endpoint` per configured destination before claims, each
+with its HTTPS URL, fixed-authority client, and decoded key ring, then consumes
+a `Dispatcher` into the existing kind registry:
 
 ```rust,ignore
-let dispatcher = outbound.dispatcher(signing_keys, max_workers)?;
-dispatcher.register(kinds);
+let endpoint = Endpoint::new(&url, keys)?;
+Dispatcher::new(endpoints).register(kinds);
 ```
 
 `Dispatcher::register` installs `webhooks.deliver` with `DELIVERY_POLICY` (20
-attempts and 30 seconds). Producers never resolve signing secrets. New jobs use
-the version-2 common payload of endpoint ID, content type, and body only. The
-reader accepts version 1 but ignores its obsolete destination and key-reference
-fields; they cannot route or sign a delivery. An endpoint missing from the
-current worker snapshot is retryable and spends an attempt.
+attempts and 30 seconds). Producers never resolve signing secrets. The queued
+payload carries `"version": 2`, endpoint ID, content type, and base64 body.
+New workers ignore that version and other unknown fields. A payload the worker
+cannot decode is retried by jobs, which keeps a rolling deploy safe; it is not a
+permanent failure. An endpoint missing from the current worker snapshot is
+retryable and spends an attempt.
 
 The payload stores endpoint ID, final bytes, and content type. Bodies are capped
 at 128 KiB; the existing JSONB-size check is final. Base64 preserves arbitrary
@@ -116,7 +113,7 @@ named gaps or the retained Cargo graphs expose a concrete aws-lc backend drawbac
 The interoperable wire authority is the [Standard Webhooks
 specification](https://github.com/standard-webhooks/standard-webhooks/blob/bece768d960f09e242f5cd5686d859e475d6b478/spec/standard-webhooks.md).
 
-The outbound snapshot builds one fixed-authority client and one decoded key ring
+The outbound snapshot builds one fixed-origin client and one decoded key ring
 for each configured endpoint before claims. The client owns hostname TLS
 verification, pooling, no proxy/redirect, and response bounds. Its attempt
 telemetry carries the method, receiver host and port, status, and a static
@@ -132,15 +129,10 @@ A complete bounded 2xx completes delivery; 410 is a permanent `endpoint_gone`
 outcome with an operator warning. Every other HTTP status, plus network,
 timeout, DNS, and response-read failures, retries with the stable ID. Valid
 `Retry-After` delta-seconds or HTTP-date is a jobs delay floor capped at 24h;
-malformed, elapsed, or conflicting advice uses ordinary backoff. Each endpoint
-client admits as many exchanges as the worker has jobs slots, so an attempt
-never fails locally for capacity. There is no per-endpoint concurrency limit: a
-refused attempt would be claimed again at once while the queue has due work, so
-a slow endpoint with a backlog would turn into a claim/snooze loop against
-PostgreSQL. Slow endpoints can therefore occupy worker slots until their
-30-second deadline. Isolating them needs a claim-time concurrency limit in the
-jobs owner, not a webhook-side refusal. Jobs alone owns jitter, leases, delay,
-exhaustion, and retry.
+malformed, elapsed, or zero advice uses ordinary backoff. Slow endpoints can
+occupy worker slots until their 30-second deadline. Isolating them needs a
+claim-time concurrency limit in the jobs owner, not a webhook-side refusal.
+Jobs alone owns jitter, leases, delay, exhaustion, and retry.
 
 ## Raw-byte interoperability vector
 
@@ -159,18 +151,14 @@ fixed interoperability input; it does not by itself prove a runtime path.
 
 ## Rollout and evidence
 
-Apply the migrations retained by the selected profile. Before any producer emits
-version-2 jobs, stop and fence every old worker and old producer, then start a
-new worker with the converted endpoint snapshot and only afterward enable v2
-producers. An old worker must not resume after the v2 cutover. The receipt
+Apply the migrations retained by the selected profile. New rows retain
+`"version": 2` so workers from the previous payload decode them; new workers
+ignore that version and other unknown fields. A row the worker cannot decode is
+retried, not failed permanently, so a rolling deploy stays safe. The receipt
 migration belongs only to the inbound profile.
 
-The v1 reader remains while any v1 job can be claimed, including retained or
-replayable terminal jobs, and while any old producer can still write one. Remove
-it only in a separately reviewed change after those conditions are demonstrably
-gone; do not bulk-rewrite durable payloads. Rollback stops new producers and
-drains relevant live jobs before removing capable workers; pending work or
-unknown commit state requires rolling forward. Provider registration, rotation
+Rollback stops new producers and drains relevant live jobs before removing
+capable workers; pending work or unknown commit state requires rolling forward. Provider registration, rotation
 execution, endpoint ownership, and egress certification remain operational work
 outside this guide. Jobs owns attempt/queue telemetry; this profile adds no
 delivery observer, health loop, automatic pause, deletion, notification channel,

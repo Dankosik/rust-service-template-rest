@@ -4,12 +4,11 @@ use std::fmt;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use sqlx::postgres::PgPool;
 use tokio::sync::Semaphore;
-use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -22,13 +21,13 @@ pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Recovery reserve added to each kind's attempt timeout.
 pub const LEASE_RESERVE: Duration = Duration::from_secs(60);
 /// How far the worker's own cancellation leads the database expiry.
-pub const CANCEL_MARGIN: Duration = Duration::from_secs(2);
+pub(crate) const CANCEL_MARGIN: Duration = Duration::from_secs(2);
 /// How long an outcome write waits before it is sent again.
-pub const RECORD_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+pub(crate) const RECORD_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// Client bound around one engine statement: acquire and statement acknowledgement.
-pub const OPERATION_BACKSTOP: Duration = Duration::from_secs(12);
+pub(crate) const OPERATION_BACKSTOP: Duration = Duration::from_secs(12);
 /// Counter of failed engine statements. Label `operation`.
-pub const OPERATION_FAILURES_METRIC: &str = "jobs_worker_operation_failures_total";
+pub(crate) const OPERATION_FAILURES_METRIC: &str = "jobs_worker_operation_failures_total";
 
 /// A worker's job engine. Cloning shares the pool, registry, and supervisor tracker.
 #[derive(Clone)]
@@ -77,14 +76,14 @@ pub enum StartupError {
 }
 
 /// Why one engine statement did not finish with an acknowledgement.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum OperationError {
     /// The pool did not hand out a connection.
     #[error("acquire")]
-    Acquire,
+    Acquire(#[source] sqlx::Error),
     /// The statement failed, or a returned row did not decode.
     #[error("statement")]
-    Statement,
+    Statement(#[source] sqlx::Error),
     /// The client bound fired before the statement returned.
     #[error("timed out")]
     TimedOut,
@@ -93,12 +92,29 @@ pub enum OperationError {
 impl OperationError {
     /// The `failure` field of the operation records.
     #[must_use]
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(&self) -> &'static str {
         match self {
-            Self::Acquire => "acquire",
-            Self::Statement => "statement",
+            Self::Acquire(_) => "acquire",
+            Self::Statement(_) => "statement",
             Self::TimedOut => "timed_out",
         }
+    }
+}
+
+impl From<infra_postgres::TxError> for OperationError {
+    fn from(error: infra_postgres::TxError) -> Self {
+        match error {
+            infra_postgres::TxError::Acquire(error) => Self::Acquire(error),
+            infra_postgres::TxError::Begin(error)
+            | infra_postgres::TxError::CommitFailed(error)
+            | infra_postgres::TxError::CommitUnknown(error) => Self::Statement(error),
+        }
+    }
+}
+
+impl From<sqlx::Error> for OperationError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Statement(error)
     }
 }
 
@@ -117,7 +133,7 @@ impl Engine {
                 slots: Arc::new(Semaphore::new(slots)),
                 permit: Semaphore::new(1),
                 force: CancellationToken::new(),
-                cleanup_deadline: Mutex::new(None),
+                hard_stop: CancellationToken::new(),
                 counters: Counters::default(),
                 attempt_tracker: TaskTracker::new(),
                 failing: Failing::new(),
@@ -215,20 +231,25 @@ impl Started {
 
     /// Cancel unfinished handlers and finish known outcomes inside `budget`.
     /// Supervisors retain ownership; this method never writes queue rows.
+    ///
+    /// The first call fixes the cleanup deadline. It holds even if this future
+    /// is dropped, and a later call waits for the same deadline.
     #[must_use]
     pub async fn cancel_and_finish(&self, budget: Duration) -> DrainEnd {
-        let requested = Instant::now()
-            .checked_add(budget)
-            .unwrap_or_else(Instant::now);
         self.stop_claiming();
-        let deadline = {
-            let mut stored = lock(&self.shared.cleanup_deadline);
-            *stored.get_or_insert(requested)
+        if !self.shared.force.is_cancelled() {
+            self.shared.force.cancel();
+            let hard_stop = self.shared.hard_stop.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(budget).await;
+                hard_stop.cancel();
+            });
+        }
+        let timed_out = tokio::select! {
+            biased;
+            () = self.drained() => false,
+            () = self.shared.hard_stop.cancelled() => true,
         };
-        self.shared.force.cancel();
-        let timed_out = tokio::time::timeout_at(deadline, self.drained())
-            .await
-            .is_err();
         let counters = &self.shared.counters;
         DrainEnd {
             known_results: counters.known_results.load(Ordering::Relaxed),
@@ -296,8 +317,10 @@ pub(crate) struct Shared {
     pub(crate) max_workers: NonZeroU32,
     pub(crate) slots: Arc<Semaphore>,
     pub(crate) permit: Semaphore,
+    /// Cancels running handlers.
     pub(crate) force: CancellationToken,
-    cleanup_deadline: Mutex<Option<Instant>>,
+    /// Stops supervisors once the cleanup budget is spent.
+    pub(crate) hard_stop: CancellationToken,
     pub(crate) counters: Counters,
     pub(crate) attempt_tracker: TaskTracker,
     pub(crate) failing: Failing,
@@ -319,12 +342,6 @@ pub(crate) struct Counters {
     pub(crate) cancelled: AtomicUsize,
     pub(crate) released: AtomicUsize,
     pub(crate) uncertain: AtomicUsize,
-}
-
-impl Shared {
-    pub(crate) fn deadline(&self, local: Instant) -> Instant {
-        lock(&self.cleanup_deadline).map_or(local, |cleanup| local.min(cleanup))
-    }
 }
 
 /// One engine statement. The label is [`Operation::as_str`].
@@ -387,14 +404,39 @@ impl fmt::Debug for Failing {
     }
 }
 
-pub(crate) fn observe_failure(shared: &Shared, operation: Operation, error: OperationError) {
+pub(crate) fn observe_failure(shared: &Shared, operation: Operation, error: &OperationError) {
     metrics::counter!(OPERATION_FAILURES_METRIC, "operation" => operation.as_str()).increment(1);
     if !shared.failing.flag(operation).swap(true, Ordering::SeqCst) {
-        tracing::warn!(
-            operation = operation.as_str(),
-            failure = error.as_str(),
-            "jobs_operation_failed"
-        );
+        log_operation_failure(operation, error);
+    }
+}
+
+fn log_operation_failure(operation: Operation, error: &OperationError) {
+    match error {
+        OperationError::TimedOut => {
+            tracing::warn!(
+                operation = operation.as_str(),
+                failure = error.as_str(),
+                "jobs_operation_failed"
+            );
+        }
+        OperationError::Acquire(err) | OperationError::Statement(err) => {
+            if let Some(code) = infra_postgres::sqlstate(err) {
+                tracing::warn!(
+                    operation = operation.as_str(),
+                    failure = error.as_str(),
+                    sqlstate = code.as_ref(),
+                    "jobs_operation_failed"
+                );
+            } else {
+                tracing::warn!(
+                    operation = operation.as_str(),
+                    failure = error.as_str(),
+                    cause = infra_postgres::failure_cause(err),
+                    "jobs_operation_failed"
+                );
+            }
+        }
     }
 }
 
@@ -413,22 +455,15 @@ pub(crate) async fn backstop<T>(
         .map_err(|_| OperationError::TimedOut)?
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test(start_paused = true)]
     async fn backstop_bounds_an_unacknowledged_operation() {
-        assert_eq!(
+        assert!(matches!(
             backstop(std::future::pending::<Result<(), OperationError>>()).await,
             Err(OperationError::TimedOut)
-        );
+        ));
     }
 }

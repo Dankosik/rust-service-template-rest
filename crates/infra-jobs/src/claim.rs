@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use sqlx::Row;
 use tokio::sync::{OwnedSemaphorePermit, SemaphorePermit};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -81,7 +80,7 @@ const CLAIM: &str = "WITH policy AS ( \
          claim_expires_at = CASE WHEN job.attempts >= policy.max_attempts THEN NULL \
                                  ELSE statement_timestamp() \
                                       + policy.timeout_micros * interval '1 microsecond' \
-                                      + interval '60 seconds' END, \
+                                      + $6::bigint * interval '1 microsecond' END, \
          attempts = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempts \
                          ELSE job.attempts + 1 END, \
          attempted_by = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempted_by \
@@ -98,12 +97,12 @@ const CLAIM: &str = "WITH policy AS ( \
        AND policy.kind = job.kind \
        AND ((job.state = 'pending' AND job.not_before <= statement_timestamp()) \
             OR (job.state = 'running' AND job.claim_expires_at <= statement_timestamp())) \
-     RETURNING job.id::text AS id, job.kind, job.state, job.attempts, job.claim_generation, \
-               policy.timeout_micros, \
+     RETURNING job.id::text AS id, job.kind, (job.state = 'failed') AS exhausted, job.attempts, \
+               job.claim_generation, \
                CASE WHEN job.state = 'running' THEN job.payload::text END AS payload, \
                job.trace_context, job.trace_state, job.error_summary, \
-               EXTRACT(EPOCH FROM statement_timestamp())::double precision AS claimed_at, \
-               EXTRACT(EPOCH FROM job.not_before)::double precision AS not_before_epoch";
+               EXTRACT(EPOCH FROM statement_timestamp() - job.not_before)::double precision \
+                   AS queue_wait_seconds";
 
 /// A row CLAIM set `running`.
 #[derive(Debug)]
@@ -177,7 +176,7 @@ async fn take_slots(shared: &Shared, stop: &CancellationToken) -> Option<OwnedSe
     let one = tokio::select! {
         biased;
         () = stop.cancelled() => return None,
-        permit = Arc::clone(&shared.slots).acquire_many_owned(1) => permit.ok()?,
+        permit = Arc::clone(&shared.slots).acquire_owned() => permit.ok()?,
     };
     let extra = shared.slots.available_permits();
     let mut permits = one;
@@ -214,17 +213,17 @@ async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
             .pool
             .acquire()
             .await
-            .map_err(|_| OperationError::Acquire)?;
-        let rows = sqlx::query(CLAIM)
+            .map_err(OperationError::Acquire)?;
+        let rows = sqlx::query_as::<_, ClaimRow>(CLAIM)
             .bind(&names)
             .bind(&max_attempts)
             .bind(&timeouts)
             .bind(requested)
             .bind(shared.worker_id.to_string())
+            .bind(lease_reserve_micros())
             .fetch_all(&mut *connection)
-            .await
-            .map_err(statement_error)?;
-        let decoded = decode_claims(&rows, &shared.registry)?;
+            .await?;
+        let decoded = decode_claims(rows, &shared.registry)?;
         Ok((sent, decoded))
     })
     .await;
@@ -235,8 +234,8 @@ async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
     }
 }
 
-fn statement_error(_error: sqlx::Error) -> OperationError {
-    OperationError::Statement
+fn lease_reserve_micros() -> i64 {
+    i64::try_from(LEASE_RESERVE.as_micros()).unwrap_or(i64::MAX)
 }
 
 fn policy_binds(registry: &crate::Registry) -> (Vec<&str>, Vec<i16>, Vec<i64>) {
@@ -273,7 +272,7 @@ fn finish_round(
             !filled
         }
         ClaimRound::Failed(error) => {
-            observe_failure(shared, Operation::Claim, error);
+            observe_failure(shared, Operation::Claim, &error);
             true
         }
     }
@@ -286,117 +285,135 @@ fn dispatch_known(
     sent: Instant,
 ) {
     for row in rows {
-        if row.state == DrawnState::Failed {
-            attempt::record_exhausted(row.id, row.kind, row.attempt, row.error_summary.as_deref());
-            continue;
+        match row {
+            Drawn::Exhausted {
+                id,
+                kind,
+                attempt,
+                error_summary,
+            } => {
+                attempt::record_exhausted(id, kind, attempt, error_summary.as_deref());
+            }
+            Drawn::Running {
+                id,
+                generation,
+                kind,
+                attempt,
+                payload,
+                trace_context,
+                trace_state,
+                timeout,
+                queue_wait,
+            } => {
+                let deadline = local_deadline(sent, timeout);
+                let Some(slot) = slots.split(1) else {
+                    tracing::error!(job.id = %id, "job_claim_exceeded_slots");
+                    break;
+                };
+                let claimed = Claimed {
+                    id,
+                    generation,
+                    kind,
+                    attempt,
+                    payload: payload.into_bytes(),
+                    trace_context,
+                    trace_state,
+                    slot,
+                };
+                metrics::histogram!(QUEUE_WAIT_METRIC, "kind" => kind).record(queue_wait.max(0.0));
+                shared.attempt_tracker.spawn(attempt::supervise(
+                    Arc::clone(shared),
+                    claimed,
+                    deadline,
+                ));
+            }
         }
-        let deadline = local_deadline(sent, row.timeout_micros);
-        if Instant::now() >= deadline {
-            continue;
-        }
-        let Some(slot) = slots.split(1) else {
-            return;
-        };
-        let Some(payload) = row.payload else {
-            return;
-        };
-        let claimed = Claimed {
-            id: row.id,
-            generation: row.generation,
-            kind: row.kind,
-            attempt: row.attempt,
-            payload: payload.into_bytes(),
-            trace_context: row.trace_context,
-            trace_state: row.trace_state,
-            slot,
-        };
-        metrics::histogram!(QUEUE_WAIT_METRIC, "kind" => row.kind)
-            .record((row.claimed_at - row.not_before_epoch).max(0.0));
-        shared
-            .attempt_tracker
-            .spawn(attempt::supervise(Arc::clone(shared), claimed, deadline));
     }
 }
 
-fn local_deadline(sent: Instant, timeout_micros: i64) -> Instant {
-    let timeout = Duration::from_micros(u64::try_from(timeout_micros).unwrap_or_default());
+fn local_deadline(sent: Instant, timeout: Duration) -> Instant {
     sent.checked_add(timeout)
         .and_then(|deadline| deadline.checked_add(LEASE_RESERVE))
         .and_then(|deadline| deadline.checked_sub(CANCEL_MARGIN))
         .unwrap_or(sent)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DrawnState {
-    Running,
-    Failed,
+enum Drawn {
+    Running {
+        id: JobId,
+        generation: i64,
+        kind: &'static str,
+        attempt: u16,
+        payload: String,
+        trace_context: Option<String>,
+        trace_state: Option<String>,
+        /// Registered policy timeout, the same value CLAIM bound.
+        timeout: Duration,
+        queue_wait: f64,
+    },
+    Exhausted {
+        id: JobId,
+        kind: &'static str,
+        attempt: u16,
+        error_summary: Option<String>,
+    },
 }
 
-struct Drawn {
-    id: JobId,
-    generation: i64,
-    kind: &'static str,
-    state: DrawnState,
-    attempt: u16,
-    timeout_micros: i64,
+#[derive(sqlx::FromRow)]
+struct ClaimRow {
+    id: String,
+    kind: String,
+    exhausted: bool,
+    attempts: i16,
+    claim_generation: i64,
     payload: Option<String>,
     trace_context: Option<String>,
     trace_state: Option<String>,
     error_summary: Option<String>,
-    claimed_at: f64,
-    not_before_epoch: f64,
+    queue_wait_seconds: f64,
 }
 
 fn decode_claims(
-    rows: &[sqlx::postgres::PgRow],
+    rows: Vec<ClaimRow>,
     registry: &crate::Registry,
 ) -> Result<Vec<Drawn>, OperationError> {
-    let mut decoded = Vec::with_capacity(rows.len());
-    for row in rows {
-        decoded.push(decode_claim(row, registry)?);
-    }
-    Ok(decoded)
+    rows.into_iter()
+        .map(|row| row.into_drawn(registry))
+        .collect()
 }
 
-fn decode_claim(
-    row: &sqlx::postgres::PgRow,
-    registry: &crate::Registry,
-) -> Result<Drawn, OperationError> {
-    let id_text: String = row.try_get("id").map_err(statement_error)?;
-    let id = JobId::parse(&id_text).ok_or(OperationError::Statement)?;
-    let kind_text: String = row.try_get("kind").map_err(statement_error)?;
-    let kind = registry
-        .get(&kind_text)
-        .map(|registered| registered.name)
-        .ok_or(OperationError::Statement)?;
-    let state_text: String = row.try_get("state").map_err(statement_error)?;
-    let state = match state_text.as_str() {
-        "running" => DrawnState::Running,
-        "failed" => DrawnState::Failed,
-        _ => return Err(OperationError::Statement),
-    };
-    let attempts_i16: i16 = row.try_get("attempts").map_err(statement_error)?;
-    let attempt = u16::try_from(attempts_i16).map_err(|_| OperationError::Statement)?;
-    let timeout_micros: i64 = row.try_get("timeout_micros").map_err(statement_error)?;
-    if timeout_micros < 0 {
-        return Err(OperationError::Statement);
+impl ClaimRow {
+    fn into_drawn(self, registry: &crate::Registry) -> Result<Drawn, OperationError> {
+        let id = JobId::parse(&self.id).ok_or_else(|| decode("job id is not a uuid"))?;
+        let Some(registered) = registry.get(&self.kind) else {
+            return Err(decode("unknown job kind"));
+        };
+        let attempt = u16::try_from(self.attempts).map_err(|_| decode("attempt does not fit"))?;
+        if self.exhausted {
+            return Ok(Drawn::Exhausted {
+                id,
+                kind: registered.name,
+                attempt,
+                error_summary: self.error_summary,
+            });
+        }
+        let Some(payload) = self.payload else {
+            return Err(decode("running claim has no payload"));
+        };
+        Ok(Drawn::Running {
+            id,
+            generation: self.claim_generation,
+            kind: registered.name,
+            attempt,
+            payload,
+            trace_context: self.trace_context,
+            trace_state: self.trace_state,
+            timeout: registered.policy.timeout,
+            queue_wait: self.queue_wait_seconds,
+        })
     }
-    let payload: Option<String> = row.try_get("payload").map_err(statement_error)?;
-    if state == DrawnState::Running && payload.is_none() {
-        return Err(OperationError::Statement);
-    }
-    Ok(Drawn {
-        id,
-        generation: row.try_get("claim_generation").map_err(statement_error)?,
-        kind,
-        state,
-        attempt,
-        timeout_micros,
-        payload,
-        trace_context: row.try_get("trace_context").map_err(statement_error)?,
-        trace_state: row.try_get("trace_state").map_err(statement_error)?,
-        error_summary: row.try_get("error_summary").map_err(statement_error)?,
-        claimed_at: row.try_get("claimed_at").map_err(statement_error)?,
-        not_before_epoch: row.try_get("not_before_epoch").map_err(statement_error)?,
-    })
+}
+
+fn decode(message: &'static str) -> OperationError {
+    OperationError::Statement(sqlx::Error::Decode(message.into()))
 }

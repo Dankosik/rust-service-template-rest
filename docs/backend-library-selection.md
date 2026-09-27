@@ -189,3 +189,12 @@ build and workspace tests when manifests or the lockfile change. Keep existing
 CI, advisory, license and unused-dependency gates intact. Report the actual
 validation and any unavailable evidence; do not claim a percentage reduction
 or performance gain without a measured comparison.
+
+## Telemetry compatibility
+
+`json-subscriber` 0.3's built-in OpenTelemetry bridge ends at
+`tracing-opentelemetry` 0.33. The telemetry crate keeps the existing nested
+`openTelemetry.traceId` and `openTelemetry.spanId` JSON shape through its
+documented dynamic-field API and the active dispatch for the selected 0.34
+bridge. This is a compatibility repair, not a new logging dependency or a
+second telemetry subscriber.

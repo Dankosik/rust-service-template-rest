@@ -29,10 +29,10 @@ Cargo graphs show a concrete aws-lc backend drawback.
 
 <!-- template:begin webhooks:docs-integration-webhooks-outbound -->
 Outbound webhook delivery reuses `infra-outbound-http` as one bounded,
-fixed-authority client per configured endpoint in a fixed startup map. Every
+fixed-origin client per configured endpoint in a fixed startup map. Every
 attempt resolves its endpoint ID to that map's current URL and key ring,
 including historical payloads whose saved routing fields are ignored. The
-provider passes the admitted current origin and path/query; it does not introduce raw reqwest calls, a
+provider requests the admitted current URL; it does not introduce raw reqwest calls, a
 general many-authority transport, proxy handling, redirects, or an inner retry.
 <!-- template:end webhooks:docs-integration-webhooks-outbound -->
 
@@ -83,8 +83,9 @@ bounded native-client calls, expected-stream ACK classification, and consumer
 settlement. Bootstrap owns connection admission, cached readiness, and close;
 features supply only registered typed payloads and handlers. Streams, replicas,
 retention, storage, capacity, and consumer names remain operator topology.
-The adapter can reconcile only delivery-coupled fields of its named consumer;
-it never creates streams or deletes/recreates a cursor to hide incompatibility.
+The adapter declares its named consumer (create or update) and the broker
+refuses an incompatible change; it never creates streams or deletes/recreates a
+cursor to hide incompatibility.
 
 The integration proof uses an actual NATS server plus actual Go source in both
 wire directions. It proves an ACK, rejection, and ambiguity are distinct;
@@ -112,12 +113,13 @@ inside the command timeout. It does not certify a deployed memory policy.
 <!-- template:begin authn:docs-integration-authn-provider -->
 Inbound authentication's provider destination is fixed by configuration or an
 exact-issuer discovery response, never by the caller. The adapter's
-`ProviderUrl` admission requires HTTPS and host, with no userinfo, fragment,
-whitespace or controls. Issuers forbid queries; JWKS and introspection endpoint
-queries are preserved on requests and excluded from diagnostics. It retains normal TLS hostname/certificate
+`IssuerUrl` and `EndpointUrl` admission requires HTTPS and host, with no
+userinfo, fragment, whitespace or controls. `IssuerUrl` forbids queries; JWKS
+and introspection `EndpointUrl` queries are preserved on requests and excluded
+from diagnostics. It retains normal TLS hostname/certificate
 validation, permits configured private HTTPS providers, disables redirects,
-ambient proxy and retry, and caps a response at 1 MiB. Provider work has a
-three-second attempt cap through body completion. The outer HTTP timeout alone
+ambient proxy and retry, and caps a response at 1 MiB. Each provider attempt
+has reqwest's three-second total timeout, which covers body completion. The outer HTTP timeout alone
 owns request expiry; authentication has no request-deadline propagation.
 
 The adapter owns URL representation because discovery and direct adapter inputs
@@ -132,7 +134,7 @@ A provider with an operator-selected fixed HTTPS dependency uses the retained
 [bounded outbound client](../outbound-http.md). The adapter supplies finite
 limits, credentials, and a parent deadline; it owns parsing, retry eligibility,
 and business errors. The client enforces same-origin targets, normal TLS,
-bounded encoded bodies/header count, and removal of correlation headers. Never
+and bounded encoded bodies/header count; request headers stay adapter-owned. Never
 construct it from a caller-controlled URL. Selection itself adds no neighbour or
 startup call.
 <!-- template:end outbound-http:docs-integration-outbound -->

@@ -40,7 +40,7 @@ dependency/toolchain upgrade is part of this design.
 | `crates/config/src/cli.rs` | PostgreSQL projection | Existing migrator test block removed only for none | Existing CLI errors unchanged; no second parser |
 | `crates/config/src/postgres.rs` | PostgreSQL projection | Existing whole module removed for none | Existing validation/error types retained unchanged for postgres |
 | `crates/service/src/api.rs` | Runtime identity | Existing private ApiDoc annotations; public document/render/contract unchanged | Generated OpenAPI owner; no YAML patch path |
-| `crates/service/src/bootstrap/mod.rs` | PostgreSQL projection | Existing private open_postgres and DB BootstrapError variants/Prepared fields; DB blocks only | Composition root keeps signals, readiness, metrics and cancel ownership; no feature/provider migration |
+| `crates/service/src/bootstrap/mod.rs` | PostgreSQL projection | Existing private open_postgres, DB BootstrapError variants and the `Dependencies` pool field; DB blocks only | Composition root keeps signals, readiness, metrics and cancel ownership; no feature/provider migration |
 | `crates/service/src/bootstrap/shutdown.rs` | PostgreSQL projection | Existing private dependency-close parts, parameter/tuple members and ShutdownPlan fields | Common joined shutdown and budgets retained; no parallel cleanup or alternate success semantics |
 | `crates/service/tests/lifecycle.rs` | Runtime identity | Black-box executable lookup follows new bin key | Test retains process lifecycle proof; no unit choreography assertions |
 | `crates/infra-postgres/src/{lib,dsn,pool,probe,transaction}.rs` | PostgreSQL projection | Existing files removed as pack for none | Provider semantics and visibility unchanged for postgres |
