@@ -3,7 +3,8 @@
 //! One recorder per process. HTTP server metrics come from `axum-prometheus`
 //! in the HTTP adapter, process metrics from `metrics-process`, runtime
 //! metrics from `tokio-metrics`; this module owns the recorder, the
-//! histogram buckets, the periodic upkeep, and the scrape route.
+//! periodic upkeep, and the scrape route. Each crate that emits a histogram
+//! owns its name and buckets.
 
 use std::time::Duration;
 
@@ -19,27 +20,6 @@ use tokio_util::sync::CancellationToken;
 /// startup, 0 otherwise. A startup-configuration signal, not delivery health.
 pub const TRACE_EXPORTER_ACTIVE_METRIC: &str = "service_startup_trace_exporter_active";
 
-/// Request-duration buckets in seconds, shaped for an HTTP API.
-const HTTP_DURATION_BUCKETS: &[f64] = &[
-    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
-];
-
-// template:begin outbound-http:telemetry-outbound-buckets-constants
-/// Explicit seconds buckets for bounded outbound exchanges.
-const OUTBOUND_HTTP_DURATION_BUCKETS: &[f64] = &[
-    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
-];
-const OUTBOUND_HTTP_DURATION_METRIC: &str = "http_client_request_duration_seconds";
-// template:end outbound-http:telemetry-outbound-buckets-constants
-
-// template:begin cache:telemetry-cache-buckets-constants
-/// Explicit seconds buckets for cache commands, including a degraded timeout.
-const CACHE_OPERATION_DURATION_BUCKETS: &[f64] = &[
-    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1.0,
-];
-const CACHE_OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
-// template:end cache:telemetry-cache-buckets-constants
-
 #[derive(Debug, thiserror::Error)]
 pub enum MetricsError {
     #[error("install metrics recorder: {0}")]
@@ -54,31 +34,22 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Install the process-global recorder with the HTTP duration buckets
-    /// and describe the process metrics.
+    /// Install the process-global recorder with explicit buckets for each
+    /// `(metric, buckets)` histogram and describe the process metrics. The
+    /// crate that emits a histogram owns its name and buckets; without an
+    /// entry here the exporter renders that histogram as a summary.
     ///
     /// # Errors
     ///
     /// Returns [`MetricsError::Install`] when a recorder is already
     /// installed or the buckets are invalid.
-    pub fn install(http_duration_metric: &str) -> Result<Self, MetricsError> {
-        let builder = PrometheusBuilder::new()
-            .set_buckets_for_metric(
-                Matcher::Full(http_duration_metric.to_owned()),
-                HTTP_DURATION_BUCKETS,
-            )
-            .map_err(MetricsError::Install)?;
-        Self::installed(builder)
-    }
-
-    /// Install `builder` and describe the process and trace-exporter metrics.
-    fn installed(builder: PrometheusBuilder) -> Result<Self, MetricsError> {
-        // template:begin outbound-http:telemetry-outbound-buckets-install
-        let builder = outbound_histogram_builder(builder).map_err(MetricsError::Install)?;
-        // template:end outbound-http:telemetry-outbound-buckets-install
-        // template:begin cache:telemetry-cache-buckets-install
-        let builder = cache_histogram_builder(builder).map_err(MetricsError::Install)?;
-        // template:end cache:telemetry-cache-buckets-install
+    pub fn install(histograms: &[(&str, &[f64])]) -> Result<Self, MetricsError> {
+        let mut builder = PrometheusBuilder::new();
+        for &(name, buckets) in histograms {
+            builder = builder
+                .set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)
+                .map_err(MetricsError::Install)?;
+        }
         let handle = builder.install_recorder().map_err(MetricsError::Install)?;
         let process = metrics_process::Collector::default();
         process.describe();
@@ -118,62 +89,16 @@ impl Metrics {
             })
             .await;
     }
-
-    /// Publish Tokio runtime metrics on `interval` until cancelled. Uses the
-    /// stable subset; `--cfg tokio_unstable` adds poll and queue detail.
-    pub async fn runtime_metrics(interval: Duration, cancel: CancellationToken) {
-        let reporter = tokio_metrics::RuntimeMetricsReporterBuilder::default()
-            .with_interval(interval)
-            .describe_and_run();
-        let _ = cancel.run_until_cancelled(reporter).await;
-    }
 }
 
-// template:begin worker:telemetry-worker-histograms
-impl Metrics {
-    /// `install` plus explicit buckets for further histograms.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MetricsError::Install`] when a recorder is already
-    /// installed or the buckets are invalid.
-    pub fn install_with_histograms(
-        http_duration_metric: &str,
-        histograms: &[(&str, &[f64])],
-    ) -> Result<Self, MetricsError> {
-        let mut builder = PrometheusBuilder::new()
-            .set_buckets_for_metric(
-                Matcher::Full(http_duration_metric.to_owned()),
-                HTTP_DURATION_BUCKETS,
-            )
-            .map_err(MetricsError::Install)?;
-        for &(name, buckets) in histograms {
-            builder = builder
-                .set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)
-                .map_err(MetricsError::Install)?;
-        }
-        Self::installed(builder)
-    }
+/// Publish Tokio runtime metrics on `interval` until cancelled. Uses the
+/// stable subset; `--cfg tokio_unstable` adds poll and queue detail.
+pub async fn runtime_metrics(interval: Duration, cancel: CancellationToken) {
+    let reporter = tokio_metrics::RuntimeMetricsReporterBuilder::default()
+        .with_interval(interval)
+        .describe_and_run();
+    let _ = cancel.run_until_cancelled(reporter).await;
 }
-// template:end worker:telemetry-worker-histograms
-
-// template:begin outbound-http:telemetry-outbound-buckets-helper
-fn outbound_histogram_builder(builder: PrometheusBuilder) -> Result<PrometheusBuilder, BuildError> {
-    builder.set_buckets_for_metric(
-        Matcher::Full(OUTBOUND_HTTP_DURATION_METRIC.to_owned()),
-        OUTBOUND_HTTP_DURATION_BUCKETS,
-    )
-}
-// template:end outbound-http:telemetry-outbound-buckets-helper
-
-// template:begin cache:telemetry-cache-buckets-helper
-fn cache_histogram_builder(builder: PrometheusBuilder) -> Result<PrometheusBuilder, BuildError> {
-    builder.set_buckets_for_metric(
-        Matcher::Full(CACHE_OPERATION_DURATION_METRIC.to_owned()),
-        CACHE_OPERATION_DURATION_BUCKETS,
-    )
-}
-// template:end cache:telemetry-cache-buckets-helper
 
 /// The diagnostics router: `GET /metrics` only. Serve it on the private
 /// diagnostics listener, never on the application listener.
@@ -200,53 +125,3 @@ async fn render(State(metrics): State<Metrics>) -> Response {
     )
         .into_response()
 }
-
-// template:begin outbound-http:telemetry-outbound-histogram-test
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn outbound_duration_uses_the_selected_prometheus_buckets() {
-        let recorder = outbound_histogram_builder(PrometheusBuilder::new())
-            .expect("outbound histogram buckets are valid")
-            .build_recorder();
-        let _local = metrics::set_default_local_recorder(&recorder);
-        metrics::describe_histogram!(
-            OUTBOUND_HTTP_DURATION_METRIC,
-            metrics::Unit::Seconds,
-            "Outbound HTTP attempt duration in seconds"
-        );
-        metrics::histogram!(OUTBOUND_HTTP_DURATION_METRIC, "server.address" => "provider.test")
-            .record(0.075);
-        let scrape = recorder.handle().render();
-        assert!(scrape.contains("http_client_request_duration_seconds_bucket"));
-        assert!(scrape.contains("le=\"0.075\""));
-    }
-}
-// template:end outbound-http:telemetry-outbound-histogram-test
-
-// template:begin cache:telemetry-cache-histogram-test
-#[cfg(test)]
-mod cache_histogram_tests {
-    use super::*;
-
-    #[test]
-    fn cache_operation_duration_uses_the_selected_prometheus_buckets() {
-        let recorder = cache_histogram_builder(PrometheusBuilder::new())
-            .expect("cache histogram buckets are valid")
-            .build_recorder();
-        let _local = metrics::set_default_local_recorder(&recorder);
-        metrics::describe_histogram!(
-            CACHE_OPERATION_DURATION_METRIC,
-            metrics::Unit::Seconds,
-            "Cache operation duration in seconds"
-        );
-        metrics::histogram!(CACHE_OPERATION_DURATION_METRIC, "cache" => "obs", "operation" => "get", "outcome" => "miss")
-            .record(0.01);
-        let scrape = recorder.handle().render();
-        assert!(scrape.contains("cache_operation_duration_seconds_bucket"));
-        assert!(scrape.contains("le=\"0.01\""));
-    }
-}
-// template:end cache:telemetry-cache-histogram-test

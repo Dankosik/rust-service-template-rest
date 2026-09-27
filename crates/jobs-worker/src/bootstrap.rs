@@ -8,7 +8,10 @@
 use std::time::Duration;
 
 use health::{Probe, Readiness, RefreshPolicy};
-use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
+use infra_http::{
+    HTTP_REQUESTS_DURATION_BUCKETS, HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server,
+    ServerOptions,
+};
 // template:begin jobs:worker-bootstrap-jobs-imports
 use infra_jobs::{
     ATTEMPT_DURATION_BUCKETS, ATTEMPT_DURATION_METRIC, Engine, Kinds, Registry, Started,
@@ -25,7 +28,7 @@ use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe};
 // template:end jobs:worker-bootstrap-postgres-imports
 use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, TracerProviderHandle, TracingOptions,
-    diagnostics_router, install_subscriber, install_tracer_provider,
+    diagnostics_router, install_subscriber, install_tracer_provider, runtime_metrics,
 };
 use secrecy::ExposeSecret;
 use service_config::{AppConfig, Config, LogFormat, TracesSampler};
@@ -524,24 +527,30 @@ fn install_observability(
             LogFormat::Text => LoggingFormat::Text,
         },
         tracer_provider: Some(&tracer_provider),
-        service_name: identity,
     })?;
-    let metrics = Metrics::install_with_histograms(
-        HTTP_REQUESTS_DURATION_SECONDS,
-        &[
-            // template:begin jobs:worker-bootstrap-jobs-histograms
-            (ATTEMPT_DURATION_METRIC, ATTEMPT_DURATION_BUCKETS),
-            (
-                infra_jobs::CLAIM_DURATION_METRIC,
-                infra_jobs::CLAIM_DURATION_BUCKETS,
-            ),
-            (
-                infra_jobs::QUEUE_WAIT_METRIC,
-                infra_jobs::QUEUE_WAIT_BUCKETS,
-            ),
-            // template:end jobs:worker-bootstrap-jobs-histograms
-        ],
-    )?;
+    let metrics = Metrics::install(&[
+        (
+            HTTP_REQUESTS_DURATION_SECONDS,
+            HTTP_REQUESTS_DURATION_BUCKETS,
+        ),
+        // template:begin jobs:worker-bootstrap-jobs-histograms
+        (ATTEMPT_DURATION_METRIC, ATTEMPT_DURATION_BUCKETS),
+        (
+            infra_jobs::CLAIM_DURATION_METRIC,
+            infra_jobs::CLAIM_DURATION_BUCKETS,
+        ),
+        (
+            infra_jobs::QUEUE_WAIT_METRIC,
+            infra_jobs::QUEUE_WAIT_BUCKETS,
+        ),
+        // template:end jobs:worker-bootstrap-jobs-histograms
+        // template:begin outbound-http:worker-bootstrap-outbound-histogram
+        (
+            infra_outbound_http::REQUEST_DURATION_METRIC,
+            infra_outbound_http::REQUEST_DURATION_BUCKETS,
+        ),
+        // template:end outbound-http:worker-bootstrap-outbound-histogram
+    ])?;
     metrics.record_trace_exporter_initialized(matches!(
         tracer_provider.exporter_state,
         ExporterState::Initialized { .. }
@@ -638,7 +647,7 @@ fn spawn_metrics_tasks(metrics: &Metrics, cancel: &CancellationToken, tracker: &
             .clone()
             .upkeep(METRICS_MAINTENANCE_INTERVAL, cancel.child_token()),
     );
-    tracker.spawn(Metrics::runtime_metrics(
+    tracker.spawn(runtime_metrics(
         METRICS_MAINTENANCE_INTERVAL,
         cancel.child_token(),
     ));
@@ -912,7 +921,7 @@ fn log_startup_record(
     // template:end jobs:worker-bootstrap-log-jobs-parameter
     exporter: &ExporterState,
 ) {
-    log_exporter(exporter);
+    exporter.log();
     // template:begin jobs:worker-bootstrap-log-jobs-kinds
     let kinds = registry
         .map(|registry| registry.names().collect::<Vec<_>>().join(","))
@@ -936,22 +945,6 @@ fn log_startup_record(
         tracing.exporter = exporter.as_str(),
         "jobs_worker_starting"
     );
-}
-
-fn log_exporter(exporter: &ExporterState) {
-    match exporter {
-        ExporterState::Degraded { reason } => tracing::warn!(
-            reason = %reason,
-            "trace exporter degraded; spans are recorded but not exported"
-        ),
-        ExporterState::Initialized { endpoint_source } => {
-            tracing::info!(
-                endpoint_source = endpoint_source.as_str(),
-                "trace exporter initialized"
-            );
-        }
-        ExporterState::Disabled => {}
-    }
 }
 
 #[cfg(test)]

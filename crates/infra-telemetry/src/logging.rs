@@ -29,8 +29,6 @@ pub struct LoggingOptions<'a> {
     /// Installed tracer provider; `None` leaves spans without an
     /// OpenTelemetry context.
     pub tracer_provider: Option<&'a TracerProviderHandle>,
-    /// Service name passed to the OpenTelemetry tracer.
-    pub service_name: &'a str,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -56,9 +54,9 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
         directive: options.level.to_owned(),
         source,
     })?;
-    let otel = options.tracer_provider.map(|handle| {
-        tracing_opentelemetry::layer().with_tracer(handle.tracer(options.service_name))
-    });
+    let otel = options
+        .tracer_provider
+        .map(|handle| tracing_opentelemetry::layer().with_tracer(handle.tracer()));
     let format: Box<dyn Layer<_> + Send + Sync> = match options.format {
         LoggingFormat::Json => Box::new(
             json_subscriber::layer()

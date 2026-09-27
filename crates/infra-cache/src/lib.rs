@@ -23,6 +23,7 @@ use redis::aio::ConnectionManager;
 use secrecy::{ExposeSecret, SecretString};
 use tracing::{Instrument, Span};
 
+pub use self::observe::{OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
 use self::observe::{OperationGuard, classify};
 
 /// One reconnect attempt stays inside the startup check.

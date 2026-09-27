@@ -39,6 +39,9 @@ infra-messaging = { workspace = true }
 # template:begin cache:service-cache-dependency
 infra-cache = { workspace = true }
 # template:end cache:service-cache-dependency
+# template:begin outbound-http:service-outbound-http-dependency
+infra-outbound-http = { workspace = true }
+# template:end outbound-http:service-outbound-http-dependency
 # template:begin inbound-webhooks:service-webhooks-dependency
 infra-webhooks = { workspace = true }
 webhook-consumers = { workspace = true }

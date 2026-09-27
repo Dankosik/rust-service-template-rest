@@ -69,10 +69,16 @@ impl RequestDeadline {
 const SHED_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 /// HTTP request-duration histogram name emitted by `axum-prometheus`.
-/// The composition root passes this into the Prometheus recorder so buckets
-/// match the adapter without naming `axum-prometheus` itself.
+/// The composition root passes it with [`HTTP_REQUESTS_DURATION_BUCKETS`]
+/// into the Prometheus recorder without naming `axum-prometheus` itself.
 pub const HTTP_REQUESTS_DURATION_SECONDS: &str =
     axum_prometheus::AXUM_HTTP_REQUESTS_DURATION_SECONDS;
+
+/// Buckets in seconds for [`HTTP_REQUESTS_DURATION_SECONDS`], shaped for an
+/// HTTP API.
+pub const HTTP_REQUESTS_DURATION_BUCKETS: &[f64] = &[
+    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
 
 /// HTTP server metrics are emitted by `axum-prometheus` under its default
 /// names: `axum_http_requests_total`, `axum_http_requests_duration_seconds`,

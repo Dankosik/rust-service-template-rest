@@ -413,9 +413,9 @@ fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
     metrics_exporter_prometheus::PrometheusBuilder::new()
         .set_buckets_for_metric(
             metrics_exporter_prometheus::Matcher::Full(
-                "cache_operation_duration_seconds".to_owned(),
+                infra_cache::OPERATION_DURATION_METRIC.to_owned(),
             ),
-            &[0.0005, 0.001, 0.01, 0.05, 0.1, 0.25, 1.0],
+            infra_cache::OPERATION_DURATION_BUCKETS,
         )
         .expect("observation buckets are valid")
         .build_recorder()
