@@ -21,6 +21,7 @@ crates/config/src/jobs.rs
 crates/config/src/webhooks.rs
 crates/config/src/inbound_webhooks.rs
 crates/config/src/integrations.rs
+crates/infra-grpc/src/router.rs
 crates/infra-http/src/webhooks.rs
 crates/infra-http/src/authn.rs
 crates/infra-http/src/idempotency/
@@ -46,6 +47,7 @@ make/profile-postgres.mk
 make/source.mk
 scripts/ci/template-init-check.sh
 scripts/tests/template-candidate-paths.txt
+scripts/tests/fixtures/template-profiles-b206.json
 scripts/tests/template-owned-purity.py
 scripts/tests/template-profile-projections.py
 scripts/tests/template-init-safety.py

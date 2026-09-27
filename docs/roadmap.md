@@ -24,7 +24,7 @@ is not a supported template state.
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | done |
 | 9 | Template initializer, profiles, and template sync | done on merge after required CI |
-| 10 | Optional capability profiles | 10.1, 10.2, 10.3, and 10.4 merged; 10.8 implemented in [PR #64](https://github.com/Dankosik/rust-service-template-rest/pull/64); remaining profiles planned |
+| 10 | Optional capability profiles | 10.1, 10.2, 10.3, 10.4, 10.6 and 10.8 merged; 10.7 implemented; remaining profiles planned |
 | 11 | Benchmarking and performance evidence | planned |
 | 12 | First release and derived-repository verification | planned |
 
@@ -61,7 +61,7 @@ for PostgreSQL, and 10.4 also depends on 8 for PostgreSQL.
 | `internal/config` (koanf, YAML + `APP__` env + flags) | `crates/config` (`config` crate + serde, TOML files, same precedence and secret rules) | `figment` was rejected: no release since 2024, silently drops malformed env names. |
 | `slog` + `logctx` | `tracing` + `tracing-subscriber` + `json-subscriber` | Typed `log.level` directive and `log.format`; `RUST_LOG` is not read. |
 | OpenTelemetry Go traces and metrics + Prometheus | Traces: `opentelemetry` 0.32 + `tracing-opentelemetry` + `axum-tracing-opentelemetry`. Metrics: the `metrics` facade + `metrics-exporter-prometheus` + `axum-prometheus` + `metrics-process` + `tokio-metrics` | The facade is the Rust idiom; OTLP metric push is deferred. Diagnostics stay on a separate listener (`:9090`). |
-| RFC 9457 `problem` package | `infra_http::problem` | Closed transport catalog, stable codes, no submitted values echoed; a `failure` leaf splits out with the gRPC profile. |
+| RFC 9457 `problem` package | `infra_http::problem` with `service-failure` | Shared closed failure identity, HTTP-owned wire projection, no submitted values echoed. |
 | oapi-codegen strict server, hand-written `service.yaml`, runtime request validator | `utoipa` + `utoipa-axum`: handlers carry the contract, the generated `api/openapi/service.yaml` is committed and byte-compared by a test, Redocly lints it, oasdiff compares it with the pull-request base | No maintained Rust-native spec-first server generator exists for axum; the JVM `openapi-generator` output was rejected on quality ([HTTP Architecture](architecture/http.md#decisions-recorded-here)). The committed document stays the reviewed authority. Extractors are the request validator. |
 | `pgx` + `sqlc` + Goose | `sqlx` 0.9 (`postgres`, `runtime-tokio`, `tls-rustls-aws-lc-rs`, `migrate`): pool, transactions, embedded migrations under an advisory lock with checksums, `#[sqlx::test]` per-test databases; template-owned `Dsn` admission and commit-outcome policy in `crates/infra-postgres`; `crates/migrate` library plus binary; compose + `#[sqlx::test]` for proof | `refinery`, `diesel-async`, `sea-orm`, `testcontainers`, `cargo-nextest` rejected or deferred with reasons in [Persistence](architecture/persistence.md#decisions-recorded-here). `query!` macros with offline `.sqlx` metadata and `sqlx-cli` arrive with the first repository (stage 10). |
 | River jobs | `infra-jobs` (stage 10.4): a template-owned PostgreSQL queue on `sqlx` 0.9, enqueued in the caller's transaction and run by the `jobs-worker` binary | No maintained crate with a stable release fills the four-part gap; [Async Architecture](architecture/async.md#decisions-recorded-here) records the candidates, the watch list, and the reopen conditions. |
@@ -645,12 +645,24 @@ markers, tests, and initializer support. Order by expected demand:
    processing, and retention limits. Raw-byte verification atomically creates a
    PostgreSQL receipt and processing job with duplicate/conflict arbitration.
 <!-- template:end inbound-webhooks:roadmap-stage-10-5-inbound-guide -->
-6. NATS JetStream messaging with typed domain events and a `worker` binary;
-   transactional outbox with an `outbox-relay` binary. Reuse `infra-jobs` for
-   durable local scheduling and completion where that boundary applies; the
-   messaging/outbox design owns its distinct delivery semantics.
-7. gRPC with `tonic`: server policy, interceptors, health, bounded drain,
-   shared client connections, buf lint and breaking checks.
+6. NATS JetStream messaging with `domain-events` and `infra-messaging`, plus
+   optional `OUTBOX=postgres`. The retained `jobs-worker` composes consumer
+   work and the outbox's separate one-slot publisher engine; it adds neither a
+   `worker` nor an `outbox-relay` binary. The outbox reuses `infra-jobs` for
+   durable scheduling and completion while preserving its distinct immutable
+   publication semantics. [Durable messaging](durable-messaging.md) and the
+   [PostgreSQL transactional outbox](postgres-transactional-outbox.md) own the
+   adopted contracts. Implemented and merged in PR #65.
+<!-- template:begin grpc:roadmap-stage-10-7 -->
+ 7. Native gRPC: tonic routes on the shared HTTP listener, bearer auth,
+   standard health, plaintext or TLS 1.3/mTLS, header deadlines and one
+   concurrent process drain. Handlers validate their own input. Shared lazy
+   clients integrate private OAuth credentials. Buf owns lint and PR-base
+   compatibility; stock tonic-prost-build commits generated Rust. The
+   [guide](grpc.md) and [decisions](grpc-decisions.md) own adoption. A
+   follow-up simplification replaced the custom transport; this item does not
+   record that change as merged.
+<!-- template:end grpc:roadmap-stage-10-7 -->
 <!-- template:begin outbound-auth:roadmap-stage-10-8-outbound-auth -->
 8. OAuth 2.0 client-credentials outbound authentication.
    **Implemented in [PR #64](https://github.com/Dankosik/rust-service-template-rest/pull/64).**
@@ -776,6 +788,18 @@ C-collated text unique keys. Future stage 10.5 (webhooks) and 10.6
 mechanisms. Process lifecycle ownership stays separate until a shared signal,
 deadline, or tracked-task teardown change justifies extraction; another binary
 alone does not.
+
+Stage 10.6 adds JetStream messaging and `OUTBOX=postgres`. Messaging remains
+independently runnable without PostgreSQL; the outbox requires PostgreSQL and
+jobs, records versioned base64 immutable intent in the caller transaction, and
+uses a separately reserved one-slot publisher engine. It retains finite
+live-key comparison for idempotent enqueue and durable logical-ID consumer
+deduplication beyond that horizon. Long broker outages snooze and refund pending
+intent; recovery and rollback retain rather than delete it. The implementation
+is complete in this candidate, but final assembled validation, exact-head CI,
+initializer representatives, real PostgreSQL+NATS proof, integrated review,
+and any delivery decision remain pending until actual receipts exist. No
+publication or deployment is claimed.
 
 ### Stage 11: Benchmarking and performance evidence
 

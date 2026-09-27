@@ -9,6 +9,11 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | Service package (`crates/service/Cargo.toml`) | The main binary named by that manifest: `main` maps the bootstrap result to an exit code; `bootstrap` composes configuration, telemetry, readiness, the route tree, the two listeners, background tasks, signals, and the staged teardown; `api` merges every `OpenApiRouter` into the one contract and finalizes its served router; the `openapi` binary renders its document; the process tests drive the built binary. | Business behavior, request handling beyond composition, provider details. |
 | `service-config` (`crates/config`) | One validated immutable snapshot: section types with defaults and validation in `<section>.rs`, loader precedence, the `APP__` name pre-scan, the secret-in-file refusal, `SecretString` fields, human-form durations and sizes, build metadata (`app.version`, `app.commit`). | Feature behavior, dependency wiring, request handling, telemetry construction. |
 | `health` (`crates/health`) | The readiness refresher over `tokio::sync::watch`: probe trait, failure threshold, staleness guard, drain flag, O(1) snapshot reads. | Probe implementations, HTTP handlers, the schedule (bootstrap owns the policy values). |
+| `service-failure` (`crates/service-failure`) | Closed failure identity, wire code spelling and transport-neutral meaning. | HTTP response metadata, tonic Status, arbitrary detail text, configuration or provider calls. |
+<!-- template:begin grpc:docs-boundaries-grpc-owners -->
+| `infra-grpc` (`crates/infra-grpc`) | Tonic route assembly, auth/deadline/capacity middleware, health projection, server TLS config and lazy clients. | Configuration loading, handler validation, feature behavior, OAuth tokens, process signals or a second lifecycle budget. |
+| `grpc-contracts` (`crates/grpc-contracts`) | Committed prost messages and native tonic traits. | Business behavior, transport policy, or a runtime generator. |
+<!-- template:end grpc:docs-boundaries-grpc-owners -->
 | `infra-http` (`crates/infra-http`) | The hardened middleware chain, the bounded accept loop (`Server`), the probe handlers with their `#[utoipa::path]` contract, the RFC 9457 `Problem` type and closed code catalog, request-id admission, the route-template access log. | Business rules, configuration loading, feature routes (they merge in `service::api`). |
 | `infra-telemetry` (`crates/infra-telemetry`) | Subscriber installation (`json`/`text`), the tracer provider with the OTLP endpoint resolution and ambient-credential refusal, the Prometheus recorder with process and Tokio runtime metrics, the diagnostics router. | Feature semantics, startup logging content, request routing, which fields a handler emits. |
 <!-- template:begin authn:docs-boundaries-authn-owner -->
@@ -27,6 +32,13 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | `infra-jobs` (`crates/infra-jobs`) | The job table's statements, enqueue, the job-kind and handler contracts (`JobKind`, `Handler`, `Kinds`), and the engine ([guide](../background-jobs.md)). | Concrete kinds or handlers (they live in adapter crates), configuration, process lifecycle, or business rules. |
 | `jobs-worker` (`crates/jobs-worker`) | The worker's composition root and binary. | Engine mechanics, feature behavior. |
 <!-- template:end jobs:docs-boundaries-jobs-owners -->
+<!-- template:begin messaging:docs-boundaries-messaging-owner -->
+| `domain-events` (`crates/domain-events`) | Immutable typed event identity, type/version, occurrence time, and payload contract. | Subjects, broker metadata, ID minting, clocks, configuration, or tasks. |
+| `infra-messaging` (`crates/infra-messaging`) | Go-compatible wire admission, prepared publication, typed registry, bounded JetStream consumer, deterministic DLQ/restore, and connection/probe mapping ([guide](../durable-messaging.md)). | Business events, feature policy, queue SQL or commits, stream administration, configuration loading, signals, or a generic bus. |
+<!-- template:end messaging:docs-boundaries-messaging-owner -->
+<!-- template:begin outbox:docs-boundaries-outbox-owner -->
+| `infra-messaging::outbox` | The private versioned/base64 immutable publication intent, prepared enqueue, and publication handler ([guide](../postgres-transactional-outbox.md)). | The `background_jobs` SQL, caller transaction control, a second connection, business-closure retries, consumer effect deduplication, or stream administration. |
+<!-- template:end outbox:docs-boundaries-outbox-owner -->
 
 | `integration-tests` (`test/`) | Executable utility recipes and any selected profile proof. | Anything a binary runs; the service's process tests stay in `crates/service/tests/`. |
 | `crates/<feature>` (none yet) | Use cases, business types, invariants, domain errors, and the feature's `OpenApiRouter` registrations with its handlers. | Transport policy, provider drivers, runtime configuration, process lifecycle. |
@@ -57,6 +69,13 @@ process tests stay in `crates/jobs-worker/tests/`.
 
 <!-- template:end jobs:docs-boundaries-jobs-tests -->
 
+<!-- template:begin messaging:docs-boundaries-messaging-tests -->
+`infra-messaging` owns its protocol and actual-Go wire fixtures. Its real NATS
+integration proof has no PostgreSQL prerequisite. Worker and service process
+tests remain with their existing composition owners; their assertions observe
+readiness, bounded drain, and process result rather than broker internals.
+<!-- template:end messaging:docs-boundaries-messaging-tests -->
+
 ## Dependency Direction
 
 ```text
@@ -72,6 +91,15 @@ main binary (crates/service, composition root)
   -> infra-bearerauthn
 infra-http -> infra-bearerauthn
 <!-- template:end authn:docs-boundaries-authn-edges -->
+<!-- template:begin messaging:docs-boundaries-messaging-edges -->
+  -> domain-events
+  -> infra-messaging -> domain-events, async-nats, health, tokio, bytes
+jobs-worker -> infra-messaging only when the messaging profile is retained
+service -> infra-messaging only for optional producer/probe composition
+<!-- template:end messaging:docs-boundaries-messaging-edges -->
+<!-- template:begin outbox:docs-boundaries-outbox-edges -->
+infra-messaging::outbox -> domain-events, infra-jobs, infra-postgres, base64
+<!-- template:end outbox:docs-boundaries-outbox-edges -->
 <!-- template:begin outbound-http:docs-boundaries-outbound-edges -->
 infra-outbound-http -> reqwest, http, bytes, url, tokio, metrics, tracing
 <!-- template:end outbound-http:docs-boundaries-outbound-edges -->
@@ -96,6 +124,21 @@ a feature's infra-<provider> adapter -> infra-jobs
 integration-tests (test/)
   -> utility and transport recipes, health
 ```
+
+Each transport projects `service-failure`; the shared leaf imports no transport.
+<!-- template:begin grpc:docs-boundaries-grpc-edges -->
+`service -> infra-grpc -> infra-http, health, service-failure` owns transport
+composition. The listener is `infra_http::Server`, plaintext `bind` or
+`bind_tls`. `service -> grpc-contracts` supplies generated servers to
+`Services::add`. `infra-grpc` does not depend on `grpc-contracts`. The
+standalone generator under `tools/grpc-codegen` is excluded from the runtime
+workspace.
+<!-- template:end grpc:docs-boundaries-grpc-edges -->
+<!-- template:begin outbound-auth-grpc:docs-boundaries-grpc-oauth-edge -->
+The optional edge `infra-oauth2-client-credentials -> infra-grpc` supplies the
+concrete authenticated Service inside the private Credentials owner. Removing
+either profile removes this bridge; the surviving owner keeps its behavior.
+<!-- template:end outbound-auth-grpc:docs-boundaries-grpc-oauth-edge -->
 
 <!-- template:begin postgres:docs-boundaries-postgres-edges -->
 The PostgreSQL profile also adds `infra-postgres -> health, sqlx, url, metrics`,

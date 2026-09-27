@@ -26,6 +26,7 @@ make template-init \
   AUTHN=none \
   OUTBOUND_HTTP=none \
   OUTBOUND_AUTH=none \
+  GRPC=none \
   AGENT_HARNESS=claude
 ```
 
@@ -71,6 +72,16 @@ persists the effective `OUTBOUND_HTTP=bounded` choice even when its input was
 `none`. `none` removes the complete profile. Selection creates no provider,
 token call, task, listener, or readiness dependency.
 <!-- template:end outbound-auth:docs-template-init-outbound-auth -->
+<!-- template:begin grpc:docs-template-init-grpc -->
+`GRPC` defaults to `none` and accepts `none` or `enabled`; the direct entry takes
+`--grpc`. It retains the native transport, committed schemas and generated
+contracts, the generation tool, configuration, the example and the
+[guide](grpc.md). Selection starts no listener or client. Old locks lacking
+`grpc` normalize to `none`; exact replay records and preserves the selection.
+`none` removes exclusive surfaces while shared HTTP failure and retained
+prost/TLS ownership survive. The concrete OAuth bridge remains only when both
+profiles are selected.
+<!-- template:end grpc:docs-template-init-grpc -->
 <!-- template:begin http-idempotency:docs-template-init-http-idempotency -->
 `HTTP_IDEMPOTENCY` defaults to `none` and accepts `none` or `postgres`; the
 direct entry takes `--http-idempotency`. `postgres` retains the
@@ -97,6 +108,17 @@ value such as `JOBS=8` makes `make template-init` refuse with
 `JOBS is unsupported`, so it must be unset or a valid choice. Selection
 starts no worker; `/jobs-worker` runs only where it is deployed.
 <!-- template:end jobs:docs-template-init-jobs -->
+<!-- template:begin messaging:docs-template-init-messaging -->
+`MESSAGING` defaults to `none` and accepts `none` or `nats-jetstream`; the
+direct entry takes `--messaging`. `nats-jetstream` retains the typed event and
+adapter crates, the existing worker where needed, configuration, NATS proof,
+digest-pinned Compose input, CI ownership, and the [durable messaging
+guide](durable-messaging.md). It is independently valid with `DATABASE=none`
+and `JOBS=none`. Selection starts no client or worker; a configured deployment
+supplies the operator-created topology. `none` removes the complete messaging
+closure. `OUTBOX` is intentionally not an initializer selection until its
+separate PostgreSQL/jobs extension exists.
+<!-- template:end messaging:docs-template-init-messaging -->
 
 
 Service names are lowercase ASCII, start with a letter, use single hyphens
@@ -139,6 +161,11 @@ historical profile shapes are `database` + `agent_harness`, `database` +
 `none`. Matching historical replay preserves the original lock bytes. Partial
 or unknown shapes refuse.
 
+<!-- template:begin messaging:docs-template-init-messaging-lock -->
+The lock records the selected `messaging` value. Historical records without it
+mean `none`; changing it after initialization is a refused profile migration.
+<!-- template:end messaging:docs-template-init-messaging-lock -->
+
 
 <!-- template:begin authn:docs-template-init-authn-lock -->
 The lock records the selected `authn` value. Historical records without it
@@ -177,6 +204,16 @@ Manifest files are replaced as whole files; directory entries end in `/` and
 own their descendants, including deletion of target-only owned content. Removing
 an entry from the source manifest relinquishes ownership of that target path.
 Standalone scripts are individual entries, so service siblings remain local.
+Profile-marked sections in portable owners are materialized by the committed
+source initializer's marker renderer using the target lock before purity checks,
+copying, and parity comparison. The manifest still owns each complete output
+file, so a dirty portable Makefile or CI helper refuses full sync. When projection is needed, its source
+helper and profile-inventory dirt also refuses; the reported source revision remains
+the captured Git revision, not a hash of the selected output. Legacy locks use
+the same normalized selections as initialization. An already initialized source
+has no removable markers and must match the target's capability selections.
+Marker-free older or initialized sources need no one-shot initializer helper;
+they follow the same strict purity and copy path.
 Generated adapters are rendered by the committed source helpers. Full sync
 prunes only the declared paths of unselected adapters and cannot restore an
 absent database pack.
@@ -273,18 +310,23 @@ Use the service's [command policy](build-test-and-development-commands.md) and
 [validation router](validation-routing.md) for ordinary development.
 The source template additionally owns `make template-owned-purity-check` and
 `ALLOW_FULL=1 make template-init-check`. Its baseline checks 368 cheap canonical
-profile/harness projections, then initializes and validates 46 runtime graphs.
+profile/harness projections, then initializes and validates the runtime graphs
+enumerated by `scripts/ci/template-init-check.sh`.
 <!-- template:begin outbound-auth:docs-template-init-outbound-auth-proof -->
-OAuth adds four canonical projections and runtime graphs 47--50: OAuth alone,
-with JWT, with introspection (all without PostgreSQL), and the maximal
-PostgreSQL/introspection/idempotency/jobs/webhook graph. Graphs 47--49 join the
-existing database-none CI part; graph 50 joins jobs-http-idempotency-2. These
+OAuth adds four standalone representatives: OAuth alone, with JWT, with
+introspection (all without PostgreSQL), and a PostgreSQL/introspection/
+idempotency/jobs/webhook graph. Messaging retains graphs 47--49; OAuth uses
+50--53; graph 54 adds the meaningful no-PostgreSQL messaging/OAuth seam; and
+55 adds the full outbox/OAuth neighboring pack. These
 compile retained production and test targets once per graph; only PostgreSQL
 selections request the integration-test feature. The workspace quality gate
 runs the OAuth adapter's behavior suite. OAuth does not multiply harness or
-database proof, and the existing eight CI parts cover all 50 runtime graphs.
+database proof, and the existing eight CI parts cover all 56 runtime graphs.
 <!-- template:end outbound-auth:docs-template-init-outbound-auth-proof -->
-
+Graph 56 retains PostgreSQL, jobs, and messaging with outbox absent. Its existing
+jobs-1 CI part runs locked offline metadata and compiles all targets with
+`integration-tests/integration`, including the fixture binary's registration
+callback. This graph adds no database or broker execution.
 Graphs 1--26 are the existing baseline. Graphs 27--46 add five auth/idempotency
 blocks, each ordered as inbound-only without bounded outbound HTTP, inbound-only
 with it, outbound-only with it, and both directions with it: graphs 27--30 use

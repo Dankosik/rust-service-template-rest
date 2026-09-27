@@ -21,6 +21,11 @@ repository surface that can prove them.
   PostgreSQL proof uses `test-integration-db`, `migration-validate`, and
   `compose-up`; its heavy targets are also behind `ALLOW_HEAVY=1`.
   <!-- template:end postgres:contributing-postgres-prerequisites -->
+  <!-- template:begin messaging:contributing-messaging-prerequisites -->
+  JetStream integration and actual-Go compatibility proof use the retained
+  Docker Compose NATS image and Go toolchain; they are CI-owned heavy checks
+  unless the task specifically requests their local execution.
+  <!-- template:end messaging:contributing-messaging-prerequisites -->
   Unit tests never need Docker.
 
 Every tool version is pinned once in `tools/versions.env`; `make` and CI read
@@ -72,6 +77,17 @@ one and an out-of-order version, and `ALLOW_HEAVY=1 make migration-validate`
 rehearses the image against a fresh database
 ([PostgreSQL Validation](docs/validation/postgres.md)).
 <!-- template:end postgres:contributing-postgres-proof -->
+
+<!-- template:begin messaging:contributing-messaging-proof -->
+A change to `crates/domain-events`, `crates/infra-messaging`, messaging
+configuration, NATS Compose, the Go bridge, or its profile closure keeps normal
+crate tests local and selects CI's `messaging_integration` surface. That gate
+uses a real NATS server and actual Go wire encode/decode in both directions;
+it checks publication ACK/rejection/ambiguity, source-before-settlement, DLQ
+before source ACK, deterministic restore, bounded shutdown, and retained
+profile pruning. It does not certify a deployed broker topology or the
+adopter's durable logical-ID effect store.
+<!-- template:end messaging:contributing-messaging-proof -->
 
 A change to an HTTP operation is made in the handler's `#[utoipa::path]`
 attributes and schema derives, then `make openapi-generate` rewrites

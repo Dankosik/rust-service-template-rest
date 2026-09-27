@@ -4,5 +4,5 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    jobs_worker::run(std::env::args_os(), Some(integration_tests::jobs::register))
+    jobs_worker::run(std::env::args_os(), Some(integration_tests::jobs::REGISTER))
 }

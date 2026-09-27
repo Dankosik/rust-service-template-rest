@@ -1,0 +1,17 @@
+[package]
+name = "grpc-contracts"
+description = "Committed protobuf contracts."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+prost = { workspace = true, features = ["std", "derive"] }
+tonic = { workspace = true, features = ["codegen"] }
+tonic-prost = { workspace = true }

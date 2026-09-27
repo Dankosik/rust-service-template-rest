@@ -391,6 +391,8 @@ check-instructions:
 	@test -f allow-skills
 secret-scan:
 	@printf 'secrets\n' >>invoked
+dockerfile-check:
+	@:
 MAKE
 	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
 	if output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml 2>&1); then
@@ -537,7 +539,7 @@ if grep -n '[[:space:]]' "${files_path}" >/dev/null; then
 fi
 
 surfaces_path=${tmp}/surfaces
-bash ./scripts/ci/changed-surfaces.sh <"${files_path}" >"${surfaces_path}"
+bash ./scripts/ci/changed-surfaces.sh --union "${merge_base_sha}" <"${files_path}" >"${surfaces_path}"
 while IFS='=' read -r name value; do
 	printf -v "surface_${name}" '%s' "${value}"
 done <"${surfaces_path}"
@@ -611,6 +613,12 @@ elif is_true module_initializer; then
 	add_command make template-init-projections "projected text changed and no runtime input did" "make template-init-projections" cpu false false
 fi
 
+# template:begin grpc:verify-grpc-schema
+if is_true grpc_schema; then
+	add_command make grpc-check "protobuf schema, generator, or committed output changed" "make grpc-check" cpu true false
+fi
+# template:end grpc:verify-grpc-schema
+
 workspace_rust=false
 if is_true cargo_dependencies; then workspace_rust=true; fi
 affected_lint=''
@@ -676,6 +684,9 @@ if is_true migrations; then
 fi
 if is_true db_integration; then
 	add_command make test-integration-db "database adapter, runner, or database proof changed" "make test-integration-db" docker true true
+fi
+if is_true messaging_integration; then
+	add_command make test-integration-messaging "JetStream adapter, bridge, Compose, or messaging proof changed" "make test-integration-messaging" docker true true
 fi
 if is_true runtime_image || is_true migrations; then
 	image=${VERIFY_RUNTIME_IMAGE:-service:verify}

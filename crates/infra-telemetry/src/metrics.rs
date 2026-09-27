@@ -118,7 +118,7 @@ impl Metrics {
     }
 }
 
-// template:begin jobs:telemetry-jobs-histograms
+// template:begin worker:telemetry-worker-histograms
 impl Metrics {
     /// `install` plus explicit buckets for further histograms.
     ///
@@ -144,7 +144,7 @@ impl Metrics {
         Self::installed(builder)
     }
 }
-// template:end jobs:telemetry-jobs-histograms
+// template:end worker:telemetry-worker-histograms
 
 // template:begin outbound-http:telemetry-outbound-buckets-helper
 fn outbound_histogram_builder(builder: PrometheusBuilder) -> Result<PrometheusBuilder, BuildError> {

@@ -24,8 +24,8 @@ pub use engine::{
     OperationError, POLL_INTERVAL, RECORD_RETRY_INTERVAL, Started, StartupError,
 };
 pub use enqueue::{
-    EnqueueError, EnqueueOptions, Enqueued, InvalidDelay, MAX_DELAY, MAX_PAYLOAD_BYTES,
-    MAX_UNIQUE_KEY_BYTES, enqueue,
+    EnqueueError, EnqueueOptions, Enqueued, InvalidDelay, LivePayloadComparison, MAX_DELAY,
+    MAX_PAYLOAD_BYTES, MAX_UNIQUE_KEY_BYTES, compare_live_payload, enqueue,
 };
 pub use kind::{
     CompleteError, DEFAULT_MAX_ATTEMPTS, DEFAULT_TIMEOUT, Handler, Job, JobError, JobId, JobKind,

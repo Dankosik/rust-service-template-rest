@@ -23,8 +23,18 @@ use tokio_util::task::TaskTracker;
 /// The error a registration returns; the worker refuses with it.
 pub type BuildError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// A derived service's registration: add each job kind with its policy and handler.
-pub type Register = fn(&mut infra_jobs::Kinds, &Support<'_>) -> Result<(), BuildError>;
+/// A derived service's registration: add each retained job kind and typed
+/// messaging handler. The worker decides which registered capabilities become
+/// active from the immutable configuration before it opens either dependency.
+pub type Register = fn(
+    // template:begin jobs:worker-register-jobs-parameter
+    &mut infra_jobs::Kinds,
+    // template:end jobs:worker-register-jobs-parameter
+    // template:begin messaging:worker-register-messaging-parameter
+    &mut infra_messaging::Registry,
+    // template:end messaging:worker-register-messaging-parameter
+    &Support<'_>,
+) -> Result<(), BuildError>;
 
 /// What a registration may use to build handlers.
 pub struct Support<'a> {
@@ -113,7 +123,7 @@ fn start(
     register: Option<Register>,
 ) -> Result<shutdown::Outcome, bootstrap::WorkerError> {
     let Some(register) = register else {
-        return Err(bootstrap::WorkerError::NoKinds);
+        return Err(bootstrap::WorkerError::NoRegistrations);
     };
     let config = service_config::load(&options, BUILD_INFO)?;
     bootstrap::check_preconditions(&config)?;
@@ -141,8 +151,10 @@ mod tests {
         assert_eq!(exit_code(&Ok(Outcome::Graceful)), 0);
         assert_eq!(exit_code(&Ok(Outcome::Degraded)), 3);
         assert_eq!(exit_code(&Err(WorkerError::EngineStopped)), 1);
-        assert_eq!(exit_code(&Err(WorkerError::NoKinds)), 1);
+        assert_eq!(exit_code(&Err(WorkerError::NoRegistrations)), 1);
+        // template:begin jobs:worker-lib-test-postgres-refusal
         assert_eq!(exit_code(&Err(WorkerError::PostgresDisabled)), 1);
+        // template:end jobs:worker-lib-test-postgres-refusal
     }
 
     fn missing_file() -> LoadOptions {
@@ -164,10 +176,21 @@ mod tests {
             "loading the missing file must refuse, got {loaded:?}"
         );
         let started = start(options, None);
-        assert!(matches!(started, Err(WorkerError::NoKinds)), "{started:?}");
+        assert!(
+            matches!(started, Err(WorkerError::NoRegistrations)),
+            "{started:?}"
+        );
     }
 
-    fn refuse(_: &mut infra_jobs::Kinds, _: &Support<'_>) -> Result<(), super::BuildError> {
+    fn refuse(
+        // template:begin jobs:worker-register-test-jobs-parameter
+        _: &mut infra_jobs::Kinds,
+        // template:end jobs:worker-register-test-jobs-parameter
+        // template:begin messaging:worker-register-test-messaging-parameter
+        _: &mut infra_messaging::Registry,
+        // template:end messaging:worker-register-test-messaging-parameter
+        _: &Support<'_>,
+    ) -> Result<(), super::BuildError> {
         Err("registration must not run before configuration".into())
     }
 

@@ -14,13 +14,14 @@ from pathlib import Path
 
 _LEGACY_B206_PROFILE_SHA256 = "75e68f9c7defd4031f5d7a0bc2866f337a6c79f69a69f56c79a268d48d8d6530"
 _LEGACY_B206_REVISION = "b2060279370713f05be81b1ad44a31e3e960bccc"
-_LEGACY_PROFILE_KEYS = ("schema_version", "source_only", "postgres", "identity", "cargo_lock")
+_HISTORICAL_OUTBOUND_REVISION = "43b7588edbdb1ebfbc478fb28e0e3d2e77417960"
+_LEGACY_B206_PROFILE_PATH = "scripts/tests/fixtures/template-profiles-b206.json"
 _AUTH_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection", "identity", "cargo_lock",
 )
 _OUTBOUND_ONLY_PROFILE_KEYS = (
     "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection",
-    "outbound-http", "egress-dns", "tls-fixtures", "request-budget", "identity", "cargo_lock",
+    "identity", "cargo_lock", "outbound-http", "egress-dns", "request-budget",
 )
 # Historical DNS pack is replay input only; never part of current selection.
 _HISTORICAL_EGRESS_PACK = {
@@ -57,7 +58,6 @@ _HISTORICAL_EGRESS_PACK = {
         }
     ]
 }
-_NEW_PROJECTION_CHECKER = "scripts/tests/template-profile-projections.py"
 
 
 def run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -116,15 +116,8 @@ def clone(source: Path, destination: Path) -> None:
 
 
 def install_historical_none(source: Path, target: Path) -> None:
-    profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
-    legacy = {key: profile[key] for key in _LEGACY_PROFILE_KEYS}
-    source_only = legacy["source_only"]
-    if not isinstance(source_only, list) or source_only.count(_NEW_PROJECTION_CHECKER) != 1:
-        raise AssertionError("current profile inventory lacks exactly one projection checker entry")
-    legacy["source_only"] = [item for item in source_only if item != _NEW_PROJECTION_CHECKER]
-    # The shared PostgreSQL proxy did not exist in the pinned b206 inventory.
-    legacy["postgres"]["remove_when_none"].remove("test/tests/support/commit_proxy.rs")
-    rendered = (json.dumps(legacy, indent=2) + "\n").encode("utf-8")
+    # Frozen bytes from _LEGACY_B206_REVISION, independent of current profiles.
+    rendered = (source / _LEGACY_B206_PROFILE_PATH).read_bytes()
     if hashlib.sha256(rendered).hexdigest() != _LEGACY_B206_PROFILE_SHA256:
         raise AssertionError("legacy b206 profile inventory bytes changed")
     (target / "scripts/lib/template_profiles.json").write_bytes(rendered)
@@ -132,8 +125,11 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("authn")
     lock["profiles"].pop("outbound_http", None)
     lock["profiles"].pop("outbound_auth", None)
+    lock["profiles"].pop("grpc", None)
     lock["profiles"].pop("http_idempotency", None)
     lock["profiles"].pop("jobs", None)
+    lock["profiles"].pop("messaging", None)
+    lock["profiles"].pop("outbox", None)
     lock["profiles"].pop("webhooks", None)
     lock["profiles"].pop("inbound_webhooks", None)
     lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
@@ -149,8 +145,11 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     lock["profiles"].pop("outbound_http", None)
     lock["profiles"].pop("outbound_auth", None)
+    lock["profiles"].pop("grpc", None)
     lock["profiles"].pop("http_idempotency", None)
     lock["profiles"].pop("jobs", None)
+    lock["profiles"].pop("messaging", None)
+    lock["profiles"].pop("outbox", None)
     lock["profiles"].pop("webhooks", None)
     lock["profiles"].pop("inbound_webhooks", None)
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
@@ -164,8 +163,8 @@ def install_derived_outbound_only_none(source: Path, target: Path) -> None:
         json.dumps(outbound_only, indent=2) + "\n", encoding="utf-8"
     )
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
-    # The outbound generation's four-field shape, whatever an earlier
-    # fixture left in the lock: a missing selection there means `none`.
+    # The DNS-bearing outbound generation's four-field shape: a missing
+    # later selection means `none` during replay.
     profiles = lock["profiles"]
     lock["profiles"] = {
         "database": profiles["database"],
@@ -173,6 +172,7 @@ def install_derived_outbound_only_none(source: Path, target: Path) -> None:
         "outbound_http": profiles.get("outbound_http", "none"),
         "agent_harness": profiles["agent_harness"],
     }
+    lock["source"]["checkout_revision"] = _HISTORICAL_OUTBOUND_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -228,6 +228,9 @@ def assert_profile_output(
     assert_profile_pack(source, target, "webhooks-common", webhooks == "durable" or inbound_webhooks == "standard-webhooks")
     assert_profile_pack(source, target, "webhooks", webhooks == "durable")
     assert_profile_pack(source, target, "inbound-webhooks", inbound_webhooks == "standard-webhooks")
+    assert_profile_pack(source, target, "grpc", False)
+    if "grpc-check:" in (target / "make/template.mk").read_text(encoding="utf-8"):
+        raise AssertionError("portable sync restored unselected gRPC Make targets")
 
 
 def initialize(
@@ -385,16 +388,20 @@ def check(source: Path) -> None:
 
         bytes_before = tooling.read_bytes()
         full_refusal = sync(source, target, "--check")
-        if full_refusal.returncode != 2 or tooling.read_bytes() != bytes_before:
+        if (
+            full_refusal.returncode != 2
+            or "dirty selected target path: make/template.mk" not in full_refusal.stderr
+            or tooling.read_bytes() != bytes_before
+        ):
             raise AssertionError("full sync did not preserve dirty portable tooling refusal")
 
         tooling.write_bytes(tooling_before)
         if tooling.read_bytes() != tooling_before:
             raise AssertionError("canary could not restore the exact portable tooling baseline")
 
-        full_owned = target / "scripts/template-sync.sh"
+        full_owned = tooling
         full_owned.write_bytes(full_owned.read_bytes() + b"\n# committed full-sync drift\n")
-        commit_paths(target, "committed full sync drift", "scripts/template-sync.sh")
+        commit_paths(target, "committed full sync drift", "make/template.mk")
         full_drift = sync(source, target, "--check")
         if full_drift.returncode != 1:
             raise AssertionError(f"full sync check should report committed drift, got {full_drift.returncode}: {full_drift.stderr}")
@@ -407,6 +414,7 @@ def check(source: Path) -> None:
         # source that retains the pack must not restore it.
         assert_profile_pack(source, target, "http-idempotency", False)
         assert_profile_pack(source, target, "http-idempotency-mounted", False)
+        assert_profile_output(source, target, "oidc-jwt", "bounded")
         commit(target, "adopt full portable snapshot")
         full_parity = sync(source, target, "--check")
         if full_parity.returncode:

@@ -6,6 +6,7 @@
 //! the graceful drain; the composition root decides when to stop and how
 //! long to wait.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -90,20 +91,39 @@ impl Server {
         app: Router,
         options: ServerOptions,
     ) -> Result<Self, ServerError> {
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|source| ServerError::Bind { addr, source })?;
-        let local_addr = listener
-            .local_addr()
-            .map_err(|source| ServerError::Bind { addr, source })?;
-        let stop_accepting = CancellationToken::new();
-        let accept_loop = tokio::spawn(accept_loop(listener, app, options, stop_accepting.clone()));
-        Ok(Self {
-            local_addr,
-            stop_accepting,
-            accept_loop: Some(accept_loop),
-        })
+        bind_listener(addr, app, options, |stream| async move { Some(stream) }).await
     }
+
+    // template:begin grpc:http-server-tls
+    /// Bind `addr` and start accepting TLS connections on the current Tokio runtime.
+    ///
+    /// The handshake runs after the first-byte peek and is bounded by
+    /// [`ServerOptions::header_read_timeout`]. A handshake error or timeout
+    /// closes the connection without a response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::Bind`] when the address cannot be bound.
+    pub async fn bind_tls(
+        addr: SocketAddr,
+        app: Router,
+        options: ServerOptions,
+        tls: Arc<rustls::ServerConfig>,
+    ) -> Result<Self, ServerError> {
+        let acceptor = tokio_rustls::TlsAcceptor::from(tls);
+        let handshake_timeout = options.header_read_timeout;
+        bind_listener(addr, app, options, move |stream| {
+            let acceptor = acceptor.clone();
+            async move {
+                match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
+                    Ok(Ok(tls_stream)) => Some(tls_stream),
+                    Ok(Err(_)) | Err(_) => None,
+                }
+            }
+        })
+        .await
+    }
+    // template:end grpc:http-server-tls
 
     /// The address the listener actually bound, including an OS-assigned port.
     #[must_use]
@@ -178,12 +198,50 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
     builder
 }
 
-async fn accept_loop(
+async fn bind_listener<F, Fut, IO>(
+    addr: SocketAddr,
+    app: Router,
+    options: ServerOptions,
+    upgrade: F,
+) -> Result<Server, ServerError>
+where
+    F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = Option<IO>> + Send + 'static,
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|source| ServerError::Bind { addr, source })?;
+    let local_addr = listener
+        .local_addr()
+        .map_err(|source| ServerError::Bind { addr, source })?;
+    let stop_accepting = CancellationToken::new();
+    let accept_loop = tokio::spawn(accept_loop(
+        listener,
+        app,
+        options,
+        stop_accepting.clone(),
+        upgrade,
+    ));
+    Ok(Server {
+        local_addr,
+        stop_accepting,
+        accept_loop: Some(accept_loop),
+    })
+}
+
+async fn accept_loop<F, Fut, IO>(
     listener: TcpListener,
     app: Router,
     options: ServerOptions,
     stop: CancellationToken,
-) -> GracefulShutdown {
+    upgrade: F,
+) -> GracefulShutdown
+where
+    F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = Option<IO>> + Send + 'static,
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let builder = connection_builder(options);
     let graceful = GracefulShutdown::new();
     let permits = options
@@ -224,13 +282,17 @@ async fn accept_loop(
         let watcher = graceful.watcher();
         let builder = builder.clone();
         let app = app.clone();
+        let upgrade = upgrade.clone();
         tokio::spawn(async move {
             let _permit = permit;
             if !wait_for_first_byte(&stream, options.header_read_timeout).await {
                 return;
             }
+            let Some(io) = upgrade(stream).await else {
+                return;
+            };
             let connection = builder
-                .serve_connection_with_upgrades(TokioIo::new(stream), TowerToHyperService::new(app))
+                .serve_connection_with_upgrades(TokioIo::new(io), TowerToHyperService::new(app))
                 .into_owned();
             if let Err(err) = watcher.watch(connection).await {
                 tracing::debug!(%peer, error = %err, "connection ended with error");
@@ -423,4 +485,85 @@ mod tests {
         assert!(matches!(err, ServerError::Bind { .. }), "{err}");
         occupied.drain(Duration::from_secs(1)).await.unwrap();
     }
+
+    // template:begin grpc:http-server-tls-test
+    #[tokio::test]
+    async fn tls_listener_serves_http2() {
+        use std::sync::Arc;
+
+        use http_body_util::BodyExt as _;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+        use rustls::{ClientConfig, RootCertStore, ServerConfig};
+        use tokio_rustls::TlsConnector;
+
+        fn localhost_tls() -> (ServerConfig, ClientConfig) {
+            use rcgen::{
+                BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose,
+                IsCa, KeyPair, KeyUsagePurpose,
+            };
+
+            let mut ca = CertificateParams::default();
+            ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+            let issuer = CertifiedIssuer::self_signed(ca, KeyPair::generate().unwrap()).unwrap();
+            let key = KeyPair::generate().unwrap();
+            let mut leaf = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
+            leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+            let certificate = leaf.signed_by(&key, &issuer).unwrap();
+            let cert = CertificateDer::from(certificate.der().to_vec());
+            let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
+            let provider = rustls::crypto::aws_lc_rs::default_provider();
+            let mut server = ServerConfig::builder_with_provider(provider.clone().into())
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert], key)
+                .unwrap();
+            server.alpn_protocols = vec![b"h2".to_vec()];
+            let mut roots = RootCertStore::empty();
+            roots.add(issuer.der().clone()).unwrap();
+            let mut client = ClientConfig::builder_with_provider(provider.into())
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            client.alpn_protocols = vec![b"h2".to_vec()];
+            (server, client)
+        }
+
+        let (server_config, client_config) = localhost_tls();
+        let mut opts = options();
+        opts.header_read_timeout = Duration::from_secs(2);
+        let server = Server::bind_tls(loopback(), app(), opts, Arc::new(server_config))
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let tls = TlsConnector::from(Arc::new(client_config))
+            .connect(ServerName::try_from("localhost").unwrap(), stream)
+            .await
+            .unwrap();
+        let (mut sender, connection) = hyper::client::conn::http2::handshake(
+            hyper_util::rt::TokioExecutor::new(),
+            hyper_util::rt::TokioIo::new(tls),
+        )
+        .await
+        .unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let request = http::Request::builder()
+            .uri(format!("https://localhost:{}/ok", addr.port()))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), sender.send_request(request))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"ok");
+        server.drain(Duration::from_secs(1)).await.unwrap();
+    }
+    // template:end grpc:http-server-tls-test
 }

@@ -1,0 +1,32 @@
+# Native gRPC decisions
+
+The [adoption guide](grpc.md) owns the supported API and operator contract.
+Each row is the present boundary, the alternative it beat, the decisive
+reason, and the condition that would reopen it.
+
+| Decision | Rejected alternative | Decisive reason | Reopen |
+| --- | --- | --- | --- |
+| Tonic `Routes` on the existing `infra_http::Server`, including `bind_tls` | Tonic's transport `Server`: a second accept loop without this template's connection cap and first-byte bound, plus a drain the process cannot budget. The previous hand-written HTTP/2 server: it duplicated the listener without keepalive or idle bounds, and span-in-body custody cost about 1300 lines. | One accept loop already has the cap, first-byte timeout, HTTP/2 keepalive, accept backoff and `GracefulShutdown`. gRPC drain is the same `Server::drain` as HTTP. | Reopen only if tonic exposes a supported server whose accept and drain the process can budget without a second loop. |
+| Tower, tower-http and axum middleware on the tonic router | A generated policy proxy in front of every method | Registration is `Services::add(EchoServiceServer::new(...))`. Handler statuses pass through. A proxy duplicated tonic dispatch to enforce policy that middleware and handlers now own. | Reopen if a feature must intercept every cardinality inside the generated trait and middleware cannot see that call. |
+| No protovalidate. Handlers validate input, as HTTP extractors do. The example checks length and returns `classified_status`. | The removed path: a third-party 0.x CEL bridge, a protoc build dependency through `prost-protovalidate-types`, and a custom codec | Shared cross-language constraints were not a requirement. The bridge added a compiler and a second decode path for rules the handler can state directly. | Reopen if cross-language shared constraints become a requirement. |
+| Stock `tonic_prost_build` over Buf's temporary file descriptor set | A custom service generator, remote Buf plugins, or `build.rs` generation | Buf owns parse, STANDARD lint and FILE compatibility. Stock codegen emits the native traits. Remote plugins add registry availability. `build.rs` would generate during ordinary service builds. | Reopen if stock codegen cannot emit a required native trait option and a local generator is the smallest fix. |
+| Deadline measured to response headers, tonic `Server::timeout` placement, status `DEADLINE_EXCEEDED`, cap 8 seconds | A body-lifetime timer, or tonic's native timeout code (`CANCELLED`) | Header placement matches tonic's server timeout. The status matches the shared deadline meaning. Client-streaming must finish the upload inside the cap; server and bidi streams are then bounded by the caller and process drain. | Reopen if a feature needs client-streaming longer than 8 seconds; make the cap configurable. |
+| Clients use tonic `ClientTlsConfig` (TLS 1.2 and 1.3, normal verification). The server stays TLS 1.3-only. | The custom connector that forced client TLS 1.3 | The client would have rebuilt rustls only to diverge from tonic's normal verification. The server already builds its own config, so the 1.3 floor has no extra cost. | Reopen if an accepted peer requires a client protocol floor tonic cannot set. |
+| Observation uses `tracing-opentelemetry-instrumentation-sdk` gRPC span helpers, already locked through axum-tracing-opentelemetry | `tonic-tracing-opentelemetry`, an extra crate for the same helpers; or custom body-lifetime observation | Header observation matches the deadline boundary. A body-lifetime span was the removed custody cost. | Reopen if a maintained helper records trailer status without holding the body and a consumer requires that status in the span. |
+| Small tonic-health adapter over `ReadinessReader` | `HealthReporter` | The stock reporter starts `SERVING` and answers unknown `Watch` with `NOT_FOUND`. This adapter reads readiness, returns `NOT_FOUND` for unknown `Check`, emits `SERVICE_UNKNOWN` for unknown `Watch`, and ends after `NOT_SERVING` at drain. | Reopen if tonic-health can start from an external verdict and end unknown `Watch` as `SERVICE_UNKNOWN` without a spawned reporter task. |
+| OAuth eviction at the initial response only | Trailer inspection | Real servers reject authentication with a Trailers-Only response, whose `grpc-status` arrives in the initial headers. Trailer inspection holds the body. The response is returned unchanged. | Reopen if an accepted provider rejects machine auth only in trailers and a supported hook can see that without a body inspector. |
+| Server `method` is the path only when the call was dispatched and the header status is not `UNIMPLEMENTED`; otherwise `method` is `"unknown"` | Labeling every raw path, or omitting undispatched failures from the series | Unknown and undispatched calls must not create a method series. Auth, shed, deadline and panic responses are still counted, under `unknown`. | Reopen if an operator must split those undispatched outcomes by path without unbounded label cardinality. |
+| The replacement fixed five listener and status defects: no HTTP/2 keepalive or idle bound, a spinning drain loop, accept errors without backoff, silently suppressed panics, and malformed bearer mapped to `INVALID_ARGUMENT` | Patching those inside the custom server | The shared listener already had keepalive, the first-byte bound, 50 ms accept backoff and `GracefulShutdown`. `CatchPanicLayer` leaves the payload to the normal hook. Malformed bearer is `UNAUTHENTICATED`. | Do not restore the custom listener to fix one of these. Reopen a single defect only if the shared listener loses that bound. |
+
+<!-- template:begin outbound-auth-grpc:docs-grpc-oauth-eviction -->
+Eviction reuses `Credentials::invalidate`. Real servers reject authentication
+with a Trailers-Only response, whose `grpc-status` arrives in the initial
+headers. It runs only when that response has `grpc-status` `UNAUTHENTICATED`,
+or HTTP 401 and no `grpc-status`. Trailers are not read. The response is
+returned unchanged.
+Cleanup spends only the remaining call deadline and starts no background
+work. `PERMISSION_DENIED` keeps the credential. A caller-supplied
+`Authorization` is `INVALID_ARGUMENT` before acquisition. Reopen if an
+accepted provider rejects machine auth only in trailers and a supported hook
+can observe that without a body inspector.
+<!-- template:end outbound-auth-grpc:docs-grpc-oauth-eviction -->

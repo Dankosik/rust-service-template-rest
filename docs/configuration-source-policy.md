@@ -46,6 +46,9 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   allowed so a file can document the key.
 - Secret fields are `secrecy::SecretString`: `Debug` output and the startup
   summary print `[REDACTED]`, and the value is zeroed on drop.
+- A secret map given a scalar (`APP__WEBHOOKS__SECRETS=value`, the reference
+  segment omitted) fails with its key and a static reason; config-rs's default
+  type diagnostic would echo the value.
 - Files are read as the process user; relative paths and symlinks are
   accepted because Kubernetes projected volumes depend on symlinks for atomic
   updates. Each file is bounded to 1 MiB before parsing.
@@ -58,6 +61,28 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   are refused at startup, and the diagnostic never carries the value
   ([Persistence](architecture/persistence.md#connection-admission)).
 <!-- template:end postgres:docs-config-postgres-source -->
+<!-- template:begin messaging:docs-config-messaging-source -->
+- `messaging` is an optional typed section. Its non-secret endpoint, stream,
+  consumer, DLQ, TLS, timeout, concurrency, and delivery-size inputs use normal
+  file/environment precedence; credentials are `SecretString`, environment-only,
+  and redacted. Active consumption requires complete named topology and distinct
+  source/DLQ subjects. Local plaintext or unauthenticated use is an explicit
+  development/test escape hatch, never a production default. Configuration
+  validates shape and resource bounds before any provider I/O; the adapter maps
+  the admitted snapshot to its client options.
+  `messaging.urls` uses a TOML array or one comma-separated
+  `APP__MESSAGING__URLS` value, for example
+  `tls://nats-a.example:4222,tls://nats-b.example:4222`. A single URL is written
+  directly; JSON array syntax is not an environment format. List parsing is
+  confined to this key, so other environment strings, including credentials,
+  keep their exact bytes.
+<!-- template:end messaging:docs-config-messaging-source -->
+<!-- template:begin outbox:docs-config-outbox-source -->
+- `OUTBOX=postgres` is initializer/profile selection, not a configuration
+  section or runtime switch. It requires the retained PostgreSQL, jobs, and
+  JetStream messaging capabilities. Its retry, snooze, dedupe, capacity, and
+  shutdown rules are code-owned; it adds no operator tuning key.
+<!-- template:end outbox:docs-config-outbox-source -->
 <!-- template:begin authn:docs-config-authn-source -->
 - `authn.mode` defaults to `none`. A retained initialized profile admits only `none` plus its selected engine. The `none` variant accepts no provider fields; an active engine needs exact, nonblank `authn.issuer` and `authn.audience`. Issuer, audience, and identity values are not trimmed or case-folded. `AuthnConfig` Debug exposes only mode; trust inputs, endpoints, queries and credentials remain redacted.
 <!-- template:end authn:docs-config-authn-source -->
@@ -89,6 +114,18 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
 <!-- template:end outbound-auth:docs-config-outbound-auth -->
 
 ## OpenTelemetry Environment Policy
+
+<!-- template:begin grpc:docs-config-grpc -->
+The optional `grpc` section defaults disabled. Enabling it requires an address
+and explicit plaintext or TLS security; bearer verification remains valid with
+either mode. PEM certificate/CA values are ordinary configuration, while
+`grpc.private_key` and `integrations.<name>.grpc.private_key` are environment-only
+secrets. The transport builds the listener config at startup. A disabled
+listener performs no TLS or network work. Config Debug omits all trust and
+identity material. Client integration inputs select a trusted destination,
+explicit security, optional CA and optional paired certificate/key; they do
+not create a client registry or token owner. See [gRPC](grpc.md).
+<!-- template:end grpc:docs-config-grpc -->
 
 Typed configuration owns service identity and takes precedence; the official
 OpenTelemetry environment stays a supported platform fallback:

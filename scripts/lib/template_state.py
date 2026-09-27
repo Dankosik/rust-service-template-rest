@@ -32,8 +32,11 @@ DATABASE_CHOICES = ("none", "postgres")
 AUTHN_CHOICES = ("none", "oidc-jwt", "oidc-introspection")
 OUTBOUND_HTTP_CHOICES = ("none", "bounded")
 OUTBOUND_AUTH_CHOICES = ("none", "oauth2-client-credentials")
+GRPC_CHOICES = ("none", "enabled")
 HTTP_IDEMPOTENCY_CHOICES = ("none", "postgres")
 JOBS_CHOICES = ("none", "postgres")
+MESSAGING_CHOICES = ("none", "nats-jetstream")
+OUTBOX_CHOICES = ("none", "postgres")
 WEBHOOKS_CHOICES = ("none", "durable")
 INBOUND_WEBHOOKS_CHOICES = ("none", "standard-webhooks")
 HARNESS_CHOICES = ("core", "codex", "claude", "qwen", "cursor", "grok", "opencode", "all")
@@ -267,6 +270,18 @@ def jobs_requirement(database: str) -> str | None:
     return None
 
 
+def outbox_requirement(database: str, jobs: str, messaging: str) -> str | None:
+    """Return the unmet transactional-outbox prerequisite, if any."""
+
+    if database != "postgres":
+        return "OUTBOX=postgres requires DATABASE=postgres"
+    if jobs != "postgres":
+        return "OUTBOX=postgres requires JOBS=postgres"
+    if messaging != "nats-jetstream":
+        return "OUTBOX=postgres requires MESSAGING=nats-jetstream"
+    return None
+
+
 def webhooks_requirement(database: str, jobs: str, outbound_http: str) -> str | None:
     """Return the unmet durable-outbound webhook prerequisite, if any."""
 
@@ -301,8 +316,28 @@ def validate_profiles(value: object) -> dict[str, str]:
             "inbound_webhooks", "agent_harness",
         },
         {
+            "database", "authn", "outbound_http", "http_idempotency", "jobs", "webhooks",
+            "inbound_webhooks", "messaging", "agent_harness",
+        },
+        {
+            "database", "authn", "outbound_http", "http_idempotency", "jobs", "webhooks",
+            "inbound_webhooks", "messaging", "outbox", "agent_harness",
+        },
+        {
             "database", "authn", "outbound_http", "outbound_auth", "http_idempotency", "jobs", "webhooks",
             "inbound_webhooks", "agent_harness",
+        },
+        {
+            "database", "authn", "outbound_http", "outbound_auth", "grpc", "http_idempotency", "jobs",
+            "webhooks", "inbound_webhooks", "agent_harness",
+        },
+        {
+            "database", "authn", "outbound_http", "outbound_auth", "http_idempotency", "jobs", "messaging",
+            "outbox", "webhooks", "inbound_webhooks", "agent_harness",
+        },
+        {
+            "database", "authn", "outbound_http", "outbound_auth", "grpc", "http_idempotency", "jobs",
+            "messaging", "outbox", "webhooks", "inbound_webhooks", "agent_harness",
         },
     ):
         raise Refusal("profiles has an unsupported shape")
@@ -310,10 +345,13 @@ def validate_profiles(value: object) -> dict[str, str]:
     authn = value.get("authn", "none")
     outbound_http = value.get("outbound_http", "none")
     outbound_auth = value.get("outbound_auth", "none")
+    grpc = value.get("grpc", "none")
     http_idempotency = value.get("http_idempotency", "none")
     jobs = value.get("jobs", "none")
     webhooks = value.get("webhooks", "none")
     inbound_webhooks = value.get("inbound_webhooks", "none")
+    messaging = value.get("messaging", "none")
+    outbox = value.get("outbox", "none")
     harness = value["agent_harness"]
     if not isinstance(database, str) or database not in DATABASE_CHOICES:
         raise Refusal("profiles.database is unsupported")
@@ -325,6 +363,8 @@ def validate_profiles(value: object) -> dict[str, str]:
         raise Refusal("profiles.outbound_auth is unsupported")
     if outbound_auth == "oauth2-client-credentials" and outbound_http != "bounded":
         raise Refusal("profiles.outbound_auth=oauth2-client-credentials requires profiles.outbound_http=bounded")
+    if not isinstance(grpc, str) or grpc not in GRPC_CHOICES:
+        raise Refusal("profiles.grpc is unsupported")
     if not isinstance(http_idempotency, str) or http_idempotency not in HTTP_IDEMPOTENCY_CHOICES:
         raise Refusal("profiles.http_idempotency is unsupported")
     if http_idempotency == "postgres":
@@ -337,6 +377,18 @@ def validate_profiles(value: object) -> dict[str, str]:
         raise Refusal("profiles.jobs is unsupported")
     if jobs == "postgres" and jobs_requirement(database) is not None:
         raise Refusal("profiles.jobs=postgres requires profiles.database=postgres")
+    if not isinstance(messaging, str) or messaging not in MESSAGING_CHOICES:
+        raise Refusal("profiles.messaging is unsupported")
+    if not isinstance(outbox, str) or outbox not in OUTBOX_CHOICES:
+        raise Refusal("profiles.outbox is unsupported")
+    if outbox == "postgres":
+        requirement = outbox_requirement(database, jobs, messaging)
+        if requirement == "OUTBOX=postgres requires DATABASE=postgres":
+            raise Refusal("profiles.outbox=postgres requires profiles.database=postgres")
+        if requirement == "OUTBOX=postgres requires JOBS=postgres":
+            raise Refusal("profiles.outbox=postgres requires profiles.jobs=postgres")
+        if requirement == "OUTBOX=postgres requires MESSAGING=nats-jetstream":
+            raise Refusal("profiles.outbox=postgres requires profiles.messaging=nats-jetstream")
     if not isinstance(webhooks, str) or webhooks not in WEBHOOKS_CHOICES:
         raise Refusal("profiles.webhooks is unsupported")
     if webhooks == "durable":
@@ -365,8 +417,11 @@ def validate_profiles(value: object) -> dict[str, str]:
         "authn": authn,
         "outbound_http": outbound_http,
         "outbound_auth": outbound_auth,
+        "grpc": grpc,
         "http_idempotency": http_idempotency,
         "jobs": jobs,
+        "messaging": messaging,
+        "outbox": outbox,
         "webhooks": webhooks,
         "inbound_webhooks": inbound_webhooks,
         "agent_harness": harness,
@@ -595,6 +650,18 @@ def selected_outbound_auth(root: Path) -> str:
     return lock["profiles"]["outbound_auth"]
 
 
+def selected_grpc(root: Path) -> str:
+    """Return the native gRPC selection, or the source capability."""
+
+    root = Path(root)
+    lock = load_lock(root)
+    if lock is None:
+        return "enabled" if (root / "crates/infra-grpc").is_dir() else "none"
+    if lock["state"] != "complete":
+        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
+    return lock["profiles"]["grpc"]
+
+
 def selected_http_idempotency(root: Path) -> str:
     """Return the normalized idempotency choice, or the source capability."""
 
@@ -617,6 +684,30 @@ def selected_jobs(root: Path) -> str:
     if lock["state"] != "complete":
         raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
     return lock["profiles"]["jobs"]
+
+
+def selected_messaging(root: Path) -> str:
+    """Return the normalized messaging choice, or the source capability."""
+
+    root = Path(root)
+    lock = load_lock(root)
+    if lock is None:
+        return "nats-jetstream" if (root / "crates/infra-messaging").is_dir() else "none"
+    if lock["state"] != "complete":
+        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
+    return lock["profiles"]["messaging"]
+
+
+def selected_outbox(root: Path) -> str:
+    """Return the normalized outbox choice, or the source capability."""
+
+    root = Path(root)
+    lock = load_lock(root)
+    if lock is None:
+        return "postgres" if (root / "crates/infra-messaging/src/outbox.rs").is_file() else "none"
+    if lock["state"] != "complete":
+        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
+    return lock["profiles"]["outbox"]
 
 
 def selected_webhooks(root: Path) -> str:
@@ -799,16 +890,8 @@ def _contains_profile_marker(contents: bytes) -> bool:
     )
 
 
-def parse_manifest(
-    snapshot_root: Path, *, harness: str = "all", target_repository: str | None = None,
-    initializing: bool = False,
-) -> tuple[str, ...]:
-    """Validate ownership; selected outputs may omit unselected adapter inputs.
-
-    Committed template sources use the default all-adapter closure. A derived
-    repository keeps that same portable manifest, with its lock selecting which
-    adapter inputs must physically exist.
-    """
+def manifest_entries(snapshot_root: Path) -> tuple[str, ...]:
+    """Read safe ownership paths before validating their materialized bytes."""
 
     manifest = Path(snapshot_root) / "template-owned.paths"
     _regular_file(manifest, "template-owned.paths")
@@ -829,6 +912,21 @@ def parse_manifest(
         for other_index, other in enumerate(plain):
             if index != other_index and other.startswith(f"{current}/"):
                 raise Refusal("template-owned.paths has overlapping owners")
+    return tuple(entries)
+
+
+def parse_manifest(
+    snapshot_root: Path, *, harness: str = "all", target_repository: str | None = None,
+    initializing: bool = False,
+) -> tuple[str, ...]:
+    """Validate ownership; selected outputs may omit unselected adapter inputs.
+
+    Committed template sources use the default all-adapter closure. A derived
+    repository keeps that same portable manifest, with its lock selecting which
+    adapter inputs must physically exist.
+    """
+
+    entries = manifest_entries(snapshot_root)
     if target_repository is not None and not isinstance(target_repository, str):
         raise Refusal("target repository identity is invalid")
     selected = set(selected_adapters(harness))
@@ -1212,8 +1310,11 @@ def _profile_command(arguments: argparse.Namespace) -> int:
             "authn": selected_authn(root),
             "outbound_http": selected_outbound_http(root),
             "outbound_auth": selected_outbound_auth(root),
+            "grpc": selected_grpc(root),
             "http_idempotency": selected_http_idempotency(root),
             "jobs": selected_jobs(root),
+            "messaging": selected_messaging(root),
+            "outbox": selected_outbox(root),
             "webhooks": selected_webhooks(root),
             "inbound_webhooks": selected_inbound_webhooks(root),
             "agent_harness": harness,
@@ -1233,8 +1334,8 @@ def build_parser() -> argparse.ArgumentParser:
     profile.add_argument(
         "--field", required=True,
         choices=(
-            "database", "authn", "outbound_http", "outbound_auth", "http_idempotency", "jobs", "webhooks",
-            "inbound_webhooks", "agent_harness",
+            "database", "authn", "outbound_http", "outbound_auth", "grpc", "http_idempotency", "jobs", "messaging",
+            "outbox", "webhooks", "inbound_webhooks", "agent_harness",
         ),
     )
     profile.set_defaults(handler=_profile_command)

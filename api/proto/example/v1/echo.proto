@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package example.v1;
+
+// Echo is an intentionally small transport example. It exercises each native
+// gRPC cardinality without defining a production business API.
+service EchoService {
+  rpc Unary(UnaryRequest) returns (UnaryResponse);
+  rpc ClientStream(stream ClientStreamRequest) returns (ClientStreamResponse);
+  rpc ServerStream(ServerStreamRequest) returns (stream ServerStreamResponse);
+  rpc BidiStream(stream BidiStreamRequest) returns (stream BidiStreamResponse);
+}
+
+message UnaryRequest {
+  string message = 1;
+}
+
+message UnaryResponse {
+  string message = 1;
+}
+
+message ClientStreamRequest {
+  string message = 1;
+}
+
+message ClientStreamResponse {
+  string message = 1;
+}
+
+message ServerStreamRequest {
+  string message = 1;
+}
+
+message ServerStreamResponse {
+  string message = 1;
+}
+
+message BidiStreamRequest {
+  string message = 1;
+}
+
+message BidiStreamResponse {
+  string message = 1;
+}

@@ -70,6 +70,10 @@ compatibility limits.
 | `make agent-roles-check`, `make codex-agents-check`, `make claude-skills-check`, `make qwen-skills-check` | The generated harness carriers (`.codex`, `.claude`, `.qwen`, `.grok`, `.cursor`, `.opencode`) are byte-stable against `.agents/roles`, `.agents/codex-project.toml`, and `.agents/skills`; the `*-sync` twins regenerate them | — |
 | `make check-instructions` | `check-skills` plus the four carrier checks; what CI runs on the `agent_instructions` surface | Python 3 |
 | `make tools-check` | `tools/versions.env` shape and digests; each Cargo tool reports its pin; the Dockerfile `ARG` defaults and `FROM` tags agree with the manifest and `rust-toolchain.toml` | Cargo tools (built once) |
+<!-- template:begin grpc:docs-command-grpc -->
+| `make grpc-generate` | Generate committed protobuf Rust from a temporary Buf descriptor set with stock tonic-prost-build | Go, Rust |
+| `make grpc-check` | Buf format/lint, generation drift and exact base FILE compatibility; heavy and CI-owned by default | Same tools; `GRPC_BASE_REF` in CI |
+<!-- template:end grpc:docs-command-grpc -->
 
 The Cargo tools (`cargo-deny`, `cargo-shear`, `zizmor`) build from
 crates.io into `<git-common-dir>/tools/<crate>-<version>` the first time a
@@ -139,6 +143,13 @@ It runs only once a service registers its kinds; the template's worker
 refuses with `no job kind is registered`. See the
 [guide](background-jobs.md#configure-and-size-the-worker).
 <!-- template:end jobs:docs-commands-jobs -->
+<!-- template:begin messaging:docs-commands-messaging -->
+With `MESSAGING=nats-jetstream`, `domain-events` and `infra-messaging` are
+package names for `make test-package`. `ALLOW_HEAVY=1 make
+test-integration-messaging` is the real NATS proof when the current Make owner
+retains that target; it requires Docker and does not certify a deployment.
+Use `make help` for the exact retained command surface.
+<!-- template:end messaging:docs-commands-messaging -->
 
 ## Guards and variables
 

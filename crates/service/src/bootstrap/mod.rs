@@ -16,6 +16,9 @@ use std::time::Duration;
 
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
+// template:begin messaging:service-bootstrap-messaging-imports
+use infra_messaging::{Messaging, MessagingError, MessagingOptions};
+// template:end messaging:service-bootstrap-messaging-imports
 // template:begin inbound-webhooks:bootstrap-webhooks-imports
 use infra_http::webhooks::WebhookState;
 use infra_webhooks::inbound::Receiver;
@@ -35,9 +38,9 @@ use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, ResolvedSampler, TracingOptions,
     diagnostics_router, install_subscriber, install_tracer_provider,
 };
-// template:begin postgres:bootstrap-postgres-secret-import
+// template:begin integration:bootstrap-postgres-secret-import
 use secrecy::ExposeSecret;
-// template:end postgres:bootstrap-postgres-secret-import
+// template:end integration:bootstrap-postgres-secret-import
 use service_config::{
     AppConfig, BuildInfo, Config, FromArgs, LogFormat, TracesSampler, process_failure,
 };
@@ -66,6 +69,9 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Interval for Prometheus histogram upkeep and Tokio runtime metrics.
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
+// template:begin messaging:service-bootstrap-messaging-startup-budget
+const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+// template:end messaging:service-bootstrap-messaging-startup-budget
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum BootstrapError {
@@ -77,6 +83,14 @@ pub(crate) enum BootstrapError {
     Logging(#[from] infra_telemetry::LoggingError),
     #[error(transparent)]
     Metrics(#[from] infra_telemetry::MetricsError),
+    // template:begin messaging:service-bootstrap-messaging-errors
+    #[error("messaging startup: {0}")]
+    Messaging(#[from] MessagingError),
+    #[error("messaging configuration requires {key}")]
+    MessagingConfigRequired { key: &'static str },
+    #[error("messaging.max_payload_bytes cannot fit this platform")]
+    MessagingPayloadBound,
+    // template:end messaging:service-bootstrap-messaging-errors
     #[error("startup admission: {0}")]
     Admission(health::NotReady),
     #[error("configuration is invalid: {0}")]
@@ -130,12 +144,21 @@ pub(crate) enum BootstrapError {
     // template:end inbound-webhooks:bootstrap-webhooks-errors
     #[error(transparent)]
     Server(#[from] infra_http::ServerError),
+    // template:begin grpc:bootstrap-grpc-error
+    #[error(transparent)]
+    Grpc(#[from] infra_grpc::Error),
+    // template:end grpc:bootstrap-grpc-error
 }
 
 /// Parse flags, load configuration, run the service, and map the result to
 /// an exit code. Never calls `process::exit`, so destructors run. `--help`
 /// exits 0; other clap errors exit 1. Version is not a loader flag.
-pub(crate) fn run<I>(args: I) -> ExitCode
+pub(crate) fn run<I>(
+    args: I,
+    // template:begin grpc:bootstrap-run-registration-parameter
+    grpc_registration: Option<crate::GrpcRegistration>,
+    // template:end grpc:bootstrap-run-registration-parameter
+) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
@@ -158,7 +181,12 @@ where
         Err(err) => return process_failure(&format!("build tokio runtime: {err}")),
     };
 
-    let outcome = runtime.block_on(serve(config));
+    let outcome = runtime.block_on(serve(
+        config,
+        // template:begin grpc:bootstrap-grpc-serve-registration-argument
+        grpc_registration,
+        // template:end grpc:bootstrap-grpc-serve-registration-argument
+    ));
     // Drops connection tasks that outlived the drain and any blocking work.
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
 
@@ -173,7 +201,16 @@ where
     }
 }
 
-async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
+#[allow(
+    clippy::too_many_lines,
+    reason = "keep acquired startup resources, admission, and their shared error cleanup in one composition scope"
+)]
+async fn serve(
+    config: Config,
+    // template:begin grpc:bootstrap-grpc-serve-registration-parameter
+    grpc_registration: Option<crate::GrpcRegistration>,
+    // template:end grpc:bootstrap-grpc-serve-registration-parameter
+) -> Result<Outcome, BootstrapError> {
     // Before this point SIGTERM has its default disposition and kills the
     // process; install the handlers first and keep them for the lifetime.
     let mut signals = Signals::install().map_err(BootstrapError::Signals)?;
@@ -217,7 +254,10 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // template:begin postgres:bootstrap-startup-pool
     let mut postgres_pool = None;
     // template:end postgres:bootstrap-startup-pool
-    let outcome = async {
+    // template:begin messaging:service-bootstrap-messaging-opened
+    let mut messaging = None;
+    // template:end messaging:service-bootstrap-messaging-opened
+    let outcome = Box::pin(async {
         let probes: Vec<Box<dyn Probe>> = Vec::new();
         #[allow(
             unused_variables,
@@ -234,6 +274,31 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             migrate::verify_history(pool).await?;
         }
         // template:end postgres:bootstrap-postgres-startup
+        #[allow(
+            unused_variables,
+            reason = "retained messaging shadows the startup stop result"
+        )]
+        let startup_stop: Option<tokio::time::Instant> = None;
+        // template:begin messaging:service-bootstrap-messaging-startup
+        let (probes, opened_messaging, startup_stop) =
+            Box::pin(prepare_messaging(probes, &config, &cancel, &mut signals)).await?;
+        messaging = opened_messaging;
+        // template:end messaging:service-bootstrap-messaging-startup
+        if let Some(deadline) = startup_stop {
+            return Ok(shutdown::finish_stopped_startup(
+                &cancel,
+                &tracker,
+                // template:begin postgres:bootstrap-stopped-startup-pool
+                postgres_pool.as_ref(),
+                // template:end postgres:bootstrap-stopped-startup-pool
+                // template:begin messaging:service-bootstrap-stopped-startup-messaging
+                messaging.take(),
+                // template:end messaging:service-bootstrap-stopped-startup-messaging
+                tracer_provider,
+                deadline,
+            )
+            .await);
+        }
         // template:begin http-idempotency:bootstrap-http-idempotency-composer
         let composer = prepare_http_idempotency(&config, postgres_pool.as_ref());
         // template:end http-idempotency:bootstrap-http-idempotency-composer
@@ -260,9 +325,15 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             readiness,
             policy,
             auth,
+            // template:begin grpc:bootstrap-registration
+            grpc_registration,
+            // template:end grpc:bootstrap-registration
             // template:begin postgres:bootstrap-prepared-pool
             postgres_pool: postgres_pool.clone(),
             // template:end postgres:bootstrap-prepared-pool
+            // template:begin messaging:service-bootstrap-prepared-messaging-value
+            messaging: &mut messaging,
+            // template:end messaging:service-bootstrap-prepared-messaging-value
             // template:begin http-idempotency:bootstrap-http-idempotency-prepared-value
             composer,
             // template:end http-idempotency:bootstrap-http-idempotency-prepared-value
@@ -271,7 +342,7 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             // template:end inbound-webhooks:bootstrap-webhooks-prepared-value
         })
         .await
-    }
+    })
     .await;
     // Bind, admission, or connect failure: cancel and join tracked tasks,
     // then close any opened pool. `Server` only cancels accept. Dropping
@@ -279,11 +350,16 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
     // until process teardown.
     if outcome.is_err() {
         shutdown::cancel_and_join_background_tasks(&cancel, &tracker).await;
-        // template:begin postgres:bootstrap-startup-pool-close
-        if let Some(pool) = postgres_pool.as_ref() {
-            shutdown::close_opened_postgres(pool).await;
-        }
-        // template:end postgres:bootstrap-startup-pool-close
+        let _ = shutdown::close_dependencies(
+            // template:begin postgres:bootstrap-startup-pool-close
+            postgres_pool.as_ref(),
+            // template:end postgres:bootstrap-startup-pool-close
+            // template:begin messaging:service-bootstrap-messaging-startup-close
+            messaging.take(),
+            // template:end messaging:service-bootstrap-messaging-startup-close
+            tokio::time::Instant::now() + shutdown::DEPENDENCY_CLOSE,
+        )
+        .await;
     }
     outcome
 }
@@ -537,6 +613,72 @@ async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
 }
 // template:end postgres:bootstrap-open-postgres
 
+/// Open the optional API producer before readiness admission. The API owns no
+/// consumer; HTTP and metrics later read the cached probe through `health`.
+// template:begin messaging:service-bootstrap-messaging-functions
+async fn prepare_messaging(
+    mut probes: Vec<Box<dyn Probe>>,
+    config: &Config,
+    cancel: &CancellationToken,
+    signals: &mut Signals,
+) -> Result<
+    (
+        Vec<Box<dyn Probe>>,
+        Option<Messaging>,
+        Option<tokio::time::Instant>,
+    ),
+    BootstrapError,
+> {
+    if !config.messaging.is_active() {
+        return Ok((probes, None, None));
+    }
+    config.messaging.validate_producer(&config.app.env)?;
+    let deadline = tokio::time::Instant::now() + MESSAGING_STARTUP_TIMEOUT;
+    let startup_cancel = cancel.child_token();
+    let connect = Messaging::connect(messaging_options(config)?, deadline, startup_cancel.clone());
+    tokio::pin!(connect);
+    let messaging = tokio::select! {
+        biased;
+        () = signals.wait() => {
+            let deadline = tokio::time::Instant::now() + config.http.grace_period;
+            startup_cancel.cancel();
+            return Ok((probes, connect.await.ok(), Some(deadline)));
+        }
+        result = &mut connect => result?,
+    };
+    probes.push(Box::new(messaging.probe()));
+    Ok((probes, Some(messaging), None))
+}
+// template:end messaging:service-bootstrap-messaging-functions
+
+// template:begin messaging:service-bootstrap-messaging-options
+fn messaging_options(config: &Config) -> Result<MessagingOptions, BootstrapError> {
+    let messaging = &config.messaging;
+    let source_stream =
+        messaging
+            .source_stream
+            .clone()
+            .ok_or(BootstrapError::MessagingConfigRequired {
+                key: "messaging.source_stream",
+            })?;
+    Ok(MessagingOptions {
+        servers: messaging.urls.clone(),
+        credentials: messaging
+            .credentials
+            .as_ref()
+            .map(|value| value.expose_secret().to_owned()),
+        root_ca_path: messaging.root_ca_path.clone(),
+        allow_plaintext: messaging.allow_plaintext,
+        allow_unauthenticated: messaging.allow_unauthenticated,
+        source_stream,
+        dlq_stream: None,
+        max_payload_bytes: usize::try_from(messaging.max_payload_bytes.as_u64())
+            .map_err(|_| BootstrapError::MessagingPayloadBound)?,
+        consumer: None,
+    })
+}
+// template:end messaging:service-bootstrap-messaging-options
+
 // template:begin http-idempotency:bootstrap-http-idempotency-functions
 /// The composer through which idempotent operations join the contract. Its
 /// store uses the pool only when a retention is set as well; otherwise the
@@ -606,9 +748,17 @@ struct Prepared<'a> {
     readiness: Readiness,
     policy: RefreshPolicy,
     auth: PreparedAuth,
+    // template:begin grpc:bootstrap-prepared-registration
+    grpc_registration: Option<crate::GrpcRegistration>,
+    // template:end grpc:bootstrap-prepared-registration
     // template:begin postgres:bootstrap-prepared-field
     postgres_pool: Option<PgPool>,
     // template:end postgres:bootstrap-prepared-field
+    // template:begin messaging:service-bootstrap-prepared-messaging-field
+    /// The optional producer remains outside the request path and transfers
+    /// to the dependency-close stage only after listener admission succeeds.
+    messaging: &'a mut Option<Messaging>,
+    // template:end messaging:service-bootstrap-prepared-messaging-field
     // template:begin http-idempotency:bootstrap-http-idempotency-prepared-field
     /// A unique move: activation consumes it after route assembly.
     composer: Composer,
@@ -618,6 +768,10 @@ struct Prepared<'a> {
     // template:end inbound-webhooks:bootstrap-webhooks-prepared-field
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "listener admission and ownership transfer form one ordered startup transaction"
+)]
 async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapError> {
     let Prepared {
         config,
@@ -629,9 +783,15 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         readiness,
         policy,
         auth,
+        // template:begin grpc:bootstrap-destructure-registration
+        grpc_registration,
+        // template:end grpc:bootstrap-destructure-registration
         // template:begin postgres:bootstrap-destructure-pool
         postgres_pool,
         // template:end postgres:bootstrap-destructure-pool
+        // template:begin messaging:service-bootstrap-destructure-messaging
+        messaging,
+        // template:end messaging:service-bootstrap-destructure-messaging
         // template:begin http-idempotency:bootstrap-http-idempotency-destructure
         mut composer,
         // template:end http-idempotency:bootstrap-http-idempotency-destructure
@@ -639,9 +799,38 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         webhook_state,
         // template:end inbound-webhooks:bootstrap-webhooks-destructure
     } = prepared;
+    // template:begin grpc:bootstrap-grpc-prepare-start
+    let grpc_prepared = if config.grpc.enabled {
+        // template:end grpc:bootstrap-grpc-prepare-start
+        // template:begin grpc-authn:bootstrap-grpc-verifier
+        let verifier = match &auth {
+            PreparedAuth::None => return Err(infra_grpc::Error::InvalidConfiguration.into()),
+            PreparedAuth::Enabled(verifier) => (**verifier).clone(),
+        };
+        // template:end grpc-authn:bootstrap-grpc-verifier
+        // template:begin grpc:bootstrap-grpc-prepare-call
+        if config.http.effective_drain_budget() < infra_grpc::UNARY_DEADLINE {
+            return Err(infra_grpc::Error::InvalidConfiguration.into());
+        }
+        Some((
+            infra_grpc::router(
+                crate::grpc::services(grpc_registration)?,
+                readiness.reader(),
+                // template:end grpc:bootstrap-grpc-prepare-call
+                // template:begin grpc-authn:bootstrap-grpc-verifier-argument
+                verifier,
+                // template:end grpc-authn:bootstrap-grpc-verifier-argument
+                // template:begin grpc:bootstrap-grpc-prepare-finish
+            ),
+            crate::grpc::tls(config)?,
+        ))
+    } else {
+        None
+    };
+    // template:end grpc:bootstrap-grpc-prepare-finish
     // The routes and the committed OpenAPI document are the two halves of
     // one contract. Assembly is pure, so it runs before readiness admission.
-    let contract = service::api::contract(
+    let contract = crate::api::contract(
         // template:begin http-idempotency:bootstrap-http-idempotency-contract-composer
         &mut composer,
         // template:end http-idempotency:bootstrap-http-idempotency-contract-composer
@@ -701,6 +890,23 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         }
     };
 
+    // template:begin grpc:bootstrap-grpc-bind
+    let grpc_listener = match grpc_prepared {
+        Some((grpc_router, tls)) => {
+            let addr = config.grpc.listen_addr()?;
+            let bound = match tls {
+                Some(tls) => {
+                    Server::bind_tls(addr, grpc_router, infra_grpc::server_options(), tls).await?
+                }
+                None => Server::bind(addr, grpc_router, infra_grpc::server_options()).await?,
+            };
+            tracing::info!(addr = %bound.local_addr(), "grpc listener bound");
+            Some(bound)
+        }
+        None => None,
+    };
+    // template:end grpc:bootstrap-grpc-bind
+
     tracing::info!("service_ready");
     signals.wait().await;
 
@@ -709,11 +915,17 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         readiness: &readiness,
         app_listener,
         diagnostics,
+        // template:begin grpc:shutdown-plan-grpc
+        grpc_listener,
+        // template:end grpc:shutdown-plan-grpc
         cancel,
         tracker,
         // template:begin postgres:bootstrap-shutdown-plan-pool
         postgres_pool,
         // template:end postgres:bootstrap-shutdown-plan-pool
+        // template:begin messaging:service-bootstrap-shutdown-messaging
+        messaging: messaging.take(),
+        // template:end messaging:service-bootstrap-shutdown-messaging
         tracer_provider,
         signals,
     })

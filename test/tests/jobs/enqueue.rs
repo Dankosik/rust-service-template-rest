@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use infra_jobs::{
-    EnqueueError, EnqueueOptions, Enqueued, JobId, JobKind, MAX_DELAY, MAX_PAYLOAD_BYTES, enqueue,
+    EnqueueError, EnqueueOptions, Enqueued, JobId, JobKind, LivePayloadComparison, MAX_DELAY,
+    MAX_PAYLOAD_BYTES, compare_live_payload, enqueue,
 };
 use infra_postgres::{
     Isolation, PgPool, Tx, TxError, TxOptions, connection, in_tx, in_tx_with, retryable,
@@ -356,6 +357,17 @@ async fn still_usable(tx: &mut Tx<'_>) {
         .await
         .expect("the transaction stays usable");
     assert_eq!(one, 1);
+}
+
+async fn duplicate_then_compare<K: JobKind>(
+    tx: &mut Tx<'_>,
+    key: &str,
+    payload: &K,
+) -> Result<LivePayloadComparison, AttemptError> {
+    assert_eq!(enqueue(tx, payload, keyed(key)).await?, Enqueued::Duplicate);
+    compare_live_payload(tx, key, payload)
+        .await
+        .map_err(AttemptError::from)
 }
 
 fn refused(
@@ -1246,5 +1258,151 @@ async fn e6_repeatable_read_inflight_claim_keeps_commit_and_rollback_oracles(poo
             );
         }
     }
+    super::close(&[&jobs]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn e6_compare_live_payload_distinguishes_same_and_different_live_duplicates(pool: PgPool) {
+    let jobs = open(&pool, 1).await;
+    let key = "compare-live";
+    let stored = Note {
+        text: "stored".to_owned(),
+    };
+    in_tx(&jobs, async |tx| -> Result<(), AttemptError> {
+        created(enqueue(tx, &stored, keyed(key)).await?);
+        Ok(())
+    })
+    .await
+    .expect("the holder commits");
+
+    let same = in_tx(
+        &jobs,
+        async |tx| -> Result<LivePayloadComparison, AttemptError> {
+            let compared = duplicate_then_compare(tx, key, &stored).await?;
+            still_usable(tx).await;
+            Ok(compared)
+        },
+    )
+    .await
+    .expect("the equal duplicate commits");
+    assert_eq!(same, LivePayloadComparison::Same);
+
+    let conflicting = Note {
+        text: "conflicting".to_owned(),
+    };
+    let different = in_tx(
+        &jobs,
+        async |tx| -> Result<LivePayloadComparison, AttemptError> {
+            let compared = duplicate_then_compare(tx, key, &conflicting).await?;
+            still_usable(tx).await;
+            Ok(compared)
+        },
+    )
+    .await
+    .expect("the conflicting duplicate commits");
+    assert_eq!(different, LivePayloadComparison::Different);
+    assert_eq!(rows_for_key(&jobs, Note::NAME, key).await, 1);
+    super::close(&[&jobs]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn e6_compare_live_payload_keeps_the_live_key_locked_until_commit(pool: PgPool) {
+    let jobs = open(&pool, 3).await;
+    let key = "compare-lock".to_owned();
+    let _holder = commit_note(&jobs, &key).await;
+    let compared = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let _unblock = Unblock(Arc::clone(&release));
+    let caller = tokio::spawn({
+        let jobs = jobs.clone();
+        let key = key.clone();
+        let compared = Arc::clone(&compared);
+        let release = Arc::clone(&release);
+        async move {
+            in_tx(
+                &jobs,
+                async move |tx| -> Result<LivePayloadComparison, AttemptError> {
+                    let payload = Note { text: key.clone() };
+                    let result = duplicate_then_compare(tx, &key, &payload).await?;
+                    compared.notify_one();
+                    release.notified().await;
+                    Ok(result)
+                },
+            )
+            .await
+        }
+    });
+
+    super::bounded("the duplicate comparison", compared.notified()).await;
+    let terminalize = tokio::spawn({
+        let jobs = jobs.clone();
+        let key = key.clone();
+        async move { complete_holder(&jobs, &key).await }
+    });
+    super::join_after_lock_wait(
+        &pool,
+        async {
+            release.notify_one();
+        },
+        terminalize,
+    )
+    .await;
+    let result = super::bounded("the comparison transaction", caller)
+        .await
+        .expect("the caller joins")
+        .expect("the comparison commits");
+    assert_eq!(result, LivePayloadComparison::Same);
+    assert_eq!(
+        states_for_key(&jobs, &key).await,
+        vec!["completed".to_owned()]
+    );
+    super::close(&[&jobs]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn e6_compare_live_payload_reports_a_lost_live_key_after_duplicate(pool: PgPool) {
+    let jobs = open(&pool, 3).await;
+    let key = "compare-lost".to_owned();
+    let _holder = commit_note(&jobs, &key).await;
+    let duplicated = Arc::new(Notify::new());
+    let compare = Arc::new(Notify::new());
+    let _unblock = Unblock(Arc::clone(&compare));
+    let caller = tokio::spawn({
+        let jobs = jobs.clone();
+        let key = key.clone();
+        let duplicated = Arc::clone(&duplicated);
+        let compare = Arc::clone(&compare);
+        async move {
+            in_tx(
+                &jobs,
+                async move |tx| -> Result<LivePayloadComparison, AttemptError> {
+                    let payload = Note { text: key.clone() };
+                    assert_eq!(
+                        enqueue(tx, &payload, keyed(&key)).await?,
+                        Enqueued::Duplicate
+                    );
+                    duplicated.notify_one();
+                    compare.notified().await;
+                    let result = compare_live_payload(tx, &key, &payload).await?;
+                    still_usable(tx).await;
+                    Ok(result)
+                },
+            )
+            .await
+        }
+    });
+
+    super::bounded("the duplicate enqueue", duplicated.notified()).await;
+    complete_holder(&jobs, &key).await;
+    compare.notify_one();
+    let result = super::bounded("the lost-key comparison", caller)
+        .await
+        .expect("the caller joins")
+        .expect("the comparison commits");
+    assert_eq!(result, LivePayloadComparison::NoLongerLive);
+    assert_eq!(
+        states_for_key(&jobs, &key).await,
+        vec!["completed".to_owned()]
+    );
     super::close(&[&jobs]).await;
 }

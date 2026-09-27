@@ -1,4 +1,4 @@
-//! Immutable named outbound machine-authentication configuration.
+//! Immutable named outbound integration configuration.
 //!
 //! This section validates static operator input only. It neither constructs a
 //! credential owner nor performs token or resource I/O.
@@ -6,20 +6,61 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use secrecy::{ExposeSecret as _, SecretString};
+use secrecy::SecretString;
+// template:begin outbound-auth:config-integration-oauth-imports
+use secrecy::ExposeSecret as _;
+// template:end outbound-auth:config-integration-oauth-imports
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
+// template:begin outbound-auth:config-integration-oauth-url-import
 use url::Url;
+// template:end outbound-auth:config-integration-oauth-url-import
 
 use crate::ValidationError;
+// template:begin grpc:config-integration-grpc-import
+use crate::GrpcSecurity;
+// template:end grpc:config-integration-grpc-import
 
-/// One named integration's optional authentication input.
+/// One named integration's optional client input.
 #[derive(Clone, Debug, Default)]
 pub struct IntegrationConfig {
+    // template:begin outbound-auth:config-integration-oauth-field
     /// OAuth client-credentials input. Absent entries do not create clients.
     pub oauth: Option<OAuthConfig>,
+    // template:end outbound-auth:config-integration-oauth-field
+    // template:begin grpc:config-integration-grpc-field
+    /// Native gRPC client input. Absent entries do not create a channel.
+    pub grpc: Option<GrpcClientConfig>,
+    // template:end grpc:config-integration-grpc-field
 }
 
+// template:begin grpc:config-integration-grpc-type
+/// Immutable native gRPC client input for one named integration.
+#[derive(Clone)]
+pub struct GrpcClientConfig {
+    /// Tonic endpoint input, admitted by the transport before a channel exists.
+    pub destination: String,
+    /// Explicit client security mode.
+    pub security: GrpcSecurity,
+    /// Optional PEM trust anchor for TLS.
+    pub ca_certificate: Option<String>,
+    /// Optional PEM client certificate for mTLS.
+    pub certificate: Option<String>,
+    /// Environment-only PEM client key for mTLS.
+    pub private_key: Option<SecretString>,
+}
+
+impl fmt::Debug for GrpcClientConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GrpcClientConfig")
+            .field("destination", &self.destination)
+            .field("security", &self.security)
+            .finish_non_exhaustive()
+    }
+}
+// template:end grpc:config-integration-grpc-type
+
+// template:begin outbound-auth:config-integration-oauth-types
 /// One immutable OAuth client-credentials tuple.
 #[derive(Clone)]
 pub struct OAuthConfig {
@@ -92,6 +133,8 @@ impl<'de> Deserialize<'de> for Scopes {
     }
 }
 
+// template:end outbound-auth:config-integration-oauth-types
+
 /// Decode through config-rs's value representation so its rejected-value
 /// diagnostics never escape this sensitive section.
 pub(crate) fn deserialize_integrations<'de, D>(
@@ -112,16 +155,35 @@ fn decode_integrations(
     for (name, value) in into_table(value, "integrations")? {
         let prefix = format!("integrations.{name}");
         let mut fields = into_table(value, &prefix)?;
+        // template:begin outbound-auth:config-integration-oauth-decode
         let oauth = fields
             .remove("oauth")
             .map(|value| decode_oauth(value, &format!("{prefix}.oauth")))
             .transpose()?;
+        // template:end outbound-auth:config-integration-oauth-decode
+        // template:begin grpc:config-integration-grpc-decode
+        let grpc = fields
+            .remove("grpc")
+            .map(|value| decode_grpc(value, &format!("{prefix}.grpc")))
+            .transpose()?;
+        // template:end grpc:config-integration-grpc-decode
         refuse_unknown(fields, &prefix)?;
-        integrations.insert(name, IntegrationConfig { oauth });
+        integrations.insert(
+            name,
+            IntegrationConfig {
+                // template:begin outbound-auth:config-integration-oauth-value
+                oauth,
+                // template:end outbound-auth:config-integration-oauth-value
+                // template:begin grpc:config-integration-grpc-value
+                grpc,
+                // template:end grpc:config-integration-grpc-value
+            },
+        );
     }
     Ok(integrations)
 }
 
+// template:begin outbound-auth:config-integration-oauth-parser
 fn decode_oauth(value: config::Value, prefix: &str) -> Result<OAuthConfig, String> {
     let mut fields = into_table(value, prefix)?;
     let token_url = take_text(&mut fields, "token_url", prefix)?.unwrap_or_default();
@@ -147,6 +209,36 @@ fn decode_oauth(value: config::Value, prefix: &str) -> Result<OAuthConfig, Strin
         audience,
     })
 }
+// template:end outbound-auth:config-integration-oauth-parser
+
+// template:begin grpc:config-integration-grpc-parser
+fn decode_grpc(value: config::Value, prefix: &str) -> Result<GrpcClientConfig, String> {
+    let mut fields = into_table(value, prefix)?;
+    let destination = take_text(&mut fields, "destination", prefix)?.unwrap_or_default();
+    let security = take_text(&mut fields, "security", prefix)?
+        .ok_or_else(|| format!("{prefix}.security: is required"))
+        .and_then(|value| parse_grpc_security(&value, prefix))?;
+    let ca_certificate = take_occupied_text(&mut fields, "ca_certificate", prefix)?;
+    let certificate = take_occupied_text(&mut fields, "certificate", prefix)?;
+    let private_key = take_occupied_secret(&mut fields, "private_key", prefix)?;
+    refuse_unknown(fields, prefix)?;
+    Ok(GrpcClientConfig {
+        destination,
+        security,
+        ca_certificate,
+        certificate,
+        private_key,
+    })
+}
+
+fn parse_grpc_security(value: &str, prefix: &str) -> Result<GrpcSecurity, String> {
+    match value {
+        "plaintext" => Ok(GrpcSecurity::Plaintext),
+        "tls" => Ok(GrpcSecurity::Tls),
+        _ => Err(format!("{prefix}.security: must be plaintext or tls")),
+    }
+}
+// template:end grpc:config-integration-grpc-parser
 
 fn into_table(
     value: config::Value,
@@ -171,6 +263,24 @@ fn take_text(
         .transpose()
 }
 
+// template:begin grpc:config-integration-grpc-material-parser
+fn take_occupied_text(
+    fields: &mut config::Map<String, config::Value>,
+    field: &str,
+    prefix: &str,
+) -> Result<Option<String>, String> {
+    Ok(take_text(fields, field, prefix)?.filter(|value| !value.trim().is_empty()))
+}
+
+fn take_occupied_secret(
+    fields: &mut config::Map<String, config::Value>,
+    field: &str,
+    prefix: &str,
+) -> Result<Option<SecretString>, String> {
+    Ok(take_occupied_text(fields, field, prefix)?.map(SecretString::from))
+}
+// template:end grpc:config-integration-grpc-material-parser
+
 fn refuse_unknown(fields: config::Map<String, config::Value>, prefix: &str) -> Result<(), String> {
     if let Some(field) = fields.into_keys().next() {
         return Err(format!("{prefix}.{field}: unknown key"));
@@ -182,13 +292,75 @@ pub(crate) fn validate_integrations(
     integrations: &BTreeMap<String, IntegrationConfig>,
 ) -> Result<(), ValidationError> {
     for (name, integration) in integrations {
+        // template:begin outbound-auth:config-integration-oauth-validate
         if let Some(oauth) = &integration.oauth {
             oauth.validate(&format!("integrations.{name}.oauth"))?;
         }
+        // template:end outbound-auth:config-integration-oauth-validate
+        // template:begin grpc:config-integration-grpc-validate
+        if let Some(grpc) = &integration.grpc {
+            grpc.validate(&format!("integrations.{name}.grpc"))?;
+        }
+        // template:end grpc:config-integration-grpc-validate
     }
     Ok(())
 }
 
+// template:begin grpc:config-integration-grpc-validation
+impl GrpcClientConfig {
+    fn validate(&self, prefix: &str) -> Result<(), ValidationError> {
+        if self.destination.trim().is_empty() {
+            return Err(ValidationError::new(
+                &format!("{prefix}.destination"),
+                "cannot be empty",
+            ));
+        }
+        if self
+            .destination
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+        {
+            return Err(ValidationError::new(
+                &format!("{prefix}.destination"),
+                "must not contain whitespace or controls",
+            ));
+        }
+        match self.security {
+            GrpcSecurity::Plaintext => {
+                if self.ca_certificate.is_some() {
+                    return Err(ValidationError::new(
+                        &format!("{prefix}.ca_certificate"),
+                        "is only valid when security is tls",
+                    ));
+                }
+                if self.certificate.is_some() {
+                    return Err(ValidationError::new(
+                        &format!("{prefix}.certificate"),
+                        "is only valid when security is tls",
+                    ));
+                }
+                if self.private_key.is_some() {
+                    return Err(ValidationError::new(
+                        &format!("{prefix}.private_key"),
+                        "is only valid when security is tls",
+                    ));
+                }
+            }
+            GrpcSecurity::Tls => {
+                if self.certificate.is_some() != self.private_key.is_some() {
+                    return Err(ValidationError::new(
+                        &format!("{prefix}.certificate/{prefix}.private_key"),
+                        "must be configured together for mTLS",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+// template:end grpc:config-integration-grpc-validation
+
+// template:begin outbound-auth:config-integration-oauth-validation
 impl OAuthConfig {
     fn validate(&self, prefix: &str) -> Result<(), ValidationError> {
         let token_url_key = format!("{prefix}.token_url");
@@ -267,3 +439,4 @@ fn is_scope_token(scope: &str) -> bool {
             .bytes()
             .all(|byte| matches!(byte, 0x21 | 0x23..=0x5b | 0x5d..=0x7e))
 }
+// template:end outbound-auth:config-integration-oauth-validation
