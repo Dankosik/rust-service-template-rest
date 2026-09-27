@@ -521,12 +521,13 @@ async fn prepare_auth(
             cache_ttl,
         } => {
             let issuer = issuer_url("oidc-introspection", "authn.issuer", issuer)?;
-            let endpoint = infra_bearerauthn::EndpointUrl::parse(introspection_endpoint)
-                .map_err(|source| BootstrapError::AuthenticationPreparation {
-                mode: "oidc-introspection",
-                key: "authn.introspection_endpoint",
-                source,
-            })?;
+            let endpoint = infra_bearerauthn::EndpointUrl::parse(introspection_endpoint).map_err(
+                |source| BootstrapError::AuthenticationPreparation {
+                    mode: "oidc-introspection",
+                    key: "authn.introspection_endpoint",
+                    source,
+                },
+            )?;
             let client_secret =
                 introspection_client_secret
                     .clone()

@@ -788,16 +788,23 @@ mod tests {
             &[JwtAlgorithm::Rs256],
         );
         verifier.keys.permit_unknown_refresh_for_test();
-        let mut token = signed(
+        // Another token's signature is a real mismatch; flipping a base64
+        // character can land in padding bits and leave the signature valid.
+        let token = signed(
             &rsa_signing(),
             Algorithm::RS256,
             Some("fixture"),
             &serde_json::json!({}),
-        )
-        .into_bytes();
-        let last = token.last_mut().unwrap();
-        *last = if *last == b'A' { b'B' } else { b'A' };
-        let token = String::from_utf8(token).unwrap();
+        );
+        let other = signed(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("fixture"),
+            &serde_json::json!({"x": 1}),
+        );
+        let (signed_part, _) = token.rsplit_once('.').unwrap();
+        let (_, other_signature) = other.rsplit_once('.').unwrap();
+        let token = format!("{signed_part}.{other_signature}");
         assert_eq!(
             check(&verifier, &token).await.unwrap_err(),
             VerificationReason::Signature
