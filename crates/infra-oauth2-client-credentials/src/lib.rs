@@ -3,12 +3,19 @@
 //! Composition prepares one immutable credential owner and binds it to a
 //! resource client. Neither access tokens nor raw provider errors leave it.
 
-use std::{fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    time::Duration,
+};
 
 use bytes::Bytes;
-use http::{HeaderValue, Request, Response, StatusCode, header::AUTHORIZATION};
+use http::{
+    HeaderMap, HeaderValue, Request, Response, StatusCode, header::AUTHORIZATION, uri::PathAndQuery,
+};
 use infra_outbound_http::{Client, Limits, Operation};
-use moka::{Expiry, future::Cache, ops::compute::Op};
 use oauth2::{
     AuthType, ClientId, ClientSecret, EndpointNotSet, EndpointSet, Scope, TokenResponse, TokenUrl,
     basic::BasicClient,
@@ -26,6 +33,7 @@ pub mod grpc;
 // template:end outbound-auth-grpc:oauth-grpc-module
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+/// A token stops being reused this long before it expires, as in Go's `oauth2`.
 const REUSE_MARGIN: Duration = Duration::from_secs(10);
 const TOKEN_LIMITS: Limits = Limits {
     max_active: 1,
@@ -34,7 +42,7 @@ const TOKEN_LIMITS: Limits = Limits {
     response_body_bytes: 1024 * 1024,
 };
 
-type ProtocolClient =
+type OAuthClient =
     BasicClient<EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 
 /// Immutable composition input. Secrets come from the configuration snapshot.
@@ -70,10 +78,25 @@ pub enum AcquisitionError {
     Transport,
     #[error("OAuth2 token response exceeded its limit")]
     ResponseLimit,
+    #[error("OAuth2 provider is unavailable")]
+    Unavailable,
     #[error("OAuth2 provider rejected the request")]
     Rejected,
     #[error("OAuth2 token response is invalid")]
     InvalidResponse,
+}
+
+impl AcquisitionError {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Transport => "transport",
+            Self::ResponseLimit => "limit",
+            Self::Unavailable => "unavailable",
+            Self::Rejected => "rejected",
+            Self::InvalidResponse => "invalid",
+        }
+    }
 }
 
 /// Authentication failures are distinct from the existing resource transport.
@@ -87,9 +110,9 @@ pub enum Error {
     Resource(#[from] infra_outbound_http::Error),
 }
 
-/// An idle, cloneable owner of one private credential tuple and its cache.
+/// An idle, cloneable owner of one private credential tuple and its token.
 #[derive(Clone)]
-pub struct Credentials(Arc<Owner>);
+pub struct Credentials(Arc<Inner>);
 
 impl fmt::Debug for Credentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -97,13 +120,35 @@ impl fmt::Debug for Credentials {
     }
 }
 
-struct Owner {
-    protocol: ProtocolClient,
-    endpoint: Url,
-    transport: Client,
+struct Inner {
+    oauth: OAuthClient,
+    token_path: PathAndQuery,
+    token_http: Client,
     scopes: Vec<String>,
     audience: Option<String>,
-    cache: Cache<(), Arc<CachedCredential>>,
+    /// The last token; never held across an `.await`.
+    cached: Mutex<Option<Arc<Token>>>,
+    /// Held by the one caller requesting a new token, so requests never overlap.
+    refresh: tokio::sync::Mutex<()>,
+}
+
+/// A sensitive `Bearer` header value and the instant it stops being reused.
+struct Token {
+    header: HeaderValue,
+    /// `None` when the provider gave no lifetime: reuse until a resource 401.
+    reuse_until: Option<Instant>,
+}
+
+impl Token {
+    fn is_reusable(&self) -> bool {
+        self.reuse_until.is_none_or(|until| Instant::now() < until)
+    }
+}
+
+impl fmt::Debug for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Token([REDACTED])")
+    }
 }
 
 impl Credentials {
@@ -113,19 +158,28 @@ impl Credentials {
     /// Returns a sanitized option or transport-construction failure.
     pub fn new(options: Options) -> Result<Self, ConfigurationError> {
         let endpoint = admit_options(&options)?;
-        let transport = Client::new(&endpoint.origin().ascii_serialization(), TOKEN_LIMITS)
-            .map_err(|_| configuration_error("token_url", "transport construction failed"))?;
-        Self::prepare(options, endpoint, transport)
+        let token_http = Client::new(&endpoint.origin().ascii_serialization(), TOKEN_LIMITS)
+            .map_err(|_| ConfigurationError {
+                key: "token_url",
+                reason: "transport construction failed",
+            })?;
+        Self::prepare(options, &endpoint, token_http)
     }
 
     fn prepare(
         options: Options,
-        endpoint: Url,
-        transport: Client,
+        endpoint: &Url,
+        token_http: Client,
     ) -> Result<Self, ConfigurationError> {
-        let token_url = TokenUrl::new(endpoint.to_string())
-            .map_err(|_| configuration_error("token_url", "invalid endpoint"))?;
-        let protocol = BasicClient::new(ClientId::new(options.client_id))
+        let invalid_endpoint = ConfigurationError {
+            key: "token_url",
+            reason: "invalid endpoint",
+        };
+        let token_url = TokenUrl::new(endpoint.to_string()).map_err(|_| invalid_endpoint)?;
+        let token_path = endpoint[url::Position::BeforePath..]
+            .parse()
+            .map_err(|_| invalid_endpoint)?;
+        let oauth = BasicClient::new(ClientId::new(options.client_id))
             .set_client_secret(ClientSecret::new(
                 options.client_secret.expose_secret().to_owned(),
             ))
@@ -135,16 +189,14 @@ impl Credentials {
             "oauth2_token_acquisitions_total",
             "OAuth2 token attempts by closed terminal outcome"
         );
-        Ok(Self(Arc::new(Owner {
-            protocol,
-            endpoint,
-            transport,
+        Ok(Self(Arc::new(Inner {
+            oauth,
+            token_path,
+            token_http,
             scopes: options.scopes,
             audience: options.audience,
-            cache: Cache::builder()
-                .max_capacity(1)
-                .expire_after(ReuseExpiry)
-                .build(),
+            cached: Mutex::new(None),
+            refresh: tokio::sync::Mutex::new(()),
         })))
     }
 
@@ -157,32 +209,59 @@ impl Credentials {
         }
     }
 
-    async fn acquire(&self, deadline: Instant) -> Result<Arc<CachedCredential>, AcquisitionError> {
+    /// Inserts a sensitive Bearer header and returns the token it used, so a
+    /// resource 401 can [`reject`](Self::reject) exactly that token.
+    async fn authorize(
+        &self,
+        headers: &mut HeaderMap,
+        deadline: Instant,
+    ) -> Result<Arc<Token>, AcquisitionError> {
+        let token = self.token(deadline).await?;
+        headers.insert(AUTHORIZATION, token.header.clone());
+        Ok(token)
+    }
+
+    /// Returns the cached token while it is reusable, otherwise requests a new
+    /// one. Waiting for another caller's request spends this caller's deadline.
+    async fn token(&self, deadline: Instant) -> Result<Arc<Token>, AcquisitionError> {
         if Instant::now() >= deadline {
             return Err(AcquisitionError::Timeout);
         }
-        tokio::time::timeout_at(
-            deadline,
-            self.0.cache.try_get_with((), self.0.fetch(deadline)),
-        )
-        .await
-        .map_err(|_| AcquisitionError::Timeout)?
-        .map_err(|error| *error)
+        if let Some(token) = self.reusable() {
+            return Ok(token);
+        }
+        let _refresh = tokio::time::timeout_at(deadline, self.0.refresh.lock())
+            .await
+            .map_err(|_| AcquisitionError::Timeout)?;
+        // The caller that held the lock may have just stored a reusable token.
+        if let Some(token) = self.reusable() {
+            return Ok(token);
+        }
+        let token = Arc::new(self.0.fetch(deadline).await?);
+        *self.cached() = Some(token.clone());
+        Ok(token)
     }
 
-    /// Drops `used` from the cache unless a newer credential already replaced it.
-    async fn invalidate(&self, used: &Arc<CachedCredential>) {
-        self.0
-            .cache
-            .entry(())
-            .and_compute_with(|entry| {
-                let op = match entry {
-                    Some(entry) if Arc::ptr_eq(entry.value(), used) => Op::Remove,
-                    _ => Op::Nop,
-                };
-                std::future::ready(op)
-            })
-            .await;
+    /// Forgets `used` unless a newer token already replaced it.
+    fn reject(&self, used: &Arc<Token>) {
+        let mut cached = self.cached();
+        if cached
+            .as_ref()
+            .is_some_and(|token| Arc::ptr_eq(token, used))
+        {
+            *cached = None;
+        }
+    }
+
+    fn reusable(&self) -> Option<Arc<Token>> {
+        self.cached()
+            .as_ref()
+            .filter(|token| token.is_reusable())
+            .cloned()
+    }
+
+    fn cached(&self) -> MutexGuard<'_, Option<Arc<Token>>> {
+        self.0.cached.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -202,7 +281,7 @@ impl fmt::Debug for AuthenticatedClient {
 impl AuthenticatedClient {
     /// Acquires credentials, injects Bearer, and spends the original deadline.
     /// Completed responses, including 401 and 403, are returned without replay;
-    /// a 401 evicts the credential it used so the next call acquires anew.
+    /// a 401 evicts the token it used so the next call acquires anew.
     ///
     /// # Errors
     /// Rejects caller Authorization before I/O, acquisition failure before
@@ -215,69 +294,57 @@ impl AuthenticatedClient {
         if request.headers().contains_key(AUTHORIZATION) {
             return Err(Error::AuthorizationConflict);
         }
-        let value = self.credentials.acquire(operation.deadline).await?;
-        if value
-            .hard_expiry
-            .is_some_and(|expiry| Instant::now() >= expiry)
-        {
-            return Err(AcquisitionError::Timeout.into());
-        }
-        request
-            .headers_mut()
-            .insert(AUTHORIZATION, value.header.clone());
+        let token = self
+            .credentials
+            .authorize(request.headers_mut(), operation.deadline)
+            .await?;
         let response = self.resource.execute(request, operation).await?;
         if response.status() == StatusCode::UNAUTHORIZED {
-            self.credentials.invalidate(&value).await;
+            self.credentials.reject(&token);
         }
         Ok(response)
     }
 }
 
-impl Owner {
-    async fn fetch(
-        &self,
-        caller_deadline: Instant,
-    ) -> Result<Arc<CachedCredential>, AcquisitionError> {
+impl Inner {
+    /// Performs one token request, bounded by the caller's deadline and
+    /// [`FETCH_TIMEOUT`], and records its outcome.
+    async fn fetch(&self, caller_deadline: Instant) -> Result<Token, AcquisitionError> {
         let started = Instant::now();
         let deadline = caller_deadline.min(started + FETCH_TIMEOUT);
-        let mut attempt = Attempt {
-            outcome: "cancelled",
+        let mut metric = AttemptMetric {
+            outcome: None,
             deadline,
         };
-        let result = self.fetch_token(started, deadline).await;
-        attempt.outcome = match &result {
-            Ok(_) => "success",
-            Err(AcquisitionError::Timeout) => "timeout",
-            Err(AcquisitionError::Transport) => "transport",
-            Err(AcquisitionError::ResponseLimit) => "limit",
-            Err(AcquisitionError::Rejected) => "rejected",
-            Err(AcquisitionError::InvalidResponse) => "invalid",
-        };
-        // ReuseExpiry gives a value without a future reuse cutoff zero
-        // lifetime: coalesced waiters still receive it, later calls do not.
-        result.map(Arc::new)
+        let result = self.request_token(started, deadline).await;
+        metric.outcome = Some(
+            result
+                .as_ref()
+                .err()
+                .map_or("success", |error| error.label()),
+        );
+        result
     }
 
-    async fn fetch_token(
+    async fn request_token(
         &self,
         started: Instant,
         deadline: Instant,
-    ) -> Result<CachedCredential, AcquisitionError> {
+    ) -> Result<Token, AcquisitionError> {
         let mut exchange = self
-            .protocol
+            .oauth
             .exchange_client_credentials()
             .add_scopes(self.scopes.iter().cloned().map(Scope::new));
         if let Some(audience) = &self.audience {
             exchange = exchange.add_extra_param("audience", audience.as_str());
         }
-        // The token transport enforces `deadline` through body completion.
-        let hook = TokenHttpClient {
-            endpoint: self.endpoint.clone(),
-            transport: self.transport.clone(),
+        let http = TokenHttp {
+            path: self.token_path.clone(),
+            client: self.token_http.clone(),
             deadline,
         };
         let response = exchange
-            .request_async(&hook)
+            .request_async(&http)
             .await
             .map_err(|error| match error {
                 oauth2::RequestTokenError::Request(error) => error,
@@ -294,65 +361,58 @@ impl Owner {
             return Err(AcquisitionError::InvalidResponse);
         }
         let token = response.access_token().secret();
-        let unpadded = token.trim_end_matches('=');
-        if unpadded.is_empty()
-            || !unpadded
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-._~+/".contains(&b))
-        {
+        if token.is_empty() {
             return Err(AcquisitionError::InvalidResponse);
         }
         let mut header = HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|_| AcquisitionError::InvalidResponse)?;
         header.set_sensitive(true);
-        let hard_expiry = response
+        let reuse_until = match response
             .expires_in()
-            .and_then(|ttl| started.checked_add(ttl));
-        if hard_expiry.is_some_and(|expiry| Instant::now() >= expiry) {
-            return Err(AcquisitionError::InvalidResponse);
-        }
-        let reuse_until = hard_expiry.and_then(|expiry| expiry.checked_sub(REUSE_MARGIN));
-        Ok(CachedCredential {
+            .and_then(|lifetime| started.checked_add(lifetime))
+        {
+            None => None,
+            Some(expiry) if Instant::now() >= expiry => {
+                return Err(AcquisitionError::InvalidResponse);
+            }
+            // A token already inside the margin serves only this request.
+            Some(expiry) => Some(expiry.checked_sub(REUSE_MARGIN).unwrap_or(started)),
+        };
+        Ok(Token {
             header,
-            hard_expiry,
             reuse_until,
         })
     }
 }
 
-struct TokenHttpClient {
-    endpoint: Url,
-    transport: Client,
+/// Sends oauth2's token request through the bounded token client.
+struct TokenHttp {
+    path: PathAndQuery,
+    client: Client,
     deadline: Instant,
 }
 
-impl<'client> oauth2::AsyncHttpClient<'client> for TokenHttpClient {
+impl<'client> oauth2::AsyncHttpClient<'client> for TokenHttp {
     type Error = AcquisitionError;
     type Future =
         Pin<Box<dyn Future<Output = Result<oauth2::HttpResponse, Self::Error>> + Send + 'client>>;
 
     fn call(&'client self, request: oauth2::HttpRequest) -> Self::Future {
-        let deadline = self.deadline;
         Box::pin(async move {
-            if request.uri() != self.endpoint.as_str() {
-                return Err(AcquisitionError::InvalidResponse);
-            }
+            // oauth2 builds the absolute token URL; the bounded client owns the
+            // fixed origin and takes only the path.
             let (mut parts, body) = request.into_parts();
-            parts.uri = self.endpoint[url::Position::BeforePath..]
-                .parse()
-                .map_err(|_| AcquisitionError::InvalidResponse)?;
+            parts.uri = self.path.clone().into();
             if let Some(header) = parts.headers.get_mut(AUTHORIZATION) {
                 header.set_sensitive(true);
             }
+            let operation = Operation {
+                deadline: self.deadline,
+                response_body_bytes: None,
+            };
             let response = self
-                .transport
-                .execute(
-                    Request::from_parts(parts, Bytes::from(body)),
-                    Operation {
-                        deadline,
-                        response_body_bytes: None,
-                    },
-                )
+                .client
+                .execute(Request::from_parts(parts, Bytes::from(body)), operation)
                 .await
                 .map_err(|error| match error {
                     infra_outbound_http::Error::Timeout { .. } => AcquisitionError::Timeout,
@@ -361,7 +421,11 @@ impl<'client> oauth2::AsyncHttpClient<'client> for TokenHttpClient {
                     }
                     _ => AcquisitionError::Transport,
                 })?;
-            if !response.status().is_success() {
+            let status = response.status();
+            if status.is_server_error() {
+                return Err(AcquisitionError::Unavailable);
+            }
+            if !status.is_success() {
                 return Err(AcquisitionError::Rejected);
             }
             let (parts, body) = response.into_parts();
@@ -370,70 +434,30 @@ impl<'client> oauth2::AsyncHttpClient<'client> for TokenHttpClient {
     }
 }
 
-struct CachedCredential {
-    header: HeaderValue,
-    hard_expiry: Option<Instant>,
-    reuse_until: Option<Instant>,
-}
-
-impl fmt::Debug for CachedCredential {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("CachedCredential([REDACTED])")
-    }
-}
-
-struct ReuseExpiry;
-
-impl Expiry<(), Arc<CachedCredential>> for ReuseExpiry {
-    fn expire_after_create(
-        &self,
-        (): &(),
-        value: &Arc<CachedCredential>,
-        _: std::time::Instant,
-    ) -> Option<Duration> {
-        Some(value.reuse_until.map_or(Duration::ZERO, |cutoff| {
-            cutoff.saturating_duration_since(Instant::now())
-        }))
-    }
-
-    fn expire_after_update(
-        &self,
-        key: &(),
-        value: &Arc<CachedCredential>,
-        now: std::time::Instant,
-        _: Option<Duration>,
-    ) -> Option<Duration> {
-        self.expire_after_create(key, value, now)
-    }
-    // The default read callback preserves the remaining duration.
-}
-
-struct Attempt {
-    outcome: &'static str,
+/// Counts one token request exactly once, including when it is dropped.
+struct AttemptMetric {
+    outcome: Option<&'static str>,
     deadline: Instant,
 }
 
-impl Drop for Attempt {
+impl Drop for AttemptMetric {
     fn drop(&mut self) {
-        let outcome = if self.outcome == "cancelled" && Instant::now() >= self.deadline {
+        let outcome = self.outcome.unwrap_or(if Instant::now() >= self.deadline {
             "timeout"
         } else {
-            self.outcome
-        };
+            "cancelled"
+        });
         metrics::counter!("oauth2_token_acquisitions_total", "outcome" => outcome).increment(1);
     }
 }
 
-fn configuration_error(key: &'static str, reason: &'static str) -> ConfigurationError {
-    ConfigurationError { key, reason }
-}
-
 fn admit_options(options: &Options) -> Result<Url, ConfigurationError> {
+    let error = |key, reason| Err(ConfigurationError { key, reason });
     if options.client_id.is_empty() {
-        return Err(configuration_error("client_id", "must be nonempty"));
+        return error("client_id", "must be nonempty");
     }
     if options.client_secret.expose_secret().is_empty() {
-        return Err(configuration_error("client_secret", "must be nonempty"));
+        return error("client_secret", "must be nonempty");
     }
     if options.scopes.iter().any(|scope| {
         scope.is_empty()
@@ -441,47 +465,29 @@ fn admit_options(options: &Options) -> Result<Url, ConfigurationError> {
                 .bytes()
                 .all(|b| matches!(b, 0x21 | 0x23..=0x5b | 0x5d..=0x7e))
     }) {
-        return Err(configuration_error(
-            "scopes",
-            "must contain RFC 6749 scope tokens",
-        ));
+        return error("scopes", "must contain RFC 6749 scope tokens");
     }
     if options.audience.as_ref().is_some_and(String::is_empty) {
-        return Err(configuration_error(
-            "audience",
-            "must be nonempty when configured",
-        ));
+        return error("audience", "must be nonempty when configured");
     }
+    // `Url::parse` silently strips tabs and newlines, so refuse them first.
     if options
         .token_url
         .chars()
         .any(|c| c.is_whitespace() || c.is_control())
     {
-        return Err(configuration_error(
-            "token_url",
-            "must be HTTPS without userinfo or fragment",
-        ));
+        return error("token_url", "must be HTTPS without userinfo or fragment");
     }
-    let endpoint = Url::parse(&options.token_url)
-        .map_err(|_| configuration_error("token_url", "invalid URL"))?;
+    let Ok(endpoint) = Url::parse(&options.token_url) else {
+        return error("token_url", "invalid URL");
+    };
     if endpoint.scheme() != "https"
         || endpoint.host_str().is_none()
         || !endpoint.username().is_empty()
         || endpoint.password().is_some()
         || endpoint.fragment().is_some()
-        || options
-            .token_url
-            .split_once("://")
-            .is_some_and(|(_, tail)| {
-                tail.split(['/', '?', '#'])
-                    .next()
-                    .is_some_and(|authority| authority.contains('@'))
-            })
     {
-        return Err(configuration_error(
-            "token_url",
-            "must be HTTPS without userinfo or fragment",
-        ));
+        return error("token_url", "must be HTTPS without userinfo or fragment");
     }
     Ok(endpoint)
 }

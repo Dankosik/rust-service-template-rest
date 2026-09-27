@@ -19,13 +19,12 @@ reason, and the condition that would reopen it.
 | The replacement fixed five listener and status defects: no HTTP/2 keepalive or idle bound, a spinning drain loop, accept errors without backoff, silently suppressed panics, and malformed bearer mapped to `INVALID_ARGUMENT` | Patching those inside the custom server | The shared listener already had keepalive, the first-byte bound, 50 ms accept backoff and `GracefulShutdown`. `CatchPanicLayer` leaves the payload to the normal hook. Malformed bearer is `UNAUTHENTICATED`. | Do not restore the custom listener to fix one of these. Reopen a single defect only if the shared listener loses that bound. |
 
 <!-- template:begin outbound-auth-grpc:docs-grpc-oauth-eviction -->
-Eviction reuses `Credentials::invalidate`. Real servers reject authentication
+Eviction reuses `Credentials::reject`. Real servers reject authentication
 with a Trailers-Only response, whose `grpc-status` arrives in the initial
 headers. It runs only when that response has `grpc-status` `UNAUTHENTICATED`,
 or HTTP 401 and no `grpc-status`. Trailers are not read. The response is
 returned unchanged.
-Cleanup spends only the remaining call deadline and starts no background
-work. `PERMISSION_DENIED` keeps the credential. A caller-supplied
+Eviction is an in-memory update and starts no background work. `PERMISSION_DENIED` keeps the credential. A caller-supplied
 `Authorization` is `INVALID_ARGUMENT` before acquisition. Reopen if an
 accepted provider rejects machine auth only in trailers and a supported hook
 can observe that without a body inspector.

@@ -11,7 +11,7 @@ behavior. This record retains the accepted choices and their reopen conditions.
 | --- | --- | --- |
 | `oauth2` 5.0.0, defaults disabled, no transport feature | Handwritten protocol duplicates Basic encoding, form construction, and standard response handling. `openidconnect` 4.0.1 adds discovery/JWT beyond this grant; `yup-oauth2` 12.1.2 has no generic Basic client-credentials authenticator. | General protocol dependencies remain even for this small grant. Reopen if resolved admission fails or an actual required provider cannot use the supported hook. |
 | Existing `infra-outbound-http` through oauth2's async HTTP hook | oauth2's default reqwest pulls 0.12 alongside workspace 0.13.5. A separate direct reqwest client repeats fixed-origin/deadline/body/observation policy. | A narrow request/response conversion preserves the current transport proof. Reopen only if its supported API prevents a required invariant. |
-| Existing `moka` 0.12.16 `future`, per-owner one-key cache | A Tokio mutex alone serializes failures into repeated fetches; a handwritten flight/notification state machine duplicates Moka's shared initializer and cancellation recovery. | Tiny owner policy around supported `try_get_with` and `Expiry`; no general cache wrapper. Reopen if library behavior contradicts accepted cancellation or failure fan-out proof. |
+| One cached token behind a double-checked refresh lock, as Go's `oauth2.ReuseTokenSource` and yup-oauth2 do | Moka's one-key `try_get_with`/`Expiry` cache shared failures, but its retention depended on initializer internals, a zero-lifetime trick, and a second clock that Tokio test time cannot move. | After a failed token request, queued callers retry one at a time, never concurrently, each within its own deadline. Reopen if provider load during an outage is measured as a problem. |
 | One new provider crate, independent of inbound authentication | Extending inbound auth joins separate trust and credential lifetimes; placing OAuth in outbound HTTP makes an optional protocol a dependency of every bare HTTP consumer. | Explicit crate/profile pruning keeps independent adoption; remove speculative traits and unused registry/generator paths. |
 
 Registry/maintenance evidence: oauth2 5.0.0 released 2025-01-21 (MIT OR
@@ -43,7 +43,7 @@ The implementation lock admits `oauth2` 5.0.0 with no OAuth transport feature.
 Its only new registry packages relative to the stage base are `oauth2`,
 `thiserror` 1.0.69 and `thiserror-impl` 1.0.69; the existing 2.0.20 error family
 remains. The protocol uses the already locked rand 0.8.8, sha2 0.10.9 and base64
-0.22.1; Moka retains crossbeam-epoch 0.9.21. No second reqwest family is added.
+0.22.1. The adapter no longer depends on Moka. No second reqwest family is added.
 OAuth enables URL's serde feature; this is an explicit feature cost of the
 protocol library. Locked offline feature-tree inspection confirms that the
 adapter is OAuth's sole workspace consumer and no OAuth default/transport
@@ -56,81 +56,63 @@ Use BasicClient with token endpoint set, explicit BasicAuth, nonempty secret,
 `exchange_client_credentials`, scopes, and `add_extra_param("audience", ...)`.
 The [protocol source](https://github.com/ramosbugs/oauth2-rs/blob/5.0.0/src/endpoint.rs)
 constructs encoded Basic credentials and a form POST. The hook receives an
-absolute `Request<Vec<u8>>`: verify it is the configured endpoint, project only
-its path/query into the fixed-origin transport, mark Authorization sensitive,
+absolute `Request<Vec<u8>>` for the configured endpoint: replace its URI with the
+endpoint path/query computed once at construction, for the fixed-origin
+transport, mark Authorization sensitive,
 and convert bounded response bytes back for oauth2. Do not expose raw library
 errors or attach them as sources.
 
 The standard parser owns mandatory fields, optional expiry, media type, and
 unknown members. Compare the library token-type representation case-insensitively
-with `bearer`; do not depend solely on a case-sensitive enum match. Header
-projection checks the RFC 6750 bearer grammar and `HeaderValue` construction;
-this is the only token-text rule beyond the library, required for a valid wire
-Authorization value. Retain only that sensitive header and expiry metadata,
+with `bearer`; do not depend solely on a case-sensitive enum match. The token
+must be nonempty and form a `HeaderValue`, as reqwest's `bearer_auth` requires;
+there is no stricter RFC 6750 grammar check. Retain only that sensitive header
+and its reuse cutoff,
 not the parsed token object, extras, refresh token, or provider error text.
 
 The template-owned gaps are: fixed-transport conversion; immutable-owner binding;
-monotonic reuse/expiry policy through Moka `Expiry`; conditional 401 eviction;
+the one-token cache and its monotonic reuse cutoff; conditional 401 eviction;
 Authorization injection; config and initializer integration; sanitized outcomes.
 There is no custom protocol serializer/parser, flight state machine, retry loop,
 resolver, background refresher, or general token-source abstraction.
 
 ## Cache, budgets, and finality
 
-Use `moka::future::Cache<(), Arc<CachedCredential>>`, capacity one, with the
-closed acquisition failure as the initializer error. Every successful
-initializer returns `Ok`; `Expiry` alone decides retention. A credential without
-a future reuse cutoff receives a zero lifetime: Moka hands the initializer value
-to already coalesced waiters, then treats the entry as expired
-(`expiration <= now`), so later calls acquire again. No success travels through
-the error channel.
+`Inner` owns `cached: std::sync::Mutex<Option<Arc<Token>>>`, never held across
+an `.await`, and `refresh: tokio::sync::Mutex<()>`. A caller returns a
+reusable cached token without waiting. Otherwise it waits for `refresh` under
+its own `timeout_at(deadline)`, checks the cache again because the previous
+holder may have just stored a token, and only then requests one within
+`min(caller_deadline, start+5s)`. Token requests therefore never overlap. A
+success is shared with every later caller while it is reusable. A failure is
+never cached: each queued caller then makes its own request in turn. Dropping
+the holder cancels its request and releases the lock, so the next waiter
+proceeds; there is no detached task. Bound all active callers by the existing
+inbound/job admission and their deadlines.
 
-Moka's [initializer source](https://github.com/moka-rs/moka/blob/v0.12.16/src/future/value_initializer.rs)
-shares the same error by Arc and removes the waiter on result. Dropping the
-initializer marks it abandoned; a surviving waiter can evaluate its own
-initializer. Outer `timeout_at(caller_deadline, cache_wait)` protects each
-caller; each elected initializer calculates `min(caller_deadline, start+5s)`.
-No attempt is retried after a completed failure. Abandonment replacement is
-library behavior, not a detached application retry. Bound all active callers
-by the existing inbound/job admission and their deadlines; the only cache key
-is unit, so cache cardinality cannot grow with caller input.
-
-The private per-exchange `TokenHttpClient` owns a clone of the fixed endpoint,
-a clone of the shared outbound HTTP client, and the absolute attempt deadline.
-It implements `oauth2::AsyncHttpClient` directly for every call lifetime,
-exposing a boxed `Send` associated future as in oauth2's
+The private per-exchange `TokenHttp` owns the fixed endpoint path, a clone of
+the shared outbound HTTP client, and the absolute attempt deadline. It
+implements `oauth2::AsyncHttpClient` directly for every call lifetime, exposing
+a boxed `Send` associated future as in oauth2's
 [supported async adapter](https://github.com/ramosbugs/oauth2-rs/blob/5.0.0/src/reqwest_client.rs).
-Its concrete type carries no borrowed owner lifetime. Acquisition passes the
-lazy `fetch(deadline)` future directly to Moka's `try_get_with` and awaits the
-lookup under the caller's `timeout_at`. Only the elected initializer creates
-and polls the exchange; dropping the caller drops its pending work under the
-original deadline. Credentials and the cache stay with the existing private
-owner. Reopen this type boundary only with compiler evidence and the existing
-cancellation/deadline proof; it adds no task, cache, token source, or replay.
+A 5xx token response is `Unavailable`; any other non-2xx is `Rejected`.
 
-`CachedCredential` has private sensitive header and optional Tokio monotonic
-hard expiry. Representable positive expiry is `acquisition_start + expires_in`.
-Its cache cutoff is `hard_expiry - 10s`; if the cutoff is already reached,
-return non-retained success while hard expiry is still future. Missing/overflow
-expiry follows that same non-retained route, while zero/already-expired lifetime
-is invalid. Before resource dispatch, check the hard boundary again and refuse
-an expired value as a timeout without resource I/O; the provider response was
-valid, so it is not reported as invalid. There is no fallback to a prior credential.
+`Token` holds the private sensitive header and an optional Tokio monotonic reuse
+cutoff; one clock governs every expiry decision. Representable positive expiry
+is `acquisition_start + expires_in`, and zero or an already passed expiry is
+invalid. The reuse cutoff is `expiry - 10s`; a token already inside that margin
+serves only the request that fetched it. A missing or unrepresentable expiry has
+no cutoff: as in Go's `oauth2`, the token is reused until a resource 401 evicts
+it. A reused token is always before its cutoff, so dispatch needs no second
+expiry check. There is no fallback to a prior token.
 
-Moka `Expiry` returns the remaining duration to the fixed reuse cutoff on
-create/update and preserves the remaining duration on read. It does not slide
-expiry. Moka's internal clock is not Tokio's paused clock; test code must not
-claim cache eviction from advancing Tokio time alone. Use the final hard-expiry
-check as the safety authority, with actual cache expiry or supported isolated
-policy proof for reuse. Avoid a new clock trait or runner solely for this test.
-
-A resource 401 evicts the credential that request used through Moka's
-`entry().and_compute_with`, removing it only while it is still the cached value,
-so a concurrently acquired replacement survives. The response is returned
-without replay; the next operation acquires anew. This follows Spring Security's
-authorization-failure handler rather than Go's keep-until-expiry, so a revoked
-or rotated token does not fail every call until its provider lifetime ends. A
-403 is a permission result and keeps the credential.
+A resource 401 evicts the token that request used, removing it only while it is
+still the cached value (`Arc::ptr_eq`), so a concurrently acquired replacement
+survives. The response is returned without replay; the next operation acquires
+anew. This follows Spring Security's authorization-failure handler rather than
+Go's keep-until-expiry, so a revoked or rotated token does not fail every call
+until its provider lifetime ends. A 403 is a permission result and keeps the
+token.
 The ten-second rule is a refresh preference, never a minimum accepted token TTL.
 
 The existing resource `Operation` is forwarded unchanged after acquisition.
@@ -160,13 +142,13 @@ the service adopts one loader-wide diagnostic policy for every section.
 Runtime errors separate caller Authorization conflict, acquisition failure,
 and existing resource transport failure. Acquisition reasons and all public
 Debug/Display are closed. Record `oauth2_token_acquisitions_total{outcome}` once
-per elected attempt, with finite success/timeout/transport/limit/rejected/invalid/
-cancelled outcomes. No scope/audience/URL/integration label or response content
+per token request, with finite success/timeout/transport/limit/unavailable/
+rejected/invalid/cancelled outcomes. No scope/audience/URL/integration label or response content
 is emitted. Existing resource transport error policy remains unchanged.
 
 The production adapter's local token/resource-server proof covers encoding,
-audience and scope omission, permissive RFC success parsing, coalesced success/
-failure, expiry and non-retained responses, cancellation replacement, per-waiter
+audience and scope omission, permissive RFC success parsing, shared success and
+serialized failure, reuse cutoff, missing expiry, cancellation replacement, per-waiter
 budget, owner isolation, Bearer injection, 401 eviction that spares a newer
 token, and 401/403 without replay. Reuse existing TLS/transport tests unless that implementation changes.
 Negative proof
@@ -180,7 +162,7 @@ Effective HTTP prerequisite selection is saved, not inferred differently during
 sync. Extend dependency reachability pruning for the new crate and feature edges.
 Profile proof uses representative OAuth-only/no-DB, OAuth+JWT, OAuth+introspection,
 and the existing maximal compatible service graph, reusing unchanged no-OAuth
-coverage. Inspect retained and removed graphs for OAuth and shared-Moka/HTTP
+coverage. Inspect retained and removed graphs for OAuth and shared HTTP
 reachability. Do not multiply by every harness/database/profile permutation or
 repeat identical full builds; harness projections remain separate static proof.
 Heavy validation remains CI-owned.
@@ -193,7 +175,8 @@ publication is implied by template proof.
 The concrete gRPC binding stays inside `Credentials`. It injects one bearer,
 does not replay, and evicts only from the initial `UNAUTHENTICATED` status or
 HTTP 401 without `grpc-status`. The call deadline is `grpc-timeout` or the
-owner's fetch timeout. Its optional dependency points from OAuth to
+owner's fetch timeout; after acquisition, `grpc-timeout` is rewritten to the
+remaining budget, as gRPC clients propagate a context deadline. Its optional dependency points from OAuth to
 `infra-grpc`; removing either profile removes the bridge. Generated clients
 take the concrete authenticated `Service`. See the [transport decision
 record](grpc-decisions.md).

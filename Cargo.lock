@@ -2146,7 +2146,6 @@ dependencies = [
  "infra-grpc",
  "infra-outbound-http",
  "metrics",
- "moka",
  "oauth2",
  "secrecy",
  "serde_json",

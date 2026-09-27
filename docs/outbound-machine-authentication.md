@@ -96,34 +96,37 @@ exchange, 64 response headers, and a 1 MiB encoded body maximum. The shared
 transport enforces header count, not a configurable aggregate header-byte limit.
 These are implementation constants, not operator tuning keys.
 
-Concurrent callers on one owner share a pending result, including failure.
-Every caller bounds its own wait by its own absolute deadline. Dropping the
-initiating future cancels its exchange; surviving waiters may elect a replacement
-under their own budgets. There is no detached fetch or application maintenance
-task. Dropping the last client/owner releases cache ownership.
+One owner never runs two token requests at once. Callers that arrive while a
+request is in flight wait for it, then reuse its token if it is reusable. After
+a failure, each waiting caller makes its own request in turn. Every caller
+bounds its own wait by its own absolute deadline. Dropping the requesting future
+cancels its exchange and lets the next waiter proceed. There is no detached
+fetch or application maintenance task. Dropping the last client/owner releases
+the cached token.
 
-A positive `expires_in` establishes a conservative monotonic hard expiry from
-acquisition start. No resource dispatch may use a token at or beyond that
-boundary. Keep the Go ten-second margin as a *reuse cutoff*: cache only until
-hard expiry minus ten seconds. A token that is still valid but already within
-that margin, including any lifetime at most ten seconds, may serve the current
-acquisition's waiters and is not retained. This avoids rejecting short-lived
-valid responses. No proactive refresh is started.
+A positive `expires_in` establishes a conservative monotonic expiry from
+acquisition start. Keep the Go ten-second margin as a *reuse cutoff*: reuse the
+token only until expiry minus ten seconds. A token that is still valid but
+already within that margin, including any lifetime at most ten seconds, serves
+only the request that fetched it. This avoids rejecting short-lived valid
+responses. No proactive refresh is started.
 
-Missing expiry and an unrepresentably large lifetime use the same successful,
-non-retained path. Zero lifetime or a token already past known hard expiry
-cannot authorize dispatch. Hits never slide expiry. Failed attempts are not
-cached and never fall back to an older token. A later operation may fetch again.
-Unknown response fields and refresh tokens are discarded; JWT claims are not
-interpreted. Only case-insensitive Bearer tokens that can safely form the RFC
-6750 Authorization value are admitted. No custom TTL ceiling or stricter JSON,
+A missing or unrepresentably large lifetime has no reuse cutoff: as in Go's
+`oauth2`, the token is reused until a resource 401 evicts it. Zero lifetime or a
+token already past its expiry when the response arrives cannot authorize
+dispatch. Hits never slide expiry. Failed attempts are not cached and never fall
+back to an older token. A later operation may fetch again. Unknown response
+fields and refresh tokens are discarded; JWT claims are not interpreted. Only
+case-insensitive Bearer tokens that are nonempty and form a valid header value
+are admitted. No custom TTL ceiling or stricter JSON,
 duplicate-field, or media-type parser is added around the protocol library.
 
 ## Failure and observation
 
 Configuration errors identify the integration/key with a bounded static reason,
 never its value. Runtime token failures use closed reasons for deadline,
-transport, response limit, provider rejection, and invalid response. Resource
+transport, response limit, provider unavailability (5xx), provider rejection,
+and invalid response. Resource
 transport errors remain distinct; concrete integrations own business/HTTP error
 mapping. No inbound Problem code is added.
 
@@ -157,7 +160,8 @@ With `GRPC=enabled`, `Credentials::grpc` binds the same private acquisition owne
 to an `infra_grpc::Client`. Each call spends `grpc-timeout` when that header is
 present, otherwise the owner's fetch timeout. Token failure prevents resource
 dispatch. Eviction inspects only the initial response and never replays the
-call. Streaming acquires once at opening. The [gRPC
+call. After acquisition, `grpc-timeout` is rewritten to the remaining budget.
+Streaming acquires once at opening. The [gRPC
 guide](grpc.md#reuse-clients-and-original-deadlines) shows the concrete binding.
 Removing either profile removes only the combined bridge.
 <!-- template:end outbound-auth-grpc:docs-oauth-grpc-binding -->
