@@ -66,7 +66,11 @@ fn plaintext_and_a_missing_password_are_admitted_when_allowed() {
     assert_eq!(cache.server().host, "127.0.0.1");
     assert_eq!(cache.server().port, 6379);
     assert!(!cache.server().tls);
-    assert!(!format!("{cache:?}").contains("6379:"));
+    let debug = format!("{cache:?}");
+    assert!(
+        debug.contains("127.0.0.1") && !debug.contains("redis://"),
+        "{debug}"
+    );
 }
 
 #[test]
@@ -321,4 +325,144 @@ fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
         )
         .expect("observation buckets are valid")
         .build_recorder()
+}
+
+/// A RESP2 server that refuses `AUTH` until told otherwise and answers every
+/// `GET` with a miss. It counts `AUTH` attempts so the test can wait for the
+/// client's own reconnect chain to give up.
+struct AuthGate {
+    address: std::net::SocketAddr,
+    accept_auth: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    auth_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl AuthGate {
+    async fn start() -> Self {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("auth gate bind");
+        let address = listener.local_addr().expect("auth gate address");
+        let accept_auth = std::sync::Arc::new(AtomicBool::new(false));
+        let auth_attempts = std::sync::Arc::new(AtomicUsize::new(0));
+        let (accept, attempts) = (accept_auth.clone(), auth_attempts.clone());
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(serve_resp(stream, accept.clone(), attempts.clone()));
+            }
+        });
+        Self {
+            address,
+            accept_auth,
+            auth_attempts,
+        }
+    }
+
+    fn attempts(&self) -> usize {
+        self.auth_attempts.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+async fn serve_resp(
+    stream: tokio::net::TcpStream,
+    accept_auth: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    auth_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    let (read, mut write) = stream.into_split();
+    let mut read = BufReader::new(read);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if read.read_line(&mut line).await.unwrap_or(0) == 0 {
+            return;
+        }
+        let Some(count) = line
+            .trim_end()
+            .strip_prefix('*')
+            .and_then(|n| n.parse::<usize>().ok())
+        else {
+            return;
+        };
+        let mut arguments = Vec::with_capacity(count);
+        for _ in 0..count {
+            line.clear();
+            if read.read_line(&mut line).await.unwrap_or(0) == 0 {
+                return;
+            }
+            let Some(length) = line
+                .trim_end()
+                .strip_prefix('$')
+                .and_then(|n| n.parse::<usize>().ok())
+            else {
+                return;
+            };
+            let mut bulk = vec![0; length + 2];
+            if read.read_exact(&mut bulk).await.is_err() {
+                return;
+            }
+            bulk.truncate(length);
+            arguments.push(String::from_utf8_lossy(&bulk).to_ascii_uppercase());
+        }
+        let reply: &[u8] = match arguments.first().map(String::as_str) {
+            Some("AUTH") => {
+                auth_attempts.fetch_add(1, Ordering::SeqCst);
+                if accept_auth.load(Ordering::SeqCst) {
+                    b"+OK\r\n"
+                } else {
+                    b"-WRONGPASS invalid username-password pair\r\n"
+                }
+            }
+            Some("GET") => b"$-1\r\n",
+            Some("PING") => b"+PONG\r\n",
+            _ => b"+OK\r\n",
+        };
+        if write.write_all(reply).await.is_err() {
+            return;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_auth_is_retried_after_the_client_gives_up() {
+    let gate = AuthGate::start().await;
+    let cache = Cache::connect(CacheOptions {
+        dsn: SecretString::from(format!("redis://:secret@{}", gate.address)),
+        root_ca_path: None,
+        allow_plaintext: true,
+        allow_unauthenticated: false,
+        command_timeout: Duration::from_millis(200),
+    })
+    .expect("lazy connect");
+    let namespace = cache.namespace("auth");
+
+    // Drive redis's own reconnect chain (one attempt plus its retries) until it
+    // gives up; the lazy chain advances only while a caller awaits it. From
+    // then on redis's manager answers every call with the stored AUTH failure
+    // and never dials again.
+    let chain = crate::NUMBER_OF_RETRIES + 1;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while gate.attempts() < chain {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "reconnect chain never finished"
+        );
+        assert_eq!(namespace.get("key").await, Err(crate::Unavailable));
+    }
+
+    gate.accept_auth
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if namespace.get("key").await == Ok(None) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the cache stayed unavailable after the server accepted AUTH again"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

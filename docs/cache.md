@@ -83,13 +83,18 @@ status.
 ## Failure and budgets
 
 A miss and an outage are degradation, not a failed process. Every `get`,
-`set`, `delete`, and probe runs inside `tokio::time::timeout(command_timeout)`.
+`set`, and `delete` runs inside `tokio::time::timeout(command_timeout)`.
 That bound covers waiting for a reconnect and the reply. During an outage each
 call costs at most `command_timeout`.
 
 `cache.command_timeout` must satisfy
-`2 * cache.command_timeout <= http.request_timeout`. A degraded cache then
-still leaves at least half of the request budget for the source of truth.
+`2 * cache.command_timeout <= http.request_timeout`, so one degraded cache
+call still leaves at least half of the request budget. The rule covers one
+call, not a handler: each sequential cache call on the request path can spend
+another `command_timeout`, and the example above spends two (a `get`, then a
+`set`). The feature counts its calls: calls × `command_timeout`, plus its
+source-of-truth work, plus a reserve for writing the response, must fit in
+`http.request_timeout`. With the defaults (100 ms and 8 s) that is not tight.
 There is no per-command retry. A timed-out `SET` is ambiguous, and the TTL
 bounds how long a missed write can stay stale.
 
@@ -97,7 +102,15 @@ Connect, backoff, and TCP are constants, not keys. Connect waits at most 1 s.
 Reconnect backoff starts at 100 ms, doubles, and caps at 2 s, with 6 retries.
 TCP nodelay is on. Keepalive is 30 s, then 10 s, with 3 retries where the
 platform supports them. On Linux, `user_timeout` is 10 s so a half-open
-connection is detected and reconnected. A command timeout does not by itself
+connection is detected and reconnected.
+
+redis 1.7.1 reconnects only after an I/O error. A connection whose setup
+fails otherwise, for example `AUTH` refused while a failover saturates the
+server, would stay failed until the process restarts. The cache replaces that
+connection from the retained client, at most once per 2 s, so it recovers
+when the server accepts it again. The first connection, and each reconnect
+chain, advances only while a call is waiting on it; with sparse traffic
+recovery can take a few calls. A command timeout does not by itself
 reconnect.
 
 ## Readiness and shutdown
@@ -105,7 +118,8 @@ reconnect.
 The cache does not gate readiness. A gate would turn a cache outage into total
 unavailability and contradict degradation. `Cache::connect` admits
 configuration and builds a lazy `ConnectionManager`. It does no network I/O.
-Startup then runs one `probe` check inside a 1 s bound. Success logs
+Startup then runs one `probe` check inside a 1 s bound, long enough for
+the first DNS, TCP, TLS, and `AUTH` exchange. Success logs
 `cache_connected` with `server.address`, `server.port`, and `cache.tls`.
 Failure logs `cache_unavailable_at_startup` and startup continues.
 
@@ -116,7 +130,8 @@ A service whose traffic requires the cache opts in by pushing the probe in
 probes.push(Box::new(cache.probe()));
 ```
 
-The probe name is `cache`. It sends `PING`. Do not add it to liveness.
+The probe name is `cache`. It sends `PING` and has no timeout of its own: the
+readiness refresher bounds it with `health.probe_budget`. Do not add it to liveness.
 
 Dropping the last `ConnectionManager` clone closes the socket. Bootstrap
 carries `Option<Cache>` into the shutdown plan and drops it inside
@@ -140,11 +155,13 @@ sum(rate(cache_operation_duration_seconds_count{outcome="hit"}[5m])) / sum(rate(
 The client span is `cache`, with `otel.kind` `client`, `db.system.name`
 `redis`, `db.operation.name` `GET`, `SET`, or `DEL`, plus `cache.name`,
 `server.address`, `server.port`, `cache.outcome`, `error.type`, and
-`otel.status_code`. On error or timeout one warning event
+`otel.status_code`. On error or timeout one debug event
 `cache_operation_failed` carries `cache.name`, `cache.operation`, and
-`error.type`. `error.type` is `timeout`, `io`, `auth`, `response`, `parse`,
-`invalid_ttl`, or `other`; a TLS handshake failure surfaces as `io`. Metrics, spans, and logs never carry keys,
-values, the DSN, or raw server text. `CacheError` Display follows the same
+`error.type`; it is not a warning because an outage would log it at the
+request rate. Alert on the `error` and `timeout` outcomes of the histogram
+instead. `error.type` is `timeout`, `io`, `auth`, `response`, `parse`,
+`invalid_ttl`, or `other`; a TLS handshake failure surfaces as `io`. Metrics,
+spans, and logs never carry keys, values, the DSN, or raw server text. `CacheError` Display follows the same
 rule.
 
 ## Operate the server

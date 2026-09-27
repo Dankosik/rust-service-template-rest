@@ -24,7 +24,7 @@ is not a supported template state.
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | done |
 | 9 | Template initializer, profiles, and template sync | done on merge after required CI |
-| 10 | Optional capability profiles | 10.1, 10.2, 10.3, 10.4, 10.6 and 10.8 merged; 10.7 implemented; remaining profiles planned |
+| 10 | Optional capability profiles | 10.1, 10.2, 10.3, 10.4, 10.6 and 10.8 merged; 10.7 and 10.11 implemented; remaining profiles planned |
 | 11 | Benchmarking and performance evidence | planned |
 | 12 | First release and derived-repository verification | planned |
 

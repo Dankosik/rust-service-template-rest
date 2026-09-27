@@ -58,7 +58,7 @@ impl OperationGuard {
     pub(crate) fn fail(&mut self, outcome: &'static str, error_type: &'static str) -> Unavailable {
         self.finish(outcome, Some(error_type));
         self.span.in_scope(|| {
-            tracing::warn!(
+            tracing::debug!(
                 cache.name = self.cache,
                 cache.operation = self.operation,
                 error.type = error_type,

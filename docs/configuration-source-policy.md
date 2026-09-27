@@ -272,8 +272,8 @@ every record inside a request) or `text` (local development).
 - `cache.command_timeout` (environment `APP__CACHE__COMMAND_TIMEOUT`, default
   `100ms`, inclusive `1ms` to `1s`) bounds one cache call, including reconnect
   wait. It must satisfy `2 * cache.command_timeout <= http.request_timeout`,
-  so a degraded cache still leaves at least half of the request budget for the
-  source of truth. Connect, backoff, and TCP stay adapter constants. During an
+  so one degraded call still leaves at least half of the request budget; a
+  feature with several sequential cache calls budgets each of them. Connect, backoff, and TCP stay adapter constants. During an
   outage each call costs at most `command_timeout`. There is no per-command
   retry. See the [cache guide](cache.md).
 <!-- template:end cache:docs-config-cache-budget -->

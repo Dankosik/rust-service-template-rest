@@ -207,7 +207,7 @@ classify() {
 	esac; fi
 	# Valkey proof follows the cache adapter, its Compose service, and the integration runner.
 	if [[ ${cache} == redis ]]; then case "${file}" in
-	Cargo.toml | Cargo.lock | crates/infra-cache/* | crates/config/Cargo.toml | crates/config/src/cache.rs | \
+	Cargo.toml | Cargo.lock | crates/infra-cache/* | test/fixtures/tls.rs | crates/config/Cargo.toml | crates/config/src/cache.rs | \
 	crates/service/Cargo.toml | crates/service/src/bootstrap/* | env/docker-compose.yml | \
 	scripts/ci/test-integration-cache.sh | make/template.mk | .github/workflows/ci.yml)
 		mark cache_integration
