@@ -444,7 +444,10 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
         "process echo"
     );
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    // A worker thread keeps serving the client connection while the test
+    // waits, as a live client would; hyper's graceful drain needs its PING ack.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
         .enable_all()
         .build()
         .expect("build gRPC observer runtime");
@@ -466,8 +469,8 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
     assert!(ended.is_none(), "health watch stayed open after drain");
 
     let (code, stderr, logs) = example.wait_within(Duration::from_secs(15));
-    assert_eq!(code, Some(0), "stderr: {stderr}");
     let messages = logged_messages(&logs);
+    assert_eq!(code, Some(0), "stderr: {stderr}; logs: {messages:?}");
     for message in [
         "readiness_disabled",
         "drain_started",
