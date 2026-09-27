@@ -117,11 +117,11 @@ inside its deadline, it writes nothing further and expiry recovers the row.
 Every transition is fenced by `(id, claim_generation, state = 'running')`.
 An acknowledged one-row write is applied; an acknowledged zero-row write is
 unchanged and makes no attribution claim. Errors or unavailable acknowledgement
-retry the identical operation at the existing one-second cadence only until
+retry the fenced write at the existing one-second cadence only until
 the local or cleanup deadline. Unknown at deadline is uncertainty, not a
-durable outcome. A retry delay is captured once: `attempt^4 * (0.9 + 0.2 *
-draw)` seconds with microsecond round-down; randomness is drawn only while a
-normal retry is prepared, never by the claim statement.
+durable outcome. PostgreSQL computes `attempt^4 * (0.9 + 0.2 * random())`
+seconds (floored by `retry_after_at_least`) when it writes the retry; a
+re-sent fenced write may redraw.
 
 `Job::complete_in_tx(&mut infra_postgres::Tx)` performs the same fenced COMPLETE
 inside the caller's transaction. It returns `CompleteError::StaleClaim` or its
@@ -132,11 +132,12 @@ replay its business closure. The following fenced outcome sees an already
 committed COMPLETE as unchanged, can retry after rollback, and otherwise
 leaves recovery to expiry when its acknowledgement cannot be established.
 
-`JobError::retry_after(error, delay)` and `JobError::snooze(delay)` use the
-same checked delay domain and return `Result<_, InvalidDelay>`. Retry-after
-spends an attempt and has no jitter. Snooze wins over exhaustion, returns the
-row to pending at database time, clears its claim, and refunds exactly one
-attempt; its fenced SQL cannot refund again after the first transition. A
+`JobError::retry_after_at_least(error, delay)` and `JobError::snooze(delay)`
+use the same checked delay domain and return `Result<_, InvalidDelay>`.
+`retry_after_at_least` spends an attempt and is a floor under the normal
+jittered backoff. Snooze wins over exhaustion, returns the row to pending at
+database time, clears its claim, and refunds exactly one attempt; its fenced
+SQL cannot refund again after the first transition. A
 handler cancelled by a forced drain is released: the unit is refunded the same
 way, but `not_before` is unchanged, so the job is due at once and keeps its
 place in claim order rather than queueing behind the backlog.
@@ -156,7 +157,8 @@ The only sampling gauges are `jobs_live_jobs{kind,state}`,
 value and timestamp is zero. A completely decoded successful sample publishes
 all values and then its database timestamp. A query or decode
 failure retains the last good values and timestamp; operation-failure telemetry
-still records the failure. Consumers reject timestamp zero or a timestamp older
+still records the failure. `jobs_operation_failed` carries `sqlstate` or
+`cause`. Consumers reject timestamp zero or a timestamp older
 than 30 seconds. The two-second statement timeout is a time backstop, not a
 scan-size proof. Retention remains bounded terminal deletion; it never deletes
 live rows. Terminal retention is independent of registered kinds.
@@ -180,6 +182,12 @@ maintained release meets the caller-connection enqueue, schema ownership,
 execution-budget, and worker-lifecycle contracts together. A proposed queue,
 online dual-format conversion, or lifecycle extraction needs its own accepted
 design.
+
+graphile_worker 0.13.5 (2026-07, sqlx 0.9, OpenTelemetry 0.32) now enqueues on
+the caller's transaction via `WorkerUtils::with_executor`, but keeps its own
+`graphile_worker` schema and migrator, makes crashed-worker recovery an opt-in
+heartbeat sweeper, has no per-kind attempt deadline with a fenced outcome, and
+has one maintainer; apalis-postgres is still 1.0.0-rc.9.
 
 ## Decisions recorded here
 
