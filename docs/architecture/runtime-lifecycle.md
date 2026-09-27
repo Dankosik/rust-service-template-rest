@@ -273,6 +273,21 @@ NATS drain and waits for its native Closed notification within the existing
 close budget; an absent notification, unjoined application work, or forced
 drain yields the established degraded exit code rather than clean shutdown.
 <!-- template:end messaging:docs-lifecycle-messaging -->
+<!-- template:begin cache:docs-lifecycle-cache -->
+## Cache lifecycle
+
+`Cache::connect` admits configuration and builds a lazy `ConnectionManager`.
+It does no network I/O. Startup then runs one probe check inside a 1 s bound.
+Success logs `cache_connected`. Failure logs `cache_unavailable_at_startup`
+and startup continues. The cache is not a readiness probe unless composition
+pushes `cache.probe()` into the probe list. It is never a liveness check. A
+gate would turn an outage into total unavailability.
+
+Shutdown drops `Option<Cache>` inside `close_dependencies`, in the dependency
+stage after HTTP drain. The drop closes the socket and does not add to
+`DEPENDENCY_CLOSE`. The same drop runs on the startup-failure and
+stopped-startup paths. The [guide](../cache.md) shows the readiness opt-in.
+<!-- template:end cache:docs-lifecycle-cache -->
 <!-- template:begin outbox:docs-lifecycle-outbox -->
 With the outbox profile retained, worker startup admits the mode-aware pool
 capacity before starting either engine: `N + 5` with ordinary jobs and outbox,

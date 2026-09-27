@@ -35,6 +35,9 @@ infra-grpc = { workspace = true }
 # template:begin messaging:service-messaging-dependency
 infra-messaging = { workspace = true }
 # template:end messaging:service-messaging-dependency
+# template:begin cache:service-cache-dependency
+infra-cache = { workspace = true }
+# template:end cache:service-cache-dependency
 # template:begin inbound-webhooks:service-webhooks-dependency
 infra-webhooks = { workspace = true }
 # template:end inbound-webhooks:service-webhooks-dependency

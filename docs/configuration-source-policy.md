@@ -74,6 +74,18 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   confined to this key, so other environment strings, including credentials,
   keep their exact bytes.
 <!-- template:end messaging:docs-config-messaging-source -->
+<!-- template:begin cache:docs-config-cache-source -->
+- `cache` is an optional typed section. It is active when `dsn` is set.
+  `cache.dsn` is `SecretString`, environment-only (`APP__CACHE__DSN`), and
+  redacted. A missing, empty, or whitespace-only value is absent. A nonempty
+  file value is refused because `dsn` is secret-like. `root_ca_path` and
+  `command_timeout` use normal file/environment precedence. `allow_plaintext`
+  and `allow_unauthenticated` are accepted only when `app.env` is `local` or
+  `development`. Admitted schemes are `redis`, `rediss`, `valkey`, and
+  `valkeys`. `#insecure`, a unix socket, Sentinel, and Cluster are refused. A
+  CA path requires TLS. DSN form checks stay in `infra-cache`. The
+  [guide](cache.md) owns admission.
+<!-- template:end cache:docs-config-cache-source -->
 <!-- template:begin outbox:docs-config-outbox-source -->
 - `OUTBOX=postgres` is initializer/profile selection, not a configuration
   section or runtime switch. It requires the retained PostgreSQL, jobs, and
@@ -256,6 +268,15 @@ every record inside a request) or `text` (local development).
 <!-- template:begin authn:docs-config-authn-budgets -->
 - Authentication provider calls have an independent fixed three-second cap through body completion; discovery plus initial keys share a six-second startup cap. Authentication accepts no request deadline or response reserve. The outer hardened timer alone emits `504 request_timeout`; a completed provider timeout is `503 authentication_unavailable` while the request is live. Introspection admits its configured number of simultaneous exchanges and rejects excess distinct misses as unavailable without queueing; live cache hits and coalesced waiters need no extra permit.
 <!-- template:end authn:docs-config-authn-budgets -->
+<!-- template:begin cache:docs-config-cache-budget -->
+- `cache.command_timeout` (environment `APP__CACHE__COMMAND_TIMEOUT`, default
+  `100ms`, inclusive `1ms` to `1s`) bounds one cache call, including reconnect
+  wait. It must satisfy `2 * cache.command_timeout <= http.request_timeout`,
+  so a degraded cache still leaves at least half of the request budget for the
+  source of truth. Connect, backoff, and TCP stay adapter constants. During an
+  outage each call costs at most `command_timeout`. There is no per-command
+  retry. See the [cache guide](cache.md).
+<!-- template:end cache:docs-config-cache-budget -->
 
 ## Adding A Config Key
 

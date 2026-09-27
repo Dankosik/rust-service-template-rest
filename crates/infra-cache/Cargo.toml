@@ -1,0 +1,50 @@
+[package]
+name = "infra-cache"
+description = "Optional Redis-compatible cache client. Bytes only; callers own keys and TTL."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Real Valkey tests run only through the explicit cache integration owner.
+integration = []
+
+[[test]]
+name = "valkey"
+path = "tests/valkey.rs"
+required-features = ["integration"]
+
+# cargo-shear 1.13.4 scans target directories, missing the #[path] inclusion
+# of test/fixtures/tls.rs. Remove this exception when it follows that source.
+[package.metadata.cargo-shear]
+ignored = ["rcgen"]
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+health = { workspace = true }
+metrics = { workspace = true }
+redis = { workspace = true, features = [
+    "tokio-comp",
+    "connection-manager",
+    "tokio-rustls-comp",
+] }
+rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
+secrecy = { workspace = true }
+socket2 = { workspace = true, features = ["all"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time"] }
+tracing = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+base64 = { workspace = true, features = ["std"] }
+metrics-exporter-prometheus = { workspace = true }
+rcgen = { workspace = true, features = ["aws_lc_rs"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }

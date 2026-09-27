@@ -85,6 +85,14 @@ topology, handler idempotency, and the selected worker's limits. `OUTBOX` is a
 separate PostgreSQL/jobs extension and is unavailable in a messaging-only
 selection.
 <!-- template:end messaging:docs-readme-messaging-profile -->
+<!-- template:begin cache:docs-readme-cache-profile -->
+`CACHE=redis` retains a bytes-only Redis-protocol cache client. It is inert
+until `APP__CACHE__DSN` is set, and it does not add a sample key or HTTP route.
+A miss or an unavailable server degrades to the source of truth. The [cache
+guide](docs/cache.md) owns configuration, budgets, and removal; the [decision
+record](docs/cache-decisions.md) records the library choices. `CACHE=none`
+removes the capability.
+<!-- template:end cache:docs-readme-cache-profile -->
 <!-- template:begin outbox:docs-readme-outbox-profile -->
 `OUTBOX=postgres` requires `DATABASE=postgres`, `JOBS=postgres`, and
 `MESSAGING=nats-jetstream`. It records publication intent in the business

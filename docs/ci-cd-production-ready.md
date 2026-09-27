@@ -52,6 +52,10 @@ it. CI also checks locked offline Cargo metadata after initialization, the
 resolved NATS image digest, and dependency policy. These are selected surfaces,
 not a Cartesian multiplication of every profile, database, and harness.
 <!-- template:end messaging:docs-ci-messaging-gates -->
+<!-- template:begin cache:docs-ci-cache-gates -->
+With the cache profile retained, the `cache_integration` surface runs
+`make test-integration-cache` against Compose Valkey in the integration job.
+<!-- template:end cache:docs-ci-cache-gates -->
 <!-- template:begin outbox:docs-ci-outbox-gates -->
 With the outbox profile retained, the database-and-NATS integration selection
 covers transactional commit/rollback, live-key same/conflict/lost outcomes,

@@ -79,3 +79,12 @@ max_connections = 4
 # dlq_subject = "dead.events"
 # consumer_concurrency = 1
 # template:end messaging:local-config
+
+# template:begin cache:local-config
+# Cache is inert until a DSN is selected. The DSN is environment-only.
+#   APP__CACHE__DSN=redis://127.0.0.1:6379
+# [cache]
+# allow_plaintext = true
+# allow_unauthenticated = true
+# command_timeout = "100ms"
+# template:end cache:local-config

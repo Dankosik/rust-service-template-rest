@@ -22,6 +22,9 @@ use infra_grpc::Server as GrpcServer;
 // template:begin messaging:service-bootstrap-messaging-imports
 use infra_messaging::{Messaging, MessagingError, MessagingOptions};
 // template:end messaging:service-bootstrap-messaging-imports
+// template:begin cache:service-bootstrap-cache-imports
+use infra_cache::{Cache, CacheError, CacheOptions};
+// template:end cache:service-bootstrap-cache-imports
 // template:begin inbound-webhooks:bootstrap-webhooks-imports
 use infra_http::webhooks::WebhookState;
 use infra_webhooks::inbound::{Consumers, Receiver};
@@ -75,6 +78,9 @@ const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
 // template:begin messaging:service-bootstrap-messaging-startup-budget
 const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 // template:end messaging:service-bootstrap-messaging-startup-budget
+// template:begin cache:service-bootstrap-cache-startup-budget
+const CACHE_STARTUP_CHECK: Duration = Duration::from_secs(1);
+// template:end cache:service-bootstrap-cache-startup-budget
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum BootstrapError {
@@ -94,6 +100,10 @@ pub(crate) enum BootstrapError {
     #[error("messaging.max_payload_bytes cannot fit this platform")]
     MessagingPayloadBound,
     // template:end messaging:service-bootstrap-messaging-errors
+    // template:begin cache:service-bootstrap-cache-errors
+    #[error("cache startup: {0}")]
+    Cache(#[from] CacheError),
+    // template:end cache:service-bootstrap-cache-errors
     #[error("startup admission: {0}")]
     Admission(health::NotReady),
     #[error("configuration is invalid: {0}")]
@@ -268,6 +278,9 @@ async fn serve(
     // template:begin messaging:service-bootstrap-messaging-opened
     let mut messaging = None;
     // template:end messaging:service-bootstrap-messaging-opened
+    // template:begin cache:service-bootstrap-cache-opened
+    let mut cache = None;
+    // template:end cache:service-bootstrap-cache-opened
     let outcome = Box::pin(async {
         let probes: Vec<Box<dyn Probe>> = Vec::new();
         #[allow(
@@ -305,11 +318,17 @@ async fn serve(
                 // template:begin messaging:service-bootstrap-stopped-startup-messaging
                 messaging.take(),
                 // template:end messaging:service-bootstrap-stopped-startup-messaging
+                // template:begin cache:service-bootstrap-stopped-startup-cache
+                cache.take(),
+                // template:end cache:service-bootstrap-stopped-startup-cache
                 tracer_provider,
                 deadline,
             )
             .await);
         }
+        // template:begin cache:service-bootstrap-cache-startup
+        cache = prepare_cache(&config).await?;
+        // template:end cache:service-bootstrap-cache-startup
         // template:begin http-idempotency:bootstrap-http-idempotency-composer
         let composer = prepare_http_idempotency(&config, postgres_pool.as_ref());
         // template:end http-idempotency:bootstrap-http-idempotency-composer
@@ -346,6 +365,9 @@ async fn serve(
             // template:begin messaging:service-bootstrap-prepared-messaging-value
             messaging: &mut messaging,
             // template:end messaging:service-bootstrap-prepared-messaging-value
+            // template:begin cache:service-bootstrap-prepared-cache-value
+            cache: &mut cache,
+            // template:end cache:service-bootstrap-prepared-cache-value
             // template:begin http-idempotency:bootstrap-http-idempotency-prepared-value
             composer,
             // template:end http-idempotency:bootstrap-http-idempotency-prepared-value
@@ -369,6 +391,9 @@ async fn serve(
             // template:begin messaging:service-bootstrap-messaging-startup-close
             messaging.take(),
             // template:end messaging:service-bootstrap-messaging-startup-close
+            // template:begin cache:service-bootstrap-cache-startup-close
+            cache.take(),
+            // template:end cache:service-bootstrap-cache-startup-close
             tokio::time::Instant::now() + shutdown::DEPENDENCY_CLOSE,
         )
         .await;
@@ -694,6 +719,48 @@ fn messaging_options(config: &Config) -> Result<MessagingOptions, BootstrapError
 }
 // template:end messaging:service-bootstrap-messaging-options
 
+// template:begin cache:service-bootstrap-cache-functions
+async fn prepare_cache(config: &Config) -> Result<Option<Cache>, BootstrapError> {
+    if !config.cache.is_active() {
+        return Ok(None);
+    }
+    let cache = Cache::connect(cache_options(config)?)?;
+    let server = cache.server();
+    match tokio::time::timeout(CACHE_STARTUP_CHECK, cache.probe().check()).await {
+        Ok(Ok(())) => {
+            tracing::info!(
+                server.address = %server.host,
+                server.port = server.port,
+                cache.tls = server.tls,
+                "cache_connected"
+            );
+        }
+        Ok(Err(_)) | Err(_) => {
+            tracing::warn!(
+                server.address = %server.host,
+                server.port = server.port,
+                cache.tls = server.tls,
+                "cache_unavailable_at_startup"
+            );
+        }
+    }
+    Ok(Some(cache))
+}
+
+fn cache_options(config: &Config) -> Result<CacheOptions, BootstrapError> {
+    let Some(dsn) = config.cache.dsn.as_ref() else {
+        return Err(CacheError::InvalidDsn.into());
+    };
+    Ok(CacheOptions {
+        dsn: secrecy::SecretString::from(secrecy::ExposeSecret::expose_secret(dsn).to_owned()),
+        root_ca_path: config.cache.root_ca_path.clone(),
+        allow_plaintext: config.cache.allow_plaintext,
+        allow_unauthenticated: config.cache.allow_unauthenticated,
+        command_timeout: config.cache.command_timeout,
+    })
+}
+// template:end cache:service-bootstrap-cache-functions
+
 // template:begin http-idempotency:bootstrap-http-idempotency-functions
 /// The composer through which idempotent operations join the contract. Its
 /// store uses the pool only when a retention is set as well; otherwise the
@@ -775,6 +842,10 @@ struct Prepared<'a> {
     /// to the dependency-close stage only after listener admission succeeds.
     messaging: &'a mut Option<Messaging>,
     // template:end messaging:service-bootstrap-prepared-messaging-field
+    // template:begin cache:service-bootstrap-prepared-cache-field
+    /// Dropped in the dependency-close stage. Not a readiness probe.
+    cache: &'a mut Option<Cache>,
+    // template:end cache:service-bootstrap-prepared-cache-field
     // template:begin http-idempotency:bootstrap-http-idempotency-prepared-field
     /// A unique move: activation consumes it after route assembly.
     composer: Composer,
@@ -809,6 +880,9 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         // template:begin messaging:service-bootstrap-destructure-messaging
         messaging,
         // template:end messaging:service-bootstrap-destructure-messaging
+        // template:begin cache:service-bootstrap-destructure-cache
+        cache,
+        // template:end cache:service-bootstrap-destructure-cache
         // template:begin http-idempotency:bootstrap-http-idempotency-destructure
         mut composer,
         // template:end http-idempotency:bootstrap-http-idempotency-destructure
@@ -938,6 +1012,9 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         // template:begin messaging:service-bootstrap-shutdown-messaging
         messaging: messaging.take(),
         // template:end messaging:service-bootstrap-shutdown-messaging
+        // template:begin cache:service-bootstrap-shutdown-cache
+        cache: cache.take(),
+        // template:end cache:service-bootstrap-shutdown-cache
         tracer_provider,
         signals,
     })

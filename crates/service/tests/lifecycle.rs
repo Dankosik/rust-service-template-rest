@@ -240,6 +240,59 @@ fn sigterm_cancels_a_stalled_messaging_connect_before_its_startup_timeout() {
 }
 // template:end messaging:service-messaging-lifecycle-admission
 
+// template:begin cache:service-cache-lifecycle-admission
+#[test]
+fn a_cache_outage_at_startup_still_becomes_ready() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("closed port");
+    let port = listener.local_addr().expect("closed port").port();
+    drop(listener);
+    let dsn = format!("redis://127.0.0.1:{port}");
+    let service = Service::spawn(&[
+        ("APP__APP__ENV", "local"),
+        ("APP__CACHE__DSN", &dsn),
+        ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
+        ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
+    ]);
+    service.await_record("cache_unavailable_at_startup");
+    let api = service.await_record("http listener bound")["addr"]
+        .as_str()
+        .expect("addr field")
+        .to_owned();
+    service.await_record("service_ready");
+    let ready = format!("http://{api}/health/ready");
+    assert!(
+        poll_until(&ready, 200, Duration::from_secs(5)),
+        "a cache outage must not keep the service from becoming ready"
+    );
+    service.terminate();
+    let (code, stderr) = service.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+}
+
+#[test]
+fn production_plaintext_cache_dsn_exits_before_the_listener() {
+    let mut service = Service::spawn(&[
+        ("APP__APP__ENV", "production"),
+        ("APP__CACHE__DSN", "redis://127.0.0.1:6379"),
+    ]);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while service.child.try_wait().expect("poll startup").is_none() {
+        if Instant::now() >= deadline {
+            let _ = service.child.kill();
+            let _ = service.child.wait();
+            panic!("plaintext cache DSN did not exit before the listener");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (code, stderr) = service.wait();
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("plaintext"),
+        "startup must refuse plaintext before the listener: {stderr}"
+    );
+}
+// template:end cache:service-cache-lifecycle-admission
+
 // template:begin inbound-webhooks:service-webhooks-lifecycle-tests
 #[test]
 fn active_inbound_webhook_endpoint_refuses_without_postgres_before_listener_admission() {

@@ -47,6 +47,10 @@ Do not create a crate, module, or directory before its first real artifact.
 | Messaging producer/client and worker resource composition | existing `crates/service/src/bootstrap/` and `crates/jobs-worker`; only composition knows selected configuration and process lifecycle |
 | Actual Go wire fixtures and the scratch bridge | `crates/infra-messaging/tests/fixtures/go-wire/` and its CI script; they adapt real Go code and do not become a second wire implementation |
 <!-- template:end messaging:docs-structure-messaging-placement -->
+<!-- template:begin cache:docs-structure-cache-placement -->
+| Bytes-only RESP cache client, DSN admission, and namespace get/set/delete | `crates/infra-cache`; the feature owns keys, serialization, TTL, and invalidation ([guide](cache.md)) |
+| Cache connect, startup check, shutdown drop, and optional readiness probe | `crates/service/src/bootstrap/`; only composition decides whether `cache.probe()` joins readiness |
+<!-- template:end cache:docs-structure-cache-placement -->
 
 | Ordinary behavior and boundary tests | `#[cfg(test)] mod tests` beside the owner |
 | Black-box tests of one crate's public surface, including the built binary | `crates/<crate>/tests/<owner>.rs` (`crates/service/tests/lifecycle.rs` drives the binary; `openapi.rs` holds the contract tests) |
