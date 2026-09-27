@@ -57,7 +57,7 @@ fn register_outbound(
         })
         .collect::<Result<_, _>>()?;
     outbound
-        .dispatcher(keys, config.jobs.max_workers()?)?
+        .dispatcher(keys, config.jobs.max_workers)?
         .register(kinds);
 
     Ok(())

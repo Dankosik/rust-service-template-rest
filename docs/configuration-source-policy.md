@@ -51,7 +51,7 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   type diagnostic would echo the value.
 - Files are read as the process user; relative paths and symlinks are
   accepted because Kubernetes projected volumes depend on symlinks for atomic
-  updates. Each file is bounded to 1 MiB before parsing.
+  updates.
 <!-- template:begin postgres:docs-config-postgres-source -->
 - `postgres.dsn` is the only PostgreSQL connection source. It must be a
   `postgres://` URL with explicit host, port, user, password, database, and
@@ -200,10 +200,8 @@ every record inside a request) or `text` (local development).
   cadence. It also closes a client that connects and sends nothing.
 - `health.probe_budget` (default `4s`) bounds one background readiness
   evaluation across every probe; `/health/ready` itself never runs a probe.
-  The previous operator key `health.readiness_timeout` is still accepted.
 - `http.drain_timeout` (default `25s`) bounds the HTTP drain, including
   the `http.readiness_propagation_delay` (default `15s`) in front of it.
-  The previous operator key `http.shutdown_timeout` is still accepted.
   `http.grace_period` (default `45s`) is the platform's SIGTERM-to-SIGKILL
   window; it must cover `drain_timeout` plus the `17s` teardown tail
   (diagnostics close `2s`, background join `5s`, dependency close `5s`,

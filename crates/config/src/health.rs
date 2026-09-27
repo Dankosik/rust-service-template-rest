@@ -20,10 +20,9 @@ pub struct HealthConfig {
     pub refresh_interval: Duration,
     /// Budget for one background readiness evaluation across every probe.
     /// `/health/ready` itself never runs a probe; it serves the cached
-    /// verdict. The previous operator key `health.readiness_timeout` is
-    /// still accepted. Also feeds the staleness bound described on
+    /// verdict. Also feeds the staleness bound described on
     /// [`Self::refresh_interval`].
-    #[serde(alias = "readiness_timeout", with = "humantime_serde")]
+    #[serde(with = "humantime_serde")]
     pub probe_budget: Duration,
     /// Consecutive failed evaluations before a healthy verdict flips off.
     /// Hysteresis applies only after a healthy streak; admission and a

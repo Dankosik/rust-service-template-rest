@@ -10,9 +10,6 @@ use crate::{Config, LoadOptions, ValidationError};
 pub const ENV_PREFIX: &str = "APP";
 const ENV_SEPARATOR: &str = "__";
 
-/// Configuration files larger than this are refused before parsing.
-pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
-
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(
@@ -25,8 +22,6 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
-    #[error("config file {} is {size} bytes, above the {MAX_FILE_BYTES} byte limit", path.display())]
-    FileTooLarge { path: PathBuf, size: u64 },
     #[error("config file {}: {source}", path.display())]
     ParseFile {
         path: PathBuf,
@@ -47,7 +42,7 @@ pub enum Error {
 ///
 /// # Errors
 ///
-/// Fails on a malformed `APP__` variable name, an unreadable, oversized, or
+/// Fails on a malformed `APP__` variable name, an unreadable or
 /// unparsable file, a non-empty secret-like value in a file, an unknown key
 /// anywhere, or a violated validation rule.
 pub fn load(options: &LoadOptions, build: BuildInfo) -> Result<Config, Error> {
@@ -76,6 +71,8 @@ where
     for path in options.files() {
         reject_file_secrets(path)?;
         builder = builder.add_source(
+            // config-rs reads the path itself so its errors name the file; the
+            // pre-scan read above serves only the secret rule.
             config::File::from(path.clone())
                 .format(config::FileFormat::Toml)
                 .required(true),
@@ -141,18 +138,6 @@ where
 }
 
 fn reject_file_secrets(path: &Path) -> Result<(), Error> {
-    let size = std::fs::metadata(path)
-        .map_err(|source| Error::ReadFile {
-            path: path.to_owned(),
-            source,
-        })?
-        .len();
-    if size > MAX_FILE_BYTES {
-        return Err(Error::FileTooLarge {
-            path: path.to_owned(),
-            size,
-        });
-    }
     let text = std::fs::read_to_string(path).map_err(|source| Error::ReadFile {
         path: path.to_owned(),
         source,
@@ -204,7 +189,7 @@ mod tests {
     #[test]
     fn defaults_alone_produce_a_valid_snapshot() {
         let cfg = load_from(&LoadOptions::default(), BUILD, env(&[])).unwrap();
-        assert_eq!(cfg.http.addr, ":8080");
+        assert_eq!(cfg.http.addr, "0.0.0.0:8080".parse().unwrap());
         assert_eq!(cfg.app.version, "1.2.3");
         assert_eq!(cfg.app.commit, "abc123");
         assert_eq!(cfg.log.format, LogFormat::Json);
@@ -349,7 +334,7 @@ mod tests {
             env(&[("APP__JOBS__MAX_WORKERS", "8")]),
         )
         .unwrap();
-        assert_eq!(cfg.jobs.max_workers, 8);
+        assert_eq!(cfg.jobs.max_workers.get(), 8);
     }
     // template:end jobs:load-jobs-environment
 
@@ -495,7 +480,7 @@ mod tests {
             Some(Path::new("/etc/nats/root-ca.pem"))
         );
         assert_eq!(cfg.messaging.max_payload_bytes, bytesize::ByteSize::mib(2));
-        assert_eq!(cfg.messaging.consumer_concurrency, 2);
+        assert_eq!(cfg.messaging.consumer_concurrency.get(), 2);
         assert!(!format!("{cfg:?}").contains("fixture-credentials"));
     }
 
@@ -1154,7 +1139,7 @@ mod tests {
             env(&[("APP__HTTP__ADDR", "127.0.0.1:3"), ("UNRELATED", "x")]),
         )
         .unwrap();
-        assert_eq!(cfg.http.addr, "127.0.0.1:3", "env wins");
+        assert_eq!(cfg.http.addr, "127.0.0.1:3".parse().unwrap(), "env wins");
         assert_eq!(
             cfg.http.request_timeout,
             Duration::from_secs(2),
@@ -1245,10 +1230,8 @@ mod tests {
             env(&[("APP__HTTP__ADDR", "")]),
         )
         .unwrap_err();
-        assert!(
-            matches!(err, Error::Validate(ref v) if v.key == "http.addr"),
-            "{err}"
-        );
+        assert!(matches!(err, Error::Deserialize(_)), "{err}");
+        assert!(err.to_string().contains("http.addr"), "{err}");
     }
 
     #[test]
@@ -1297,7 +1280,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_oversized_files_are_reported() {
+    fn missing_file_is_reported() {
         let options = LoadOptions {
             config: Some(PathBuf::from("/definitely/missing.toml")),
             ..LoadOptions::default()
@@ -1306,28 +1289,26 @@ mod tests {
             load_from(&options, BUILD, env(&[])),
             Err(Error::ReadFile { .. })
         ));
-
-        let dir = tempfile::tempdir().unwrap();
-        let big = write(
-            &dir,
-            "big.toml",
-            &format!(
-                "# {}\n",
-                "x".repeat(usize::try_from(MAX_FILE_BYTES).unwrap())
-            ),
-        );
-        let options = LoadOptions {
-            config: Some(big),
-            ..LoadOptions::default()
-        };
-        assert!(matches!(
-            load_from(&options, BUILD, env(&[])),
-            Err(Error::FileTooLarge { .. })
-        ));
     }
 
     #[test]
-    fn drain_timeout_and_probe_budget_accept_legacy_keys() {
+    fn zero_counts_fail_to_deserialize() {
+        for (name, key) in [
+            ("APP__POSTGRES__MAX_CONNECTIONS", "postgres.max_connections"),
+            ("APP__JOBS__MAX_WORKERS", "jobs.max_workers"),
+            (
+                "APP__MESSAGING__CONSUMER_CONCURRENCY",
+                "messaging.consumer_concurrency",
+            ),
+        ] {
+            let err = load_from(&LoadOptions::default(), BUILD, env(&[(name, "0")])).unwrap_err();
+            assert!(matches!(err, Error::Deserialize(_)), "{name}: {err}");
+            assert!(err.to_string().contains(key), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn drain_timeout_and_probe_budget_load_from_env() {
         let canonical = load_from(
             &LoadOptions::default(),
             BUILD,
@@ -1344,15 +1325,11 @@ mod tests {
         let legacy = load_from(
             &LoadOptions::default(),
             BUILD,
-            env(&[
-                ("APP__HTTP__SHUTDOWN_TIMEOUT", "22s"),
-                ("APP__HTTP__REQUEST_TIMEOUT", "4s"),
-                ("APP__HEALTH__READINESS_TIMEOUT", "5s"),
-            ]),
+            env(&[("APP__HTTP__SHUTDOWN_TIMEOUT", "22s")]),
         )
-        .unwrap();
-        assert_eq!(legacy.http.drain_timeout, Duration::from_secs(22));
-        assert_eq!(legacy.health.probe_budget, Duration::from_secs(5));
+        .unwrap_err();
+        assert!(matches!(legacy, Error::Deserialize(_)), "{legacy}");
+        assert!(legacy.to_string().contains("shutdown_timeout"), "{legacy}");
     }
 
     #[test]

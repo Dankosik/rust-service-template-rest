@@ -45,7 +45,7 @@ use infra_telemetry::{
 use secrecy::ExposeSecret;
 // template:end integration:bootstrap-postgres-secret-import
 use service_config::{
-    AppConfig, BuildInfo, Config, FromArgs, LogFormat, TracesSampler, process_failure,
+    AppConfig, BuildInfo, Config, LoadOptions, LogFormat, TracesSampler, process_failure,
 };
 // template:begin authn:bootstrap-authn-config-import
 use service_config::AuthnConfig;
@@ -161,8 +161,9 @@ pub(crate) enum BootstrapError {
 }
 
 /// Parse flags, load configuration, run the service, and map the result to
-/// an exit code. Never calls `process::exit`, so destructors run. `--help`
-/// exits 0; other clap errors exit 1. Version is not a loader flag.
+/// an exit code. `--help` exits 0 and a flag error exits 2, both printed by
+/// clap. Later failures do not call `process::exit`, so destructors run.
+/// Version is not a loader flag.
 pub(crate) fn run<I>(
     args: I,
     // template:begin grpc:bootstrap-run-registration-parameter
@@ -172,10 +173,7 @@ pub(crate) fn run<I>(
 where
     I: IntoIterator<Item = OsString>,
 {
-    let options = match FromArgs::from_argv(args) {
-        FromArgs::Run(options) => options,
-        FromArgs::Exit(code) => return code,
-    };
+    let options = LoadOptions::parse_from(args);
     let config = match service_config::load(&options, BUILD_INFO) {
         Ok(config) => config,
         Err(err) => return process_failure(&err.to_string()),
@@ -619,7 +617,7 @@ async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
     let pool = infra_postgres::connect(
         &dsn,
         &PoolOptions {
-            max_connections: config.postgres.pool_max_connections()?,
+            max_connections: config.postgres.max_connections,
             // Same process identity as traces (`service.name`).
             application_name: &config.observability.otel.service_name,
             default_isolation: infra_postgres::Isolation::ServerDefault,
@@ -631,7 +629,7 @@ async fn open_postgres(config: &Config) -> Result<PgPool, BootstrapError> {
         postgres.port = dsn.port(),
         postgres.database = dsn.database(),
         postgres.sslmode = dsn.ssl_mode_name(),
-        postgres.max_connections = config.postgres.max_connections,
+        postgres.max_connections = config.postgres.max_connections.get(),
         "postgres_pool_opened"
     );
     Ok(pool)
@@ -959,10 +957,10 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
             log_health_probes: config.http.access_log_health_probes,
         },
     );
-    let app_listener = Server::bind(config.http.listen_addr()?, app, server_options).await?;
+    let app_listener = Server::bind(config.http.addr, app, server_options).await?;
     tracing::info!(addr = %app_listener.local_addr(), "http listener bound");
 
-    let diagnostics = match config.observability.metrics.listen_addr()? {
+    let diagnostics = match config.observability.metrics.addr {
         None => None,
         Some(addr) => {
             // Intentionally unhardened: Prometheus text on a private listener.
@@ -1077,7 +1075,7 @@ fn log_startup_summary(config: &Config, exporter: &ExporterState) {
         http.request_timeout = ?config.http.request_timeout,
         http.drain_timeout = ?config.http.drain_timeout,
         http.grace_period = ?config.http.grace_period,
-        observability.metrics.addr = %config.observability.metrics.addr,
+        observability.metrics.addr = ?config.observability.metrics.addr,
         // template:begin postgres:bootstrap-startup-log-postgres
         postgres.enabled = config.postgres.enabled,
         // template:end postgres:bootstrap-startup-log-postgres

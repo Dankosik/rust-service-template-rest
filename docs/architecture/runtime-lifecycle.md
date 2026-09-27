@@ -7,10 +7,11 @@ it against the built binary.
 
 ## Startup
 
-1. `main` hands `argv` to `bootstrap::run`, which parses the loader flags,
+1. `main` hands `argv` to `bootstrap::run`, which parses the loader flags
+   (`LoadOptions::parse_from`; `--help` exits `0`, a flag error exits `2`),
    loads the configuration snapshot, and validates the grace budget before a
-   runtime exists. A failure here prints one readable message to stderr and
-   exits `1`.
+   runtime exists. A later failure here prints one readable message to stderr
+   and exits `1`.
 2. Inside the Tokio runtime, the signal streams are installed first, so a
    `SIGTERM` that arrives during startup is handled rather than killing the
    process.
@@ -167,11 +168,11 @@ with its refusals; signals, the stage budget, the shutdown plan, and
 for the shipped binary, and the test-only `jobs-worker-fixture` suite in
 `test/tests/jobs/`.
 
-**Startup.** Each refusal below exits `1`.
+**Startup.** Each refusal below exits `1`, except step 1, which exits `2`.
 
 | Step | What | Refusal (exit 1) |
 | --- | --- | --- |
-| 1 | `FromArgs::from_argv` (`--help` exits `0`) | clap error |
+| 1 | `LoadOptions::parse_from` (`--help` exits `0`) | clap usage error (exit 2) |
 | 2 | Registration function is `None` | `no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs` |
 | 3 | `service_config::load` (same sources, precedence, unknown-key and secret rules as the service) | `configuration is invalid: ...` |
 | 4 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)` |

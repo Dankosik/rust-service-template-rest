@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::app::occupied_string;
+use crate::de::blank_as_none;
 use crate::postgres::PostgresConfig;
 use crate::validate::{ValidationError, duration_range};
 
@@ -25,7 +25,7 @@ pub struct HttpIdempotencyConfig {
     /// whitespace-only is vacant (`None`). A set value must be between 1
     /// minute and 30 days inclusive; that range is checked whether or not
     /// the pack is active.
-    #[serde(default, deserialize_with = "occupied_duration")]
+    #[serde(default, deserialize_with = "blank_duration_as_none")]
     pub retention: Option<Duration>,
 }
 
@@ -71,11 +71,11 @@ impl HttpIdempotencyConfig {
 /// Missing, empty, or whitespace-only text is vacant (`None`); a present
 /// value is trimmed, then parsed as a human-form duration. Any
 /// sub-microsecond part it names survives parsing unchanged.
-fn occupied_duration<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
+fn blank_duration_as_none<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    occupied_string(deserializer)?
+    blank_as_none(deserializer)?
         .map(|text| {
             humantime::parse_duration(&text)
                 .map_err(|err| serde::de::Error::custom(format!("{text:?}: {err}")))

@@ -50,6 +50,7 @@ pub mod webhooks;
 // template:end webhooks:config-webhooks-module
 
 mod cli;
+mod de;
 mod load;
 mod secret_policy;
 mod validate;
@@ -57,7 +58,7 @@ mod validate;
 use serde::Deserialize;
 
 pub use app::{AppConfig, BuildInfo};
-pub use cli::{FromArgs, LoadOptions, process_failure};
+pub use cli::{LoadOptions, process_failure};
 pub use health::HealthConfig;
 pub use http::HttpConfig;
 // template:begin grpc:config-export
@@ -75,7 +76,7 @@ pub use integrations::GrpcClientConfig;
 // template:begin inbound-webhooks:config-inbound-webhooks-export
 pub use inbound_webhooks::{InboundWebhookEndpointConfig, InboundWebhooksConfig};
 // template:end inbound-webhooks:config-inbound-webhooks-export
-pub use load::{ENV_PREFIX, Error, MAX_FILE_BYTES, load};
+pub use load::{ENV_PREFIX, Error, load};
 pub use log::{LogConfig, LogFormat};
 pub use observability::{
     MetricsConfig, ObservabilityConfig, OtelConfig, OtelExporterConfig, TracesSampler,
@@ -104,7 +105,6 @@ pub use jobs::JobsConfig;
 // template:begin webhooks:config-webhooks-export
 pub use webhooks::{WebhookEndpointConfig, WebhooksConfig};
 // template:end webhooks:config-webhooks-export
-pub use secret_policy::is_secret_like_key;
 pub use validate::ValidationError;
 
 /// The immutable runtime snapshot built once during startup.

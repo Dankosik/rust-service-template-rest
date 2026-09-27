@@ -218,9 +218,9 @@ fn decode_grpc(value: config::Value, prefix: &str) -> Result<GrpcClientConfig, S
     let security = take_text(&mut fields, "security", prefix)?
         .ok_or_else(|| format!("{prefix}.security: is required"))
         .and_then(|value| parse_grpc_security(&value, prefix))?;
-    let ca_certificate = take_occupied_text(&mut fields, "ca_certificate", prefix)?;
-    let certificate = take_occupied_text(&mut fields, "certificate", prefix)?;
-    let private_key = take_occupied_secret(&mut fields, "private_key", prefix)?;
+    let ca_certificate = take_nonblank_text(&mut fields, "ca_certificate", prefix)?;
+    let certificate = take_nonblank_text(&mut fields, "certificate", prefix)?;
+    let private_key = take_nonblank_secret(&mut fields, "private_key", prefix)?;
     refuse_unknown(fields, prefix)?;
     Ok(GrpcClientConfig {
         destination,
@@ -264,7 +264,7 @@ fn take_text(
 }
 
 // template:begin grpc:config-integration-grpc-material-parser
-fn take_occupied_text(
+fn take_nonblank_text(
     fields: &mut config::Map<String, config::Value>,
     field: &str,
     prefix: &str,
@@ -272,12 +272,12 @@ fn take_occupied_text(
     Ok(take_text(fields, field, prefix)?.filter(|value| !value.trim().is_empty()))
 }
 
-fn take_occupied_secret(
+fn take_nonblank_secret(
     fields: &mut config::Map<String, config::Value>,
     field: &str,
     prefix: &str,
 ) -> Result<Option<SecretString>, String> {
-    Ok(take_occupied_text(fields, field, prefix)?.map(SecretString::from))
+    Ok(take_nonblank_text(fields, field, prefix)?.map(SecretString::from))
 }
 // template:end grpc:config-integration-grpc-material-parser
 
@@ -366,13 +366,13 @@ impl OAuthConfig {
         let token_url_key = format!("{prefix}.token_url");
         validate_token_url(&token_url_key, &self.token_url)?;
 
-        if self.client_id.is_empty() {
+        if self.client_id.trim().is_empty() {
             return Err(ValidationError::new(
                 &format!("{prefix}.client_id"),
                 "cannot be empty",
             ));
         }
-        if self.client_secret.expose_secret().is_empty() {
+        if self.client_secret.expose_secret().trim().is_empty() {
             return Err(ValidationError::new(
                 &format!("{prefix}.client_secret"),
                 "cannot be empty",
@@ -438,5 +438,26 @@ fn is_scope_token(scope: &str) -> bool {
         && scope
             .bytes()
             .all(|byte| matches!(byte, 0x21 | 0x23..=0x5b | 0x5d..=0x7e))
+}
+
+#[cfg(test)]
+mod tests {
+    use secrecy::SecretString;
+
+    use super::*;
+
+    #[test]
+    fn whitespace_only_client_secret_is_refused() {
+        let config = OAuthConfig {
+            token_url: "https://identity.example/token".to_owned(),
+            client_id: "billing-service".to_owned(),
+            client_secret: SecretString::from("   "),
+            scopes: Scopes::default(),
+            audience: None,
+        };
+        let err = config.validate("integrations.billing.oauth").unwrap_err();
+        assert_eq!(err.key, "integrations.billing.oauth.client_secret");
+        assert_eq!(err.message, "cannot be empty");
+    }
 }
 // template:end outbound-auth:config-integration-oauth-validation
