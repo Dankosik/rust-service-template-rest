@@ -27,7 +27,7 @@ use infra_postgres::{
     connection, in_tx, in_tx_with, retryable,
 };
 use integration_tests::{DATABASE_URL, dsn_for, fixture_dir};
-use migrate::{HistoryError, MIGRATOR, RunError, RunOptions, Stage};
+use migrate::{HistoryError, MIGRATOR, RunError, RunOptions};
 use sqlx::Executor;
 use sqlx::migrate::{Migrate, MigrateError, Migrator};
 use url::Url;
@@ -422,10 +422,8 @@ async fn migrations_apply_once_and_then_report_no_change(pool: PgPool) {
 
     let first = migrate::run(&widgets, &options(&dsn)).await.unwrap();
     assert_eq!(first.before, None);
-    assert_eq!(first.target, Some(20_260_918_000_002));
-    assert_eq!(first.after, Some(20_260_918_000_002));
-    assert_eq!(first.applied, 2);
-    assert_eq!(first.outcome().as_str(), "success");
+    assert_eq!(first.applied, vec![20_260_918_000_001, 20_260_918_000_002]);
+    assert_eq!(first.after(), Some(20_260_918_000_002));
     assert_eq!(applied_count(&pool).await, 2);
     pool.execute("INSERT INTO widgets (id, name, sku) VALUES (1, 'w', 's')")
         .await
@@ -433,34 +431,30 @@ async fn migrations_apply_once_and_then_report_no_change(pool: PgPool) {
 
     let second = migrate::run(&widgets, &options(&dsn)).await.unwrap();
     assert_eq!(second.before, Some(20_260_918_000_002));
-    assert_eq!(second.after, Some(20_260_918_000_002));
-    assert_eq!(second.applied, 0);
-    assert_eq!(second.outcome().as_str(), "no_change");
+    assert!(second.applied.is_empty());
+    assert_eq!(second.after(), Some(20_260_918_000_002));
 }
 
 #[sqlx::test(migrations = false)]
 async fn the_embedded_set_runs_on_an_empty_database(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
+    let target = MIGRATOR.iter().map(|migration| migration.version).max();
     let result = migrate::run(&MIGRATOR, &options(&dsn)).await.unwrap();
-    assert_eq!(result.applied, MIGRATOR.iter().count());
-    assert_eq!(result.target, MIGRATOR.iter().map(|m| m.version).max());
-    assert_eq!(result.after, result.target);
+    assert_eq!(result.applied.len(), MIGRATOR.iter().count());
+    assert_eq!(result.after(), target);
     assert_eq!(
         applied_count(&pool).await,
-        i64::try_from(result.applied).unwrap()
+        i64::try_from(result.applied.len()).unwrap()
     );
 
     let repeated = migrate::run(&MIGRATOR, &options(&dsn)).await.unwrap();
-    assert_eq!(repeated.before, result.target);
-    assert_eq!(repeated.target, result.target);
-    assert_eq!(repeated.after, result.target);
-    assert_eq!(repeated.applied, 0);
-    assert_eq!(repeated.outcome().as_str(), "no_change");
+    assert_eq!(repeated.before, target);
+    assert!(repeated.applied.is_empty());
     assert_eq!(migrate::verify_history(&pool).await, Ok(()));
 
     // A later release that already migrated this database keeps an older
     // binary admissible: its version lies above the newest embedded one.
-    let newer = result.target.unwrap_or(0) + 1;
+    let newer = target.unwrap_or(0) + 1;
     sqlx::query(
         "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
          VALUES ($1, 'later release', true, '\\x00'::bytea, 0)",
@@ -470,6 +464,10 @@ async fn the_embedded_set_runs_on_an_empty_database(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(migrate::verify_history(&pool).await, Ok(()));
+    // A rolled-back release's migrate job also admits the later history.
+    let rolled_back = migrate::run(&MIGRATOR, &options(&dsn)).await.unwrap();
+    assert!(rolled_back.applied.is_empty());
+    assert_eq!(rolled_back.before, Some(newer));
 }
 
 #[sqlx::test(migrations = false)]
@@ -489,7 +487,7 @@ async fn history_admission_refuses_missing_bookkeeping_without_creating_it(pool:
 }
 
 #[sqlx::test(migrations = false)]
-async fn an_edited_applied_migration_fails_in_the_state_stage(pool: PgPool) {
+async fn an_edited_applied_migration_fails_in_the_history_stage(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     migrate::run(&fixture("widgets").await, &options(&dsn))
         .await
@@ -498,43 +496,31 @@ async fn an_edited_applied_migration_fails_in_the_state_stage(pool: PgPool) {
     let err = migrate::run(&fixture("widgets_edited").await, &options(&dsn))
         .await
         .unwrap_err();
-    assert_eq!(err.stage(), Stage::History);
+    assert_eq!(err.stage(), "history");
     assert!(
         matches!(
-            *err.error,
-            RunError::Migrate {
-                source: MigrateError::VersionMismatch(20_260_918_000_001),
-                ..
-            }
+            &err,
+            RunError::Migrate(MigrateError::VersionMismatch(20_260_918_000_001))
         ),
         "{err}"
     );
-    assert_eq!(err.observed.before, Some(20_260_918_000_002));
-    assert_eq!(err.observed.target, Some(20_260_918_000_002));
     assert_eq!(applied_count(&pool).await, 2, "nothing was re-applied");
 }
 
 #[sqlx::test(migrations = false)]
-async fn a_removed_applied_migration_fails_in_the_state_stage(pool: PgPool) {
+async fn an_older_release_admits_the_history_of_a_later_one(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     migrate::run(&fixture("widgets").await, &options(&dsn))
         .await
         .unwrap();
 
-    let err = migrate::run(&fixture("widgets_partial").await, &options(&dsn))
+    // An unknown version inside the embedded range is still refused (unit test).
+    let result = migrate::run(&fixture("widgets_partial").await, &options(&dsn))
         .await
-        .unwrap_err();
-    assert_eq!(err.stage(), Stage::History);
-    assert!(
-        matches!(
-            *err.error,
-            RunError::Migrate {
-                source: MigrateError::VersionMissing(20_260_918_000_002),
-                ..
-            }
-        ),
-        "{err}"
-    );
+        .unwrap();
+    assert!(result.applied.is_empty());
+    assert_eq!(result.before, Some(20_260_918_000_002));
+    assert_eq!(applied_count(&pool).await, 2);
 }
 
 #[sqlx::test(migrations = false)]
@@ -549,13 +535,8 @@ async fn a_held_session_lock_fails_in_the_lock_stage(pool: PgPool) {
     let err = migrate::run(&fixture("widgets").await, &options)
         .await
         .unwrap_err();
-    assert_eq!(err.stage(), Stage::Lock, "{err}");
+    assert_eq!(err.stage(), "lock", "{err}");
     assert!(started.elapsed() < Duration::from_secs(5));
-    assert_eq!(
-        err.observed.before, None,
-        "the history was not read without the lock"
-    );
-    assert_eq!(err.observed.target, Some(20_260_918_000_002));
     holder.unlock().await.unwrap();
 
     migrate::run(&fixture("widgets").await, &options)
@@ -572,12 +553,12 @@ async fn the_deadline_drops_the_session_and_leaves_no_partial_history(pool: PgPo
     let err = migrate::run(&fixture("slow").await, &options)
         .await
         .unwrap_err();
-    assert_eq!(err.stage(), Stage::Deadline, "{err}");
+    assert_eq!(err.stage(), "deadline", "{err}");
     assert!(started.elapsed() < Duration::from_secs(3));
 
     // The history table was created outside the migration transaction; the
-    // migration's own row and its table are rolled back with the dropped
-    // session once the server notices.
+    // migration's own row and its table are rolled back when the session is
+    // dropped. `client_connection_check_interval` lets the server end it promptly.
     assert_eq!(applied_count(&pool).await, 0);
     let mut conn = pool.acquire().await.unwrap();
     conn.lock()
@@ -587,31 +568,13 @@ async fn the_deadline_drops_the_session_and_leaves_no_partial_history(pool: PgPo
 }
 
 #[sqlx::test(migrations = false)]
-async fn a_source_rule_violation_fails_before_connecting(pool: PgPool) {
-    let dsn = dsn_for(&pool).await;
-    let err = migrate::run(&fixture("no_tx").await, &options(&dsn))
-        .await
-        .unwrap_err();
-    assert_eq!(err.stage(), Stage::Source);
-    assert!(err.to_string().contains("no-transaction"), "{err}");
-    let exists: bool = sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert!(
-        !exists,
-        "no connection was made, so no history table exists"
-    );
-}
-
-#[sqlx::test(migrations = false)]
 async fn an_unreachable_target_fails_in_the_connect_stage(pool: PgPool) {
     let _ = pool;
     let dsn = Dsn::admit("postgres://app:pw@127.0.0.1:1/app?sslmode=disable").unwrap();
     let err = migrate::run(&fixture("widgets").await, &options(&dsn))
         .await
         .unwrap_err();
-    assert_eq!(err.stage(), Stage::Connect, "{err}");
+    assert_eq!(err.stage(), "connect", "{err}");
     assert!(!err.to_string().contains("pw"), "{err}");
 }
 
@@ -622,6 +585,13 @@ async fn a_migration_that_fails_is_the_execute_stage(pool: PgPool) {
     let err = migrate::run(&fixture("widgets").await, &options(&dsn))
         .await
         .unwrap_err();
-    assert_eq!(err.stage(), Stage::SqlExecute, "{err}");
+    assert_eq!(err.stage(), "execute", "{err}");
+    assert!(
+        matches!(
+            &err,
+            RunError::Migrate(MigrateError::ExecuteMigration(_, 20_260_918_000_001))
+        ),
+        "{err}"
+    );
     assert_eq!(applied_count(&pool).await, 0);
 }
