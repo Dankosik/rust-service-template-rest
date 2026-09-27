@@ -726,7 +726,7 @@ async fn prepare_cache(config: &Config) -> Result<Option<Cache>, BootstrapError>
                 server.address = %server.host,
                 server.port = server.port,
                 cache.tls = server.tls,
-                reason = %error.0,
+                reason = %error,
                 "cache_unavailable_at_startup"
             );
         }
