@@ -31,8 +31,8 @@ impl PreparedEvent {
             assert!(
                 T::SCHEMA_VERSION > 0,
                 "event schema version must be positive"
-            )
-        };
+            );
+        }
         let subject = subject.into();
         if !crate::wire::valid_subject(&subject) {
             return Err(crate::MessagingError::Envelope("subject is invalid"));

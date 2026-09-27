@@ -25,8 +25,8 @@ fn route_key<T: EventPayload>() -> RouteKey {
         assert!(
             T::SCHEMA_VERSION > 0,
             "event schema version must be positive"
-        )
-    };
+        );
+    }
     RouteKey {
         event_type: T::EVENT_TYPE.to_owned(),
         schema_version: T::SCHEMA_VERSION,
