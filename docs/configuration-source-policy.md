@@ -82,8 +82,8 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   `command_timeout` use normal file/environment precedence. `allow_plaintext`
   and `allow_unauthenticated` are accepted only when `app.env` is `local` or
   `development`. Admitted schemes are `redis`, `rediss`, `valkey`, and
-  `valkeys`. `#insecure`, a unix socket, Sentinel, and Cluster are refused. A
-  CA path requires TLS. DSN form checks stay in `infra-cache`. The
+  `valkeys`. `#insecure` and a unix socket are refused; Sentinel and Cluster
+  URLs are not admitted. A CA path requires TLS. DSN form checks stay in `infra-cache`. The
   [guide](cache.md) owns admission.
 <!-- template:end cache:docs-config-cache-source -->
 <!-- template:begin outbox:docs-config-outbox-source -->

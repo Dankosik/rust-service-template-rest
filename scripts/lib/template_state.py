@@ -36,6 +36,7 @@ GRPC_CHOICES = ("none", "enabled")
 HTTP_IDEMPOTENCY_CHOICES = ("none", "postgres")
 JOBS_CHOICES = ("none", "postgres")
 MESSAGING_CHOICES = ("none", "nats-jetstream")
+CACHE_CHOICES = ("none", "redis")
 OUTBOX_CHOICES = ("none", "postgres")
 WEBHOOKS_CHOICES = ("none", "durable")
 INBOUND_WEBHOOKS_CHOICES = ("none", "standard-webhooks")
@@ -339,6 +340,10 @@ def validate_profiles(value: object) -> dict[str, str]:
             "database", "authn", "outbound_http", "outbound_auth", "grpc", "http_idempotency", "jobs",
             "messaging", "outbox", "webhooks", "inbound_webhooks", "agent_harness",
         },
+        {
+            "database", "authn", "outbound_http", "outbound_auth", "grpc", "http_idempotency", "jobs",
+            "messaging", "outbox", "webhooks", "inbound_webhooks", "cache", "agent_harness",
+        },
     ):
         raise Refusal("profiles has an unsupported shape")
     database = value["database"]
@@ -351,6 +356,7 @@ def validate_profiles(value: object) -> dict[str, str]:
     webhooks = value.get("webhooks", "none")
     inbound_webhooks = value.get("inbound_webhooks", "none")
     messaging = value.get("messaging", "none")
+    cache = value.get("cache", "none")
     outbox = value.get("outbox", "none")
     harness = value["agent_harness"]
     if not isinstance(database, str) or database not in DATABASE_CHOICES:
@@ -379,6 +385,8 @@ def validate_profiles(value: object) -> dict[str, str]:
         raise Refusal("profiles.jobs=postgres requires profiles.database=postgres")
     if not isinstance(messaging, str) or messaging not in MESSAGING_CHOICES:
         raise Refusal("profiles.messaging is unsupported")
+    if not isinstance(cache, str) or cache not in CACHE_CHOICES:
+        raise Refusal("profiles.cache is unsupported")
     if not isinstance(outbox, str) or outbox not in OUTBOX_CHOICES:
         raise Refusal("profiles.outbox is unsupported")
     if outbox == "postgres":
@@ -424,6 +432,7 @@ def validate_profiles(value: object) -> dict[str, str]:
         "outbox": outbox,
         "webhooks": webhooks,
         "inbound_webhooks": inbound_webhooks,
+        "cache": cache,
         "agent_harness": harness,
     }
 
@@ -696,6 +705,18 @@ def selected_messaging(root: Path) -> str:
     if lock["state"] != "complete":
         raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
     return lock["profiles"]["messaging"]
+
+
+def selected_cache(root: Path) -> str:
+    """Return the normalized cache choice, or the source capability."""
+
+    root = Path(root)
+    lock = load_lock(root)
+    if lock is None:
+        return "redis" if (root / "crates/infra-cache").is_dir() else "none"
+    if lock["state"] != "complete":
+        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
+    return lock["profiles"]["cache"]
 
 
 def selected_outbox(root: Path) -> str:
@@ -1314,6 +1335,7 @@ def _profile_command(arguments: argparse.Namespace) -> int:
             "http_idempotency": selected_http_idempotency(root),
             "jobs": selected_jobs(root),
             "messaging": selected_messaging(root),
+            "cache": selected_cache(root),
             "outbox": selected_outbox(root),
             "webhooks": selected_webhooks(root),
             "inbound_webhooks": selected_inbound_webhooks(root),
@@ -1335,7 +1357,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--field", required=True,
         choices=(
             "database", "authn", "outbound_http", "outbound_auth", "grpc", "http_idempotency", "jobs", "messaging",
-            "outbox", "webhooks", "inbound_webhooks", "agent_harness",
+            "outbox", "webhooks", "inbound_webhooks", "cache", "agent_harness",
         ),
     )
     profile.set_defaults(handler=_profile_command)

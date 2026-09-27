@@ -38,10 +38,11 @@ client prints host, port, and whether TLS is on. It never prints the DSN or
 password.
 
 Admitted schemes are `redis`, `rediss`, `valkey`, and `valkeys`. The address
-must be standalone TCP. A unix socket, Sentinel address, or Cluster address is
-refused. A password is required unless `allow_unauthenticated` is set. TLS
-uses native roots, or the PEM file at `root_ca_path` when that path is set. A
-CA path on a plaintext scheme is refused. The `#insecure` fragment is refused.
+must be standalone TCP; a unix socket is refused, and Sentinel or Cluster URLs
+are not admitted because their client features are not enabled. A password is
+required unless `allow_unauthenticated` is set. TLS uses native roots, or the
+PEM file at `root_ca_path` when that path is set. A CA path on a plaintext
+scheme is refused. The `#insecure` fragment is refused.
 
 `allow_plaintext` and `allow_unauthenticated` are accepted only when `app.env`
 is `local` or `development`. `command_timeout` uses a human duration, in a file
@@ -59,8 +60,10 @@ command_timeout = "100ms"
 ## Use it from a feature
 
 Hold a `Cache` from composition. `namespace` panics unless the name matches
-`^[a-z][a-z0-9_]{0,63}$`. That is a programmer error. The name is the metric
-label, not a key prefix. The feature puts its own prefix and version in the key.
+`^[a-z][a-z0-9_]{0,63}$`. That is a programmer error. The name is both the
+`cache` metric label and the key prefix: a namespace stores `key` as
+`{name}:{key}`, so two features sharing one server cannot read each other's
+entries. The feature still puts a format version in its key.
 
 ```rust
 let profiles = cache.namespace("user_profile");
@@ -140,7 +143,7 @@ The client span is `cache`, with `otel.kind` `client`, `db.system.name`
 `otel.status_code`. On error or timeout one warning event
 `cache_operation_failed` carries `cache.name`, `cache.operation`, and
 `error.type`. `error.type` is `timeout`, `io`, `auth`, `response`, `parse`,
-`tls`, `invalid_ttl`, or `other`. Metrics, spans, and logs never carry keys,
+`invalid_ttl`, or `other`; a TLS handshake failure surfaces as `io`. Metrics, spans, and logs never carry keys,
 values, the DSN, or raw server text. `CacheError` Display follows the same
 rule.
 
@@ -148,13 +151,13 @@ rule.
 
 The tested server is Valkey 9.1.2
 (`valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11`).
-Redis OSS 7.2 and later is compatible for the command subset the client uses:
+Redis 7.2 and later is compatible for the command subset the client uses:
 `GET`, `SET` with `PX`, `DEL`, and `PING`, plus `HELLO`, `AUTH`, and `SELECT`
 by the client. Topology is standalone TCP only.
 
-Set `maxmemory` and an eviction policy, such as `allkeys-lru`. The feature
-owns each key's prefix and version so a schema change does not read another
-feature's bytes.
+Set `maxmemory` and an eviction policy, such as `allkeys-lru`. Every entry
+carries a TTL, so `volatile-lru` also works on a server this profile does not
+share with durable data.
 
 ## Local run and proof
 

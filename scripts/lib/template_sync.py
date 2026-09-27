@@ -43,6 +43,7 @@ from template_state import (
     selected_http_idempotency,
     selected_inbound_webhooks,
     selected_jobs,
+    selected_cache,
     selected_messaging,
     selected_outbox,
     selected_outbound_auth,
@@ -877,6 +878,7 @@ def _run(arguments: argparse.Namespace) -> int:
         selected_http_idempotency(target)
         selected_jobs(target)
         selected_messaging(target)
+        selected_cache(target)
         selected_outbox(target)
         selected_webhooks(target)
         selected_inbound_webhooks(target)

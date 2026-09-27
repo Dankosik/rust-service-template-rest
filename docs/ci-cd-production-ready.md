@@ -106,8 +106,10 @@ suite. Database-free graphs do not request the removed integration-test feature.
 Graph 56 joins jobs-1 for PostgreSQL/jobs/messaging without outbox. It uses the
 focused locked offline metadata and all-target compile path with
 `integration-tests/integration`, so the fixture callback's optional registry
-argument is compiled. It adds no live PostgreSQL or NATS scenario; eight CI
-parts cover 56 runtime representatives.
+argument is compiled. It adds no live PostgreSQL or NATS scenario. Graph 62
+joins database-none for cache alone, and graph 63 joins jobs-http-idempotency-2
+for the maximal profile set plus cache. Neither adds a database suite. Eight CI
+parts cover 63 runtime representatives.
 
 A change to projected text alone selects `module_initializer` without the
 runtime surface and runs the Cargo-free `initializer (projections)` job.

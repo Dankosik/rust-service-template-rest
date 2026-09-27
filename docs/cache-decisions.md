@@ -17,13 +17,21 @@ the accepted choices and their reopen conditions.
 | No readiness gate | A gate would turn a cache outage into total unavailability and contradict degradation. | Startup still runs one probe inside 1 s, logs `cache_unavailable_at_startup` on failure, and continues. A service that requires the cache pushes `cache.probe()` into readiness. Never liveness. Reopen only if an accepted operation cannot degrade. |
 | `cache.command_timeout` as configuration, default 100 ms, range 1 ms to 1 s, with `2 * cache.command_timeout <= http.request_timeout` | A constant cannot track the operator's request timeout. The rule leaves at least half of the request budget for the source of truth. During an outage each call costs at most `command_timeout`. | One operator key. Connect stays the 1 s constant. Reopen a second timeout key only if connect and command must be tuned apart. |
 | Connect, backoff, and TCP as constants | `connection_timeout` is 1 s. Backoff uses `min_delay` 100 ms, `exponent_base` 2, `max_delay` 2 s, and `number_of_retries` 6. TCP nodelay is on. Keepalive is 30 s, interval 10 s, and 3 retries where supported. Linux `user_timeout` is 10 s so a half-open connection is detected and reconnected. | Not operator keys. Reopen if a deployment cannot use these bounds. |
+| Namespace name is the metric label and the key prefix (`{name}:{key}`) | Leaving keys unprefixed would let two features that share a server read each other's entries, and the metric label would not match the keyspace it measures. | A key written by another client must carry the same prefix to be shared. Reopen if a feature must read keys it does not own. |
 | Histogram only | Hit, miss, and error counts are the `_count` series of `cache_operation_duration_seconds`. Labels are the closed sets `cache`, `operation` (`get`, `set`, `delete`), and `outcome` (`hit`, `miss`, `ok`, `error`, `timeout`, `cancelled`). | No parallel counters. Reopen a counter only if an operator question cannot be answered from the histogram. |
 
 Registry and maintenance evidence, fetched 2026-09-27: `redis` (redis-rs) 1.7.1, released 2026-09-25, BSD-3-Clause, MSRV 1.88, repository pushed 2026-09-25, ~26.6M recent downloads. `fred` 10.1.0, last release and last push 2025-02-27, 43 open issues. `deadpool-redis` 0.23.1, 2026-08-26, depending on `redis` ^1.6. `bb8-redis` 0.26.0, 2025-12-09, depending on `redis` ^1. `rustis` 0.26, 30k recent downloads. `valkey-glide` has no crates.io Rust API. `moka` 0.12.16 is already in the workspace. Valkey is BSD-3-Clause. Redis 8 is AGPLv3 / RSALv2 / SSPLv1. redis-rs MSRV 1.88 fits workspace Rust 1.98. These figures do not describe the resolved lock.
 
 ## Resolved dependency graph
 
-TODO(lead): packages added to Cargo.lock
+The profile adds five packages to `Cargo.lock`: `infra-cache`, `redis`
+1.7.1, `arc-swap` 1.9.2 (the connection manager's swappable connection),
+`arcstr` 1.2.0 and `xxhash-rust` 0.8.18. `combine` 4.6.8 was already locked;
+it gains only the async feature edges `redis` needs. `socket2` 0.6.5 was
+already locked; `infra-cache` names it directly because `redis` does not
+re-export `TcpKeepalive`, which sets keepalive retries. No existing package
+changed version. `CACHE=none` projects the lock without these packages and
+edges.
 
 ## Supported extension points
 

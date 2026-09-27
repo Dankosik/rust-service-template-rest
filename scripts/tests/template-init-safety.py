@@ -141,6 +141,7 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("outbox", None)
     lock["profiles"].pop("webhooks", None)
     lock["profiles"].pop("inbound_webhooks", None)
+    lock["profiles"].pop("cache", None)
     lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
@@ -161,6 +162,7 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("outbox", None)
     lock["profiles"].pop("webhooks", None)
     lock["profiles"].pop("inbound_webhooks", None)
+    lock["profiles"].pop("cache", None)
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -263,6 +265,7 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
         outbox="none",
         webhooks="none",
         inbound_webhooks="none",
+        cache="none",
         agent_harness="core",
     )
     for label, contents in (
@@ -313,6 +316,7 @@ def assert_preflight_extraction(source: Path, work: Path) -> None:
             outbox="none",
             webhooks="none",
             inbound_webhooks="none",
+            cache="none",
             agent_harness="core",
         )
 
@@ -370,6 +374,7 @@ def must_refuse(
             "duplicate-http-idempotency", "duplicate-jobs", "jobs-flag-and-environment", "duplicate-messaging",
             "messaging-flag-and-environment", "duplicate-outbox", "outbox-flag-and-environment",
             "duplicate-webhooks", "webhooks-flag-and-environment", "duplicate-inbound-webhooks",
+            "duplicate-cache", "cache-flag-and-environment",
         }
         and "may be supplied once" in result.stderr
     ):
@@ -415,7 +420,7 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
 def assert_profile_packs(
     source: Path, target: Path, *, database: str, authn: str, outbound_http: str, http_idempotency: str,
     jobs: str, outbound_auth: str = "none", grpc: str = "none", messaging: str = "none", outbox: str = "none",
-    webhooks: str = "none", inbound_webhooks: str = "none",
+    webhooks: str = "none", inbound_webhooks: str = "none", cache: str = "none",
 ) -> None:
     assert_profile_pack(source, target, "postgres", database == "postgres")
     assert_profile_pack(source, target, "authn", authn != "none")
@@ -428,8 +433,9 @@ def assert_profile_packs(
         source, target, "outbound-auth-grpc", grpc == "enabled" and outbound_auth == "oauth2-client-credentials"
     )
     assert_profile_pack(source, target, "config-url", messaging == "nats-jetstream" or outbound_auth == "oauth2-client-credentials")
-    shared_selected = authn != "none" or outbound_http == "bounded" or grpc == "enabled"
+    shared_selected = authn != "none" or outbound_http == "bounded" or grpc == "enabled" or cache == "redis"
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
+    assert_profile_pack(source, target, "rustls", grpc == "enabled" or cache == "redis")
     assert_profile_pack(
         source, target, "request-budget", outbound_http == "bounded" or http_idempotency == "postgres"
     )
@@ -443,12 +449,16 @@ def assert_profile_packs(
     )
     assert_profile_pack(source, target, "outbox", outbox == "postgres")
     assert_profile_pack(source, target, "messaging", messaging == "nats-jetstream")
+    assert_profile_pack(source, target, "cache", cache == "redis")
     assert_profile_pack(source, target, "worker", jobs == "postgres" or messaging == "nats-jetstream")
     assert_profile_pack(
         source, target, "service-secrets",
-        database == "postgres" or messaging == "nats-jetstream" or grpc == "enabled",
+        database == "postgres" or messaging == "nats-jetstream" or grpc == "enabled" or cache == "redis",
     )
-    assert_profile_pack(source, target, "integration", database == "postgres" or messaging == "nats-jetstream")
+    assert_profile_pack(
+        source, target, "integration",
+        database == "postgres" or messaging == "nats-jetstream" or cache == "redis",
+    )
     assert_profile_pack(source, target, "jobs-messaging", jobs == "postgres" and messaging == "nats-jetstream")
     assert_profile_pack(source, target, "webhooks-common", webhooks == "durable" or inbound_webhooks == "standard-webhooks")
     assert_profile_pack(source, target, "webhooks", webhooks == "durable")
@@ -692,6 +702,15 @@ def check(source: Path) -> None:
             expected="JOBS=postgres requires DATABASE=postgres",
         )
         must_refuse(source, work, "unknown-messaging", "--messaging", "amqp", expected="MESSAGING is unsupported")
+        must_refuse(source, work, "unknown-cache", "--cache", "memcached", expected="CACHE is unsupported")
+        must_refuse(
+            source, work, "duplicate-cache", "--cache", "none", "--cache", "redis",
+            expected="--cache may be supplied once",
+        )
+        must_refuse(
+            source, work, "cache-flag-and-environment", "--cache", "none",
+            environment={"CACHE": "none"}, expected="CACHE may be supplied once, by flag or environment",
+        )
         must_refuse(
             source, work, "duplicate-messaging", "--messaging", "none", "--messaging", "nats-jetstream",
             expected="--messaging may be supplied once",
@@ -1097,6 +1116,30 @@ def check(source: Path) -> None:
         )
         if messaging_replay.returncode or state(messaging_target) != messaging_before:
             raise AssertionError("complete messaging lock replay changed target bytes")
+        cache_target = work / "cache-replay"
+        clone(source, cache_target)
+        cache_result = init(
+            source, cache_target, "--database", "none", "--jobs", "none",
+            "--cache", "redis", "--agent-harness", "core",
+        )
+        if cache_result.returncode:
+            raise AssertionError(f"cache-only initialization failed: {cache_result.stderr}")
+        assert_profile_pack(source, cache_target, "cache", True)
+        assert_profile_pack(source, cache_target, "integration", True)
+        assert_profile_pack(source, cache_target, "tls-fixtures", True)
+        assert_profile_pack(source, cache_target, "service-secrets", True)
+        assert_profile_pack(source, cache_target, "rustls", True)
+        assert_profile_pack(source, cache_target, "config-url", False)
+        lock = json.loads((cache_target / "template.lock").read_text(encoding="utf-8"))
+        if lock["profiles"].get("cache") != "redis":
+            raise AssertionError("template.lock did not record cache=redis")
+        cache_before = state(cache_target)
+        cache_replay = init(
+            source, cache_target, "--database", "none", "--jobs", "none",
+            "--cache", "redis", "--agent-harness", "core",
+        )
+        if cache_replay.returncode or state(cache_target) != cache_before:
+            raise AssertionError("complete cache lock replay changed target bytes")
         outbox_target = work / "outbox-replay"
         clone(source, outbox_target)
         outbox_result = init(

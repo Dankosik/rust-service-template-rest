@@ -116,10 +116,11 @@ impl Proxy {
     }
 
     async fn stop(&mut self) {
+        // A second stop (restart after an outage) must not poll the finished task again.
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
+            let _ = tokio::time::timeout(Duration::from_secs(1), &mut self.task).await;
         }
-        let _ = tokio::time::timeout(Duration::from_secs(1), &mut self.task).await;
         self.task.abort();
     }
 

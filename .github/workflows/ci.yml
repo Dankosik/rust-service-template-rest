@@ -57,6 +57,7 @@ jobs:
       secret_scanning: ${{ steps.surfaces.outputs.secret_scanning }}
       db_integration: ${{ steps.surfaces.outputs.db_integration }}
       messaging_integration: ${{ steps.surfaces.outputs.messaging_integration }}
+      cache_integration: ${{ steps.surfaces.outputs.cache_integration }}
       migrations: ${{ steps.surfaces.outputs.migrations }}
       agent_instructions: ${{ steps.surfaces.outputs.agent_instructions }}
       documentation: ${{ steps.surfaces.outputs.documentation }}
@@ -522,7 +523,8 @@ jobs:
     needs: changes
     if: >-
       needs.changes.outputs.db_integration == 'true' ||
-      needs.changes.outputs.messaging_integration == 'true'
+      needs.changes.outputs.messaging_integration == 'true' ||
+      needs.changes.outputs.cache_integration == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -550,6 +552,7 @@ jobs:
         env:
           DATABASE_SELECTED: ${{ needs.changes.outputs.db_integration }}
           MESSAGING_SELECTED: ${{ needs.changes.outputs.messaging_integration }}
+          CACHE_SELECTED: ${{ needs.changes.outputs.cache_integration }}
         run: |
           set -euo pipefail
           OUTBOX_SELECTED=$(python3 scripts/lib/template_state.py profile --repo . --field outbox)
@@ -558,6 +561,9 @@ jobs:
           fi
           if [[ "${MESSAGING_SELECTED}" == true || ( "${DATABASE_SELECTED}" == true && "${OUTBOX_SELECTED}" == postgres ) ]]; then
             NATS_PORT=4222 docker compose -f env/docker-compose.yml up -d --wait nats
+          fi
+          if [[ "${CACHE_SELECTED}" == true ]]; then
+            VALKEY_PORT=6379 docker compose -f env/docker-compose.yml up -d --wait valkey
           fi
       - name: Integration startup diagnostics
         if: failure() && steps.integration-services.outcome == 'failure'
@@ -577,6 +583,12 @@ jobs:
           DATABASE_URL='postgres://app:app@127.0.0.1:5432/app?sslmode=disable'
           NATS_URL=nats://127.0.0.1:4222
           make test-integration-db
+      - name: Cache proof
+        if: needs.changes.outputs.cache_integration == 'true'
+        run: >-
+          bash ./scripts/ci/measure.sh integration-cache --
+          env REQUIRE_DOCKER=1 CACHE_URL=redis://127.0.0.1:6379
+          make test-integration-cache
       - name: JetStream proof
         if: needs.changes.outputs.messaging_integration == 'true'
         run: >-
@@ -639,13 +651,14 @@ jobs:
       fail-fast: false
       matrix:
         # Together the parts are `make template-init-check`: the source
-        # suites with the canonical projections and sixty-one runtime graphs.
+        # suites with the canonical projections and sixty-three runtime graphs.
         # Graphs 1-46 retain the established database, idempotency, jobs, and
         # webhook representatives. Graphs 47-49 retain messaging and outbox;
         # 50-53 retain OAuth; 54 proves messaging plus OAuth without PostgreSQL;
         # and 55 proves the full outbox/OAuth neighboring pack. Graph 56 compiles
-        # the jobs/messaging integration fixture with outbox absent. Broker and
-        # Go-wire behavior stay in the selected integration job.
+        # the jobs/messaging integration fixture with outbox absent. Graph 62 is
+        # cache only and stays in database-none; graph 63 is graph 61 plus cache.
+        # Broker, Go-wire, and Valkey behavior stay in the selected integration job.
         # `source`, `database-none`, and
         # `database-postgres` keep their own warm target caches. Every part
         # with `cache` restores that part's cache (database-postgres) and
@@ -654,7 +667,7 @@ jobs:
         include:
           - part: source
           - part: database-none
-            graphs: 1,2,3,4,5,6,47,50,51,52,54,57,58,59,60
+            graphs: 1,2,3,4,5,6,47,50,51,52,54,57,58,59,60,62
           - part: database-postgres
             graphs: 7,8,9,10,11,12
           - part: http-idempotency
@@ -674,7 +687,7 @@ jobs:
             cache: database-postgres
             docker: true
           - part: jobs-http-idempotency-2
-            graphs: 25,26,28,34,38,42,46,49,53,55,61
+            graphs: 25,26,28,34,38,42,46,49,53,55,61,63
             cache: database-postgres
             docker: true
     steps:

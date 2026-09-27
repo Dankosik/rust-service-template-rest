@@ -752,7 +752,7 @@ fn cache_options(config: &Config) -> Result<CacheOptions, BootstrapError> {
         return Err(CacheError::InvalidDsn.into());
     };
     Ok(CacheOptions {
-        dsn: secrecy::SecretString::from(secrecy::ExposeSecret::expose_secret(dsn).to_owned()),
+        dsn: secrecy::SecretString::from(dsn.expose_secret().to_owned()),
         root_ca_path: config.cache.root_ca_path.clone(),
         allow_plaintext: config.cache.allow_plaintext,
         allow_unauthenticated: config.cache.allow_unauthenticated,

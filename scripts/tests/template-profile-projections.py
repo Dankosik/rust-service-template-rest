@@ -333,7 +333,7 @@ def _compare_lock(reference: bytes, actual: bytes, harness: str, initializer) ->
 def _inputs(
     initializer, database: str, authn: str, outbound_http: str, http_idempotency: str,
     jobs: str, webhooks: str, inbound_webhooks: str, harness: str, outbound_auth: str = "none", grpc: str = "none",
-    messaging: str = "none", outbox: str = "none",
+    messaging: str = "none", outbox: str = "none", cache: str = "none",
 ):
     # Canonical projection identities remain stable across harness comparisons.
     # Runtime representatives use their graph number to stay within the name bound.
@@ -369,6 +369,7 @@ def _inputs(
         outbox=outbox,
         webhooks=webhooks,
         inbound_webhooks=inbound_webhooks,
+        cache=cache,
         agent_harness=harness,
     )
 
@@ -402,6 +403,7 @@ def _refused_namespace(
         jobs=jobs,
         messaging="none",
         outbox="none",
+        cache="none",
         webhooks=webhooks,
         inbound_webhooks=inbound_webhooks,
         agent_harness="core",
@@ -595,6 +597,71 @@ def _check_grpc_projections(source: Path, candidate: str, initializer, work: Pat
         )
 
 
+def _check_cache_projections(source: Path, candidate: str, initializer, work: Path) -> None:
+    """Project cache alone, with PostgreSQL, and with the maximal profile set."""
+
+    profile_data = initializer._profile_data(source)
+    cache_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["cache"])
+    integration_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["integration"])
+    tls_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["tls-fixtures"])
+    scenarios = (
+        ("none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
+        ("postgres", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
+        (
+            "postgres", "oidc-introspection", "bounded", "oauth2-client-credentials", "postgres", "postgres",
+            "nats-jetstream", "postgres", "durable", "standard-webhooks", "enabled",
+        ),
+    )
+    for index, (
+        database, authn, outbound_http, outbound_auth, http_idempotency, jobs, messaging, outbox, webhooks,
+        inbound_webhooks, grpc,
+    ) in enumerate(scenarios, 1):
+        inputs = _inputs(
+            initializer, database, authn, outbound_http, http_idempotency, jobs, webhooks, inbound_webhooks,
+            "core", outbound_auth=outbound_auth, grpc=grpc, messaging=messaging, outbox=outbox, cache="redis",
+        )
+        with tempfile.TemporaryDirectory(prefix=f"cache-{index}-", dir=work) as selection:
+            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+        _assert_profile_output(initializer, nodes, "cache", cache_paths)
+        _assert_profile_output(initializer, nodes, "integration", integration_paths)
+        _assert_profile_output(initializer, nodes, "tls-fixtures", tls_paths)
+        if index == 1:
+            config_manifest = nodes.get("crates/config/Cargo.toml")
+            payload = config_manifest.payload if config_manifest is not None and isinstance(config_manifest.payload, bytes) else b""
+            if b"url = { workspace = true" in payload:
+                raise initializer.Refusal("cache-only projection retained the config url dependency")
+        profiles = inputs.profiles()
+        if profiles["cache"] != "redis":
+            raise initializer.Refusal("cache projection did not retain its redis selection")
+        _emit(
+            "cache-selection",
+            scenario=index,
+            database=database,
+            authn=authn,
+            outbound_http=outbound_http,
+            outbound_auth=outbound_auth,
+            http_idempotency=http_idempotency,
+            jobs=jobs,
+            messaging=messaging,
+            outbox=outbox,
+            webhooks=webhooks,
+            inbound_webhooks=inbound_webhooks,
+            grpc=grpc,
+            profiles=profiles,
+            tree_sha256=_tree_digest(nodes),
+            lock_sha256=hashlib.sha256(initializer._lock_bytes(inputs, candidate, "complete")).hexdigest(),
+        )
+    refused = _refused_namespace("none", "none", "none", "none", "none", "none", "none")
+    refused.cache = "memcached"
+    try:
+        initializer.parse_inputs(refused)
+    except initializer.Refusal as error:
+        if "CACHE is unsupported" not in str(error):
+            raise initializer.Refusal(f"unknown CACHE refusal did not name the selector: {error}") from error
+    else:
+        raise initializer.Refusal("unknown CACHE was accepted")
+
+
 def check(source: Path) -> None:
     initializer = _load_initializer(source)
     source = initializer.git_root(source)
@@ -779,6 +846,7 @@ def check(source: Path) -> None:
                                         )
         _check_oauth_projections(source, candidate, initializer, work)
         _check_grpc_projections(source, candidate, initializer, work)
+        _check_cache_projections(source, candidate, initializer, work)
 
 
 def _expect_refusal(initializer, action, label: str) -> None:

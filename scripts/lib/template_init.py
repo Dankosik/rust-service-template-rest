@@ -27,6 +27,7 @@ from template_state import (
     HTTP_IDEMPOTENCY_CHOICES,
     INBOUND_WEBHOOKS_CHOICES,
     JOBS_CHOICES,
+    CACHE_CHOICES,
     MESSAGING_CHOICES,
     OUTBOX_CHOICES,
     LOCK_NAME,
@@ -101,6 +102,7 @@ class InitInputs:
     outbox: str
     webhooks: str
     inbound_webhooks: str
+    cache: str
     agent_harness: str
 
     def identity(self) -> dict[str, str]:
@@ -124,6 +126,7 @@ class InitInputs:
             "outbox": self.outbox,
             "webhooks": self.webhooks,
             "inbound_webhooks": self.inbound_webhooks,
+            "cache": self.cache,
             "agent_harness": self.agent_harness,
         }
 
@@ -168,6 +171,7 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         outbox=_argument_value(arguments, "outbox", default="none"),
         webhooks=_argument_value(arguments, "webhooks", default="none"),
         inbound_webhooks=_argument_value(arguments, "inbound_webhooks", default="none"),
+        cache=_argument_value(arguments, "cache", default="none"),
         agent_harness=_argument_value(arguments, "agent_harness", default="all"),
     )
     if inputs.database not in DATABASE_CHOICES:
@@ -197,6 +201,7 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
             outbox=inputs.outbox,
             webhooks=inputs.webhooks,
             inbound_webhooks=inputs.inbound_webhooks,
+            cache=inputs.cache,
             agent_harness=inputs.agent_harness,
         )
     if inputs.http_idempotency not in HTTP_IDEMPOTENCY_CHOICES:
@@ -207,6 +212,8 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         raise Refusal("JOBS is unsupported")
     if inputs.messaging not in MESSAGING_CHOICES:
         raise Refusal("MESSAGING is unsupported")
+    if inputs.cache not in CACHE_CHOICES:
+        raise Refusal("CACHE is unsupported")
     if inputs.outbox not in OUTBOX_CHOICES:
         raise Refusal("OUTBOX is unsupported")
     if inputs.webhooks not in WEBHOOKS_CHOICES:
@@ -321,6 +328,7 @@ _GRPC_PROFILE_INVENTORY_KEYS = _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS | {
     "outbound-auth-grpc",
     "client-integrations",
 }
+_CACHE_PROFILE_INVENTORY_KEYS = _GRPC_PROFILE_INVENTORY_KEYS | {"cache", "rustls"}
 
 
 def _profile_data(
@@ -340,7 +348,20 @@ def _profile_data(
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
         raise Refusal("template profile inventory has an unsupported schema")
     keys = frozenset(raw)
-    if keys == _GRPC_PROFILE_INVENTORY_KEYS:
+    include_cache = False
+    if keys == _CACHE_PROFILE_INVENTORY_KEYS:
+        include_authn = True
+        include_outbound = True
+        include_outbound_auth = True
+        include_grpc = True
+        include_tls_fixtures = True
+        include_http_idempotency = True
+        include_jobs = True
+        include_webhooks = True
+        include_messaging = True
+        include_outbox = True
+        include_cache = True
+    elif keys == _GRPC_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
         include_outbound_auth = True
@@ -599,6 +620,18 @@ def _profile_data(
             raise Refusal("template outbox inventory has an unsupported shape")
         removals["outbox"] = tuple(_path_list(section["remove_when_unselected"], "outbox remove_when_unselected"))
         markers.extend(_markers("outbox", section["markers"]))
+    if include_cache:
+        section = raw["cache"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template cache inventory has an unsupported shape")
+        removals["cache"] = tuple(_path_list(section["remove_when_unselected"], "cache remove_when_unselected"))
+        markers.extend(_markers("cache", section["markers"]))
+    if "rustls" in keys:
+        section = raw["rustls"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template rustls inventory has an unsupported shape")
+        removals["rustls"] = tuple(_path_list(section["remove_when_unselected"], "rustls remove_when_unselected"))
+        markers.extend(_markers("rustls", section["markers"]))
     identity = raw["identity"]
     if not isinstance(identity, list):
         raise Refusal("template identity inventory has an unsupported shape")
@@ -764,7 +797,12 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("grpc-none")
     if inputs.messaging == "nats-jetstream" or inputs.outbound_auth == "oauth2-client-credentials":
         selected.add("config-url")
-    if inputs.authn != "none" or inputs.outbound_http == "bounded" or inputs.grpc == "enabled":
+    if (
+        inputs.authn != "none"
+        or inputs.outbound_http == "bounded"
+        or inputs.grpc == "enabled"
+        or inputs.cache == "redis"
+    ):
         selected.add("tls-fixtures")
     if inputs.outbound_http == "bounded":
         selected.add("request-budget")
@@ -784,9 +822,18 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("outbox")
     if inputs.jobs == "postgres" or inputs.messaging == "nats-jetstream":
         selected.add("worker")
-    if inputs.database == "postgres" or inputs.messaging == "nats-jetstream" or inputs.grpc == "enabled":
+    if inputs.cache == "redis":
+        selected.add("cache")
+    if inputs.grpc == "enabled" or inputs.cache == "redis":
+        selected.add("rustls")
+    if (
+        inputs.database == "postgres"
+        or inputs.messaging == "nats-jetstream"
+        or inputs.grpc == "enabled"
+        or inputs.cache == "redis"
+    ):
         selected.add("service-secrets")
-    if inputs.database == "postgres" or inputs.messaging == "nats-jetstream":
+    if inputs.database == "postgres" or inputs.messaging == "nats-jetstream" or inputs.cache == "redis":
         selected.add("integration")
     if inputs.webhooks == "durable" or inputs.inbound_webhooks == "standard-webhooks":
         selected.add("webhooks-common")
@@ -1439,6 +1486,14 @@ def _project_feature_edge(
 def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInputs) -> None:
     """Remove only source-anchored feature edges made unreachable by a profile."""
 
+    if inputs.cache == "none":
+        # redis alone enables combine's tokio parser features. The retained
+        # jni/combine edge does not.
+        _project_feature_edge(
+            records, "combine", "4.6.8",
+            ["bytes", "futures-core", "memchr", "pin-project-lite", "tokio", "tokio-util"],
+            ["bytes", "memchr"],
+        )
     if inputs.messaging == "none":
         # async-nats alone enables bytes/serde. Removing messaging must also
         # remove that registry feature edge from the retained bytes package.
@@ -1502,10 +1557,11 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
         and inputs.outbound_http == "none"
         and inputs.messaging == "none"
         and inputs.grpc == "none"
+        and inputs.cache == "none"
     ):
-        # TLS fixtures retained by authentication, outbound HTTP, or gRPC test
-        # support enable rcgen/aws_lc_rs and its weak x509-parser/verify-aws
-        # edge; NATS also enables aws-lc-rs defaults directly.
+        # TLS fixtures retained by authentication, outbound HTTP, gRPC, or cache
+        # test support enable rcgen/aws_lc_rs and its weak x509-parser/verify-aws
+        # edge; NATS and the cache client also enable aws-lc-rs directly.
         _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
     if inputs.outbound_auth == "none":
         # oauth2 enables url's serde feature; the source still uses url through
@@ -1742,6 +1798,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--outbox", action=SingleValue)
     parser.add_argument("--webhooks", action=SingleValue)
     parser.add_argument("--inbound-webhooks", action=SingleValue)
+    parser.add_argument("--cache", action=SingleValue)
     parser.add_argument("--agent-harness", action=SingleValue)
     return parser
 
