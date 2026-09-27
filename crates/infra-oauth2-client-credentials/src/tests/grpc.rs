@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use grpc_contracts::generated::{
+use grpc_contracts::example::v1::{
     UnaryRequest, UnaryResponse, echo_service_client::EchoServiceClient,
 };
 use hyper::{Request as HyperRequest, Response as HyperResponse, body::Incoming};
