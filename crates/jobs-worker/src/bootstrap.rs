@@ -1,8 +1,7 @@
-//! The worker's asynchronous startup (steps 8-19 of the startup order in
-//! docs/architecture/runtime-lifecycle.md), its refusals, the health
-//! listener, and readiness.
+//! Asynchronous startup after the runtime exists: stop signals, observability,
+//! registration, dependency admission, listeners, and readiness.
 //!
-//! Steps 1-10 do no database I/O. Every refusal after the runtime started
+//! A failed signal install returns before anything is open. Every later refusal
 //! goes through `shutdown::abort_startup`.
 
 use std::time::Duration;
@@ -10,13 +9,11 @@ use std::time::Duration;
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server, ServerOptions};
 // template:begin jobs:worker-bootstrap-jobs-imports
-use infra_jobs::{
-    ATTEMPT_DURATION_BUCKETS, ATTEMPT_DURATION_METRIC, Engine, Kinds, Registry, Started,
-};
+use infra_jobs::{ATTEMPT_DURATION_BUCKETS, ATTEMPT_DURATION_METRIC, Engine, Kinds, Registry};
 // template:end jobs:worker-bootstrap-jobs-imports
 // template:begin messaging:worker-bootstrap-messaging-imports
 use infra_messaging::{
-    ConsumerHandle, ConsumerOptions, Messaging, MessagingError, MessagingOptions,
+    Consumer, ConsumerOptions, Messaging, MessagingError, MessagingOptions,
     Registry as MessagingRegistry,
 };
 // template:end messaging:worker-bootstrap-messaging-imports
@@ -32,7 +29,7 @@ use service_config::{AppConfig, Config, LogFormat, TracesSampler};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::shutdown::{self, Listeners, Signals};
+use crate::shutdown::{self, Resources, Signals};
 use crate::{BuildError, Support};
 
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
@@ -116,175 +113,86 @@ pub(crate) fn check_preconditions(config: &Config) -> Result<(), WorkerError> {
     Ok(())
 }
 
-/// What startup has opened so far, which `abort_startup` tears down.
-#[derive(Default)]
-struct Opened {
-    // template:begin jobs:worker-bootstrap-opened-jobs
-    pool: Option<PgPool>,
-    // template:end jobs:worker-bootstrap-opened-jobs
-    // template:begin messaging:worker-bootstrap-opened-messaging
-    messaging: Option<Messaging>,
-    consumer: Option<ConsumerHandle>,
-    // template:end messaging:worker-bootstrap-opened-messaging
-    listeners: Listeners,
-    // template:begin jobs:worker-bootstrap-opened-started
-    started: Vec<Started>,
-    // template:end jobs:worker-bootstrap-opened-started
+/// How the running worker ended. A stop during startup counts as [`Self::Signal`].
+enum Ended {
+    Signal,
+    Failure,
 }
 
-/// What steps 9-17 hand back when startup was not refused. `admitted` is
-/// false when a stop signal ended startup before readiness admission passed.
+/// Observability and readiness handed back when startup was not refused.
 struct Prepared {
     tracer_provider: TracerProviderHandle,
     readiness: Readiness,
     policy: RefreshPolicy,
-    // template:begin jobs:worker-bootstrap-prepared-jobs
-    pool: Option<PgPool>,
-    // template:end jobs:worker-bootstrap-prepared-jobs
     admitted: bool,
 }
 
-/// Steps 8-19. Every refusal after the runtime started, including a failed
-/// signal-handler install, goes through `shutdown::abort_startup` exactly once
-/// before it is returned. A stop signal or an engine failure runs the staged
-/// shutdown plan.
+/// Install stop signals, admit dependencies, then wait until a stop signal or
+/// a terminal engine or consumer failure. A failed signal install returns
+/// before anything is open. Every later refusal goes through
+/// `shutdown::abort_startup` exactly once. A stop signal or an engine failure
+/// runs the staged shutdown plan.
 pub(crate) async fn serve(
     config: Config,
     register: crate::Register,
 ) -> Result<shutdown::Outcome, WorkerError> {
+    let mut signals = Signals::install().map_err(WorkerError::Signals)?;
     let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
-    let mut opened = Opened::default();
-    let mut signals = match Signals::install() {
-        Ok(signals) => signals,
-        Err(err) => {
-            shutdown::abort_startup(
-                // template:begin jobs:worker-bootstrap-signal-abort-started
-                &[],
-                // template:end jobs:worker-bootstrap-signal-abort-started
-                // template:begin messaging:worker-bootstrap-signal-abort-consumer
-                None,
-                // template:end messaging:worker-bootstrap-signal-abort-consumer
-                Listeners::default(),
-                &cancel,
-                &tracker,
-                // template:begin jobs:worker-bootstrap-signal-abort-pool
-                None,
-                // template:end jobs:worker-bootstrap-signal-abort-pool
-                // template:begin messaging:worker-bootstrap-signal-abort-messaging
-                None,
-                // template:end messaging:worker-bootstrap-signal-abort-messaging
-            )
-            .await;
-            return Err(WorkerError::Signals(err));
-        }
-    };
+    let mut resources = Resources::default();
     let prepared = match Box::pin(prepare(
         &config,
         register,
         &mut signals,
         &cancel,
         &tracker,
-        &mut opened,
+        &mut resources,
     ))
     .await
     {
         Ok(prepared) => prepared,
         Err(err) => {
-            // template:begin jobs:worker-bootstrap-error-started
-            let started = std::mem::take(&mut opened.started);
-            // template:end jobs:worker-bootstrap-error-started
-            let listeners = std::mem::take(&mut opened.listeners);
-            shutdown::abort_startup(
-                // template:begin jobs:worker-bootstrap-error-abort-started
-                &started,
-                // template:end jobs:worker-bootstrap-error-abort-started
-                // template:begin messaging:worker-bootstrap-error-abort-consumer
-                opened.consumer.take(),
-                // template:end messaging:worker-bootstrap-error-abort-consumer
-                listeners,
-                &cancel,
-                &tracker,
-                // template:begin jobs:worker-bootstrap-error-abort-pool
-                opened.pool.as_ref(),
-                // template:end jobs:worker-bootstrap-error-abort-pool
-                // template:begin messaging:worker-bootstrap-error-abort-messaging
-                opened.messaging.take(),
-                // template:end messaging:worker-bootstrap-error-abort-messaging
-            )
-            .await;
+            shutdown::abort_startup(resources, &cancel, &tracker).await;
             return Err(err);
         }
     };
-    let stop_signal = if prepared.admitted {
+    let ended = if prepared.admitted {
         spawn_refresher(&prepared.readiness, prepared.policy, &cancel, &tracker);
         tracing::info!("jobs_worker_ready");
-        wait_for_stop(
-            // template:begin jobs:worker-bootstrap-wait-started-argument
-            &opened.started,
-            // template:end jobs:worker-bootstrap-wait-started-argument
-            // template:begin messaging:worker-bootstrap-wait-consumer-argument
-            opened.consumer.as_ref(),
-            // template:end messaging:worker-bootstrap-wait-consumer-argument
-            &mut signals,
-        )
-        .await
+        wait_for_stop(&resources, &mut signals).await
     } else {
-        true
+        Ended::Signal
     };
-    // template:begin jobs:worker-bootstrap-shutdown-started
-    let started = std::mem::take(&mut opened.started);
-    // template:end jobs:worker-bootstrap-shutdown-started
-    let listeners = std::mem::take(&mut opened.listeners);
-    let tracer_provider = prepared.tracer_provider;
-    // template:begin jobs:worker-bootstrap-shutdown-pool
-    let pool = prepared.pool;
-    // template:end jobs:worker-bootstrap-shutdown-pool
     let outcome = shutdown::run(shutdown::Plan {
         http: &config.http,
         readiness: &prepared.readiness,
-        // template:begin jobs:worker-bootstrap-shutdown-plan-started
-        started: &started,
-        // template:end jobs:worker-bootstrap-shutdown-plan-started
-        listeners,
+        resources,
         cancel,
         tracker,
-        // template:begin jobs:worker-bootstrap-shutdown-plan-pool
-        pool,
-        // template:end jobs:worker-bootstrap-shutdown-plan-pool
-        // template:begin messaging:worker-bootstrap-shutdown-plan-messaging
-        consumer: opened.consumer.take(),
-        messaging: opened.messaging.take(),
-        // template:end messaging:worker-bootstrap-shutdown-plan-messaging
-        tracer_provider,
+        tracer_provider: prepared.tracer_provider,
         signals: &mut signals,
     })
     .await;
-    if stop_signal {
-        Ok(outcome)
-    } else {
-        Err(WorkerError::EngineStopped)
+    match ended {
+        Ended::Signal => Ok(outcome),
+        Ended::Failure => Err(WorkerError::EngineStopped),
     }
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "keep pool and broker admission with startup resource ownership in one ordered sequence"
-)]
 async fn prepare(
     config: &Config,
     register: crate::Register,
     signals: &mut Signals,
     cancel: &CancellationToken,
     tracker: &TaskTracker,
-    opened: &mut Opened,
+    resources: &mut Resources,
 ) -> Result<Prepared, WorkerError> {
     let identity = worker_identity(&config.observability.otel.service_name);
     let (tracer_provider, metrics) = install_observability(config, &identity)?;
     // template:begin messaging:worker-bootstrap-sanitized-panic-hook-call
     install_sanitized_panic_hook();
     // template:end messaging:worker-bootstrap-sanitized-panic-hook-call
-    let registrations = register_capabilities(config, register, cancel, tracker)?;
+    let mut registrations = register_capabilities(config, register, cancel, tracker)?;
     log_startup_record(
         config,
         &identity,
@@ -294,6 +202,81 @@ async fn prepare(
         &tracer_provider.exporter_state,
     );
     spawn_metrics_tasks(&metrics, cancel, tracker);
+    admit_pool(config, &registrations, cancel, tracker, resources).await?;
+    #[allow(
+        unused_variables,
+        reason = "retained messaging shadows the signal result"
+    )]
+    let startup_stopped = false;
+    // template:begin messaging:worker-bootstrap-messaging-startup
+    #[allow(
+        unused_variables,
+        reason = "retained outbox also requires broker admission"
+    )]
+    let needs_messaging = registrations.messages.is_some();
+    // template:end messaging:worker-bootstrap-messaging-startup
+    // template:begin outbox:worker-bootstrap-outbox-messaging
+    let needs_messaging = true;
+    // template:end outbox:worker-bootstrap-outbox-messaging
+    // template:begin messaging:worker-bootstrap-messaging-connect
+    let (consumer, startup_stopped) = Box::pin(connect_messaging(
+        config,
+        &mut registrations.messages,
+        signals,
+        cancel,
+        resources,
+        needs_messaging,
+    ))
+    .await?;
+    // template:end messaging:worker-bootstrap-messaging-connect
+    // template:begin outbox:worker-bootstrap-outbox-engine
+    let publisher =
+        outbox_publisher(startup_stopped, resources, registrations.jobs.as_ref()).await?;
+    // template:end outbox:worker-bootstrap-outbox-engine
+    // template:begin jobs:worker-bootstrap-build-engines
+    let mut engines = build_engines(config, &mut registrations, resources, startup_stopped).await?;
+    // template:end jobs:worker-bootstrap-build-engines
+    // template:begin outbox:worker-bootstrap-append-publisher
+    if let Some(publisher) = publisher {
+        engines.push(publisher);
+    }
+    // template:end outbox:worker-bootstrap-append-publisher
+    let (readiness, policy, admitted) =
+        bind_and_admit(config, &metrics, resources, signals, startup_stopped).await?;
+    // template:begin jobs:worker-bootstrap-start-admitted-jobs
+    if admitted {
+        resources.started = engines
+            .iter()
+            .map(|engine| engine.start(tracker, cancel))
+            .collect();
+        tracing::info!(engines = resources.started.len(), "jobs_claiming_started");
+    }
+    // template:end jobs:worker-bootstrap-start-admitted-jobs
+    // template:begin messaging:worker-bootstrap-start-admitted-consumer
+    if admitted && let Some(consumer) = consumer {
+        resources.consumer = Some(consumer.start(cancel));
+        tracing::info!("messaging_consuming_started");
+    }
+    // template:end messaging:worker-bootstrap-start-admitted-consumer
+    Ok(Prepared {
+        tracer_provider,
+        readiness,
+        policy,
+        admitted,
+    })
+}
+
+#[allow(
+    unused_variables,
+    reason = "retained jobs and outbox consume pool admission inputs"
+)]
+async fn admit_pool(
+    config: &Config,
+    registrations: &Registrations,
+    cancel: &CancellationToken,
+    tracker: &TaskTracker,
+    resources: &mut Resources,
+) -> Result<(), WorkerError> {
     // template:begin jobs:worker-bootstrap-jobs-startup
     #[allow(
         unused_variables,
@@ -305,8 +288,7 @@ async fn prepare(
     let needs_pool = true;
     // template:end outbox:worker-bootstrap-outbox-pool
     // template:begin jobs:worker-bootstrap-pool-admission
-    let mut engines = Vec::new();
-    let pool = if needs_pool {
+    if needs_pool {
         if !config.postgres.enabled {
             return Err(WorkerError::PostgresDisabled);
         }
@@ -330,168 +312,152 @@ async fn prepare(
         config.messaging.validate_producer(&config.app.env)?;
         // template:end outbox:worker-bootstrap-outbox-config
         // template:begin jobs:worker-bootstrap-pool-open
-        let pool = open_pool(config, cancel, tracker, opened).await?;
+        let pool = open_pool(config, cancel, tracker, resources).await?;
         migrate::verify_history(&pool).await?;
-        Some(pool)
-    } else {
-        None
-    };
+    }
     // template:end jobs:worker-bootstrap-pool-open
-    #[allow(
-        unused_variables,
-        reason = "retained messaging shadows the signal result"
-    )]
-    let startup_stopped = false;
-    // template:begin messaging:worker-bootstrap-messaging-startup
-    #[allow(
-        unused_variables,
-        reason = "retained outbox also requires broker admission"
-    )]
-    let needs_messaging = registrations.messages.is_some();
-    // template:end messaging:worker-bootstrap-messaging-startup
-    // template:begin outbox:worker-bootstrap-outbox-messaging
-    let needs_messaging = true;
-    // template:end outbox:worker-bootstrap-outbox-messaging
-    // template:begin messaging:worker-bootstrap-messaging-connect
-    let (consumer, startup_stopped) = if needs_messaging {
-        let options = messaging_options(config, registrations.messages.is_some())?;
-        let deadline = tokio::time::Instant::now() + MESSAGING_STARTUP_TIMEOUT;
-        let startup_cancel = cancel.child_token();
-        let connect = Messaging::connect(options, deadline, startup_cancel.clone());
-        tokio::pin!(connect);
-        let (connected, stopped) = tokio::select! {
+    Ok(())
+}
+
+// template:begin messaging:worker-bootstrap-messaging-admit
+async fn connect_messaging(
+    config: &Config,
+    messages: &mut Option<MessagingRegistry>,
+    signals: &mut Signals,
+    cancel: &CancellationToken,
+    resources: &mut Resources,
+    needs_messaging: bool,
+) -> Result<(Option<Consumer>, bool), WorkerError> {
+    if !needs_messaging {
+        return Ok((None, false));
+    }
+    let options = messaging_options(config, messages.is_some())?;
+    let deadline = tokio::time::Instant::now() + MESSAGING_STARTUP_TIMEOUT;
+    let startup_cancel = cancel.child_token();
+    let connect = Messaging::connect(options, deadline, startup_cancel.clone());
+    tokio::pin!(connect);
+    let (connected, stopped) = tokio::select! {
+        biased;
+        () = signals.wait() => {
+            startup_cancel.cancel();
+            (connect.await, true)
+        }
+        connected = &mut connect => (connected, false),
+    };
+    if stopped {
+        resources.messaging = connected.ok();
+        return Ok((None, true));
+    }
+    resources.messaging = Some(connected?);
+    let messaging = resources
+        .messaging
+        .as_ref()
+        .ok_or(MessagingError::Connection)?;
+    if let Some(registry) = messages.take() {
+        let admit_consumer = messaging.consumer(registry);
+        tokio::pin!(admit_consumer);
+        tokio::select! {
             biased;
             () = signals.wait() => {
                 startup_cancel.cancel();
-                (connect.await, true)
+                let _ = admit_consumer.await;
+                Ok((None, true))
             }
-            connected = &mut connect => (connected, false),
-        };
-        if stopped {
-            opened.messaging = connected.ok();
-            (None, true)
-        } else {
-            opened.messaging = Some(connected?);
-            let messaging = opened
-                .messaging
-                .as_ref()
-                .ok_or(MessagingError::Connection)?;
-            if let Some(registry) = registrations.messages {
-                let admit_consumer = messaging.consumer(registry);
-                tokio::pin!(admit_consumer);
-                tokio::select! {
-                    biased;
-                    () = signals.wait() => {
-                        startup_cancel.cancel();
-                        let _ = admit_consumer.await;
-                        (None, true)
-                    }
-                    consumer = &mut admit_consumer => (Some(consumer?), false),
-                }
-            } else {
-                (None, false)
-            }
+            consumer = &mut admit_consumer => Ok((Some(consumer?), false)),
         }
     } else {
-        (None, false)
-    };
-    // template:end messaging:worker-bootstrap-messaging-connect
-    // template:begin outbox:worker-bootstrap-outbox-engine
-    let publisher = if startup_stopped {
-        None
-    } else {
-        let messaging = opened
-            .messaging
-            .as_ref()
-            .ok_or(MessagingError::Connection)?;
-        let registry = infra_messaging::outbox::registry(messaging.producer())?;
-        if registrations.jobs.as_ref().is_some_and(|ordinary| {
-            registry
-                .names()
-                .any(|reserved| ordinary.names().any(|name| name == reserved))
-        }) {
-            return Err(WorkerError::PublisherKindConflict);
-        }
-        let publisher = Engine::new(
-            pool.as_ref().ok_or(WorkerError::PostgresDisabled)?.clone(),
-            registry,
-            std::num::NonZeroU32::MIN,
-        );
-        publisher.check_startup().await?;
-        Some(publisher)
-    };
-    // template:end outbox:worker-bootstrap-outbox-engine
-    // template:begin jobs:worker-bootstrap-ordinary-engine
-    if !startup_stopped && let Some(registry) = registrations.jobs {
+        Ok((None, false))
+    }
+}
+// template:end messaging:worker-bootstrap-messaging-admit
+
+// template:begin jobs:worker-bootstrap-ordinary-engine
+async fn build_engines(
+    config: &Config,
+    registrations: &mut Registrations,
+    resources: &Resources,
+    startup_stopped: bool,
+) -> Result<Vec<Engine>, WorkerError> {
+    let mut engines = Vec::new();
+    if !startup_stopped && let Some(registry) = registrations.jobs.take() {
         let engine = Engine::new(
-            pool.as_ref().ok_or(WorkerError::PostgresDisabled)?.clone(),
+            resources
+                .pool
+                .as_ref()
+                .ok_or(WorkerError::PostgresDisabled)?
+                .clone(),
             registry,
             config.jobs.max_workers()?,
         );
         engine.check_startup().await?;
         engines.push(engine);
     }
-    // template:end jobs:worker-bootstrap-ordinary-engine
-    // template:begin outbox:worker-bootstrap-append-publisher
-    if let Some(publisher) = publisher {
-        engines.push(publisher);
+    Ok(engines)
+}
+// template:end jobs:worker-bootstrap-ordinary-engine
+
+// template:begin outbox:worker-bootstrap-outbox-publisher
+async fn outbox_publisher(
+    startup_stopped: bool,
+    resources: &Resources,
+    jobs: Option<&Registry>,
+) -> Result<Option<Engine>, WorkerError> {
+    if startup_stopped {
+        return Ok(None);
     }
-    // template:end outbox:worker-bootstrap-append-publisher
-    // template:begin messaging:worker-bootstrap-messaging-probe-value
-    let messaging_probe = opened.messaging.as_ref().map(Messaging::probe);
-    // template:end messaging:worker-bootstrap-messaging-probe-value
-    let (readiness, policy) = if startup_stopped {
-        (
-            Readiness::new(Vec::new()),
-            RefreshPolicy {
-                interval: config.health.refresh_interval,
-                probe_budget: config.health.probe_budget,
-                failure_threshold: config.health.failure_threshold,
-            },
-        )
+    let messaging = resources
+        .messaging
+        .as_ref()
+        .ok_or(MessagingError::Connection)?;
+    let registry = infra_messaging::outbox::registry(messaging.producer())?;
+    if jobs.is_some_and(|ordinary| {
+        registry
+            .names()
+            .any(|reserved| ordinary.names().any(|name| name == reserved))
+    }) {
+        return Err(WorkerError::PublisherKindConflict);
+    }
+    let publisher = Engine::new(
+        resources
+            .pool
+            .as_ref()
+            .ok_or(WorkerError::PostgresDisabled)?
+            .clone(),
+        registry,
+        std::num::NonZeroU32::MIN,
+    );
+    publisher.check_startup().await?;
+    Ok(Some(publisher))
+}
+// template:end outbox:worker-bootstrap-outbox-publisher
+
+fn refresh_policy(config: &Config) -> RefreshPolicy {
+    RefreshPolicy {
+        interval: config.health.refresh_interval,
+        probe_budget: config.health.probe_budget,
+        failure_threshold: config.health.failure_threshold,
+    }
+}
+
+async fn bind_and_admit(
+    config: &Config,
+    metrics: &Metrics,
+    resources: &mut Resources,
+    signals: &mut Signals,
+    startup_stopped: bool,
+) -> Result<(Readiness, RefreshPolicy, bool), WorkerError> {
+    let policy = refresh_policy(config);
+    let readiness = if startup_stopped {
+        Readiness::new(Vec::new())
     } else {
-        bind_listeners(
-            config,
-            &metrics,
-            opened,
-            // template:begin jobs:worker-bootstrap-listener-jobs-probe-argument
-            pool.as_ref(),
-            // template:end jobs:worker-bootstrap-listener-jobs-probe-argument
-            // template:begin messaging:worker-bootstrap-listener-messaging-probe-argument
-            messaging_probe,
-            // template:end messaging:worker-bootstrap-listener-messaging-probe-argument
-        )
-        .await?
+        bind_listeners(config, metrics, resources).await?
     };
     let admitted = if startup_stopped || signals.pending() {
         false
     } else {
         admit(signals, &readiness, policy).await?
     };
-    // template:begin jobs:worker-bootstrap-start-admitted-jobs
-    if admitted {
-        opened.started = engines
-            .iter()
-            .map(|engine| engine.start(tracker, cancel))
-            .collect();
-        tracing::info!(engines = opened.started.len(), "jobs_claiming_started");
-    }
-    // template:end jobs:worker-bootstrap-start-admitted-jobs
-    // template:begin messaging:worker-bootstrap-start-admitted-consumer
-    if admitted && let Some(consumer) = consumer {
-        opened.consumer = Some(consumer.start(cancel));
-        tracing::info!("messaging_consuming_started");
-    }
-    // template:end messaging:worker-bootstrap-start-admitted-consumer
-    Ok(Prepared {
-        tracer_provider,
-        readiness,
-        policy,
-        // template:begin jobs:worker-bootstrap-prepared-jobs-value
-        pool,
-        // template:end jobs:worker-bootstrap-prepared-jobs-value
-        admitted,
-    })
+    Ok((readiness, policy, admitted))
 }
 
 // template:begin messaging:worker-bootstrap-sanitized-panic-hook
@@ -649,7 +615,7 @@ async fn open_pool(
     config: &Config,
     cancel: &CancellationToken,
     tracker: &TaskTracker,
-    opened: &mut Opened,
+    resources: &mut Resources,
 ) -> Result<PgPool, WorkerError> {
     let dsn = Dsn::admit(config.postgres.required_dsn()?.expose_secret())?;
     let application_name = application_name(&config.observability.otel.service_name);
@@ -662,7 +628,7 @@ async fn open_pool(
         },
     )
     .await?;
-    opened.pool = Some(pool.clone());
+    resources.pool = Some(pool.clone());
     tracing::info!(
         postgres.host = dsn.host(),
         postgres.port = dsn.port(),
@@ -683,43 +649,32 @@ async fn open_pool(
 async fn bind_listeners(
     config: &Config,
     metrics: &Metrics,
-    opened: &mut Opened,
-    // template:begin jobs:worker-bootstrap-listener-jobs-parameter
-    pool: Option<&PgPool>,
-    // template:end jobs:worker-bootstrap-listener-jobs-parameter
-    // template:begin messaging:worker-bootstrap-listener-messaging-parameter
-    messaging_probe: Option<infra_messaging::MessagingProbe>,
-    // template:end messaging:worker-bootstrap-listener-messaging-parameter
-) -> Result<(Readiness, RefreshPolicy), WorkerError> {
+    resources: &mut Resources,
+) -> Result<Readiness, WorkerError> {
     let mut probes: Vec<Box<dyn Probe>> = Vec::new();
     // template:begin jobs:worker-bootstrap-listener-jobs-probe
-    if let Some(pool) = pool {
+    if let Some(pool) = resources.pool.as_ref() {
         probes.push(Box::new(PostgresProbe::new(pool.clone())));
     }
     // template:end jobs:worker-bootstrap-listener-jobs-probe
     // template:begin messaging:worker-bootstrap-listener-messaging-probe
-    if let Some(probe) = messaging_probe {
-        probes.push(Box::new(probe));
+    if let Some(messaging) = resources.messaging.as_ref() {
+        probes.push(Box::new(messaging.probe()));
     }
     // template:end messaging:worker-bootstrap-listener-messaging-probe
     let readiness = Readiness::new(probes);
-    let policy = RefreshPolicy {
-        interval: config.health.refresh_interval,
-        probe_budget: config.health.probe_budget,
-        failure_threshold: config.health.failure_threshold,
-    };
     let options = server_options(config);
     let routes = infra_http::finalize_public(infra_http::router())?.with_state(readiness.reader());
     let app = infra_http::harden(routes, &harden_options(config));
     let health = Server::bind(config.http.listen_addr()?, app, options).await?;
     tracing::info!(addr = %health.local_addr(), "http listener bound");
-    opened.listeners.health = Some(health);
+    resources.listeners.health = Some(health);
     if let Some(addr) = config.observability.metrics.listen_addr()? {
         let diagnostics = Server::bind(addr, diagnostics_router(metrics.clone()), options).await?;
         tracing::info!(addr = %diagnostics.local_addr(), "diagnostics listener bound");
-        opened.listeners.diagnostics = Some(diagnostics);
+        resources.listeners.diagnostics = Some(diagnostics);
     }
-    Ok((readiness, policy))
+    Ok(readiness)
 }
 
 // template:begin messaging:worker-bootstrap-messaging-options
@@ -804,41 +759,33 @@ fn spawn_refresher(
     tracker.spawn(async move { readiness.refresh_until(policy, cancel).await });
 }
 
-/// `true` when a stop signal ended the wait. A terminal jobs or messaging
-/// failure takes the existing error exit after ordered cleanup.
-async fn wait_for_stop(
-    // template:begin jobs:worker-bootstrap-wait-started-parameter
-    started: &[Started],
-    // template:end jobs:worker-bootstrap-wait-started-parameter
-    // template:begin messaging:worker-bootstrap-wait-consumer-parameter
-    consumer: Option<&ConsumerHandle>,
-    // template:end messaging:worker-bootstrap-wait-consumer-parameter
-    signals: &mut Signals,
-) -> bool {
+/// `Ended::Signal` when a stop signal ended the wait. A terminal jobs or
+/// messaging failure takes the existing error exit after ordered cleanup.
+async fn wait_for_stop(resources: &Resources, signals: &mut Signals) -> Ended {
     tokio::select! {
         biased;
-        () = signals.wait() => true,
+        () = signals.wait() => Ended::Signal,
         // template:begin jobs:worker-bootstrap-wait-jobs-failure
         () = async {
-            if started.is_empty() {
+            if resources.started.is_empty() {
                 std::future::pending::<()>().await;
             } else {
                 futures_util::future::select_all(
-                    started.iter().map(|engine| Box::pin(engine.failed())),
+                    resources.started.iter().map(|engine| Box::pin(engine.failed())),
                 ).await;
             }
-        } => false,
+        } => Ended::Failure,
         // template:end jobs:worker-bootstrap-wait-jobs-failure
         // template:begin messaging:worker-bootstrap-wait-messaging-failure
         error = async {
-            if let Some(consumer) = consumer {
+            if let Some(consumer) = resources.consumer.as_ref() {
                 consumer.failed().await
             } else {
                 std::future::pending::<infra_messaging::ConsumerError>().await
             }
         } => {
             tracing::error!(error = %error, "messaging consumer stopped");
-            false
+            Ended::Failure
         },
         // template:end messaging:worker-bootstrap-wait-messaging-failure
     }
@@ -867,10 +814,13 @@ fn worker_identity(service_name: &str) -> String {
 }
 
 // template:begin jobs:worker-bootstrap-application-name
+const APPLICATION_NAME_SUFFIX: &str = "-jobs-worker";
+const POSTGRES_IDENTIFIER_LIMIT: usize = 63;
+
 fn application_name(service_name: &str) -> String {
-    let end = service_name.floor_char_boundary(51);
-    let prefix = service_name.get(..end).unwrap_or("");
-    format!("{prefix}-jobs-worker")
+    let end =
+        service_name.floor_char_boundary(POSTGRES_IDENTIFIER_LIMIT - APPLICATION_NAME_SUFFIX.len());
+    format!("{}{APPLICATION_NAME_SUFFIX}", &service_name[..end])
 }
 // template:end jobs:worker-bootstrap-application-name
 
@@ -999,8 +949,8 @@ mod tests {
         );
         // template:begin jobs:worker-bootstrap-test-jobs-refusals
         assert_eq!(
-            WorkerError::Kinds(KindError::NoKinds).to_string(),
-            "job kinds are invalid: no job kind is registered"
+            WorkerError::Kinds(KindError::Duplicate("welcome")).to_string(),
+            "job kinds are invalid: job kind \"welcome\" is registered twice"
         );
         assert_eq!(
             WorkerError::JobsStartup(StartupError::Unavailable).to_string(),
@@ -1013,44 +963,23 @@ mod tests {
     #[test]
     fn identity_keeps_the_suffix_inside_the_postgres_limit() {
         assert_eq!(super::worker_identity("service"), "service-jobs-worker");
-        assert_eq!(application_name("service"), "service-jobs-worker");
-
-        let ascii_64 = "a".repeat(64);
-        let cut = application_name(&ascii_64);
-        assert_eq!(cut, format!("{}-jobs-worker", "a".repeat(51)));
-        assert_eq!(cut.len(), 63);
-
-        let ascii_51 = "a".repeat(51);
-        let whole = application_name(&ascii_51);
-        assert_eq!(whole, format!("{ascii_51}-jobs-worker"));
-        assert_eq!(whole.len(), 63);
-
-        let inside = format!("{}é", "a".repeat(50));
-        assert_eq!(inside.len(), 52);
-        let cut_char = application_name(&inside);
-        assert_eq!(cut_char, format!("{}-jobs-worker", "a".repeat(50)));
-        assert_eq!(cut_char.len(), 62);
-
-        let exact = format!("{}é", "a".repeat(49));
-        assert_eq!(exact.len(), 51);
-        let kept = application_name(&exact);
-        assert_eq!(kept, format!("{exact}-jobs-worker"));
-        assert_eq!(kept.len(), 63);
-
-        let wide = "あ".repeat(20);
-        assert_eq!(wide.len(), 60);
-        let wide_name = application_name(&wide);
-        assert_eq!(wide_name.len(), 63);
-        assert!(wide_name.starts_with(&wide[..51]));
-
-        for name in [
-            application_name("service"),
-            cut,
-            whole,
-            cut_char,
-            kept,
-            wide_name,
-        ] {
+        let cases = [
+            ("service".to_owned(), "service-jobs-worker".to_owned()),
+            ("a".repeat(64), format!("{}-jobs-worker", "a".repeat(51))),
+            ("a".repeat(51), format!("{}-jobs-worker", "a".repeat(51))),
+            (
+                format!("{}é", "a".repeat(50)),
+                format!("{}-jobs-worker", "a".repeat(50)),
+            ),
+            (
+                format!("{}é", "a".repeat(49)),
+                format!("{}é-jobs-worker", "a".repeat(49)),
+            ),
+            ("あ".repeat(20), format!("{}-jobs-worker", "あ".repeat(17))),
+        ];
+        for (input, expected) in cases {
+            let name = application_name(&input);
+            assert_eq!(name, expected, "{input}");
             assert!(name.ends_with("-jobs-worker"), "{name}");
             assert!(name.len() <= 63, "{}", name.len());
         }
