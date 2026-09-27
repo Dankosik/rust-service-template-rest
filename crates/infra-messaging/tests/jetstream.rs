@@ -264,15 +264,14 @@ fn event(id: &str) -> Event<ExampleEvent> {
 }
 
 fn event_with_value(id: &str, value: &str) -> Event<ExampleEvent> {
-    Event::new(
-        id,
-        time::OffsetDateTime::from_unix_timestamp(1_700_000_000)
+    Event {
+        id: id.to_owned(),
+        occurred_at: time::OffsetDateTime::from_unix_timestamp(1_700_000_000)
             .expect("fixed event timestamp is valid"),
-        ExampleEvent {
+        payload: ExampleEvent {
             value: value.to_owned(),
         },
-    )
-    .expect("fixed event is valid")
+    }
 }
 
 fn options(
@@ -622,7 +621,7 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
                 .expect("test completion sender lock must not be poisoned")
                 .take()
             {
-                let _ = sender.send(event.id().to_owned());
+                let _ = sender.send(event.id.clone());
             }
             async { Ok(()) }
         })

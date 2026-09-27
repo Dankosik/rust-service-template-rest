@@ -248,7 +248,7 @@ fn parse_schema(value: &str) -> Result<u16, MessagingError> {
     Ok(version)
 }
 
-fn validate_text(value: &str) -> Result<(), MessagingError> {
+pub(crate) fn validate_text(value: &str) -> Result<(), MessagingError> {
     if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
         return Err(MessagingError::Envelope("header identity is invalid"));
     }

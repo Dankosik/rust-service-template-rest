@@ -12,6 +12,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-serde = { workspace = true, features = ["std", "derive"] }
+serde = { workspace = true, features = ["std"] }
 time = { workspace = true, features = ["std"] }
-thiserror = { workspace = true }

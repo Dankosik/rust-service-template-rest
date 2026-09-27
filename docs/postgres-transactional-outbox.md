@@ -46,8 +46,6 @@ The canonical guides show the transaction boundary explicitly:
 #[derive(Debug, thiserror::Error)]
 enum CreateError {
     #[error(transparent)]
-    Event(#[from] domain_events::EventError),
-    #[error(transparent)]
     Messaging(#[from] infra_messaging::MessagingError),
     #[error(transparent)]
     Outbox(#[from] infra_messaging::outbox::OutboxEnqueueError),
@@ -57,7 +55,7 @@ enum CreateError {
     RetryTransaction,
 }
 
-let event = domain_events::Event::new(logical_id, occurred_at, payload)?;
+let event = domain_events::Event { id: logical_id, occurred_at, payload };
 let prepared = registry.prepare(&event, max_payload_bytes)?;
 infra_postgres::in_tx(pool, async |tx| {
     write_business_record(infra_postgres::connection(tx)).await?;
