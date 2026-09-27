@@ -1,15 +1,11 @@
 use std::sync::Arc;
 
-use hyper_rustls::HttpsConnectorBuilder;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
-use tonic::transport::{Channel, Endpoint};
-use tower::ServiceExt as _;
+use rustls::{RootCertStore, ServerConfig};
 
 use crate::Error;
-use crate::client::ClientTlsMaterial;
 
-/// Server certificate material admitted by configuration.  The private key is
+/// Server certificate material admitted by configuration. The private key is
 /// redacted by configuration; this type's `Debug` reports only material presence.
 #[derive(Clone)]
 pub struct ServerTlsMaterial {
@@ -29,7 +25,14 @@ impl std::fmt::Debug for ServerTlsMaterial {
     }
 }
 
-pub(crate) fn server_config(material: &ServerTlsMaterial) -> Result<Arc<ServerConfig>, Error> {
+/// TLS 1.3 server config with HTTP/2 ALPN. A client CA makes client
+/// certificates mandatory.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidConfiguration`] when the certificate, private key,
+/// or client CA cannot be used.
+pub fn server_tls_config(material: &ServerTlsMaterial) -> Result<Arc<ServerConfig>, Error> {
     let certificates = certificates(&material.certificate_pem)?;
     let key = PrivateKeyDer::from_pem_slice(&material.private_key_pem)
         .map_err(|_| Error::InvalidConfiguration)?;
@@ -50,64 +53,6 @@ pub(crate) fn server_config(material: &ServerTlsMaterial) -> Result<Arc<ServerCo
     .map_err(|_| Error::InvalidConfiguration)?;
     config.alpn_protocols = vec![b"h2".to_vec()];
     Ok(Arc::new(config))
-}
-
-pub(crate) fn client_channel(
-    endpoint: &Endpoint,
-    material: ClientTlsMaterial,
-) -> Result<Channel, Error> {
-    let config = client_config(material)?;
-    let connector = HttpsConnectorBuilder::new()
-        .with_tls_config(config)
-        .https_only()
-        .enable_http2()
-        .build();
-    let secure_uri = endpoint.uri().clone();
-    let mut transport_parts = secure_uri.clone().into_parts();
-    transport_parts.scheme = Some(http::uri::Scheme::HTTP);
-    let transport_uri =
-        http::Uri::from_parts(transport_parts).map_err(|_| Error::InvalidConfiguration)?;
-    // The custom connector owns TLS. An HTTPS routing URI makes tonic add its
-    // own TLS gate when another package enables `_tls-any`. Keep the wire
-    // origin HTTPS and pin every real connection to the original secure URI.
-    let transport = Endpoint::from(transport_uri).origin(secure_uri.clone());
-    let connector = connector.map_request(move |_: http::Uri| secure_uri.clone());
-    Ok(transport.connect_with_connector_lazy(connector))
-}
-
-fn client_config(material: ClientTlsMaterial) -> Result<ClientConfig, Error> {
-    let mut roots = RootCertStore::empty();
-    let native = rustls_native_certs::load_native_certs();
-    if !native.errors.is_empty() {
-        return Err(Error::InvalidConfiguration);
-    }
-    for certificate in native.certs {
-        roots
-            .add(certificate)
-            .map_err(|_| Error::InvalidConfiguration)?;
-    }
-    if let Some(ca) = material.ca_certificate_pem.as_deref() {
-        for certificate in certificates(ca)? {
-            roots
-                .add(certificate)
-                .map_err(|_| Error::InvalidConfiguration)?;
-        }
-    }
-    let provider = rustls::crypto::aws_lc_rs::default_provider();
-    let builder = ClientConfig::builder_with_provider(provider.into())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|_| Error::InvalidConfiguration)?
-        .with_root_certificates(roots);
-    match (material.certificate_pem, material.private_key_pem) {
-        (Some(certificate), Some(key)) => builder
-            .with_client_auth_cert(
-                certificates(&certificate)?,
-                PrivateKeyDer::from_pem_slice(&key).map_err(|_| Error::InvalidConfiguration)?,
-            )
-            .map_err(|_| Error::InvalidConfiguration),
-        (None, None) => Ok(builder.with_no_client_auth()),
-        _ => Err(Error::InvalidConfiguration),
-    }
 }
 
 fn certificates(input: &[u8]) -> Result<Vec<CertificateDer<'static>>, Error> {

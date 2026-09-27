@@ -202,15 +202,12 @@ classify() {
 		esac
 		# template:begin grpc:classifier-grpc-schema
 		case "${file}" in
-		api/proto/* | crates/grpc-contracts/* | tools/grpc-codegen/* | buf.yaml | buf.lock | scripts/grpc-generate.sh | scripts/ci/grpc-check.sh | scripts/grpc-protoc.py | scripts/tests/grpc-protoc.py | .cargo/config.toml | tools/versions.env)
+		api/proto/* | crates/grpc-contracts/* | tools/grpc-codegen/* | buf.yaml | scripts/grpc-generate.sh | scripts/ci/grpc-check.sh | tools/versions.env)
 			mark grpc_schema
 			;;
 		esac
 		case "${file}" in
 		tools/grpc-codegen/Cargo.toml | tools/grpc-codegen/Cargo.lock) mark cargo_dependencies ;;
-		esac
-		case "${file}" in
-		scripts/grpc-protoc.py | scripts/tests/grpc-protoc.py | .cargo/config.toml | tools/versions.env) mark tool_manifest runtime_image ;;
 		esac
 		# template:end grpc:classifier-grpc-schema
 		# The Dockerfile carries tool pins too (ARG defaults, FROM digests).
@@ -270,7 +267,7 @@ classify() {
 			mark module_initializer initializer_runtime
 			;;
 		# template:begin grpc:classifier-grpc-initializer
-		api/proto/* | crates/infra-grpc/* | crates/grpc-contracts/* | crates/service/examples/grpc.rs | tools/grpc-codegen/* | buf.yaml | buf.lock | scripts/grpc-generate.sh | scripts/ci/grpc-check.sh | scripts/grpc-protoc.py | scripts/tests/grpc-protoc.py | .cargo/config.toml)
+		api/proto/* | crates/infra-grpc/* | crates/grpc-contracts/* | crates/service/examples/grpc.rs | tools/grpc-codegen/* | buf.yaml | scripts/grpc-generate.sh | scripts/ci/grpc-check.sh)
 			mark module_initializer initializer_runtime
 			;;
 		# template:end grpc:classifier-grpc-initializer
@@ -296,16 +293,23 @@ classify() {
 }
 
 union_classify() {
-	local base_ref=$1 tmp files old_files base_script current old current_status old_status name value count=0
+	local base_ref=$1 tmp files old_files current_files base_script current old current_status old_status name value count=0
 	local current_classified current_unclassified line
 	tmp=$(mktemp -d)
 	trap 'rm -rf -- "${tmp}"' RETURN
 	files=${tmp}/files
 	old_files=${tmp}/old-files
 	base_script=${tmp}/changed-surfaces.sh
+	current_files=${tmp}/current-files
 	cat >"${files}"
 	: >"${old_files}"
+	: >"${current_files}"
 	while IFS= read -r file; do
+		# A path deleted by this change is classified only by the base
+		# classifier, which still knows it; the head classifier may not.
+		if [[ -e ${file} || -L ${file} ]] || ! git cat-file -e "${base_ref}:${file}" 2>/dev/null; then
+			printf '%s\n' "${file}" >>"${current_files}"
+		fi
 		[[ ${file} != scripts/ci/changed-surfaces.sh ]] || continue
 		git cat-file -e "${base_ref}:${file}" 2>/dev/null && printf '%s\n' "${file}" >>"${old_files}"
 	done <"${files}"
@@ -314,7 +318,7 @@ union_classify() {
 		return 2
 	}
 	set +e
-	current=$(classify <"${files}")
+	current=$(classify <"${current_files}")
 	current_status=$?
 	old=$(bash "${base_script}" <"${old_files}")
 	old_status=$?
@@ -506,11 +510,9 @@ EOF
 		"openapi" \
 		"rust_source documentation"
 	# template:begin grpc:classifier-grpc-tests
-	for file in api/proto/example/v1/echo.proto crates/grpc-contracts/src/generated/example.v1.rs tools/grpc-codegen/Cargo.toml buf.yaml buf.lock; do
+	for file in api/proto/example/v1/echo.proto crates/grpc-contracts/src/generated/example.v1.rs tools/grpc-codegen/Cargo.toml buf.yaml; do
 		assert_case "${file}" "grpc_schema" "openapi runtime_image"
 	done
-	assert_case scripts/grpc-protoc.py "grpc_schema tool_manifest runtime_image" "openapi"
-	assert_case .cargo/config.toml "grpc_schema tool_manifest runtime_image" "openapi"
 	# template:end grpc:classifier-grpc-tests
 	assert_case .redocly.yaml \
 		"openapi" \

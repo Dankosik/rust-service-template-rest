@@ -19,9 +19,10 @@ if [[ "${1:-}" == "buf" ]]; then
   exit 0
 fi
 
-readonly output_dir="${1:-${root_dir}/crates/grpc-contracts/src}"
-readonly descriptor_path="${output_dir}/descriptor.bin"
-readonly generated_dir="${output_dir}/generated"
+readonly generated_dir="${1:-${root_dir}/crates/grpc-contracts/src/generated}"
+descriptor_path="$(mktemp)"
+readonly descriptor_path
+trap 'rm -f "${descriptor_path}"' EXIT
 
 mkdir -p "${generated_dir}"
 run_buf build "${root_dir}/api/proto" \

@@ -1,45 +1,21 @@
-//! Governed native gRPC transport.
+//! Native gRPC transport over tonic and the shared HTTP listener.
 //!
-//! Application crates use generated contracts and [`Services`].  This crate
-//! owns the policy surrounding those generated services: registration,
-//! authentication, validation, terminal status provenance, resource lifetime,
-//! listener security, and outbound custody.
+//! Application crates register generated services and serve them through
+//! [`router`]. This crate owns authentication, deadlines, health, listener
+//! security, and outbound channels.
 
 #![forbid(unsafe_code)]
 
-mod body;
-mod call;
 mod client;
-mod codec;
 mod error;
 mod health;
 mod observe;
-mod registration;
-mod server;
+mod router;
 mod status;
 mod tls;
-mod validation;
 
-pub use client::{Client, ClientSecurity, ClientTlsMaterial, Operation};
+pub use client::{Client, ClientSecurity, ClientTlsMaterial};
 pub use error::Error;
-pub use registration::Services;
-pub use server::{
-    BoundServer, PreparedServer, RunningServer, Server, ServerOptions, ServerSecurity,
-};
+pub use router::{Services, UNARY_DEADLINE, grpc_timeout, router, server_options};
 pub use status::classified_status;
-pub use tls::ServerTlsMaterial;
-
-#[doc(hidden)]
-pub use registration::{Cardinality, Method, ServiceDescriptor};
-
-/// Source-level policy interface emitted alongside generated contracts.
-///
-/// It is intentionally hidden from normal application documentation: feature
-/// adapters use their generated native trait, while generated code alone uses
-/// this seam to prevent a method from bypassing the transport boundary.
-#[doc(hidden)]
-pub mod generated {
-    pub use crate::call::{GovernedService, GuardedStream, guard_stream, guard_unary};
-    pub use crate::codec::{BoundedClientCodec, ValidatedCodec};
-    pub use crate::registration::{Cardinality, Method, ServiceDescriptor};
-}
+pub use tls::{ServerTlsMaterial, server_tls_config};

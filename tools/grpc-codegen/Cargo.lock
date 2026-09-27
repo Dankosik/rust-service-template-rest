@@ -90,9 +90,7 @@ dependencies = [
 name = "grpc-codegen"
 version = "0.1.0"
 dependencies = [
- "heck",
  "prost",
- "prost-build",
  "prost-types",
  "tonic-prost-build",
 ]

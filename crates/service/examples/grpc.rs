@@ -2,7 +2,7 @@
 //!
 //! This executable deliberately registers no default business service. It is
 //! the one small feature adapter that proves a derived service uses the same
-//! process, listener, admission, and shutdown path as the service binary.
+//! process, listener, and shutdown path as the service binary.
 
 use std::pin::Pin;
 use std::process::ExitCode;
@@ -11,12 +11,13 @@ use futures_util::{Stream, StreamExt as _};
 use grpc_contracts::generated::{
     BidiStreamRequest, BidiStreamResponse, ClientStreamRequest, ClientStreamResponse,
     ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
-    echo_service_server::EchoService,
+    echo_service_server::{EchoService, EchoServiceServer},
 };
 use infra_grpc::{Services, classified_status};
 use service_failure::{ClassifiedFailure, Code};
 use tonic::{Request, Response, Status};
 
+const MAX_MESSAGE_BYTES: usize = 1024;
 const MAX_AGGREGATE_BYTES: usize = 1024;
 
 #[derive(Clone, Debug, Default)]
@@ -28,9 +29,8 @@ impl EchoService for Echo {
         &self,
         request: Request<UnaryRequest>,
     ) -> Result<Response<UnaryResponse>, Status> {
-        Ok(Response::new(UnaryResponse {
-            message: request.into_inner().message,
-        }))
+        let message = accepted(request.into_inner().message)?;
+        Ok(Response::new(UnaryResponse { message }))
     }
 
     async fn client_stream(
@@ -40,12 +40,13 @@ impl EchoService for Echo {
         let mut input = request.into_inner();
         let mut message = String::new();
         while let Some(next) = input.message().await? {
-            if message.len().saturating_add(next.message.len()) > MAX_AGGREGATE_BYTES {
+            let next = accepted(next.message)?;
+            if message.len().saturating_add(next.len()) > MAX_AGGREGATE_BYTES {
                 return Err(classified_status(ClassifiedFailure::new(
                     Code::RequestEntityTooLarge,
                 )));
             }
-            message.push_str(&next.message);
+            message.push_str(&next);
         }
         Ok(Response::new(ClientStreamResponse { message }))
     }
@@ -57,7 +58,7 @@ impl EchoService for Echo {
         &self,
         request: Request<ServerStreamRequest>,
     ) -> Result<Response<Self::ServerStreamStream>, Status> {
-        let message = request.into_inner().message;
+        let message = accepted(request.into_inner().message)?;
         Ok(Response::new(Box::pin(tokio_stream::iter([Ok(
             ServerStreamResponse { message },
         )]))))
@@ -70,16 +71,27 @@ impl EchoService for Echo {
         request: Request<tonic::Streaming<BidiStreamRequest>>,
     ) -> Result<Response<Self::BidiStreamStream>, Status> {
         let responses = request.into_inner().map(|item| {
-            item.map(|request| BidiStreamResponse {
-                message: request.message,
+            item.and_then(|request| {
+                accepted(request.message.clone())?;
+                Ok(BidiStreamResponse {
+                    message: request.message,
+                })
             })
         });
         Ok(Response::new(Box::pin(responses)))
     }
 }
 
+fn accepted(message: String) -> Result<String, Status> {
+    if (1..=MAX_MESSAGE_BYTES).contains(&message.len()) {
+        Ok(message)
+    } else {
+        Err(classified_status(ClassifiedFailure::new(Code::BadRequest)))
+    }
+}
+
 fn register(services: &mut Services) -> Result<(), infra_grpc::Error> {
-    grpc_contracts::generated::register_echo_service(services, Echo)
+    services.add(EchoServiceServer::new(Echo))
 }
 
 fn main() -> ExitCode {

@@ -1,6 +1,6 @@
 [package]
 name = "grpc-contracts"
-description = "Committed protobuf contracts and governed native gRPC adapters."
+description = "Committed protobuf contracts."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,7 +12,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-infra-grpc = { workspace = true }
 prost = { workspace = true, features = ["std", "derive"] }
-prost-reflect = { workspace = true, features = ["derive"] }
 tonic = { workspace = true, features = ["codegen"] }
+tonic-prost = { workspace = true }

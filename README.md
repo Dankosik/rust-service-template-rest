@@ -60,12 +60,13 @@ prerequisites, refusal and recovery.
 ## Profiles and local owners
 
 <!-- template:begin grpc:readme-grpc-profile -->
-`GRPC=enabled` retains native tonic/prost RPCs on a separate HTTP/2 listener,
-generated contracts, standard health, shared lazy clients and bounded shutdown.
-It is inert until explicitly enabled and registered. `GRPC=none` removes the
-complete capability. The [gRPC guide](docs/grpc.md) owns registration, validation,
-TLS/plaintext trust, authentication and generation; the [decision
-record](docs/grpc-decisions.md) explains the library boundaries.
+`GRPC=enabled` retains native tonic RPCs on a separate listener that uses the
+shared HTTP accept loop, generated contracts, standard health, lazy clients
+and the process drain. It is inert until explicitly enabled and registered.
+`GRPC=none` removes the complete capability. The [gRPC guide](docs/grpc.md)
+owns registration, handler validation, TLS/plaintext, authentication and
+generation; the [decision record](docs/grpc-decisions.md) explains the
+boundaries.
 <!-- template:end grpc:readme-grpc-profile -->
 
 <!-- template:begin webhooks-common:readme-webhooks-profiles -->
