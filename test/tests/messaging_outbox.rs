@@ -192,15 +192,14 @@ fn nats_url() -> String {
 }
 
 fn event(id: &str, value: &str) -> Event<Created> {
-    Event::new(
-        id,
-        time::OffsetDateTime::from_unix_timestamp(1_700_000_000)
+    Event {
+        id: id.to_owned(),
+        occurred_at: time::OffsetDateTime::from_unix_timestamp(1_700_000_000)
             .expect("fixed occurrence is valid"),
-        Created {
+        payload: Created {
             value: value.to_owned(),
         },
-    )
-    .expect("fixture event is valid")
+    }
 }
 
 fn messaging_options(fixture: &Fixture) -> MessagingOptions {
@@ -971,7 +970,7 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
         .register::<Created, _, _>(move |event, _| {
             let pool = effect_pool.clone();
             let invoked = Arc::clone(&invoked_handler);
-            let logical_id = event.id().to_owned();
+            let logical_id = event.id.clone();
             async move {
                 sqlx::query(
                     "INSERT INTO messaging_effects (logical_id) VALUES ($1) ON CONFLICT DO NOTHING",

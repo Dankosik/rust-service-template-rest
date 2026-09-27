@@ -19,6 +19,20 @@ struct RouteKey {
     schema_version: u16,
 }
 
+/// The route key of a payload type; rejects version zero at compile time.
+fn route_key<T: EventPayload>() -> RouteKey {
+    const {
+        assert!(
+            T::SCHEMA_VERSION > 0,
+            "event schema version must be positive"
+        )
+    };
+    RouteKey {
+        event_type: T::EVENT_TYPE.to_owned(),
+        schema_version: T::SCHEMA_VERSION,
+    }
+}
+
 /// Composition-owned subject routing for one typed event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Route {
@@ -31,10 +45,7 @@ impl Route {
     #[must_use]
     pub fn new<T: EventPayload>(subject: impl Into<String>) -> Self {
         Self {
-            key: RouteKey {
-                event_type: T::EVENT_TYPE.to_owned(),
-                schema_version: T::SCHEMA_VERSION,
-            },
+            key: route_key::<T>(),
             subject: subject.into(),
         }
     }
@@ -65,15 +76,7 @@ impl Registry {
     pub fn new(routes: impl IntoIterator<Item = Route>) -> Result<Self, RegistryError> {
         let mut mapped = HashMap::new();
         for route in routes {
-            if route.key.schema_version == 0 {
-                return Err(RegistryError::InvalidRoute(
-                    "schema version must be positive",
-                ));
-            }
-            if route.key.event_type.is_empty()
-                || route.key.event_type.len() > 256
-                || route.key.event_type.chars().any(char::is_control)
-            {
+            if crate::wire::validate_text(&route.key.event_type).is_err() {
                 return Err(RegistryError::InvalidRoute("event type is invalid"));
             }
             if !valid_subject(&route.subject) {
@@ -99,14 +102,11 @@ impl Registry {
     /// Rejects missing routes and a second handler for the same event version.
     pub fn register<T, F, Fut>(&mut self, handler: F) -> Result<(), RegistryError>
     where
-        T: EventPayload,
+        T: EventPayload + 'static,
         F: Fn(Event<T>, CancellationToken) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), HandlerError>> + Send + 'static,
     {
-        let key = RouteKey {
-            event_type: T::EVENT_TYPE.to_owned(),
-            schema_version: T::SCHEMA_VERSION,
-        };
+        let key = route_key::<T>();
         if !self.routes.contains_key(&key) {
             return Err(RegistryError::MissingRoute {
                 event_type: T::EVENT_TYPE.to_owned(),
@@ -126,9 +126,10 @@ impl Registry {
                 let Ok(payload) = serde_json::from_slice::<T>(&envelope.payload) else {
                     return Box::pin(async { Err(HandlerError::Permanent) });
                 };
-                let Ok(event) = Event::new(envelope.message_id, envelope.occurred_at, payload)
-                else {
-                    return Box::pin(async { Err(HandlerError::Permanent) });
+                let event = Event {
+                    id: envelope.message_id,
+                    occurred_at: envelope.occurred_at,
+                    payload,
                 };
                 Box::pin(handler(event, cancel))
             }),
@@ -172,19 +173,11 @@ impl Registry {
 
     #[must_use]
     pub fn has_route<T: EventPayload>(&self) -> bool {
-        self.routes.contains_key(&RouteKey {
-            event_type: T::EVENT_TYPE.to_owned(),
-            schema_version: T::SCHEMA_VERSION,
-        })
+        self.routes.contains_key(&route_key::<T>())
     }
 
     pub(crate) fn subject_for<T: EventPayload>(&self) -> Option<&str> {
-        self.routes
-            .get(&RouteKey {
-                event_type: T::EVENT_TYPE.to_owned(),
-                schema_version: T::SCHEMA_VERSION,
-            })
-            .map(String::as_str)
+        self.routes.get(&route_key::<T>()).map(String::as_str)
     }
 
     pub(crate) fn subjects(&self) -> impl Iterator<Item = &str> {

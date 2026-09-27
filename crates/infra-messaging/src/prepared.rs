@@ -27,24 +27,36 @@ impl PreparedEvent {
         event: &Event<T>,
         max_payload_bytes: usize,
     ) -> Result<Self, crate::MessagingError> {
+        const {
+            assert!(
+                T::SCHEMA_VERSION > 0,
+                "event schema version must be positive"
+            )
+        };
         let subject = subject.into();
         if !crate::wire::valid_subject(&subject) {
             return Err(crate::MessagingError::Envelope("subject is invalid"));
         }
-        let payload = serde_json::to_vec(event.payload())
+        let payload = serde_json::to_vec(&event.payload)
             .map_err(|_| crate::MessagingError::Envelope("event payload cannot be serialized"))?;
         if payload.len() > max_payload_bytes {
             return Err(crate::MessagingError::Envelope(
                 "payload exceeds configured maximum",
             ));
         }
+        let occurred_at = event
+            .occurred_at
+            .checked_to_offset(time::UtcOffset::UTC)
+            .ok_or(crate::MessagingError::Envelope(
+                "occurrence time is out of range",
+            ))?;
         let prepared = Self {
             subject,
-            message_id: event.id().to_owned(),
-            publication_id: event.id().to_owned(),
+            message_id: event.id.clone(),
+            publication_id: event.id.clone(),
             event_type: T::EVENT_TYPE.to_owned(),
             schema_version: T::SCHEMA_VERSION,
-            occurred_at: event.occurred_at(),
+            occurred_at,
             payload: payload.into(),
         };
         let headers = crate::wire::encode_prepared(&prepared)?;
