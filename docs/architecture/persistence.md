@@ -34,15 +34,19 @@ access code from that schema.
 
 `postgres.dsn` is a `postgres://` or `postgresql://` URL with an explicit
 host, port, user, password, database, and `sslmode` in `disable`, `require`,
-`verify-ca`, or `verify-full`, and no other parameter. `Dsn::admit` refuses,
-in this order and without ever quoting the value: an empty string, another
-scheme, an unparsable URL, a URL fragment, a missing component, a Unix socket
-host, a comma-separated host list, `allow`/`prefer`, a service or passfile
-parameter, a TLS certificate or key file parameter, any other parameter, a
-non-empty libpq variable (`PGHOST`, `PGPASSWORD`, `PGSSLMODE`, ... the
-thirteen names in `AMBIENT_ENVIRONMENT`), and a string the driver still
-cannot turn into connect options. The result is exactly what the
-operator wrote; `application_name` is added by the template from
+`verify-ca`, or `verify-full`. The only other parameter is an optional
+`sslrootcert` with an absolute path to the CA bundle of a private
+certificate authority (RDS, Cloud SQL, Azure, an in-house CA); it is
+admitted only with `verify-ca` or `verify-full`, because `sqlx` ignores it
+under `require`, and it adds to the bundled webpki roots. `Dsn::admit`
+refuses, without ever quoting the value: an empty string, a non-empty
+`PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, or `PGOPTIONS` (the libpq
+variables `sqlx` would still merge into an explicit URL; the others are
+overwritten by a required component), another scheme, an unparsable URL, a
+URL fragment, a missing component, `allow`/`prefer`, any other parameter, a
+string the driver cannot turn into connect options, and, read back from
+the driver's own parse, a Unix socket host or a comma-separated host list.
+The result is exactly what the operator wrote; `application_name` is added by the template from
 `observability.otel.service_name` (the same identity traces publish) so
 `pg_stat_activity` attributes sessions. A distinct database session label
 is not a configuration axis.
@@ -58,7 +62,7 @@ different ones changes them in one reviewed place.
 | `statement_timeout` | 8 s | Session default in the startup packet of every pooled connection |
 | `idle_in_transaction_session_timeout` | 8 s | Same duration as `statement_timeout` by policy; a separate constant |
 | Slow statement warning | 1 s | `warn` with SQL text and duration; statement logging is otherwise off |
-| Rollback after a failed closure | 3 s | `tokio::time::timeout` around `Transaction::rollback` |
+| Rollback after a failed closure | 3 s | `tokio::time::timeout` around `Transaction::rollback`; a failed or late rollback discards the connection |
 | Readiness probe | health `probe_budget` | The refresher bounds the acquire plus ping |
 | Pool close at shutdown | 5 s (`DEPENDENCY_CLOSE`) | After background tasks joined, before the telemetry flush |
 | Migration `statement_timeout`, idle-in-transaction | 2 min | Session defaults of the one migration connection |
@@ -85,8 +89,22 @@ failure class (`no connection available inside the acquire budget`,
 opaque `&mut Tx`. The provider adapter obtains a scoped connection through
 `infra_postgres::connection(tx)`; the handle exposes no constructor or
 transaction-control methods. The boundary commits on `Ok` and rolls back on
-`Err` inside the rollback budget, returning the closure's error. Rollback
-failure logs contain only a bounded cause category and sanitized SQLSTATE.
+`Err` inside the rollback budget, returning the closure's error. A rollback
+that fails or overruns the budget closes the physical connection instead of
+returning it to the pool in an unknown state; the same guard discards a
+connection whose `BEGIN` future was cancelled, which sqlx 0.9 would return
+to the pool inside an open transaction. Rollback failure logs contain only
+a bounded cause category and sanitized SQLSTATE.
+
+Before `COMMIT` of a read-write transaction the boundary runs `SELECT 1`.
+PostgreSQL answers `COMMIT` in an aborted transaction with a silent
+`ROLLBACK` and `sqlx` does not check the command tag, so a closure that
+swallowed a failed statement and returned `Ok` would look committed (pgx
+reports the same case as `ErrTxCommitRollback`). The probe turns it into
+`TxError::CommitFailed` with SQLSTATE `25P02` for one extra round trip.
+Read-only transactions skip it: nothing they did can be lost. A closure
+that expects a statement to fail runs it under a savepoint
+(`connection(tx).begin()`).
 `in_tx_with(&pool, TxOptions { isolation, read_only }, work)` renders the `BEGIN`
 statement for `Connection::begin_with`. `Isolation::ServerDefault` omits the
 isolation clause (server `default_transaction_isolation`);
@@ -157,7 +175,8 @@ classification, source rules, stage mapping. Database-backed proof lives in
 `test/tests/postgres.rs` behind the `integration` feature and runs through
 `ALLOW_HEAVY=1 make test-integration-db`: session defaults observed with
 `SHOW`, probe verdicts including pool exhaustion, commit and rollback,
-`CommitFailed` from a deferred constraint, a serialization failure,
+`CommitFailed` from a deferred constraint and from a swallowed statement
+failure, a serialization failure,
 read-only refusal, apply-then-no-change, edited and removed history, lock
 contention, the deadline, source and connect failures. Each test gets its
 own database from `#[sqlx::test]`. `ALLOW_HEAVY=1 make migration-validate`
@@ -258,8 +277,8 @@ scratch project against `postgres:18.4`):
   process-default provider is `aws-lc-rs`, the same one `reqwest` uses for
   OTLP HTTPS; enabling both providers leaves rustls without a default and
   panics at first use. sqlx 0.9's aws-lc-rs feature only ships
-  `webpki-roots` (no native-roots variant); the DSN policy admits no
-  root-certificate file. `aws-lc-sys` lists `cmake` as a build dependency,
+  `webpki-roots` (no native-roots variant); a private CA is added through
+  the DSN's `sslrootcert`. `aws-lc-sys` lists `cmake` as a build dependency,
   but Linux `gnu`/`aarch64` and `x86_64` use the `cc` builder with
   pregenerated bindings, not cmake-the-tool. The slim builder already
   compiles C through `cc`. `ring` stays in the lockfile as an optional
@@ -269,8 +288,11 @@ scratch project against `postgres:18.4`):
 - **`Dsn` is template-owned** because no crate refuses what the policy
   refuses: `sqlx` seeds every `PgConnectOptions` from the libpq environment
   (there is no environment-free constructor), reads `.pgpass` when the URL
-  has no password, accepts sockets, `allow`/`prefer`, TLS files, and warns
-  with key and value on an unknown parameter.
+  has no password, accepts sockets, `allow`/`prefer`, and client key files,
+  and warns with key and value on an unknown parameter. `Dsn` checks the
+  URL text only for what must be refused before `sqlx` parses it and reads
+  the rest back through `PgConnectOptions` getters instead of repeating the
+  driver's parser.
 - **Session defaults through `PgConnectOptions::options`**: `SHOW` returned
   the published values, `lock_timeout` cancels a waiting `pg_advisory_lock`
   with `55P03`, `statement_timeout` cancels with `57014`.

@@ -37,11 +37,13 @@ pub const IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(8);
 /// duration. Statement-level logging is otherwise off: it would repeat every
 /// query at `debug` and, through bound values in error paths, risk carrying
 /// data into logs.
-pub const SLOW_STATEMENT_THRESHOLD: Duration = Duration::from_secs(1);
+const SLOW_STATEMENT_THRESHOLD: Duration = Duration::from_secs(1);
 
-/// Metric name for pool occupancy, following the OpenTelemetry database
-/// client semantic convention; labels `pool` and `state` (`idle`, `used`).
-pub const CONNECTION_COUNT_METRIC: &str = "db_client_connection_count";
+/// Pool occupancy, named after the OpenTelemetry database client semantic
+/// convention `db.client.connection.count` with its required attributes
+/// `db.client.connection.pool.name` and `db.client.connection.state`
+/// (`idle`, `used`). The Prometheus exporter spells dots as underscores.
+const CONNECTION_COUNT_METRIC: &str = "db_client_connection_count";
 
 const POOL_NAME: &str = "postgres";
 
@@ -100,18 +102,18 @@ pub struct SessionOptions<'a> {
 /// [`ACQUIRE_TIMEOUT`]; [`ConnectError::Connect`] when the first attempt is
 /// refused (credentials, TLS, or the server).
 pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, ConnectError> {
-    let default_isolation = default_isolation_setting(options.default_isolation);
-    let isolation_extra = default_isolation.map(|value| [("default_transaction_isolation", value)]);
-    let extra: &[(&str, &str)] = isolation_extra.as_ref().map_or(&[], |values| values);
-    let connect_options = attach_session(
-        dsn,
-        options.application_name,
-        STATEMENT_TIMEOUT,
-        IDLE_IN_TRANSACTION_TIMEOUT,
-        None,
-        extra,
-        Some(SLOW_STATEMENT_THRESHOLD),
-    );
+    let mut settings = vec![
+        ("statement_timeout", to_runtime_param(STATEMENT_TIMEOUT)),
+        (
+            "idle_in_transaction_session_timeout",
+            to_runtime_param(IDLE_IN_TRANSACTION_TIMEOUT),
+        ),
+    ];
+    if let Some(level) = options.default_isolation.as_sql() {
+        settings.push(("default_transaction_isolation", level.to_owned()));
+    }
+    let connect_options = session(dsn, options.application_name, settings)
+        .log_slow_statements(log::LevelFilter::Warn, SLOW_STATEMENT_THRESHOLD);
     PgPoolOptions::new()
         .max_connections(options.max_connections.get())
         .acquire_timeout(ACQUIRE_TIMEOUT)
@@ -137,63 +139,43 @@ pub async fn connect_session(
     dsn: &Dsn,
     options: &SessionOptions<'_>,
 ) -> Result<PgConnection, sqlx::Error> {
-    let connect_options = attach_session(
-        dsn,
-        options.application_name,
-        options.statement_timeout,
-        options.idle_in_transaction_timeout,
-        Some(options.lock_timeout),
-        options.extra,
-        None,
+    let settings = [
+        (
+            "statement_timeout",
+            to_runtime_param(options.statement_timeout),
+        ),
+        (
+            "idle_in_transaction_session_timeout",
+            to_runtime_param(options.idle_in_transaction_timeout),
+        ),
+        ("lock_timeout", to_runtime_param(options.lock_timeout)),
+    ]
+    .into_iter()
+    .chain(
+        options
+            .extra
+            .iter()
+            .map(|&(name, value)| (name, value.to_owned())),
     );
-    PgConnection::connect_with(&connect_options).await
+    PgConnection::connect_with(&session(dsn, options.application_name, settings)).await
 }
 
-/// Publish session defaults through the startup packet so a connection
-/// opened later carries them too.
+/// Connect options that publish `settings` through the startup packet, so a
+/// connection opened later carries them too, without a round trip.
 ///
 /// `idle_in_transaction_session_timeout` covers what `statement_timeout`
 /// cannot: a transaction that ran a fast statement and then lost its client
-/// holds its locks while no statement is running at all.
-fn attach_session(
+/// holds its locks while no statement is running at all. Statement logging
+/// is off: it would repeat every query and could carry bound values.
+fn session<'a>(
     dsn: &Dsn,
     application_name: &str,
-    statement_timeout: Duration,
-    idle_in_transaction_timeout: Duration,
-    lock_timeout: Option<Duration>,
-    extra: &[(&str, &str)],
-    slow_statement_threshold: Option<Duration>,
+    settings: impl IntoIterator<Item = (&'a str, String)>,
 ) -> PgConnectOptions {
-    let statement = to_runtime_param(statement_timeout);
-    let idle = to_runtime_param(idle_in_transaction_timeout);
-    let lock = lock_timeout.map(to_runtime_param);
-    let core = [
-        Some(("statement_timeout", statement.as_str())),
-        Some(("idle_in_transaction_session_timeout", idle.as_str())),
-        lock.as_ref().map(|value| ("lock_timeout", value.as_str())),
-    ];
-    let mut options = dsn
-        .connect_options()
+    dsn.connect_options()
         .application_name(application_name)
-        .options(core.into_iter().flatten().chain(extra.iter().copied()))
-        .log_statements(log::LevelFilter::Off);
-    if let Some(threshold) = slow_statement_threshold {
-        options = options.log_slow_statements(log::LevelFilter::Warn, threshold);
-    }
-    options
-}
-
-/// The startup-packet value for an opted-in pool default.
-///
-/// [`Isolation::ServerDefault`] deliberately does not render a GUC, so an
-/// existing service keeps the database's ambient transaction default.
-const fn default_isolation_setting(isolation: Isolation) -> Option<&'static str> {
-    match isolation {
-        Isolation::ServerDefault => None,
-        Isolation::ReadCommitted => Some("read committed"),
-        Isolation::RepeatableRead => Some("repeatable read"),
-        Isolation::Serializable => Some("serializable"),
-    }
+        .options(settings)
+        .log_statements(log::LevelFilter::Off)
 }
 
 /// Render a duration as a PostgreSQL runtime-parameter value.
@@ -208,7 +190,7 @@ const fn default_isolation_setting(isolation: Isolation) -> Option<&'static str>
 /// `statement_timeout`, `idle_in_transaction_session_timeout`, and
 /// `lock_timeout` — that is not a zero-length bound.
 #[must_use]
-pub fn to_runtime_param(duration: Duration) -> String {
+fn to_runtime_param(duration: Duration) -> String {
     format!("{}ms", duration.as_nanos().div_ceil(1_000_000))
 }
 
@@ -236,9 +218,14 @@ pub fn record_metrics(pool: &PgPool) {
     // `num_idle` is a count of pooled connections and fits in f64 exactly.
     #[allow(clippy::cast_precision_loss)]
     let idle = pool.num_idle() as f64;
-    metrics::gauge!(CONNECTION_COUNT_METRIC, "pool" => POOL_NAME, "state" => "idle").set(idle);
-    metrics::gauge!(CONNECTION_COUNT_METRIC, "pool" => POOL_NAME, "state" => "used")
-        .set((size - idle).max(0.0));
+    for (state, value) in [("idle", idle), ("used", (size - idle).max(0.0))] {
+        metrics::gauge!(
+            CONNECTION_COUNT_METRIC,
+            "db.client.connection.pool.name" => POOL_NAME,
+            "db.client.connection.state" => state
+        )
+        .set(value);
+    }
 }
 
 /// Publish the gauges every `interval` until `cancel` fires. Same missed-tick
@@ -276,35 +263,22 @@ mod tests {
     }
 
     #[test]
-    fn attach_session_carries_the_named_budgets() {
+    fn session_publishes_every_setting_in_the_startup_packet() {
         let dsn =
             Dsn::admit_with_environment("postgres://app:pw@h:5432/app?sslmode=disable", |_| false)
                 .unwrap();
-        let options = attach_session(
+        let options = session(
             &dsn,
             "svc",
-            STATEMENT_TIMEOUT,
-            IDLE_IN_TRANSACTION_TIMEOUT,
-            Some(Duration::from_secs(15)),
-            &[],
-            Some(SLOW_STATEMENT_THRESHOLD),
+            [
+                ("statement_timeout", to_runtime_param(STATEMENT_TIMEOUT)),
+                ("lock_timeout", to_runtime_param(Duration::from_secs(15))),
+            ],
         );
         assert_eq!(options.get_application_name(), Some("svc"));
-        let options = options.get_options().unwrap_or_default();
-        assert!(options.contains("-c statement_timeout=8000ms"), "{options}");
-        assert!(
-            options.contains("-c idle_in_transaction_session_timeout=8000ms"),
-            "{options}"
-        );
-        assert!(options.contains("-c lock_timeout=15000ms"), "{options}");
-    }
-
-    #[test]
-    fn pool_default_isolation_only_renders_for_an_opted_in_pool() {
-        assert_eq!(default_isolation_setting(Isolation::ServerDefault), None);
         assert_eq!(
-            default_isolation_setting(Isolation::ReadCommitted),
-            Some("read committed")
+            options.get_options(),
+            Some("-c statement_timeout=8000ms -c lock_timeout=15000ms")
         );
     }
 

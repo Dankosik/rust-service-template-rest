@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use infra_postgres::{ACQUIRE_TIMEOUT, Dsn, SessionOptions, connect_session, raw_sqlstate};
+use infra_postgres::{ACQUIRE_TIMEOUT, Dsn, SessionOptions, connect_session, sqlstate};
 use sqlx::Connection;
 use sqlx::migrate::{Migrate, MigrateError, MigrationType, Migrator};
 use sqlx::postgres::{PgConnection, PgPool};
@@ -104,7 +104,7 @@ async fn verify_history_with(migrator: &Migrator, pool: &PgPool) -> Result<(), H
             .collect::<Result<Vec<_>, _>>()?,
         // An absent history table means nothing is applied yet: an empty
         // embedded set needs no bookkeeping, a nonempty one is pending.
-        Ok(Err(err)) if raw_sqlstate(&err).as_deref() == Some("42P01") => {
+        Ok(Err(err)) if sqlstate(&err).as_deref() == Some("42P01") => {
             return if migrator.iter().next().is_none() {
                 Ok(())
             } else {
