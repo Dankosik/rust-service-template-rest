@@ -70,21 +70,20 @@ Authorization value. Retain only that sensitive header and expiry metadata,
 not the parsed token object, extras, refresh token, or provider error text.
 
 The template-owned gaps are: fixed-transport conversion; immutable-owner binding;
-monotonic reuse/expiry policy; non-retained success through the cache API;
+monotonic reuse/expiry policy through Moka `Expiry`; conditional 401 eviction;
 Authorization injection; config and initializer integration; sanitized outcomes.
 There is no custom protocol serializer/parser, flight state machine, retry loop,
 resolver, background refresher, or general token-source abstraction.
 
 ## Cache, budgets, and finality
 
-Use `moka::future::Cache<(), Arc<CachedCredential>>`, capacity one and one
-private initializer error type. An `Ok` initializer stores a reusable credential.
-A private error variant holds a successful but non-retained credential; Moka
-shares that result with already coalesced waiters without inserting it. A
-separate variant holds the closed acquisition failure. Translate non-retained
-success back to success before leaving the owner, so telemetry never counts it
-as a failure. `optionally_get_with(None)` would lose the successful value and
-therefore does not fit this requirement.
+Use `moka::future::Cache<(), Arc<CachedCredential>>`, capacity one, with the
+closed acquisition failure as the initializer error. Every successful
+initializer returns `Ok`; `Expiry` alone decides retention. A credential without
+a future reuse cutoff receives a zero lifetime: Moka hands the initializer value
+to already coalesced waiters, then treats the entry as expired
+(`expiration <= now`), so later calls acquire again. No success travels through
+the error channel.
 
 Moka's [initializer source](https://github.com/moka-rs/moka/blob/v0.12.16/src/future/value_initializer.rs)
 shares the same error by Arc and removes the waiter on result. Dropping the
@@ -96,13 +95,27 @@ library behavior, not a detached application retry. Bound all active callers
 by the existing inbound/job admission and their deadlines; the only cache key
 is unit, so cache cardinality cannot grow with caller input.
 
+The private per-exchange `TokenHttpClient` owns a clone of the fixed endpoint,
+a clone of the shared outbound HTTP client, and the absolute attempt deadline.
+It implements `oauth2::AsyncHttpClient` directly for every call lifetime,
+exposing a boxed `Send` associated future as in oauth2's
+[supported async adapter](https://github.com/ramosbugs/oauth2-rs/blob/5.0.0/src/reqwest_client.rs).
+Its concrete type carries no borrowed owner lifetime. Acquisition passes the
+lazy `fetch(deadline)` future directly to Moka's `try_get_with` and awaits the
+lookup under the caller's `timeout_at`. Only the elected initializer creates
+and polls the exchange; dropping the caller drops its pending work under the
+original deadline. Credentials and the cache stay with the existing private
+owner. Reopen this type boundary only with compiler evidence and the existing
+cancellation/deadline proof; it adds no task, cache, token source, or replay.
+
 `CachedCredential` has private sensitive header and optional Tokio monotonic
 hard expiry. Representable positive expiry is `acquisition_start + expires_in`.
 Its cache cutoff is `hard_expiry - 10s`; if the cutoff is already reached,
 return non-retained success while hard expiry is still future. Missing/overflow
 expiry follows that same non-retained route, while zero/already-expired lifetime
 is invalid. Before resource dispatch, check the hard boundary again and refuse
-expired values without resource I/O. There is no fallback to a prior credential.
+an expired value as a timeout without resource I/O; the provider response was
+valid, so it is not reported as invalid. There is no fallback to a prior credential.
 
 Moka `Expiry` returns the remaining duration to the fixed reuse cutoff on
 create/update and preserves the remaining duration on read. It does not slide
@@ -110,6 +123,14 @@ expiry. Moka's internal clock is not Tokio's paused clock; test code must not
 claim cache eviction from advancing Tokio time alone. Use the final hard-expiry
 check as the safety authority, with actual cache expiry or supported isolated
 policy proof for reuse. Avoid a new clock trait or runner solely for this test.
+
+A resource 401 evicts the credential that request used through Moka's
+`entry().and_compute_with`, removing it only while it is still the cached value,
+so a concurrently acquired replacement survives. The response is returned
+without replay; the next operation acquires anew. This follows Spring Security's
+authorization-failure handler rather than Go's keep-until-expiry, so a revoked
+or rotated token does not fail every call until its provider lifetime ends. A
+403 is a permission result and keeps the credential.
 The ten-second rule is a refresh preference, never a minimum accepted token TTL.
 
 The existing resource `Operation` is forwarded unchanged after acquisition.
@@ -128,6 +149,14 @@ the adapter receives primitives/SecretString through composition and does not
 depend on service-config. Normal config validation runs in every existing binary;
 there is no eager token call or extra service lifecycle field.
 
+The section decodes through `config::Value` instead of derived serde like the
+webhook sections. Derived decoding surfaces serde's `invalid type: string "..."`
+as a config-rs `Message` error, which echoes the rejected value; config-rs keeps
+its `Unexpected` type private, so a global redaction in `load` would have to
+parse error text. The explicit decoder keeps full key paths and unknown-key
+names without values. Reopen when config-rs exposes value-free type errors or
+the service adopts one loader-wide diagnostic policy for every section.
+
 Runtime errors separate caller Authorization conflict, acquisition failure,
 and existing resource transport failure. Acquisition reasons and all public
 Debug/Display are closed. Record `oauth2_token_acquisitions_total{outcome}` once
@@ -138,8 +167,9 @@ is emitted. Existing resource transport error policy remains unchanged.
 The production adapter's local token/resource-server proof covers encoding,
 audience and scope omission, permissive RFC success parsing, coalesced success/
 failure, expiry and non-retained responses, cancellation replacement, per-waiter
-budget, owner isolation, Bearer injection, and 401/403 without replay. Reuse
-existing TLS/transport tests unless that implementation changes. Negative proof
+budget, owner isolation, Bearer injection, 401 eviction that spares a newer
+token, and 401/403 without replay. Reuse existing TLS/transport tests unless that implementation changes.
+Negative proof
 covers Authorization conflict, secret files, safe diagnostics, token redirect,
 limit/timeout, and absence of resource dispatch. Test constructors remain
 `cfg(test)` or the existing dev-only `test-support`; no production HTTP bypass.
@@ -155,9 +185,16 @@ reachability. Do not multiply by every harness/database/profile permutation or
 repeat identical full builds; harness projections remain separate static proof.
 Heavy validation remains CI-owned.
 
-The second landing stage merges current main and adds concrete gRPC composition,
-with the same private-token ownership, deadline accounting, and unauthenticated/
-permission-denied pass-through. No gRPC dependency or unused interface is added
-in this stage before that boundary exists. Exact-head CI and whole-result review
-belong to delivery; no deployment or image publication is authorized.
+Exact-head CI and whole-result review belong to delivery; no deployment or image
+publication is implied by template proof.
 <!-- template:end outbound-auth:docs-outbound-machine-authentication-decisions -->
+
+<!-- template:begin outbound-auth-grpc:docs-oauth-grpc-decision -->
+The concrete gRPC binding stays inside `Credentials`. It injects one bearer,
+does not replay, and evicts only from the initial `UNAUTHENTICATED` status or
+HTTP 401 without `grpc-status`. The call deadline is `grpc-timeout` or the
+owner's fetch timeout. Its optional dependency points from OAuth to
+`infra-grpc`; removing either profile removes the bridge. Generated clients
+take the concrete authenticated `Service`. See the [transport decision
+record](grpc-decisions.md).
+<!-- template:end outbound-auth-grpc:docs-oauth-grpc-decision -->

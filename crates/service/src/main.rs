@@ -1,9 +1,5 @@
-//! Thin process entrypoint. All composition lives in `bootstrap`.
+//! Thin process entrypoint. All composition lives in the service library.
 
-use std::process::ExitCode;
-
-mod bootstrap;
-
-fn main() -> ExitCode {
-    bootstrap::run(std::env::args_os())
+fn main() -> std::process::ExitCode {
+    service::run(std::env::args_os())
 }

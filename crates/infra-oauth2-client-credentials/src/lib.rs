@@ -3,12 +3,12 @@
 //! Composition prepares one immutable credential owner and binds it to a
 //! resource client. Neither access tokens nor raw provider errors leave it.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use http::{HeaderValue, Request, Response, header::AUTHORIZATION};
+use http::{HeaderValue, Request, Response, StatusCode, header::AUTHORIZATION};
 use infra_outbound_http::{Client, Limits, Operation};
-use moka::{Expiry, future::Cache};
+use moka::{Expiry, future::Cache, ops::compute::Op};
 use oauth2::{
     AuthType, ClientId, ClientSecret, EndpointNotSet, EndpointSet, Scope, TokenResponse, TokenUrl,
     basic::BasicClient,
@@ -19,6 +19,11 @@ use url::Url;
 
 #[cfg(test)]
 mod tests;
+
+// template:begin outbound-auth-grpc:oauth-grpc-module
+#[cfg(feature = "grpc")]
+pub mod grpc;
+// template:end outbound-auth-grpc:oauth-grpc-module
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const REUSE_MARGIN: Duration = Duration::from_secs(10);
@@ -156,19 +161,28 @@ impl Credentials {
         if Instant::now() >= deadline {
             return Err(AcquisitionError::Timeout);
         }
-        let result = tokio::time::timeout_at(
+        tokio::time::timeout_at(
             deadline,
             self.0.cache.try_get_with((), self.0.fetch(deadline)),
         )
         .await
-        .map_err(|_| AcquisitionError::Timeout)?;
-        match result {
-            Ok(value) => Ok(value),
-            Err(error) => match error.as_ref() {
-                FillError::NotRetained(value) => Ok(value.clone()),
-                FillError::Failed(error) => Err(*error),
-            },
-        }
+        .map_err(|_| AcquisitionError::Timeout)?
+        .map_err(|error| *error)
+    }
+
+    /// Drops `used` from the cache unless a newer credential already replaced it.
+    async fn invalidate(&self, used: &Arc<CachedCredential>) {
+        self.0
+            .cache
+            .entry(())
+            .and_compute_with(|entry| {
+                let op = match entry {
+                    Some(entry) if Arc::ptr_eq(entry.value(), used) => Op::Remove,
+                    _ => Op::Nop,
+                };
+                std::future::ready(op)
+            })
+            .await;
     }
 }
 
@@ -187,7 +201,8 @@ impl fmt::Debug for AuthenticatedClient {
 
 impl AuthenticatedClient {
     /// Acquires credentials, injects Bearer, and spends the original deadline.
-    /// Completed responses, including 401 and 403, are returned without replay.
+    /// Completed responses, including 401 and 403, are returned without replay;
+    /// a 401 evicts the credential it used so the next call acquires anew.
     ///
     /// # Errors
     /// Rejects caller Authorization before I/O, acquisition failure before
@@ -205,17 +220,24 @@ impl AuthenticatedClient {
             .hard_expiry
             .is_some_and(|expiry| Instant::now() >= expiry)
         {
-            return Err(AcquisitionError::InvalidResponse.into());
+            return Err(AcquisitionError::Timeout.into());
         }
         request
             .headers_mut()
             .insert(AUTHORIZATION, value.header.clone());
-        Ok(self.resource.execute(request, operation).await?)
+        let response = self.resource.execute(request, operation).await?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            self.credentials.invalidate(&value).await;
+        }
+        Ok(response)
     }
 }
 
 impl Owner {
-    async fn fetch(&self, caller_deadline: Instant) -> Result<Arc<CachedCredential>, FillError> {
+    async fn fetch(
+        &self,
+        caller_deadline: Instant,
+    ) -> Result<Arc<CachedCredential>, AcquisitionError> {
         let started = Instant::now();
         let deadline = caller_deadline.min(started + FETCH_TIMEOUT);
         let mut attempt = Attempt {
@@ -231,15 +253,9 @@ impl Owner {
             Err(AcquisitionError::Rejected) => "rejected",
             Err(AcquisitionError::InvalidResponse) => "invalid",
         };
-        let value = Arc::new(result.map_err(FillError::Failed)?);
-        if value
-            .reuse_until
-            .is_some_and(|cutoff| Instant::now() < cutoff)
-        {
-            Ok(value)
-        } else {
-            Err(FillError::NotRetained(value))
-        }
+        // ReuseExpiry gives a value without a future reuse cutoff zero
+        // lifetime: coalesced waiters still receive it, later calls do not.
+        result.map(Arc::new)
     }
 
     async fn fetch_token(
@@ -254,10 +270,15 @@ impl Owner {
         if let Some(audience) = &self.audience {
             exchange = exchange.add_extra_param("audience", audience.as_str());
         }
-        let hook = |request| self.exchange(request, deadline);
-        let response = tokio::time::timeout_at(deadline, exchange.request_async(&hook))
+        // The token transport enforces `deadline` through body completion.
+        let hook = TokenHttpClient {
+            endpoint: self.endpoint.clone(),
+            transport: self.transport.clone(),
+            deadline,
+        };
+        let response = exchange
+            .request_async(&hook)
             .await
-            .map_err(|_| AcquisitionError::Timeout)?
             .map_err(|error| match error {
                 oauth2::RequestTokenError::Request(error) => error,
                 oauth2::RequestTokenError::ServerResponse(_) => AcquisitionError::Rejected,
@@ -265,9 +286,6 @@ impl Owner {
                     AcquisitionError::InvalidResponse
                 }
             })?;
-        if Instant::now() >= deadline {
-            return Err(AcquisitionError::Timeout);
-        }
         if !response
             .token_type()
             .as_ref()
@@ -300,42 +318,55 @@ impl Owner {
             reuse_until,
         })
     }
+}
 
-    async fn exchange(
-        &self,
-        request: oauth2::HttpRequest,
-        deadline: Instant,
-    ) -> Result<oauth2::HttpResponse, AcquisitionError> {
-        if request.uri() != self.endpoint.as_str() {
-            return Err(AcquisitionError::InvalidResponse);
-        }
-        let (mut parts, body) = request.into_parts();
-        parts.uri = self.endpoint[url::Position::BeforePath..]
-            .parse()
-            .map_err(|_| AcquisitionError::InvalidResponse)?;
-        if let Some(header) = parts.headers.get_mut(AUTHORIZATION) {
-            header.set_sensitive(true);
-        }
-        let response = self
-            .transport
-            .execute(
-                Request::from_parts(parts, Bytes::from(body)),
-                Operation {
-                    deadline,
-                    response_body_bytes: None,
-                },
-            )
-            .await
-            .map_err(|error| match error {
-                infra_outbound_http::Error::Timeout { .. } => AcquisitionError::Timeout,
-                infra_outbound_http::Error::ResponseBodyTooLarge => AcquisitionError::ResponseLimit,
-                _ => AcquisitionError::Transport,
-            })?;
-        if !response.status().is_success() {
-            return Err(AcquisitionError::Rejected);
-        }
-        let (parts, body) = response.into_parts();
-        Ok(Response::from_parts(parts, body.to_vec()))
+struct TokenHttpClient {
+    endpoint: Url,
+    transport: Client,
+    deadline: Instant,
+}
+
+impl<'client> oauth2::AsyncHttpClient<'client> for TokenHttpClient {
+    type Error = AcquisitionError;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<oauth2::HttpResponse, Self::Error>> + Send + 'client>>;
+
+    fn call(&'client self, request: oauth2::HttpRequest) -> Self::Future {
+        let deadline = self.deadline;
+        Box::pin(async move {
+            if request.uri() != self.endpoint.as_str() {
+                return Err(AcquisitionError::InvalidResponse);
+            }
+            let (mut parts, body) = request.into_parts();
+            parts.uri = self.endpoint[url::Position::BeforePath..]
+                .parse()
+                .map_err(|_| AcquisitionError::InvalidResponse)?;
+            if let Some(header) = parts.headers.get_mut(AUTHORIZATION) {
+                header.set_sensitive(true);
+            }
+            let response = self
+                .transport
+                .execute(
+                    Request::from_parts(parts, Bytes::from(body)),
+                    Operation {
+                        deadline,
+                        response_body_bytes: None,
+                    },
+                )
+                .await
+                .map_err(|error| match error {
+                    infra_outbound_http::Error::Timeout { .. } => AcquisitionError::Timeout,
+                    infra_outbound_http::Error::ResponseBodyTooLarge => {
+                        AcquisitionError::ResponseLimit
+                    }
+                    _ => AcquisitionError::Transport,
+                })?;
+            if !response.status().is_success() {
+                return Err(AcquisitionError::Rejected);
+            }
+            let (parts, body) = response.into_parts();
+            Ok(Response::from_parts(parts, body.to_vec()))
+        })
     }
 }
 
@@ -349,11 +380,6 @@ impl fmt::Debug for CachedCredential {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("CachedCredential([REDACTED])")
     }
-}
-
-enum FillError {
-    Failed(AcquisitionError),
-    NotRetained(Arc<CachedCredential>),
 }
 
 struct ReuseExpiry;

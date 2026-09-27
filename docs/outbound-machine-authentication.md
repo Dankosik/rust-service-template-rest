@@ -82,7 +82,9 @@ Otherwise acquisition supplies exactly one sensitive Bearer header. The
 resource client's target, admission, body limit, transport policy, and original
 absolute caller deadline remain authoritative. Token wait consumes that deadline;
 it never resets it. Completed resource results, including 401 and 403, pass
-through without token invalidation or replay.
+through without replay. A 401 evicts the credential that request used, unless a
+newer one already replaced it, so the next operation acquires a fresh token; a
+403 keeps it.
 
 ## Acquisition and reuse
 
@@ -149,9 +151,13 @@ certification. Adopters own registration, grants/scopes, credentials, rotation,
 network/TLS policy, capacity, readiness criticality, and live-provider acceptance.
 Other authentication methods require a separate accepted behavior decision.
 
-The HTTP surface is complete in this stage. Stage 10.7 owns gRPC transport;
-whichever stage merges second composes credentials there and proves the combined
-behavior. Keep the token private inside infrastructure; do not add a speculative
-public authorizer now. gRPC composition may add a concrete adapter in this crate
-when the real transport exists.
 <!-- template:end outbound-auth:docs-outbound-machine-authentication-guide -->
+<!-- template:begin outbound-auth-grpc:docs-oauth-grpc-binding -->
+With `GRPC=enabled`, `Credentials::grpc` binds the same private acquisition owner
+to an `infra_grpc::Client`. Each call spends `grpc-timeout` when that header is
+present, otherwise the owner's fetch timeout. Token failure prevents resource
+dispatch. Eviction inspects only the initial response and never replays the
+call. Streaming acquires once at opening. The [gRPC
+guide](grpc.md#reuse-clients-and-original-deadlines) shows the concrete binding.
+Removing either profile removes only the combined bridge.
+<!-- template:end outbound-auth-grpc:docs-oauth-grpc-binding -->

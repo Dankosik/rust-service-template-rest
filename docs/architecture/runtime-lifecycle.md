@@ -285,6 +285,17 @@ path.
 
 ## Decisions Recorded Here
 
+<!-- template:begin grpc:docs-runtime-grpc -->
+The optional gRPC listener uses the same bootstrap and `infra_http::Server`.
+It builds the tonic router and any TLS config before serving. Health reads
+cached readiness and is `NOT_SERVING` until admission succeeds. At first stop,
+readiness drain publishes `NOT_SERVING` before the propagation delay. HTTP and
+gRPC then drain concurrently under the remaining effective drain budget.
+Health watchers end after `NOT_SERVING` and do not hold that drain. It does
+not add a second budget or change NATS/provider shutdown ownership. See
+[gRPC](../grpc.md#health-shutdown-and-observation).
+<!-- template:end grpc:docs-runtime-grpc -->
+
 - **Tokio multi-thread runtime owned by `bootstrap::run`**, sized by
   `available_parallelism`, which honours cgroup quotas; no `GOMAXPROCS` or
   `memory_limit_ratio` equivalent exists because there is no garbage

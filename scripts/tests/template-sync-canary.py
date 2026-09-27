@@ -125,6 +125,7 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("authn")
     lock["profiles"].pop("outbound_http", None)
     lock["profiles"].pop("outbound_auth", None)
+    lock["profiles"].pop("grpc", None)
     lock["profiles"].pop("http_idempotency", None)
     lock["profiles"].pop("jobs", None)
     lock["profiles"].pop("messaging", None)
@@ -144,6 +145,7 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     lock["profiles"].pop("outbound_http", None)
     lock["profiles"].pop("outbound_auth", None)
+    lock["profiles"].pop("grpc", None)
     lock["profiles"].pop("http_idempotency", None)
     lock["profiles"].pop("jobs", None)
     lock["profiles"].pop("messaging", None)
@@ -226,6 +228,9 @@ def assert_profile_output(
     assert_profile_pack(source, target, "webhooks-common", webhooks == "durable" or inbound_webhooks == "standard-webhooks")
     assert_profile_pack(source, target, "webhooks", webhooks == "durable")
     assert_profile_pack(source, target, "inbound-webhooks", inbound_webhooks == "standard-webhooks")
+    assert_profile_pack(source, target, "grpc", False)
+    if "grpc-check:" in (target / "make/template.mk").read_text(encoding="utf-8"):
+        raise AssertionError("portable sync restored unselected gRPC Make targets")
 
 
 def initialize(
@@ -383,16 +388,20 @@ def check(source: Path) -> None:
 
         bytes_before = tooling.read_bytes()
         full_refusal = sync(source, target, "--check")
-        if full_refusal.returncode != 2 or tooling.read_bytes() != bytes_before:
+        if (
+            full_refusal.returncode != 2
+            or "dirty selected target path: make/template.mk" not in full_refusal.stderr
+            or tooling.read_bytes() != bytes_before
+        ):
             raise AssertionError("full sync did not preserve dirty portable tooling refusal")
 
         tooling.write_bytes(tooling_before)
         if tooling.read_bytes() != tooling_before:
             raise AssertionError("canary could not restore the exact portable tooling baseline")
 
-        full_owned = target / "scripts/template-sync.sh"
+        full_owned = tooling
         full_owned.write_bytes(full_owned.read_bytes() + b"\n# committed full-sync drift\n")
-        commit_paths(target, "committed full sync drift", "scripts/template-sync.sh")
+        commit_paths(target, "committed full sync drift", "make/template.mk")
         full_drift = sync(source, target, "--check")
         if full_drift.returncode != 1:
             raise AssertionError(f"full sync check should report committed drift, got {full_drift.returncode}: {full_drift.stderr}")
@@ -405,6 +414,7 @@ def check(source: Path) -> None:
         # source that retains the pack must not restore it.
         assert_profile_pack(source, target, "http-idempotency", False)
         assert_profile_pack(source, target, "http-idempotency-mounted", False)
+        assert_profile_output(source, target, "oidc-jwt", "bounded")
         commit(target, "adopt full portable snapshot")
         full_parity = sync(source, target, "--check")
         if full_parity.returncode:

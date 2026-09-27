@@ -20,6 +20,9 @@ set -euo pipefail
 
 names=(
 	rust_source cargo_dependencies dependency_policy lint_config openapi tool_manifest
+	# template:begin grpc:classifier-grpc-surface
+	grpc_schema
+	# template:end grpc:classifier-grpc-surface
 	github_workflows dependency_automation shell runtime_image publication_metadata secret_scanning
 	db_integration messaging_integration migrations
 	agent_instructions documentation validation_system module_initializer initializer_runtime no_validation_required
@@ -197,6 +200,16 @@ classify() {
 		case "${file}" in
 		.redocly.yaml | api/openapi/* | crates/infra-http/src/webhooks.rs | crates/service/src/api.rs) mark openapi ;;
 		esac
+		# template:begin grpc:classifier-grpc-schema
+		case "${file}" in
+		api/proto/* | crates/grpc-contracts/* | tools/grpc-codegen/* | buf.yaml | scripts/grpc-generate.sh | scripts/ci/grpc-check.sh | tools/versions.env)
+			mark grpc_schema
+			;;
+		esac
+		case "${file}" in
+		tools/grpc-codegen/Cargo.toml | tools/grpc-codegen/Cargo.lock) mark cargo_dependencies ;;
+		esac
+		# template:end grpc:classifier-grpc-schema
 		# The Dockerfile carries tool pins too (ARG defaults, FROM digests).
 		case "${file}" in
 		tools/versions.env | scripts/ci/tools-check.sh | build/docker/Dockerfile) mark tool_manifest ;;
@@ -249,9 +262,15 @@ classify() {
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
 		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
 		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/domain-events/* | crates/infra-messaging/* | \
+		crates/service-failure/* | crates/infra-oauth2-client-credentials/* | \
 		test/* | migrations/*)
 			mark module_initializer initializer_runtime
 			;;
+		# template:begin grpc:classifier-grpc-initializer
+		api/proto/* | crates/infra-grpc/* | crates/grpc-contracts/* | crates/service/examples/grpc.rs | tools/grpc-codegen/* | buf.yaml | scripts/grpc-generate.sh | scripts/ci/grpc-check.sh)
+			mark module_initializer initializer_runtime
+			;;
+		# template:end grpc:classifier-grpc-initializer
 		build/docker/Dockerfile | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
 		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | \
@@ -274,16 +293,23 @@ classify() {
 }
 
 union_classify() {
-	local base_ref=$1 tmp files old_files base_script current old current_status old_status name value count=0
+	local base_ref=$1 tmp files old_files current_files base_script current old current_status old_status name value count=0
 	local current_classified current_unclassified line
 	tmp=$(mktemp -d)
 	trap 'rm -rf -- "${tmp}"' RETURN
 	files=${tmp}/files
 	old_files=${tmp}/old-files
 	base_script=${tmp}/changed-surfaces.sh
+	current_files=${tmp}/current-files
 	cat >"${files}"
 	: >"${old_files}"
+	: >"${current_files}"
 	while IFS= read -r file; do
+		# A path deleted by this change is classified only by the base
+		# classifier, which still knows it; the head classifier may not.
+		if [[ -e ${file} || -L ${file} ]] || ! git cat-file -e "${base_ref}:${file}" 2>/dev/null; then
+			printf '%s\n' "${file}" >>"${current_files}"
+		fi
 		[[ ${file} != scripts/ci/changed-surfaces.sh ]] || continue
 		git cat-file -e "${base_ref}:${file}" 2>/dev/null && printf '%s\n' "${file}" >>"${old_files}"
 	done <"${files}"
@@ -292,7 +318,7 @@ union_classify() {
 		return 2
 	}
 	set +e
-	current=$(classify <"${files}")
+	current=$(classify <"${current_files}")
 	current_status=$?
 	old=$(bash "${base_script}" <"${old_files}")
 	old_status=$?
@@ -483,6 +509,11 @@ EOF
 	assert_case api/openapi/service.yaml \
 		"openapi" \
 		"rust_source documentation"
+	# template:begin grpc:classifier-grpc-tests
+	for file in api/proto/example/v1/echo.proto crates/grpc-contracts/src/generated/example.v1.rs tools/grpc-codegen/Cargo.toml buf.yaml; do
+		assert_case "${file}" "grpc_schema" "openapi runtime_image"
+	done
+	# template:end grpc:classifier-grpc-tests
 	assert_case .redocly.yaml \
 		"openapi" \
 		"rust_source documentation"

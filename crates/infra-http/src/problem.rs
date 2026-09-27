@@ -2,8 +2,9 @@
 //!
 //! One catalog on purpose: a second copy drifts, and a status advertising the
 //! wrong type URI is what a client keys its retry policy off. `Code` is the
-//! stable machine-readable identity; status, title, and type URI derive from
-//! it. A code with no matching response in a service's contract is
+//! stable machine-readable identity; this module projects it into status,
+//! title, and type URI. A code with no matching response in a service's
+//! contract is
 //! unreachable, not wrong. Connection-layer outcomes (hyper 431, the
 //! accept-cap close, a silent first-byte close) are not `Problem` values
 //! even when a matching `Code` exists in the catalog.
@@ -19,256 +20,161 @@ use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+pub use service_failure::Code;
+pub use service_failure::{AT_CAPACITY_DETAIL, SANITIZED_DETAIL};
 use utoipa::ToSchema;
 
-/// Stable machine-readable failure code a client matches on.
-/// `Display` and serialization delegate to [`Code::as_str`], not to the
-/// Rust variant name: `InternalServerError` stays `internal_error` on the wire.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-    Hash,
-    strum::VariantArray,
-    derive_more::Display,
-    serde_with::SerializeDisplay,
+/// HTTP's RFC 9457 projection of the shared failure identity.
+#[allow(
+    clippy::too_many_lines,
+    clippy::match_same_arms,
+    reason = "One exhaustive wire projection keeps independently removable profile arms together."
 )]
-#[display("{}", self.as_str())]
-pub enum Code {
-    BadRequest,
-    Unauthorized,
-    // template:begin authn:http-authentication-codes
-    AuthenticationRequired,
-    AuthenticationMalformed,
-    AuthenticationInvalid,
-    AuthenticationUnavailable,
-    // template:end authn:http-authentication-codes
-    // template:begin http-idempotency:http-idempotency-codes
-    IdempotencyRequestInProgress,
-    IdempotencyKeyMismatch,
-    IdempotencyUnavailable,
-    // template:end http-idempotency:http-idempotency-codes
-    // template:begin inbound-webhooks:http-webhook-codes
-    WebhookRejected,
-    WebhookConflict,
-    // template:end inbound-webhooks:http-webhook-codes
-    Forbidden,
-    NotFound,
-    MethodNotAllowed,
-    Conflict,
-    AlreadyExists,
-    RequestEntityTooLarge,
-    /// Catalog identity for 431. The accept loop answers hyper-native 431
-    /// before routing; this code is not emitted as [`Problem`].
-    RequestHeaderFieldsTooLarge,
-    UnprocessableContent,
-    TooManyRequests,
-    InternalServerError,
-    ServiceUnavailable,
-    /// Local handler budget expired (`HardenOptions.request_timeout`).
-    /// HTTP status stays 504; the machine identity is not a gateway/proxy
-    /// failure.
-    RequestTimeout,
-}
-
-/// Caller-visible text for every failure the transport refuses to describe:
-/// an unclassified handler error, a recovered panic, a policy rejection.
-/// One constant so those stay indistinguishable to a caller.
-pub const SANITIZED_DETAIL: &str = "request failed";
-
-/// Caller-visible text when admission control sheds a request.
-pub const AT_CAPACITY_DETAIL: &str = "server is at capacity";
-
-impl Code {
-    /// Every published code, for catalog rendering and coverage tests.
-    pub const ALL: &'static [Code] = <Self as strum::VariantArray>::VARIANTS;
-
-    /// The `snake_case` wire form.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        self.meta().wire
-    }
-
-    #[must_use]
-    pub const fn status(self) -> StatusCode {
-        self.meta().status
-    }
-
-    #[must_use]
-    pub const fn title(self) -> &'static str {
-        self.meta().title
-    }
-
-    /// Stable URI identifying the problem class.
-    #[must_use]
-    pub const fn type_uri(self) -> &'static str {
-        self.meta().type_uri
-    }
-
-    // The exhaustive closed catalog keeps every wire identity, status, title,
-    // and type URI under one reviewable authority. Splitting it would add a
-    // second policy table solely to satisfy a line-count heuristic.
-    #[allow(clippy::too_many_lines)]
-    const fn meta(self) -> CodeMeta {
-        match self {
-            Code::BadRequest => CodeMeta {
-                wire: "bad_request",
-                status: StatusCode::BAD_REQUEST,
-                title: "bad request",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.1"),
-            },
-            Code::Unauthorized => CodeMeta {
-                wire: "unauthorized",
-                status: StatusCode::UNAUTHORIZED,
-                title: "unauthorized",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.2"),
-            },
-            // template:begin authn:http-authentication-code-meta
-            Code::AuthenticationRequired => CodeMeta {
-                wire: "authentication_required",
-                status: StatusCode::UNAUTHORIZED,
-                title: "authentication required",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.2"),
-            },
-            Code::AuthenticationMalformed => CodeMeta {
-                wire: "authentication_malformed",
-                status: StatusCode::BAD_REQUEST,
-                title: "authentication malformed",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.1"),
-            },
-            Code::AuthenticationInvalid => CodeMeta {
-                wire: "authentication_invalid",
-                status: StatusCode::UNAUTHORIZED,
-                title: "authentication invalid",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.2"),
-            },
-            Code::AuthenticationUnavailable => CodeMeta {
-                wire: "authentication_unavailable",
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                title: "authentication unavailable",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4"),
-            },
-            // template:end authn:http-authentication-code-meta
-            // template:begin http-idempotency:http-idempotency-code-meta
-            Code::IdempotencyRequestInProgress => CodeMeta {
-                wire: "idempotency_request_in_progress",
-                status: StatusCode::CONFLICT,
-                title: "conflict",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.10"),
-            },
-            Code::IdempotencyKeyMismatch => CodeMeta {
-                wire: "idempotency_key_mismatch",
-                status: StatusCode::UNPROCESSABLE_ENTITY,
-                title: "unprocessable content",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.21"),
-            },
-            Code::IdempotencyUnavailable => CodeMeta {
-                wire: "idempotency_unavailable",
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                title: "service unavailable",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4"),
-            },
-            // template:end http-idempotency:http-idempotency-code-meta
-            // template:begin inbound-webhooks:http-webhook-code-meta
-            Code::WebhookRejected => CodeMeta {
-                wire: "webhook_rejected",
-                status: StatusCode::BAD_REQUEST,
-                title: "webhook rejected",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.1"),
-            },
-            Code::WebhookConflict => CodeMeta {
-                wire: "webhook_conflict",
-                status: StatusCode::CONFLICT,
-                title: "webhook conflict",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.10"),
-            },
-            // template:end inbound-webhooks:http-webhook-code-meta
-            Code::Forbidden => CodeMeta {
-                wire: "forbidden",
-                status: StatusCode::FORBIDDEN,
-                title: "forbidden",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.4"),
-            },
-            Code::NotFound => CodeMeta {
-                wire: "not_found",
-                status: StatusCode::NOT_FOUND,
-                title: "not found",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.5"),
-            },
-            Code::MethodNotAllowed => CodeMeta {
-                wire: "method_not_allowed",
-                status: StatusCode::METHOD_NOT_ALLOWED,
-                title: "method not allowed",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.6"),
-            },
-            Code::Conflict => CodeMeta {
-                wire: "conflict",
-                status: StatusCode::CONFLICT,
-                title: "conflict",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.10"),
-            },
-            Code::AlreadyExists => CodeMeta {
-                wire: "already_exists",
-                status: StatusCode::CONFLICT,
-                title: "conflict",
-                // 409 has one RFC type URI and title; Conflict vs AlreadyExists
-                // are sibling `code` values in that class, not two problem types.
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.10"),
-            },
-            Code::RequestEntityTooLarge => CodeMeta {
-                wire: "request_entity_too_large",
-                status: StatusCode::PAYLOAD_TOO_LARGE,
-                title: "request entity too large",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.14"),
-            },
-            // RFC 9110 stops at 426; 431 and 429 are defined by RFC 6585.
-            Code::RequestHeaderFieldsTooLarge => CodeMeta {
-                wire: "request_header_fields_too_large",
-                status: StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-                title: "request header fields too large",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc6585", "#section-5"),
-            },
-            Code::UnprocessableContent => CodeMeta {
-                wire: "unprocessable_content",
-                status: StatusCode::UNPROCESSABLE_ENTITY,
-                title: "unprocessable content",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.21"),
-            },
-            Code::TooManyRequests => CodeMeta {
-                wire: "too_many_requests",
-                status: StatusCode::TOO_MANY_REQUESTS,
-                title: "too many requests",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc6585", "#section-4"),
-            },
-            Code::InternalServerError => CodeMeta {
-                wire: "internal_error",
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                title: "internal server error",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.1"),
-            },
-            Code::ServiceUnavailable => CodeMeta {
-                wire: "service_unavailable",
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                title: "service unavailable",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4"),
-            },
-            Code::RequestTimeout => CodeMeta {
-                wire: "request_timeout",
-                status: StatusCode::GATEWAY_TIMEOUT,
-                title: "request timeout",
-                type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.5"),
-            },
-        }
+const fn http_meta(code: Code) -> HttpCodeMeta {
+    match code {
+        Code::BadRequest => HttpCodeMeta {
+            status: StatusCode::BAD_REQUEST,
+            title: "bad request",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.1"),
+        },
+        Code::Unauthorized => HttpCodeMeta {
+            status: StatusCode::UNAUTHORIZED,
+            title: "unauthorized",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.2"),
+        },
+        // template:begin authn:http-authentication-code-meta
+        Code::AuthenticationRequired => HttpCodeMeta {
+            status: StatusCode::UNAUTHORIZED,
+            title: "authentication required",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.2"),
+        },
+        Code::AuthenticationMalformed => HttpCodeMeta {
+            status: StatusCode::BAD_REQUEST,
+            title: "authentication malformed",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.1"),
+        },
+        Code::AuthenticationInvalid => HttpCodeMeta {
+            status: StatusCode::UNAUTHORIZED,
+            title: "authentication invalid",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.2"),
+        },
+        Code::AuthenticationUnavailable => HttpCodeMeta {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            title: "authentication unavailable",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4"),
+        },
+        // template:end authn:http-authentication-code-meta
+        // template:begin http-idempotency:http-idempotency-code-meta
+        Code::IdempotencyRequestInProgress => HttpCodeMeta {
+            status: StatusCode::CONFLICT,
+            title: "conflict",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.10"),
+        },
+        Code::IdempotencyKeyMismatch => HttpCodeMeta {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            title: "unprocessable content",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.21"),
+        },
+        Code::IdempotencyUnavailable => HttpCodeMeta {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            title: "service unavailable",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4"),
+        },
+        // template:end http-idempotency:http-idempotency-code-meta
+        // template:begin inbound-webhooks:http-webhook-code-meta
+        Code::WebhookRejected => HttpCodeMeta {
+            status: StatusCode::BAD_REQUEST,
+            title: "webhook rejected",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.1"),
+        },
+        Code::WebhookConflict => HttpCodeMeta {
+            status: StatusCode::CONFLICT,
+            title: "webhook conflict",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.10"),
+        },
+        // template:end inbound-webhooks:http-webhook-code-meta
+        Code::Forbidden => HttpCodeMeta {
+            status: StatusCode::FORBIDDEN,
+            title: "forbidden",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.4"),
+        },
+        Code::NotFound => HttpCodeMeta {
+            status: StatusCode::NOT_FOUND,
+            title: "not found",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.5"),
+        },
+        Code::MethodNotAllowed => HttpCodeMeta {
+            status: StatusCode::METHOD_NOT_ALLOWED,
+            title: "method not allowed",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.6"),
+        },
+        Code::Conflict => HttpCodeMeta {
+            status: StatusCode::CONFLICT,
+            title: "conflict",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.10"),
+        },
+        Code::AlreadyExists => HttpCodeMeta {
+            status: StatusCode::CONFLICT,
+            title: "conflict",
+            // 409 has one RFC type URI and title; Conflict vs AlreadyExists
+            // are sibling `code` values in that class, not two problem types.
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.10"),
+        },
+        Code::RequestEntityTooLarge => HttpCodeMeta {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            title: "request entity too large",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.14"),
+        },
+        // RFC 9110 stops at 426; 431 and 429 are defined by RFC 6585.
+        Code::RequestHeaderFieldsTooLarge => HttpCodeMeta {
+            status: StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            title: "request header fields too large",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc6585", "#section-5"),
+        },
+        Code::UnprocessableContent => HttpCodeMeta {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            title: "unprocessable content",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.21"),
+        },
+        Code::TooManyRequests => HttpCodeMeta {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            title: "too many requests",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc6585", "#section-4"),
+        },
+        Code::InternalServerError => HttpCodeMeta {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            title: "internal server error",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.1"),
+        },
+        Code::ServiceUnavailable => HttpCodeMeta {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            title: "service unavailable",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.4"),
+        },
+        Code::RequestTimeout => HttpCodeMeta {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            title: "request timeout",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.6.5"),
+        },
     }
 }
 
-struct CodeMeta {
-    wire: &'static str,
+struct HttpCodeMeta {
     status: StatusCode,
     title: &'static str,
     type_uri: &'static str,
+}
+
+pub(crate) const fn http_status(code: Code) -> StatusCode {
+    http_meta(code).status
+}
+
+const fn http_title(code: Code) -> &'static str {
+    http_meta(code).title
+}
+
+const fn http_type_uri(code: Code) -> &'static str {
+    http_meta(code).type_uri
 }
 
 /// Which part of a request failed validation, following the RFC 9457
@@ -311,12 +217,12 @@ pub struct Problem {
     #[serde(rename = "type")]
     #[schema(
         format = "uri-reference",
-        example = json!(Code::BadRequest.type_uri())
+        example = json!(http_type_uri(Code::BadRequest))
     )]
     type_uri: &'static str,
-    #[schema(example = json!(Code::BadRequest.title()))]
+    #[schema(example = json!(http_title(Code::BadRequest)))]
     title: &'static str,
-    #[schema(example = json!(Code::BadRequest.status().as_u16()))]
+    #[schema(example = json!(http_status(Code::BadRequest).as_u16()))]
     status: u16,
     #[schema(nullable = false, example = "invalid request framing")]
     detail: Option<String>,
@@ -340,9 +246,9 @@ impl Problem {
     pub fn new(code: Code) -> Self {
         Self {
             code,
-            type_uri: code.type_uri(),
-            title: code.title(),
-            status: code.status().as_u16(),
+            type_uri: http_type_uri(code),
+            title: http_title(code),
+            status: http_status(code).as_u16(),
             detail: None,
             instance: None,
             request_id: None,
@@ -398,7 +304,7 @@ impl IntoResponse for Problem {
         // Problem contains only infallibly serializable strings and integers.
         // The extension lets the access log distinguish codes sharing a status.
         let mut response = (
-            code.status(),
+            http_status(code),
             [(
                 CONTENT_TYPE,
                 HeaderValue::from_static("application/problem+json"),
@@ -590,16 +496,19 @@ mod tests {
                 serde_json::to_string(code).unwrap(),
                 format!("\"{}\"", code.as_str())
             );
-            assert!(
-                code.type_uri()
-                    .starts_with("https://www.rfc-editor.org/rfc/rfc")
-            );
-            assert!(!code.title().is_empty());
+            assert!(http_type_uri(*code).starts_with("https://www.rfc-editor.org/rfc/rfc"));
+            assert!(!http_title(*code).is_empty());
         }
-        assert_eq!(Code::AlreadyExists.status(), StatusCode::CONFLICT);
-        assert_eq!(Code::AlreadyExists.type_uri(), Code::Conflict.type_uri());
+        assert_eq!(http_status(Code::AlreadyExists), StatusCode::CONFLICT);
+        assert_eq!(
+            http_type_uri(Code::AlreadyExists),
+            http_type_uri(Code::Conflict)
+        );
         assert_eq!(Code::RequestTimeout.as_str(), "request_timeout");
-        assert_eq!(Code::RequestTimeout.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            http_status(Code::RequestTimeout),
+            StatusCode::GATEWAY_TIMEOUT
+        );
     }
 
     #[tokio::test]
@@ -628,7 +537,7 @@ mod tests {
         assert_eq!(json["title"], "service unavailable");
         assert_eq!(json["detail"], AT_CAPACITY_DETAIL);
         assert_eq!(json["request_id"], "req-1");
-        assert_eq!(json["type"], Code::ServiceUnavailable.type_uri());
+        assert_eq!(json["type"], http_type_uri(Code::ServiceUnavailable));
         assert!(json.get("invalid_params").is_none());
         assert!(json.get("instance").is_none());
     }

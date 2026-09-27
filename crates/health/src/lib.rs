@@ -161,6 +161,9 @@ impl std::fmt::Debug for dyn Probe {
 #[derive(Clone, Debug)]
 pub struct ReadinessReader {
     rx: watch::Receiver<Snapshot>,
+    // template:begin grpc:health-reader-stale-edge
+    stale_edge_for: Option<Instant>,
+    // template:end grpc:health-reader-stale-edge
 }
 
 impl Readiness {
@@ -183,6 +186,9 @@ impl Readiness {
     pub fn reader(&self) -> ReadinessReader {
         ReadinessReader {
             rx: self.tx.subscribe(),
+            // template:begin grpc:health-reader-stale-edge-init
+            stale_edge_for: None,
+            // template:end grpc:health-reader-stale-edge-init
         }
     }
 
@@ -358,6 +364,57 @@ impl ReadinessReader {
     pub async fn changed(&mut self) -> Result<(), OwnerDropped> {
         self.rx.changed().await.map_err(|_| OwnerDropped)
     }
+
+    // template:begin grpc:health-changed-verdict
+    /// Resolve for an unseen publication or once when the current evaluation
+    /// reaches its stale boundary.
+    ///
+    /// This observes the cached snapshot only; it never evaluates a probe. A
+    /// caller must re-read [`Self::verdict`] after this future resolves, which
+    /// makes a publication race use the current monotone drain state.
+    ///
+    /// # Errors
+    ///
+    /// [`OwnerDropped`] when the last [`Readiness`] sender is gone.
+    pub async fn changed_verdict(&mut self) -> Result<(), OwnerDropped> {
+        let snapshot = self.rx.borrow().clone();
+        if self.rx.has_changed().map_err(|_| OwnerDropped)? {
+            return self.changed().await;
+        }
+
+        // Draining is monotone and has no time edge. Once its publication has
+        // been observed, wait for a later publication or owner drop.
+        if snapshot.draining {
+            return self.changed().await;
+        }
+
+        let Some((evaluated_at, stale_after)) = snapshot
+            .evaluation
+            .as_ref()
+            .map(|evaluation| (evaluation.evaluated_at(), snapshot.stale_after))
+            .and_then(|(evaluated_at, stale_after)| {
+                stale_after.map(|stale_after| (evaluated_at, stale_after))
+            })
+        else {
+            return self.changed().await;
+        };
+
+        // `verdict` refuses only an age strictly above `stale_after`, so one
+        // nanosecond is the earliest representable stale instant. Do not turn
+        // an expired deadline into a perpetual ready future for this snapshot.
+        if self.stale_edge_for == Some(evaluated_at) {
+            return self.changed().await;
+        }
+        let stale_at = evaluated_at + stale_after + Duration::from_nanos(1);
+        tokio::select! {
+            changed = self.rx.changed() => changed.map_err(|_| OwnerDropped),
+            () = tokio::time::sleep_until(stale_at) => {
+                self.stale_edge_for = Some(evaluated_at);
+                Ok(())
+            },
+        }
+    }
+    // template:end grpc:health-changed-verdict
 }
 
 #[cfg(test)]
@@ -615,4 +672,77 @@ mod tests {
         drop(readiness);
         assert_eq!(reader.changed().await, Err(OwnerDropped));
     }
+
+    // template:begin grpc:health-changed-verdict-test
+    #[tokio::test(start_paused = true)]
+    async fn changed_verdict_delivers_drain_once_then_waits_without_losing_drain() {
+        let (readiness, _, calls) = flaky(true);
+        readiness.refresh(policy()).await;
+        let mut reader = readiness.reader();
+
+        readiness.start_drain();
+        assert_eq!(reader.changed_verdict().await, Ok(()));
+
+        let waiter = tokio::spawn(async move { reader.changed_verdict().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiter.is_finished(),
+            "observed draining must wait for another publication"
+        );
+
+        readiness.refresh(policy()).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("drain publication waiter must finish")
+                .expect("drain publication waiter must not panic"),
+            Ok(())
+        );
+        assert_eq!(readiness.reader().verdict(), Err(NotReady::Draining));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn changed_verdict_delivers_each_stale_edge_once_without_a_probe() {
+        let (readiness, _, calls) = flaky(true);
+        readiness.refresh(policy()).await;
+        readiness.tx.send_modify(|snapshot| {
+            snapshot.stale_after = Some(policy().stale_after());
+        });
+        let mut reader = readiness.reader();
+        let waiter = tokio::spawn(async move {
+            let result = reader.changed_verdict().await;
+            (reader, result)
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiter.is_finished(),
+            "a fresh snapshot must wait for its stale boundary"
+        );
+
+        tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
+        let (mut reader, result) = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("stale boundary waiter must finish")
+            .expect("stale boundary waiter must not panic");
+        assert_eq!(result, Ok(()));
+
+        let waiter = tokio::spawn(async move { reader.changed_verdict().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiter.is_finished(),
+            "the same stale snapshot must not wake repeatedly"
+        );
+
+        readiness.refresh(policy()).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("publication waiter must finish")
+                .expect("publication waiter must not panic"),
+            Ok(())
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+    // template:end grpc:health-changed-verdict-test
 }

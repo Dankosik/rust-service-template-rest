@@ -46,6 +46,9 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   allowed so a file can document the key.
 - Secret fields are `secrecy::SecretString`: `Debug` output and the startup
   summary print `[REDACTED]`, and the value is zeroed on drop.
+- A secret map given a scalar (`APP__WEBHOOKS__SECRETS=value`, the reference
+  segment omitted) fails with its key and a static reason; config-rs's default
+  type diagnostic would echo the value.
 - Files are read as the process user; relative paths and symlinks are
   accepted because Kubernetes projected volumes depend on symlinks for atomic
   updates. Each file is bounded to 1 MiB before parsing.
@@ -111,6 +114,18 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
 <!-- template:end outbound-auth:docs-config-outbound-auth -->
 
 ## OpenTelemetry Environment Policy
+
+<!-- template:begin grpc:docs-config-grpc -->
+The optional `grpc` section defaults disabled. Enabling it requires an address
+and explicit plaintext or TLS security; bearer verification remains valid with
+either mode. PEM certificate/CA values are ordinary configuration, while
+`grpc.private_key` and `integrations.<name>.grpc.private_key` are environment-only
+secrets. The transport builds the listener config at startup. A disabled
+listener performs no TLS or network work. Config Debug omits all trust and
+identity material. Client integration inputs select a trusted destination,
+explicit security, optional CA and optional paired certificate/key; they do
+not create a client registry or token owner. See [gRPC](grpc.md).
+<!-- template:end grpc:docs-config-grpc -->
 
 Typed configuration owns service identity and takes precedence; the official
 OpenTelemetry environment stays a supported platform fallback:

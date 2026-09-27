@@ -12,7 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-derive_more = { workspace = true, features = ["display"] }
+service-failure = { workspace = true }
 serde_with = { workspace = true, features = ["std", "macros"] }
 axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json"] }
 axum-prometheus = { workspace = true, features = ["prometheus"] }
@@ -35,19 +35,27 @@ hyper-util = { workspace = true, features = ["server", "server-auto", "server-gr
 metrics = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
-strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tower = { workspace = true, features = ["util", "limit", "load-shed", "timeout"] }
 tower-http = { workspace = true, features = ["request-id", "set-header", "catch-panic", "limit", "trace"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
+# template:begin grpc:http-tls-dependencies
+rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
+# template:end grpc:http-tls-dependencies
 utoipa = { workspace = true, features = ["macros"] }
 utoipa-axum = { workspace = true }
 
 [dev-dependencies]
-uuid = { workspace = true, features = ["std"] }
+# template:begin grpc:http-tls-test-dependencies
+http = { workspace = true }
+hyper = { workspace = true, features = ["client", "http2"] }
+rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
+# template:end grpc:http-tls-test-dependencies
 itertools = { workspace = true, features = ["use_std"] }
+uuid = { workspace = true, features = ["std"] }
 axum-test = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "test-util"] }

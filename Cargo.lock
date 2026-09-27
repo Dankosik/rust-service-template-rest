@@ -1507,6 +1507,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
+name = "grpc-contracts"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-prost",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1742,6 +1751,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyper-timeout"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b90d566bffbce6a75bd8b09a05aa8c2cb1fabb6cb348f8840c9e4c90a0d83b0"
+dependencies = [
+ "hyper",
+ "hyper-util",
+ "pin-project-lite",
+ "tokio",
+ "tower-service",
+]
+
+[[package]]
 name = "hyper-util"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1946,6 +1968,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "infra-grpc"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "grpc-contracts",
+ "health",
+ "http",
+ "hyper",
+ "hyper-util",
+ "infra-bearerauthn",
+ "infra-http",
+ "metrics",
+ "rcgen",
+ "rustls",
+ "secrecy",
+ "service-failure",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tonic",
+ "tonic-health",
+ "tonic-types",
+ "tower",
+ "tower-http 0.7.1",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-opentelemetry-instrumentation-sdk",
+]
+
+[[package]]
 name = "infra-http"
 version = "0.1.0"
 dependencies = [
@@ -1953,10 +2007,11 @@ dependencies = [
  "axum-prometheus",
  "axum-test",
  "axum-tracing-opentelemetry",
- "derive_more",
  "futures-util",
  "health",
+ "http",
  "http-body-util",
+ "hyper",
  "hyper-util",
  "infra-bearerauthn",
  "infra-idempotency-store",
@@ -1964,14 +2019,17 @@ dependencies = [
  "infra-webhooks",
  "itertools 0.15.0",
  "metrics",
+ "rcgen",
+ "rustls",
  "serde",
  "serde_json",
  "serde_with",
+ "service-failure",
  "sfv",
  "sha2 0.11.0",
- "strum",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tower",
  "tower-http 0.7.1",
@@ -2041,7 +2099,11 @@ name = "infra-oauth2-client-credentials"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "grpc-contracts",
  "http",
+ "hyper",
+ "hyper-util",
+ "infra-grpc",
  "infra-outbound-http",
  "metrics",
  "moka",
@@ -2050,6 +2112,9 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tonic",
+ "tonic-prost",
+ "tower",
  "url",
 ]
 
@@ -3018,6 +3083,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 
 [[package]]
+name = "pem"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120"
+dependencies = [
+ "base64 0.23.1",
+ "serde_core",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3220,6 +3295,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "prost-types"
+version = "0.14.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a"
+dependencies = [
+ "prost",
 ]
 
 [[package]]
@@ -3443,6 +3527,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"
 dependencies = [
  "aws-lc-rs",
+ "pem",
  "rustls-pki-types",
  "time",
  "x509-parser",
@@ -3686,6 +3771,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "rustls-pki-types",
  "rustls-webpki",
@@ -4018,24 +4104,35 @@ name = "service"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "futures-util",
  "gethostname",
+ "grpc-contracts",
  "health",
  "infra-bearerauthn",
+ "infra-grpc",
  "infra-http",
  "infra-idempotency-store",
  "infra-messaging",
  "infra-postgres",
  "infra-telemetry",
  "infra-webhooks",
+ "jsonwebtoken",
  "migrate",
  "nix",
+ "rcgen",
  "rstest",
+ "rustls",
  "secrecy",
  "serde_json",
  "service-config",
+ "service-failure",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls",
+ "tokio-stream",
  "tokio-util",
+ "tonic",
+ "tonic-health",
  "tracing",
  "ureq",
  "utoipa",
@@ -4059,6 +4156,13 @@ dependencies = [
  "toml",
  "url",
  "vergen-gitcl",
+]
+
+[[package]]
+name = "service-failure"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -4690,6 +4794,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4772,6 +4877,72 @@ dependencies = [
 ]
 
 [[package]]
+name = "tonic"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "h2",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-timeout",
+ "hyper-util",
+ "percent-encoding",
+ "pin-project",
+ "rustls-native-certs",
+ "socket2",
+ "sync_wrapper",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tower",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "tonic-health"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcfab99db777fba2802f0dfa861d1628d1ae916fb199d29819941f139ae85082"
+dependencies = [
+ "prost",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+]
+
+[[package]]
+name = "tonic-prost"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50849f68853be452acf590cde0b146665b8d507b3b8af17261df47e02c209ea0"
+dependencies = [
+ "bytes",
+ "prost",
+ "tonic",
+]
+
+[[package]]
+name = "tonic-types"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73ab1b02061f83d519bba3caa167f88f261ef05720ab8ebc954ade70de3348e8"
+dependencies = [
+ "prost",
+ "prost-types",
+ "tonic",
+]
+
+[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4779,7 +4950,9 @@ checksum = "ebe5ef63511595f1344e2d5cfa636d973292adc0eec1f0ad45fae9f0851ab1d4"
 dependencies = [
  "futures-core",
  "futures-util",
+ "indexmap 2.14.2",
  "pin-project-lite",
+ "slab",
  "sync_wrapper",
  "tokio",
  "tokio-util",

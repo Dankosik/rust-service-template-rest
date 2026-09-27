@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "test"]
+# template:begin grpc:workspace-grpc-generator
+exclude = ["tools/grpc-codegen"]
+# template:end grpc:workspace-grpc-generator
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +20,11 @@ publish = false
 service-config = { path = "crates/config" }
 health = { path = "crates/health" }
 infra-http = { path = "crates/infra-http" }
+service-failure = { path = "crates/service-failure" }
+# template:begin grpc:workspace-grpc-crates
+infra-grpc = { path = "crates/infra-grpc" }
+grpc-contracts = { path = "crates/grpc-contracts" }
+# template:end grpc:workspace-grpc-crates
 # template:begin authn:workspace-authn-crate
 infra-bearerauthn = { path = "crates/infra-bearerauthn" }
 # template:end authn:workspace-authn-crate
@@ -75,6 +83,17 @@ tokio = { version = "1.53.1", default-features = false }
 tokio-util = { version = "0.7.19", default-features = false }
 tower = { version = "0.5.3", default-features = false }
 tower-http = { version = "0.7.1", default-features = false }
+# template:begin grpc:workspace-grpc-dependencies
+tonic = { version = "=0.14.6", default-features = false }
+tonic-prost = { version = "=0.14.6", default-features = false }
+tonic-health = { version = "=0.14.6", default-features = false }
+tonic-types = { version = "=0.14.6", default-features = false }
+prost = { version = "=0.14.4", default-features = false }
+tracing-opentelemetry-instrumentation-sdk = { version = "=0.38.3", default-features = false, features = ["http"] }
+hyper = { version = "1.11.1", default-features = false }
+tokio-stream = { version = "0.1.19", default-features = false }
+rustls = { version = "0.23.45", default-features = false }
+# template:end grpc:workspace-grpc-dependencies
 
 # API contract (docs/architecture/http.md). The document is derived from the
 # handlers and committed as api/openapi/service.yaml.

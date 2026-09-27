@@ -59,6 +59,16 @@ prerequisites, refusal and recovery.
 
 ## Profiles and local owners
 
+<!-- template:begin grpc:readme-grpc-profile -->
+`GRPC=enabled` retains native tonic RPCs on a separate listener that uses the
+shared HTTP accept loop, generated contracts, standard health, lazy clients
+and the process drain. It is inert until explicitly enabled and registered.
+`GRPC=none` removes the complete capability. The [gRPC guide](docs/grpc.md)
+owns registration, handler validation, TLS/plaintext, authentication and
+generation; the [decision record](docs/grpc-decisions.md) explains the
+boundaries.
+<!-- template:end grpc:readme-grpc-profile -->
+
 <!-- template:begin webhooks-common:readme-webhooks-profiles -->
 The optional webhook profiles are selected by `WEBHOOKS=none|durable` and
 `INBOUND_WEBHOOKS=none|standard-webhooks`, both defaulting to `none`. Each
@@ -104,7 +114,7 @@ record](docs/outbound-machine-authentication-decisions.md).
 <!-- template:end outbound-auth:readme-outbound-auth-profile -->
 
 The database and installed adapters are selected by `template.lock`; the source
-checkout without a lock carries PostgreSQL and all six adapters. A retained
+checkout without a lock carries PostgreSQL and the optional adapters. A retained
 PostgreSQL profile remains inert until configured. The
 [local persistence record](docs/architecture/persistence.md) describes its
 availability, and [PostgreSQL Validation](docs/validation/postgres.md) names

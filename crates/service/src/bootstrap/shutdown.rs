@@ -271,6 +271,9 @@ pub(crate) struct Plan<'a> {
     pub(crate) readiness: &'a Readiness,
     pub(crate) app_listener: Server,
     pub(crate) diagnostics: Option<Server>,
+    // template:begin grpc:shutdown-plan-grpc
+    pub(crate) grpc_listener: Option<Server>,
+    // template:end grpc:shutdown-plan-grpc
     pub(crate) cancel: CancellationToken,
     pub(crate) tracker: TaskTracker,
     /// Closed after tracked background tasks joined. HTTP connection tasks
@@ -287,6 +290,10 @@ pub(crate) struct Plan<'a> {
     pub(crate) signals: &'a mut Signals,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the ordered shutdown stages share one deadline and retain their task owners"
+)]
 pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     let budget = Budget::start(plan.http_config.grace_period);
     tracing::info!(grace = ?plan.http_config.grace_period, "shutdown_started");
@@ -307,29 +314,63 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
 
     let http_drain_budget = budget.remaining(plan.http_config.effective_drain_budget());
     tracing::info!(budget = ?http_drain_budget, "drain_started");
-    let drain_overran = match plan.app_listener.drain(http_drain_budget).await {
-        Ok(Drained::Complete) => {
-            tracing::info!("drain_completed");
-            false
-        }
-        Ok(Drained::TimedOut {
-            remaining_connections: remaining,
-        }) => {
-            // Remaining HTTP connection tasks are not in TaskTracker. The
-            // next wait for pooled connections they still hold is
-            // `pool.close`; `runtime.shutdown_timeout` is the last drop.
-            tracing::warn!(
-                remaining,
-                reason = "in_flight_requests_outlived_drain_budget",
-                "shutdown_forced"
-            );
-            true
-        }
-        Err(err) => {
-            tracing::error!(error = %err, "drain_failed");
-            true
+    let http_drain = async {
+        match plan.app_listener.drain(http_drain_budget).await {
+            Ok(Drained::Complete) => {
+                tracing::info!("drain_completed");
+                false
+            }
+            Ok(Drained::TimedOut {
+                remaining_connections: remaining,
+            }) => {
+                // Remaining HTTP connection tasks are not in TaskTracker. The
+                // next wait for pooled connections they still hold is
+                // `pool.close`; `runtime.shutdown_timeout` is the last drop.
+                tracing::warn!(
+                    remaining,
+                    reason = "in_flight_requests_outlived_drain_budget",
+                    "shutdown_forced"
+                );
+                true
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "drain_failed");
+                true
+            }
         }
     };
+    // template:begin grpc:shutdown-concurrent-grpc-drain
+    let grpc_drain = async {
+        match plan.grpc_listener {
+            Some(listener) => match listener.drain(http_drain_budget).await {
+                Ok(Drained::Complete) => {
+                    tracing::info!("grpc_drain_completed");
+                    false
+                }
+                Ok(Drained::TimedOut {
+                    remaining_connections: remaining,
+                }) => {
+                    tracing::warn!(
+                        remaining,
+                        reason = "in_flight_requests_outlived_drain_budget",
+                        "grpc_drain_forced"
+                    );
+                    true
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "grpc_drain_failed");
+                    true
+                }
+            },
+            None => false,
+        }
+    };
+    let http_drain = async {
+        let (http_overran, grpc_overran) = tokio::join!(http_drain, grpc_drain);
+        http_overran || grpc_overran
+    };
+    // template:end grpc:shutdown-concurrent-grpc-drain
+    let drain_overran = http_drain.await;
 
     if let Some(diagnostics) = plan.diagnostics {
         // An in-flight scrape must not park the process past the telemetry

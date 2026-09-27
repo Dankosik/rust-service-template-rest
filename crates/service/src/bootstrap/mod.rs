@@ -38,9 +38,9 @@ use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, ResolvedSampler, TracingOptions,
     diagnostics_router, install_subscriber, install_tracer_provider,
 };
-// template:begin service-secrets:bootstrap-postgres-secret-import
+// template:begin integration:bootstrap-postgres-secret-import
 use secrecy::ExposeSecret;
-// template:end service-secrets:bootstrap-postgres-secret-import
+// template:end integration:bootstrap-postgres-secret-import
 use service_config::{
     AppConfig, BuildInfo, Config, FromArgs, LogFormat, TracesSampler, process_failure,
 };
@@ -144,12 +144,21 @@ pub(crate) enum BootstrapError {
     // template:end inbound-webhooks:bootstrap-webhooks-errors
     #[error(transparent)]
     Server(#[from] infra_http::ServerError),
+    // template:begin grpc:bootstrap-grpc-error
+    #[error(transparent)]
+    Grpc(#[from] infra_grpc::Error),
+    // template:end grpc:bootstrap-grpc-error
 }
 
 /// Parse flags, load configuration, run the service, and map the result to
 /// an exit code. Never calls `process::exit`, so destructors run. `--help`
 /// exits 0; other clap errors exit 1. Version is not a loader flag.
-pub(crate) fn run<I>(args: I) -> ExitCode
+pub(crate) fn run<I>(
+    args: I,
+    // template:begin grpc:bootstrap-run-registration-parameter
+    grpc_registration: Option<crate::GrpcRegistration>,
+    // template:end grpc:bootstrap-run-registration-parameter
+) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
@@ -172,7 +181,12 @@ where
         Err(err) => return process_failure(&format!("build tokio runtime: {err}")),
     };
 
-    let outcome = runtime.block_on(serve(config));
+    let outcome = runtime.block_on(serve(
+        config,
+        // template:begin grpc:bootstrap-grpc-serve-registration-argument
+        grpc_registration,
+        // template:end grpc:bootstrap-grpc-serve-registration-argument
+    ));
     // Drops connection tasks that outlived the drain and any blocking work.
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
 
@@ -191,7 +205,12 @@ where
     clippy::too_many_lines,
     reason = "keep acquired startup resources, admission, and their shared error cleanup in one composition scope"
 )]
-async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
+async fn serve(
+    config: Config,
+    // template:begin grpc:bootstrap-grpc-serve-registration-parameter
+    grpc_registration: Option<crate::GrpcRegistration>,
+    // template:end grpc:bootstrap-grpc-serve-registration-parameter
+) -> Result<Outcome, BootstrapError> {
     // Before this point SIGTERM has its default disposition and kills the
     // process; install the handlers first and keep them for the lifetime.
     let mut signals = Signals::install().map_err(BootstrapError::Signals)?;
@@ -306,6 +325,9 @@ async fn serve(config: Config) -> Result<Outcome, BootstrapError> {
             readiness,
             policy,
             auth,
+            // template:begin grpc:bootstrap-registration
+            grpc_registration,
+            // template:end grpc:bootstrap-registration
             // template:begin postgres:bootstrap-prepared-pool
             postgres_pool: postgres_pool.clone(),
             // template:end postgres:bootstrap-prepared-pool
@@ -729,6 +751,9 @@ struct Prepared<'a> {
     readiness: Readiness,
     policy: RefreshPolicy,
     auth: PreparedAuth,
+    // template:begin grpc:bootstrap-prepared-registration
+    grpc_registration: Option<crate::GrpcRegistration>,
+    // template:end grpc:bootstrap-prepared-registration
     // template:begin postgres:bootstrap-prepared-field
     postgres_pool: Option<PgPool>,
     // template:end postgres:bootstrap-prepared-field
@@ -746,6 +771,10 @@ struct Prepared<'a> {
     // template:end inbound-webhooks:bootstrap-webhooks-prepared-field
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "listener admission and ownership transfer form one ordered startup transaction"
+)]
 async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapError> {
     let Prepared {
         config,
@@ -757,6 +786,9 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         readiness,
         policy,
         auth,
+        // template:begin grpc:bootstrap-destructure-registration
+        grpc_registration,
+        // template:end grpc:bootstrap-destructure-registration
         // template:begin postgres:bootstrap-destructure-pool
         postgres_pool,
         // template:end postgres:bootstrap-destructure-pool
@@ -770,9 +802,38 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         webhook_state,
         // template:end inbound-webhooks:bootstrap-webhooks-destructure
     } = prepared;
+    // template:begin grpc:bootstrap-grpc-prepare-start
+    let grpc_prepared = if config.grpc.enabled {
+        // template:end grpc:bootstrap-grpc-prepare-start
+        // template:begin grpc-authn:bootstrap-grpc-verifier
+        let verifier = match &auth {
+            PreparedAuth::None => return Err(infra_grpc::Error::InvalidConfiguration.into()),
+            PreparedAuth::Enabled(verifier) => (**verifier).clone(),
+        };
+        // template:end grpc-authn:bootstrap-grpc-verifier
+        // template:begin grpc:bootstrap-grpc-prepare-call
+        if config.http.effective_drain_budget() < infra_grpc::UNARY_DEADLINE {
+            return Err(infra_grpc::Error::InvalidConfiguration.into());
+        }
+        Some((
+            infra_grpc::router(
+                crate::grpc::services(grpc_registration)?,
+                readiness.reader(),
+                // template:end grpc:bootstrap-grpc-prepare-call
+                // template:begin grpc-authn:bootstrap-grpc-verifier-argument
+                verifier,
+                // template:end grpc-authn:bootstrap-grpc-verifier-argument
+                // template:begin grpc:bootstrap-grpc-prepare-finish
+            ),
+            crate::grpc::tls(config)?,
+        ))
+    } else {
+        None
+    };
+    // template:end grpc:bootstrap-grpc-prepare-finish
     // The routes and the committed OpenAPI document are the two halves of
     // one contract. Assembly is pure, so it runs before readiness admission.
-    let contract = service::api::contract(
+    let contract = crate::api::contract(
         // template:begin http-idempotency:bootstrap-http-idempotency-contract-composer
         &mut composer,
         // template:end http-idempotency:bootstrap-http-idempotency-contract-composer
@@ -832,6 +893,23 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         }
     };
 
+    // template:begin grpc:bootstrap-grpc-bind
+    let grpc_listener = match grpc_prepared {
+        Some((grpc_router, tls)) => {
+            let addr = config.grpc.listen_addr()?;
+            let bound = match tls {
+                Some(tls) => {
+                    Server::bind_tls(addr, grpc_router, infra_grpc::server_options(), tls).await?
+                }
+                None => Server::bind(addr, grpc_router, infra_grpc::server_options()).await?,
+            };
+            tracing::info!(addr = %bound.local_addr(), "grpc listener bound");
+            Some(bound)
+        }
+        None => None,
+    };
+    // template:end grpc:bootstrap-grpc-bind
+
     tracing::info!("service_ready");
     signals.wait().await;
 
@@ -840,6 +918,9 @@ async fn admit_and_serve(prepared: Prepared<'_>) -> Result<Outcome, BootstrapErr
         readiness: &readiness,
         app_listener,
         diagnostics,
+        // template:begin grpc:shutdown-plan-grpc
+        grpc_listener,
+        // template:end grpc:shutdown-plan-grpc
         cancel,
         tracker,
         // template:begin postgres:bootstrap-shutdown-plan-pool
