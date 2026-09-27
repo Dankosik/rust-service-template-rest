@@ -16,7 +16,7 @@ should weigh before reopening them.
 | Owner | Owns | Does not own |
 | --- | --- | --- |
 | `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`), the pool with the template's session budgets (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), pool gauges, the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`, `retryable`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
-| `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), read-only embedded-history verification (`verify_history`), the source rules beyond the resolver's, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
+| `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), read-only embedded-history verification (`verify_history`), the shared history rule, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
 | `migrations/` | Forward-only SQL files, one transaction each, `<version>_<snake_case>.sql` ([rules](../../migrations/README.md)). | Access code; a repository adapts to the schema, never the reverse. |
 | `service-config` (`postgres` section) | `postgres.enabled`, `postgres.dsn` (secret, environment only), `postgres.max_connections`. | DSN shape (the adapter refuses what the driver would accept). |
 | `service` bootstrap | Opening the pool before readiness admission when the profile is enabled, verifying the embedded migration history, registering the probe and the gauge task, partial-startup cleanup, closing the pool in the dependency-close stage. | Pool mechanics, migration execution. |
@@ -106,40 +106,43 @@ already did.
 ## Migrations
 
 `crates/migrate` embeds `migrations/` with `sqlx::migrate!` (the image needs
-no migration directory) and runs `sqlx::migrate::Migrator` over one
-connection whose session defaults are the migration budgets above, under a
-`tokio::time::timeout`. The runner takes the `pg_advisory_lock` (key derived
-from the database name) before it reads the history, so `before` and
-`applied` describe this run and not a concurrent one; `Migrator::run` takes
-the same re-entrant lock again and releases its own count. `sqlx` owns the
-append-only history: a checksum mismatch (`VersionMismatch`) or an applied
-version missing from the source (`VersionMissing`) fails the run before
-anything is applied, and each migration shares one transaction with its
-history row. On any failure the connection is dropped, which ends the
-session, the lock, and any open transaction.
+no migration directory). The runner follows the `sqlx migrate run` sequence
+over the `Migrate` trait on one connection whose session defaults are the
+migration budgets above, under a `tokio::time::timeout`: lock before reading
+history, ensure the history table, refuse a failed row, compare, apply each
+pending migration in one transaction with its history row, unlock. A changed
+checksum (`VersionMismatch`) or an unknown applied version inside the
+embedded range (`VersionMissing`) fails before anything is applied. A
+version above the newest embedded one is admitted by both the runner and
+startup (the same rule), so a rolled-back release's migrate job and service
+both succeed. On failure the connection is dropped;
+`client_connection_check_interval = 1s` makes the server end the session,
+its lock and transaction promptly.
 
 Source rules beyond the resolver's are a unit test over the embedded set
-(`cargo test -p migrate`, part of `make migration-check`) and a runtime
-gate in `run`: positive version, simple forward-only files (no `.up.sql`/
-`.down.sql`), no `-- no-transaction`, lowercase `snake_case` description.
+(`cargo test -p migrate`, part of `make migration-check`): positive version,
+simple forward-only files (no `.up.sql`/`.down.sql`), no
+`-- no-transaction`, lowercase `snake_case` description.
 `scripts/ci/migration-history-check.sh`
 refuses a pull request that modifies, deletes, or renames an existing
 migration or adds one older than the newest the base has.
 
 The `migrate` binary loads the same configuration as the service, requires
-`postgres.enabled = true`, writes `migration_starting` and one terminal
+`postgres.enabled = true`, and writes `migration_starting` and one terminal
 `migration_run` record (`before`, `target`, `after`, `applied_count`,
-`duration_ms`, `outcome` in `success`/`no_change`/`error`, and on error
-`stage` in `config`/`source`/`connect`/`lock`/`state`/`execute`/`deadline`/
-`interrupted` with the `target` and any `before` the run had observed), and
-exits 1 on failure. In the image it runs as
+`duration_ms`, `outcome` in `success`/`no_change`/`error`). A version field
+is omitted when there is none or it was not observed. On error the record
+adds `stage` in `config`/`signals`/`connect`/`lock`/`history`/`execute`/
+`deadline`/`interrupted` and `error`, which names the failing migration
+version for `execute`. It exits 1 on failure. In the image it runs as
 `--entrypoint /migrate`; a stop signal drops the run.
 
 The service, and the jobs worker when that pack is retained, never run
 migrations at startup. After the pool opens they call
-`migrate::verify_history`: one read-only statement, bounded with its acquire
-to five seconds, that requires every embedded migration to be applied
-successfully with its checksum. An absent or incomplete history is `Pending`
+`migrate::verify_history`, which applies the same rule as the runner:
+read-only history reads, bounded with its acquire to five seconds, that
+require every embedded migration to be applied successfully with its
+checksum. An absent or incomplete history is `Pending`
 (run the migrator first); a failed row, a checksum mismatch, or an applied
 version inside the embedded range that the binary does not embed is
 `Mismatch`. A version above the newest embedded migration belongs to a later
