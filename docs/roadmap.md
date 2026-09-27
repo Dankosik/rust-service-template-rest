@@ -24,7 +24,7 @@ is not a supported template state.
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | done |
 | 9 | Template initializer, profiles, and template sync | done on merge after required CI |
-| 10 | Optional capability profiles | 10.1, 10.2, 10.3, 10.4, and 10.8 merged; 10.6 implemented with assembled CI pending; remaining profiles planned |
+| 10 | Optional capability profiles | 10.1, 10.2, 10.3, 10.4, 10.6 and 10.8 merged; 10.7 implemented; remaining profiles planned |
 | 11 | Benchmarking and performance evidence | planned |
 | 12 | First release and derived-repository verification | planned |
 
@@ -61,7 +61,7 @@ for PostgreSQL, and 10.4 also depends on 8 for PostgreSQL.
 | `internal/config` (koanf, YAML + `APP__` env + flags) | `crates/config` (`config` crate + serde, TOML files, same precedence and secret rules) | `figment` was rejected: no release since 2024, silently drops malformed env names. |
 | `slog` + `logctx` | `tracing` + `tracing-subscriber` + `json-subscriber` | Typed `log.level` directive and `log.format`; `RUST_LOG` is not read. |
 | OpenTelemetry Go traces and metrics + Prometheus | Traces: `opentelemetry` 0.32 + `tracing-opentelemetry` + `axum-tracing-opentelemetry`. Metrics: the `metrics` facade + `metrics-exporter-prometheus` + `axum-prometheus` + `metrics-process` + `tokio-metrics` | The facade is the Rust idiom; OTLP metric push is deferred. Diagnostics stay on a separate listener (`:9090`). |
-| RFC 9457 `problem` package | `infra_http::problem` | Closed transport catalog, stable codes, no submitted values echoed; a `failure` leaf splits out with the gRPC profile. |
+| RFC 9457 `problem` package | `infra_http::problem` with `service-failure` | Shared closed failure identity, HTTP-owned wire projection, no submitted values echoed. |
 | oapi-codegen strict server, hand-written `service.yaml`, runtime request validator | `utoipa` + `utoipa-axum`: handlers carry the contract, the generated `api/openapi/service.yaml` is committed and byte-compared by a test, Redocly lints it, oasdiff compares it with the pull-request base | No maintained Rust-native spec-first server generator exists for axum; the JVM `openapi-generator` output was rejected on quality ([HTTP Architecture](architecture/http.md#decisions-recorded-here)). The committed document stays the reviewed authority. Extractors are the request validator. |
 | `pgx` + `sqlc` + Goose | `sqlx` 0.9 (`postgres`, `runtime-tokio`, `tls-rustls-aws-lc-rs`, `migrate`): pool, transactions, embedded migrations under an advisory lock with checksums, `#[sqlx::test]` per-test databases; template-owned `Dsn` admission and commit-outcome policy in `crates/infra-postgres`; `crates/migrate` library plus binary; compose + `#[sqlx::test]` for proof | `refinery`, `diesel-async`, `sea-orm`, `testcontainers`, `cargo-nextest` rejected or deferred with reasons in [Persistence](architecture/persistence.md#decisions-recorded-here). `query!` macros with offline `.sqlx` metadata and `sqlx-cli` arrive with the first repository (stage 10). |
 | River jobs | `infra-jobs` (stage 10.4): a template-owned PostgreSQL queue on `sqlx` 0.9, enqueued in the caller's transaction and run by the `jobs-worker` binary | No maintained crate with a stable release fills the four-part gap; [Async Architecture](architecture/async.md#decisions-recorded-here) records the candidates, the watch list, and the reopen conditions. |
@@ -652,10 +652,16 @@ markers, tests, and initializer support. Order by expected demand:
    durable scheduling and completion while preserving its distinct immutable
    publication semantics. [Durable messaging](durable-messaging.md) and the
    [PostgreSQL transactional outbox](postgres-transactional-outbox.md) own the
-   adopted contracts. Final assembled validation and exact-head CI evidence remain
-   pending; no delivery result is claimed.
-7. gRPC with `tonic`: server policy, interceptors, health, bounded drain,
-   shared client connections, buf lint and breaking checks.
+   adopted contracts. Implemented and merged in PR #65.
+<!-- template:begin grpc:roadmap-stage-10-7 -->
+7. Native gRPC with tonic/prost, generated all-cardinality policy, semantic
+   validation, shared failure identity, cached standard health, explicit
+   plaintext/TLS13/mTLS, full-call deadlines and one concurrent process drain.
+   Shared lazy clients integrate private OAuth credentials. Buf owns committed
+   schema generation, lint and PR-base compatibility; initializer graphs retain
+   or remove the complete profile. The [guide](grpc.md) and [decisions](grpc-decisions.md)
+   own adoption and the source-supported custom gaps.
+<!-- template:end grpc:roadmap-stage-10-7 -->
 <!-- template:begin outbound-auth:roadmap-stage-10-8-outbound-auth -->
 8. OAuth 2.0 client-credentials outbound authentication.
    **Implemented in [PR #64](https://github.com/Dankosik/rust-service-template-rest/pull/64).**

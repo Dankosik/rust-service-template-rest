@@ -28,6 +28,10 @@ ignore = [
 # aws-lc-sys) and the Mozilla root store's CDLA-Permissive-2.0 (webpki-roots).
 allow = [
     "MIT",
+    # template:begin grpc:grpc-validator-license
+    # borrow-or-share via fluent-uri/prost-protovalidate uses MIT No Attribution.
+    "MIT-0",
+    # template:end grpc:grpc-validator-license
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",

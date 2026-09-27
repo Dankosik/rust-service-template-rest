@@ -37,6 +37,11 @@ authority.
 | `crates/config/src/<section>.rs` (type, defaults, validation) | The immutable `Config` snapshot bootstrap and the adapters read |
 | `env/config/*.toml`, `APP__SECTION__KEY`, `--config`, `--config-overlay` | Inputs whose precedence and secret rules live in [Configuration Source Policy](configuration-source-policy.md) |
 | `crates/health` | The readiness verdict `/health/ready` serves and the drain flag teardown flips |
+| `crates/service-failure` | Closed transport-neutral failure codes and meanings; each transport owns its wire projection |
+<!-- template:begin grpc:docs-architecture-grpc-source -->
+| `api/proto/`, `buf.lock`, `tools/grpc-codegen` | Committed prost/tonic contracts and descriptors under `crates/grpc-contracts`, checked against the PR base |
+| `crates/infra-grpc` | Governed native RPC registration, codecs, clients, health projection and listener lifetime ([guide](grpc.md)) |
+<!-- template:end grpc:docs-architecture-grpc-source -->
 | `crates/service/src/bootstrap` | Startup order, the shutdown plan, exit codes |
 | `crates/<feature>` (none yet) | Behavior consumed by transports and future binaries |
 | `tools/versions.env`, `deny.toml`, `.gitleaks.toml`, `build/docker/Dockerfile` | Tool pins and gate policy consumed by `make` and CI ([CI/CD Production Readiness](ci-cd-production-ready.md)) |

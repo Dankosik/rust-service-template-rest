@@ -12,7 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-derive_more = { workspace = true, features = ["display"] }
+service-failure = { workspace = true }
 serde_with = { workspace = true, features = ["std", "macros"] }
 axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json"] }
 axum-prometheus = { workspace = true, features = ["prometheus"] }
@@ -35,7 +35,6 @@ hyper-util = { workspace = true, features = ["server", "server-auto", "server-gr
 metrics = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
-strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
@@ -46,8 +45,8 @@ utoipa = { workspace = true, features = ["macros"] }
 utoipa-axum = { workspace = true }
 
 [dev-dependencies]
-uuid = { workspace = true, features = ["std"] }
 itertools = { workspace = true, features = ["use_std"] }
+uuid = { workspace = true, features = ["std"] }
 axum-test = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "test-util"] }

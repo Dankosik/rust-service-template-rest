@@ -70,6 +70,11 @@ compatibility limits.
 | `make agent-roles-check`, `make codex-agents-check`, `make claude-skills-check`, `make qwen-skills-check` | The generated harness carriers (`.codex`, `.claude`, `.qwen`, `.grok`, `.cursor`, `.opencode`) are byte-stable against `.agents/roles`, `.agents/codex-project.toml`, and `.agents/skills`; the `*-sync` twins regenerate them | — |
 | `make check-instructions` | `check-skills` plus the four carrier checks; what CI runs on the `agent_instructions` surface | Python 3 |
 | `make tools-check` | `tools/versions.env` shape and digests; each Cargo tool reports its pin; the Dockerfile `ARG` defaults and `FROM` tags agree with the manifest and `rust-toolchain.toml` | Cargo tools (built once) |
+<!-- template:begin grpc:docs-command-grpc -->
+| `make grpc-tools` | Provision the checksum-verified managed compiler for the validator dependency; normal compiler use is cache-only | Python 3.11+, network only on first provisioning |
+| `make grpc-generate` | Generate owned protobuf Rust from pinned Buf descriptors with the separately locked development tool | Go, Rust; no system protoc |
+| `make grpc-check` | Buf format/lint, twice-repeated generation, committed drift and exact base compatibility; heavy and CI-owned by default | Same tools; `GRPC_BASE_REF` in CI |
+<!-- template:end grpc:docs-command-grpc -->
 
 The Cargo tools (`cargo-deny`, `cargo-shear`, `zizmor`) build from
 crates.io into `<git-common-dir>/tools/<crate>-<version>` the first time a

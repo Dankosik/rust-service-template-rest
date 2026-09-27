@@ -1,0 +1,58 @@
+[package]
+name = "infra-grpc"
+description = "Governed native gRPC transport and shared lazy clients."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum = { workspace = true }
+bytes = { workspace = true, features = ["std"] }
+futures-util = { workspace = true, features = ["std"] }
+health = { workspace = true }
+http = { workspace = true }
+http-body = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["server", "http2"] }
+hyper-rustls = { workspace = true, features = ["http2", "native-tokio", "aws-lc-rs"] }
+hyper-util = { workspace = true, features = ["server", "tokio", "service", "http2"] }
+# template:begin authn:grpc-bearer-dependency
+infra-bearerauthn = { workspace = true }
+# template:end authn:grpc-bearer-dependency
+metrics = { workspace = true }
+opentelemetry = { workspace = true, features = ["trace"] }
+pin-project-lite = { workspace = true }
+prost = { workspace = true, features = ["std", "derive"] }
+prost-reflect = { workspace = true, features = ["derive"] }
+prost-protovalidate = { workspace = true, features = ["cel"] }
+rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
+rustls-native-certs = { workspace = true }
+service-failure = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
+tokio-stream = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tonic = { workspace = true, features = ["router", "channel", "server", "codegen"] }
+tonic-health = { workspace = true }
+tonic-prost = { workspace = true }
+tonic-types = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+tracing = { workspace = true, features = ["std", "attributes"] }
+tracing-opentelemetry = { workspace = true }
+
+[dev-dependencies]
+grpc-contracts = { workspace = true }
+rustls = { workspace = true, features = ["tls12"] }
+# template:begin authn:grpc-bearer-test-dependency
+infra-bearerauthn = { workspace = true, features = ["test-support"] }
+secrecy = { workspace = true }
+# template:end authn:grpc-bearer-test-dependency
+rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

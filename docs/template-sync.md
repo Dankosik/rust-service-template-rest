@@ -26,6 +26,7 @@ make template-init \
   AUTHN=none \
   OUTBOUND_HTTP=none \
   OUTBOUND_AUTH=none \
+  GRPC=none \
   AGENT_HARNESS=claude
 ```
 
@@ -71,6 +72,15 @@ persists the effective `OUTBOUND_HTTP=bounded` choice even when its input was
 `none`. `none` removes the complete profile. Selection creates no provider,
 token call, task, listener, or readiness dependency.
 <!-- template:end outbound-auth:docs-template-init-outbound-auth -->
+<!-- template:begin grpc:docs-template-init-grpc -->
+`GRPC` defaults to `none` and accepts `none` or `enabled`; the direct entry takes
+`--grpc`. It retains the native transport, committed schemas/generated contracts,
+managed compiler/generation tools, configuration, example and [guide](grpc.md).
+Selection starts no listener or client. Old locks lacking `grpc` normalize to
+`none`; exact replay records and preserves the selection. `none` removes all
+exclusive surfaces while shared HTTP failure and retained prost/TLS ownership
+survive. The concrete OAuth bridge remains only when both profiles are selected.
+<!-- template:end grpc:docs-template-init-grpc -->
 <!-- template:begin http-idempotency:docs-template-init-http-idempotency -->
 `HTTP_IDEMPOTENCY` defaults to `none` and accepts `none` or `postgres`; the
 direct entry takes `--http-idempotency`. `postgres` retains the
@@ -193,6 +203,16 @@ Manifest files are replaced as whole files; directory entries end in `/` and
 own their descendants, including deletion of target-only owned content. Removing
 an entry from the source manifest relinquishes ownership of that target path.
 Standalone scripts are individual entries, so service siblings remain local.
+Profile-marked sections in portable owners are materialized by the committed
+source initializer's marker renderer using the target lock before purity checks,
+copying, and parity comparison. The manifest still owns each complete output
+file, so a dirty portable Makefile or CI helper refuses full sync. When projection is needed, its source
+helper and profile-inventory dirt also refuses; the reported source revision remains
+the captured Git revision, not a hash of the selected output. Legacy locks use
+the same normalized selections as initialization. An already initialized source
+has no removable markers and must match the target's capability selections.
+Marker-free older or initialized sources need no one-shot initializer helper;
+they follow the same strict purity and copy path.
 Generated adapters are rendered by the committed source helpers. Full sync
 prunes only the declared paths of unselected adapters and cannot restore an
 absent database pack.

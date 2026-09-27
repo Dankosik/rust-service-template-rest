@@ -266,6 +266,64 @@ mod tests {
         assert_eq!(cfg.observability.otel.exporter.otlp_endpoint, None);
     }
 
+    // template:begin grpc:load-listener-environment
+    #[test]
+    fn grpc_environment_enables_an_explicit_plaintext_listener() {
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__GRPC__ENABLED", "true"),
+                ("APP__GRPC__ADDR", "127.0.0.1:0"),
+                ("APP__GRPC__SECURITY", "plaintext"),
+            ]),
+        )
+        .unwrap();
+        assert!(cfg.grpc.enabled);
+        assert_eq!(cfg.grpc.listen_addr().unwrap().port(), 0);
+        assert_eq!(cfg.grpc.security, Some(crate::GrpcSecurity::Plaintext));
+    }
+
+    #[test]
+    fn grpc_private_key_is_environment_only_and_debug_is_redacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = write(
+            &dir,
+            "grpc.toml",
+            "[grpc]\nenabled = true\naddr = \"127.0.0.1:0\"\nsecurity = \"tls\"\ncertificate = \"public-cert\"\n",
+        );
+        let cfg = load_from(
+            &LoadOptions {
+                config: Some(listener),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[("APP__GRPC__PRIVATE_KEY", "private-key-material")]),
+        )
+        .unwrap();
+        assert!(!format!("{cfg:?}").contains("private-key-material"));
+
+        let leaked = write(
+            &dir,
+            "leaked.toml",
+            "[grpc]\nprivate_key = \"private-key-material\"\n",
+        );
+        let err = load_from(
+            &LoadOptions {
+                config: Some(leaked),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::SecretInFile { key, .. } if key == "grpc.private_key"),
+            "{err}"
+        );
+    }
+    // template:end grpc:load-listener-environment
+
     // template:begin http-idempotency:load-http-idempotency-environment
     #[test]
     fn http_idempotency_environment_sets_the_retention() {
@@ -697,6 +755,68 @@ mod tests {
         );
     }
     // template:end outbound-auth:load-integrations-environment
+
+    // template:begin grpc:load-integration-grpc-environment
+    #[test]
+    fn grpc_integration_environment_builds_a_lazy_client_tuple() {
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                (
+                    "APP__INTEGRATIONS__BILLING__GRPC__DESTINATION",
+                    "https://billing.example:8443",
+                ),
+                ("APP__INTEGRATIONS__BILLING__GRPC__SECURITY", "tls"),
+                (
+                    "APP__INTEGRATIONS__BILLING__GRPC__CA_CERTIFICATE",
+                    "public-ca",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__GRPC__CERTIFICATE",
+                    "public-client-cert",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__GRPC__PRIVATE_KEY",
+                    "private-client-key",
+                ),
+            ]),
+        )
+        .unwrap();
+        let grpc = cfg
+            .integrations
+            .get("billing")
+            .and_then(|integration| integration.grpc.as_ref())
+            .expect("named gRPC tuple");
+        assert_eq!(grpc.destination, "https://billing.example:8443");
+        assert_eq!(grpc.security, crate::GrpcSecurity::Tls);
+        assert!(!format!("{cfg:?}").contains("private-client-key"));
+    }
+
+    #[test]
+    fn grpc_integration_refuses_unpaired_mtls_material() {
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                (
+                    "APP__INTEGRATIONS__BILLING__GRPC__DESTINATION",
+                    "https://billing.example:8443",
+                ),
+                ("APP__INTEGRATIONS__BILLING__GRPC__SECURITY", "tls"),
+                (
+                    "APP__INTEGRATIONS__BILLING__GRPC__CERTIFICATE",
+                    "public-client-cert",
+                ),
+            ]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Validate(error) if error.key == "integrations.billing.grpc.certificate/integrations.billing.grpc.private_key"),
+            "{err}"
+        );
+    }
+    // template:end grpc:load-integration-grpc-environment
 
     // template:begin inbound-webhooks:load-inbound-webhooks-environment
     #[test]

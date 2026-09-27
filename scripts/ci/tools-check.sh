@@ -55,6 +55,22 @@ check_cargo_tool CARGO_DENY cargo-deny "${CARGO_DENY_VERSION}"
 check_cargo_tool CARGO_SHEAR cargo-shear "${CARGO_SHEAR_VERSION}"
 check_cargo_tool ZIZMOR zizmor "${ZIZMOR_VERSION}"
 
+# template:begin grpc:tools-check-protoc
+check_protoc_pins() {
+
+	[[ ${PROTOC_VERSION:-} =~ ^[0-9]+\.[0-9]+$ ]] || fail "PROTOC_VERSION is not a major.minor pin"
+	for name in PROTOC_SHA256_LINUX_X86_64 PROTOC_SHA256_LINUX_AARCH_64 PROTOC_SHA256_OSX_X86_64 PROTOC_SHA256_OSX_AARCH_64; do
+		[[ ${!name:-} =~ ^[0-9a-f]{64}$ ]] || fail "${name} is not a SHA-256"
+	done
+	archive=$(python3 scripts/grpc-protoc.py --print-host) || fail "managed protoc host selection failed"
+	[[ ${archive} == "protoc-${PROTOC_VERSION}-"*.zip ]] || fail "managed protoc selected unexpected archive: ${archive}"
+	reported=$(python3 scripts/grpc-protoc.py --version 2>/dev/null || true)
+	[[ ${reported} == "libprotoc ${PROTOC_VERSION}" ]] || fail "managed protoc reports ${reported:-<none>}, ${manifest} pins ${PROTOC_VERSION}"
+	echo "tools-check: managed protoc ${PROTOC_VERSION} pin and host selection passed"
+}
+check_protoc_pins
+# template:end grpc:tools-check-protoc
+
 # Dockerfile ARG defaults for the tools built inside the image.
 check_dockerfile_arg() {
 	local name=$1 pinned=$2 default

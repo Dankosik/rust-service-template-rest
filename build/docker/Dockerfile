@@ -33,6 +33,16 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 ENV CARGO_INCREMENTAL=0
+# template:begin grpc:docker-protoc-build-deps
+ENV TOOLS_ROOT=/opt/service-tools
+COPY .cargo/config.toml .cargo/config.toml
+COPY scripts/grpc-protoc.py scripts/grpc-protoc.py
+COPY tools/versions.env tools/versions.env
+RUN apt-get update \
+ && apt-get install --no-install-recommends --yes python3 ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && python3 scripts/grpc-protoc.py --provision
+# template:end grpc:docker-protoc-build-deps
 COPY --from=planner /src/recipe.json recipe.json
 ARG SERVICE_PACKAGE=service
 ARG SERVICE_BIN=service

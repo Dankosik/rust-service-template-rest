@@ -16,14 +16,17 @@
 pub mod app;
 pub mod health;
 pub mod http;
+// template:begin grpc:config-module
+pub mod grpc;
+// template:end grpc:config-module
 pub mod log;
 pub mod observability;
 // template:begin messaging:config-module
 pub mod messaging;
 // template:end messaging:config-module
-// template:begin outbound-auth:config-module
+// template:begin client-integrations:config-module
 pub mod integrations;
-// template:end outbound-auth:config-module
+// template:end client-integrations:config-module
 // template:begin authn:config-module
 pub mod authn;
 // template:end authn:config-module
@@ -54,9 +57,18 @@ pub use app::{AppConfig, BuildInfo};
 pub use cli::{FromArgs, LoadOptions, process_failure};
 pub use health::HealthConfig;
 pub use http::HttpConfig;
+// template:begin grpc:config-export
+pub use grpc::{GrpcConfig, GrpcSecurity};
+// template:end grpc:config-export
 // template:begin outbound-auth:config-export
-pub use integrations::{IntegrationConfig, OAuthConfig, Scopes};
+pub use integrations::{OAuthConfig, Scopes};
 // template:end outbound-auth:config-export
+// template:begin client-integrations:config-integration-export
+pub use integrations::IntegrationConfig;
+// template:end client-integrations:config-integration-export
+// template:begin grpc:config-integration-grpc-export
+pub use integrations::GrpcClientConfig;
+// template:end grpc:config-integration-grpc-export
 // template:begin inbound-webhooks:config-inbound-webhooks-export
 pub use inbound_webhooks::{InboundWebhookEndpointConfig, InboundWebhooksConfig};
 // template:end inbound-webhooks:config-inbound-webhooks-export
@@ -95,6 +107,9 @@ pub use validate::ValidationError;
 pub struct Config {
     pub app: AppConfig,
     pub http: HttpConfig,
+    // template:begin grpc:config-field
+    pub grpc: GrpcConfig,
+    // template:end grpc:config-field
     // template:begin inbound-webhooks:config-inbound-webhooks-field
     pub inbound_webhooks: InboundWebhooksConfig,
     // template:end inbound-webhooks:config-inbound-webhooks-field
@@ -104,10 +119,10 @@ pub struct Config {
     // template:begin messaging:config-field
     pub messaging: MessagingConfig,
     // template:end messaging:config-field
-    // template:begin outbound-auth:config-field
+    // template:begin client-integrations:config-field
     #[serde(default, deserialize_with = "integrations::deserialize_integrations")]
     pub integrations: std::collections::BTreeMap<String, IntegrationConfig>,
-    // template:end outbound-auth:config-field
+    // template:end client-integrations:config-field
     // template:begin authn:config-field
     pub authn: AuthnConfig,
     // template:end authn:config-field
@@ -135,6 +150,9 @@ impl Config {
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.app.validate()?;
         self.http.validate()?;
+        // template:begin grpc:config-validate
+        self.grpc.validate()?;
+        // template:end grpc:config-validate
         // template:begin inbound-webhooks:config-inbound-webhooks-validate
         self.inbound_webhooks.validate()?;
         // template:end inbound-webhooks:config-inbound-webhooks-validate
@@ -144,9 +162,9 @@ impl Config {
         // template:begin messaging:config-validate
         self.messaging.validate(&self.app.env)?;
         // template:end messaging:config-validate
-        // template:begin outbound-auth:config-validate
+        // template:begin client-integrations:config-validate
         integrations::validate_integrations(&self.integrations)?;
-        // template:end outbound-auth:config-validate
+        // template:end client-integrations:config-validate
         // template:begin authn:config-validate
         self.authn.validate()?;
         // template:end authn:config-validate

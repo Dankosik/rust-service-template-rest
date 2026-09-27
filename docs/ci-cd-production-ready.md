@@ -30,6 +30,9 @@ version) and starts only the jobs its surfaces select:
 | `delivery` | shell, workflows, tool manifest, image, publication metadata | actionlint; ShellCheck over the changed scripts; `tools-check`; BuildKit Dockerfile checks; the publication metadata self-test |
 | `image` | Docker/image sources and any selected profile image path | one local-default image: cached build, hardened lifecycle asserting `app.commit`, and Trivy for image changes; retained profile details below |
 | `docs` | any `*.md`, `docs/`, `specs/` | every relative link and `#fragment` resolves (lychee, offline, pinned container); no toolchain |
+<!-- template:begin grpc:docs-ci-grpc-gates -->
+| `grpc` | schema, generated contracts, generator, Buf/compiler configuration | Buf format/lint, repeat deterministic generation, committed drift and FILE compatibility against the actual PR base; managed compiler resolver checks |
+<!-- template:end grpc:docs-ci-grpc-gates -->
 | `required` | always | fails when any job failed or was cancelled; requires terminal success for a selected initializer matrix |
 
 <!-- template:begin postgres:docs-ci-postgres-gates -->
