@@ -49,7 +49,7 @@ const CLOSE_BUDGET: Duration = Duration::from_secs(5);
 const APP: &str = "integration-tests-outbox";
 const OUTBOX_KIND: &str = "publish_domain_event";
 const WEBHOOK_ENDPOINT: &str = "partner/a?#";
-const WEBHOOK_KEY: &str = "whsec_d2ViaG9va19zZWNyZXQ=";
+const WEBHOOK_KEY: &str = "whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=";
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
@@ -1078,23 +1078,21 @@ struct HeldWebhookConsumer {
     release: Notify,
 }
 
+#[infra_webhooks::inbound::async_trait]
 impl WebhookConsumer for HeldWebhookConsumer {
-    fn process<'a>(
-        &'a self,
-        tx: &'a mut infra_postgres::Tx<'_>,
-        incoming: &'a Incoming,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            sqlx::query("INSERT INTO webhook_effects (message_id) VALUES ($1)")
-                .bind(incoming.message_id())
-                .execute(connection(tx))
-                .await
-                .map_err(JobError::from)?;
-            self.entered.notify_one();
-            self.release.notified().await;
-            Ok(())
-        })
+    async fn process(
+        &self,
+        tx: &mut infra_postgres::Tx<'_>,
+        incoming: &Incoming,
+    ) -> Result<(), JobError> {
+        sqlx::query("INSERT INTO webhook_effects (message_id) VALUES ($1)")
+            .bind(incoming.message_id())
+            .execute(connection(tx))
+            .await
+            .map_err(JobError::from)?;
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
     }
 }
 // template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-fixture

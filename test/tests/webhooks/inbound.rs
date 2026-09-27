@@ -8,7 +8,7 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use infra_jobs::{Engine, JobError, Kinds, Policy};
 use infra_postgres::{Dsn, PgPool, Tx, connection};
 use infra_webhooks::inbound::{
-    Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver,
+    Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver, async_trait,
 };
 use infra_webhooks::protocol::KeyRing;
 use integration_tests::{DATABASE_URL, dsn_for};
@@ -21,7 +21,7 @@ use url::Url;
 use super::commit_proxy::{CommitProxy, Fault};
 
 const ENDPOINT: &str = "partner/a?#";
-const KEY: &str = "whsec_d2ViaG9va19zZWNyZXQ=";
+const KEY: &str = "whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=";
 
 fn receiver(pool: PgPool) -> Receiver {
     Receiver::new(
@@ -59,6 +59,31 @@ fn signed_headers(keys: &KeyRing, message_id: impl AsRef<[u8]>, body: &[u8]) -> 
         )
         .expect("signature header"),
     );
+    headers.insert(
+        "content-type",
+        HeaderValue::from_bytes(b"application/webhook\xff").expect("opaque content type"),
+    );
+    headers
+}
+
+fn unsigned_headers(message_id: impl AsRef<[u8]>) -> HeaderMap {
+    let message_id = message_id.as_ref();
+    let timestamp: i64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
+        .try_into()
+        .expect("timestamp fits i64");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "webhook-id",
+        HeaderValue::from_bytes(message_id).expect("message id"),
+    );
+    headers.insert(
+        "webhook-timestamp",
+        HeaderValue::from_str(&timestamp.to_string()).expect("timestamp"),
+    );
+    headers.insert("webhook-signature", HeaderValue::from_static("v1,unsigned"));
     headers.insert(
         "content-type",
         HeaderValue::from_bytes(b"application/webhook\xff").expect("opaque content type"),
@@ -293,24 +318,18 @@ struct EffectConsumer {
     release: Notify,
 }
 
+#[async_trait]
 impl Consumer for EffectConsumer {
-    fn process<'a>(
-        &'a self,
-        tx: &'a mut Tx<'_>,
-        incoming: &'a Incoming,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            sqlx::query("INSERT INTO webhook_effects (message_id, content_type) VALUES ($1, $2)")
-                .bind(incoming.message_id())
-                .bind(incoming.content_type())
-                .execute(&mut *connection(tx))
-                .await
-                .map_err(JobError::from)?;
-            self.entered.notify_one();
-            self.release.notified().await;
-            Ok(())
-        })
+    async fn process(&self, tx: &mut Tx<'_>, incoming: &Incoming) -> Result<(), JobError> {
+        sqlx::query("INSERT INTO webhook_effects (message_id, content_type) VALUES ($1, $2)")
+            .bind(incoming.message_id())
+            .bind(incoming.content_type())
+            .execute(&mut *connection(tx))
+            .await
+            .map_err(JobError::from)?;
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
     }
 }
 
@@ -595,6 +614,32 @@ async fn receipt_identity_preserves_binary_ids_and_endpoint_scope(pool: PgPool) 
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn remove_expired_deletes_only_receipts_older_than_retention(pool: PgPool) {
+    sqlx::query(
+        "INSERT INTO webhook_receipts (endpoint_id, message_id, received_at) \
+         VALUES ($1, $2, now() - interval '8 days'), ($1, $3, now())",
+    )
+    .bind("partner")
+    .bind(vec![1_u8])
+    .bind(vec![2_u8])
+    .execute(&pool)
+    .await
+    .expect("receipt fixtures");
+    let removed = receiver(pool.clone())
+        .remove_expired()
+        .await
+        .expect("cleanup");
+    assert_eq!(removed, 1);
+    let remaining: Vec<Vec<u8>> =
+        sqlx::query_scalar("SELECT message_id FROM webhook_receipts ORDER BY message_id")
+            .fetch_all(&pool)
+            .await
+            .expect("remaining receipts");
+    assert_eq!(remaining, vec![vec![2]]);
+    super::close(&[&pool]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool: PgPool) {
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt as _;
@@ -628,7 +673,11 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
         let mut request = http::Request::post("/webhooks/partner%2Fa%3F%23")
             .body(Body::from(body))
             .expect("request");
-        *request.headers_mut() = signed_headers(&keys, &id, body);
+        *request.headers_mut() = if id.len() > 255 {
+            unsigned_headers(&id)
+        } else {
+            signed_headers(&keys, &id, body)
+        };
         request
             .headers_mut()
             .insert("content-type", HeaderValue::from_static(content_type));
@@ -780,12 +829,11 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
     let approximation: bool = sqlx::query_scalar("SELECT count(DISTINCT received_at) = 1 AND bool_and(received_at >= $1::text::timestamptz AND received_at <= now()) FROM webhook_receipts")
         .bind(before).fetch_one(&pool).await.expect("migration timestamp approximation");
     assert!(approximation);
-    let keys = KeyRing::from_encoded(KEY, None).expect("key");
     assert_eq!(
         receiver(pool.clone())
             .receive(
                 ENDPOINT,
-                &signed_headers(&keys, &legacy, b"legacy"),
+                &unsigned_headers(&legacy),
                 b"legacy",
                 SystemTime::now()
             )

@@ -1260,7 +1260,6 @@
       "docs/outbound-webhooks.md"
     ],
     "markers": [
-      {"path": "test/Cargo.toml", "ids": ["test-webhooks-fixture-feature"]},
       {
         "path": "Cargo.toml",
         "ids": [
@@ -1285,8 +1284,7 @@
       {
         "path": "crates/infra-webhooks/Cargo.toml",
         "ids": [
-          "webhooks-outbound-dependencies",
-          "webhooks-outbound-test-feature"
+          "webhooks-outbound-dependencies"
         ]
       },
       {

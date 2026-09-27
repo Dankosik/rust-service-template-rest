@@ -42,9 +42,6 @@ tokio = { workspace = true, features = ["time"] }
 [dev-dependencies.infra-webhooks]
 workspace = true
 # template:end webhooks-common:test-webhooks-dependencies
-# template:begin webhooks:test-webhooks-fixture-feature
-features = ["test-support"]
-# template:end webhooks:test-webhooks-fixture-feature
 
 [dev-dependencies]
 # template:begin outbox:test-messaging-outbox-dependencies

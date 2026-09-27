@@ -25,9 +25,8 @@ APP__INBOUND_WEBHOOKS__SECRETS__PARTNER_V2=whsec_<base64-key>
 APP__INBOUND_WEBHOOKS__SECRETS__PARTNER_V1=whsec_<base64-key>
 ```
 
-Keys are Standard Webhooks base64, optionally `whsec_` prefixed, and decode to
-nonempty bytes. The 24--64-byte recommendation is provisioning guidance; a
-32-byte random key is an example, not an extra startup rule. Endpoint/key scope
+Keys are Standard Webhooks base64, optionally `whsec_` prefixed, and must decode
+to 24--64 bytes. A 32-byte random key is an example. Endpoint/key scope
 prevents verification with another endpoint's key. The processing worker needs
 the non-secret binding only, not the verification keys.
 
@@ -57,9 +56,8 @@ original message-ID bytes, ASCII dot, parsed timestamp rendered as canonical i64
 decimal, ASCII dot, and original body bytes. The parser accepts optional sign
 and leading zeroes, rejects whitespace/out-of-range values, compares in a wider
 integer domain, and accepts the inclusive 300-second clock window. A message ID
-is 1–255 bytes for new receiver admission and cannot contain the signing dot.
-The 255-byte bound is an application storage constraint, not a protocol limit.
-Historical jobs with longer IDs remain processable. Conflicting identity/timestamp
+is 1–255 bytes and cannot contain the signing dot. The protocol rejects a longer
+ID. Historical jobs already queued with longer IDs remain processable. Conflicting identity/timestamp
 headers reject; identical repeats are allowed. Candidates are space-delimited:
 unknown versions and mismatches do not prevent another valid v1 candidate with a
 current or predecessor key.
@@ -93,20 +91,35 @@ ReceiveError, Incoming, Consumer, Consumers, Processor}`. Construction uses
 `receive(endpoint_id, &HeaderMap, body, SystemTime)` and returns Accepted,
 or Duplicate, or closed UnknownEndpoint, Rejected, or Unavailable
 errors. `Incoming` exposes original endpoint, message-ID, body, and optional
-byte-safe content type. A registered `Consumer` receives `(&mut Tx, &Incoming)`
-and returns a boxed Send future of `Result<(), JobError>`; `Processor` owns the
-binding lookup, transaction, and fenced completion.
+byte-safe content type. A registered `Consumer` implements
+`async fn process(&self, &mut Tx, &Incoming) -> Result<(), JobError>` under the
+re-exported `#[infra_webhooks::inbound::async_trait]`; `Processor` owns the
+binding lookup, transaction, and fenced completion. `Consumers::require` fails
+startup when a configured endpoint has no binding. `Processor::register` installs
+`webhooks.process` with the default jobs policy.
 
 A derived service edits `consumers()` in `crates/webhook-consumers/src/lib.rs`
 to register its `Arc<dyn Consumer>` adapters. Both roots call that one constructor
 and check every configured endpoint before serving or claiming. The worker
-moves that same registry into `Processor::new` when registering
-`webhooks.process`; it does not construct a second registry.
+moves that same registry into `Processor::new(...).register(kinds)`; it does not
+construct a second registry.
 
 ```rust,ignore
+use infra_webhooks::inbound::{Consumer, Consumers, Incoming, async_trait};
+
+struct Partner;
+
+#[async_trait]
+impl Consumer for Partner {
+    async fn process(&self, tx: &mut Tx<'_>, incoming: &Incoming) -> Result<(), JobError> {
+        // Parse incoming.body() and apply the business effect on tx.
+        Ok(())
+    }
+}
+
 pub fn consumers() -> Consumers {
     let mut consumers = Consumers::new();
-    consumers.insert(endpoint_id, Arc::clone(&consumer));
+    consumers.insert("partner", Arc::new(Partner));
     consumers
 }
 ```
@@ -121,8 +134,12 @@ transaction it inserts a receipt and enqueues `webhooks.process`. The composite
 primary key uses C-collated endpoint text and binary message IDs. Only the first
 insert enqueues a job; an authenticated duplicate leaves the original job body
 and content type unchanged. A new receipt's database-default `received_at`
-records its first admission and never refreshes on replay. Its time index
-supports future maintenance, without introducing a TTL or cleanup task.
+records its first admission and never refreshes on replay. The service process
+deletes receipts older than 7 days, in batches, every 60 seconds, starting at
+boot. A sender retries one message ID with fresh timestamps for its whole retry
+horizon (Standard Webhooks senders retry for more than a day; this template's
+outbound schedule runs about six days), so receipts must outlive that horizon.
+The specification's 5-minute example only covers replay of one signed request.
 
 The worker uses existing jobs policy (25 attempts, 60 seconds), resolves a
 consumer before opening a transaction, and retries a missing binding until
@@ -134,8 +151,8 @@ cannot undo an already committed completion. An external consumer must supply
 recipient idempotency from endpoint/message identity because PostgreSQL cannot
 roll back its effect.
 
-Receipts have no expiry here: distinct identities grow receipt metadata and
-deleting it permits reacceptance. This profile does not certify payload erasure,
+Receipts older than 7 days are deleted by that service-process cleanup; deleting
+one permits reacceptance of that identity. This profile does not certify payload erasure,
 legal retention, provider registration, capacity, TLS ingress, or production
 operation. Terminal job retention remains jobs-owned and cannot delete live work.
 

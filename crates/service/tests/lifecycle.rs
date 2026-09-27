@@ -305,14 +305,14 @@ fn active_inbound_webhook_endpoint_refuses_without_postgres_before_listener_admi
         ),
         (
             "APP__INBOUND_WEBHOOKS__SECRETS__PARTNER_V1",
-            "whsec_d2ViaG9va19zZWNyZXQ=",
+            "whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=",
         ),
     ])
     .wait();
     assert_eq!(code, Some(1));
     assert!(stderr.contains("postgres.enabled"), "stderr: {stderr}");
     assert!(
-        !stderr.contains("d2ViaG9va19zZWNyZXQ="),
+        !stderr.contains("Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M="),
         "a webhook secret must not reach startup diagnostics: {stderr}"
     );
 }

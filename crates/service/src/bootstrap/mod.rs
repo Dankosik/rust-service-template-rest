@@ -337,7 +337,7 @@ async fn serve_until_stopped(
     let mut composer = prepare_http_idempotency(config, dependencies.postgres.as_ref());
     // template:end http-idempotency:bootstrap-http-idempotency-composer
     // template:begin inbound-webhooks:bootstrap-webhooks-prepare
-    let webhook_state = prepare_inbound_webhooks(config, dependencies.postgres.as_ref())?;
+    let webhook_state = prepare_inbound_webhooks(config, dependencies.postgres.as_ref(), tracker, cancel)?;
     // template:end inbound-webhooks:bootstrap-webhooks-prepare
     let readiness = Readiness::new(
         probes,
@@ -490,6 +490,8 @@ async fn serve_until_stopped(
 fn prepare_inbound_webhooks(
     config: &Config,
     postgres_pool: Option<&PgPool>,
+    tracker: &TaskTracker,
+    cancel: &CancellationToken,
 ) -> Result<WebhookState, BootstrapError> {
     let webhooks = &config.inbound_webhooks;
     if webhooks.endpoints.is_empty() {
@@ -503,13 +505,13 @@ fn prepare_inbound_webhooks(
         )
     })?;
     let consumers = webhook_consumers::consumers();
+    consumers
+        .require(webhooks.endpoints.keys().map(String::as_str))
+        .map_err(|missing| BootstrapError::InboundWebhookConsumerMissing {
+            endpoint: missing.endpoint,
+        })?;
     let mut bindings = Vec::with_capacity(webhooks.endpoints.len());
     for (endpoint_id, endpoint) in &webhooks.endpoints {
-        if !consumers.contains(endpoint_id) {
-            return Err(BootstrapError::InboundWebhookConsumerMissing {
-                endpoint: endpoint_id.clone(),
-            });
-        }
         let active = signing_key(webhooks, endpoint_id, &endpoint.active_key)?;
         let previous = endpoint
             .previous_key
@@ -518,7 +520,9 @@ fn prepare_inbound_webhooks(
             .transpose()?;
         bindings.push((endpoint_id.clone(), KeyRing::new(active, previous)));
     }
-    Ok(WebhookState::active(Receiver::new(pool.clone(), bindings)))
+    let receiver = Receiver::new(pool.clone(), bindings);
+    tracker.spawn(receiver.clone().run_cleanup(cancel.child_token()));
+    Ok(WebhookState::active(receiver))
 }
 
 /// Decode the secret that one endpoint's key reference names. The worker
@@ -961,7 +965,9 @@ mod tests {
         );
         let pool = PgPool::connect_lazy("postgres://localhost/unused")
             .expect("lazy pool does not connect");
-        let result = prepare_inbound_webhooks(&config, Some(&pool));
+        let tracker = TaskTracker::new();
+        let cancel = CancellationToken::new();
+        let result = prepare_inbound_webhooks(&config, Some(&pool), &tracker, &cancel);
         assert!(matches!(
             result,
             Err(BootstrapError::InboundWebhookConsumerMissing { endpoint })
