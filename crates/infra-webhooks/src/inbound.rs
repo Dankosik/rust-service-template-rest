@@ -260,6 +260,8 @@ enum ReceiptFailure {
 #[serde_as]
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Incoming {
+    #[serde(skip_deserializing, default = "incoming_version")]
+    version: u8,
     endpoint_id: String,
     #[serde_as(as = "Base64")]
     message_id: Vec<u8>,
@@ -269,9 +271,14 @@ pub struct Incoming {
     body: Vec<u8>,
 }
 
+const fn incoming_version() -> u8 {
+    1
+}
+
 impl Incoming {
     fn new(endpoint_id: &str, message_id: &[u8], content_type: Option<&[u8]>, body: &[u8]) -> Self {
         Self {
+            version: incoming_version(),
             endpoint_id: endpoint_id.to_owned(),
             message_id: message_id.to_vec(),
             content_type: content_type.map(ToOwned::to_owned),
@@ -308,6 +315,7 @@ impl fmt::Debug for Incoming {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Incoming")
+            .field("version", &self.version)
             .field("endpoint_id", &"[REDACTED]")
             .field("message_id", &"[REDACTED]")
             .field("content_type", &self.content_type.is_some())

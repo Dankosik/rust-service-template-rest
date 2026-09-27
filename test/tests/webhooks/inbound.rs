@@ -203,6 +203,7 @@ async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool
         .fetch_one(&pool)
         .await
         .expect("original processing job");
+    assert_eq!(payload["version"], 1);
     let incoming: Incoming = serde_json::from_value(payload).expect("incoming");
     assert_eq!(incoming.body(), body);
     assert_eq!(

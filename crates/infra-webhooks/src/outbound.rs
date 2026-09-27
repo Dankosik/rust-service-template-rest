@@ -85,6 +85,7 @@ impl Outbound {
             return Err(OutboundError::InvalidContentType);
         }
         let delivery = Delivery {
+            version: delivery_version(),
             endpoint_id: endpoint_id.to_owned(),
             content_type: content_type.to_owned(),
             body,
@@ -127,6 +128,11 @@ impl Endpoint {
     /// Use a caller-built local test client.
     ///
     /// The caller supplies the absolute destination admitted by its client.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutboundError::InvalidEndpoint`] when the destination cannot
+    /// be represented as an HTTP request URI.
     pub fn with_client(
         destination: Url,
         client: Client,
@@ -219,10 +225,16 @@ impl fmt::Debug for Dispatcher {
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 struct Delivery {
+    #[serde(skip_deserializing, default = "delivery_version")]
+    version: u8,
     endpoint_id: String,
     content_type: String,
     #[serde_as(as = "serde_with::base64::Base64")]
     body: Vec<u8>,
+}
+
+const fn delivery_version() -> u8 {
+    2
 }
 
 impl JobKind for Delivery {
@@ -415,6 +427,7 @@ mod tests {
     #[test]
     fn serialized_payload_is_endpoint_content_type_and_base64_body() {
         let delivery = super::Delivery {
+            version: super::delivery_version(),
             endpoint_id: "partner".to_owned(),
             content_type: "application/json".to_owned(),
             body: b"raw\0bytes".to_vec(),
@@ -423,6 +436,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&delivery).unwrap(),
             serde_json::json!({
+                "version": 2,
                 "endpoint_id": "partner",
                 "content_type": "application/json",
                 "body": "cmF3AGJ5dGVz"
@@ -431,9 +445,9 @@ mod tests {
     }
 
     #[test]
-    fn a_v2_row_with_version_still_deserializes() {
+    fn a_versioned_row_still_deserializes() {
         let delivery: super::Delivery = serde_json::from_str(
-            r#"{"version":2,"endpoint_id":"partner","content_type":"application/json","body":"cmF3AGJ5dGVz"}"#,
+            r#"{"version":99,"endpoint_id":"partner","content_type":"application/json","body":"cmF3AGJ5dGVz"}"#,
         )
         .unwrap();
 

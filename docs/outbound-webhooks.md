@@ -69,8 +69,8 @@ Dispatcher::new(endpoints).register(kinds);
 
 `Dispatcher::register` installs `webhooks.deliver` with `DELIVERY_POLICY` (20
 attempts and 30 seconds). Producers never resolve signing secrets. The queued
-payload is endpoint ID, content type, and base64 body. Unknown fields, including
-a `version` written by the previous payload, are ignored. A payload the worker
+payload carries `"version": 2`, endpoint ID, content type, and base64 body.
+New workers ignore that version and other unknown fields. A payload the worker
 cannot decode is retried by jobs, which keeps a rolling deploy safe; it is not a
 permanent failure. An endpoint missing from the current worker snapshot is
 retryable and spends an attempt.
@@ -151,11 +151,11 @@ fixed interoperability input; it does not by itself prove a runtime path.
 
 ## Rollout and evidence
 
-Apply the migrations retained by the selected profile. Queued rows from the
-previous payload, which carry `"version"`, still decode; unknown fields are
-ignored. A row the worker cannot decode is retried, not failed permanently, so
-a rolling deploy stays safe. The receipt migration belongs only to the inbound
-profile.
+Apply the migrations retained by the selected profile. New rows retain
+`"version": 2` so workers from the previous payload decode them; new workers
+ignore that version and other unknown fields. A row the worker cannot decode is
+retried, not failed permanently, so a rolling deploy stays safe. The receipt
+migration belongs only to the inbound profile.
 
 Rollback stops new producers and drains relevant live jobs before removing
 capable workers; pending work or unknown commit state requires rolling forward. Provider registration, rotation

@@ -256,10 +256,10 @@ async fn producer_commits_only_common_fields_and_preserves_raw_body(pool: PgPool
     .await
     .expect("delivery row");
     assert_eq!(row.try_get::<String, _>("id").expect("id"), id);
-    assert!(
+    assert_eq!(
         row.try_get::<Option<String>, _>("version")
-            .expect("version")
-            .is_none()
+            .expect("version"),
+        Some("2".to_owned())
     );
     assert_eq!(
         row.try_get::<String, _>("endpoint_id").expect("endpoint"),

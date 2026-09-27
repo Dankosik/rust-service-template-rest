@@ -506,6 +506,9 @@ fn observation_records_polled_attempts_once_without_request_data() {
         .expect("test runtime");
     metrics::with_local_recorder(&recorder, || {
         tracing::subscriber::with_default(diagnostics.clone(), || {
+            // Keep callsite interest independent of a sibling test's thread-local
+            // subscriber; tracing-core 0.1.36 otherwise has a single-dispatcher fast path.
+            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
             runtime.block_on(exercise_completed_attempts());
         });
     });
@@ -599,6 +602,9 @@ fn observation_records_timeout_and_polled_drop_once() {
         .expect("test runtime");
     metrics::with_local_recorder(&recorder, || {
         tracing::subscriber::with_default(diagnostics.clone(), || {
+            // Keep callsite interest independent of a sibling test's thread-local
+            // subscriber; tracing-core 0.1.36 otherwise has a single-dispatcher fast path.
+            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
             runtime.block_on(async {
                 let material = TlsMaterial::new(FIXTURE_HOST);
                 // The recorded 200 status proves the timeout struck after the
