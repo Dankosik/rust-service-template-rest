@@ -7,8 +7,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -28,6 +26,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::protocol::KeyRing;
 
+/// Re-exported so a consumer crate implements [`Consumer`] without its own
+/// `async-trait` dependency, as `tonic::async_trait` does for services.
+pub use async_trait::async_trait;
+
+// Under REPEATABLE READ a concurrent `ON CONFLICT DO NOTHING` fails with 40001
+// instead of reporting the duplicate, so admission pins READ COMMITTED.
 const READ_COMMITTED: TxOptions = TxOptions {
     isolation: Isolation::ReadCommitted,
     read_only: false,
@@ -319,13 +323,13 @@ impl JobKind for Incoming {
 const _: () = infra_jobs::assert_valid_kind_name(Incoming::NAME);
 
 /// A provider adapter that applies one retained delivery inside its transaction.
+///
+/// Implement it under [`async_trait`](macro@async_trait), the workspace idiom
+/// for object-safe async traits.
+#[async_trait]
 pub trait Consumer: Send + Sync + 'static {
     /// Apply `incoming` through the adopter's business boundary.
-    fn process<'a>(
-        &'a self,
-        tx: &'a mut Tx<'_>,
-        incoming: &'a Incoming,
-    ) -> Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'a>>;
+    async fn process(&self, tx: &mut Tx<'_>, incoming: &Incoming) -> Result<(), JobError>;
 }
 
 /// Explicit endpoint-to-consumer bindings for a processing worker.

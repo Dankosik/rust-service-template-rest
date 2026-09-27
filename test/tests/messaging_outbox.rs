@@ -1079,23 +1079,21 @@ struct HeldWebhookConsumer {
     release: Notify,
 }
 
+#[infra_webhooks::inbound::async_trait]
 impl WebhookConsumer for HeldWebhookConsumer {
-    fn process<'a>(
-        &'a self,
-        tx: &'a mut infra_postgres::Tx<'_>,
-        incoming: &'a Incoming,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            sqlx::query("INSERT INTO webhook_effects (message_id) VALUES ($1)")
-                .bind(incoming.message_id())
-                .execute(connection(tx))
-                .await
-                .map_err(JobError::from)?;
-            self.entered.notify_one();
-            self.release.notified().await;
-            Ok(())
-        })
+    async fn process(
+        &self,
+        tx: &mut infra_postgres::Tx<'_>,
+        incoming: &Incoming,
+    ) -> Result<(), JobError> {
+        sqlx::query("INSERT INTO webhook_effects (message_id) VALUES ($1)")
+            .bind(incoming.message_id())
+            .execute(connection(tx))
+            .await
+            .map_err(JobError::from)?;
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
     }
 }
 // template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-fixture

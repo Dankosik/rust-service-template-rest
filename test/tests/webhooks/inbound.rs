@@ -8,7 +8,7 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use infra_jobs::{Engine, JobError, Kinds, Policy};
 use infra_postgres::{Dsn, PgPool, Tx, connection};
 use infra_webhooks::inbound::{
-    Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver,
+    Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver, async_trait,
 };
 use infra_webhooks::protocol::KeyRing;
 use integration_tests::{DATABASE_URL, dsn_for};
@@ -318,24 +318,18 @@ struct EffectConsumer {
     release: Notify,
 }
 
+#[async_trait]
 impl Consumer for EffectConsumer {
-    fn process<'a>(
-        &'a self,
-        tx: &'a mut Tx<'_>,
-        incoming: &'a Incoming,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            sqlx::query("INSERT INTO webhook_effects (message_id, content_type) VALUES ($1, $2)")
-                .bind(incoming.message_id())
-                .bind(incoming.content_type())
-                .execute(&mut *connection(tx))
-                .await
-                .map_err(JobError::from)?;
-            self.entered.notify_one();
-            self.release.notified().await;
-            Ok(())
-        })
+    async fn process(&self, tx: &mut Tx<'_>, incoming: &Incoming) -> Result<(), JobError> {
+        sqlx::query("INSERT INTO webhook_effects (message_id, content_type) VALUES ($1, $2)")
+            .bind(incoming.message_id())
+            .bind(incoming.content_type())
+            .execute(&mut *connection(tx))
+            .await
+            .map_err(JobError::from)?;
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
     }
 }
 

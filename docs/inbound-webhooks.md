@@ -91,8 +91,9 @@ ReceiveError, Incoming, Consumer, Consumers, Processor}`. Construction uses
 `receive(endpoint_id, &HeaderMap, body, SystemTime)` and returns Accepted,
 or Duplicate, or closed UnknownEndpoint, Rejected, or Unavailable
 errors. `Incoming` exposes original endpoint, message-ID, body, and optional
-byte-safe content type. A registered `Consumer` receives `(&mut Tx, &Incoming)`
-and returns a boxed Send future of `Result<(), JobError>`; `Processor` owns the
+byte-safe content type. A registered `Consumer` implements
+`async fn process(&self, &mut Tx, &Incoming) -> Result<(), JobError>` under the
+re-exported `#[infra_webhooks::inbound::async_trait]`; `Processor` owns the
 binding lookup, transaction, and fenced completion. `Consumers::require` fails
 startup when a configured endpoint has no binding. `Processor::register` installs
 `webhooks.process` with the default jobs policy.
@@ -104,9 +105,21 @@ moves that same registry into `Processor::new(...).register(kinds)`; it does not
 construct a second registry.
 
 ```rust,ignore
+use infra_webhooks::inbound::{Consumer, Consumers, Incoming, async_trait};
+
+struct Partner;
+
+#[async_trait]
+impl Consumer for Partner {
+    async fn process(&self, tx: &mut Tx<'_>, incoming: &Incoming) -> Result<(), JobError> {
+        // Parse incoming.body() and apply the business effect on tx.
+        Ok(())
+    }
+}
+
 pub fn consumers() -> Consumers {
     let mut consumers = Consumers::new();
-    consumers.insert(endpoint_id, Arc::clone(&consumer));
+    consumers.insert("partner", Arc::new(Partner));
     consumers
 }
 ```
