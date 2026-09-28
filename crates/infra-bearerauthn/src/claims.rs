@@ -4,7 +4,7 @@
 
 use crate::{Failure, Principal, VerificationError, VerificationReason};
 use serde::Deserialize;
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 // template:begin oidc-jwt:authn-claims-jwt-import
 use crate::TokenProfile;
 // template:end oidc-jwt:authn-claims-jwt-import
@@ -106,22 +106,21 @@ pub(crate) fn validate_jwt_claims(
     let claims: JwtClaims = serde_json::from_str(payload)
         .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))?;
     let subject = non_empty(claims.sub);
-    let client_id = [
-        claims.client_id.clone(),
-        claims.azp,
-        claims.appid,
-        claims.cid,
-    ]
-    .into_iter()
-    .find_map(non_empty);
+    let has_client_id = claims
+        .client_id
+        .as_ref()
+        .is_some_and(|value| !value.is_empty());
+    let client_id = [claims.client_id, claims.azp, claims.appid, claims.cid]
+        .into_iter()
+        .find_map(non_empty);
     if subject.is_none() && client_id.is_none() {
         return Err(VerificationError::invalid(VerificationReason::MissingClaim));
     }
     if token_profile == TokenProfile::Rfc9068 {
-        let (Some(iat), Some(_), Some(_), Some(_)) = (
+        let (Some(iat), Some(_), Some(()), Some(_)) = (
             claims.iat,
             &subject,
-            non_empty(claims.client_id),
+            has_client_id.then_some(()),
             non_empty(claims.jti),
         ) else {
             return Err(VerificationError::invalid(VerificationReason::MissingClaim));
@@ -153,13 +152,16 @@ pub(crate) fn validate_introspection_claims(
     let malformed =
         || VerificationError::new(Failure::Unavailable, VerificationReason::MalformedClaims);
     let invalid = VerificationError::invalid;
-    let payload: Box<serde_json::value::RawValue> =
-        serde_json::from_slice(bytes).map_err(|_| malformed())?;
-    let envelope: Envelope = serde_json::from_str(payload.get()).map_err(|_| malformed())?;
+    // Keep the provider evidence intact, excluding only JSON boundary whitespace.
+    // Envelope deserialization still validates the entire response before active.
+    let payload = std::str::from_utf8(bytes)
+        .map_err(|_| malformed())?
+        .trim_matches([' ', '\t', '\r', '\n']);
+    let envelope: Envelope = serde_json::from_str(payload).map_err(|_| malformed())?;
     if !envelope.active {
         return Err(invalid(VerificationReason::Inactive));
     }
-    let claims: ActiveClaims = serde_json::from_str(payload.get()).map_err(|_| malformed())?;
+    let claims: ActiveClaims = serde_json::from_str(payload).map_err(|_| malformed())?;
     let (Some(issuer), Some(audience), Some(expiry)) = (claims.iss, claims.aud, claims.exp) else {
         return Err(invalid(VerificationReason::MissingClaim));
     };
@@ -194,7 +196,7 @@ pub(crate) fn validate_introspection_claims(
         client_id,
         scopes,
         expiry,
-        Arc::from(payload.get()),
+        Arc::from(payload),
     ))
 }
 // template:end oidc-introspection:authn-claims-introspection-validation
@@ -208,7 +210,7 @@ fn normalize_scopes(
     scope: Option<Scope>,
     malformed: Failure,
 ) -> Result<Vec<String>, VerificationError> {
-    let values = match scope {
+    let mut values = match scope {
         None => Vec::new(),
         Some(Scope::Delimited(value)) if value.is_empty() => Vec::new(),
         Some(Scope::Delimited(value)) => value.split(' ').map(ToOwned::to_owned).collect(),
@@ -217,11 +219,9 @@ fn normalize_scopes(
     if !values.iter().all(|value| is_scope_token(value)) {
         return Err(VerificationError::new(malformed, VerificationReason::Scope));
     }
-    Ok(values
-        .into_iter()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect())
+    values.sort_unstable();
+    values.dedup();
+    Ok(values)
 }
 
 /// RFC 6749 section 3.3: `scope-token = 1*( %x21 / %x23-5B / %x5D-7E )`.
@@ -318,10 +318,14 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_active_responses_are_unavailable_trust() {
+    fn unreadable_responses_are_unavailable_trust() {
         for response in [
             b"{".as_slice(),
             br#"{"active":"yes"}"#,
+            br#"{"active":false}{}"#,
+            br#"{"active":false,"active":true}"#,
+            b"{\"active\":false,\"extra\":\"\xff\"}",
+            b"\x0b{\"active\":false}",
             br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"one","sub":"two"}"#,
             br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":1.5,"sub":"subject"}"#,
             br#"{"active":true,"iss":1,"aud":"api","exp":130,"sub":"subject"}"#,

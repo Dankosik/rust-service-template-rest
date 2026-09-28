@@ -739,9 +739,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(retention(&unbounded, ttl, at(100_500)), ttl);
-        assert_eq!(
-            retention(&principal(&"x".repeat(MAX_ENTRY_BYTES)), ttl, at(100_500)),
-            Duration::ZERO
-        );
+        for (length, expected) in [
+            (MAX_ENTRY_BYTES, Duration::from_millis(30_500)),
+            (MAX_ENTRY_BYTES + 1, Duration::ZERO),
+        ] {
+            let prefix = r#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"sub":"subject","custom":""#;
+            let response = format!("{prefix}{}\"}}", "x".repeat(length - prefix.len() - 2));
+            let padded = format!(" \t\r\n{response}\n\r\t ");
+            let principal = validate_introspection_claims(padded.as_bytes(), &policy, 100).unwrap();
+            assert_eq!(principal.payload_len(), length);
+            assert_eq!(retention(&principal, ttl, at(100_500)), expected);
+        }
     }
 }

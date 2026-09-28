@@ -63,6 +63,19 @@ impl Outcome {
     }
 
     fn count(&self, result: &'static str, failure: &'static str) {
+        if result == "success" && failure == "none" {
+            match self.transport {
+                "http" => {
+                    metrics::counter!(AUTHN_VERIFICATIONS_METRIC, "transport" => "http", "result" => "success", "failure" => "none").increment(1);
+                    return;
+                }
+                "grpc" => {
+                    metrics::counter!(AUTHN_VERIFICATIONS_METRIC, "transport" => "grpc", "result" => "success", "failure" => "none").increment(1);
+                    return;
+                }
+                _ => {}
+            }
+        }
         metrics::counter!(
             AUTHN_VERIFICATIONS_METRIC,
             "transport" => self.transport,
