@@ -332,6 +332,53 @@ fn a_silent_server_records_timeout() {
     assert!(!scrape.contains("hunter2"), "{scrape}");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reply_inside_the_command_timeout_is_not_cut_short() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("slow listener");
+    let address = listener.local_addr().expect("listener address");
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        // Setup commands arrive pipelined and are answered at once; only
+        // `GET` is slow.
+        let mut request = [0; 512];
+        loop {
+            let read = stream.read(&mut request).await.unwrap_or(0);
+            if read == 0 {
+                return;
+            }
+            let request = &request[..read];
+            let reply = if request.windows(5).any(|w| w == b"\r\nGET") {
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                b"$-1\r\n".to_vec()
+            } else {
+                let commands = request
+                    .split(|&b| b == b'\n')
+                    .filter(|l| l.first() == Some(&b'*'));
+                b"+OK\r\n".repeat(commands.count())
+            };
+            if stream.write_all(&reply).await.is_err() {
+                return;
+            }
+        }
+    });
+    let cache = Cache::connect(CacheOptions {
+        dsn: SecretString::from(format!("redis://{address}")),
+        root_ca_path: None,
+        allow_plaintext: true,
+        allow_unauthenticated: true,
+        command_timeout: Duration::from_secs(1),
+    })
+    .expect("lazy connect");
+
+    assert_eq!(cache.namespace("slow").get("key").await, Ok(None));
+}
+
 fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
     PrometheusBuilder::new()
         .set_buckets_for_metric(

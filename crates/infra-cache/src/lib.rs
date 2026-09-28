@@ -491,10 +491,13 @@ fn tcp_settings() -> redis::io::tcp::TcpSettings {
 }
 
 /// Reconnect bounds only. Commands are bounded by `command_timeout` in
-/// [`CacheNamespace::run`], which also covers the wait for a reconnect.
+/// [`CacheNamespace::run`], which also covers the wait for a reconnect, so
+/// redis's own 500 ms response timeout is off: it would cut a longer
+/// `command_timeout` short and arm a second timer on every command.
 fn manager_config() -> redis::aio::ConnectionManagerConfig {
     redis::aio::ConnectionManagerConfig::new()
         .set_connection_timeout(Some(CONNECT_TIMEOUT))
+        .set_response_timeout(None)
         .set_min_delay(MIN_DELAY)
         .set_exponent_base(EXPONENT_BASE)
         .set_max_delay(MAX_DELAY)
