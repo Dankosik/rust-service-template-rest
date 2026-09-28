@@ -72,10 +72,8 @@ impl EchoService for Echo {
     ) -> Result<Response<Self::BidiStreamStream>, Status> {
         let responses = request.into_inner().map(|item| {
             item.and_then(|request| {
-                accepted(request.message.clone())?;
-                Ok(BidiStreamResponse {
-                    message: request.message,
-                })
+                let message = accepted(request.message)?;
+                Ok(BidiStreamResponse { message })
             })
         });
         Ok(Response::new(Box::pin(responses)))

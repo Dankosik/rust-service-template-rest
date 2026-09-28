@@ -66,6 +66,7 @@ pub(crate) struct JwtVerifier {
     claim_policy: ClaimPolicy,
     token_profile: TokenProfile,
     algorithms: Vec<JwtAlgorithm>,
+    validations: Vec<Validation>,
     keys: Arc<KeyStore>,
 }
 
@@ -151,10 +152,14 @@ impl JwtVerifier {
         kid: Option<&str>,
         algorithm: JwtAlgorithm,
     ) -> Result<Box<RawValue>, DecodeError> {
-        let validation = validation_for(algorithm, &self.claim_policy);
+        let validation = self
+            .validations
+            .iter()
+            .find(|validation| validation.algorithms.contains(&algorithm.jsonwebtoken()))
+            .ok_or(DecodeError::NoCandidate)?;
         let mut miss = DecodeError::NoCandidate;
         for key in keys.candidates(kid, algorithm) {
-            match decode::<Box<RawValue>>(token.as_bytes(), &key.decoding_key, &validation) {
+            match decode::<Box<RawValue>>(token.as_bytes(), &key.decoding_key, validation) {
                 Ok(data) => return Ok(data.claims),
                 Err(error) if *error.kind() == ErrorKind::InvalidSignature => {
                     miss = DecodeError::BadSignature;
@@ -260,8 +265,15 @@ async fn prepare_with_provider(
         })
     })?;
     let keys = KeyStore::new(Arc::new(keys));
+    let claim_policy = ClaimPolicy::new(options.issuer.as_str().to_owned(), options.audiences);
+    let validations = options
+        .algorithms
+        .iter()
+        .map(|algorithm| validation_for(*algorithm, &claim_policy))
+        .collect();
     let verifier = JwtVerifier {
-        claim_policy: ClaimPolicy::new(options.issuer.as_str().to_owned(), options.audiences),
+        claim_policy,
+        validations,
         token_profile: options.token_profile,
         algorithms: options.algorithms.clone(),
         keys: keys.clone(),
@@ -649,11 +661,15 @@ mod tests {
     }
 
     fn verifier(keys: Arc<super::KeySet>, algorithms: &[JwtAlgorithm]) -> JwtVerifier {
+        let claim_policy =
+            ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()]);
+        let validations = algorithms
+            .iter()
+            .map(|algorithm| super::validation_for(*algorithm, &claim_policy))
+            .collect();
         JwtVerifier {
-            claim_policy: ClaimPolicy::new(
-                "https://issuer.example".to_owned(),
-                vec!["api".to_owned()],
-            ),
+            claim_policy,
+            validations,
             token_profile: TokenProfile::ResourceServer,
             algorithms: algorithms.to_vec(),
             keys: KeyStore::new(keys),
@@ -1140,5 +1156,105 @@ mod tests {
                     && !event.contains("private-key-id")),
             "recorded events: {events:?}"
         );
+    }
+
+    #[test]
+    fn authentication_metrics_preserve_success_failure_and_cancellation_labels() {
+        use std::{future::Future, task::Poll};
+
+        let diagnostics = Diagnostics::default();
+        let engine = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
+        engine.keys.permit_unknown_refresh_for_test();
+        let verifier = crate::Verifier::jwt(engine);
+        let token = signed(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("fixture"),
+            &serde_json::json!({}),
+        );
+        let header = format!("Bearer {token}");
+        let unknown = signed(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("rotated"),
+            &serde_json::json!({}),
+        );
+        let unknown_header = format!("Bearer {unknown}");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        metrics::with_local_recorder(&diagnostics, || {
+            runtime.block_on(async {
+                for transport in ["http", "grpc", "custom"] {
+                    verifier
+                        .authenticate([header.as_bytes()], transport)
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(
+                    verifier.authenticate(std::iter::empty(), "http").await,
+                    Err(Failure::Missing)
+                );
+                assert_eq!(
+                    verifier
+                        .authenticate([b"Bearer =".as_slice()], "grpc")
+                        .await,
+                    Err(Failure::Malformed)
+                );
+                let mut pending =
+                    Box::pin(verifier.authenticate([unknown_header.as_bytes()], "http"));
+                std::future::poll_fn(|cx| {
+                    assert!(pending.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                drop(pending);
+            });
+        });
+        let counters = diagnostics.counters.lock().unwrap();
+        let verifications = counters
+            .iter()
+            .filter(|(key, _)| key.name() == "authn_token_verifications_total")
+            .collect::<Vec<_>>();
+        assert_eq!(verifications.len(), 3);
+        assert!(verifications.iter().all(|(key, value)| {
+            *value == 1
+                && key
+                    .labels()
+                    .any(|label| label.key() == "mode" && label.value() == "jwt")
+                && key
+                    .labels()
+                    .any(|label| label.key() == "outcome" && label.value() == "success")
+                && key
+                    .labels()
+                    .any(|label| label.key() == "reason" && label.value() == "verified")
+        }));
+        let outcomes = counters
+            .iter()
+            .filter(|(key, _)| key.name() == crate::AUTHN_VERIFICATIONS_METRIC)
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes.len(), 6);
+        for (transport, result, failure) in [
+            ("http", "success", "none"),
+            ("grpc", "success", "none"),
+            ("custom", "success", "none"),
+            ("http", "failure", "missing"),
+            ("grpc", "failure", "malformed"),
+            ("http", "cancelled", "cancelled"),
+        ] {
+            assert!(outcomes.iter().any(|(key, value)| {
+                *value == 1
+                    && key
+                        .labels()
+                        .any(|label| label.key() == "transport" && label.value() == transport)
+                    && key
+                        .labels()
+                        .any(|label| label.key() == "result" && label.value() == result)
+                    && key
+                        .labels()
+                        .any(|label| label.key() == "failure" && label.value() == failure)
+            }));
+        }
     }
 }
