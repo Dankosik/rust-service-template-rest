@@ -458,6 +458,30 @@ async fn exercise_completed_attempts() {
     assert_eq!(not_found.status(), http::StatusCode::NOT_FOUND);
     server.await.expect("not-found fixture joins");
 
+    let (address, server) = tls_server(
+        &material,
+        b"HTTP/1.1 600 Fixture Error\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
+    let custom_error = fixture_client(address, &material)
+        .execute(request(), deadline())
+        .await
+        .expect("600 status remains a response");
+    assert_eq!(custom_error.status().as_u16(), 600);
+    server.await.expect("600-status fixture joins");
+
+    let (address, server) = tls_server(
+        &material,
+        b"HTTP/1.1 999 Fixture Error\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
+    let custom_error = fixture_client(address, &material)
+        .execute(request(), deadline())
+        .await
+        .expect("999 status remains a response");
+    assert_eq!(custom_error.status().as_u16(), 999);
+    server.await.expect("999-status fixture joins");
+
     // Refused before I/O, so it is not an attempt.
     assert!(matches!(
         client
@@ -522,19 +546,22 @@ fn observation_records_polled_attempts_once_without_request_data() {
                 "http_request_method=\"GET\""
             ],
         ),
-        2
+        4
     );
-    assert_eq!(
-        recorded_count(
-            &scrape,
-            &[
-                "outbound_outcome=\"response\"",
-                "error_type=\"404\"",
-                "http_response_status_code=\"404\"",
-            ],
-        ),
-        1
-    );
+    for status in ["404", "600", "999"] {
+        assert_eq!(
+            recorded_count(
+                &scrape,
+                &[
+                    "outbound_outcome=\"response\"",
+                    &format!("error_type=\"{status}\""),
+                    &format!("http_response_status_code=\"{status}\""),
+                ],
+            ),
+            1,
+            "{status} keeps matching status and error labels",
+        );
+    }
     assert_eq!(
         recorded_count(&scrape, &["error_type=\"invalid_target\""]),
         0
@@ -558,7 +585,7 @@ fn observation_records_polled_attempts_once_without_request_data() {
     let spans = diagnostics.0.lock().expect("span diagnostic lock");
     assert_eq!(
         spans.len(),
-        3,
+        5,
         "unpolled futures and refused targets are not attempts"
     );
     let body_failure = spans
@@ -866,6 +893,23 @@ fn requests_must_name_the_configured_origin() {
         policy::admit_request(&origin, with_host),
         Err(Error::InvalidTarget)
     ));
+}
+
+#[test]
+fn request_conversion_preserves_supported_parts() {
+    let origin = url("https://authn.fixture.test").origin();
+    let request = Request::builder()
+        .method(http::Method::PATCH)
+        .uri("https://AUTHN.fixture.test:443/items")
+        .version(Version::HTTP_2)
+        .header("x-request-part", "preserved")
+        .body(Bytes::from_static(b"preserved"))
+        .expect("request parts");
+    let converted = policy::admit_request(&origin, request).expect("admitted request");
+    assert_eq!(converted.method(), http::Method::PATCH);
+    assert_eq!(converted.version(), Version::HTTP_2);
+    assert_eq!(converted.url().as_str(), "https://authn.fixture.test/items");
+    assert_eq!(converted.headers()["x-request-part"], "preserved");
 }
 
 #[test]

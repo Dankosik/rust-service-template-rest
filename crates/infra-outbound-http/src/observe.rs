@@ -1,7 +1,7 @@
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use http::{Method, StatusCode};
-use metrics::{Label, Unit};
+use metrics::{Label, SharedString, Unit};
 use tracing::Span;
 use url::Origin;
 
@@ -78,34 +78,47 @@ impl Attempt {
         match result {
             Ok(_) => {
                 let error_type = self.status.and_then(http_error_type);
-                self.emit("response", error_type.as_deref());
+                let is_http_error = error_type.is_some();
+                self.emit("response", error_type, is_http_error);
             }
-            Err(error) => self.emit("error", Some(error_type(error))),
+            Err(error) => self.emit("error", Some(error_type(error).into()), false),
         }
     }
 
-    fn emit(&self, outcome: &'static str, error_type: Option<&str>) {
+    fn emit(&self, outcome: &'static str, error_type: Option<SharedString>, is_http_error: bool) {
         self.span.record("outbound.outcome", outcome);
-        if let Some(error_type) = error_type {
+        if let Some(error_type) = error_type.as_deref() {
             self.span.record("error.type", error_type);
             self.span.record("otel.status_code", "ERROR");
         }
 
         describe_histogram();
-        let mut labels = vec![
+        let mut labels = Vec::with_capacity(
+            4 + usize::from(self.status.is_some()) + usize::from(error_type.is_some()),
+        );
+        labels.extend([
             Label::new("http.request.method", self.method),
             Label::new("server.address", self.server_address.clone()),
             Label::new("server.port", self.server_port.clone()),
             Label::new("outbound.outcome", outcome),
-        ];
-        if let Some(status) = self.status {
-            labels.push(Label::new(
-                "http.response.status_code",
-                status.as_u16().to_string(),
-            ));
-        }
+        ]);
+        let error_type = match (self.status, is_http_error, error_type) {
+            (Some(_), true, Some(error_type)) => {
+                labels.push(Label::new("http.response.status_code", error_type.clone()));
+                labels.push(Label::new("error.type", error_type));
+                None
+            }
+            (Some(status), _, error_type) => {
+                labels.push(Label::new(
+                    "http.response.status_code",
+                    status.as_u16().to_string(),
+                ));
+                error_type
+            }
+            (None, _, error_type) => error_type,
+        };
         if let Some(error_type) = error_type {
-            labels.push(Label::new("error.type", error_type.to_owned()));
+            labels.push(Label::new("error.type", error_type));
         }
         metrics::histogram!(REQUEST_DURATION_METRIC, labels)
             .record(self.started.elapsed().as_secs_f64());
@@ -115,7 +128,7 @@ impl Attempt {
 impl Drop for Attempt {
     fn drop(&mut self) {
         if !self.finalized {
-            self.emit("cancelled", None);
+            self.emit("cancelled", None, false);
         }
     }
 }
@@ -147,9 +160,9 @@ fn bounded_method(method: &Method) -> &'static str {
     }
 }
 
-fn http_error_type(status: StatusCode) -> Option<String> {
+fn http_error_type(status: StatusCode) -> Option<SharedString> {
     if status.is_client_error() || status.is_server_error() || status.as_u16() >= 600 {
-        Some(status.as_u16().to_string())
+        Some(Arc::<str>::from(status.as_str()).into())
     } else {
         None
     }
