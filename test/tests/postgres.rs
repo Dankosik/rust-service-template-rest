@@ -187,6 +187,31 @@ async fn pool_default_isolation_survives_replacement_and_explicit_transactions_o
 }
 
 #[sqlx::test(migrations = false)]
+async fn an_idle_connection_the_server_closed_is_replaced_before_use(pool: PgPool) {
+    let dsn = dsn_for(&pool).await;
+    let ours = template_pool(&dsn, 1).await;
+    let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&ours)
+        .await
+        .unwrap();
+
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(first_pid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(terminated);
+    // Past the pool's one-second idle threshold, so the next acquire pings.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&ours)
+        .await
+        .expect("the idle ping discards the closed connection");
+    assert_ne!(first_pid, second_pid);
+}
+
+#[sqlx::test(migrations = false)]
 async fn probe_is_ready_and_fails_generically_when_the_pool_is_exhausted(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     let ours = template_pool(&dsn, 1).await;
