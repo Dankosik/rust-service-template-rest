@@ -379,6 +379,42 @@ async fn a_reply_inside_the_command_timeout_is_not_cut_short() {
     assert_eq!(cache.namespace("slow").get("key").await, Ok(None));
 }
 
+#[test]
+fn each_outcome_records_into_its_own_series() {
+    let recorder = observation_recorder();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    metrics::with_local_recorder(&recorder, || {
+        runtime.block_on(async {
+            let server = FakeServer::start().await;
+            let cache = admitted(&format!("redis://{}", server.address), true, true);
+            let namespace = cache.namespace("series");
+            assert_eq!(namespace.get("key").await, Ok(None));
+            assert_eq!(namespace.get("key").await, Ok(None));
+            assert_eq!(
+                namespace.set("key", b"value", Duration::from_secs(1)).await,
+                Ok(())
+            );
+        });
+    });
+    let scrape = recorder.handle().render();
+    let count = |operation: &str, outcome: &str| {
+        let series = format!(
+            "cache_operation_duration_seconds_count{{cache=\"series\",operation=\"{operation}\",outcome=\"{outcome}\"}} "
+        );
+        scrape
+            .lines()
+            .find_map(|line| line.strip_prefix(series.as_str()))
+            .unwrap_or_else(|| panic!("{series} missing from {scrape}"))
+            .to_owned()
+    };
+    assert_eq!(count("get", "miss"), "2");
+    assert_eq!(count("set", "ok"), "1");
+    assert_eq!(scrape.matches("_count{").count(), 2, "{scrape}");
+}
+
 fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
     PrometheusBuilder::new()
         .set_buckets_for_metric(
