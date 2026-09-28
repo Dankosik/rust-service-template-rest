@@ -185,6 +185,8 @@ pub(crate) async fn supervise(
     let _slot = slot;
     let span = tracing::info_span!("job_attempt", job.id = %id, job.kind = kind, job.attempt = u64::from(attempt), otel.kind = "consumer");
     crate::trace_context::link(&span, parent.as_deref(), trace_state.as_deref());
+    drop(parent);
+    drop(trace_state);
     run_attempt(
         &shared,
         AttemptId {
@@ -386,9 +388,10 @@ async fn send_outcome(
             .acquire()
             .await
             .map_err(OperationError::Acquire)?;
+        let mut id = [0; 36];
         execute(
             &mut connection,
-            &attempt.id.to_string(),
+            attempt.id.encode(&mut id),
             attempt.generation,
             transition,
         )
@@ -452,12 +455,12 @@ fn map_outcome(kind: &'static str, attempt: u16, policy: Policy, ended: Ended) -
             Disposition::Snooze(delay_micros) => Transition::Snooze { delay_micros },
             Disposition::Permanent => Transition::Fail {
                 reason: Failure::Permanent,
-                summary: summary(&error.to_string()),
+                summary: summary(&error.summary),
             },
             Disposition::RetryAfterAtLeast(floor_micros) => {
-                retry(attempt, policy, &error.to_string(), floor_micros, false)
+                retry(attempt, policy, &error.summary, floor_micros, false)
             }
-            Disposition::Retry => retry(attempt, policy, &error.to_string(), 0, false),
+            Disposition::Retry => retry(attempt, policy, &error.summary, 0, false),
         },
         Ended::Panic => retry(attempt, policy, "handler panicked", 0, false),
         Ended::Payload(error) => retry(attempt, policy, &payload_summary(kind, &error), 0, false),

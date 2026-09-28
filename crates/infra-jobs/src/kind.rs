@@ -40,6 +40,10 @@ pub trait JobKind: Serialize + DeserializeOwned + Send + Sync + 'static {
 pub struct JobId(uuid::Uuid);
 
 impl JobId {
+    pub(crate) fn encode<'a>(&self, buffer: &'a mut [u8; 36]) -> &'a str {
+        self.0.hyphenated().encode_lower(buffer)
+    }
+
     /// The id as the database returns it (`id::text`).
     ///
     /// `None` when `text` is not a UUID.
@@ -183,7 +187,7 @@ pub(crate) enum Disposition {
 #[derive(Debug)]
 pub struct JobError {
     pub(crate) disposition: Disposition,
-    summary: String,
+    pub(crate) summary: String,
 }
 
 impl JobError {
