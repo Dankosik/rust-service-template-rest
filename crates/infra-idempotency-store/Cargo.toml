@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+bytes = { workspace = true }
 infra-postgres = { workspace = true }
 sqlx = { workspace = true, features = ["derive", "postgres", "runtime-tokio", "tls-rustls-aws-lc-rs"] }
 thiserror = { workspace = true }

@@ -48,13 +48,25 @@ pub enum TxError {
 #[derive(Debug)]
 pub struct Tx<'c> {
     conn: &'c mut PgConnection,
+    /// Set by [`statement_succeeded`] and cleared by [`connection`].
+    live: bool,
 }
 
 /// The connection borrowed by `tx` for a provider adapter's statement.
 ///
 /// Do not issue transaction-control SQL through this connection.
 pub fn connection<'a>(tx: &'a mut Tx<'_>) -> &'a mut PgConnection {
+    tx.live = false;
     tx.conn
+}
+
+/// Record that the statement just run through [`connection`] succeeded.
+///
+/// That success proves the transaction is not aborted, so a commit that
+/// follows skips its probe statement and one round trip. Borrowing
+/// [`connection`] again withdraws the proof.
+pub fn statement_succeeded(tx: &mut Tx<'_>) {
+    tx.live = true;
 }
 
 /// A pooled connection that is closed instead of returned to the pool
@@ -167,10 +179,15 @@ where
     .map_err(TxError::Begin)?;
     guard.discard = false;
 
-    let result = f(&mut Tx { conn: &mut tx }).await;
+    let mut handle = Tx {
+        conn: &mut tx,
+        live: false,
+    };
+    let result = f(&mut handle).await;
+    let live = handle.live;
     match result {
         Ok(value) => {
-            if !options.read_only {
+            if !options.read_only && !live {
                 // PostgreSQL answers `COMMIT` in an aborted transaction with
                 // a silent `ROLLBACK`, and sqlx does not check the command
                 // tag (pgx reports it as `ErrTxCommitRollback`). One

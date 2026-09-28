@@ -331,7 +331,7 @@ mod tests {
                 name: "content-type".to_owned(),
                 value: b"text/plain".to_vec(),
             }],
-            body: b"stored".to_vec(),
+            body: axum::body::Bytes::from_static(b"stored"),
         }
     }
 
