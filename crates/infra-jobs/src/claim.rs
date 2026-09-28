@@ -215,12 +215,13 @@ async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
             .acquire()
             .await
             .map_err(OperationError::Acquire)?;
+        let mut worker_id = [0; 36];
         let rows = sqlx::query(CLAIM)
             .bind(&names)
             .bind(&max_attempts)
             .bind(&timeouts)
             .bind(requested)
-            .bind(shared.worker_id.to_string())
+            .bind(&*shared.worker_id.hyphenated().encode_lower(&mut worker_id))
             .bind(lease_reserve_micros())
             .try_map(|row| ClaimRow::from_row(&row)?.into_drawn(&shared.registry))
             .fetch_all(&mut *connection)
@@ -370,7 +371,7 @@ struct ClaimRow<'a> {
     payload: Option<String>,
     trace_context: Option<String>,
     trace_state: Option<String>,
-    error_summary: Option<String>,
+    error_summary: Option<&'a str>,
     queue_wait_seconds: f64,
 }
 
@@ -386,7 +387,7 @@ impl ClaimRow<'_> {
                 id,
                 kind: registered.name,
                 attempt,
-                error_summary: self.error_summary,
+                error_summary: self.error_summary.map(str::to_owned),
             });
         }
         let Some(payload) = self.payload else {
