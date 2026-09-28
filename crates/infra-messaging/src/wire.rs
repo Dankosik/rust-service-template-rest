@@ -1,7 +1,5 @@
 //! Go-compatible NATS envelope headers and bounded decoding.
 
-use std::fmt::Write as _;
-
 use async_nats::HeaderMap;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
@@ -83,15 +81,15 @@ pub fn decode_envelope(
     let schema = required_header(headers, EVENT_SCHEMA)?;
     let created_at = header_value(headers, CREATED_AT);
     let _publication_id = required_header(headers, NATS_MSG_ID)?;
-    let schema_version = parse_schema(&schema)?;
+    let schema_version = parse_schema(schema)?;
     let occurred_at = parse_timestamp(created_at)?;
     if is_zero_time(occurred_at) {
         return Err(MessagingError::Envelope("creation time is required"));
     }
 
     Ok(InboundEnvelope {
-        message_id,
-        event_type,
+        message_id: message_id.to_owned(),
+        event_type: event_type.to_owned(),
         schema_version,
         occurred_at,
         payload,
@@ -134,7 +132,7 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, Me
     }
     let message_id = required_header(&record.headers, MESSAGE_ID)?;
     let event_type = required_header(&record.headers, EVENT_TYPE)?;
-    let schema_version = parse_schema(&required_header(&record.headers, EVENT_SCHEMA)?)?;
+    let schema_version = parse_schema(required_header(&record.headers, EVENT_SCHEMA)?)?;
     let occurred_at = parse_timestamp(header_value(&record.headers, CREATED_AT))?;
     if is_zero_time(occurred_at) {
         return Err(MessagingError::Envelope(
@@ -153,9 +151,9 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, Me
     )?;
     Ok(PreparedEvent {
         subject,
-        message_id,
+        message_id: message_id.to_owned(),
         publication_id,
-        event_type,
+        event_type: event_type.to_owned(),
         schema_version,
         occurred_at,
         payload: record.payload,
@@ -182,15 +180,16 @@ pub fn dead_letter_id(
 }
 
 pub(crate) fn valid_subject(subject: &str) -> bool {
-    !subject.is_empty()
-        && !subject.split('.').any(|token| {
-            token.is_empty()
-                || token
-                    .bytes()
-                    .any(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
-                || token.contains('*')
-                || token.contains('>')
-        })
+    let mut previous_dot = true;
+    for byte in subject.bytes() {
+        match byte {
+            b' ' | b'\t' | b'\r' | b'\n' | b'*' | b'>' => return false,
+            b'.' if previous_dot => return false,
+            b'.' => previous_dot = true,
+            _ => previous_dot = false,
+        }
+    }
+    !previous_dot
 }
 
 /// Whether the concrete `subject` is selected by the NATS `filter`.
@@ -214,12 +213,15 @@ pub(crate) fn header_value<'a>(headers: &'a HeaderMap, name: &'static str) -> &'
     headers.get(name).map_or("", |value| value.as_str())
 }
 
-fn required_header(headers: &HeaderMap, name: &'static str) -> Result<String, MessagingError> {
+fn required_header<'a>(
+    headers: &'a HeaderMap,
+    name: &'static str,
+) -> Result<&'a str, MessagingError> {
     let value = headers
         .get(name)
-        .map(ToString::to_string)
+        .map(async_nats::HeaderValue::as_str)
         .ok_or(MessagingError::Envelope("required header is missing"))?;
-    validate_text(&value)?;
+    validate_text(value)?;
     Ok(value)
 }
 
@@ -230,7 +232,7 @@ fn parse_schema(value: &str) -> Result<u16, MessagingError> {
     let version = raw
         .parse::<u16>()
         .map_err(|_| MessagingError::Envelope("event schema is invalid"))?;
-    if version == 0 || format!("v{version}") != value {
+    if version == 0 || raw.starts_with('0') || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(MessagingError::Envelope("event schema is invalid"));
     }
     Ok(version)
@@ -252,7 +254,7 @@ pub(crate) fn encoded_header_bytes(headers: &HeaderMap) -> usize {
         .map(|(name, values)| {
             values
                 .iter()
-                .map(|value| name.to_string().len() + 2 + value.to_string().len() + 2)
+                .map(|value| AsRef::<str>::as_ref(name).len() + 2 + value.as_str().len() + 2)
                 .sum::<usize>()
         })
         .sum::<usize>()
@@ -289,22 +291,25 @@ fn record_id(
 ) -> Result<String, MessagingError> {
     let stored_at = format_timestamp(stored_at)?;
     let sequence = stream_sequence.to_string();
-    let input = [
-        stream,
-        sequence.as_str(),
-        stored_at.as_str(),
-        publication_id,
-    ]
-    .join("\0");
-    Ok(prefixed_sha256_hex(prefix, input.as_bytes()))
+    let mut hash = Sha256::new();
+    hash.update(stream.as_bytes());
+    hash.update([0]);
+    hash.update(sequence.as_bytes());
+    hash.update([0]);
+    hash.update(stored_at.as_bytes());
+    hash.update([0]);
+    hash.update(publication_id.as_bytes());
+    Ok(prefixed_digest_hex(prefix, &hash.finalize()))
 }
 
-/// `prefix` followed by the lowercase hex SHA-256 of `input`.
-pub(crate) fn prefixed_sha256_hex(prefix: &str, input: &[u8]) -> String {
+/// `prefix` followed by the lowercase hex of a SHA-256 digest.
+pub(crate) fn prefixed_digest_hex(prefix: &str, digest: &[u8]) -> String {
     let mut id = String::with_capacity(prefix.len() + 64);
     id.push_str(prefix);
-    for byte in Sha256::digest(input) {
-        let _ = write!(id, "{byte:02x}");
+    for &byte in digest {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        id.push(char::from(HEX[usize::from(byte >> 4)]));
+        id.push(char::from(HEX[usize::from(byte & 15)]));
     }
     id
 }
