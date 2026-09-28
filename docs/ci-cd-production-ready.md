@@ -347,9 +347,8 @@ The initializer does not create linked Railway inputs or deployment resources.
 - `cargo-vet` and a Renovate regex manager: a derived repository's policy.
 - Multi-platform image: a consumer that deploys on another architecture;
   the Dockerfile is arch-neutral.
-- Second `tower-http` in the tree (`axum-prometheus`,
-  `axum-tracing-opentelemetry` through `reqwest`): a warning until upstream
-  converges.
+- Second `tower-http` in the tree (`axum-tracing-opentelemetry` through
+  `reqwest`): a warning until upstream converges.
 - BuildKit `rewrite-timestamp` for reproducible image ids: a consumer that
   needs identical image digests, not only identical binaries.
 
