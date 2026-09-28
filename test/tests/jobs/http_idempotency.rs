@@ -101,7 +101,7 @@ fn success(fingerprint: Digest, body: &str) -> Record {
             name: "content-type".to_owned(),
             value: b"application/json".to_vec(),
         }],
-        body: body.as_bytes().to_vec(),
+        body: body.as_bytes().to_vec().into(),
     }
 }
 

@@ -122,7 +122,7 @@ impl Stored {
             fingerprint,
             status,
             headers,
-            body: self.body.to_vec(),
+            body: self.body.clone(),
         })
     }
 
@@ -166,7 +166,7 @@ pub(super) fn decode(record: Record) -> Result<Stored, Undecodable> {
     Ok(Stored {
         status,
         headers,
-        body: Bytes::from(record.body),
+        body: record.body,
     })
 }
 
@@ -210,7 +210,7 @@ mod tests {
             fingerprint: FINGERPRINT,
             status,
             headers,
-            body,
+            body: body.into(),
         }
     }
 

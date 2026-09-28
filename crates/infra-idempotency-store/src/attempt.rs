@@ -2,28 +2,34 @@
 //!
 //! An attempt holds one explicit `READ COMMITTED` transaction:
 //!
-//! 1. One statement checks the writer and takes the scope's
-//!    transaction-scoped advisory lock without waiting.
-//! 2. A second statement reads a live record. A live record decides before
-//!    lock ownership: equal fingerprints replay, different ones mismatch.
-//! 3. Only a missing live record with the lock runs the work, then writes the
+//! 1. One statement checks the writer, takes the scope's transaction-scoped
+//!    advisory lock without waiting, and reads a live record. A live record
+//!    decides whatever the lock returned: equal fingerprints replay, different
+//!    ones mismatch. No record and no lock means another attempt holds the
+//!    scope.
+//! 2. With the lock and no record, a second statement reads again.
+//! 3. Only a record still missing in step 2 runs the work, then writes the
 //!    success record in the same transaction.
 //!
 //! Correctness rests on two PostgreSQL facts. A commit becomes visible before
 //! its transaction releases its locks, and under `READ COMMITTED` every
-//! statement takes a new snapshot. So the read in step 2 sees any record whose
-//! writer released the lock taken in step 1. Merging steps 1 and 2 into one
-//! statement, or running them under `REPEATABLE READ`, would take the snapshot
-//! before the lock and let a duplicate run the work a second time.
+//! statement takes a new snapshot. Step 1 takes its snapshot before its lock,
+//! so it can miss the record of a writer that released the lock in between;
+//! step 2 takes its snapshot after the lock and sees that record. Skipping
+//! step 2, or running under `REPEATABLE READ`, would let a duplicate run the
+//! work a second time. A decision in step 1 alone runs no work, and a live
+//! record is never replaced, so it needs no second read.
 
 use std::fmt;
 use std::time::Duration;
 
+use bytes::Bytes;
 use infra_postgres::{
-    Isolation, Tx, TxError, TxOptions, connection, failure_cause, in_tx_with, sqlstate, transient,
+    Isolation, Tx, TxError, TxOptions, connection, failure_cause, in_tx_with, sqlstate,
+    statement_succeeded, transient,
 };
 use sqlx::Row;
-use sqlx::postgres::PgConnection;
+use sqlx::postgres::{PgConnection, PgRow};
 
 use crate::Store;
 
@@ -34,14 +40,20 @@ const READ_COMMITTED: TxOptions = TxOptions {
     read_only: false,
 };
 
-/// Step 1. Advisory locks work on a standby too; a lock taken there ends with
-/// the refused transaction.
-const WRITER_CHECK_AND_LOCK: &str = "SELECT \
+/// Step 1. The lock is taken after the statement's snapshot, so a missing
+/// record with the lock still needs step 2. Advisory locks work on a standby
+/// too; a lock taken there ends with the refused transaction.
+const LOCK_AND_READ: &str = "SELECT \
     NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS writable, \
-    pg_try_advisory_xact_lock($1) AS acquired";
+    pg_try_advisory_xact_lock($1) AS acquired, \
+    r.fingerprint, r.status, r.headers, \
+    CASE WHEN r.fingerprint = $3 THEN r.body END AS body \
+    FROM (VALUES (1)) AS one LEFT JOIN http_idempotency_records AS r \
+    ON r.scope_key = $2 AND r.expires_at > statement_timestamp()";
 
 /// Step 2. It must stay a statement of its own after step 1.
-const READ: &str = "SELECT fingerprint, status, headers, body \
+const READ: &str = "SELECT fingerprint, status, headers, \
+    CASE WHEN fingerprint = $2 THEN body END AS body \
     FROM http_idempotency_records \
     WHERE scope_key = $1 AND expires_at > statement_timestamp()";
 
@@ -128,12 +140,12 @@ pub struct HeaderPair {
 }
 
 /// One stored success. The store moves values without applying HTTP policy.
-#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     pub fingerprint: Digest,
     pub status: i16,
     pub headers: Vec<HeaderPair>,
-    pub body: Vec<u8>,
+    pub body: Bytes,
 }
 
 /// How [`Store::attempt`] decided.
@@ -199,6 +211,8 @@ impl Store {
                     Err(rollback) => return Err(Stop(Ok(Attempted::RolledBack(rollback)))),
                 };
                 write(connection(tx), scope, caller, &record, self.retention).await?;
+                // The write is the last statement, so the commit needs no probe.
+                statement_succeeded(tx);
                 Ok(value)
             },
         )
@@ -216,11 +230,20 @@ async fn arbitrate<C, R>(
     scope: &ScopeKey,
     fingerprint: &Digest,
 ) -> Result<Option<Attempted<C, R>>, AttemptError> {
-    let (writable, acquired): (bool, bool) = sqlx::query_as(WRITER_CHECK_AND_LOCK)
+    let (writable, acquired, live): (bool, bool, _) = sqlx::query(LOCK_AND_READ)
         .bind(scope.lock_key())
+        .bind(scope.0)
+        .bind(fingerprint.as_slice())
+        .try_map(|row: PgRow| {
+            Ok((
+                row.try_get("writable")?,
+                row.try_get("acquired")?,
+                live_record(&row, fingerprint)?,
+            ))
+        })
         .fetch_one(&mut *conn)
         .await
-        .map_err(|err| failed(&err, "arbitrate", classify(&err)))?;
+        .map_err(|err| read_failed(&err, "arbitrate"))?;
     if !writable {
         tracing::warn!(
             phase = "writer_check",
@@ -230,35 +253,58 @@ async fn arbitrate<C, R>(
         );
         return Err(AttemptError::Unavailable);
     }
-    // Validate every column before mismatch; only replay needs an owned body.
-    let live: Option<Option<Record>> = sqlx::query(READ)
-        .bind(scope.0)
-        .try_map(|row: sqlx::postgres::PgRow| {
-            let stored_fingerprint: Digest = row.try_get("fingerprint")?;
-            let status: i16 = row.try_get("status")?;
-            let headers: Vec<HeaderPair> = row.try_get("headers")?;
-            let body: &[u8] = row.try_get("body")?;
-            Ok((stored_fingerprint == *fingerprint).then(|| Record {
-                fingerprint: stored_fingerprint,
-                status,
-                headers,
-                body: body.to_vec(),
-            }))
-        })
-        .fetch_optional(conn)
-        .await
-        .map_err(|err| match err {
-            sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => {
-                failed(&err, "decode_record", AttemptError::Integrity)
-            }
-            _ => failed(&err, "read_record", classify(&err)),
-        })?;
-    Ok(match live {
-        Some(Some(record)) => Some(Attempted::Replay(record)),
-        Some(None) => Some(Attempted::Mismatch),
-        None if acquired => None,
-        None => Some(Attempted::InProgress),
-    })
+    let live = match live {
+        Some(live) => Some(live),
+        None if !acquired => return Ok(Some(Attempted::InProgress)),
+        None => sqlx::query(READ)
+            .bind(scope.0)
+            .bind(fingerprint.as_slice())
+            .try_map(|row: PgRow| live_record(&row, fingerprint))
+            .fetch_optional(conn)
+            .await
+            .map_err(|err| read_failed(&err, "read_record"))?
+            .flatten(),
+    };
+    Ok(live.map(|live| match live {
+        Live::Same(record) => Attempted::Replay(record),
+        Live::Different => Attempted::Mismatch,
+    }))
+}
+
+/// A live record, by whether it was written for the same request.
+enum Live {
+    Same(Record),
+    Different,
+}
+
+/// The live record in `row`, if any. Every column but the body is validated
+/// before mismatch; the statement returns the body only for replay, so a
+/// mismatch neither detoasts nor transfers it.
+fn live_record(row: &PgRow, fingerprint: &Digest) -> Result<Option<Live>, sqlx::Error> {
+    let Some(stored_fingerprint) = row.try_get::<Option<Digest>, _>("fingerprint")? else {
+        return Ok(None);
+    };
+    let status: i16 = row.try_get("status")?;
+    let headers: Vec<HeaderPair> = row.try_get("headers")?;
+    if stored_fingerprint != *fingerprint {
+        return Ok(Some(Live::Different));
+    }
+    let body: &[u8] = row.try_get("body")?;
+    Ok(Some(Live::Same(Record {
+        fingerprint: stored_fingerprint,
+        status,
+        headers,
+        body: Bytes::copy_from_slice(body),
+    })))
+}
+
+fn read_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
+    match err {
+        sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => {
+            failed(err, "decode_record", AttemptError::Integrity)
+        }
+        _ => failed(err, phase, classify(err)),
+    }
 }
 
 /// Step 3.
@@ -274,7 +320,7 @@ async fn write(
         .bind(record.fingerprint)
         .bind(record.status)
         .bind(&record.headers)
-        .bind(record.body.as_slice())
+        .bind(record.body.as_ref())
         .bind(&caller.issuer)
         .bind(caller.kind.as_str())
         .bind(&caller.value)

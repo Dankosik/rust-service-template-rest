@@ -102,9 +102,11 @@ PostgreSQL answers `COMMIT` in an aborted transaction with a silent
 swallowed a failed statement and returned `Ok` would look committed (pgx
 reports the same case as `ErrTxCommitRollback`). The probe turns it into
 `TxError::CommitFailed` with SQLSTATE `25P02` for one extra round trip.
-Read-only transactions skip it: nothing they did can be lost. A closure
-that expects a statement to fail runs it under a savepoint
-(`connection(tx).begin()`).
+Read-only transactions skip it: nothing they did can be lost. So does a
+closure that calls `statement_succeeded(tx)` right after its last statement
+succeeded: that success already proves the transaction is not aborted, and
+borrowing `connection(tx)` again withdraws the proof. A closure that expects
+a statement to fail runs it under a savepoint (`connection(tx).begin()`).
 `in_tx_with(&pool, TxOptions { isolation, read_only }, work)` renders the `BEGIN`
 statement for `Connection::begin_with`. `Isolation::ServerDefault` omits the
 isolation clause (server `default_transaction_isolation`);
