@@ -288,7 +288,7 @@ impl Delivery {
         }
 
         match outcome {
-            Outcome::Success => acknowledge(&message).await,
+            Outcome::Success => acknowledge(&self.shared.client, &message).await,
             Outcome::Permanent => self.dead_letter(&message, "permanent", &cancel).await,
             _ if delivered >= MAX_DELIVERIES => {
                 self.dead_letter(&message, "exhausted", &cancel).await;
@@ -365,7 +365,7 @@ impl Delivery {
         metrics::counter!("messaging_dead_letter_total", "reason" => reason, "outcome" => outcome)
             .increment(1);
         if result.is_ok() {
-            acknowledge(source).await;
+            acknowledge(&self.shared.client, source).await;
         } else {
             tracing::error!(reason, outcome, "messaging dead-letter transfer failed");
             redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
@@ -375,9 +375,16 @@ impl Delivery {
 
 /// Confirms the source. A lost confirmation is redelivered after ack wait,
 /// which idempotent handlers tolerate.
-async fn acknowledge(source: &Message) {
-    let confirmed = tokio::time::timeout(BROKER_OPERATION_BUDGET, source.double_ack()).await;
-    if !matches!(confirmed, Ok(Ok(()))) {
+///
+/// The confirmation travels through the client's shared request inbox under
+/// its `BROKER_OPERATION_BUDGET` request timeout; `Message::double_ack`
+/// subscribes and unsubscribes a new inbox per call.
+async fn acknowledge(client: &async_nats::Client, source: &Message) {
+    let confirmed = match source.reply.clone() {
+        Some(reply) => client.request(reply, AckKind::Ack.into()).await.is_ok(),
+        None => false,
+    };
+    if !confirmed {
         tracing::warn!("messaging source acknowledgement is unconfirmed");
         metrics::counter!("messaging_settlement_failures_total", "operation" => "ack").increment(1);
     }
