@@ -21,7 +21,7 @@ use time::OffsetDateTime;
 
 use crate::Producer;
 use crate::prepared::PreparedEvent;
-use crate::wire::{encode_prepared, prefixed_digest_hex, valid_subject};
+use crate::wire::{prefixed_digest_hex, valid_subject, validate_prepared};
 
 const OUTBOX_KIND: &str = "publish_domain_event";
 const FORMAT_VERSION: u8 = 1;
@@ -193,7 +193,7 @@ impl PublishDomainEvent {
             subject: event.subject.clone(),
             message_id: event.message_id.clone(),
             publication_id: event.publication_id.clone(),
-            event_type: event.event_type.clone(),
+            event_type: event.event_type.clone().into_owned(),
             schema_version: event.schema_version,
             occurred_at_unix_seconds: event.occurred_at.unix_timestamp(),
             occurred_at_nanosecond: event.occurred_at.nanosecond(),
@@ -220,12 +220,12 @@ impl PublishDomainEvent {
             subject: self.subject.clone(),
             message_id: self.message_id.clone(),
             publication_id: self.publication_id.clone(),
-            event_type: self.event_type.clone(),
+            event_type: self.event_type.clone().into(),
             schema_version: self.schema_version,
             occurred_at,
             payload,
         };
-        encode_prepared(&event).map_err(|_| StoredIntentError)?;
+        validate_prepared(&event).map_err(|_| StoredIntentError)?;
         Ok(event)
     }
 }
@@ -268,7 +268,7 @@ mod tests {
             subject: "events.created".to_owned(),
             message_id: "logical-id".to_owned(),
             publication_id: "logical-id".to_owned(),
-            event_type: "example.created".to_owned(),
+            event_type: "example.created".into(),
             schema_version: 1,
             occurred_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
             payload,

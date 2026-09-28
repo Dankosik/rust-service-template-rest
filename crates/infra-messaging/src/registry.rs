@@ -13,24 +13,19 @@ use crate::wire::{InboundEnvelope, valid_subject};
 type HandlerFuture = Pin<Box<dyn Future<Output = Result<(), HandlerError>> + Send>>;
 type ErasedHandler = Arc<dyn Fn(InboundEnvelope, CancellationToken) -> HandlerFuture + Send + Sync>;
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct RouteKey {
-    event_type: String,
-    schema_version: u16,
-}
+/// Event type and schema version. Every key comes from an [`EventPayload`]
+/// constant, so building one to look up a route does not allocate.
+type RouteKey = (&'static str, u16);
 
 /// The route key of a payload type; rejects version zero at compile time.
-fn route_key<T: EventPayload>() -> RouteKey {
+const fn route_key<T: EventPayload>() -> RouteKey {
     const {
         assert!(
             T::SCHEMA_VERSION > 0,
             "event schema version must be positive"
         );
     }
-    RouteKey {
-        event_type: T::EVENT_TYPE.to_owned(),
-        schema_version: T::SCHEMA_VERSION,
-    }
+    (T::EVENT_TYPE, T::SCHEMA_VERSION)
 }
 
 /// Composition-owned subject routing for one typed event.
@@ -76,17 +71,17 @@ impl Registry {
     pub fn new(routes: impl IntoIterator<Item = Route>) -> Result<Self, RegistryError> {
         let mut mapped = HashMap::new();
         for route in routes {
-            if crate::wire::validate_text(&route.key.event_type).is_err() {
+            if crate::wire::validate_text(route.key.0).is_err() {
                 return Err(RegistryError::InvalidRoute("event type is invalid"));
             }
             if !valid_subject(&route.subject) {
                 return Err(RegistryError::InvalidRoute("subject is invalid"));
             }
-            let key = route.key.clone();
-            if mapped.insert(key.clone(), route.subject).is_some() {
+            let (event_type, schema_version) = route.key;
+            if mapped.insert(route.key, route.subject).is_some() {
                 return Err(RegistryError::DuplicateRoute {
-                    event_type: key.event_type,
-                    schema_version: key.schema_version,
+                    event_type: event_type.to_owned(),
+                    schema_version,
                 });
             }
         }
@@ -190,14 +185,16 @@ impl Registry {
         mut envelope: InboundEnvelope,
         cancel: CancellationToken,
     ) -> Result<(), HandlerError> {
-        let key = RouteKey {
-            event_type: std::mem::take(&mut envelope.event_type),
-            schema_version: envelope.schema_version,
-        };
-        if self.routes.get(&key).is_none_or(|route| route != subject) {
+        // The maps are covariant in the key, so the inbound type looks up the
+        // `'static` keys without a copy. Typed handlers never read it.
+        let event_type = std::mem::take(&mut envelope.event_type);
+        let key = (event_type.as_str(), envelope.schema_version);
+        let routes: &HashMap<(&str, u16), String> = &self.routes;
+        if routes.get(&key).is_none_or(|route| route != subject) {
             return Err(HandlerError::Permanent);
         }
-        let Some(handler) = self.handlers.get(&key) else {
+        let handlers: &HashMap<(&str, u16), ErasedHandler> = &self.handlers;
+        let Some(handler) = handlers.get(&key) else {
             return Err(HandlerError::Permanent);
         };
         handler(envelope, cancel).await
