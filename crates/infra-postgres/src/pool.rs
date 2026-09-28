@@ -45,8 +45,6 @@ const SLOW_STATEMENT_THRESHOLD: Duration = Duration::from_secs(1);
 /// (`idle`, `used`). The Prometheus exporter spells dots as underscores.
 const CONNECTION_COUNT_METRIC: &str = "db_client_connection_count";
 
-const POOL_NAME: &str = "postgres";
-
 /// Why the pool could not be opened.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
@@ -218,14 +216,19 @@ pub fn record_metrics(pool: &PgPool) {
     // `num_idle` is a count of pooled connections and fits in f64 exactly.
     #[allow(clippy::cast_precision_loss)]
     let idle = pool.num_idle() as f64;
-    for (state, value) in [("idle", idle), ("used", (size - idle).max(0.0))] {
-        metrics::gauge!(
-            CONNECTION_COUNT_METRIC,
-            "db.client.connection.pool.name" => POOL_NAME,
-            "db.client.connection.state" => state
-        )
-        .set(value);
-    }
+    // Literal labels select the metrics facade's static-label fast path.
+    metrics::gauge!(
+        CONNECTION_COUNT_METRIC,
+        "db.client.connection.pool.name" => "postgres",
+        "db.client.connection.state" => "idle"
+    )
+    .set(idle);
+    metrics::gauge!(
+        CONNECTION_COUNT_METRIC,
+        "db.client.connection.pool.name" => "postgres",
+        "db.client.connection.state" => "used"
+    )
+    .set((size - idle).max(0.0));
 }
 
 /// Publish the gauges every `interval` until `cancel` fires. Same missed-tick
