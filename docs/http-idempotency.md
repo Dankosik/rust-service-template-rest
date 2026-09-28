@@ -200,9 +200,11 @@ the marker.
 startup also requires PostgreSQL, the admitted schema, and a writable session.
 Publish this duration as the retry promise. Expired keys may execute again.
 
-Every request that reaches `execute` holds one pooled connection: four round
-trips when a record or the lock decides it, and the work's duration plus five
-round trips when it executes. A duplicate never waits for the holder, but
+Every request that reaches `execute` holds one pooled connection. Replay,
+mismatch, and in-progress arbitration use four transaction statements; a stored
+success uses six plus the work's statements, including the pre-commit check.
+These counts exclude connection validation and statement preparation. A duplicate
+never waits for the holder, but
 distinct keys executing together compete for the pool; once it is exhausted,
 a request waits up to the 3 s acquire budget and then gets 503
 `idempotency_unavailable`. Size `postgres.max_connections` for concurrent
@@ -297,3 +299,62 @@ caller, so an authentication engine is required; retention has no template
 default. Cleanup deletes 500-row batches every 60 s under a 1 s statement
 timeout; reopen for a backlog one tick cannot drain or for lock waits cleanup
 causes.
+
+
+## Performance evidence
+
+Arbitration decodes every stored column before deciding a fingerprint mismatch,
+so SQL decoding errors still return `Integrity`. It borrows the body during that
+decision and makes an owned copy only for replay. Cleanup consumes each selected
+`ctid` under its row lock within the same statement; it retains the 500-row bound,
+expiry recheck, `SKIP LOCKED`, transaction boundary, and one-second timeout.
+
+DigitalOcean measurements on 2026-09-28 used c-4 hosts, locked Rust 1.98.1 release
+builds, the pinned PostgreSQL 18 image, a four-connection pool, client CPU 0 and
+PostgreSQL CPUs 1–3. The work closure was empty to isolate the store's cost.
+Each timing cell used three warmup pairs, six baseline-null pairs and twelve
+alternating baseline/candidate pairs. A speed claim required at most 5% null
+noise, improvement above max(5%, twice that noise), and at least 10/12 positive
+pairs. Allocation profiling was separate, using three paired 128/256-operation
+slopes. These are synthetic store observations, not endpoint capacity or SLOs.
+
+The original isolated comparisons against `9631b002` qualified both mechanisms:
+
+| Mechanism and workload | Qualified result |
+| --- | --- |
+| Borrow body for a 1 MiB mismatch | 10.94% lower time; exactly one 1 MiB body copy removed; median peak RSS 14,200 → 12,280 KiB |
+| Drain 100,000 expired records beside 100,000 live records | 30.13% lower drain time and 37.94% lower PostgreSQL-container CPU |
+
+The assembled implementation was also compared against `51c3b9e` on a second
+host. The store/provider/dependency/toolchain surfaces were unchanged between
+these bases. Large mismatch qualified again: 11.28% lower time, 12/12 positive
+pairs, 1.73% null noise; the replay and fresh-write controls were neutral.
+Allocation slopes saved 1.21–1.31 million requested bytes per large mismatch,
+above twice the 260,482-byte null noise. This whole-process range includes SQLx
+buffer growth; it is not an assertion of exactly 1 MiB net process savings.
+
+The second host did **not** establish a fresh cleanup speed or CPU claim:
+
+| Expired rows (with 100,000 live rows) | Paired median time reduction | Null noise | Disposition |
+| --- | ---: | ---: | --- |
+| 0 | +1.11% | 6.78% | Inconclusive |
+| 500 | -3.51% | 6.70% | Inconclusive |
+| 5,000 | -8.90% | 8.75% | Inconclusive |
+| 100,000 | +18.87% | 5.52% | Inconclusive |
+
+Negative reductions mean longer observed times; the noisy controls are not
+claimed regression-free. PostgreSQL CPU fell 26.35% in the paired median with
+12/12 positive pairs, but 6.61% null noise prevented qualification. One
+prospective baseline-only recovery grouped eight independent drains; it failed
+its declared noise criteria and admitted no further candidate comparisons.
+Cleanup is retained on its earlier qualified, source-identical evidence, with
+these later limitations disclosed; isolated gains are never added together.
+
+Cleanup's benefit depends on plan choice and cardinality. The large-backlog
+custom plan replaced repeated primary-key probes with a `Tid Scan` and reduced
+buffer hits from 3012 to 1512 in one diagnostic batch. Auto mode selected custom
+plans in the diagnostic; forced-generic plans used hash joins and did not support
+a speedup. Small-backlog isolated controls were neutral. Reopen the performance
+assessment for forced-generic plans, materially different statistics, partitioning
+(`ctid` is relation-local), or PostgreSQL upgrades. No schema or planner setting
+is changed by this optimization.

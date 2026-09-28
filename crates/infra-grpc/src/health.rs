@@ -63,12 +63,18 @@ fn watch(
     futures_util::stream::unfold(Some((reader, None)), move |state| async move {
         let (mut reader, sent) = state?;
         loop {
-            let status = if known {
-                serving(&reader)
-            } else {
-                ServingStatus::ServiceUnknown
+            // Drop the verdict before awaiting so it does not enlarge the stream state.
+            let (status, draining) = {
+                let verdict = reader.verdict();
+                let status = if !known {
+                    ServingStatus::ServiceUnknown
+                } else if verdict.is_ok() {
+                    ServingStatus::Serving
+                } else {
+                    ServingStatus::NotServing
+                };
+                (status, matches!(verdict, Err(NotReady::Draining)))
             };
-            let draining = matches!(reader.verdict(), Err(NotReady::Draining));
             if sent != Some(status) {
                 let next = (!draining).then_some((reader, Some(status)));
                 return Some((Ok(response(status)), next));

@@ -3,10 +3,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use async_nats::HeaderMap;
 use async_nats::jetstream::consumer::pull::MessagesErrorKind;
 use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, PullConsumer, ReplayPolicy};
 use async_nats::jetstream::{AckKind, Message};
+use async_nats::{HeaderMap, HeaderName};
 use futures_util::{FutureExt as _, StreamExt as _, TryStreamExt as _};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -80,27 +80,19 @@ struct Delivery {
     dlq_stream: String,
 }
 
-/// How one handler invocation ended.
+/// How one handler invocation ended. The discriminant indexes [`OUTCOME_LABELS`].
 #[derive(Clone, Copy)]
 enum Outcome {
-    Success,
-    Permanent,
-    Retryable,
-    TimedOut,
-    Panicked,
+    Success = 0,
+    Permanent = 1,
+    Retryable = 2,
+    TimedOut = 3,
+    Panicked = 4,
 }
 
-impl Outcome {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::Permanent => "permanent",
-            Self::Retryable => "retryable",
-            Self::TimedOut => "timeout",
-            Self::Panicked => "panic",
-        }
-    }
-}
+/// Metric label of each [`Outcome`], indexed by its discriminant.
+pub(crate) const OUTCOME_LABELS: [&str; 5] =
+    ["success", "permanent", "retryable", "timeout", "panic"];
 
 impl Consumer {
     pub(crate) async fn admit(
@@ -288,10 +280,9 @@ impl Delivery {
                 Ok(Err(_)) => Outcome::Panicked,
                 Err(_) => Outcome::TimedOut,
             };
-        let label = outcome.label();
-        metrics::counter!("messaging_handler_total", "outcome" => label).increment(1);
-        metrics::histogram!("messaging_handler_duration_seconds", "outcome" => label)
-            .record(started.elapsed().as_secs_f64());
+        self.shared
+            .handler_metrics
+            .record(outcome as usize, started.elapsed());
         if matches!(outcome, Outcome::Panicked) {
             tracing::error!("messaging handler panicked");
         }
@@ -327,7 +318,7 @@ impl Delivery {
                 info.stream,
                 info.stream_sequence,
                 info.published,
-                wire::header_value(original, wire::NATS_MSG_ID),
+                wire::header_value(original, wire::name::NATS_MSG_ID),
             )
             .ok()
         });
@@ -337,24 +328,24 @@ impl Delivery {
         };
         let mut headers = HeaderMap::new();
         for name in [
-            wire::MESSAGE_ID,
-            wire::EVENT_TYPE,
-            wire::EVENT_SCHEMA,
-            wire::CREATED_AT,
-            "traceparent",
-            "tracestate",
+            wire::name::MESSAGE_ID,
+            wire::name::EVENT_TYPE,
+            wire::name::EVENT_SCHEMA,
+            wire::name::CREATED_AT,
+            HeaderName::from_static("traceparent"),
+            HeaderName::from_static("tracestate"),
         ] {
-            let value = wire::header_value(original, name);
+            let value = wire::header_value(original, name.clone());
             if !value.is_empty() {
                 headers.insert(name, value);
             }
         }
-        if wire::header_value(&headers, wire::MESSAGE_ID).is_empty() {
-            headers.insert(wire::MESSAGE_ID, transfer_id.as_str());
+        if wire::header_value(&headers, wire::name::MESSAGE_ID).is_empty() {
+            headers.insert(wire::name::MESSAGE_ID, transfer_id.as_str());
         }
-        headers.insert(wire::NATS_MSG_ID, transfer_id.as_str());
-        headers.insert(wire::ORIGINAL_SUBJECT, source.subject.as_str());
-        headers.insert(wire::DEAD_LETTER_REASON, reason);
+        headers.insert(wire::name::NATS_MSG_ID, transfer_id.as_str());
+        headers.insert(wire::name::ORIGINAL_SUBJECT, source.subject.as_str());
+        headers.insert(wire::name::DEAD_LETTER_REASON, reason);
 
         let result = publish(
             &self.shared,
