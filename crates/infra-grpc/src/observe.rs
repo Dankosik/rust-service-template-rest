@@ -21,11 +21,7 @@ static DESCRIBE: Once = Once::new();
 #[derive(Clone, Copy)]
 struct Dispatched;
 
-pub(crate) async fn mark_dispatched(
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let mut response = next.run(request).await;
+pub(crate) fn mark_dispatched<B>(mut response: http::Response<B>) -> http::Response<B> {
     response.extensions_mut().insert(Dispatched);
     response
 }
@@ -101,17 +97,25 @@ fn record(
     describe();
     metrics::counter!(
         handled,
-        "grpc_service" => service.to_owned(),
-        "grpc_method" => method.to_owned(),
+        "grpc_service" => label(service),
+        "grpc_method" => label(method),
         "grpc_code" => code_name(code),
     )
     .increment(1);
     metrics::histogram!(
         handling_seconds,
-        "grpc_service" => service.to_owned(),
-        "grpc_method" => method.to_owned(),
+        "grpc_service" => label(service),
+        "grpc_method" => label(method),
     )
     .record(elapsed.as_secs_f64());
+}
+
+fn label(value: &str) -> metrics::SharedString {
+    if value == "unknown" {
+        "unknown".into()
+    } else {
+        value.to_owned().into()
+    }
 }
 
 /// Splits `/package.Service/Method`.
