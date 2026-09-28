@@ -223,7 +223,7 @@ fn success(fingerprint: Digest, body: &str) -> Record {
                 value: b"Sun, 06 Nov 1994 08:49:37 GMT".to_vec(),
             },
         ],
-        body: body.as_bytes().to_vec(),
+        body: body.as_bytes().to_vec().into(),
     }
 }
 
@@ -531,15 +531,28 @@ async fn p3_corrupt_columns_are_integrity_failures_even_for_a_mismatch(pool: PgP
         .execute(&pool)
         .await
         .expect("the fixture permits a corrupt body");
-    for corruption in [
-        "UPDATE http_idempotency_records SET headers = \
-         ARRAY[NULL]::http_idempotency_header_pair[] WHERE scope_key = $1",
-        "UPDATE http_idempotency_records SET headers = \
-         ARRAY[ROW(NULL, ''::bytea)::http_idempotency_header_pair] WHERE scope_key = $1",
-        "UPDATE http_idempotency_records SET headers = \
-         ARRAY[ROW('content-type', NULL)::http_idempotency_header_pair] WHERE scope_key = $1",
-        "UPDATE http_idempotency_records SET headers = \
-         ARRAY[]::http_idempotency_header_pair[], body = NULL WHERE scope_key = $1",
+    // A mismatch never reads the body, so only a replay sees a corrupt one.
+    for (corruption, mismatch_sees_it) in [
+        (
+            "UPDATE http_idempotency_records SET headers = \
+             ARRAY[NULL]::http_idempotency_header_pair[] WHERE scope_key = $1",
+            true,
+        ),
+        (
+            "UPDATE http_idempotency_records SET headers = \
+             ARRAY[ROW(NULL, ''::bytea)::http_idempotency_header_pair] WHERE scope_key = $1",
+            true,
+        ),
+        (
+            "UPDATE http_idempotency_records SET headers = \
+             ARRAY[ROW('content-type', NULL)::http_idempotency_header_pair] WHERE scope_key = $1",
+            true,
+        ),
+        (
+            "UPDATE http_idempotency_records SET headers = \
+             ARRAY[]::http_idempotency_header_pair[], body = NULL WHERE scope_key = $1",
+            false,
+        ),
     ] {
         let changed = sqlx::query(corruption)
             .bind(SCOPE)
@@ -553,7 +566,11 @@ async fn p3_corrupt_columns_are_integrity_failures_even_for_a_mismatch(pool: PgP
                 execute(&store, SCOPE, fingerprint, &record, &work),
             )
             .await;
-            assert!(matches!(result, Err(AttemptError::Integrity)), "{result:?}");
+            if fingerprint == INPUT || mismatch_sees_it {
+                assert!(matches!(result, Err(AttemptError::Integrity)), "{result:?}");
+            } else {
+                assert!(matches!(result, Ok(Attempted::Mismatch)), "{result:?}");
+            }
         }
     }
     assert_eq!(work.runs(), 1);

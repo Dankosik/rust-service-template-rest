@@ -24,4 +24,6 @@ pub use pool::{
 };
 pub use probe::PostgresProbe;
 pub use sqlx::postgres::PgPool;
-pub use transaction::{Isolation, Tx, TxError, TxOptions, connection, in_tx, in_tx_with};
+pub use transaction::{
+    Isolation, Tx, TxError, TxOptions, connection, in_tx, in_tx_with, statement_succeeded,
+};
