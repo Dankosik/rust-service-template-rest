@@ -8,7 +8,7 @@ This page records the durable technical decisions behind the optional bounded ou
 
 The builder fixes rustls TLS, HTTPS-only production construction, system DNS, no redirects, retry, proxy, referer, or automatic decompression, HTTP/1, a 30-second idle pool timeout, and the configured parser header count. Reqwest's [0.13.5 supported builder API](https://docs.rs/reqwest/0.13.5/reqwest/struct.ClientBuilder.html) provides these controls. It has no supported HTTP/1 aggregate response-header byte control, so a header byte ceiling is not represented as a false guarantee; a parser rejection remains `Transport`. The header count stays at most 32,768 because hyper sizes a response `HeaderMap` from it and `http` 1.5 `HeaderMap` panics above that size. Dropping an exchange releases its caller-owned future, but system `getaddrinfo` is not promised to be physically abortable.
 
-Each request is an absolute URL, converted with reqwest's own `TryFrom<http::Request>`, and admitted when `Url::origin` equals the configured origin; a caller `Host` header or userinfo is refused. This replaces the earlier origin-form composition, which made both current adapters (OAuth2 token URL and webhook endpoint URL) split a URL they already held and let the client rebuild it.
+Each request is an absolute URL, converted with reqwest's own `TryFrom<http::Request>`, and admitted when its origin equals the configured origin; a caller `Host` header or userinfo is refused. HTTP(S) comparison borrows the normalized scheme, host and effective port instead of constructing an owned origin. Other schemes retain `Url::origin` equality. This replaces the earlier origin-form composition, which made both current adapters (OAuth2 token URL and webhook endpoint URL) split a URL they already held and let the client rebuild it.
 
 Time uses one mechanism: reqwest's per-request total timeout, set to the earlier of the caller deadline and `Limits::operation_timeout`. Reqwest applies it from connection through the last body byte, so there is no second `tokio::time::timeout_at` and no deadline arithmetic that can overflow. An already expired deadline is refused before I/O.
 
@@ -37,6 +37,49 @@ pinned scanner follows the shared source.
 The existing `metrics` 0.24.6 and tracing stack record the private attempt lifecycle. The OpenTelemetry `http.client.request.duration` instrument is exported as `http_client_request_duration_seconds`, matching the recorder's explicit Prometheus names with unit suffixes, and uses explicit second buckets that this crate exports as `REQUEST_DURATION_BUCKETS`; the composition root passes them to the Prometheus recorder. The chosen attributes are a privacy-restricted subset of the current [OpenTelemetry HTTP span](https://opentelemetry.io/docs/specs/semconv/http/http-spans/) and [metric](https://opentelemetry.io/docs/specs/semconv/http/http-metrics/) conventions: method, configured server identity, known status, static failure type, and finite outcome. Full URLs, targets, headers, request identifiers, credentials, bodies, and arbitrary error text remain excluded.
 
 The local observation guard starts after deadline and target admission, because the duration instrument describes requests that were attempted; a refused target or an expired deadline sends nothing. It then covers complete responses, timeouts, transport/body failures, and dropped polled futures exactly once. Complete 1xx, 2xx, and 3xx responses have no span error; complete 4xx, 5xx, and uninterpretable 600–999 statuses retain an `Ok(Response)` result but use their decimal status as the error type. A body failure takes precedence over a known status. A drop reports caller cancellation with no error type; it does not infer provider outcome.
+
+## Allocation decisions and measured scope
+
+Attempt labels reserve their known final count before insertion. A completed
+error HTTP status uses one shared decimal string for both status and error
+labels, constructed with the supported `StatusCode::as_str()` API. Static
+transport/body/timeout error labels stay static. Body failure still takes
+precedence over an observed status, and recorder lookup remains per attempt;
+no metric-handle cache or additional retained client state is introduced.
+
+These changes and borrowed-origin comparison were measured together as C08
+against commit `9631b0020e9efbf5df5026e005d898d083ce0db5` on 2026-09-28.
+The DigitalOcean c-4 fixture used four vCPUs, 8 GiB RAM, Ubuntu 24.04,
+Rust 1.98.1 and the locked dependencies. Baseline and candidate release test
+executables received the same private measurement overlay; this was not a
+comparison of untouched production service executables. The overlay included
+a baseline collector-helper extraction and a bounded tracing subscriber.
+Neither that helper extraction nor the measurement harness is adopted here.
+
+Three independent 10,000/20,000-operation count slopes reproduced removal of
+two allocation calls at named adapter sites per short HTTP success, six per
+HTTP error, three per HTTPS success and seven per HTTPS error. Transport and
+recorder allocation totals remained variable. Observation-only cases saved
+one call and 336 requested bytes for status 200, or five calls and 279 requested
+bytes for status 500; status sharing alone trades fewer calls for nine extra
+requested bytes on 500 responses. These are distinct metrics, not RSS savings.
+
+Five paired timing runs per workload, with separate baseline/baseline noise
+calibration, established no C08 latency, throughput or CPU improvement. Long
+targets had adverse median throughput and CPU-per-operation changes, so this
+decision does not establish a performance recommendation for long-target-heavy
+workloads. No production speedup, RSS reduction or exporter-cost claim follows.
+The selected change removes the identified allocations while retaining the
+transport, buffering, admission and observation contracts. Custom collectors
+and batched span recording were evaluated and not adopted.
+
+The archived experiment patch SHA-256 is
+`d6f79888d5447405926a7752e6237c031b2fb82298b80ccd55f2ed81c3749472`;
+the reviewed completion manifest is
+`70aa85c792ce3a50d5839e64e9071fab4ace0d00d92994a5b83db6f76e533114`.
+These identify the retained study artifacts, not Git commits or fresh CI proof.
+Recheck the measurement claims when the implementation, dependency versions,
+compiler, subscriber or workload changes.
 
 ## Reopen conditions
 
