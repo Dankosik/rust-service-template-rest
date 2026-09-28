@@ -87,16 +87,28 @@ fn add_trace_ids<S, W>(
 ) where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
-    layer.add_dynamic_field("openTelemetry", move |event, context| {
-        let span = context.event_span(event)?;
-        let dispatch = dispatch.get()?.upgrade()?;
-        let otel = tracing_opentelemetry::get_otel_context(&span.id(), &dispatch)?;
+    layer.add_multiple_dynamic_fields(move |event, context, writer| {
+        let Some(span) = context.event_span(event) else {
+            return;
+        };
+        let Some(dispatch) = dispatch
+            .get()
+            .and_then(tracing::dispatcher::WeakDispatch::upgrade)
+        else {
+            return;
+        };
+        let Some(otel) = tracing_opentelemetry::get_otel_context(&span.id(), &dispatch) else {
+            return;
+        };
         let span = otel.span();
         let ids = span.span_context();
-        Some(std::collections::BTreeMap::from([
-            ("traceId", ids.trace_id().to_string()),
-            ("spanId", ids.span_id().to_string()),
-        ]))
+        let _ = writer.write_field(
+            "openTelemetry",
+            std::collections::BTreeMap::from([
+                ("traceId", ids.trace_id().to_string()),
+                ("spanId", ids.span_id().to_string()),
+            ]),
+        );
     });
 }
 
