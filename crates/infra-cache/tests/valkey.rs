@@ -231,20 +231,21 @@ async fn roundtrip_hit_miss_and_delete_are_scoped_to_the_namespace() {
     let cache = connect_url(&cache_url(), Duration::from_secs(1));
     let alpha = cache.namespace("alpha");
     let beta = cache.namespace("beta");
-    let key = unique_key();
-    assert_eq!(alpha.get(&key).await.unwrap(), None);
-    alpha
-        .set(&key, b"value", Duration::from_secs(30))
-        .await
-        .unwrap();
-    assert_eq!(
-        alpha.get(&key).await.unwrap().as_deref(),
-        Some(&b"value"[..])
-    );
-    assert_eq!(beta.get(&key).await.unwrap(), None);
-    alpha.delete(&key).await.unwrap();
-    assert_eq!(alpha.get(&key).await.unwrap(), None);
-    alpha.delete(&key).await.unwrap();
+    for key in [unique_key(), format!("{}:\0\r\nюникод", unique_key())] {
+        assert_eq!(alpha.get(&key).await.unwrap(), None);
+        alpha
+            .set(&key, b"value", Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(
+            alpha.get(&key).await.unwrap().as_deref(),
+            Some(&b"value"[..])
+        );
+        assert_eq!(beta.get(&key).await.unwrap(), None);
+        alpha.delete(&key).await.unwrap();
+        assert_eq!(alpha.get(&key).await.unwrap(), None);
+        alpha.delete(&key).await.unwrap();
+    }
 }
 
 #[tokio::test]
