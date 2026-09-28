@@ -10,7 +10,7 @@ There are no dependency, filtering, sampling, metric, exporter or lifecycle chan
 The 2026-09-28 comparison used baseline
 `9631b0020e9efbf5df5026e005d898d083ce0db5`, pinned Rust 1.98.1 and locked
 dependencies on one DigitalOcean c-4 in `lon1`: four virtual CPUs, 8 GiB RAM,
-Intel Xeon Platinum 8280 under KVM. The merge base `599d590` has identical
+Intel Xeon Platinum 8280 under KVM. The integration base `54907fc` has identical
 telemetry source, workspace manifest/lockfile and toolchain inputs.
 
 Each isolated candidate/workload cell used three warmups, six baseline/null
