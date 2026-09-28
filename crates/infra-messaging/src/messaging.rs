@@ -18,6 +18,40 @@ use crate::wire::HEADER_LIMIT_BYTES;
 
 pub(crate) const BROKER_OPERATION_BUDGET: Duration = Duration::from_secs(5);
 
+/// A count and a duration per outcome label, registered once with the
+/// recorder installed at connect. Emitting through the macros instead looks
+/// each metric up and allocates its labels on every publish and delivery.
+pub(crate) struct Outcomes<const N: usize>([(metrics::Counter, metrics::Histogram); N]);
+
+impl<const N: usize> Outcomes<N> {
+    fn register(
+        total: &'static str,
+        duration: &'static str,
+        label: &'static str,
+        values: [&'static str; N],
+    ) -> Self {
+        Self(values.map(|value| {
+            (
+                metrics::counter!(total, label => value),
+                metrics::histogram!(duration, label => value),
+            )
+        }))
+    }
+
+    /// Records one outcome by its index in the registered label values.
+    pub(crate) fn record(&self, outcome: usize, elapsed: Duration) {
+        let (total, duration) = &self.0[outcome];
+        total.increment(1);
+        duration.record(elapsed.as_secs_f64());
+    }
+}
+
+impl<const N: usize> std::fmt::Debug for Outcomes<N> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Outcomes")
+    }
+}
+
 /// Configuration already validated by the composition root, which owns the
 /// transport, credential and resident-memory policy.
 #[derive(Clone)]
@@ -78,6 +112,10 @@ pub(crate) struct Shared {
     pub(crate) startup_cancel: CancellationToken,
     pub(crate) draining: AtomicBool,
     pub(crate) failed: AtomicBool,
+    /// Indexed like `producer::PUBLISH_RESULTS`.
+    pub(crate) publish_metrics: Outcomes<3>,
+    /// Indexed by `consumer::Outcome`.
+    pub(crate) handler_metrics: Outcomes<5>,
     closed: watch::Receiver<bool>,
 }
 
@@ -97,6 +135,9 @@ pub enum CloseOutcome {
 
 impl Messaging {
     /// Connects and admits the source stream before the process accepts work.
+    ///
+    /// Publication and handler metrics bind to the metrics recorder installed
+    /// at this call, so install the recorder first.
     ///
     /// # Errors
     ///
@@ -181,6 +222,18 @@ impl Messaging {
                 startup_cancel: cancel,
                 draining: AtomicBool::new(false),
                 failed: AtomicBool::new(false),
+                publish_metrics: Outcomes::register(
+                    "messaging_publish_total",
+                    "messaging_publish_duration_seconds",
+                    "result",
+                    crate::producer::PUBLISH_RESULTS,
+                ),
+                handler_metrics: Outcomes::register(
+                    "messaging_handler_total",
+                    "messaging_handler_duration_seconds",
+                    "outcome",
+                    crate::consumer::OUTCOME_LABELS,
+                ),
                 closed,
             }),
             consumer: options.consumer,

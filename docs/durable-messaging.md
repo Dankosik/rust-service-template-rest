@@ -175,6 +175,42 @@ The original experimental patch SHA-256 was
 delivery preserves these operations while keeping extension-only hashing with
 its optional module. The temporary host was deleted after evidence download.
 
+### Publication path
+
+Preparing an event checks the header rules without building the header map
+that publication builds again. NATS header names are constants, so inserts and
+lookups no longer validate and copy each name. Route keys borrow the payload
+type's static event type, and the prepared event borrows it too. Publication
+and handler outcome metrics are registered once at connect, so the metrics
+recorder must be installed before `Messaging::connect`; the bootstraps do so.
+
+Measured on 2026-09-28 on a DigitalOcean c-4 in London (Intel Xeon Platinum
+8280, Ubuntu 24.04, Rust 1.98.1, locked dependencies) against the adapter
+above. Each figure is the median of 15 interleaved rounds pinned to one CPU.
+The event is an order with one line item (203-byte JSON) or 40 items (2.8 KB).
+
+| Operation | Before | After |
+| --- | ---: | ---: |
+| Prepare, one item | 1.55 µs, 24 allocations | 0.52 µs, 7 allocations |
+| Prepare and encode headers, one item | 2.62 µs | 1.50 µs |
+| Prepare and encode headers, 40 items | 5.29 µs | 4.14 µs |
+| Decode normal envelope | 0.46 µs, 6 allocations | 0.35 µs, 2 allocations |
+| Outcome counter and histogram, Prometheus recorder | 353 ns, 6 allocations | 77 ns, 0 allocations |
+
+Retired instructions agree: prepare and encode fell from 27,859 to 16,174 per
+event. Against a local NATS 2.15.0 JetStream (memory storage, two client Tokio
+workers, Prometheus recorder installed, 64 publications in flight, 10 paired
+rounds), one-item publication throughput rose 12% and client CPU per event fell
+15%. With one publication in flight, client CPU fell 7.5% and latency changed
+by 2–5%. These results do not establish production R3 or TLS capacity.
+
+Rejected alternatives: a 1 KiB initial serialization buffer (slower for large
+payloads, more memory for small ones), an ASCII fast path for header text
+validation (no measurable change), a non-generic `prepare` core (about 550
+bytes less code per payload type but no faster), sharing route subject bytes
+through `async_nats::Subject` (about 1% fewer instructions, public signature
+change), and one route-and-handler map (about 40 ns per delivery).
+
 <!-- template:end messaging:docs-durable-messaging -->
 
 <!-- template:begin outbox:docs-durable-messaging-outbox -->
