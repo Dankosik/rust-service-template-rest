@@ -225,6 +225,7 @@ async fn run_attempt(shared: &Shared, attempt: AttemptId, payload: Vec<u8>, dead
         },
         &payload,
     );
+    drop(payload);
     let (ended, ran) = match prepared {
         Err(error) => (Ended::Payload(error), None),
         Ok(future) => {
@@ -511,11 +512,14 @@ fn payload_summary(kind: &str, error: &serde_json::Error) -> String {
 }
 
 fn summary(text: &str) -> String {
-    let mut sanitized: String = text
-        .chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect();
-    sanitized.truncate(sanitized.floor_char_boundary(ERROR_SUMMARY_MAX_BYTES));
+    let mut sanitized = String::with_capacity(text.len().min(ERROR_SUMMARY_MAX_BYTES));
+    for ch in text.chars() {
+        let ch = if ch.is_control() { ' ' } else { ch };
+        if sanitized.len() + ch.len_utf8() > ERROR_SUMMARY_MAX_BYTES {
+            break;
+        }
+        sanitized.push(ch);
+    }
     sanitized
 }
 
@@ -601,6 +605,11 @@ mod tests {
     #[test]
     fn summaries_sanitize_controls_and_preserve_utf8_without_payload_disclosure() {
         assert_eq!(summary("a\nb\0c"), "a b c");
+        assert_eq!(summary(""), "");
+        assert_eq!(summary(&"x".repeat(1024)), "x".repeat(1024));
+        assert_eq!(summary(&"x".repeat(65_536)), "x".repeat(1024));
+        assert_eq!(summary(&("\u{0085}".repeat(1023) + "é")), " ".repeat(1023));
+        assert_eq!(summary(&("é".repeat(512) + "tail")), "é".repeat(512));
         assert_eq!(summary(&("a".repeat(1023) + "é")), "a".repeat(1023));
         let error = serde_json::from_str::<u32>("\"secret\"").unwrap_err();
         assert_eq!(

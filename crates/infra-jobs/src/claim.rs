@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use sqlx::FromRow;
 use tokio::sync::{OwnedSemaphorePermit, SemaphorePermit};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -214,17 +215,17 @@ async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
             .acquire()
             .await
             .map_err(OperationError::Acquire)?;
-        let rows = sqlx::query_as::<_, ClaimRow>(CLAIM)
+        let rows = sqlx::query(CLAIM)
             .bind(&names)
             .bind(&max_attempts)
             .bind(&timeouts)
             .bind(requested)
             .bind(shared.worker_id.to_string())
             .bind(lease_reserve_micros())
+            .try_map(|row| ClaimRow::from_row(&row)?.into_drawn(&shared.registry))
             .fetch_all(&mut *connection)
             .await?;
-        let decoded = decode_claims(rows, &shared.registry)?;
-        Ok((sent, decoded))
+        Ok((sent, rows))
     })
     .await;
     metrics::histogram!(CLAIM_DURATION_METRIC).record(sent.elapsed().as_secs_f64());
@@ -360,9 +361,9 @@ enum Drawn {
 }
 
 #[derive(sqlx::FromRow)]
-struct ClaimRow {
-    id: String,
-    kind: String,
+struct ClaimRow<'a> {
+    id: &'a str,
+    kind: &'a str,
     exhausted: bool,
     attempts: i16,
     claim_generation: i64,
@@ -373,19 +374,10 @@ struct ClaimRow {
     queue_wait_seconds: f64,
 }
 
-fn decode_claims(
-    rows: Vec<ClaimRow>,
-    registry: &crate::Registry,
-) -> Result<Vec<Drawn>, OperationError> {
-    rows.into_iter()
-        .map(|row| row.into_drawn(registry))
-        .collect()
-}
-
-impl ClaimRow {
-    fn into_drawn(self, registry: &crate::Registry) -> Result<Drawn, OperationError> {
-        let id = JobId::parse(&self.id).ok_or_else(|| decode("job id is not a uuid"))?;
-        let Some(registered) = registry.get(&self.kind) else {
+impl ClaimRow<'_> {
+    fn into_drawn(self, registry: &crate::Registry) -> Result<Drawn, sqlx::Error> {
+        let id = JobId::parse(self.id).ok_or_else(|| decode("job id is not a uuid"))?;
+        let Some(registered) = registry.get(self.kind) else {
             return Err(decode("unknown job kind"));
         };
         let attempt = u16::try_from(self.attempts).map_err(|_| decode("attempt does not fit"))?;
@@ -414,6 +406,6 @@ impl ClaimRow {
     }
 }
 
-fn decode(message: &'static str) -> OperationError {
-    OperationError::Statement(sqlx::Error::Decode(message.into()))
+fn decode(message: &'static str) -> sqlx::Error {
+    sqlx::Error::Decode(message.into())
 }
