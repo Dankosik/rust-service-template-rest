@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use time::OffsetDateTime;
@@ -8,7 +10,7 @@ pub struct PreparedEvent {
     pub(crate) subject: String,
     pub(crate) message_id: String,
     pub(crate) publication_id: String,
-    pub(crate) event_type: String,
+    pub(crate) event_type: Cow<'static, str>,
     pub(crate) schema_version: u16,
     pub(crate) occurred_at: OffsetDateTime,
     pub(crate) payload: Bytes,
@@ -54,12 +56,12 @@ impl PreparedEvent {
             subject,
             message_id: event.id.clone(),
             publication_id: event.id.clone(),
-            event_type: T::EVENT_TYPE.to_owned(),
+            event_type: Cow::Borrowed(T::EVENT_TYPE),
             schema_version: T::SCHEMA_VERSION,
             occurred_at,
             payload: payload.into(),
         };
-        crate::wire::encode_prepared(&prepared)?;
+        crate::wire::validate_prepared(&prepared)?;
         Ok(prepared)
     }
     #[must_use]

@@ -16,6 +16,9 @@ use crate::messaging::{BROKER_OPERATION_BUDGET, Shared};
 use crate::prepared::{PreparedEvent, PublishAck};
 use crate::wire::encode_prepared;
 
+/// Metric label of each publication result; `Producer::publish` records by index.
+pub(crate) const PUBLISH_RESULTS: [&str; 3] = ["acknowledged", "rejected", "ambiguous"];
+
 /// A clonable producer admitted by one live messaging resource.
 #[derive(Clone, Debug)]
 pub struct Producer {
@@ -77,13 +80,13 @@ impl Producer {
             }
         };
         let outcome = match &result {
-            Ok(_) => "acknowledged",
-            Err(PublishError::Rejected) => "rejected",
-            Err(PublishError::Ambiguous) => "ambiguous",
+            Ok(_) => 0,
+            Err(PublishError::Rejected) => 1,
+            Err(PublishError::Ambiguous) => 2,
         };
-        metrics::counter!("messaging_publish_total", "result" => outcome).increment(1);
-        metrics::histogram!("messaging_publish_duration_seconds", "result" => outcome)
-            .record(started.elapsed().as_secs_f64());
+        self.shared
+            .publish_metrics
+            .record(outcome, started.elapsed());
         result
     }
 }
