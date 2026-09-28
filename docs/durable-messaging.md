@@ -102,6 +102,79 @@ To remove the profile, initialize or migrate a service with `MESSAGING=none` so
 the initializer removes its code, configuration, tests, images, CI, and this
 guide together. Do not remove a profile from a live service by deleting only a
 binary or configuration section.
+
+## Allocation and CPU measurements
+
+The adapter avoids temporary header strings and a cloned dispatch key.
+Schema and subject validation retain their admission
+rules. Deterministic transfer IDs use the same SHA-256 input bytes and lowercase
+hex output.
+
+### Measurement scope
+
+Measurements ran on 2026-09-28 against baseline
+`9631b0020e9efbf5df5026e005d898d083ce0db5`, on one DigitalOcean c-4 in London:
+four vCPU, 8 GiB RAM, Intel Xeon Platinum 8168, Ubuntu 24.04, Rust 1.98.1 and
+the locked dependencies. A normal downstream binary imported `infra_messaging`;
+baseline and candidates used identical release features and were saved before
+test builds. Timings used three warmups and 21 alternating pairs, pinned to one
+CPU. Payloads contained an ASCII data string and a number; sizes below describe
+the data string, not the complete JSON envelope.
+
+| Public API operation | Baseline median | Optimized median |
+| --- | ---: | ---: |
+| Prepare, 64-byte data string | 1.94 µs | 1.41 µs |
+| Prepare, 4,096-byte data string | 5.78 µs | 4.10 µs |
+| Prepare, 48,000-byte data string | 47.46 µs | 32.84 µs |
+| Encode normal headers | 1.60 µs | 1.13 µs |
+| Decode normal envelope | 1.27 µs | 0.69 µs |
+| Decode with extra headers | 1.96 µs | 0.64 µs |
+| Deterministic DLQ ID | 1.51 µs | 0.85 µs |
+
+These are per-operation averages within each process, then medians across runs.
+The prepare result is sensitive to compiled context; it is not a claim that
+subject scanning alone accounts for the large-payload difference. Performance
+on other compilers, architectures and payload shapes needs fresh measurement.
+
+Separate calibrated allocation runs measured normal decode at 19→6 allocations
+and 311→95 requested bytes per operation. Moving the dispatch
+key and streaming the DLQ hash each removed one allocation in component probes;
+their isolated CPU gains were not established reliably.
+
+Requested allocation bytes include reallocation requests and describe allocation
+traffic, not retained heap or RSS. Process maximum RSS remained approximately
+5 MiB for the component workloads; no RSS reduction was established.
+
+### Real broker boundary and correctness
+
+The broker comparison used the pinned NATS 2.15.0 image, R1 file storage,
+`sync_interval: always`, loopback plaintext, two Tokio workers, 16 in-flight
+publications and consumer concurrency 16. The handler performed no business
+work and no metrics recorder was installed. Each of 11 paired samples per size
+waited for all 1,000 handlers and the durable ACK floor.
+
+There was no demonstrated total-delivery improvement at 64 bytes or 4 KiB.
+For 48,000-byte data strings, paired total time decreased about 3.2%, with a
+paired-bootstrap 95% time-ratio interval of 0.931–0.985. This synthetic R1 result
+does not establish production R3 capacity, TLS cost, database-outbox performance,
+or a general broker-throughput improvement.
+
+The measured full-template candidate passed its crate unit suite, twelve real JetStream tests
+and explicit compatibility checks against the pinned actual Go package in both
+directions. Schema admission, representative header/subject bounds and transfer
+identities also matched differential probes. Delivery, retry, acknowledgment,
+cancellation and resource limits retain the messaging contract above.
+
+The research retained an intermediate source-included prepare regression and an
+invalid confirmation series whose binary had been overwritten by a test-feature
+build. Neither supplies the figures above. The public-library confirmation used
+uniform build features, and an independent review reproduced its 31 timing
+cells, 66 broker samples, allocation summaries and RSS ranges from raw receipts.
+The original experimental patch SHA-256 was
+`c76e3b3318b94ad8bae054edfedc14c7caa7c38c255414ed8109a9465ecd511f`;
+delivery preserves these operations while keeping extension-only hashing with
+its optional module. The temporary host was deleted after evidence download.
+
 <!-- template:end messaging:docs-durable-messaging -->
 
 <!-- template:begin outbox:docs-durable-messaging-outbox -->
@@ -114,4 +187,16 @@ deduplication by logical ID remains authoritative beyond broker and jobs
 dedupe horizons. The outbox guide owns the caller-transaction, live-key,
 outage, recovery, and capacity rules. See [PostgreSQL transactional
 outbox](postgres-transactional-outbox.md).
+
+### Outbox allocation measurements
+
+The outbox metadata-only payload-limit calculation avoids base64 encoding and
+copying the payload. In the measurement environment described above, the public
+helper with a 48,000-byte data string took 31.17→0.59 µs and used
+129,164→1,100 requested bytes per operation. The enqueue metadata-budget helper
+separately removed one payload copy. These component results do not establish
+database or complete-outbox throughput, or a reduction in process RSS.
+
+Stored JSON validation remains `serde_json::Value`: replacing it with
+`IgnoredAny` admitted previously rejected numbers, nesting and Unicode escapes.
 <!-- template:end outbox:docs-durable-messaging-outbox -->

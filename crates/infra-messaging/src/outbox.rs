@@ -16,11 +16,12 @@ use infra_jobs::{
 };
 use infra_postgres::Tx;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use crate::Producer;
 use crate::prepared::PreparedEvent;
-use crate::wire::{encode_prepared, prefixed_sha256_hex, valid_subject};
+use crate::wire::{encode_prepared, prefixed_digest_hex, valid_subject};
 
 const OUTBOX_KIND: &str = "publish_domain_event";
 const FORMAT_VERSION: u8 = 1;
@@ -94,7 +95,7 @@ impl PreparedEvent {
     /// Returns the canonical jobs serialization error if immutable metadata
     /// cannot be represented as a jobs payload.
     pub fn outbox_payload_limit(&self) -> Result<usize, OutboxEnqueueError> {
-        max_payload_bytes(&PublishDomainEvent::from(self)).map_err(OutboxEnqueueError::from)
+        max_payload_bytes(&PublishDomainEvent::metadata(self)).map_err(OutboxEnqueueError::from)
     }
 
     /// Enqueues this immutable event inside the caller's already-open transaction.
@@ -179,6 +180,15 @@ impl JobKind for PublishDomainEvent {
 impl From<&PreparedEvent> for PublishDomainEvent {
     fn from(event: &PreparedEvent) -> Self {
         Self {
+            payload_base64: STANDARD.encode(&event.payload),
+            ..Self::metadata(event)
+        }
+    }
+}
+
+impl PublishDomainEvent {
+    fn metadata(event: &PreparedEvent) -> Self {
+        Self {
             version: FORMAT_VERSION,
             subject: event.subject.clone(),
             message_id: event.message_id.clone(),
@@ -187,7 +197,7 @@ impl From<&PreparedEvent> for PublishDomainEvent {
             schema_version: event.schema_version,
             occurred_at_unix_seconds: event.occurred_at.unix_timestamp(),
             occurred_at_nanosecond: event.occurred_at.nanosecond(),
-            payload_base64: STANDARD.encode(&event.payload),
+            payload_base64: String::new(),
         }
     }
 }
@@ -224,12 +234,18 @@ impl PublishDomainEvent {
 struct StoredIntentError;
 
 fn event_key(message_id: &str) -> String {
-    prefixed_sha256_hex("event-", message_id.as_bytes())
+    prefixed_digest_hex("event-", &Sha256::digest(message_id.as_bytes()))
 }
 
 fn max_payload_bytes(intent: &PublishDomainEvent) -> Result<usize, infra_jobs::EnqueueError> {
-    let mut metadata = intent.clone();
-    metadata.payload_base64.clear();
+    let metadata = PublishDomainEvent {
+        payload_base64: String::new(),
+        subject: intent.subject.clone(),
+        message_id: intent.message_id.clone(),
+        publication_id: intent.publication_id.clone(),
+        event_type: intent.event_type.clone(),
+        ..*intent
+    };
     let overhead = serde_json::to_vec(&metadata)
         .map_err(infra_jobs::EnqueueError::Serialize)?
         .len();
