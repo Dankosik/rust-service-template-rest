@@ -5,9 +5,10 @@
 //! grammar before that layer runs, so an attacker cannot inject log or header
 //! content, and reads the accepted value back for problem bodies and logs.
 
-use axum::http::Request;
 use axum::http::header::HeaderName;
-use tower_http::request_id::RequestId;
+use axum::http::{HeaderValue, Request};
+use tower_http::request_id::{MakeRequestId, RequestId};
+use uuid::Uuid;
 
 /// The correlation header shared with outbound sanitizers.
 pub const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
@@ -22,6 +23,21 @@ fn is_valid(value: &[u8]) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'~' | b'-'))
 }
 
+/// A random UUID v4 per request. tower-http's `MakeRequestUuid` formats a
+/// `String` and copies it into the header value; this formats on the stack.
+/// `uuid`'s `fast-rng` draws from a thread-local CSPRNG instead of a
+/// `getrandom` system call per id.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct MakeRequestUuid;
+
+impl MakeRequestId for MakeRequestUuid {
+    fn make_request_id<B>(&mut self, _request: &Request<B>) -> Option<RequestId> {
+        let mut buffer = Uuid::encode_buffer();
+        let id = Uuid::new_v4().hyphenated().encode_lower(&mut buffer);
+        HeaderValue::from_str(id).ok().map(RequestId::new)
+    }
+}
+
 /// Remove an inbound `X-Request-ID` that does not match
 /// `^[A-Za-z0-9._~-]{1,128}$`, so the next layer generates one.
 pub(crate) fn strip_invalid<B>(mut request: Request<B>) -> Request<B> {
@@ -33,14 +49,6 @@ pub(crate) fn strip_invalid<B>(mut request: Request<B>) -> Request<B> {
         request.headers_mut().remove(&REQUEST_ID_HEADER);
     }
     request
-}
-
-/// The accepted request id for this request, if the correlation layer ran.
-#[must_use]
-pub(crate) fn request_id(extensions: &axum::http::Extensions) -> Option<String> {
-    extensions
-        .get::<RequestId>()
-        .and_then(|id| id.header_value().to_str().ok().map(str::to_owned))
 }
 
 #[cfg(test)]

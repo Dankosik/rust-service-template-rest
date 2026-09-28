@@ -39,6 +39,13 @@ pub const IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(8);
 /// data into logs.
 const SLOW_STATEMENT_THRESHOLD: Duration = Duration::from_secs(1);
 
+/// A pooled connection idle longer than this is pinged before it is handed
+/// out; a busier one is handed out as is. The `sqlx` default pings on every
+/// acquire, which doubles the round trips of a single-statement request.
+/// Same threshold as pgx's pool, which the Go template uses. A connection the
+/// server dropped while it was busy fails its next statement either way.
+const PING_IDLE_AFTER: Duration = Duration::from_secs(1);
+
 /// Pool occupancy, named after the OpenTelemetry database client semantic
 /// convention `db.client.connection.count` with its required attributes
 /// `db.client.connection.pool.name` and `db.client.connection.state`
@@ -115,6 +122,15 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
     PgPoolOptions::new()
         .max_connections(options.max_connections.get())
         .acquire_timeout(ACQUIRE_TIMEOUT)
+        .test_before_acquire(false)
+        .before_acquire(|conn, meta| {
+            Box::pin(async move {
+                if meta.idle_for > PING_IDLE_AFTER {
+                    conn.ping().await?;
+                }
+                Ok(true)
+            })
+        })
         .connect_with(connect_options)
         .await
         .map_err(|err| match err {

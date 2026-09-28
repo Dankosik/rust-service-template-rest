@@ -287,26 +287,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axum-prometheus"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27e29a21d8a876465c009f1a69883fdfdf428a3ea42719a0c96021076c34cdf0"
-dependencies = [
- "axum",
- "bytes",
- "futures-core",
- "http",
- "http-body",
- "matchit",
- "metrics",
- "metrics-exporter-prometheus",
- "pin-project-lite",
- "tokio",
- "tower",
- "tower-http 0.7.1",
-]
-
-[[package]]
 name = "axum-test"
 version = "21.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2043,12 +2023,12 @@ name = "infra-http"
 version = "0.1.0"
 dependencies = [
  "axum",
- "axum-prometheus",
  "axum-test",
  "axum-tracing-opentelemetry",
  "futures-util",
  "health",
  "http",
+ "http-body",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -2058,6 +2038,7 @@ dependencies = [
  "infra-webhooks",
  "itertools 0.15.0",
  "metrics",
+ "opentelemetry",
  "rcgen",
  "rustls",
  "serde",
@@ -2073,6 +2054,7 @@ dependencies = [
  "tower",
  "tower-http 0.7.1",
  "tracing",
+ "tracing-opentelemetry-instrumentation-sdk",
  "utoipa",
  "utoipa-axum",
  "uuid",
@@ -5381,6 +5363,7 @@ checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "rand 0.10.2",
  "serde_core",
  "wasm-bindgen",
 ]

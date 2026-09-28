@@ -299,7 +299,11 @@ scratch project against `postgres:18.4`):
 - **Session defaults through `PgConnectOptions::options`**: `SHOW` returned
   the published values, `lock_timeout` cancels a waiting `pg_advisory_lock`
   with `55P03`, `statement_timeout` cancels with `57014`.
-  `test_before_acquire` stays at the `sqlx` default (`true`).
+  The pool pings a connection before handing it out only after more than
+  one second idle, as pgx does; the `sqlx` default (`test_before_acquire`)
+  pings on every acquire and doubled the round trips of a single-statement
+  request. The idle ping still discards a connection the server or a proxy
+  closed while it sat in the pool.
 - **`in_tx` takes an `AsyncFnOnce`** (edition 2024): the closure borrows the
   opaque provider-owned `Tx`, the future is `Send` when the closure's is, and callers pass
   their own error type through `E: From<TxError>`. The Go template joined
