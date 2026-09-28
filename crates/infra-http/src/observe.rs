@@ -2,13 +2,14 @@
 //! `observe` does it: the OpenTelemetry server span, the HTTP server metrics,
 //! and one structured access-log line.
 //!
-//! The span is the one `axum-tracing-opentelemetry`'s `OtelAxumLayer` opens,
-//! built from the same `tracing-opentelemetry-instrumentation-sdk` pieces,
-//! except that the route, the operation name, and the request id are fields of
-//! the new span instead of `Span::record` calls after it. This runs after
-//! routing and after the request id is set, so all three are known, and every
-//! record re-serializes all of the span's fields in the JSON log layer. Only
-//! the response status is recorded afterwards.
+//! The span carries the attributes `axum-tracing-opentelemetry`'s
+//! `OtelAxumLayer` sets, from the same `tracing-opentelemetry-instrumentation-sdk`
+//! pieces. Only the operation name, the kind, and the request id are `tracing`
+//! fields, because the JSON log layer serializes every span field and repeats
+//! it on each record inside the request; the HTTP attributes go to the
+//! OpenTelemetry span alone. This runs after routing and after the request id
+//! is set, so all of them are known at creation, and nothing is `Span::record`ed
+//! afterwards, since every record re-serializes the span's fields.
 //!
 //! The metrics keep the names and labels `axum-prometheus` defined: requests
 //! and their duration by method, route template, and status, and in-flight
@@ -35,7 +36,7 @@ use metrics::{Label, SharedString};
 use opentelemetry::context::FutureExt as _;
 use tower_http::request_id::RequestId;
 use tracing::Instrument as _;
-use tracing::field::Empty;
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
 
@@ -111,12 +112,13 @@ pub(crate) async fn observe(
             );
         });
     }
-    otel_http::http_server::update_span_from_response(&span, &response);
+    update_span_from_response(&span, status);
     pending.until_body_ends(response)
 }
 
-/// `otel_http::http_server::make_span_from_request` with `http.route`,
-/// `otel.name`, and `request_id` filled in.
+/// The server span. Only what every log record inside the request should
+/// carry is a `tracing` field; the other OpenTelemetry HTTP attributes go to
+/// the span alone, so the JSON log layer neither serializes nor repeats them.
 fn make_span(
     request: &Request,
     matched: Option<&MatchedPath>,
@@ -124,29 +126,44 @@ fn make_span(
 ) -> tracing::Span {
     let method = request.method();
     let route = matched.map_or("", MatchedPath::as_str);
-    let (server_address, server_port) = otel_http::http_host_port(request);
-    otel_trace_span!(
+    let span = otel_trace_span!(
         "HTTP request",
-        http.request.method = %method,
-        http.route = route,
-        network.protocol.version = %otel_http::http_flavor(request.version()),
-        server.address = server_address,
-        server.port = server_port,
-        http.client.address = Empty,
-        user_agent.original = otel_http::user_agent(request),
-        http.response.status_code = Empty,
-        url.path = request.uri().path(),
-        url.query = request.uri().query(),
-        url.scheme = otel_http::url_scheme(request.uri()),
         otel.name = format!("{method} {route}").trim(),
         otel.kind = ?opentelemetry::trace::SpanKind::Server,
-        otel.status_code = Empty,
-        trace_id = Empty,
         request_id,
-        exception.message = Empty,
-        // Datadog's span category, as the SDK's `SpanType::Web` renders it.
-        "span.type" = "web",
-    )
+    );
+    let (server_address, server_port) = otel_http::http_host_port(request);
+    span.set_attribute("http.request.method", method.as_str().to_owned());
+    span.set_attribute("http.route", route.to_owned());
+    span.set_attribute(
+        "network.protocol.version",
+        otel_http::http_flavor(request.version()).into_owned(),
+    );
+    span.set_attribute("server.address", server_address.to_owned());
+    if let Some(port) = server_port {
+        span.set_attribute("server.port", port);
+    }
+    span.set_attribute(
+        "user_agent.original",
+        otel_http::user_agent(request).to_owned(),
+    );
+    span.set_attribute("url.path", request.uri().path().to_owned());
+    if let Some(query) = request.uri().query() {
+        span.set_attribute("url.query", query.to_owned());
+    }
+    span.set_attribute(
+        "url.scheme",
+        otel_http::url_scheme(request.uri()).to_owned(),
+    );
+    span.set_attribute("span.type", "web");
+    span
+}
+
+fn update_span_from_response(span: &tracing::Span, status: StatusCode) {
+    span.set_attribute("http.response.status_code", i64::from(status.as_u16()));
+    if status.is_server_error() {
+        span.set_status(opentelemetry::trace::Status::error(""));
+    }
 }
 
 /// The in-flight gauge of one request, held until its response body ends or
@@ -258,5 +275,78 @@ mod tests {
             log_health_probes: true,
         };
         assert!(!skip_probe(verbose, &Method::GET, "/health/live"));
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "transport fixture exercises the middleware independently of contract finalization"
+    )]
+    async fn exported_server_span_keeps_the_http_attributes_and_the_error_status() {
+        use axum::Router;
+        use axum::routing::get;
+        use opentelemetry::trace::{Status, TracerProvider as _};
+        use opentelemetry::{KeyValue, Value};
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+        use tower::ServiceExt as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let app = crate::harden(
+            Router::new().route(
+                "/items/{id}",
+                get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+            ),
+            &crate::HardenOptions {
+                max_body_bytes: 64,
+                request_timeout: Duration::from_secs(5),
+                max_in_flight: std::num::NonZeroU32::new(2),
+                log_health_probes: false,
+            },
+        );
+        let request = Request::builder()
+            .uri("/items/7?full=1")
+            .header("host", "api.test:8443")
+            .header("user-agent", "probe/1")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        drop(response);
+
+        let spans = exporter.get_finished_spans().unwrap();
+        let [span] = spans.as_slice() else {
+            panic!("one server span, got {spans:?}");
+        };
+        assert_eq!(span.name, "GET /items/{id}");
+        assert_eq!(span.span_kind, opentelemetry::trace::SpanKind::Server);
+        assert!(matches!(span.status, Status::Error { .. }));
+        let attribute = |key: &str| {
+            span.attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == key)
+                .map(|kv| kv.value.clone())
+        };
+        for KeyValue { key, value, .. } in [
+            KeyValue::new("http.request.method", "GET"),
+            KeyValue::new("http.route", "/items/{id}"),
+            KeyValue::new("http.response.status_code", 500),
+            KeyValue::new("network.protocol.version", "1.1"),
+            KeyValue::new("server.address", "api.test"),
+            KeyValue::new("server.port", 8443),
+            KeyValue::new("url.path", "/items/7"),
+            KeyValue::new("url.query", "full=1"),
+            KeyValue::new("user_agent.original", "probe/1"),
+            KeyValue::new("span.type", "web"),
+        ] {
+            assert_eq!(attribute(key.as_str()), Some(value), "{key}");
+        }
+        assert!(matches!(attribute("request_id"), Some(Value::String(_))));
     }
 }
