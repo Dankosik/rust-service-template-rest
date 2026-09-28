@@ -358,7 +358,7 @@ fn parse_headers(raw: &str) -> Result<HashMap<String, String>, TracingError> {
 /// Typed identity over the SDK detectors: detector values (including
 /// `OTEL_RESOURCE_ATTRIBUTES`) fill in first, typed attributes override.
 fn resource(options: &TracingOptions) -> Resource {
-    let mut attributes = vec![
+    let attributes = [
         KeyValue::new(attribute::SERVICE_NAME, options.service_name.clone()),
         KeyValue::new(attribute::SERVICE_VERSION, options.service_version.clone()),
         KeyValue::new(
@@ -370,13 +370,11 @@ fn resource(options: &TracingOptions) -> Resource {
             options.deployment_environment.clone(),
         ),
     ];
-    if !options.instance_id.trim().is_empty() {
-        attributes.push(KeyValue::new(
-            attribute::SERVICE_INSTANCE_ID,
-            options.instance_id.clone(),
-        ));
-    }
-    Resource::builder().with_attributes(attributes).build()
+    let instance = (!options.instance_id.trim().is_empty())
+        .then(|| KeyValue::new(attribute::SERVICE_INSTANCE_ID, options.instance_id.clone()));
+    Resource::builder()
+        .with_attributes(attributes.into_iter().chain(instance))
+        .build()
 }
 
 impl ResolvedSampler {
@@ -394,7 +392,11 @@ impl ResolvedSampler {
 
 /// Bound the degraded reason kept for the startup log and warning.
 fn truncate(message: &str) -> String {
-    message.chars().take(200).collect()
+    let end = message
+        .char_indices()
+        .nth(200)
+        .map_or(message.len(), |(end, _)| end);
+    message[..end].to_owned()
 }
 
 #[cfg(test)]
@@ -534,7 +536,9 @@ mod tests {
 
     #[test]
     fn resource_carries_typed_identity() {
-        let resource = resource(&options(""));
+        let mut options = options("");
+        options.instance_id = "instance-1".to_owned();
+        let resource = resource(&options);
         let get = |key: &str| {
             resource
                 .get(&opentelemetry::Key::new(key.to_owned()))
@@ -542,6 +546,10 @@ mod tests {
         };
         assert_eq!(get(attribute::SERVICE_NAME).as_deref(), Some("svc"));
         assert_eq!(get(attribute::SERVICE_VERSION).as_deref(), Some("1.0.0"));
+        assert_eq!(
+            get(attribute::SERVICE_INSTANCE_ID).as_deref(),
+            Some("instance-1")
+        );
         assert_eq!(
             get(attribute::DEPLOYMENT_ENVIRONMENT_NAME).as_deref(),
             Some("test")
@@ -551,5 +559,22 @@ mod tests {
             Some("abc")
         );
         assert!(get("telemetry.sdk.language").is_some());
+    }
+
+    #[test]
+    fn degraded_reason_keeps_at_most_200_unicode_characters() {
+        for (input, expected) in [
+            (String::new(), String::new()),
+            ("short error".to_owned(), "short error".to_owned()),
+            ("a".repeat(200), "a".repeat(200)),
+            ("a".repeat(201), "a".repeat(200)),
+            ("🙂".repeat(201), "🙂".repeat(200)),
+            (
+                format!("{}Ж🙂", "a".repeat(199)),
+                format!("{}Ж", "a".repeat(199)),
+            ),
+        ] {
+            assert_eq!(truncate(&input), expected);
+        }
     }
 }
