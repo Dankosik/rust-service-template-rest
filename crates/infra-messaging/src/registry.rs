@@ -187,11 +187,11 @@ impl Registry {
     pub(crate) async fn dispatch(
         &self,
         subject: &str,
-        envelope: InboundEnvelope,
+        mut envelope: InboundEnvelope,
         cancel: CancellationToken,
     ) -> Result<(), HandlerError> {
         let key = RouteKey {
-            event_type: envelope.event_type.clone(),
+            event_type: std::mem::take(&mut envelope.event_type),
             schema_version: envelope.schema_version,
         };
         if self.routes.get(&key).is_none_or(|route| route != subject) {
