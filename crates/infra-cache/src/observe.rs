@@ -1,6 +1,7 @@
+use std::sync::OnceLock;
 use std::time::Instant;
 
-use metrics::Unit;
+use metrics::{Histogram, Unit};
 use tracing::Span;
 
 use crate::{ServerIdentity, Unavailable};
@@ -24,6 +25,8 @@ pub(crate) enum Operation {
 }
 
 impl Operation {
+    const COUNT: usize = 3;
+
     /// The `operation` metric label.
     fn label(self) -> &'static str {
         match self {
@@ -40,6 +43,59 @@ impl Operation {
             Self::Set => "SET",
             Self::Delete => "DEL",
         }
+    }
+}
+
+/// Every `outcome` label.
+#[derive(Clone, Copy)]
+pub(crate) enum Outcome {
+    Hit,
+    Miss,
+    Ok,
+    Timeout,
+    Error,
+    Cancelled,
+}
+
+impl Outcome {
+    const COUNT: usize = 6;
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::Ok => "ok",
+            Self::Timeout => "timeout",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// One namespace's histogram handles, registered on first use so the scrape
+/// shows only series that were recorded. Resolving a labelled key on every
+/// call would hash and look it up in the recorder instead. A handle stays
+/// bound to the recorder of its first use; bootstrap installs the recorder
+/// before it opens the cache.
+#[derive(Default)]
+pub(crate) struct Histograms([OnceLock<Histogram>; Operation::COUNT * Outcome::COUNT]);
+
+impl std::fmt::Debug for Histograms {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Histograms").finish_non_exhaustive()
+    }
+}
+
+impl Histograms {
+    fn get(&self, cache: &'static str, operation: Operation, outcome: Outcome) -> &Histogram {
+        self.0[operation as usize * Outcome::COUNT + outcome as usize].get_or_init(|| {
+            metrics::histogram!(
+                OPERATION_DURATION_METRIC,
+                "cache" => cache,
+                "operation" => operation.label(),
+                "outcome" => outcome.label(),
+            )
+        })
     }
 }
 
@@ -61,10 +117,10 @@ impl Failure {
         }
     }
 
-    fn outcome(self) -> &'static str {
+    fn outcome(self) -> Outcome {
         match self {
-            Self::Timeout => "timeout",
-            Self::Redis(_) => "error",
+            Self::Timeout => Outcome::Timeout,
+            Self::Redis(_) => Outcome::Error,
         }
     }
 
@@ -79,17 +135,19 @@ impl Failure {
 /// One polled cache command. The guard keeps only the namespace label and
 /// the outcome, never the key, the value, or server text. Dropping it before
 /// an outcome records `cancelled`.
-pub(crate) struct OperationGuard {
+pub(crate) struct OperationGuard<'a> {
     started: Instant,
     cache: &'static str,
+    histograms: &'a Histograms,
     operation: Operation,
     span: Span,
     finalized: bool,
 }
 
-impl OperationGuard {
+impl<'a> OperationGuard<'a> {
     pub(crate) fn start(
         cache: &'static str,
+        histograms: &'a Histograms,
         operation: Operation,
         server: &ServerIdentity,
     ) -> Self {
@@ -108,17 +166,14 @@ impl OperationGuard {
         Self {
             started: Instant::now(),
             cache,
+            histograms,
             operation,
             span,
             finalized: false,
         }
     }
 
-    pub(crate) fn span(&self) -> Span {
-        self.span.clone()
-    }
-
-    pub(crate) fn succeed(&mut self, outcome: &'static str) {
+    pub(crate) fn succeed(&mut self, outcome: Outcome) {
         self.finish(outcome);
     }
 
@@ -138,23 +193,19 @@ impl OperationGuard {
         Unavailable
     }
 
-    fn finish(&mut self, outcome: &'static str) {
+    fn finish(&mut self, outcome: Outcome) {
         self.finalized = true;
-        self.span.record("cache.outcome", outcome);
-        metrics::histogram!(
-            OPERATION_DURATION_METRIC,
-            "cache" => self.cache,
-            "operation" => self.operation.label(),
-            "outcome" => outcome,
-        )
-        .record(self.started.elapsed().as_secs_f64());
+        self.span.record("cache.outcome", outcome.label());
+        self.histograms
+            .get(self.cache, self.operation, outcome)
+            .record(self.started.elapsed().as_secs_f64());
     }
 }
 
-impl Drop for OperationGuard {
+impl Drop for OperationGuard<'_> {
     fn drop(&mut self) {
         if !self.finalized {
-            self.finish("cancelled");
+            self.finish(Outcome::Cancelled);
         }
     }
 }
