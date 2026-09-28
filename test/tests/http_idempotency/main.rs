@@ -515,6 +515,53 @@ async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(p
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p3_corrupt_columns_are_integrity_failures_even_for_a_mismatch(pool: PgPool) {
+    create_effects(&pool).await;
+    let (store_pool, store) = replica(&dsn_for(&pool).await).await;
+    let record = success(INPUT, "stored body");
+    let work = Work::default();
+    assert_eq!(
+        committed(execute(&store, SCOPE, INPUT, &record, &work).await),
+        record
+    );
+
+    // Only this per-test database admits a NULL body, to exercise the decoder
+    // independently of the table's ordinary NOT NULL guard.
+    sqlx::query("ALTER TABLE http_idempotency_records ALTER COLUMN body DROP NOT NULL")
+        .execute(&pool)
+        .await
+        .expect("the fixture permits a corrupt body");
+    for corruption in [
+        "UPDATE http_idempotency_records SET headers = \
+         ARRAY[NULL]::http_idempotency_header_pair[] WHERE scope_key = $1",
+        "UPDATE http_idempotency_records SET headers = \
+         ARRAY[ROW(NULL, ''::bytea)::http_idempotency_header_pair] WHERE scope_key = $1",
+        "UPDATE http_idempotency_records SET headers = \
+         ARRAY[ROW('content-type', NULL)::http_idempotency_header_pair] WHERE scope_key = $1",
+        "UPDATE http_idempotency_records SET headers = \
+         ARRAY[]::http_idempotency_header_pair[], body = NULL WHERE scope_key = $1",
+    ] {
+        let changed = sqlx::query(corruption)
+            .bind(SCOPE)
+            .execute(&pool)
+            .await
+            .expect("one stored column is corrupted");
+        assert_eq!(changed.rows_affected(), 1);
+        for fingerprint in [INPUT, OTHER_INPUT] {
+            let result = bounded(
+                "the corrupt record is refused",
+                execute(&store, SCOPE, fingerprint, &record, &work),
+            )
+            .await;
+            assert!(matches!(result, Err(AttemptError::Integrity)), "{result:?}");
+        }
+    }
+    assert_eq!(work.runs(), 1);
+    assert_eq!(count(&pool, EFFECTS).await, 1);
+    close(&[&store_pool]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p3_a_long_verified_caller_identity_commits_and_replays(pool: PgPool) {
     create_effects(&pool).await;
     let (store_pool, store) = replica(&dsn_for(&pool).await).await;

@@ -27,12 +27,14 @@ const STARTUP_CHECK: &str = "SELECT NOT pg_is_in_recovery() \
 const CLEANUP_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '1000ms'";
 
 /// One batch of at most `$1` expired records. It skips rows a running attempt
-/// holds, and re-checks expiry, so it never deletes a live record.
-const CLEANUP_BATCH: &str = "DELETE FROM http_idempotency_records WHERE scope_key IN \
-    (SELECT scope_key FROM http_idempotency_records \
+/// holds, and re-checks expiry, so it never deletes a live record. The tuple
+/// locator is consumed under its row lock within this statement.
+const CLEANUP_BATCH: &str = "WITH batch AS ( \
+    SELECT ctid FROM http_idempotency_records \
     WHERE expires_at <= statement_timestamp() \
     ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED) \
-    AND expires_at <= statement_timestamp()";
+    DELETE FROM http_idempotency_records AS r USING batch \
+    WHERE r.ctid = batch.ctid AND r.expires_at <= statement_timestamp()";
 
 /// Why an active idempotency boundary cannot start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
