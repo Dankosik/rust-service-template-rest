@@ -191,7 +191,18 @@ pub(crate) fn record_verification(
         .as_ref()
         .map_or_else(|error| error.reason.label(), |_| "verified");
     let outcome = if result.is_ok() { "success" } else { "failure" };
-    metrics::counter!("authn_token_verifications_total", "mode" => mode, "outcome" => outcome, "reason" => reason).increment(1);
+    let counter = match (mode, outcome, reason) {
+        ("jwt", "success", "verified") => {
+            metrics::counter!("authn_token_verifications_total", "mode" => "jwt", "outcome" => "success", "reason" => "verified")
+        }
+        ("introspection", "success", "verified") => {
+            metrics::counter!("authn_token_verifications_total", "mode" => "introspection", "outcome" => "success", "reason" => "verified")
+        }
+        _ => {
+            metrics::counter!("authn_token_verifications_total", "mode" => mode, "outcome" => outcome, "reason" => reason)
+        }
+    };
+    counter.increment(1);
     if result.is_err() {
         tracing::debug!(mode, reason, "authn_verification_failed");
     }
@@ -202,11 +213,17 @@ pub(crate) fn record_verification(
 /// attach unverified request data as a principal.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Principal {
+    identity: Arc<Identity>,
+    // Keep expiry outside the shared allocation for the const accessor.
+    expiry_epoch_seconds: u64,
+}
+
+#[derive(Eq, PartialEq)]
+struct Identity {
     issuer: String,
     subject: Option<String>,
     client_id: Option<String>,
     scopes: Vec<String>,
-    expiry_epoch_seconds: u64,
     payload: Arc<str>,
 }
 
@@ -220,12 +237,14 @@ impl Principal {
         payload: Arc<str>,
     ) -> Self {
         Self {
-            issuer,
-            subject,
-            client_id,
-            scopes,
+            identity: Arc::new(Identity {
+                issuer,
+                subject,
+                client_id,
+                scopes,
+                payload,
+            }),
             expiry_epoch_seconds,
-            payload,
         }
     }
 
@@ -234,33 +253,33 @@ impl Principal {
     /// # Errors
     /// Returns a sanitized error when the application type cannot read the claims.
     pub fn claims<T: serde::de::DeserializeOwned>(&self) -> Result<T, ClaimAccessError> {
-        let value: serde_json::Value =
-            serde_json::from_str(&self.payload).map_err(|_| ClaimAccessError::InvalidShape)?;
+        let value: serde_json::Value = serde_json::from_str(&self.identity.payload)
+            .map_err(|_| ClaimAccessError::InvalidShape)?;
         serde_json::from_value(value).map_err(|_| ClaimAccessError::InvalidShape)
     }
 
     /// The exact issuer that the selected verifier accepted.
     #[must_use]
     pub fn issuer(&self) -> &str {
-        &self.issuer
+        &self.identity.issuer
     }
 
     /// The verified subject, when the accepted token profile supplied one.
     #[must_use]
     pub fn subject(&self) -> Option<&str> {
-        self.subject.as_deref()
+        self.identity.subject.as_deref()
     }
 
     /// The verified client identity, when the accepted token profile supplied one.
     #[must_use]
     pub fn client_id(&self) -> Option<&str> {
-        self.client_id.as_deref()
+        self.identity.client_id.as_deref()
     }
 
     /// The normalized, exact-case scopes from verified token evidence.
     #[must_use]
     pub fn scopes(&self) -> &[String] {
-        &self.scopes
+        &self.identity.scopes
     }
 
     /// The verified `exp` claim in unsigned epoch seconds.
@@ -288,7 +307,7 @@ impl Principal {
     /// The verified provider evidence this principal retains. Its other fields
     /// are configuration or copies of values inside this payload.
     pub(crate) fn payload_len(&self) -> usize {
-        self.payload.len()
+        self.identity.payload.len()
     }
 }
 // template:end oidc-introspection:authn-retained-payload
