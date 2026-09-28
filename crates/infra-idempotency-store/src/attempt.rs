@@ -22,6 +22,7 @@ use std::time::Duration;
 use infra_postgres::{
     Isolation, Tx, TxError, TxOptions, connection, failure_cause, in_tx_with, sqlstate, transient,
 };
+use sqlx::Row;
 use sqlx::postgres::PgConnection;
 
 use crate::Store;
@@ -229,8 +230,21 @@ async fn arbitrate<C, R>(
         );
         return Err(AttemptError::Unavailable);
     }
-    let live: Option<Record> = sqlx::query_as(READ)
+    // Validate every column before mismatch; only replay needs an owned body.
+    let live: Option<Option<Record>> = sqlx::query(READ)
         .bind(scope.0)
+        .try_map(|row: sqlx::postgres::PgRow| {
+            let stored_fingerprint: Digest = row.try_get("fingerprint")?;
+            let status: i16 = row.try_get("status")?;
+            let headers: Vec<HeaderPair> = row.try_get("headers")?;
+            let body: &[u8] = row.try_get("body")?;
+            Ok((stored_fingerprint == *fingerprint).then(|| Record {
+                fingerprint: stored_fingerprint,
+                status,
+                headers,
+                body: body.to_vec(),
+            }))
+        })
         .fetch_optional(conn)
         .await
         .map_err(|err| match err {
@@ -240,8 +254,8 @@ async fn arbitrate<C, R>(
             _ => failed(&err, "read_record", classify(&err)),
         })?;
     Ok(match live {
-        Some(record) if record.fingerprint == *fingerprint => Some(Attempted::Replay(record)),
-        Some(_) => Some(Attempted::Mismatch),
+        Some(Some(record)) => Some(Attempted::Replay(record)),
+        Some(None) => Some(Attempted::Mismatch),
         None if acquired => None,
         None => Some(Attempted::InProgress),
     })
