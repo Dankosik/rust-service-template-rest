@@ -548,18 +548,7 @@ fn observation_records_polled_attempts_once_without_request_data() {
         ),
         4
     );
-    assert_eq!(
-        recorded_count(
-            &scrape,
-            &[
-                "outbound_outcome=\"response\"",
-                "error_type=\"404\"",
-                "http_response_status_code=\"404\"",
-            ],
-        ),
-        1
-    );
-    for status in ["600", "999"] {
+    for status in ["404", "600", "999"] {
         assert_eq!(
             recorded_count(
                 &scrape,
