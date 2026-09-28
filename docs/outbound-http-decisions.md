@@ -51,9 +51,9 @@ Measured on 2026-09-28 against `4824ffc` on a DigitalOcean c-4 (4 dedicated vCPU
 | HTTPS POST 1 KiB | 113.9k → 73.8k (−35%) | 108 → 54 |
 | HTTP loopback GET | 97.2k → 54.3k (−44%) | 94 → 40 |
 | HTTPS 64 KiB body | 281.8k → 246.0k (−13%) | 96 → 49 |
-| New connection and TLS handshake | 1.073M → 1.036M (−3%) | 242 → 184 |
+| New connection and TLS handshake | 1.073M → 1.033M (−4%) | 242 → 181 |
 
-Without a subscriber or recorder, a short HTTPS GET falls from 72.6k to 45.9k instructions and from 67 to 27 allocations. Client construction falls from 6.0 ms to 1.7 µs, and the resident memory of a client with one open connection from 108 KB to 24 KB.
+Without a subscriber or recorder, a short HTTPS GET falls from 72.6k to 45.9k instructions and from 67 to 27 allocations. At 64 concurrent requests on two runtime workers, throughput rises 39–50% and CPU per request falls 28–33%. Client construction falls from 6.2 ms to 1.6 µs, and the resident memory of a client with one open connection from 108 KB to 24 KB.
 
 The accepted changes, each measured alone before combination:
 
