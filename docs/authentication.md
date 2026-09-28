@@ -120,10 +120,19 @@ the last usable snapshot. Refresh is not immediate revocation and does not add
 a readiness probe. Bootstrap cancels and joins the refresh task through the
 existing background tracker.
 
-`jsonwebtoken` 11.1.0 performs verified decode and registered-claim validation
-with the selected aws-lc backend. Typed claims retain duplicate and malformed
-evidence rejection; no second signature verifier or generic claims visitor is
-used. Revisit this choice only for a new trust profile or token dialect.
+Each admitted key is parsed once into an aws-lc `ParsedPublicKey` per
+algorithm it serves, and a token's signature is checked against those keys
+directly. `jsonwebtoken` 11.1.0 still supplies the JWK, header and algorithm
+types, and the crate reads registered claims with its rules: `iss` and `aud`
+are a string or an array that must name a configured value, `exp` is required,
+a numeric `nbf` may be fractional, and lifetime is checked before issuer and
+audience. The payload is decoded and read once. `jsonwebtoken::decode` was
+replaced because it rebuilds the aws-lc key on every call and parses the header
+three times and the payload three times; the direct path cut full RS256
+verification by about 40% (see
+[bearer authentication performance](bearer-authentication-performance.md)).
+Revisit when `jsonwebtoken` verifies with pre-parsed keys, or for a new trust
+profile or token dialect.
 
 Discovery and JWKS refresh stay in this crate: `jwt-authorizer` 0.15 (last
 release 2024-08) targets `jsonwebtoken` 9, `reqwest` 0.12 and `axum` 0.7, and

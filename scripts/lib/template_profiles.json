@@ -283,7 +283,7 @@
       "crates/infra-bearerauthn/tests/fixtures/authn-jwt-signing-key.der"
     ],
     "markers": [
-      {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-jwt-import", "authn-claims-jwt-policy-accessors", "authn-claims-jwt-type", "authn-claims-jwt-validation", "authn-claims-jwt-test-imports", "authn-claims-jwt-normalization-test", "authn-claims-scope-jwt-assertion"]},
+      {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-jwt-import", "authn-claims-jwt-type", "authn-claims-jwt-validation", "authn-claims-jwt-test-imports", "authn-claims-jwt-normalization-test", "authn-claims-scope-jwt-assertion"]},
       {"path": "Cargo.toml", "ids": ["workspace-authn-jwt"]},
       {"path": "crates/config/src/authn.rs", "ids": ["authn-token-profile", "authn-algorithm", "authn-config-jwt-variant", "authn-default-algorithms", "authn-config-jwt-validation", "authn-config-jwt-tests", "authn-config-jwt-debug"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-jwt-input-exports"]},
@@ -304,7 +304,7 @@
       "crates/infra-bearerauthn/src/introspection.rs"
     ],
     "markers": [
-      {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-introspection-envelope", "authn-claims-audience-values", "authn-claims-introspection-validation", "authn-claims-introspection-test-import", "authn-claims-introspection-shape-test", "authn-claims-introspection-missing-test", "authn-claims-scope-introspection-assertion"]},
+      {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-introspection-envelope", "authn-claims-introspection-validation", "authn-claims-introspection-test-import", "authn-claims-introspection-shape-test", "authn-claims-introspection-missing-test", "authn-claims-scope-introspection-assertion"]},
       {"path": "crates/config/src/authn.rs", "ids": ["authn-nonzero-import", "authn-secrecy-import", "authn-occupied-secret-import", "authn-config-introspection-variant", "authn-default-provider-concurrency", "authn-config-introspection-validation", "authn-config-introspection-tests", "authn-config-introspection-debug"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-introspection-environment", "load-introspection-secret-file"]},
       {"path": "crates/config/src/secret_policy.rs", "ids": ["secret-key-introspection-vector", "secret-policy-introspection-fixture"]},

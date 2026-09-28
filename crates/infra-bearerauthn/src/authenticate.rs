@@ -28,7 +28,13 @@ impl Verifier {
             Ok(token) => self.verify(&token).await,
             Err(failure) => Err(failure),
         };
-        outcome.record(result.as_ref().err().copied());
+        match (&result, self.counters.transport(transport)) {
+            (Ok(_), Some(success)) => {
+                success.increment(1);
+                outcome.recorded = true;
+            }
+            _ => outcome.record(result.as_ref().err().copied()),
+        }
         result
     }
 }
@@ -63,19 +69,6 @@ impl Outcome {
     }
 
     fn count(&self, result: &'static str, failure: &'static str) {
-        if result == "success" && failure == "none" {
-            match self.transport {
-                "http" => {
-                    metrics::counter!(AUTHN_VERIFICATIONS_METRIC, "transport" => "http", "result" => "success", "failure" => "none").increment(1);
-                    return;
-                }
-                "grpc" => {
-                    metrics::counter!(AUTHN_VERIFICATIONS_METRIC, "transport" => "grpc", "result" => "success", "failure" => "none").increment(1);
-                    return;
-                }
-                _ => {}
-            }
-        }
         metrics::counter!(
             AUTHN_VERIFICATIONS_METRIC,
             "transport" => self.transport,
