@@ -21,8 +21,8 @@ pub mod authn;
 pub mod idempotency;
 // template:end http-idempotency:infra-http-idempotency-module
 
-mod access_log;
 mod harden;
+mod observe;
 mod probes;
 mod request_id;
 mod router;

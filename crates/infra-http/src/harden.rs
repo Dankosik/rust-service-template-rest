@@ -2,10 +2,11 @@
 //!
 //! Order is the contract, outermost first:
 //!
-//! request-id sanitize → set → propagate → nosniff → OpenTelemetry server span →
-//! traceparent response header → HTTP metrics → access log → problem completion →
-//! error mapping → load shed → in-flight limit → request deadline → request timeout →
-//! panic recovery → body limit (tower-http) → extractor body limit → routes / 404 / 405
+//! request-id sanitize → set → propagate → nosniff → observation (OpenTelemetry
+//! server span, HTTP metrics, problem completion, access log) → traceparent
+//! response header → error mapping → load shed → in-flight limit → request
+//! deadline → request timeout → panic recovery → body limit (tower-http) →
+//! extractor body limit → routes / 404 / 405
 //!
 //! Every layer is applied with `Router::layer`, so the 404 and 405 fallbacks
 //! travel through the same chain. Cross-origin requests are fail-closed by
@@ -20,11 +21,10 @@ use axum::error_handling::HandleErrorLayer;
 use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::header::X_CONTENT_TYPE_OPTIONS;
 use axum::http::{HeaderValue, StatusCode};
-use axum::middleware::{self, Next};
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::{BoxError, Router};
-use axum_prometheus::{EndpointLabel, PrometheusMetricLayerBuilder};
-use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
+use axum_tracing_opentelemetry::middleware::OtelInResponseLayer;
 use tower::ServiceBuilder;
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tower::load_shed::error::Overloaded;
@@ -32,10 +32,10 @@ use tower::timeout::error::Elapsed;
 use tower::util::option_layer;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::access_log::{self, AccessLogOptions, UNMATCHED_ROUTE};
+use crate::observe::{self, AccessLogOptions};
 use crate::problem::{AT_CAPACITY_DETAIL, Code, Problem, SANITIZED_DETAIL};
 use crate::request_id;
 
@@ -65,11 +65,9 @@ impl RequestDeadline {
 /// is momentarily past capacity, not down.
 const SHED_RETRY_AFTER: Duration = Duration::from_secs(1);
 
-/// HTTP request-duration histogram name emitted by `axum-prometheus`.
-/// The composition root passes it with [`HTTP_REQUESTS_DURATION_BUCKETS`]
-/// into the Prometheus recorder without naming `axum-prometheus` itself.
-pub const HTTP_REQUESTS_DURATION_SECONDS: &str =
-    axum_prometheus::AXUM_HTTP_REQUESTS_DURATION_SECONDS;
+/// HTTP request-duration histogram name. The composition root passes it with
+/// [`HTTP_REQUESTS_DURATION_BUCKETS`] into the Prometheus recorder.
+pub const HTTP_REQUESTS_DURATION_SECONDS: &str = "axum_http_requests_duration_seconds";
 
 /// Buckets in seconds for [`HTTP_REQUESTS_DURATION_SECONDS`], shaped for an
 /// HTTP API.
@@ -77,14 +75,17 @@ pub const HTTP_REQUESTS_DURATION_BUCKETS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
-/// HTTP server metrics are emitted by `axum-prometheus` under its default
-/// names: `axum_http_requests_total`, `axum_http_requests_duration_seconds`,
-/// and `axum_http_requests_pending`, labelled by `method`, `endpoint` (the
-/// matched route template or [`UNMATCHED_ROUTE`]), and `status`.
+pub(crate) const HTTP_REQUESTS_TOTAL: &str = "axum_http_requests_total";
+pub(crate) const HTTP_REQUESTS_PENDING: &str = "axum_http_requests_pending";
+
+/// HTTP server metrics, under the names `axum-prometheus` introduced:
+/// `axum_http_requests_total`, `axum_http_requests_duration_seconds`, and
+/// `axum_http_requests_pending`, labelled by `method`, `endpoint` (the matched
+/// route template or `<unmatched>`), and `status` (not on the pending gauge).
 pub const HTTP_METRICS_NAMES: &[&str] = &[
-    axum_prometheus::AXUM_HTTP_REQUESTS_TOTAL,
+    HTTP_REQUESTS_TOTAL,
     HTTP_REQUESTS_DURATION_SECONDS,
-    axum_prometheus::AXUM_HTTP_REQUESTS_PENDING,
+    HTTP_REQUESTS_PENDING,
 ];
 
 /// Counter of requests rejected without running a handler because the
@@ -115,11 +116,21 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         metrics::Unit::Count,
         "Requests rejected without running a handler because the in-flight limit was reached."
     );
-    let http_metrics = PrometheusMetricLayerBuilder::new()
-        .with_endpoint_label_type(EndpointLabel::MatchedPathWithFallbackFn(|_| {
-            UNMATCHED_ROUTE.to_owned()
-        }))
-        .build();
+    metrics::describe_counter!(
+        HTTP_REQUESTS_TOTAL,
+        metrics::Unit::Count,
+        "The number of times a HTTP request was processed."
+    );
+    metrics::describe_gauge!(
+        HTTP_REQUESTS_PENDING,
+        metrics::Unit::Count,
+        "The number of currently in-flight requests."
+    );
+    metrics::describe_histogram!(
+        HTTP_REQUESTS_DURATION_SECONDS,
+        metrics::Unit::Seconds,
+        "The distribution of HTTP response times."
+    );
     let in_flight = options
         .max_in_flight
         .map(|limit| GlobalConcurrencyLimitLayer::new(limit.get() as usize));
@@ -134,25 +145,22 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         .map_request(request_id::strip_invalid)
         .layer(SetRequestIdLayer::new(
             request_id::REQUEST_ID_HEADER,
-            MakeRequestUuid,
+            request_id::MakeRequestUuid,
         ))
         .layer(PropagateRequestIdLayer::new(request_id::REQUEST_ID_HEADER))
         .layer(SetResponseHeaderLayer::overriding(
             X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
         ))
-        .layer(OtelAxumLayer::default())
-        .layer(OtelInResponseLayer)
-        .layer(http_metrics)
+        // Outside error mapping, so every Problem is completed before it is
+        // counted and logged.
         .layer(middleware::from_fn_with_state(
             AccessLogOptions {
                 log_health_probes: options.log_health_probes,
             },
-            access_log::record,
+            observe::observe,
         ))
-        // Inside the access log and outside error mapping, so every Problem
-        // is completed before it is logged.
-        .layer(middleware::from_fn(complete_problems))
+        .layer(OtelInResponseLayer)
         .layer(HandleErrorLayer::new(middleware_error))
         .load_shed()
         .layer(option_layer(in_flight))
@@ -202,9 +210,7 @@ async fn middleware_error(err: BoxError) -> Response {
 /// Complete every Problem the chain or a handler returns: a bare 413 from
 /// tower-http's body limit or an axum extractor takes the Problem envelope,
 /// and every Problem body gains the request id.
-async fn complete_problems(request: Request, next: Next) -> Response {
-    let request_id = request_id::request_id(request.extensions());
-    let mut response = next.run(request).await;
+pub(crate) fn complete_problem(mut response: Response, request_id: Option<&str>) -> Response {
     if response.status() == StatusCode::PAYLOAD_TOO_LARGE
         && response.extensions().get::<Problem>().is_none()
     {
@@ -218,7 +224,7 @@ async fn complete_problems(request: Request, next: Next) -> Response {
     let Some(problem) = response.extensions_mut().remove::<Problem>() else {
         return response;
     };
-    let problem = problem.with_request_id(id);
+    let problem = problem.with_request_id(id.to_owned());
     // Only `Problem::into_response` attaches the extension, so status and
     // headers (Allow, WWW-Authenticate, Retry-After) are already right.
     *response.body_mut() = axum::Json(&problem).into_response().into_body();
@@ -367,6 +373,21 @@ mod tests {
         let parsed = uuid::Uuid::parse_str(id).expect("generated request ID is a UUID");
         assert_eq!(parsed.get_version_num(), 4);
         assert_eq!(parsed.get_variant(), uuid::Variant::RFC4122);
+    }
+
+    #[tokio::test]
+    async fn a_known_body_length_survives_the_chain() {
+        // hyper writes `Content-Length` from the exact size hint; a layer
+        // that wraps the body without forwarding it turns every response
+        // into a chunked one.
+        let response = app(&options())
+            .oneshot(request(Method::GET, "/ok"))
+            .await
+            .unwrap();
+        assert_eq!(
+            axum::body::HttpBody::size_hint(response.body()).exact(),
+            Some(2)
+        );
     }
 
     #[tokio::test]
