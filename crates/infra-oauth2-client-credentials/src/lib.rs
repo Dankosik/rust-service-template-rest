@@ -357,7 +357,7 @@ impl Inner {
         if token.is_empty() {
             return Err(AcquisitionError::InvalidResponse);
         }
-        let mut header = HeaderValue::from_str(&format!("Bearer {token}"))
+        let mut header = HeaderValue::try_from(format!("Bearer {token}"))
             .map_err(|_| AcquisitionError::InvalidResponse)?;
         header.set_sensitive(true);
         let reuse_until = match response
@@ -418,7 +418,7 @@ impl<'client> oauth2::AsyncHttpClient<'client> for TokenHttp {
                 return Err(AcquisitionError::Rejected);
             }
             let (parts, body) = response.into_parts();
-            Ok(Response::from_parts(parts, body.to_vec()))
+            Ok(Response::from_parts(parts, body.into()))
         })
     }
 }
