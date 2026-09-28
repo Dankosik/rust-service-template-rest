@@ -15,7 +15,6 @@ workspace = true
 service-failure = { workspace = true }
 serde_with = { workspace = true, features = ["std", "macros"] }
 axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json"] }
-axum-prometheus = { workspace = true, features = ["prometheus"] }
 axum-tracing-opentelemetry = { workspace = true, features = ["tracing_level_info"] }
 health = { workspace = true }
 # template:begin inbound-webhooks:http-webhooks-dependency
@@ -30,9 +29,11 @@ infra-postgres = { workspace = true }
 sha2 = { workspace = true }
 sfv = { workspace = true, features = ["parsed-types"] }
 # template:end http-idempotency:http-idempotency-dependencies
+http-body = { workspace = true }
 http-body-util = { workspace = true }
 hyper-util = { workspace = true, features = ["server", "server-auto", "server-graceful", "service", "tokio", "http1", "http2"] }
 metrics = { workspace = true }
+opentelemetry = { workspace = true, features = ["trace"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
@@ -41,12 +42,14 @@ tokio-util = { workspace = true, features = ["rt"] }
 tower = { workspace = true, features = ["util", "limit", "load-shed", "timeout"] }
 tower-http = { workspace = true, features = ["request-id", "set-header", "catch-panic", "limit"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
+tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["tracing_level_info"] }
 # template:begin grpc:http-tls-dependencies
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 # template:end grpc:http-tls-dependencies
 utoipa = { workspace = true, features = ["macros"] }
 utoipa-axum = { workspace = true }
+uuid = { workspace = true, features = ["v4", "fast-rng"] }
 
 [dev-dependencies]
 # template:begin grpc:http-tls-test-dependencies
