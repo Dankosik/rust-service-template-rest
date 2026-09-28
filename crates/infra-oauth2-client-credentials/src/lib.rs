@@ -137,8 +137,8 @@ struct Token {
 }
 
 impl Token {
-    fn is_reusable(&self) -> bool {
-        self.reuse_until.is_none_or(|until| Instant::now() < until)
+    fn is_reusable(&self, now: Instant) -> bool {
+        self.reuse_until.is_none_or(|until| now < until)
     }
 }
 
@@ -217,17 +217,23 @@ impl Credentials {
     /// Returns the cached token while it is reusable, otherwise requests a new
     /// one. Waiting for another caller's request spends this caller's deadline.
     async fn token(&self, deadline: Instant) -> Result<Arc<Token>, AcquisitionError> {
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
             return Err(AcquisitionError::Timeout);
         }
-        if let Some(token) = self.reusable() {
+        if let Some(token) = self.reusable(now) {
             return Ok(token);
         }
+        // Boxed so that the reuse path above keeps a small future.
+        Box::pin(self.acquire(deadline)).await
+    }
+
+    async fn acquire(&self, deadline: Instant) -> Result<Arc<Token>, AcquisitionError> {
         let _refresh = tokio::time::timeout_at(deadline, self.0.refresh.lock())
             .await
             .map_err(|_| AcquisitionError::Timeout)?;
         // The caller that held the lock may have just stored a reusable token.
-        if let Some(token) = self.reusable() {
+        if let Some(token) = self.reusable(Instant::now()) {
             return Ok(token);
         }
         let token = Arc::new(self.0.fetch(deadline).await?);
@@ -246,10 +252,10 @@ impl Credentials {
         }
     }
 
-    fn reusable(&self) -> Option<Arc<Token>> {
+    fn reusable(&self, now: Instant) -> Option<Arc<Token>> {
         self.cached()
             .as_ref()
-            .filter(|token| token.is_reusable())
+            .filter(|token| token.is_reusable(now))
             .cloned()
     }
 

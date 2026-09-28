@@ -174,8 +174,9 @@ publication is implied by template proof.
 The concrete gRPC binding stays inside `Credentials`. It injects one bearer,
 does not replay, and evicts only from the initial `UNAUTHENTICATED` status or
 HTTP 401 without `grpc-status`. The call deadline is `grpc-timeout` or the
-owner's fetch timeout; after acquisition, `grpc-timeout` is rewritten to the
-remaining budget, as gRPC clients propagate a context deadline. Its optional dependency points from OAuth to
+owner's fetch timeout; when acquisition waited at least a millisecond, the
+header's resolution, `grpc-timeout` is rewritten to the remaining budget, as gRPC
+clients propagate a context deadline. A reused token forwards it unchanged. Its optional dependency points from OAuth to
 `infra-grpc`; removing either profile removes the bridge. Generated clients
 take the concrete authenticated `Service`. See the [transport decision
 record](grpc-decisions.md).

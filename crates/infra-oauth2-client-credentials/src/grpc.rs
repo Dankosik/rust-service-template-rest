@@ -7,13 +7,15 @@ use std::{
     time::Duration,
 };
 
-use http::{HeaderValue, Request, Response, StatusCode, header::AUTHORIZATION};
+use http::{HeaderName, HeaderValue, Request, Response, StatusCode, header::AUTHORIZATION};
 use infra_grpc::Client;
 use tokio::time::Instant;
 use tonic::{Code, Status, body::Body};
 use tower::Service;
 
 use crate::{AcquisitionError, Credentials, FETCH_TIMEOUT};
+
+const GRPC_TIMEOUT: HeaderName = HeaderName::from_static("grpc-timeout");
 
 /// A cloneable governed gRPC client with private machine credentials.
 #[derive(Clone)]
@@ -58,18 +60,21 @@ impl Service<Request<Body>> for AuthenticatedClient {
                 ));
             }
             let budget = infra_grpc::grpc_timeout(request.headers());
-            let deadline = Instant::now() + budget.unwrap_or(FETCH_TIMEOUT);
+            let started = Instant::now();
+            let deadline = started + budget.unwrap_or(FETCH_TIMEOUT);
             let token = credentials
                 .authorize(request.headers_mut(), deadline)
                 .await
                 .map_err(acquisition_status)?;
-            if budget.is_some() {
+            let now = Instant::now();
+            if budget.is_some() && now - started >= Duration::from_millis(1) {
                 // Propagate what the token wait left of the caller's budget,
-                // as gRPC clients do for a context deadline.
-                let remaining = deadline.saturating_duration_since(Instant::now());
+                // as gRPC clients do for a context deadline. A reused token
+                // spends less than the millisecond this header resolves.
+                let remaining = deadline.saturating_duration_since(now);
                 request
                     .headers_mut()
-                    .insert("grpc-timeout", grpc_timeout_value(remaining)?);
+                    .insert(GRPC_TIMEOUT, grpc_timeout_value(remaining)?);
             }
             let response = resource.call(request).await?;
             let unauthenticated =

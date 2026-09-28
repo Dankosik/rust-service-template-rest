@@ -423,6 +423,29 @@ async fn token_wait_is_subtracted_from_the_propagated_grpc_timeout() {
 }
 
 #[tokio::test]
+async fn a_reused_token_forwards_the_callers_grpc_timeout_unchanged() {
+    let tokens = Fixture::new().await;
+    let resource = Resource::new().await;
+    let mut client = resource.client(&tokens.credentials(&[], None));
+    for _ in 0..2 {
+        client
+            .unary(rpc(
+                UnaryRequest {
+                    message: "budget".to_owned(),
+                },
+                Duration::from_secs(1),
+            ))
+            .await
+            .unwrap();
+    }
+    let timeouts = resource.peer.timeouts.lock().unwrap().clone();
+    // Tonic encodes one second as microseconds.
+    assert_eq!(timeouts.last().map(String::as_str), Some("1000000u"));
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
 async fn trailers_only_unauthenticated_evicts_without_replay_and_permission_denied_keeps_the_token()
 {
     let tokens = Fixture::new().await;

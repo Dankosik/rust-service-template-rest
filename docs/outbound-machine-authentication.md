@@ -160,7 +160,8 @@ With `GRPC=enabled`, `Credentials::grpc` binds the same private acquisition owne
 to an `infra_grpc::Client`. Each call spends `grpc-timeout` when that header is
 present, otherwise the owner's fetch timeout. Token failure prevents resource
 dispatch. Eviction inspects only the initial response and never replays the
-call. After acquisition, `grpc-timeout` is rewritten to the remaining budget.
+call. When acquisition waited at least a millisecond, `grpc-timeout` is
+rewritten to the remaining budget; a reused token forwards it unchanged.
 Streaming acquires once at opening. The [gRPC
 guide](grpc.md#reuse-clients-and-original-deadlines) shows the concrete binding.
 Removing either profile removes only the combined bridge.
