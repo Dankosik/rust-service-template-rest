@@ -289,6 +289,11 @@ impl Credentials {
                 && let Ok(token) = credentials.0.fetch(Instant::now() + FETCH_TIMEOUT).await
             {
                 credentials.store(token);
+                // A provider may return a token already inside its own
+                // refresh window; still wait before the next attempt.
+                let retry = Instant::now() + REFRESH_RETRY;
+                let mut cached = credentials.cached();
+                cached.refresh_after = cached.refresh_after.map(|after| after.max(retry));
             }
         });
     }

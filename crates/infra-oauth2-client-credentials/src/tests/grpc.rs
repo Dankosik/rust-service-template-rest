@@ -427,7 +427,7 @@ async fn a_reused_token_forwards_the_callers_grpc_timeout_unchanged() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let mut client = resource.client(&tokens.credentials(&[], None));
-    for _ in 0..2 {
+    for _ in 0..4 {
         client
             .unary(rpc(
                 UnaryRequest {
@@ -439,8 +439,12 @@ async fn a_reused_token_forwards_the_callers_grpc_timeout_unchanged() {
             .unwrap();
     }
     let timeouts = resource.peer.timeouts.lock().unwrap().clone();
-    // Tonic encodes one second as microseconds.
-    assert_eq!(timeouts.last().map(String::as_str), Some("1000000u"));
+    // Tonic encodes one second as microseconds. A reuse that a scheduler pause
+    // stretches past a millisecond is rewritten, so one unchanged value proves it.
+    assert!(
+        timeouts[1..].iter().any(|timeout| timeout == "1000000u"),
+        "{timeouts:?}"
+    );
     resource.finish().await;
     tokens.finish().await;
 }

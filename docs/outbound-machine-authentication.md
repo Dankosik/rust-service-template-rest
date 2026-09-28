@@ -105,12 +105,12 @@ client/owner releases the cached token.
 
 Once a quarter of the reuse period, or at most five minutes, remains before the
 reuse cutoff, the first caller to find the token also starts one detached
-refresh, as Azure.Core refreshes five minutes early. No caller waits for it:
-every caller keeps the current token until the new one is stored. The attempt
-has only the five-second cap and takes the refresh lock like any other
-request. A failure keeps the current token until its reuse cutoff, and the next
-background attempt waits thirty seconds. The attempt is not joined at shutdown;
-the runtime cancels it.
+refresh, as Azure.Core refreshes five minutes early. No caller waits for it
+while the current token is reusable: every caller keeps that token until the
+new one is stored. The attempt has only the five-second cap and takes the
+refresh lock like any other request. A failure keeps the current token until its
+reuse cutoff. After either outcome the next background attempt waits at least
+thirty seconds. The attempt is not joined at shutdown; the runtime cancels it.
 
 A positive `expires_in` establishes a conservative monotonic expiry from
 acquisition start. Keep the Go ten-second margin as a *reuse cutoff*: reuse the
