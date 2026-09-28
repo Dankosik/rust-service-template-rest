@@ -14,8 +14,10 @@ bytes and headers, expiry, and trusted caller metadata. It intentionally omits
 a caller-identity index: unrestricted verified caller values cannot be safely
 represented by a literal btree key, and no runtime query needs that access
 path. Trusted operators can still use the heap metadata with bound queries.
-Only `infra-idempotency-store` names the table; the service never creates or
-alters it at runtime.
+`20260928190000_compress_http_idempotency_bodies_with_lz4.sql` switches new
+bodies to lz4 TOAST compression, which PostgreSQL 14+ builds with lz4 support
+provide. Only `infra-idempotency-store` names the table; the service never
+creates or alters it at runtime.
 <!-- template:end http-idempotency:migrations-readme-http-idempotency -->
 <!-- template:begin jobs:migrations-readme-jobs -->
 The background jobs pack creates `background_jobs` and its claim-generation
