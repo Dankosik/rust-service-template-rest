@@ -49,12 +49,41 @@ pub(crate) fn admit_request(
         return Err(Error::InvalidTarget);
     }
     let request = reqwest::Request::try_from(request).map_err(|_| Error::InvalidTarget)?;
-    if request.url().origin() != *origin || has_userinfo(request.url()) {
+    if !same_origin(origin, request.url()) || has_userinfo(request.url()) {
         return Err(Error::InvalidTarget);
     }
     Ok(request)
 }
 
+fn same_origin(origin: &Origin, url: &Url) -> bool {
+    match origin {
+        Origin::Tuple(scheme, host, port)
+            if matches!(scheme.as_str(), "http" | "https")
+                && matches!(url.scheme(), "http" | "https") =>
+        {
+            url.scheme() == scheme
+                && url.host().is_some_and(|request_host| request_host == *host)
+                && url.port_or_known_default() == Some(*port)
+        }
+        _ => url.origin() == *origin,
+    }
+}
+
 fn has_userinfo(url: &Url) -> bool {
     !url.username().is_empty() || url.password().is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_origin;
+    use crate::Url;
+
+    #[test]
+    fn non_http_url_uses_origin_fallback() {
+        let origin = Url::parse("https://authn.fixture.test/")
+            .expect("configured origin")
+            .origin();
+        let blob = Url::parse("blob:https://authn.fixture.test/items").expect("blob URL");
+        assert!(same_origin(&origin, &blob));
+    }
 }
