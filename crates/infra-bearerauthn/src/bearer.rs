@@ -56,13 +56,12 @@ pub fn parse_bearer<'a>(
     if !scheme.eq_ignore_ascii_case(b"Bearer") {
         return Err(Failure::Missing);
     }
-    if header
+    let rest = &header[separator..];
+    let start = rest
         .iter()
-        .any(|byte| !byte.is_ascii() || byte.is_ascii_control())
-    {
-        return Err(Failure::Malformed);
-    }
-    let credentials = header[separator..].trim_ascii_start();
+        .position(|byte| *byte != b' ')
+        .unwrap_or(rest.len());
+    let credentials = &rest[start..];
     if !valid_token(credentials) {
         return Err(Failure::Malformed);
     }
@@ -111,6 +110,8 @@ mod tests {
             b" Bearer abc".as_slice(),
             b"Bearer abc ".as_slice(),
             b"Bearer\tabc".as_slice(),
+            b"Bearer \tabc".as_slice(),
+            b"Bearer \nabc".as_slice(),
             b"Bearer ".as_slice(),
             b"Bearer =".as_slice(),
             b"Bearer ===".as_slice(),
