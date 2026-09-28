@@ -123,11 +123,10 @@ pub struct ServerIdentity {
 #[derive(Clone, Debug)]
 pub struct Cache {
     link: Arc<Link>,
-    server: ServerIdentity,
     command_timeout: Duration,
 }
 
-/// The replaceable connection manager.
+/// Shared server identity and the replaceable connection manager.
 ///
 /// redis 1.7.1 reconnects a `ConnectionManager` only after an I/O error. Two
 /// failures leave it failing without dialing again: setup that fails without
@@ -138,6 +137,7 @@ pub struct Cache {
 /// #790). Replacement happens at most once per [`MAX_DELAY`], so a wrong
 /// password costs one reconnect chain per interval rather than one per call.
 struct Link {
+    server: ServerIdentity,
     client: redis::Client,
     config: redis::aio::ConnectionManagerConfig,
     state: Mutex<LinkState>,
@@ -151,7 +151,10 @@ struct LinkState {
 impl std::fmt::Debug for Link {
     /// The client holds the DSN, so nothing of it is printed.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Link").finish_non_exhaustive()
+        formatter
+            .debug_struct("Link")
+            .field("server", &self.server)
+            .finish_non_exhaustive()
     }
 }
 
@@ -244,6 +247,7 @@ impl Cache {
         observe::describe();
         Ok(Self {
             link: Arc::new(Link {
+                server,
                 client,
                 config,
                 state: Mutex::new(LinkState {
@@ -251,7 +255,6 @@ impl Cache {
                     replaced_at: None,
                 }),
             }),
-            server,
             command_timeout,
         })
     }
@@ -287,7 +290,7 @@ impl Cache {
     /// Admitted server identity for logs.
     #[must_use]
     pub fn server(&self) -> ServerIdentity {
-        self.server.clone()
+        self.link.server.clone()
     }
 }
 
@@ -305,7 +308,8 @@ impl CacheNamespace {
     ///
     /// Returns [`Unavailable`] when the command times out or the server cannot be used.
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Unavailable> {
-        let command = redis::Cmd::get(self.stored_key(key));
+        let mut command = redis::Cmd::with_capacity(2, 3 + self.name.len() + 1 + key.len());
+        command.arg("GET").arg(self.stored_key(key));
         self.run(Operation::Get, command, |value: &Option<Vec<u8>>| {
             if value.is_some() { "hit" } else { "miss" }
         })
@@ -331,7 +335,16 @@ impl CacheNamespace {
         );
         let milliseconds = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
         let options = SetOptions::default().with_expiration(SetExpiry::PX(milliseconds));
-        let command = redis::Cmd::set_options(self.stored_key(key), value, options);
+        // A PX expiry fits in at most 20 decimal digits.
+        let mut command = redis::Cmd::with_capacity(
+            5,
+            3 + self.name.len() + 1 + key.len() + value.len() + 2 + 20,
+        );
+        command
+            .arg("SET")
+            .arg(self.stored_key(key))
+            .arg(value)
+            .arg(options);
         self.run(Operation::Set, command, |(): &()| "ok").await
     }
 
@@ -341,7 +354,8 @@ impl CacheNamespace {
     ///
     /// Returns [`Unavailable`] when the command times out or the server cannot be used.
     pub async fn delete(&self, key: &str) -> Result<(), Unavailable> {
-        let command = redis::Cmd::del(self.stored_key(key));
+        let mut command = redis::Cmd::with_capacity(2, 3 + self.name.len() + 1 + key.len());
+        command.arg("DEL").arg(self.stored_key(key));
         self.run(Operation::Delete, command, |(): &()| "ok").await
     }
 
@@ -353,7 +367,7 @@ impl CacheNamespace {
         command: redis::Cmd,
         outcome: fn(&T) -> &'static str,
     ) -> Result<T, Unavailable> {
-        let mut guard = OperationGuard::start(self.name, operation, &self.cache.server);
+        let mut guard = OperationGuard::start(self.name, operation, &self.cache.link.server);
         let mut manager = self.cache.link.manager();
         let reply = tokio::time::timeout(
             self.cache.command_timeout,
@@ -374,8 +388,11 @@ impl CacheNamespace {
         }
     }
 
-    fn stored_key(&self, key: &str) -> String {
-        format!("{}:{key}", self.name)
+    fn stored_key<'a>(&self, key: &'a str) -> NamespacedKey<'a> {
+        NamespacedKey {
+            namespace: self.name,
+            key,
+        }
     }
 }
 
@@ -499,3 +516,16 @@ fn valid_namespace(name: &str) -> bool {
     rest <= 63
         && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
+
+/// One Redis argument written directly into the command buffer.
+struct NamespacedKey<'a> {
+    namespace: &'static str,
+    key: &'a str,
+}
+
+impl redis::ToRedisArgs for NamespacedKey<'_> {
+    fn write_redis_args<W: redis::RedisWrite + ?Sized>(&self, out: &mut W) {
+        out.write_arg_fmt(format_args!("{}:{}", self.namespace, self.key));
+    }
+}
+impl redis::ToSingleRedisArg for NamespacedKey<'_> {}
