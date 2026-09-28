@@ -38,7 +38,7 @@ Each request carries an absolute URI on the configured origin. A request for ano
 
 The caller supplies an absolute deadline. The exchange ends at the earlier of that deadline and its start plus `Limits::operation_timeout`; an already expired deadline returns `Timeout` before network work. The timeout covers DNS through the last body byte. Dropping the future ends request-owned work, but does not prove that a provider received no request or reversed a provider effect.
 
-The client uses normal system resolution (including system hosts mappings), one pooled HTTP/1 transport, normal TLS validation, no redirects, ambient proxy, referer, automatic decompression, or reqwest retry. Construction and cloning perform no DNS or network I/O. The client has no local concurrency queue, tracker, cancellation token, readiness probe, or teardown stage; the caller's own concurrency bound (for example jobs worker slots or the inbound limit) bounds its work, and library internals own their cleanup.
+The client uses normal system resolution (including system hosts mappings), one pooled HTTP/1 transport, normal TLS validation, no redirects, ambient proxy, referer, automatic decompression, or transport retry. Construction and cloning perform no DNS or network I/O; the process-wide TLS configuration loads the system roots once, on first construction. The client has no local concurrency queue, tracker, cancellation token, readiness probe, or teardown stage; the caller's own concurrency bound (for example jobs worker slots or the inbound limit) bounds its work, and library internals own their cleanup.
 
 Responses preserve HTTP version, status, headers, extensions, and encoded body bytes, including 3xx, 4xx, and 5xx statuses. The HTTP/1 parser enforces the configured header count; a parser refusal is `Transport`. Content length is rejected early when it exceeds the body ceiling, and streamed encoded bytes are bounded while they are buffered. An adapter that requests compression owns decoding and any bound on decoded content.
 
@@ -46,7 +46,7 @@ The transport never retries or reconciles an uncertain effect. For an adapter-ow
 
 ## Error and observation contract
 
-The client returns `InvalidConfiguration`, `InvalidTarget`, `Timeout`, `ResponseBodyTooLarge`, `ClientBuild`, or `Transport`. Retained reqwest errors are sanitized without a URL. Provider adapters map these errors at their own boundary; this client does not construct inbound Problems.
+The client returns `InvalidConfiguration`, `InvalidTarget`, `Timeout`, `ResponseBodyTooLarge`, `ClientBuild`, or `Transport`. Retained transport errors carry no request URL, headers, or body. Provider adapters map these errors at their own boundary; this client does not construct inbound Problems.
 
 Each polled attempt that passes deadline and target admission records a bounded client span and the OpenTelemetry `http.client.request.duration` histogram, exported in the service's Prometheus naming as `http_client_request_duration_seconds`. The signal contains only the standard method or `_OTHER`, configured origin address/port, a finite outcome, known status, and a static failure type. It never includes a full URL, path, query, headers, credentials, body, request identifier, or arbitrary error text. A dropped pending attempt is observed as caller cancellation rather than provider success or failure.
 
