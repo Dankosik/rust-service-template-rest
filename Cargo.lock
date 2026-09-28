@@ -2066,6 +2066,7 @@ dependencies = [
 name = "infra-idempotency-store"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "infra-postgres",
  "sqlx",
  "thiserror 2.0.20",

@@ -201,11 +201,12 @@ startup also requires PostgreSQL, the admitted schema, and a writable session.
 Publish this duration as the retry promise. Expired keys may execute again.
 
 Every request that reaches `execute` holds one pooled connection. Replay,
-mismatch, and in-progress arbitration use four transaction statements; a stored
-success uses six plus the work's statements, including the pre-commit check.
-These counts exclude connection validation and statement preparation. A duplicate
-never waits for the holder, but
-distinct keys executing together compete for the pool; once it is exhausted,
+mismatch, and in-progress arbitration use three transaction statements
+(`BEGIN`, one lock-and-read, `ROLLBACK`); a stored success uses five plus the
+work's statements. The record write is the last statement, so the commit needs
+no pre-commit probe, and a connection idle for one second or less is handed
+out without a ping. These counts exclude statement preparation. A duplicate never
+waits for the holder, but distinct keys executing together compete for the pool; once it is exhausted,
 a request waits up to the 3 s acquire budget and then gets 503
 `idempotency_unavailable`. Size `postgres.max_connections` for concurrent
 work, replays, the readiness probe, and one cleanup connection, and keep the
@@ -267,10 +268,15 @@ handler, and `idempotent` 2.0.0 keeps leases in a separate store. Reassess
 when a maintained crate joins the caller's transaction.
 
 Each attempt is one explicit `READ COMMITTED` transaction on the writer. Its
-first statement refuses a recovering or read-only session and takes
+first statement refuses a recovering or read-only session, takes
 `pg_try_advisory_xact_lock` on the scope digest's first eight bytes without
-waiting; a second statement reads the record, so its snapshot follows the
-lock, and a live record decides before the lock result. The primary key and
+waiting, and reads the record under a snapshot taken before the lock. A live
+record decides regardless of the lock, and no record without the lock answers
+409. Only with the lock and no record does a second statement read again,
+so its snapshot follows the lock and sees a holder that committed in between.
+A holder that commits between the first snapshot and a failed lock yields 409,
+and the retry replays. The record body is returned only for an equal
+fingerprint, so a mismatch neither detoasts nor transfers it. The primary key and
 an upsert that replaces only an expired row are the backstop. A duplicate
 gets 409 instead of waiting because `sqlx` 0.9 keeps a dropped waiting
 request's connection busy until the server statement ends, and `REPEATABLE
@@ -303,9 +309,9 @@ causes.
 
 ## Performance evidence
 
-Arbitration decodes every stored column before deciding a fingerprint mismatch,
-so SQL decoding errors still return `Integrity`. It borrows the body during that
-decision and makes an owned copy only for replay. Cleanup consumes each selected
+Arbitration decodes the stored fingerprint, status, and headers before deciding
+a fingerprint mismatch, so their decoding errors still return `Integrity`; the
+statement returns the body only for an equal fingerprint. Cleanup consumes each selected
 `ctid` under its row lock within the same statement; it retains the 500-row bound,
 expiry recheck, `SKIP LOCKED`, transaction boundary, and one-second timeout.
 
@@ -358,3 +364,54 @@ a speedup. Small-backlog isolated controls were neutral. Reopen the performance
 assessment for forced-generic plans, materially different statistics, partitioning
 (`ctid` is relation-local), or PostgreSQL upgrades. No schema or planner setting
 is changed by this optimization.
+
+### Round trips, body copies, and TOAST compression
+
+A second pass on 2026-09-28 measured each hypothesis against `4824ffc` on a
+DigitalOcean c-4 pair in lon1 (client and PostgreSQL 18.6 over the VPC,
+0.4–0.7 ms RTT), with a store-level load generator and an empty work closure.
+Every round ran all variants in a fresh random order; a result is the median
+of 6–8 paired rounds, and "n/6" counts rounds that improved. Client CPU is
+the process's on-CPU time per attempt, server CPU the database host's busy
+time per attempt.
+
+| Change | Workload | ops/s | p50 | Client CPU | Server CPU |
+| --- | --- | ---: | ---: | ---: | ---: |
+| All code changes together, including the idle-only ping | stored success, 1 KiB, 1 caller | +20.3% (6/6) | −16.7% | −26.6% | −5.9% |
+| | stored success, 1 KiB, 32 callers | +12.5% (6/6) | −11.3% | −21.3% | −13.5% |
+| | replay, 1 KiB, 1 caller | +54.6% (6/6) | −35.8% | −27.8% | −17.3% |
+| | replay, 1 KiB, 32 callers | +37.6% (6/6) | −27.2% | −28.3% | −25.8% |
+| | mismatch, 1 KiB | +57.2% (6/6) | −36.7% | −27.8% | −24.2% |
+| | in progress | +63.2% (6/6) | −38.6% | −27.0% | −29.9% |
+| | mismatch, 1 MiB | ×8.3 (6/6) | −88% | −89% | −94% |
+| lz4 instead of pglz | stored success, 64 KiB JSON | +41.9% (6/6) | −31.0% | −0.9% | −61.4% |
+| | stored success, 256 KiB JSON | +96.9% (6/6) | −51.8% | −5.9% | −69.1% |
+| | stored success, 1 MiB JSON, 4 callers | +126.4% (6/6) | −58.7% | −11.3% | −73.6% |
+| | replay, 256 KiB JSON | +23.7% (6/6) | −19.4% | +0.7% | −42.1% |
+| | stored success, 256 KiB random bytes | −6.4% (0/6) | +5.0% | −1.9% | +5.9% |
+
+The code changes, each first measured alone:
+
+- **One lock-and-read statement.** Replay, mismatch, and in-progress lose a
+  round trip (+15–26% ops/s alone); a stored success keeps two reads.
+- **No pre-commit probe after the record write** (`statement_succeeded`): the
+  write's success already proves the transaction is not aborted. A stored
+  success loses a round trip (+8% ops/s, −25% allocations, −8–12% server CPU).
+- **Ping only idle connections.** Measured here with a 500 ms window; the same
+  change landed separately as #110 with pgx's one-second threshold, which is
+  equivalent under this load. Every attempt loses a round trip (+6–7% stored
+  success, +13–25% decisions).
+- **Body only for an equal fingerprint.** A 1 MiB mismatch no longer detoasts,
+  sends, or copies the body.
+- **`Record::body` is `Bytes`**, shared with the captured response instead of
+  copied: −25% allocated bytes per stored success with 256 KiB and 1 MiB
+  bodies, with time neutral.
+
+Rejected after measurement: a BRIN index on `expires_at` instead of the btree
+(neutral), `STORAGE EXTERNAL` without compression (+57% at 256 KiB JSON, well
+behind lz4's +97%, and +6% on random bytes), and a `VOLATILE` SQL function
+that re-reads after the lock inside the first statement (+6–8% for a stored
+success, but −7% replay and −4% in-progress, and it adds a schema function
+whose correctness rests on the per-query snapshot rule). Reopen lz4 if stored
+bodies are mostly already compressed (for example `Content-Encoding: br`),
+where it cost 6%.
