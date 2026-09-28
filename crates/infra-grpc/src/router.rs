@@ -75,7 +75,7 @@ pub fn router(
                 BUSINESS_CONCURRENCY,
             ))
             .layer(axum::middleware::from_fn(enforce_deadline))
-            .layer(axum::middleware::from_fn(crate::observe::mark_dispatched)),
+            .map_response(crate::observe::mark_dispatched),
     );
     // template:begin authn:grpc-router-authenticate
     let business = business.layer(axum::middleware::from_fn(move |request, next| {
@@ -137,7 +137,7 @@ fn with_health(
     names: &BTreeSet<&'static str>,
 ) -> axum::Router {
     let health = tower::ServiceBuilder::new()
-        .layer(axum::middleware::from_fn(crate::observe::mark_dispatched))
+        .map_response(crate::observe::mark_dispatched)
         .service(HealthServer::new(crate::health::Adapter::new(
             readiness, names,
         )));
