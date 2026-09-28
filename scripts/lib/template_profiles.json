@@ -878,7 +878,7 @@
       "test/tests/outbound_http.rs"
     ],
     "markers": [
-      {"path": "Cargo.toml", "ids": ["workspace-outbound-http-crate"]},
+      {"path": "Cargo.toml", "ids": ["workspace-outbound-http-crate", "workspace-outbound-http-transport"]},
       {"path": "test/Cargo.toml", "ids": ["test-outbound-http-dependencies"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-outbound-http-dependency"]},
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["service-bootstrap-outbound-histogram"]},
