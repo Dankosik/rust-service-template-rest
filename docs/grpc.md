@@ -133,10 +133,15 @@ Fixed listener options, shared with HTTP except for the values below:
   A handshake error or timeout closes the connection without a response.
 - 16 KiB of request metadata.
 - HTTP/2 PING keepalive every 20 seconds, with a 20 second timeout.
+- `TCP_NODELAY` on every accepted socket, as tonic's own server sets it.
+  Without it a response's trailing segment waits for the peer's delayed
+  ACK, about 40 ms.
 - Hyper's default concurrent-stream limit, 200 in locked hyper 1.11.1. This
   listener does not set its own, and hyper does not treat that number as stable.
 - Tonic's default 4 MiB decode limit on business RPCs and health. The
   transport sets no encode cap.
+- 2 KiB initial codec buffers per call, from `grpc_contracts::codec`,
+  instead of tonic's 8 KiB. Larger messages grow the buffer.
 
 ## Handler validation
 

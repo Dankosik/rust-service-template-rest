@@ -35,6 +35,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build_server(true)
         .build_client(true)
         .build_transport(false)
+        // Stock prost codec with smaller per-call buffers; see `grpc_contracts::codec`.
+        .codec_path("crate::codec::ContractCodec")
         .emit_rerun_if_changed(false)
         // Nests each package's file in its module path: `example.v1` becomes `example::v1`.
         .include_file("_includes.rs")

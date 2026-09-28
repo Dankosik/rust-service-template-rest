@@ -279,6 +279,12 @@ where
                 continue;
             }
         };
+        // hyper writes HTTP/2 headers, data and trailers as separate small
+        // segments; with Nagle on, a follow-up write waits for the peer's
+        // delayed ACK (about 40 ms). Tonic's own server sets this too.
+        if let Err(err) = stream.set_nodelay(true) {
+            tracing::debug!(%peer, error = %err, "TCP_NODELAY not set");
+        }
         let watcher = graceful.watcher();
         let builder = builder.clone();
         let app = app.clone();

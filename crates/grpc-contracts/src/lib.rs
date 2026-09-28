@@ -11,4 +11,6 @@
     reason = "prost and tonic output is regenerated, checked for drift and never edited by hand"
 )]
 
+pub mod codec;
+
 include!("generated/_includes.rs");
