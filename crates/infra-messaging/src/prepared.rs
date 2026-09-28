@@ -13,6 +13,8 @@ pub struct PreparedEvent {
     pub(crate) event_type: Cow<'static, str>,
     pub(crate) schema_version: u16,
     pub(crate) occurred_at: OffsetDateTime,
+    /// `occurred_at` as the RFC 3339 `Created-At` header value.
+    pub(crate) created_at: String,
     pub(crate) payload: Bytes,
 }
 
@@ -52,16 +54,17 @@ impl PreparedEvent {
             .ok_or(crate::MessagingError::Envelope(
                 "occurrence time is out of range",
             ))?;
-        let prepared = Self {
+        let mut prepared = Self {
             subject,
             message_id: event.id.clone(),
             publication_id: event.id.clone(),
             event_type: Cow::Borrowed(T::EVENT_TYPE),
             schema_version: T::SCHEMA_VERSION,
             occurred_at,
+            created_at: String::new(),
             payload: payload.into(),
         };
-        crate::wire::validate_prepared(&prepared)?;
+        prepared.created_at = crate::wire::validate_prepared(&prepared)?;
         Ok(prepared)
     }
     #[must_use]
