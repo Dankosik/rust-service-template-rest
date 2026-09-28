@@ -12,9 +12,10 @@ mod tests;
 #[path = "../../../test/fixtures/tls.rs"]
 mod tls;
 
-use std::{fmt, time::Duration};
+use std::{fmt, sync::OnceLock, time::Duration};
 
-use http_body_util::{BodyExt as _, Limited};
+use http_body_util::{BodyExt as _, Full, Limited};
+use hyper_util::client::legacy::connect::HttpConnector;
 use tokio::time::Instant;
 use tracing::Instrument as _;
 
@@ -22,6 +23,18 @@ pub use bytes::Bytes;
 pub use http::{HeaderMap, Method, Request, Response, StatusCode, Version, header};
 pub use observe::{REQUEST_DURATION_BUCKETS, REQUEST_DURATION_METRIC};
 pub use url::Url;
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+type Transport = hyper_util::client::legacy::Client<
+    hyper_rustls::HttpsConnector<HttpConnector<Resolver>>,
+    Full<Bytes>,
+>;
+
+// System DNS; tests route fixture names to loopback listeners instead.
+#[cfg(not(test))]
+type Resolver = hyper_util::client::legacy::connect::dns::GaiResolver;
+#[cfg(test)]
+type Resolver = tests::FixtureResolver;
 
 /// Fixed client ceilings. Every field is required and positive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,12 +58,12 @@ pub enum Error {
     #[error("outbound HTTP client construction failed")]
     ClientBuild {
         #[source]
-        source: reqwest::Error,
+        source: BoxError,
     },
     #[error("outbound HTTP transport failed")]
     Transport {
         #[source]
-        source: reqwest::Error,
+        source: BoxError,
     },
 }
 
@@ -83,16 +96,17 @@ pub enum Error {
 /// ```
 #[derive(Clone)]
 pub struct Client {
-    origin: url::Origin,
+    target: policy::Target,
+    server: observe::Server,
     limits: Limits,
-    transport: reqwest::Client,
+    transport: Transport,
 }
 
 impl fmt::Debug for Client {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Client")
-            .field("origin", &self.origin)
+            .field("origin", &self.target)
             .field("limits", &self.limits)
             .finish_non_exhaustive()
     }
@@ -109,11 +123,12 @@ impl Client {
     /// non-HTTPS URL, a URL without a host, or a URL with userinfo.
     pub fn new(origin: &Url, limits: Limits) -> Result<Self, Error> {
         policy::validate_limits(&limits)?;
-        let origin = policy::admit_origin(origin)?;
+        let target = policy::admit_origin(origin)?;
         Ok(Self {
-            origin,
+            server: observe::Server::new(&target),
+            target,
             limits,
-            transport: build_client(&limits, true)?,
+            transport: build_transport(&limits, true, tls_config()?.clone(), Resolver::new()),
         })
     }
 
@@ -127,11 +142,12 @@ impl Client {
     #[cfg(feature = "test-support")]
     pub fn new_for_test_http(origin: &Url, limits: Limits) -> Result<Self, Error> {
         policy::validate_limits(&limits)?;
-        let origin = policy::admit_test_http_origin(origin)?;
+        let target = policy::admit_test_http_origin(origin)?;
         Ok(Self {
-            origin,
+            server: observe::Server::new(&target),
+            target,
             limits,
-            transport: build_client(&limits, false)?,
+            transport: build_transport(&limits, false, tls_config()?.clone(), Resolver::new()),
         })
     }
 
@@ -156,104 +172,109 @@ impl Client {
         if timeout.is_zero() {
             return Err(Error::Timeout);
         }
-        let mut request = policy::admit_request(&self.origin, request)?;
-        *request.timeout_mut() = Some(timeout);
+        let request = policy::admit_request(&self.target, request)?;
 
-        let mut attempt = observe::Attempt::start(request.method(), &self.origin);
-        let result = self.exchange(request, &mut attempt).await;
+        let mut attempt = observe::Attempt::start(request.method(), &self.server);
+        let result = self.exchange(request, timeout, &mut attempt).await;
         attempt.finish(&result);
         result
     }
 
     async fn exchange(
         &self,
-        request: reqwest::Request,
+        request: Request<Bytes>,
+        timeout: Duration,
         attempt: &mut observe::Attempt,
     ) -> Result<Response<Bytes>, Error> {
         let span = attempt.span();
-        async {
+        let exchange = async {
             let response = self
                 .transport
-                .execute(request)
+                .request(request.map(Full::new))
                 .await
-                .map_err(map_transport_error)?;
+                .map_err(|source| Error::Transport {
+                    source: Box::new(source),
+                })?;
             attempt.response_headers(response.status());
             let body_limit = self.limits.response_body_bytes;
-            if response
-                .content_length()
+            if hyper::body::Body::size_hint(response.body())
+                .exact()
                 .is_some_and(|length| length > body_limit as u64)
             {
                 return Err(Error::ResponseBodyTooLarge);
             }
 
-            let (parts, body) = http::Response::from(response).into_parts();
+            let (parts, body) = response.into_parts();
             let body = Limited::new(body, body_limit)
                 .collect()
                 .await
                 .map_err(map_body_error)?
                 .to_bytes();
             Ok(Response::from_parts(parts, body))
-        }
-        .instrument(span)
-        .await
+        };
+        tokio::time::timeout(timeout, exchange.instrument(span))
+            .await
+            .unwrap_or(Err(Error::Timeout))
     }
 }
 
-fn build_client(limits: &Limits, https_only: bool) -> Result<reqwest::Client, Error> {
-    client_builder(limits, https_only)
-        .build()
-        .map_err(|source| Error::ClientBuild {
-            source: source.without_url(),
-        })
+/// The process-wide TLS client configuration. Its platform verifier loads the
+/// system root store once, and every client shares its session cache, which
+/// rustls keys by server name.
+fn tls_config() -> Result<&'static rustls::ClientConfig, Error> {
+    use rustls_platform_verifier::BuilderVerifierExt as _;
+
+    static CONFIG: OnceLock<rustls::ClientConfig> = OnceLock::new();
+    if let Some(config) = CONFIG.get() {
+        return Ok(config);
+    }
+    let build_error = |source: rustls::Error| Error::ClientBuild {
+        source: Box::new(source),
+    };
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(build_error)?
+    .with_platform_verifier()
+    .map_err(build_error)?
+    .with_no_client_auth();
+    Ok(CONFIG.get_or_init(|| config))
 }
 
-fn client_builder(limits: &Limits, https_only: bool) -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
-        .tls_backend_rustls()
-        .https_only(https_only)
-        .no_hickory_dns()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .no_proxy()
-        .referer(false)
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .no_zstd()
-        .http1_only()
-        .http1_max_headers(limits.response_header_count)
-        .pool_idle_timeout(Duration::from_secs(30))
-}
-
-#[cfg(test)]
-fn build_fixture_client(
-    host: &str,
-    address: std::net::SocketAddr,
+fn build_transport(
     limits: &Limits,
-    root: reqwest::Certificate,
-) -> Result<reqwest::Client, Error> {
-    client_builder(limits, true)
-        .resolve(host, address)
-        .tls_certs_only([root])
-        .build()
-        .map_err(|source| Error::ClientBuild {
-            source: source.without_url(),
-        })
+    https_only: bool,
+    tls: rustls::ClientConfig,
+    resolver: Resolver,
+) -> Transport {
+    let mut http = HttpConnector::new_with_resolver(resolver);
+    http.enforce_http(false);
+    http.set_nodelay(true);
+    http.set_keepalive(Some(Duration::from_secs(15)));
+    http.set_keepalive_interval(Some(Duration::from_secs(15)));
+    http.set_keepalive_retries(Some(3));
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    http.set_tcp_user_timeout(Some(Duration::from_secs(30)));
+    let https = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(tls);
+    let https = if https_only {
+        https.https_only()
+    } else {
+        https.https_or_http()
+    };
+    hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+        .timer(hyper_util::rt::TokioTimer::new())
+        .pool_timer(hyper_util::rt::TokioTimer::new())
+        .pool_idle_timeout(Duration::from_secs(30))
+        .http1_max_headers(limits.response_header_count)
+        .build(https.enable_http1().wrap_connector(http))
 }
 
-fn map_transport_error(error: reqwest::Error) -> Error {
-    if error.is_timeout() {
-        return Error::Timeout;
-    }
-    Error::Transport {
-        source: error.without_url(),
-    }
-}
-
-// `Limited` yields either the reqwest body error or its own length error.
-fn map_body_error(error: Box<dyn std::error::Error + Send + Sync>) -> Error {
-    match error.downcast::<reqwest::Error>() {
-        Ok(error) => map_transport_error(*error),
-        Err(_) => Error::ResponseBodyTooLarge,
+// `Limited` yields either the hyper body error or its own length error.
+fn map_body_error(error: BoxError) -> Error {
+    if error.is::<http_body_util::LengthLimitError>() {
+        Error::ResponseBodyTooLarge
+    } else {
+        Error::Transport { source: error }
     }
 }

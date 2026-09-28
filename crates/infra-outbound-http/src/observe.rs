@@ -3,9 +3,8 @@ use std::{sync::Arc, time::Instant};
 use http::{Method, StatusCode};
 use metrics::{Label, SharedString, Unit};
 use tracing::Span;
-use url::Origin;
 
-use crate::Error;
+use crate::{Error, policy::Target};
 
 /// OpenTelemetry `http.client.request.duration`, in the recorder's
 /// Prometheus naming.
@@ -17,31 +16,44 @@ pub const REQUEST_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
 ];
 
+/// Configured server identity, formatted once per client. Clones share it.
+#[derive(Clone, Debug)]
+pub(crate) struct Server {
+    address: SharedString,
+    port: SharedString,
+    port_number: u16,
+}
+
+impl Server {
+    pub(crate) fn new(target: &Target) -> Self {
+        Self {
+            address: Arc::<str>::from(target.host()).into(),
+            port: Arc::<str>::from(target.port().to_string()).into(),
+            port_number: target.port(),
+        }
+    }
+}
+
 /// One polled outbound attempt. The guard retains only bounded configured
 /// identity and outcome state, never caller request data or transport errors.
 pub(crate) struct Attempt {
     started: Instant,
     method: &'static str,
-    server_address: String,
-    server_port: String,
+    server: Server,
     status: Option<StatusCode>,
     span: Span,
     finalized: bool,
 }
 
 impl Attempt {
-    pub(crate) fn start(method: &Method, origin: &Origin) -> Self {
+    pub(crate) fn start(method: &Method, server: &Server) -> Self {
         let method = bounded_method(method);
-        let (server_address, server_port) = match origin {
-            Origin::Tuple(_, host, port) => (host.to_string(), port.to_string()),
-            Origin::Opaque(_) => (String::new(), String::new()),
-        };
         let span = tracing::info_span!(
             "outbound_http",
             otel.kind = "client",
             http.request.method = method,
-            server.address = %server_address,
-            server.port = %server_port,
+            server.address = &*server.address,
+            server.port = server.port_number,
             http.response.status_code = tracing::field::Empty,
             error.type = tracing::field::Empty,
             outbound.outcome = tracing::field::Empty,
@@ -50,8 +62,7 @@ impl Attempt {
         Self {
             started: Instant::now(),
             method,
-            server_address,
-            server_port,
+            server: server.clone(),
             status: None,
             span,
             finalized: false,
@@ -64,10 +75,6 @@ impl Attempt {
 
     pub(crate) fn response_headers(&mut self, status: StatusCode) {
         self.status = Some(status);
-        self.span.record(
-            "http.response.status_code",
-            tracing::field::display(status.as_u16()),
-        );
     }
 
     pub(crate) fn finish<T>(&mut self, result: &Result<T, Error>) {
@@ -86,11 +93,14 @@ impl Attempt {
     }
 
     fn emit(&self, outcome: &'static str, error_type: Option<SharedString>, is_http_error: bool) {
-        self.span.record("outbound.outcome", outcome);
-        if let Some(error_type) = error_type.as_deref() {
-            self.span.record("error.type", error_type);
-            self.span.record("otel.status_code", "ERROR");
-        }
+        // One call: a formatting layer may re-serialize every field per record.
+        tracing::record_all!(
+            self.span,
+            http.response.status_code = self.status.map(|status| status.as_u16()),
+            error.type = error_type.as_deref(),
+            outbound.outcome = outcome,
+            otel.status_code = error_type.is_some().then_some("ERROR"),
+        );
 
         describe_histogram();
         let mut labels = Vec::with_capacity(
@@ -98,8 +108,8 @@ impl Attempt {
         );
         labels.extend([
             Label::new("http.request.method", self.method),
-            Label::new("server.address", self.server_address.clone()),
-            Label::new("server.port", self.server_port.clone()),
+            Label::new("server.address", self.server.address.clone()),
+            Label::new("server.port", self.server.port.clone()),
             Label::new("outbound.outcome", outcome),
         ]);
         let error_type = match (self.status, is_http_error, error_type) {

@@ -824,7 +824,7 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("worker")
     if inputs.cache == "redis":
         selected.add("cache")
-    if inputs.grpc == "enabled" or inputs.cache == "redis":
+    if inputs.grpc == "enabled" or inputs.cache == "redis" or inputs.outbound_http == "bounded":
         selected.add("rustls")
     if (
         inputs.database == "postgres"

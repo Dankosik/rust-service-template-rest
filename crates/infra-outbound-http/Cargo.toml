@@ -24,9 +24,13 @@ test-support = []
 http = { workspace = true }
 bytes = { workspace = true, features = ["std"] }
 http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-rustls = { workspace = true, features = ["aws-lc-rs", "http1", "tls12", "rustls-platform-verifier"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
 metrics = { workspace = true }
+rustls = { workspace = true, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-platform-verifier = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
-reqwest = { workspace = true, features = ["rustls"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 url = { workspace = true, features = ["std"] }
@@ -36,3 +40,4 @@ metrics-exporter-prometheus = { workspace = true }
 rcgen = { workspace = true, features = ["aws_lc_rs"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
+tower = { workspace = true }

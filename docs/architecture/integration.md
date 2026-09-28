@@ -32,7 +32,7 @@ Outbound webhook delivery reuses `infra-outbound-http` as one bounded,
 fixed-origin client per configured endpoint in a fixed startup map. Every
 attempt resolves its endpoint ID to that map's current URL and key ring,
 including historical payloads whose saved routing fields are ignored. The
-provider requests the admitted current URL; it does not introduce raw reqwest calls, a
+provider requests the admitted current URL; it does not introduce raw HTTP client calls, a
 general many-authority transport, proxy handling, redirects, or an inner retry.
 <!-- template:end webhooks:docs-integration-webhooks-outbound -->
 
