@@ -56,9 +56,16 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
         directive: options.level.to_owned(),
         source,
     })?;
-    let otel = options
-        .tracer_provider
-        .map(|handle| tracing_opentelemetry::layer().with_tracer(handle.tracer()));
+    // Source location, thread, and busy/idle timings would be added to every
+    // span, sampled or not, at about 2% of a small request's instructions;
+    // no dashboard or runbook reads them.
+    let otel = options.tracer_provider.map(|handle| {
+        tracing_opentelemetry::layer()
+            .with_tracer(handle.tracer())
+            .with_location(false)
+            .with_threads(false)
+            .with_tracked_inactivity(false)
+    });
     let trace_dispatch = Arc::new(OnceLock::new());
     let format: Box<dyn Layer<_> + Send + Sync> = match options.format {
         LoggingFormat::Json => {

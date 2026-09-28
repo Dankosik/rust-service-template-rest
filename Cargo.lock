@@ -2038,6 +2038,7 @@ dependencies = [
  "itertools 0.15.0",
  "metrics",
  "opentelemetry",
+ "opentelemetry_sdk",
  "rcgen",
  "rustls",
  "serde",
@@ -2053,7 +2054,9 @@ dependencies = [
  "tower",
  "tower-http 0.7.1",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-opentelemetry-instrumentation-sdk",
+ "tracing-subscriber",
  "utoipa",
  "utoipa-axum",
  "uuid",
@@ -3064,6 +3067,7 @@ dependencies = [
  "portable-atomic",
  "rand 0.9.5",
  "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]

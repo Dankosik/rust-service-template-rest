@@ -43,6 +43,7 @@ tower = { workspace = true, features = ["util", "limit", "load-shed", "timeout"]
 tower-http = { workspace = true, features = ["request-id", "set-header", "catch-panic", "limit"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["tracing_level_info"] }
+tracing-opentelemetry = { workspace = true }
 # template:begin grpc:http-tls-dependencies
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
@@ -63,3 +64,5 @@ axum-test = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "test-util"] }
 tower = { workspace = true, features = ["util"] }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+tracing-subscriber = { workspace = true, features = ["registry"] }
