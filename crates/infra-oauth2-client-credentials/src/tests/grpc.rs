@@ -509,7 +509,7 @@ async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
         () = resource.started() => {}
         result = &mut delayed => panic!("delayed call finished before the gate: {result:?}"),
     }
-    *credentials.cached() = None;
+    *credentials.cached() = crate::Cached::default();
     tokens.token_json(
         "200 OK",
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),

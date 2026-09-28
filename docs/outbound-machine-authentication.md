@@ -100,22 +100,30 @@ One owner never runs two token requests at once. Callers that arrive while a
 request is in flight wait for it, then reuse its token if it is reusable. After
 a failure, each waiting caller makes its own request in turn. Every caller
 bounds its own wait by its own absolute deadline. Dropping the requesting future
-cancels its exchange and lets the next waiter proceed. There is no detached
-fetch or application maintenance task. Dropping the last client/owner releases
-the cached token.
+cancels its exchange and lets the next waiter proceed. Dropping the last
+client/owner releases the cached token.
+
+Once a quarter of the reuse period, or at most five minutes, remains before the
+reuse cutoff, the first caller to find the token also starts one detached
+refresh, as Azure.Core refreshes five minutes early. No caller waits for it:
+every caller keeps the current token until the new one is stored. The attempt
+has only the five-second cap and takes the refresh lock like any other
+request. A failure keeps the current token until its reuse cutoff, and the next
+background attempt waits thirty seconds. The attempt is not joined at shutdown;
+the runtime cancels it.
 
 A positive `expires_in` establishes a conservative monotonic expiry from
 acquisition start. Keep the Go ten-second margin as a *reuse cutoff*: reuse the
 token only until expiry minus ten seconds. A token that is still valid but
 already within that margin, including any lifetime at most ten seconds, serves
 only the request that fetched it. This avoids rejecting short-lived valid
-responses. No proactive refresh is started.
+responses.
 
 A missing or unrepresentably large lifetime has no reuse cutoff: as in Go's
 `oauth2`, the token is reused until a resource 401 evicts it. Zero lifetime or a
 token already past its expiry when the response arrives cannot authorize
-dispatch. Hits never slide expiry. Failed attempts are not cached and never fall
-back to an older token. A later operation may fetch again. Unknown response
+dispatch. Hits never slide expiry. Failed attempts are not cached, and no token
+is reused past its cutoff. A later operation may fetch again. Unknown response
 fields and refresh tokens are discarded; JWT claims are not interpreted. Only
 case-insensitive Bearer tokens that are nonempty and form a valid header value
 are admitted. No custom TTL ceiling or stricter JSON,

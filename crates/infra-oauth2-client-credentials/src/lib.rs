@@ -33,6 +33,11 @@ pub mod grpc;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// A token stops being reused this long before it expires, as in Go's `oauth2`.
 const REUSE_MARGIN: Duration = Duration::from_secs(10);
+/// A reusable token is replaced in the background once at most this much, or a
+/// quarter, of its reuse remains, as Azure.Core refreshes five minutes early.
+const REFRESH_AHEAD: Duration = Duration::from_mins(5);
+/// A background refresh attempt waits this long after the previous one.
+const REFRESH_RETRY: Duration = Duration::from_secs(30);
 const TOKEN_LIMITS: Limits = Limits {
     operation_timeout: FETCH_TIMEOUT,
     response_header_count: 64,
@@ -124,9 +129,16 @@ struct Inner {
     scopes: Vec<String>,
     audience: Option<String>,
     /// The last token; never held across an `.await`.
-    cached: Mutex<Option<Arc<Token>>>,
+    cached: Mutex<Cached>,
     /// Held by the one caller requesting a new token, so requests never overlap.
     refresh: tokio::sync::Mutex<()>,
+}
+
+#[derive(Default)]
+struct Cached {
+    token: Option<Arc<Token>>,
+    /// When the next background refresh of a still reusable token may start.
+    refresh_after: Option<Instant>,
 }
 
 /// A sensitive `Bearer` header value and the instant it stops being reused.
@@ -134,6 +146,8 @@ struct Token {
     header: HeaderValue,
     /// `None` when the provider gave no lifetime: reuse until a resource 401.
     reuse_until: Option<Instant>,
+    /// When a background refresh first replaces this token.
+    refresh_after: Option<Instant>,
 }
 
 impl Token {
@@ -188,7 +202,7 @@ impl Credentials {
             token_http,
             scopes: options.scopes,
             audience: options.audience,
-            cached: Mutex::new(None),
+            cached: Mutex::default(),
             refresh: tokio::sync::Mutex::new(()),
         })))
     }
@@ -236,30 +250,70 @@ impl Credentials {
         if let Some(token) = self.reusable(Instant::now()) {
             return Ok(token);
         }
-        let token = Arc::new(self.0.fetch(deadline).await?);
-        *self.cached() = Some(token.clone());
-        Ok(token)
+        Ok(self.store(self.0.fetch(deadline).await?))
+    }
+
+    /// Returns the cached token while it is reusable. The first caller to find
+    /// it past its refresh time also starts a background refresh.
+    fn reusable(&self, now: Instant) -> Option<Arc<Token>> {
+        let mut cached = self.cached();
+        let token = cached
+            .token
+            .as_ref()
+            .filter(|token| token.is_reusable(now))?
+            .clone();
+        if cached.refresh_after.is_some_and(|after| now >= after) {
+            cached.refresh_after = Some(now + REFRESH_RETRY);
+            drop(cached);
+            self.refresh_ahead(token.clone());
+        }
+        Some(token)
+    }
+
+    /// Replaces `current` without delaying any caller. A failure keeps it until
+    /// its reuse cutoff; the next attempt waits [`REFRESH_RETRY`].
+    fn refresh_ahead(&self, current: Arc<Token>) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let credentials = self.clone();
+        runtime.spawn(async move {
+            let _refresh = credentials.0.refresh.lock().await;
+            // A caller that held the lock may have replaced or evicted it.
+            let unchanged = credentials
+                .cached()
+                .token
+                .as_ref()
+                .is_some_and(|token| Arc::ptr_eq(token, &current));
+            if unchanged
+                && let Ok(token) = credentials.0.fetch(Instant::now() + FETCH_TIMEOUT).await
+            {
+                credentials.store(token);
+            }
+        });
+    }
+
+    fn store(&self, token: Token) -> Arc<Token> {
+        let token = Arc::new(token);
+        let mut cached = self.cached();
+        cached.refresh_after = token.refresh_after;
+        cached.token = Some(token.clone());
+        token
     }
 
     /// Forgets `used` unless a newer token already replaced it.
     fn reject(&self, used: &Arc<Token>) {
         let mut cached = self.cached();
         if cached
+            .token
             .as_ref()
             .is_some_and(|token| Arc::ptr_eq(token, used))
         {
-            *cached = None;
+            *cached = Cached::default();
         }
     }
 
-    fn reusable(&self, now: Instant) -> Option<Arc<Token>> {
-        self.cached()
-            .as_ref()
-            .filter(|token| token.is_reusable(now))
-            .cloned()
-    }
-
-    fn cached(&self) -> MutexGuard<'_, Option<Arc<Token>>> {
+    fn cached(&self) -> MutexGuard<'_, Cached> {
         self.0.cached.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -377,9 +431,12 @@ impl Inner {
             // A token already inside the margin serves only this request.
             Some(expiry) => Some(expiry.checked_sub(REUSE_MARGIN).unwrap_or(started)),
         };
+        let refresh_after = reuse_until
+            .map(|until| until - REFRESH_AHEAD.min(until.saturating_duration_since(started) / 4));
         Ok(Token {
             header,
             reuse_until,
+            refresh_after,
         })
     }
 }

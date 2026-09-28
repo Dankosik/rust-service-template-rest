@@ -30,7 +30,7 @@ metrics = { workspace = true }
 oauth2 = { workspace = true }
 secrecy = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["rt", "time"] }
 url = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
