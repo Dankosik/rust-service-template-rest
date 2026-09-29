@@ -79,7 +79,7 @@ fn watch(
                 let next = (!draining).then_some((reader, Some(status)));
                 return Some((Ok(response(status)), next));
             }
-            if draining || reader.changed_verdict().await.is_err() {
+            if draining || reader.wait_for_verdict_event().await.is_err() {
                 return None;
             }
         }
