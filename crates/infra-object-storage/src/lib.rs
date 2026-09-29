@@ -351,6 +351,15 @@ impl ObjectStorage {
             return Err(guard.fail(ObjectStorageError::TooLarge, "too_large"));
         }
         let _permit = self.admit(&mut guard)?;
+        // hyper never polls a body declared empty, so the length check in
+        // the body cannot see extra bytes: read it here instead.
+        let mut body = body;
+        if !body.in_memory && body.len == 0 {
+            if body.stream.next().await.is_some() {
+                return Err(guard.fail(ObjectStorageError::Rejected, "body_length"));
+            }
+            body = PutBody::from(Bytes::new());
+        }
         let checksum = match (self.inner.checksum, body.in_memory) {
             (UploadChecksum::Always, _) | (UploadChecksum::BytesOnly, true) => {
                 Some(ChecksumAlgorithm::Crc64Nvme)
@@ -645,9 +654,8 @@ impl Download {
     ///
     /// # Errors
     ///
-    /// `Integrity` for a checksum mismatch or a body longer than its
-    /// headers; `Unavailable` for a transport failure, a body shorter than
-    /// its headers, or a stalled body. After an error every call returns the
+    /// `Integrity` for a checksum mismatch; `Unavailable` for a transport
+    /// failure, a body shorter than its headers, or a stalled body. After an error every call returns the
     /// same error; after the end, `Ok(None)`.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, ObjectStorageError> {
         if let Some(error) = self.failed {

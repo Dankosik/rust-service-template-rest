@@ -129,7 +129,7 @@ a clean end.
 | `Unavailable` | Transient: a read failed, or the provider refused a mutation before applying it (409, 429, 503, or S3's `400 RequestTimeout`) | Retry later |
 | `Rejected` | Permanent: another 4xx, 501, a missing bucket, a streamed body that does not match its length, or an out-of-range presign lifetime | Fix configuration, credentials, or input |
 | `OutcomeUnknown` | A mutation may or may not have taken effect: a timeout, a lost response, or a 500, 502, or 504 | Reconcile, for example with `head`, before relying on either state |
-| `Integrity` | A checksum mismatch, a range response, or a body longer than its headers | Treat the data as unusable |
+| `Integrity` | A checksum mismatch or a range response | Treat the data as unusable |
 
 A put or delete makes exactly one attempt, so the reply the client classifies
 is the only one: a refusal really means nothing was applied. A retry could

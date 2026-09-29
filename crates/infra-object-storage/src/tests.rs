@@ -613,7 +613,7 @@ async fn mutations_make_one_attempt() {
 
 #[tokio::test]
 async fn a_stream_that_differs_from_its_length_is_rejected() {
-    for (declared, sent) in [(4_u64, &b"longer"[..]), (16, &b"short"[..])] {
+    for (declared, sent) in [(4_u64, &b"longer"[..]), (16, &b"short"[..]), (0, &b"x"[..])] {
         let stub = Stub::start(|_, _| ok_empty()).await;
         let storage = stub.storage(|_| {});
         let body = http_body_util::Full::new(Bytes::from_static(sent));
