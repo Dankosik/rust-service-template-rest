@@ -435,7 +435,9 @@ def assert_profile_packs(
     assert_profile_pack(source, target, "config-url", messaging == "nats-jetstream" or outbound_auth == "oauth2-client-credentials")
     shared_selected = authn != "none" or outbound_http == "bounded" or grpc == "enabled" or cache == "redis"
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
-    assert_profile_pack(source, target, "rustls", grpc == "enabled" or cache == "redis")
+    assert_profile_pack(
+        source, target, "rustls", grpc == "enabled" or cache == "redis" or outbound_http == "bounded"
+    )
     assert_profile_pack(
         source, target, "request-budget", outbound_http == "bounded" or http_idempotency == "postgres"
     )

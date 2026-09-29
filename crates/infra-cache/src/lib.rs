@@ -21,9 +21,8 @@ use std::time::{Duration, Instant};
 use redis::aio::ConnectionManager;
 use redis::{IntoConnectionInfo, SetExpiry, SetOptions};
 use secrecy::{ExposeSecret, SecretString};
-use tracing::Instrument;
 
-use self::observe::{Failure, Operation, OperationGuard};
+use self::observe::{Failure, Histograms, Operation, OperationGuard, Outcome};
 pub use self::observe::{OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
 
 /// One reconnect attempt stays inside the startup check.
@@ -276,6 +275,7 @@ impl Cache {
         CacheNamespace {
             cache: self.clone(),
             name,
+            histograms: Arc::default(),
         }
     }
 
@@ -299,6 +299,7 @@ impl Cache {
 pub struct CacheNamespace {
     cache: Cache,
     name: &'static str,
+    histograms: Arc<Histograms>,
 }
 
 impl CacheNamespace {
@@ -311,7 +312,11 @@ impl CacheNamespace {
         let mut command = redis::Cmd::with_capacity(2, 3 + self.name.len() + 1 + key.len());
         command.arg("GET").arg(self.stored_key(key));
         self.run(Operation::Get, command, |value: &Option<Vec<u8>>| {
-            if value.is_some() { "hit" } else { "miss" }
+            if value.is_some() {
+                Outcome::Hit
+            } else {
+                Outcome::Miss
+            }
         })
         .await
     }
@@ -345,7 +350,8 @@ impl CacheNamespace {
             .arg(self.stored_key(key))
             .arg(value)
             .arg(options);
-        self.run(Operation::Set, command, |(): &()| "ok").await
+        self.run(Operation::Set, command, |(): &()| Outcome::Ok)
+            .await
     }
 
     /// `DEL`. The deleted-count is ignored; a missing key is still success.
@@ -356,7 +362,8 @@ impl CacheNamespace {
     pub async fn delete(&self, key: &str) -> Result<(), Unavailable> {
         let mut command = redis::Cmd::with_capacity(2, 3 + self.name.len() + 1 + key.len());
         command.arg("DEL").arg(self.stored_key(key));
-        self.run(Operation::Delete, command, |(): &()| "ok").await
+        self.run(Operation::Delete, command, |(): &()| Outcome::Ok)
+            .await
     }
 
     /// One observed command under `command_timeout`, which also bounds the
@@ -365,15 +372,22 @@ impl CacheNamespace {
         &self,
         operation: Operation,
         command: redis::Cmd,
-        outcome: fn(&T) -> &'static str,
+        outcome: fn(&T) -> Outcome,
     ) -> Result<T, Unavailable> {
-        let mut guard = OperationGuard::start(self.name, operation, &self.cache.link.server);
+        let mut guard = OperationGuard::start(
+            self.name,
+            &self.histograms,
+            operation,
+            &self.cache.link.server,
+        );
         let mut manager = self.cache.link.manager();
+        // The span is not entered while polling: redis emits nothing on the
+        // command path, and entering on every poll costs each subscriber layer
+        // an enter and an exit.
         let reply = tokio::time::timeout(
             self.cache.command_timeout,
             command.query_async::<T>(&mut manager),
         )
-        .instrument(guard.span())
         .await;
         match reply {
             Ok(Ok(value)) => {
@@ -491,10 +505,13 @@ fn tcp_settings() -> redis::io::tcp::TcpSettings {
 }
 
 /// Reconnect bounds only. Commands are bounded by `command_timeout` in
-/// [`CacheNamespace::run`], which also covers the wait for a reconnect.
+/// [`CacheNamespace::run`], which also covers the wait for a reconnect, so
+/// redis's own 500 ms response timeout is off: it would cut a longer
+/// `command_timeout` short and arm a second timer on every command.
 fn manager_config() -> redis::aio::ConnectionManagerConfig {
     redis::aio::ConnectionManagerConfig::new()
         .set_connection_timeout(Some(CONNECT_TIMEOUT))
+        .set_response_timeout(None)
         .set_min_delay(MIN_DELAY)
         .set_exponent_base(EXPONENT_BASE)
         .set_max_delay(MAX_DELAY)

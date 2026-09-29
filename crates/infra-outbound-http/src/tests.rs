@@ -6,7 +6,14 @@
 )]
 
 use std::{collections::BTreeMap, sync::Mutex};
-use std::{error::Error as _, fmt::Write as _, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    error::Error as _,
+    fmt::Write as _,
+    net::SocketAddr,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use bytes::Bytes;
 use http::{Request, Version, header};
@@ -26,7 +33,9 @@ use tokio_rustls::{
     },
 };
 
-use crate::{Client, Error, Limits, Url, build_fixture_client, policy, tls::TlsMaterial};
+use hyper_util::client::legacy::connect::dns::Name;
+
+use crate::{Client, Error, Limits, Url, build_transport, observe, policy, tls::TlsMaterial};
 
 const FIXTURE_HOST: &str = "authn.fixture.test";
 const FIXTURE_URL: &str = "https://authn.fixture.test/fixture";
@@ -96,6 +105,35 @@ fn recorded_count(scrape: &str, required_labels: &[&str]) -> usize {
         .count()
 }
 
+/// Resolves every name to one fixture listener. Clients built by the public
+/// constructors in tests have none, so they cannot reach the network.
+#[derive(Clone, Default)]
+pub(crate) struct FixtureResolver(Option<SocketAddr>);
+
+impl FixtureResolver {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl tower::Service<Name> for FixtureResolver {
+    type Response = std::option::IntoIter<SocketAddr>;
+    type Error = std::io::Error;
+    type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: Name) -> Self::Future {
+        std::future::ready(
+            self.0
+                .map(|address| Some(address).into_iter())
+                .ok_or_else(|| std::io::Error::other("no fixture listener")),
+        )
+    }
+}
+
 fn limits() -> Limits {
     Limits {
         operation_timeout: Duration::from_secs(1),
@@ -122,13 +160,23 @@ fn fixture_client_for_host(
     material: &TlsMaterial,
     limits: Limits,
 ) -> Client {
-    let certificate =
-        reqwest::Certificate::from_der(&material.root).expect("fixture root certificate");
+    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(material.root.clone()))
+        .expect("fixture root certificate");
+    let tls = tokio_rustls::rustls::ClientConfig::builder_with_provider(Arc::new(
+        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("fixture TLS protocol versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let target = policy::admit_origin(&url(&format!("https://{host}/"))).expect("fixture origin");
     Client {
-        origin: url(&format!("https://{host}/")).origin(),
+        server: observe::Server::new(&target),
+        target,
         limits,
-        transport: build_fixture_client(host, address, &limits, certificate)
-            .expect("fixture client"),
+        transport: build_transport(&limits, true, tls, FixtureResolver(Some(address))),
     }
 }
 
@@ -857,7 +905,7 @@ fn client_binds_one_https_origin() {
 
 #[test]
 fn requests_must_name_the_configured_origin() {
-    let origin = url("https://authn.fixture.test").origin();
+    let origin = policy::admit_origin(&url("https://authn.fixture.test")).expect("origin");
     for admitted in [
         "https://authn.fixture.test/items",
         "https://authn.fixture.test:443/items?q=1",
@@ -896,8 +944,8 @@ fn requests_must_name_the_configured_origin() {
 }
 
 #[test]
-fn request_conversion_preserves_supported_parts() {
-    let origin = url("https://authn.fixture.test").origin();
+fn admission_preserves_the_request_and_sets_the_configured_host() {
+    let origin = policy::admit_origin(&url("https://authn.fixture.test")).expect("origin");
     let request = Request::builder()
         .method(http::Method::PATCH)
         .uri("https://AUTHN.fixture.test:443/items")
@@ -905,11 +953,19 @@ fn request_conversion_preserves_supported_parts() {
         .header("x-request-part", "preserved")
         .body(Bytes::from_static(b"preserved"))
         .expect("request parts");
-    let converted = policy::admit_request(&origin, request).expect("admitted request");
-    assert_eq!(converted.method(), http::Method::PATCH);
-    assert_eq!(converted.version(), Version::HTTP_2);
-    assert_eq!(converted.url().as_str(), "https://authn.fixture.test/items");
-    assert_eq!(converted.headers()["x-request-part"], "preserved");
+    let admitted = policy::admit_request(&origin, request).expect("admitted request");
+    assert_eq!(admitted.method(), http::Method::PATCH);
+    assert_eq!(admitted.version(), Version::HTTP_2);
+    assert_eq!(admitted.uri(), "https://AUTHN.fixture.test:443/items");
+    assert_eq!(admitted.headers()[header::HOST], "authn.fixture.test");
+    assert_eq!(admitted.headers()[header::ACCEPT], "*/*");
+    assert_eq!(admitted.headers()["x-request-part"], "preserved");
+    assert_eq!(admitted.body().as_ref(), b"preserved");
+
+    let port = policy::admit_origin(&url("https://[::1]:8443")).expect("IPv6 origin");
+    let admitted = policy::admit_request(&port, request_to("https://[::1]:8443/items"))
+        .expect("admitted IPv6 request");
+    assert_eq!(admitted.headers()[header::HOST], "[::1]:8443");
 }
 
 #[test]

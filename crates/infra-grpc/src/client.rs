@@ -9,6 +9,7 @@ use opentelemetry::trace::SpanKind;
 use secrecy::{ExposeSecret as _, SecretString};
 use tonic::body::Body;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
+use tower::ServiceExt as _;
 use tracing::Instrument as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 
@@ -94,8 +95,10 @@ impl tower::Service<Request<Body>> for Client {
     type Error = tonic::Status;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
-    fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.channel.poll_ready(context).map_err(transport_status)
+    /// Always ready: each call waits for the channel itself, so a wrapper may
+    /// clone this client and call it without driving readiness first.
+    fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
@@ -107,13 +110,15 @@ impl tower::Service<Request<Body>> for Client {
         let started = Instant::now();
         // Shares the request's bytes; the path is read after the call.
         let uri = request.uri().clone();
-        let response = span.in_scope(|| self.channel.call(request));
+        let mut channel = self.channel.clone();
         let series = Arc::clone(&self.series);
         Box::pin(async move {
-            let result = response
-                .instrument(span.clone())
-                .await
-                .map_err(transport_status);
+            let result = async {
+                let ready = channel.ready().await.map_err(transport_status)?;
+                ready.call(request).await.map_err(transport_status)
+            }
+            .instrument(span.clone())
+            .await;
             let code = match &result {
                 Ok(response) => crate::observe::code_from_headers(response.headers()),
                 Err(status) => status.code(),
