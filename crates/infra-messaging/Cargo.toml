@@ -32,6 +32,7 @@ infra-postgres = { workspace = true }
 # template:end outbox:messaging-outbox-dependencies
 bytes = { workspace = true, features = ["std"] }
 domain-events = { workspace = true }
+foldhash = { workspace = true, features = ["std"] }
 futures-util = { workspace = true, features = ["std"] }
 health = { workspace = true }
 metrics = { workspace = true }
