@@ -30,10 +30,62 @@ without changing its wire identity.
 | `strum` with `derive` | `infra-http`: derive the complete `Code` variant array and keep `Code::ALL` as the public alias. | Keep the exhaustive `Code::meta()` match, wire names, `const` methods, statuses and URIs explicit. Do not derive serde `snake_case` Serialize: `SerializeDisplay` delegates through `Display` to `as_str` (`internal_error`, not `internal_server_error`). Do not derive unrestricted error policy. |
 | `axum-test`, no optional features | `infra-http` dev-dependency: ordinary router requests, response decoding and assertions. | Use in-process mock transport. Keep raw `Request<Body>` and `oneshot` where byte framing, streaming body limits, concurrency or response extensions are the subject; keep real server/process tests for connection and lifecycle behavior. |
 | `rstest`, no default features | `service-config` and `service` dev-dependency: named parameterized cases for range checks, addresses and the OpenAPI security classifier. | Keep semantic expectations visible in each case. Do not build a fixture framework for simple values or hide lifecycle setup. |
+| `tikv-jemallocator` 0.7, no default features | `service` and `jobs-worker` binaries: the global allocator. | Only the long-running binaries. `migrate` and `openapi` run for seconds and keep the system allocator. Libraries never set an allocator. The image builder installs `make` because jemalloc builds with `configure` and `make`. |
 
 The examples live with their owners in `crates/infra-http/src/harden.rs`,
 `crates/config/src/validate.rs` and `crates/service/tests/openapi.rs`. Test-only
 libraries do not become normal dependencies of production crates.
+
+### Global allocator
+
+Measured on 2026-09-29 on a DigitalOcean c-4 in London (Xeon 8280, Ubuntu
+24.04, Rust 1.98.1, fat LTO, aligned code layout). The release service ran on
+two CPUs, with PostgreSQL 16 on a third CPU and wrk on the fourth, using 64
+connections against the Rust/Go comparison's contract fixtures. The matrix
+figures are medians of five interleaved rounds of 20 seconds each, with a fresh
+process for every cell. The soak test ran 30 minutes of mixed traffic: 1 KiB
+and 64 KiB JSON, reads, and writes.
+
+| Workload | CPU per request, glibc | mimalloc 0.1.52 | jemalloc 0.7.0 |
+| --- | ---: | ---: | ---: |
+| 1 KiB JSON | 65.8 µs | −20% | −19% |
+| 64 KiB JSON | 442 µs | −4% | −1% |
+| Indexed read | 158 µs | −18% | −20% |
+| Durable write | 152 µs | −14% | −15% |
+| Mixed, 30 minutes | 219 µs | −13% | −12% |
+
+| Mixed 30-minute soak | glibc | mimalloc | jemalloc |
+| --- | ---: | ---: | ---: |
+| Throughput | 9,027/s | +16% | +15% |
+| p99 latency | 13.8 ms | 11.9 ms | 12.0 ms |
+| Resident memory under load | 18.7 MB | 30.5 MB | 23.3 MB |
+| Resident memory after 60 s idle | 18.1 MB | 28.0 MB | 17.6 MB |
+
+Plaintext responses were bimodal between rounds for every allocator, so they
+do not decide anything. Resident memory stayed flat during the 30 minutes for
+all three allocators. jemalloc matches mimalloc's CPU gain at less than half of
+its extra memory, and it returns memory when idle.
+
+The jobs engine was measured the same way with the `infra-jobs` bench on a
+second c-4 client against PostgreSQL 18 on its own c-4: five interleaved
+rounds of draining 20,000–40,000 no-op jobs, then a 20-minute soak at 1,000
+jobs per second with 64 workers. Throughput stays within ±3% because
+PostgreSQL sets the ceiling.
+
+| Jobs worker | glibc | mimalloc | jemalloc |
+| --- | ---: | ---: | ---: |
+| CPU per job, 16 workers, 64 B payload | 50.0 µs | −8% | −5% |
+| CPU per job, 64 workers, 64 B payload | 25.8 µs | −9% | −11% |
+| CPU per job, 16 workers, 4 KiB payload | 58.5 µs | −11% | −3% |
+| CPU per job, 64 workers, 4 KiB payload | 34.0 µs | −9% | −4% |
+| Peak resident memory, drain | 10.5 MB | 26 MB | 13 MB |
+| CPU over the 20-minute soak | 219 s | −7% | −3% |
+| Resident memory after the soak | 82.2 MB | 98.5 MB | 79.5 MB |
+
+Most of the soak's resident memory is the bench's own latency samples, and
+they are the same for every allocator. `jobs-worker` uses jemalloc for the same
+reason as the service and so that both long-running binaries share one
+allocator.
 
 ## First request DTO or constrained parameter
 
