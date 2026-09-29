@@ -72,22 +72,17 @@ fn is_tchar(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
+/// RFC 6750 `b64token = 1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="`.
 fn valid_token(token: &[u8]) -> bool {
-    let mut padding = false;
-    let mut value_bytes = 0_usize;
-    token.iter().all(|byte| match *byte {
-        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'+' | b'/'
-            if !padding =>
-        {
-            value_bytes += 1;
-            true
-        }
-        b'=' if value_bytes > 0 => {
-            padding = true;
-            true
-        }
-        _ => false,
-    }) && value_bytes > 0
+    let padding = token.iter().rev().take_while(|byte| **byte == b'=').count();
+    let value = &token[..token.len() - padding];
+    // A non-short-circuiting fold lets the compiler vectorize the class check.
+    !value.is_empty()
+        && value.iter().fold(true, |valid, byte| {
+            valid
+                & (byte.is_ascii_alphanumeric()
+                    | matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/'))
+        })
 }
 
 #[cfg(test)]
