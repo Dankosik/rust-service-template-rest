@@ -20,6 +20,9 @@
 # - The binary is reproducible: CARGO_INCREMENTAL=0, a fixed /src path,
 #   `strip = true` in the release profile, and SOURCE_DATE_EPOCH for its mtime.
 
+# Declared once for the stages that cook and build the service package.
+ARG SERVICE_PACKAGE=service
+
 FROM rust:1.98.1-slim-trixie@sha256:3999a7ff854f315cf5f2b9a58071cb71196fdfc2ccd32fa20eedce8e754fd62a AS chef
 WORKDIR /src
 ARG CARGO_CHEF_VERSION=0.1.78
@@ -31,11 +34,14 @@ FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
-FROM chef AS builder
+# The three binaries build in parallel stages over one cooked layer: each is
+# one fat-LTO link on one codegen unit, so serial builds left three of four
+# cores idle. Separate cargo invocations keep each binary's own feature
+# resolution, as the separate cooks do.
+FROM chef AS cooked
 ENV CARGO_INCREMENTAL=0
 COPY --from=planner /src/recipe.json recipe.json
-ARG SERVICE_PACKAGE=service
-ARG SERVICE_BIN=service
+ARG SERVICE_PACKAGE
 RUN cargo chef cook --release --locked --recipe-path recipe.json -p "${SERVICE_PACKAGE}"
 # template:begin postgres:docker-migrator-build
 RUN cargo chef cook --release --locked --recipe-path recipe.json -p migrate
@@ -43,24 +49,36 @@ RUN cargo chef cook --release --locked --recipe-path recipe.json -p migrate
 # template:begin worker:docker-jobs-worker-build
 RUN cargo chef cook --release --locked --recipe-path recipe.json -p jobs-worker
 # template:end worker:docker-jobs-worker-build
+
+FROM cooked AS source
 ARG VCS_REF=unknown
 ARG RAILWAY_GIT_COMMIT_SHA
-ARG SOURCE_DATE_EPOCH=0
 # vergen emits VERGEN_GIT_SHA verbatim when the build has no .git (see
 # crates/config/build.rs); this is what the binary logs as app.commit.
 ENV VERGEN_GIT_SHA=${RAILWAY_GIT_COMMIT_SHA:-${VCS_REF}}
 COPY . .
+
+FROM source AS service-build
+ARG SERVICE_PACKAGE
+ARG SERVICE_BIN=service
+ARG SOURCE_DATE_EPOCH=0
 RUN cargo auditable build --release --locked -p "${SERVICE_PACKAGE}" --bin "${SERVICE_BIN}" \
  && mkdir -p /out && cp "target/release/${SERVICE_BIN}" "/out/${SERVICE_BIN}" \
  && touch -d "@${SOURCE_DATE_EPOCH}" "/out/${SERVICE_BIN}"
 # template:begin postgres:docker-migrator-output
+
+FROM source AS migrate-build
+ARG SOURCE_DATE_EPOCH=0
 RUN cargo auditable build --release --locked -p migrate --bin migrate \
- && cp target/release/migrate /out/migrate \
+ && mkdir -p /out && cp target/release/migrate /out/migrate \
  && touch -d "@${SOURCE_DATE_EPOCH}" /out/migrate
 # template:end postgres:docker-migrator-output
 # template:begin worker:docker-jobs-worker-output
+
+FROM source AS jobs-worker-build
+ARG SOURCE_DATE_EPOCH=0
 RUN cargo auditable build --release --locked -p jobs-worker --bin jobs-worker \
- && cp target/release/jobs-worker /out/jobs-worker \
+ && mkdir -p /out && cp target/release/jobs-worker /out/jobs-worker \
  && touch -d "@${SOURCE_DATE_EPOCH}" /out/jobs-worker
 # template:end worker:docker-jobs-worker-output
 
@@ -75,15 +93,15 @@ LABEL org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.revision="${RAILWAY_GIT_COMMIT_SHA:-$VCS_REF}" \
       org.opencontainers.image.source="${SOURCE_URL}"
 ARG SERVICE_BIN=service
-COPY --from=builder "/out/${SERVICE_BIN}" /service
+COPY --from=service-build "/out/${SERVICE_BIN}" /service
 # The migration job runs the same image with `--entrypoint /migrate`
 # (docs/architecture/persistence.md); it needs no migration directory.
 # template:begin postgres:docker-migrator-runtime
-COPY --from=builder /out/migrate /migrate
+COPY --from=migrate-build /out/migrate /migrate
 # template:end postgres:docker-migrator-runtime
 # template:begin worker:docker-jobs-worker-runtime
 # The jobs worker runs the same image with --entrypoint /jobs-worker (docs/background-jobs.md).
-COPY --from=builder /out/jobs-worker /jobs-worker
+COPY --from=jobs-worker-build /out/jobs-worker /jobs-worker
 # template:end worker:docker-jobs-worker-runtime
 EXPOSE 8080
 STOPSIGNAL SIGTERM

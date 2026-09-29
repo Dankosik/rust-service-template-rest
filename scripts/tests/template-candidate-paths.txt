@@ -48,6 +48,7 @@ make/service.mk
 make/profile-postgres.mk
 make/source.mk
 scripts/ci/template-init-check.sh
+scripts/ci/initializer-matrix.py
 scripts/tests/template-candidate-paths.txt
 scripts/tests/fixtures/template-profiles-b206.json
 scripts/tests/template-owned-purity.py

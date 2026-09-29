@@ -3,8 +3,9 @@ name: ci
 # Jobs are selected by the changed surfaces that scripts/ci/changed-surfaces.sh
 # reports; `make verify` reads the same classifier. `required` is the one
 # status to protect: it fails on any failed or cancelled gate and accepts a
-# gate the surfaces did not select. Job layout and the reason for each gate:
-# docs/ci-cd-production-ready.md.
+# gate the surfaces did not select. A draft pull request defers the heavy
+# gates (initializer, image, integration) until it is ready for review. Job
+# layout and the reason for each gate: docs/ci-cd-production-ready.md.
 
 on:
   push:
@@ -12,6 +13,8 @@ on:
     tags: [v*]
   pull_request:
     branches: [main]
+    # ready_for_review reruns a draft with the heavy gates it deferred.
+    types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
   schedule:
     # Weekly: advisory databases move without a commit, so every surface runs.
@@ -64,6 +67,7 @@ jobs:
       validation_system: ${{ steps.surfaces.outputs.validation_system }}
       module_initializer: ${{ steps.surfaces.outputs.module_initializer }}
       initializer_runtime: ${{ steps.surfaces.outputs.initializer_runtime }}
+      initializer_matrix: ${{ steps.surfaces.outputs.initializer_matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -86,15 +90,24 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         # Tags, schedules, manual runs, and a push without a readable base
         # select every surface; a diff event is classified by both the base
-        # and the head classifier.
+        # and the head classifier. A selected initializer plans the runtime
+        # graphs the same diff can affect (scripts/ci/initializer-matrix.py).
         run: |
           set -euo pipefail
-          if [[ "${EVENT_NAME}" == schedule || "${EVENT_NAME}" == workflow_dispatch || "${GITHUB_REF}" == refs/tags/* ]]; then
-            bash ./scripts/ci/changed-surfaces.sh --all | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
-          elif [[ -n "${BASE_SHA}" && "${BASE_SHA}" != 0000000000000000000000000000000000000000 ]]; then
-            bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD | bash ./scripts/ci/changed-surfaces.sh --union "${BASE_SHA}" | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
+          paths=${RUNNER_TEMP}/changed-paths
+          surfaces=${RUNNER_TEMP}/surfaces
+          if [[ "${EVENT_NAME}" == schedule || "${EVENT_NAME}" == workflow_dispatch || "${GITHUB_REF}" == refs/tags/* || -z "${BASE_SHA}" || "${BASE_SHA}" == 0000000000000000000000000000000000000000 ]]; then
+            bash ./scripts/ci/changed-surfaces.sh --all >"${surfaces}"
+            plan=(--all)
+            : >"${paths}"
           else
-            bash ./scripts/ci/changed-surfaces.sh --all | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
+            bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD >"${paths}"
+            bash ./scripts/ci/changed-surfaces.sh --union "${BASE_SHA}" <"${paths}" >"${surfaces}"
+            plan=()
+          fi
+          tee -a "${GITHUB_OUTPUT}" <"${surfaces}" >>"${GITHUB_STEP_SUMMARY}"
+          if grep -qx 'initializer_runtime=true' "${surfaces}"; then
+            python3 ./scripts/ci/initializer-matrix.py "${plan[@]}" <"${paths}" | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
           fi
 
   # template:begin grpc:ci-grpc-job
@@ -163,18 +176,18 @@ jobs:
         run: |
           rustup toolchain install
           rustup show active-toolchain
-      - name: Restore cargo caches
+      - name: Cargo caches
+        # Keyed by the toolchain, every manifest and lockfile, and the CARGO_*
+        # and RUST* environment (the debuginfo level among them). Only a push
+        # to main saves, after a successful job, and the saved target holds
+        # dependency artifacts alone: workspace crates rebuild on every
+        # checkout anyway, and keeping them overran the 10 GB cache budget.
+        # zizmor reads lookup-only, not save-if, hence its ignore below.
         if: env.RUST_SELECTED == 'true'
-        id: cargo-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.head_ref == 'claude/ci-speed' }}
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
         uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
@@ -292,25 +305,6 @@ jobs:
       - name: Validation routing
         if: needs.changes.outputs.validation_system == 'true'
         run: bash ./scripts/ci/measure.sh quality-validation-system -- make changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
-      - name: Save cargo caches
-        # Only a push to main writes the cache, so a pull request or tag build
-        # cannot poison what later runs restore; and only after the workspace
-        # build, because the first save claims the key and a partial target
-        # would otherwise own it until Cargo.lock changes.
-        if: >-
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/main' &&
-          steps.cargo-cache.outcome == 'success' &&
-          steps.cargo-cache.outputs.cache-hit != 'true' &&
-          steps.lint-build-test.outcome == 'success'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   security:
     needs: changes
@@ -473,7 +467,7 @@ jobs:
 
   image:
     needs: changes
-    if: needs.changes.outputs.runtime_image == 'true'
+    if: needs.changes.outputs.runtime_image == 'true' && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -522,9 +516,11 @@ jobs:
   integration:
     needs: changes
     if: >-
-      needs.changes.outputs.db_integration == 'true' ||
-      needs.changes.outputs.messaging_integration == 'true' ||
-      needs.changes.outputs.cache_integration == 'true'
+      github.event.pull_request.draft != true && (
+        needs.changes.outputs.db_integration == 'true' ||
+        needs.changes.outputs.messaging_integration == 'true' ||
+        needs.changes.outputs.cache_integration == 'true'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -536,17 +532,11 @@ jobs:
         run: |
           rustup toolchain install
           rustup show active-toolchain
-      - name: Restore cargo caches
-        id: cargo-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Cargo caches
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-integration-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-integration-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.head_ref == 'claude/ci-speed' }}
       - name: Start selected integration services
         id: integration-services
         env:
@@ -623,25 +613,11 @@ jobs:
           name: go-wire-provenance
           path: ${{ runner.temp }}/go-wire/records.json
           if-no-files-found: error
-      - name: Save cargo caches
-        if: >-
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/main' &&
-          steps.cargo-cache.outcome == 'success' &&
-          steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
   # template:end integration:ci-integration-job
 
   initializer:
     needs: changes
-    if: needs.changes.outputs.initializer_runtime == 'true'
+    if: needs.changes.outputs.initializer_runtime == 'true' && github.event.pull_request.draft != true
     name: initializer (${{ matrix.part }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -649,47 +625,12 @@ jobs:
       # Each part reports its own result; `required` reads the aggregate,
       # which is success only when every part passed.
       fail-fast: false
-      matrix:
-        # Together the parts are `make template-init-check`: the source
-        # suites with the canonical projections and sixty-three runtime graphs.
-        # Graphs 1-46 retain the established database, idempotency, jobs, and
-        # webhook representatives. Graphs 47-49 retain messaging and outbox;
-        # 50-53 retain OAuth; 54 proves messaging plus OAuth without PostgreSQL;
-        # and 55 proves the full outbox/OAuth neighboring pack. Graph 56 compiles
-        # the jobs/messaging integration fixture with outbox absent. Graph 62 is
-        # cache only and stays in database-none; graph 63 is graph 61 plus cache.
-        # Broker, Go-wire, and Valkey behavior stay in the selected integration job.
-        # `source`, `database-none`, and
-        # `database-postgres` keep their own warm target caches. Every part
-        # with `cache` restores that part's cache (database-postgres) and
-        # saves none, so the Actions cache does not grow. Every part with
-        # `docker` runs its graphs' retained database suites.
-        include:
-          - part: source
-          - part: database-none
-            graphs: 1,2,3,4,5,6,47,50,51,52,54,57,58,59,60,62
-          - part: database-postgres
-            graphs: 7,8,9,10,11,12
-          - part: http-idempotency
-            graphs: 13,14,15,16
-            cache: database-postgres
-            docker: true
-          - part: jobs-1
-            graphs: 17,18,19,27,31,35,39,43,48,56
-            cache: database-postgres
-            docker: true
-          - part: jobs-2
-            graphs: 20,21,22,29,32,36,40,44
-            cache: database-postgres
-            docker: true
-          - part: jobs-http-idempotency-1
-            graphs: 23,24,30,33,37,41,45
-            cache: database-postgres
-            docker: true
-          - part: jobs-http-idempotency-2
-            graphs: 25,26,28,34,38,42,46,49,53,55,61,63
-            cache: database-postgres
-            docker: true
+      # Together the parts are `make template-init-check`: the `source` part
+      # runs the source suites and canonical projections, every other part a
+      # group of runtime graphs. scripts/ci/initializer-matrix.py owns the
+      # grouping and keeps only the graphs the diff can affect; a push without
+      # a readable base, a tag, a schedule, or a manual run selects them all.
+      matrix: ${{ fromJSON(needs.changes.outputs.initializer_matrix || '{"include":[{"part":"source"}]}') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -699,20 +640,14 @@ jobs:
         run: |
           rustup toolchain install
           rustup show active-toolchain
-      - name: Restore cargo caches
-        id: cargo-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Cargo caches
+        # One cache per part: a part's graphs share dependency features, so
+        # its pruned target serves the next run of the same part.
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          # A part with `cache` has no warm cache of its own: it restores that
-          # part's cache and never saves, so it adds no initializer cache to
-          # the repository's 10 GB budget.
-          key: cargo-initializer-${{ matrix.cache || matrix.part }}-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-initializer-${{ matrix.cache || matrix.part }}-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-
+          key: ${{ matrix.part }}
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.head_ref == 'claude/ci-speed' }}
       - name: Fetch locked Cargo packages
         run: cargo fetch --locked
       - name: Source suites and canonical projections
@@ -729,26 +664,10 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           PART: ${{ matrix.part }}
           GRAPHS: ${{ matrix.graphs }}
-          # Graphs 13-26 and full webhook shapes 27,29,30 run retained database suites.
-          REQUIRE_DOCKER: ${{ matrix.docker && '1' || '' }}
+          # The runner has Docker; graphs with retained database suites fail
+          # rather than refuse if it is ever missing.
+          REQUIRE_DOCKER: "1"
         run: bash ./scripts/ci/measure.sh "template-initializer-${PART}" -- bash ./scripts/ci/template-init-check.sh --runtime-graphs "${GRAPHS}"
-      - name: Save cargo caches
-        # A part with `cache` reuses that part's cache and never claims its
-        # own key.
-        if: >-
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/main' &&
-          !matrix.cache &&
-          steps.cargo-cache.outcome == 'success' &&
-          steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   initializer-projections:
     # Only projected text changed (documentation, instructions, harness
@@ -808,7 +727,11 @@ jobs:
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
       - name: Require selected initializer matrix success
-        if: needs.changes.outputs.initializer_runtime == 'true' && needs.initializer.result != 'success'
+        # A draft defers the matrix; ready_for_review runs it.
+        if: >-
+          needs.changes.outputs.initializer_runtime == 'true' &&
+          github.event.pull_request.draft != true &&
+          needs.initializer.result != 'success'
         run: exit 1
       # template:begin grpc:ci-required-grpc-success
       - name: Require selected protobuf contract success

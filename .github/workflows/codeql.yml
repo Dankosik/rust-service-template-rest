@@ -11,6 +11,8 @@ on:
     tags: [v*]
   pull_request:
     branches: [main]
+    # A draft defers the Rust analysis; ready_for_review runs it.
+    types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
   schedule:
     - cron: "17 3 * * 1"
@@ -83,7 +85,9 @@ jobs:
 
   analyze-rust:
     needs: changes
-    if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
+    if: >-
+      github.event.pull_request.draft != true &&
+      (needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true')
     name: Analyze (rust)
     runs-on: ubuntu-latest
     timeout-minutes: 30

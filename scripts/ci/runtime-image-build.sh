@@ -35,19 +35,23 @@ service_package=${service_package:-service}
 app_version=${APP_VERSION:-$(printf '%s' "${package_id}" | sed -E 's/.*#([^@]+@)?//')}
 app_version=${app_version:-unknown}
 
-build=(docker buildx build --load)
-[[ -z ${RUNTIME_IMAGE_CACHE_FROM:-} ]] || build+=(--cache-from "${RUNTIME_IMAGE_CACHE_FROM}")
-[[ -z ${RUNTIME_IMAGE_CACHE_TO:-} ]] || build+=(--cache-to "${RUNTIME_IMAGE_CACHE_TO}")
+arguments=(
+	--build-arg "CARGO_CHEF_VERSION=${CARGO_CHEF_VERSION}"
+	--build-arg "CARGO_AUDITABLE_VERSION=${CARGO_AUDITABLE_VERSION}"
+	--build-arg "SERVICE_PACKAGE=${service_package}"
+	--build-arg "SERVICE_BIN=${SERVICE_BIN:-${service_package}}"
+	--build-arg "APP_VERSION=${app_version}"
+	--build-arg "VCS_REF=${vcs_ref}"
+	--build-arg "SOURCE_URL=${SOURCE_URL:-}"
+	--build-arg "SOURCE_DATE_EPOCH=${source_date_epoch}"
+	-f build/docker/Dockerfile
+)
+[[ -z ${RUNTIME_IMAGE_CACHE_FROM:-} ]] || arguments+=(--cache-from "${RUNTIME_IMAGE_CACHE_FROM}")
 
-"${build[@]}" \
-	--build-arg "CARGO_CHEF_VERSION=${CARGO_CHEF_VERSION}" \
-	--build-arg "CARGO_AUDITABLE_VERSION=${CARGO_AUDITABLE_VERSION}" \
-	--build-arg "SERVICE_PACKAGE=${service_package}" \
-	--build-arg "SERVICE_BIN=${SERVICE_BIN:-${service_package}}" \
-	--build-arg "APP_VERSION=${app_version}" \
-	--build-arg "VCS_REF=${vcs_ref}" \
-	--build-arg "SOURCE_URL=${SOURCE_URL:-}" \
-	--build-arg "SOURCE_DATE_EPOCH=${source_date_epoch}" \
-	-f build/docker/Dockerfile \
-	-t "${image}" \
-	.
+# Only the cooked stage is worth exporting: every later layer follows a source
+# copy, so a new commit never reuses it, and exporting the three binary
+# stages would spend the repository's cache budget on dead layers.
+if [[ -n ${RUNTIME_IMAGE_CACHE_TO:-} ]]; then
+	docker buildx build "${arguments[@]}" --target cooked --cache-to "${RUNTIME_IMAGE_CACHE_TO}" .
+fi
+docker buildx build --load "${arguments[@]}" -t "${image}" .
