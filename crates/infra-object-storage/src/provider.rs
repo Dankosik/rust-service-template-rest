@@ -94,7 +94,8 @@ pub(crate) struct Admitted {
 }
 
 pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, ConfigError> {
-    if !valid_bucket(bucket) {
+    let amazon = matches!(provider, Provider::AmazonS3 { .. });
+    if !valid_bucket(bucket) || (amazon && amazon_reserved(bucket)) {
         return Err(ConfigError::Bucket);
     }
     match provider {
@@ -229,11 +230,8 @@ fn r2_host(host: &str) -> bool {
 }
 
 /// Dotless DNS bucket names (3 to 63 of `[a-z0-9-]`, alphanumeric at both
-/// ends), so virtual-hosted TLS wildcards hold, minus Amazon's reserved
-/// prefixes and suffixes.
+/// ends), so virtual-hosted TLS wildcards hold.
 fn valid_bucket(bucket: &str) -> bool {
-    const RESERVED_PREFIXES: [&str; 3] = ["xn--", "sthree-", "amzn-s3-demo-"];
-    const RESERVED_SUFFIXES: [&str; 4] = ["-s3alias", "--ol-s3", "--x-s3", "--table-s3"];
     let bytes = bucket.as_bytes();
     (3..=63).contains(&bytes.len())
         && bytes
@@ -241,10 +239,16 @@ fn valid_bucket(bucket: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
         && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
         && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
-        && !RESERVED_PREFIXES
-            .iter()
-            .any(|prefix| bucket.starts_with(prefix))
-        && !RESERVED_SUFFIXES
+}
+
+/// Prefixes and suffixes Amazon S3 reserves for its own bucket kinds.
+fn amazon_reserved(bucket: &str) -> bool {
+    const RESERVED_PREFIXES: [&str; 3] = ["xn--", "sthree-", "amzn-s3-demo-"];
+    const RESERVED_SUFFIXES: [&str; 4] = ["-s3alias", "--ol-s3", "--x-s3", "--table-s3"];
+    RESERVED_PREFIXES
+        .iter()
+        .any(|prefix| bucket.starts_with(prefix))
+        || RESERVED_SUFFIXES
             .iter()
             .any(|suffix| bucket.ends_with(suffix))
 }

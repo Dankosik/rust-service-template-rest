@@ -10,6 +10,7 @@
 //! Construction performs no I/O and the client is not a readiness
 //! dependency. [`ObjectStorage::probe`] is the opt-in bucket check.
 
+mod body;
 mod error;
 mod key;
 mod observe;
@@ -19,6 +20,7 @@ mod provider;
 mod tests;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use aws_sdk_s3::config::retry::RetryConfig;
@@ -43,7 +45,9 @@ pub use self::observe::{OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
 use self::provider::UploadChecksum;
 pub use self::provider::{ConfigError, Provider};
 
-/// Standard retry for reads, deletes, and replayable unconditional puts.
+/// Standard retry for reads. A put or delete makes one attempt: the SDK
+/// keeps only the last attempt's reply, so after a retry a refusal could
+/// hide an earlier attempt that applied the mutation.
 const MAX_ATTEMPTS: u32 = 3;
 /// Cap on one jittered retry delay, so three attempts fit an interactive
 /// `operation_timeout`. The SDK default of 20 s would outlast it.
@@ -51,13 +55,16 @@ const MAX_BACKOFF: Duration = Duration::from_secs(1);
 /// TCP and TLS connect bound per attempt; the SDK default of the pinned
 /// behavior version, stated so an SDK bump cannot move it.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(3100);
+/// A transfer with no progress for this long fails; the pinned behavior
+/// version's default, stated because an explicit config would otherwise
+/// take the builder's 20 s.
+const STALL_GRACE: Duration = Duration::from_secs(5);
 /// Shortest presigned lifetime.
 const PRESIGN_MIN: Duration = Duration::from_secs(1);
 /// The `SigV4` limit, and R2's; Railway would allow 90 days.
 const PRESIGN_MAX: Duration = Duration::from_hours(7 * 24);
 
-/// Construction input. [`Debug`] redacts the secret.
-#[derive(Debug)]
+/// Construction input. [`Debug`] prints the provider name and limits only.
 pub struct ObjectStorageOptions {
     /// Provider and its endpoint, region, and owner fields.
     pub provider: Provider,
@@ -74,6 +81,18 @@ pub struct ObjectStorageOptions {
     pub max_concurrency: usize,
     /// Bound for one call up to its response headers, retries included.
     pub operation_timeout: Duration,
+}
+
+impl std::fmt::Debug for ObjectStorageOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ObjectStorageOptions")
+            .field("provider", &self.provider.name())
+            .field("max_object_bytes", &self.max_object_bytes)
+            .field("max_concurrency", &self.max_concurrency)
+            .field("operation_timeout", &self.operation_timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A client for one bucket. Cheap to clone; clones share admission.
@@ -108,22 +127,27 @@ impl std::fmt::Debug for ObjectStorage {
 #[derive(Debug)]
 pub struct PutBody {
     len: u64,
-    replayable: bool,
+    in_memory: bool,
     stream: ByteStream,
+    /// Set when a streamed body did not match `len`.
+    mismatch: Option<Arc<AtomicBool>>,
 }
 
 impl PutBody {
-    /// A streamed body that must yield exactly `len` bytes. It cannot be
-    /// replayed, so the put makes one attempt.
+    /// A streamed body that must yield exactly `len` bytes. A body that
+    /// yields more or fewer fails the put with
+    /// [`ObjectStorageError::Rejected`] instead of storing a truncated object.
     pub fn stream<B, E>(len: u64, body: B) -> Self
     where
         B: http_body::Body<Data = Bytes, Error = E> + Send + Sync + 'static,
         E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
     {
+        let (body, mismatch) = body::ExactLength::new(len, body);
         Self {
             len,
-            replayable: false,
+            in_memory: false,
             stream: ByteStream::from_body_1_x(body),
+            mismatch: Some(mismatch),
         }
     }
 
@@ -140,13 +164,14 @@ impl PutBody {
     }
 }
 
-/// In-memory bytes: replayable, so a put without a condition is retried.
+/// In-memory bytes. The SDK can sign a checksum of them as a header.
 impl From<Bytes> for PutBody {
     fn from(bytes: Bytes) -> Self {
         Self {
             len: bytes.len() as u64,
-            replayable: true,
+            in_memory: true,
             stream: ByteStream::from(bytes),
+            mismatch: None,
         }
     }
 }
@@ -278,7 +303,11 @@ impl ObjectStorage {
                     .operation_timeout(operation_timeout)
                     .build(),
             )
-            .stalled_stream_protection(StalledStreamProtectionConfig::enabled().build());
+            .stalled_stream_protection(
+                StalledStreamProtectionConfig::enabled()
+                    .grace_period(STALL_GRACE)
+                    .build(),
+            );
         if let Some(endpoint) = admitted.endpoint {
             config = config.endpoint_url(endpoint);
         }
@@ -322,28 +351,27 @@ impl ObjectStorage {
             return Err(guard.fail(ObjectStorageError::TooLarge, "too_large"));
         }
         let _permit = self.admit(&mut guard)?;
-        let checksum = match (self.inner.checksum, body.replayable) {
+        let checksum = match (self.inner.checksum, body.in_memory) {
             (UploadChecksum::Always, _) | (UploadChecksum::BytesOnly, true) => {
                 Some(ChecksumAlgorithm::Crc64Nvme)
             }
             (UploadChecksum::BytesOnly, false) | (UploadChecksum::Never, _) => None,
         };
-        // The client computes no checksum by default (`WhenRequired`), and
-        // under it an explicit algorithm is sent as a header with no value.
-        // An upload that carries CRC64NVME therefore switches this one call
-        // to `WhenSupported`, which computes the named algorithm.
-        let mut once = aws_sdk_s3::Config::builder();
+        // Under the client's `WhenRequired` the SDK sends the named
+        // algorithm but computes no checksum value. An upload that carries
+        // CRC64NVME therefore switches this one call to `WhenSupported`.
+        let mut once = one_attempt();
         if checksum.is_some() {
             once = once.request_checksum_calculation(RequestChecksumCalculation::WhenSupported);
         }
+        // A create-only retry could also meet this call's own lost success
+        // and report it as `AlreadyExists`.
         let call = if options.create_only {
-            // One attempt: a retry could meet this call's own lost success
-            // and report it as `AlreadyExists`.
-            once = once.retry_config(RetryConfig::standard().with_max_attempts(1));
             Call::CreateOnly
         } else {
             Call::Mutation
         };
+        let mismatch = body.mismatch.clone();
         let result = self
             .inner
             .client
@@ -364,6 +392,9 @@ impl ObjectStorage {
             Ok(_) => {
                 guard.succeed();
                 Ok(())
+            }
+            Err(_) if mismatch.is_some_and(|flag| flag.load(Ordering::Acquire)) => {
+                Err(guard.fail(ObjectStorageError::Rejected, "body_length"))
             }
             Err(failure) => Err(Self::fail(&mut guard, call, &failure)),
         }
@@ -422,6 +453,7 @@ impl ObjectStorage {
                 guard,
                 _permit: permit,
             }),
+            failed: None,
         })
     }
 
@@ -480,6 +512,8 @@ impl ObjectStorage {
             .bucket(&self.inner.bucket)
             .key(key.as_str())
             .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
+            .customize()
+            .config_override(one_attempt())
             .send()
             .await;
         match result {
@@ -574,6 +608,11 @@ impl ObjectStorage {
     }
 }
 
+/// One attempt for a mutation, as a per-call override of the client's retry.
+fn one_attempt() -> aws_sdk_s3::config::Builder {
+    aws_sdk_s3::Config::builder().retry_config(RetryConfig::standard().with_max_attempts(1))
+}
+
 /// An open download. Dropping it releases the admission slot and the
 /// connection; the operation is recorded as `cancelled` unless the body
 /// already ended.
@@ -583,6 +622,8 @@ pub struct Download {
     remaining: u64,
     body: ByteStream,
     end: Option<End>,
+    /// The failure that ended the body, returned again on every later call.
+    failed: Option<ObjectStorageError>,
 }
 
 /// What a download releases when it ends.
@@ -604,10 +645,14 @@ impl Download {
     ///
     /// # Errors
     ///
-    /// `Integrity` for a checksum mismatch or a length that differs from the
-    /// headers; `Unavailable` for a transport failure or a stalled body.
-    /// After an error or the end, every call returns `Ok(None)`.
+    /// `Integrity` for a checksum mismatch or a body longer than its
+    /// headers; `Unavailable` for a transport failure, a body shorter than
+    /// its headers, or a stalled body. After an error every call returns the
+    /// same error; after the end, `Ok(None)`.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, ObjectStorageError> {
+        if let Some(error) = self.failed {
+            return Err(error);
+        }
         let Some(end) = self.end.as_mut() else {
             return Ok(None);
         };
@@ -632,6 +677,7 @@ impl Download {
         };
         let error = end.guard.fail(failure.0, failure.1);
         self.end = None;
+        self.failed = Some(error);
         Err(error)
     }
 

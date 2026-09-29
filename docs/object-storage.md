@@ -109,9 +109,12 @@ let body = storage.get(&key).await?.bytes().await?;
 ```
 
 `put` takes `Bytes` (or `Vec<u8>`) directly. A stream uses
-`PutBody::stream(len, body)` with any `http_body::Body<Data = Bytes>`, and it
-must yield exactly `len` bytes. A `Download` can be read chunk by chunk with
-`next_chunk()`, for example to stream it into an HTTP response.
+`PutBody::stream(len, body)` with any `http_body::Body<Data = Bytes>`; a body
+that yields more or fewer than `len` bytes fails the put with `Rejected`
+instead of storing a truncated object. A `Download` can be read chunk by chunk
+with `next_chunk()`, for example to stream it into an HTTP response; after a
+failure every later call returns the same error, so a cut body never reads as
+a clean end.
 
 ## Failures
 
@@ -119,29 +122,37 @@ must yield exactly `len` bytes. A `Download` can be read chunk by chunk with
 
 | Variant | Meaning | Caller action |
 | --- | --- | --- |
-| `NotFound` | The object does not exist | Business decision |
+| `NotFound` | The object does not exist (see the note below on Amazon and on `head`) | Business decision |
 | `AlreadyExists` | A create-only put found the key | Business decision |
 | `TooLarge` | A declared or stored size exceeds `max_object_bytes`; nothing was sent | Refuse the input |
 | `Busy` | The admission limit is full; nothing was sent | Shed load, for example HTTP 503 |
-| `Unavailable` | Transient: a read failed, or the provider refused a mutation before applying it (409, 429, 503) | Retry later |
-| `Rejected` | Permanent: 400, 403, a missing bucket, or an out-of-range presign lifetime | Fix configuration, credentials, or input |
+| `Unavailable` | Transient: a read failed, or the provider refused a mutation before applying it (409, 429, 503, or S3's `400 RequestTimeout`) | Retry later |
+| `Rejected` | Permanent: another 4xx, 501, a missing bucket, a streamed body that does not match its length, or an out-of-range presign lifetime | Fix configuration, credentials, or input |
 | `OutcomeUnknown` | A mutation may or may not have taken effect: a timeout, a lost response, or a 500, 502, or 504 | Reconcile, for example with `head`, before relying on either state |
-| `Integrity` | A checksum mismatch, a range response, or a length that differs from the headers | Treat the data as unusable |
+| `Integrity` | A checksum mismatch, a range response, or a body longer than its headers | Treat the data as unusable |
 
-A create-only put runs exactly one attempt. A retry after a lost success would
-meet the object this call created and answer 412, which would be reported as
-`AlreadyExists` for the caller's own object. If a caller retries after
+A put or delete makes exactly one attempt, so the reply the client classifies
+is the only one: a refusal really means nothing was applied. A retry could
+hide an earlier attempt that applied the mutation behind a later 503, and a
+create-only retry after a lost success would meet the object this call created
+and answer 412, which would be reported as `AlreadyExists` for the caller's
+own object. The caller retries `Unavailable` with its own policy. If a caller retries after
 `OutcomeUnknown`, `AlreadyExists` can mean its own earlier attempt; compare
 the object (for example its size or a digest the feature keeps) before
 deciding. Display and `Debug` never contain a key, bucket, endpoint, URL, or
 provider message.
 
+A missing object is `NotFound` only when the provider may say so. Amazon S3
+answers 403 instead of 404 for a missing key when the credentials lack
+`s3:ListBucket`, which reads as `Rejected`: grant it where `NotFound` matters.
+A `head` response has no body, so a missing bucket on `head` also reads as
+`NotFound`; `get` and `delete` report it as `Rejected`.
+
 ## Retries, timeouts, and admission
 
 - The SDK standard retryer runs up to three attempts, each delay capped at
-  1 s, for get, head, delete, and a bytes put without a condition (replaying
-  identical bytes is idempotent). A create-only put and a streamed put make
-  one attempt.
+  1 s, for get, head, and the probe. Put and delete make one attempt (see
+  Failures).
 - `object_storage.operation_timeout` (default `5s`, `1s` to `15m`) bounds one
   call up to its response headers, retries included. Connect is bounded at
   3.1 s. A download body is bounded by the SDK's stalled-stream protection: no
@@ -244,8 +255,10 @@ No metric, span, or log from this crate carries a key, bucket, endpoint, URL,
 or credential. The SDK itself logs endpoint parameters, which include the key,
 at DEBUG and whole requests at TRACE. While this profile is retained, the
 process subscriber keeps every `aws_*` target at INFO or quieter, even under
-`log.level = "debug"`, unless `log.level` names an `aws_` target. Name one
-only to debug the SDK, and only where the keys may be seen.
+`log.level = "debug"`. A target the directive names, such as
+`aws_smithy_runtime=debug`, is exempt with the targets under it; unnamed
+siblings stay capped. Name one only to debug the SDK, and only where the keys
+may be seen.
 
 ## Providers
 
@@ -266,7 +279,8 @@ the feature's business, for example a scheduled delete of expired keys.
 
 `make test` runs the adapter against an in-process HTTP stub. It needs no
 credentials and no Docker, and it covers admission, the failure mapping,
-create-only as one attempt, retries, checksum validation, range refusal,
+one attempt per mutation, read retries, checksum validation, range refusal,
+stream length enforcement,
 presign bounds, and redaction.
 
 The emulator proof runs the client against versitygw from

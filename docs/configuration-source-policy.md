@@ -309,9 +309,10 @@ every record inside a request) or `text` (local development).
 <!-- template:begin object-storage:docs-config-object-storage-budget -->
 - `object_storage.operation_timeout` (environment
   `APP__OBJECT_STORAGE__OPERATION_TIMEOUT`, default `5s`, inclusive `1s` to
-  `15m`) bounds one call up to its response headers, the SDK's three attempts
-  included; connect stays a `3.1s` constant and a download body is bounded by
-  the SDK's stalled-stream protection instead. On a request path the handler
+  `15m`) bounds one call up to its response headers, a read's three attempts
+  included (a put or delete makes one); connect stays a `3.1s` constant and a
+  download body is bounded by the SDK's stalled-stream protection (5 s without
+  progress) instead. On a request path the handler
   budget still applies: a put dropped by `http.request_timeout` has an unknown
   outcome. `object_storage.max_concurrency` (default `8`, `1..512`) admits
   that many calls at once and refuses the excess without queueing; a download

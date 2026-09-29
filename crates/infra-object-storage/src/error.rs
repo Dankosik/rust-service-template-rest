@@ -20,7 +20,9 @@ pub enum ObjectStorageError {
     #[error("object storage admission limit reached")]
     Busy,
     /// Transient failure; retrying the same operation is safe. A read failed,
-    /// or the provider refused a mutation before applying it (409, 429, 503).
+    /// or the provider refused a mutation before applying it (409, 429, 503,
+    /// or S3's `RequestTimeout`). A mutation makes one attempt, so no earlier
+    /// attempt can have applied it.
     #[error("object storage unavailable")]
     Unavailable,
     /// Permanent refusal, such as 400, 403, or a missing bucket: credentials,
@@ -136,8 +138,12 @@ pub(crate) fn classify(call: Call, reply: Reply<'_>) -> ObjectStorageError {
             (404, _) if call == Call::Read => E::NotFound,
             (412, _) if call == Call::CreateOnly => E::AlreadyExists,
             // Refused before applying: a conflicting concurrent write,
-            // throttling, or a provider shedding load.
-            (409 | 429 | 503, _) => E::Unavailable,
+            // throttling, a provider shedding load, or a body the provider
+            // stopped waiting for (S3's `400 RequestTimeout`). A mutation
+            // makes one attempt, so this reply is the only one.
+            (409 | 429 | 503, _) | (_, Some("RequestTimeout")) => E::Unavailable,
+            // An unsupported header or operation is permanent.
+            (501, _) => E::Rejected,
             (500..=599, _) => match call {
                 Call::Read => E::Unavailable,
                 Call::Mutation | Call::CreateOnly => E::OutcomeUnknown,

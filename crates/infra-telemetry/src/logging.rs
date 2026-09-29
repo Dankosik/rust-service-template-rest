@@ -94,20 +94,33 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
 }
 
 // template:begin object-storage:telemetry-sdk-log-cap
-/// A global filter on one library's targets.
-type SdkCap = tracing_subscriber::filter::FilterFn<fn(&tracing::Metadata<'_>) -> bool>;
+/// A global filter that caps the AWS SDK's targets.
+type SdkCap =
+    tracing_subscriber::filter::FilterFn<Box<dyn Fn(&tracing::Metadata<'_>) -> bool + Send + Sync>>;
 
 /// The AWS SDK logs S3 endpoint parameters, which include object keys, at
 /// DEBUG and whole requests at TRACE. Its `aws_*` targets stay at INFO or
-/// quieter unless the directive names one, so a global `debug` never
-/// records or exports a key.
-fn sdk_log_cap(level: &str) -> Option<SdkCap> {
-    fn at_most_info(metadata: &tracing::Metadata<'_>) -> bool {
-        !metadata.target().starts_with("aws_") || *metadata.level() <= tracing::Level::INFO
-    }
-    (!level.contains("aws_")).then(|| {
-        tracing_subscriber::filter::filter_fn(at_most_info as fn(&tracing::Metadata<'_>) -> bool)
-    })
+/// quieter, so a global `debug` never records or exports a key. A target
+/// the directive names (`aws_smithy_runtime=debug`) is exempt with
+/// everything under it; an unnamed sibling stays capped.
+fn sdk_log_cap(level: &str) -> SdkCap {
+    let named: Vec<String> = level
+        .split(',')
+        .filter_map(|directive| {
+            let target = directive.split(['=', '[']).next()?.trim();
+            target.starts_with("aws_").then(|| target.to_owned())
+        })
+        .collect();
+    tracing_subscriber::filter::filter_fn(Box::new(move |metadata: &tracing::Metadata<'_>| {
+        let target = metadata.target();
+        *metadata.level() <= tracing::Level::INFO
+            || !target.starts_with("aws_")
+            || named.iter().any(|name| {
+                target
+                    .strip_prefix(name.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+            })
+    }))
 }
 // template:end object-storage:telemetry-sdk-log-cap
 
@@ -341,6 +354,8 @@ mod tests {
         assert!(capped.contains("service debug"), "{capped}");
         let named = emit("debug,aws_smithy_runtime=debug");
         assert!(named.contains("sdk debug with key"), "{named}");
+        let sibling = emit("debug,aws_config=warn");
+        assert!(!sibling.contains("sdk debug with key"), "{sibling}");
         let quiet = emit("warn");
         assert!(!quiet.contains("sdk info"), "{quiet}");
     }

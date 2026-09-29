@@ -254,16 +254,30 @@ fn buckets_are_dotless_dns_names() {
         "Upper",
         "-leading",
         "trailing-",
-        "xn--punycode",
-        "sthree-bucket",
-        "bucket-s3alias",
-        "bucket--ol-s3",
     ] {
         assert_eq!(
             admit(&provider, bucket).unwrap_err(),
             ConfigError::Bucket,
             "{bucket:?}"
         );
+    }
+    // Amazon's reserved names are refused only where Amazon reserves them.
+    let amazon = Provider::AmazonS3 {
+        region: "us-east-1".to_owned(),
+        expected_bucket_owner: "123456789012".to_owned(),
+    };
+    for bucket in [
+        "xn--punycode",
+        "sthree-bucket",
+        "bucket-s3alias",
+        "bucket--ol-s3",
+    ] {
+        assert_eq!(
+            admit(&amazon, bucket).unwrap_err(),
+            ConfigError::Bucket,
+            "{bucket:?}"
+        );
+        admit(&provider, bucket).unwrap_or_else(|_| panic!("{bucket:?}"));
     }
 }
 
@@ -364,6 +378,17 @@ fn classification_separates_not_applied_from_unknown() {
             status(403, Some("SignatureDoesNotMatch")),
             E::Rejected,
         ),
+        (
+            Call::Mutation,
+            status(400, Some("RequestTimeout")),
+            E::Unavailable,
+        ),
+        (
+            Call::Mutation,
+            status(501, Some("NotImplemented")),
+            E::Rejected,
+        ),
+        (Call::Read, status(501, Some("NotImplemented")), E::Rejected),
     ];
     for (call, reply, expected) in cases {
         assert_eq!(classify(call, reply), expected, "{call:?} {reply:?}");
@@ -561,25 +586,50 @@ async fn failed_create_only_put_is_not_retried_and_is_unknown() {
 }
 
 #[tokio::test]
-async fn unconditional_bytes_put_is_retried_then_succeeds() {
-    let stub = Stub::start(|_, index| {
-        if index == 0 {
-            xml_error(StatusCode::SERVICE_UNAVAILABLE, "SlowDown")
-        } else {
-            ok_empty()
-        }
-    })
-    .await;
+async fn mutations_make_one_attempt() {
+    // A retry would leave only the last reply, which could hide an earlier
+    // attempt that applied the mutation.
+    let stub = Stub::start(|_, _| xml_error(StatusCode::SERVICE_UNAVAILABLE, "SlowDown")).await;
     let storage = stub.storage(|_| {});
-    storage
+    let result = storage
         .put(
             &key(),
             Bytes::from_static(b"{}").into(),
             PutOptions::default(),
         )
-        .await
-        .unwrap();
-    assert_eq!(stub.seen().len(), 2);
+        .await;
+    assert_eq!(result, Err(ObjectStorageError::Unavailable));
+    assert_eq!(stub.seen().len(), 1);
+
+    let stub =
+        Stub::start(|_, _| xml_error(StatusCode::INTERNAL_SERVER_ERROR, "InternalError")).await;
+    let storage = stub.storage(|_| {});
+    assert_eq!(
+        storage.delete(&key()).await,
+        Err(ObjectStorageError::OutcomeUnknown)
+    );
+    assert_eq!(stub.seen().len(), 1);
+}
+
+#[tokio::test]
+async fn a_stream_that_differs_from_its_length_is_rejected() {
+    for (declared, sent) in [(4_u64, &b"longer"[..]), (16, &b"short"[..])] {
+        let stub = Stub::start(|_, _| ok_empty()).await;
+        let storage = stub.storage(|_| {});
+        let body = http_body_util::Full::new(Bytes::from_static(sent));
+        let result = storage
+            .put(
+                &key(),
+                PutBody::stream(declared, body),
+                PutOptions::default(),
+            )
+            .await;
+        assert_eq!(
+            result,
+            Err(ObjectStorageError::Rejected),
+            "declared {declared}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -662,8 +712,17 @@ async fn get_with_a_wrong_checksum_fails_integrity_at_the_end() {
     })
     .await;
     let storage = stub.storage(|_| {});
-    let download = storage.get(&key()).await.unwrap();
-    assert_eq!(download.bytes().await, Err(ObjectStorageError::Integrity));
+    let mut download = storage.get(&key()).await.unwrap();
+    let mut outcome = download.next_chunk().await;
+    while let Ok(Some(_)) = outcome {
+        outcome = download.next_chunk().await;
+    }
+    assert_eq!(outcome, Err(ObjectStorageError::Integrity));
+    // A later call must not read as a clean end.
+    assert_eq!(
+        download.next_chunk().await,
+        Err(ObjectStorageError::Integrity)
+    );
 }
 
 #[tokio::test]

@@ -31,18 +31,18 @@ Every MSRV fits workspace Rust 1.98.
 | Decision | Reason | Reopen condition |
 | --- | --- | --- |
 | A closed `ObjectStorageError`: `NotFound`, `AlreadyExists`, `TooLarge`, `Busy`, `Unavailable`, `Rejected`, `OutcomeUnknown`, `Integrity` | The caller's next action differs for each. The Go sibling maps every failed mutation except 412 to unknown outcome, so callers reconcile a definitive 403 forever. | A consumer needs to branch on a class the set merges. |
-| A create-only put makes exactly one attempt | A retried create-only put after a lost success meets its own object and answers 412, which would be reported as `AlreadyExists`. The Go sibling has this defect. | Never while create-only maps 412 to `AlreadyExists`. |
-| 409, 429, and 503 on a mutation are `Unavailable`; 500, 502, 504, timeouts, and lost responses are `OutcomeUnknown`; other 4xx are `Rejected` | S3 documents 409 `ConditionalRequestConflict` and 503 `SlowDown` as refusals to retry; a 5xx gateway or internal error can follow an applied write. | A provider documents a different meaning for one of these statuses. |
-| Three attempts, each delay capped at 1 s, for reads, deletes, and bytes puts without a condition | The SDK default 20 s cap would outlast an interactive `operation_timeout`. Replaying identical bytes is idempotent. A stream cannot be replayed. | A consumer needs a longer backoff under throttling. |
+| A put or delete makes exactly one attempt; reads make up to three, each delay capped at 1 s | The SDK keeps only the last attempt's reply (`aws-smithy-runtime` orchestrator), so after a retry a 503 could hide an earlier attempt that applied the mutation, and a retried create-only put after a lost success meets its own object and answers 412, reported as `AlreadyExists` (the Go sibling has this defect). The SDK default 20 s backoff cap would outlast an interactive `operation_timeout`. | The SDK exposes every attempt's reply, or a consumer needs SDK-level write retries and accepts reporting them as unknown outcomes. |
+| 409, 429, 503, and S3's `400 RequestTimeout` on a mutation are `Unavailable`; 500, 502, 504, timeouts, and lost responses are `OutcomeUnknown`; 501 and other 4xx are `Rejected` | S3 documents 409 `ConditionalRequestConflict`, 503 `SlowDown`, and `RequestTimeout` as refusals to retry; a 5xx gateway or internal error can follow an applied write; 501 is an unsupported header or operation. | A provider documents a different meaning for one of these statuses. |
+| A streamed body is held to its declared length | hyper cuts a longer body at `Content-Length` without an error, so a provider that receives no checksum would store a truncated object. | Never. |
 | Reject, do not queue, at `max_concurrency` (default 8) | A hidden queue turns overload into latency. The Go sibling's fixed 4 would shed document-processing's per-request reads. The permit moves into a download, so dropping it releases the slot and the "caller must close" rule disappears. | Measured overload shows a queue would help. |
-| `operation_timeout` bounds a call to its response headers; stalled-stream protection bounds a body | A single timer cannot cover a download whose length the operator does not bound in time. | A consumer needs a total transfer deadline. |
+| `operation_timeout` bounds a call to its response headers; stalled-stream protection with a 5 s grace (stated in code: an explicit config would otherwise take the builder's 20 s) bounds a body | A single timer cannot cover a download whose length the operator does not bound in time. | A consumer needs a total transfer deadline. |
 | Not a readiness dependency; no startup I/O; `probe()` is opt-in | A bucket probe during a provider outage would evict every replica. document-processing's worker gates on its bucket and can opt in. | Never as a default. |
 
 ## Integrity
 
 | Decision | Reason | Reopen condition |
 | --- | --- | --- |
-| `WhenRequired` for request calculation and response validation on the client; a put that carries CRC64NVME switches that one call to `WhenSupported` | Under `WhenRequired` the SDK sends a named algorithm as a header with no value; the provider then expects a checksum it never gets. Nothing a provider has not proven is sent by default. | An SDK release changes the checksum interceptor. |
+| `WhenRequired` for request calculation and response validation on the client; a put that carries CRC64NVME switches that one call to `WhenSupported` | Under `WhenRequired` the SDK sends the named algorithm (`x-amz-sdk-checksum-algorithm`) but computes no checksum value, so the provider would expect a checksum it never gets. Nothing a provider has not proven is sent by default. | An SDK release changes the checksum interceptor. |
 | CRC64NVME on every Amazon upload, on R2 bytes uploads only, and on no Railway upload | Amazon documents CRC64NVME full-object checksums and trailers. R2 documents CRC64NVME full-object since 2025-07-03 but no trailer. Railway and Tigris document only a SHA-256 checksum. | A recorded conformance run shows R2 trailers or a Railway checksum accepted. |
 | Every get sends `x-amz-checksum-mode: ENABLED`; a missing checksum is not a failure | Objects written by other clients (the Go SDK defaults to CRC32) must stay readable. The Go sibling refuses them. | Never while existing buckets hold such objects. |
 
@@ -64,7 +64,7 @@ Every MSRV fits workspace Rust 1.98.
 | --- | --- | --- |
 | One histogram, `object_storage_operation_duration_seconds{operation, outcome}`; a get is observed when its download ends | Per-outcome counts are the `_count` series (the cache profile's precedent), and body failures are counted. | An operator question the histogram cannot answer. |
 | One `object_storage.<operation>` span without key, bucket, endpoint, or URL; `error.type` is the provider code, status, or transport class | Keys can carry business identifiers; the bucket and endpoint are configuration. | |
-| The subscriber keeps `aws_*` targets at INFO or quieter unless `log.level` names one | The SDK logs endpoint parameters, which include the key, at DEBUG and whole requests at TRACE. | The SDK stops logging keys. |
+| The subscriber keeps `aws_*` targets at INFO or quieter; a target `log.level` names is exempt with the targets under it | The SDK logs endpoint parameters, which include the key, at DEBUG and whole requests at TRACE. | The SDK stops logging keys. |
 
 ## Ownership and proving surfaces
 

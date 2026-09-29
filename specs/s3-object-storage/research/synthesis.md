@@ -117,8 +117,8 @@ outcome is unknown by construction.
 
 | Decision | Choice and reason |
 | --- | --- |
-| Retry | The SDK standard retryer, three attempts with each delay capped at 1 s (the SDK default of 20 s would outlast an interactive timeout), for get, head, delete, and a bytes put without a condition (replaying identical bytes is idempotent). A create-only put runs exactly one attempt through a per-operation `config_override`, so a 412 can never answer a retry of this call's own lost success (Go F3). A streamed body cannot be replayed, so the SDK makes one attempt. |
-| Timeouts | `object_storage.operation_timeout` bounds one call from start to response headers, retries included: default `5s` (pricing's put, head, and delete budgets), inclusive `1s` to `15m`. Connect is the SDK's 3.1 s from the pinned behavior version. A download body is bounded by the SDK's stalled-stream protection (no progress for 5 s fails it), not by the operation timeout. |
+| Retry | The SDK standard retryer, three attempts with each delay capped at 1 s (the SDK default of 20 s would outlast an interactive timeout), for get, head, and the probe. Put and delete run exactly one attempt through a per-operation `config_override`: the SDK keeps only the last attempt's reply, so after a retry a refusal could hide an applied earlier attempt, and a 412 could answer a retry of this call's own lost success (Go F3). The independent review found the first case; the original Go spec (D6) had also chosen one-attempt mutations. |
+| Timeouts | `object_storage.operation_timeout` bounds one call from start to response headers, retries included: default `5s` (pricing's put, head, and delete budgets), inclusive `1s` to `15m`. Connect is the SDK's 3.1 s from the pinned behavior version. A download body is bounded by the SDK's stalled-stream protection (no progress for 5 s fails it; stated in code because an explicit config takes the builder's 20 s), not by the operation timeout. A streamed upload is held to its declared length, because hyper cuts a longer body at `Content-Length` silently. |
 | Behavior version | `BehaviorVersion::v2026_01_12()` in code, not the `behavior-version-latest` feature, so an SDK bump cannot silently change retry, timeout, or proxy defaults. |
 | Admission | Reject, do not queue: `Semaphore::try_acquire_owned` refuses excess work with `Busy`. `object_storage.max_concurrency`, default 8, inclusive 1 to 512. Go's fixed 4 is too low for document-processing's per-request reads. The permit is held through a download's body. Worst-case buffered memory is `max_concurrency × max_object_bytes` (64 MiB by default); the guide states the formula. |
 | Readiness | Not a readiness dependency, and startup performs no I/O. `probe()` returns a `HeadBucket` probe that a service registers only when its business outcome requires storage (document-processing's worker does). A bucket probe during a provider outage would otherwise evict every replica. |
@@ -193,7 +193,7 @@ outcome is unknown by construction.
 - The SDK logs endpoint parameters, which include the object key, at DEBUG
   and the whole request at TRACE. When the profile is retained, the process
   subscriber (both binaries) keeps every `aws_*` target at INFO or quieter
-  unless `log.level` names an `aws_` target, so a global `debug` never
+  except for targets `log.level` names, so a global `debug` never
   records or exports keys. Features still keep personal data out of keys.
 
 ### Proof
