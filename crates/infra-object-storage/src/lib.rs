@@ -36,6 +36,7 @@ use aws_smithy_http_client::tls;
 use bytes::Bytes;
 use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::time::{Instant, timeout_at};
 
 use self::error::Call;
 pub use self::error::ObjectStorageError;
@@ -174,7 +175,7 @@ impl PutBody {
     /// before sending and normalize its EOF to an in-memory body.
     async fn prepare_empty_stream(
         &mut self,
-        timeout: Duration,
+        deadline: Instant,
     ) -> Result<(), (ObjectStorageError, &'static str)> {
         let UploadSource::Streamed { mismatch } = &self.source else {
             return Ok(());
@@ -182,7 +183,7 @@ impl PutBody {
         if self.len != 0 {
             return Ok(());
         }
-        let first = tokio::time::timeout(timeout, self.stream.next()).await;
+        let first = timeout_at(deadline, self.stream.next()).await;
         let length_mismatch = mismatch.load(Ordering::Acquire);
         match first {
             Err(_elapsed) => Err((ObjectStorageError::Unavailable, "timeout")),
@@ -398,13 +399,14 @@ impl ObjectStorage {
         body: PutBody,
         options: PutOptions,
     ) -> Result<(), ObjectStorageError> {
+        let deadline = tokio::time::sleep(self.inner.operation_timeout).deadline();
         let mut guard = self.start(Operation::Put);
         if body.len > self.inner.max_object_bytes {
             return Err(guard.fail(ObjectStorageError::TooLarge, "too_large"));
         }
         let _permit = self.admit(&mut guard)?;
         let mut body = body;
-        body.prepare_empty_stream(self.inner.operation_timeout)
+        body.prepare_empty_stream(deadline)
             .await
             .map_err(|(error, error_type)| guard.fail(error, error_type))?;
         let checksum = match (self.inner.checksum, &body.source) {
@@ -432,7 +434,7 @@ impl ObjectStorage {
             UploadSource::InMemory => None,
             UploadSource::Streamed { mismatch } => Some(Arc::clone(mismatch)),
         };
-        let result = self
+        let request = self
             .inner
             .client
             .put_object()
@@ -446,17 +448,27 @@ impl ObjectStorage {
             .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
             .customize()
             .config_override(once)
-            .send()
-            .await;
+            .send();
+        // Preparation and dispatch spend one budget. Refuse an expired
+        // budget before polling the request, while its outcome is still known.
+        if Instant::now() >= deadline {
+            return Err(guard.fail(ObjectStorageError::Unavailable, "timeout"));
+        }
+        let result = timeout_at(deadline, request).await;
         match result {
-            Ok(_) => {
+            Ok(Ok(_)) => {
                 guard.succeed();
                 Ok(())
             }
-            Err(_) if mismatch.is_some_and(|flag| flag.load(Ordering::Acquire)) => {
+            Ok(Err(_)) | Err(_)
+                if mismatch
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Acquire)) =>
+            {
                 Err(guard.fail(ObjectStorageError::Rejected, "body_length"))
             }
-            Err(failure) => Err(Self::fail(&mut guard, call, &failure)),
+            Ok(Err(failure)) => Err(Self::fail(&mut guard, call, &failure)),
+            Err(_elapsed) => Err(guard.fail(ObjectStorageError::OutcomeUnknown, "timeout")),
         }
     }
 

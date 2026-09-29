@@ -424,14 +424,23 @@ type Respond = Arc<dyn Fn(&Seen, usize) -> Response + Send + Sync>;
 struct Stub {
     endpoint: String,
     seen: Arc<Mutex<Vec<Seen>>>,
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
 }
 
 impl Stub {
+    async fn start(respond: impl Fn(&Seen, usize) -> Response + Send + Sync + 'static) -> Self {
+        Self::start_with_delay(Duration::ZERO, respond).await
+    }
+
     #[allow(
         clippy::disallowed_methods,
         reason = "a test-local S3 stand-in, not an application route"
     )]
-    async fn start(respond: impl Fn(&Seen, usize) -> Response + Send + Sync + 'static) -> Self {
+    async fn start_with_delay(
+        response_delay: Duration,
+        respond: impl Fn(&Seen, usize) -> Response + Send + Sync + 'static,
+    ) -> Self {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let respond: Respond = Arc::new(respond);
         let counter = Arc::new(AtomicUsize::new(0));
@@ -454,6 +463,9 @@ impl Stub {
                         let index = counter.fetch_add(1, Ordering::SeqCst);
                         let response = respond(&record, index);
                         seen.lock().unwrap().push(record);
+                        if !response_delay.is_zero() {
+                            tokio::time::sleep(response_delay).await;
+                        }
                         response
                     }
                 }
@@ -461,8 +473,20 @@ impl Stub {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(listener, router).await });
-        Self { endpoint, seen }
+        let (shutdown, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+        });
+        Self {
+            endpoint,
+            seen,
+            shutdown,
+            task,
+        }
     }
 
     fn storage(&self, configure: impl FnOnce(&mut ObjectStorageOptions)) -> ObjectStorage {
@@ -476,6 +500,15 @@ impl Stub {
 
     fn seen(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
+    }
+
+    async fn stop(self) {
+        self.shutdown.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), self.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 }
 
@@ -643,6 +676,45 @@ async fn streamed_put_declares_its_length_and_is_sent_once() {
         .await;
     assert_eq!(result, Err(ObjectStorageError::OutcomeUnknown));
     assert_eq!(stub.seen().len(), 1);
+}
+
+#[tokio::test]
+async fn empty_stream_preparation_and_response_share_one_put_timeout() {
+    // Each phase fits alone; together they exceed the two-second call budget.
+    // Delays model slow input/provider I/O, rather than synchronize test tasks.
+    struct DelayedEof(std::pin::Pin<Box<tokio::time::Sleep>>);
+
+    impl http_body::Body for DelayedEof {
+        type Data = Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+            std::future::Future::poll(self.0.as_mut(), context).map(|()| None)
+        }
+    }
+
+    let delay = Duration::from_millis(1500);
+    let stub = Stub::start_with_delay(delay, |_, _| ok_empty()).await;
+    let storage = stub.storage(|options| options.max_concurrency = 1);
+    let body = DelayedEof(Box::pin(tokio::time::sleep(delay)));
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        storage.put(&key(), PutBody::stream(0, body), PutOptions::default()),
+    )
+    .await
+    .unwrap();
+    let sent = stub.seen().len();
+    // A timed-out call releases its slot, even though the provider may finish.
+    let follow_up = storage
+        .put(&key(), Bytes::new().into(), PutOptions::default())
+        .await;
+    stub.stop().await;
+    assert_eq!(result, Err(ObjectStorageError::OutcomeUnknown));
+    assert_eq!(sent, 1, "the mutation must be dispatched exactly once");
+    assert_eq!(follow_up, Ok(()));
 }
 
 #[tokio::test]
