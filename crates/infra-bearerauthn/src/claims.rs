@@ -2,7 +2,10 @@
 //!
 //! JSON `null` means absent for every consumed claim.
 
-use crate::{Actor, Failure, Principal, VerificationError, VerificationReason};
+use crate::{
+    Actor, Failure, PreparationError, PreparationPhase, PreparationReason, Principal, VerificationError,
+    VerificationReason,
+};
 use serde::Deserialize;
 use std::{borrow::Cow, fmt};
 // template:begin oidc-jwt:authn-claims-jwt-import
@@ -18,8 +21,14 @@ pub(crate) struct ClaimPolicy {
 }
 
 impl ClaimPolicy {
-    pub(crate) fn new(issuer: String, audiences: Vec<String>) -> Self {
-        Self { issuer, audiences }
+    pub(crate) fn new(issuer: String, audiences: Vec<String>) -> Result<Self, PreparationError> {
+        if audiences.is_empty() || audiences.iter().any(String::is_empty) {
+            return Err(PreparationError::new(
+                PreparationPhase::Options,
+                PreparationReason::Parse,
+            ));
+        }
+        Ok(Self { issuer, audiences })
     }
 }
 
@@ -390,7 +399,7 @@ mod tests {
     // template:end oidc-introspection:authn-claims-introspection-test-import
 
     fn policy() -> ClaimPolicy {
-        ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()])
+        ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()]).unwrap()
     }
 
     /// A fixed access token for tests that do not exercise its exact value.
