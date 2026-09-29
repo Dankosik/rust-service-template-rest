@@ -102,12 +102,14 @@ pub fn server_options() -> infra_http::ServerOptions {
     }
 }
 
+const GRPC_TIMEOUT: http::HeaderName = http::HeaderName::from_static("grpc-timeout");
+
 /// Parses `grpc-timeout`. A malformed value, including more than eight digits,
 /// is absent. Tonic's own parser is private.
 #[must_use]
 pub fn grpc_timeout(headers: &http::HeaderMap) -> Option<Duration> {
     headers
-        .get("grpc-timeout")
+        .get(GRPC_TIMEOUT)
         .and_then(|value| parse_grpc_timeout(value.as_bytes()))
 }
 
