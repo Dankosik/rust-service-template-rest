@@ -78,12 +78,38 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
         }
         LoggingFormat::Text => Box::new(tracing_subscriber::fmt::layer().with_target(false)),
     };
-    let dispatch = tracing::Dispatch::new(Registry::default().with(filter).with(otel).with(format));
+    let dispatch = tracing::Dispatch::new(
+        Registry::default()
+            .with(filter)
+            // template:begin object-storage:telemetry-sdk-log-cap-apply
+            .with(sdk_log_cap(options.level))
+            // template:end object-storage:telemetry-sdk-log-cap-apply
+            .with(otel)
+            .with(format),
+    );
     let _ = trace_dispatch.set(dispatch.downgrade());
     dispatch
         .try_init()
         .map_err(|_| LoggingError::AlreadyInstalled)
 }
+
+// template:begin object-storage:telemetry-sdk-log-cap
+/// A global filter on one library's targets.
+type SdkCap = tracing_subscriber::filter::FilterFn<fn(&tracing::Metadata<'_>) -> bool>;
+
+/// The AWS SDK logs S3 endpoint parameters, which include object keys, at
+/// DEBUG and whole requests at TRACE. Its `aws_*` targets stay at INFO or
+/// quieter unless the directive names one, so a global `debug` never
+/// records or exports a key.
+fn sdk_log_cap(level: &str) -> Option<SdkCap> {
+    fn at_most_info(metadata: &tracing::Metadata<'_>) -> bool {
+        !metadata.target().starts_with("aws_") || *metadata.level() <= tracing::Level::INFO
+    }
+    (!level.contains("aws_")).then(|| {
+        tracing_subscriber::filter::filter_fn(at_most_info as fn(&tracing::Metadata<'_>) -> bool)
+    })
+}
+// template:end object-storage:telemetry-sdk-log-cap
 
 // json-subscriber's built-in bridge currently ends at tracing-opentelemetry
 // 0.33. Its dynamic-field API preserves the same wire shape with our 0.34
@@ -286,6 +312,39 @@ mod tests {
             );
         }
     }
+
+    // template:begin object-storage:telemetry-sdk-log-cap-test
+    #[test]
+    fn sdk_debug_records_stay_out_unless_the_directive_names_them() {
+        let emit = |level: &str| {
+            let buffer = Buffer::default();
+            let filter = EnvFilter::try_new(level).expect("valid directive");
+            let layer = tracing_subscriber::fmt::layer()
+                .with_writer(buffer.clone())
+                .with_ansi(false);
+            let dispatch = tracing::Dispatch::new(
+                Registry::default()
+                    .with(filter)
+                    .with(sdk_log_cap(level))
+                    .with(layer),
+            );
+            tracing::dispatcher::with_default(&dispatch, || {
+                tracing::debug!(target: "aws_smithy_runtime::client::orchestrator::endpoints", "sdk debug with key");
+                tracing::info!(target: "aws_smithy_runtime::client", "sdk info");
+                tracing::debug!(target: "service::feature", "service debug");
+            });
+            buffer.records()
+        };
+        let capped = emit("debug");
+        assert!(!capped.contains("sdk debug with key"), "{capped}");
+        assert!(capped.contains("sdk info"), "{capped}");
+        assert!(capped.contains("service debug"), "{capped}");
+        let named = emit("debug,aws_smithy_runtime=debug");
+        assert!(named.contains("sdk debug with key"), "{named}");
+        let quiet = emit("warn");
+        assert!(!quiet.contains("sdk info"), "{quiet}");
+    }
+    // template:end object-storage:telemetry-sdk-log-cap-test
 
     #[test]
     fn json_logs_omit_otel_correlation_without_a_span_or_provider() {

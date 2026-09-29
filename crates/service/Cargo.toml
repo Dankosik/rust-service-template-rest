@@ -36,6 +36,9 @@ rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 # template:begin cache:service-cache-dependency
 infra-cache = { workspace = true }
 # template:end cache:service-cache-dependency
+# template:begin object-storage:service-object-storage-dependency
+infra-object-storage = { workspace = true }
+# template:end object-storage:service-object-storage-dependency
 # template:begin outbound-http:service-outbound-http-dependency
 infra-outbound-http = { workspace = true }
 # template:end outbound-http:service-outbound-http-dependency

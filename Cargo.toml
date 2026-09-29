@@ -54,6 +54,9 @@ infra-messaging = { path = "crates/infra-messaging" }
 # template:begin cache:workspace-cache-crates
 infra-cache = { path = "crates/infra-cache" }
 # template:end cache:workspace-cache-crates
+# template:begin object-storage:workspace-object-storage-crate
+infra-object-storage = { path = "crates/infra-object-storage" }
+# template:end object-storage:workspace-object-storage-crate
 # template:begin webhooks-common:workspace-webhooks-crate
 infra-webhooks = { path = "crates/infra-webhooks" }
 # template:end webhooks-common:workspace-webhooks-crate
@@ -85,6 +88,15 @@ redis = { version = "1.7.1", default-features = false }
 # Keepalive retries are a socket2 method; redis does not re-export the type.
 socket2 = { version = "0.6.5", default-features = false }
 # template:end cache:workspace-cache-client
+# template:begin object-storage:workspace-object-storage-client
+# The AWS SDK family releases weekly and yanked one release on 2026-09-14:
+# move these pins together in one reviewed change
+# (docs/object-storage-decisions.md). Default features select the legacy
+# hyper 0.14, rustls 0.21, and ring stack; keep them off.
+aws-sdk-s3 = { version = "=1.150.0", default-features = false }
+aws-smithy-http-client = { version = "=1.4.2", default-features = false }
+aws-smithy-checksums = { version = "=0.65.0", default-features = false }
+# template:end object-storage:workspace-object-storage-client
 futures-util = { version = "0.3", default-features = false }
 axum = { version = "0.8.9", default-features = false }
 hyper = { version = "1.11.1", default-features = false }
