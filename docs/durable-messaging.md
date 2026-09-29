@@ -11,7 +11,7 @@ PostgreSQL/jobs extension; it is unavailable in a messaging-only selection.
 
 ## Event contract and Go interoperability
 
-Features create an immutable typed event once, outside a retryable transaction:
+Features create a typed event once, outside a retryable transaction:
 logical ID, stable type, positive schema version, nonzero UTC occurrence time,
 and JSON payload. Composition maps the registered `(type, version)` to a fixed
 subject and registers typed handlers. Domain code never receives subjects,

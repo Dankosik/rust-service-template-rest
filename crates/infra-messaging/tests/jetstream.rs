@@ -266,7 +266,7 @@ fn event(id: &str) -> Event<ExampleEvent> {
 fn event_with_value(id: &str, value: &str) -> Event<ExampleEvent> {
     Event {
         id: id.to_owned(),
-        occurred_at: time::OffsetDateTime::from_unix_timestamp(1_700_000_000)
+        occurred_at: time::UtcDateTime::from_unix_timestamp(1_700_000_000)
             .expect("fixed event timestamp is valid"),
         payload: ExampleEvent {
             value: value.to_owned(),
