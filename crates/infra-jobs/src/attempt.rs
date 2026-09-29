@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use futures_util::FutureExt as _;
 use sqlx::postgres::PgConnection;
-use tokio::task::JoinError;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -33,27 +33,41 @@ pub const ATTEMPT_DURATION_BUCKETS: &[f64] = &[
     1800.0, 3600.0,
 ];
 
+// Every outcome write fences on `claim_expires_at IS NOT NULL`, which the
+// table's CHECK makes equivalent to `state = 'running'`. A literal
+// `state = 'running'` proves the partial `background_jobs_running` predicate,
+// and after ANALYZE saw few running rows the planner scans that whole index
+// for the id, dead entries of every job claimed since the last VACUUM
+// included. This predicate leaves the primary key as the only access path.
 pub(crate) const COMPLETE: &str = "UPDATE background_jobs \
      SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
-     WHERE id = $1::uuid AND claim_generation = $2 AND state = 'running'";
+     WHERE id = $1::uuid AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
 const RETRY: &str = "UPDATE background_jobs \
      SET state = 'pending', not_before = statement_timestamp() + \
          GREATEST($3::double precision * (0.9 + 0.2 * random()), $4::bigint) * interval '1 microsecond', \
          claim_expires_at = NULL, error_summary = $5 \
-     WHERE id = $1::uuid AND claim_generation = $2 AND state = 'running'";
+     WHERE id = $1::uuid AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
 const FAIL: &str = "UPDATE background_jobs \
      SET state = 'failed', failure_reason = $3, finished_at = statement_timestamp(), \
          claim_expires_at = NULL, error_summary = $4 \
-     WHERE id = $1::uuid AND claim_generation = $2 AND state = 'running'";
+     WHERE id = $1::uuid AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
 const SNOOZE: &str = "UPDATE background_jobs \
      SET state = 'pending', not_before = statement_timestamp() + $3, claim_expires_at = NULL, \
          attempts = attempts - 1 \
-     WHERE id = $1::uuid AND claim_generation = $2 AND state = 'running'";
+     WHERE id = $1::uuid AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
+/// COMPLETE for every attempt queued while the previous batch was in flight.
+/// Returns the 1-based position of each applied completion.
+const COMPLETE_BATCH: &str = "UPDATE background_jobs AS job \
+     SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
+     FROM unnest($1::text[]::uuid[], $2::bigint[]) WITH ORDINALITY AS done (id, generation, position) \
+     WHERE job.id = done.id AND job.claim_generation = done.generation \
+       AND job.claim_expires_at IS NOT NULL \
+     RETURNING done.position";
 /// A cancelled attempt gives its unit back and keeps `not_before`, so the job
 /// keeps its place in claim order instead of queueing behind the backlog.
 const RELEASE: &str = "UPDATE background_jobs \
      SET state = 'pending', claim_expires_at = NULL, attempts = attempts - 1 \
-     WHERE id = $1::uuid AND claim_generation = $2 AND state = 'running'";
+     WHERE id = $1::uuid AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
 
 /// The queue transition a known attempt result asks for.
 enum Transition {
@@ -120,6 +134,33 @@ pub(crate) fn describe_metrics() {
     );
 }
 
+/// Metric handles of the completed-attempt path for one kind, registered
+/// once at engine start instead of looked up by name for every attempt.
+pub(crate) struct KindMetrics {
+    completed: metrics::Counter,
+    duration: metrics::Histogram,
+    applied: metrics::Counter,
+    pub(crate) queue_wait: metrics::Histogram,
+}
+
+impl KindMetrics {
+    pub(crate) fn new(kind: &'static str) -> Self {
+        Self {
+            completed: metrics::counter!(ATTEMPTS_METRIC, "kind" => kind, "outcome" => "completed"),
+            duration: metrics::histogram!(ATTEMPT_DURATION_METRIC, "kind" => kind),
+            applied: metrics::counter!(PERSISTENCE_METRIC, "kind" => kind, "disposition" => "applied"),
+            queue_wait: metrics::histogram!(crate::claim::QUEUE_WAIT_METRIC, "kind" => kind),
+        }
+    }
+}
+
+pub(crate) fn kind_metrics<'a>(shared: &'a Shared, kind: &str) -> Option<&'a KindMetrics> {
+    shared
+        .registry
+        .get(kind)
+        .and_then(|registered| registered.metrics.get())
+}
+
 struct AttemptId {
     id: JobId,
     generation: i64,
@@ -130,6 +171,7 @@ struct AttemptId {
 /// Claim-time exhaustion is observed only after its transaction is acknowledged.
 pub(crate) fn record_exhausted(id: JobId, kind: &'static str, attempt: u16, summary: Option<&str>) {
     record(
+        None,
         &AttemptId {
             id,
             generation: 0,
@@ -144,12 +186,25 @@ pub(crate) fn record_exhausted(id: JobId, kind: &'static str, attempt: u16, summ
     );
 }
 
-fn record(attempt: &AttemptId, transition: &Transition, ran: Option<Duration>) {
-    metrics::counter!(ATTEMPTS_METRIC, "kind" => attempt.kind, "outcome" => transition.label())
-        .increment(1);
+fn record(
+    handles: Option<&KindMetrics>,
+    attempt: &AttemptId,
+    transition: &Transition,
+    ran: Option<Duration>,
+) {
+    match handles {
+        Some(handles) if matches!(transition, Transition::Complete) => {
+            handles.completed.increment(1);
+        }
+        _ => metrics::counter!(ATTEMPTS_METRIC, "kind" => attempt.kind, "outcome" => transition.label())
+            .increment(1),
+    }
     if let Some(ran) = ran {
-        metrics::histogram!(ATTEMPT_DURATION_METRIC, "kind" => attempt.kind)
-            .record(ran.as_secs_f64());
+        match handles {
+            Some(handles) => handles.duration.record(ran.as_secs_f64()),
+            None => metrics::histogram!(ATTEMPT_DURATION_METRIC, "kind" => attempt.kind)
+                .record(ran.as_secs_f64()),
+        }
     }
     match transition {
         Transition::Complete => {
@@ -182,7 +237,6 @@ pub(crate) async fn supervise(
         trace_state,
         slot,
     } = claimed;
-    let _slot = slot;
     let span = tracing::info_span!("job_attempt", job.id = %id, job.kind = kind, job.attempt = u64::from(attempt), otel.kind = "consumer");
     crate::trace_context::link(&span, parent.as_deref(), trace_state.as_deref());
     drop(parent);
@@ -197,12 +251,19 @@ pub(crate) async fn supervise(
         },
         payload,
         deadline,
+        slot,
     )
     .instrument(span)
     .await;
 }
 
-async fn run_attempt(shared: &Shared, attempt: AttemptId, payload: Vec<u8>, deadline: Instant) {
+async fn run_attempt(
+    shared: &Shared,
+    attempt: AttemptId,
+    payload: Vec<u8>,
+    deadline: Instant,
+    slot: tokio::sync::OwnedSemaphorePermit,
+) {
     if expired(shared, deadline) {
         uncertain(shared, &attempt);
         return;
@@ -240,6 +301,9 @@ async fn run_attempt(shared: &Shared, attempt: AttemptId, payload: Vec<u8>, dead
             (ended, Some(started.elapsed()))
         }
     };
+    // The handler has returned: its slot admits the next attempt while this
+    // supervisor records the outcome.
+    drop(slot);
     let transition = map_outcome(attempt.kind, attempt.attempt, policy, ended);
     if matches!(transition, Transition::Release) {
         shared.counters.cancelled.fetch_add(1, Ordering::Relaxed);
@@ -249,7 +313,7 @@ async fn run_attempt(shared: &Shared, attempt: AttemptId, payload: Vec<u8>, dead
             .known_results
             .fetch_add(1, Ordering::Relaxed);
     }
-    record(&attempt, &transition, ran);
+    record(registered.metrics.get(), &attempt, &transition, ran);
     persist(shared, &attempt, &transition, deadline).await;
 }
 
@@ -276,10 +340,11 @@ async fn drive(
     attempt_deadline: Instant,
     local: Instant,
 ) -> Option<Ended> {
-    let mut join = tokio::spawn(future.instrument(tracing::Span::current()));
+    // The handler runs on the supervisor's task; dropping it is the abort.
+    let mut run = std::pin::pin!(std::panic::AssertUnwindSafe(future).catch_unwind());
     let reason = tokio::select! {
         biased;
-        result = &mut join => return Some(ended_from(result)),
+        result = &mut run => return Some(ended_from(result)),
         () = shared.force.cancelled() => Ended::Cancelled,
         () = tokio::time::sleep_until(attempt_deadline) => Ended::Timeout,
     };
@@ -288,20 +353,17 @@ async fn drive(
         .checked_add(COOPERATIVE_GRACE)
         .unwrap_or(local)
         .min(local);
-    if let Some(result) = within(shared, grace, &mut join).await {
+    if let Some(result) = within(shared, grace, &mut run).await {
         return Some(ended_after_cancel(&result, reason));
     }
-    join.abort();
-    within(shared, local, &mut join)
-        .await
-        .map(|result| ended_after_cancel(&result, reason))
+    (!expired(shared, local)).then_some(reason)
 }
 
 /// A result that joins after the supervisor cancelled the handler. Success
 /// means the work finished, so it is kept. An error, snooze, or panic is how
 /// the handler reacted to the cancellation, so it takes the cancellation's
 /// `reason`: a forced drain still releases the job and refunds its attempt.
-fn ended_after_cancel(result: &Result<Result<(), JobError>, JoinError>, reason: Ended) -> Ended {
+fn ended_after_cancel(result: &Result<Result<(), JobError>, Panicked>, reason: Ended) -> Ended {
     if matches!(result, Ok(Ok(()))) {
         Ended::Success
     } else {
@@ -309,11 +371,12 @@ fn ended_after_cancel(result: &Result<Result<(), JobError>, JoinError>, reason: 
     }
 }
 
-fn ended_from(result: Result<Result<(), JobError>, JoinError>) -> Ended {
+type Panicked = Box<dyn std::any::Any + Send>;
+
+fn ended_from(result: Result<Result<(), JobError>, Panicked>) -> Ended {
     match result {
         Ok(Ok(())) => Ended::Success,
         Ok(Err(error)) => Ended::Error(error),
-        Err(error) if error.is_cancelled() => Ended::Cancelled,
         Err(_) => Ended::Panic,
     }
 }
@@ -328,12 +391,20 @@ async fn persist(shared: &Shared, attempt: &AttemptId, transition: &Transition, 
         if expired(shared, local) {
             break;
         }
-        match within(shared, local, send_outcome(shared, attempt, transition)).await {
+        let sent = if matches!(transition, Transition::Complete) {
+            within(shared, local, complete_batched(shared, attempt)).await
+        } else {
+            within(shared, local, send_outcome(shared, attempt, transition)).await
+        };
+        match sent {
             None => break,
             Some(Ok(rows)) => {
                 observe_recovery(shared, operation);
                 let disposition = if rows == 1 { "applied" } else { "unchanged" };
-                persistence(attempt.kind, disposition);
+                match kind_metrics(shared, attempt.kind) {
+                    Some(handles) if rows == 1 => handles.applied.increment(1),
+                    _ => persistence(attempt.kind, disposition),
+                }
                 tracing::debug!(
                     job.kind = attempt.kind,
                     disposition,
@@ -344,7 +415,8 @@ async fn persist(shared: &Shared, attempt: &AttemptId, transition: &Transition, 
                 }
                 return;
             }
-            Some(Err(error)) => observe_failure(shared, operation, &error),
+            Some(Err(Some(error))) => observe_failure(shared, operation, &error),
+            Some(Err(None)) => {}
         }
         let until = Instant::now()
             .checked_add(RECORD_RETRY_INTERVAL)
@@ -376,11 +448,106 @@ fn uncertain(shared: &Shared, attempt: &AttemptId) {
     );
 }
 
+/// Completions waiting for the next batch, and the one batch in flight.
+///
+/// The first waiter that holds `flush` writes every queued completion in one
+/// statement; completions queued meanwhile go in the next batch. A waiter
+/// whose completion another waiter wrote finds the queue empty and reads its
+/// answer. A batch whose writer was dropped answers nobody, and each of its
+/// waiters retries as after a failed statement.
+#[derive(Default)]
+pub(crate) struct Completions {
+    queued: std::sync::Mutex<Vec<Queued>>,
+    flush: tokio::sync::Mutex<()>,
+}
+
+struct Queued {
+    id: JobId,
+    generation: i64,
+    applied: tokio::sync::oneshot::Sender<Result<bool, ()>>,
+}
+
+/// `Err(None)`: the batch failed and its writer already observed the error.
+async fn complete_batched(
+    shared: &Shared,
+    attempt: &AttemptId,
+) -> Result<u64, Option<OperationError>> {
+    let (applied, answer) = tokio::sync::oneshot::channel();
+    queued(shared).push(Queued {
+        id: attempt.id,
+        generation: attempt.generation,
+        applied,
+    });
+    let flush = shared.completions.flush.lock().await;
+    let batch = std::mem::take(&mut *queued(shared));
+    if !batch.is_empty() {
+        write_batch(shared, batch).await;
+    }
+    drop(flush);
+    match answer.await {
+        Ok(Ok(applied)) => Ok(u64::from(applied)),
+        Ok(Err(())) | Err(_) => Err(None),
+    }
+}
+
+fn queued(shared: &Shared) -> std::sync::MutexGuard<'_, Vec<Queued>> {
+    shared
+        .completions
+        .queued
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+async fn write_batch(shared: &Shared, batch: Vec<Queued>) {
+    let mut ids = Vec::with_capacity(batch.len());
+    let mut generations = Vec::with_capacity(batch.len());
+    for queued in &batch {
+        ids.push(queued.id.to_string());
+        generations.push(queued.generation);
+    }
+    let result = backstop(Box::pin(async {
+        let mut connection = shared
+            .pool
+            .acquire()
+            .await
+            .map_err(OperationError::Acquire)?;
+        sqlx::query_scalar::<_, i64>(COMPLETE_BATCH)
+            .bind(&ids)
+            .bind(&generations)
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(OperationError::from)
+    }))
+    .await;
+    match result {
+        Ok(positions) => {
+            let mut applied = vec![false; batch.len()];
+            for position in positions {
+                if let Some(flag) = usize::try_from(position - 1)
+                    .ok()
+                    .and_then(|index| applied.get_mut(index))
+                {
+                    *flag = true;
+                }
+            }
+            for (queued, applied) in batch.into_iter().zip(applied) {
+                let _ = queued.applied.send(Ok(applied));
+            }
+        }
+        Err(error) => {
+            observe_failure(shared, Operation::Record, &error);
+            for queued in batch {
+                let _ = queued.applied.send(Err(()));
+            }
+        }
+    }
+}
+
 async fn send_outcome(
     shared: &Shared,
     attempt: &AttemptId,
     transition: &Transition,
-) -> Result<u64, OperationError> {
+) -> Result<u64, Option<OperationError>> {
     // An sqlx statement future is about 16 KiB; box it once so the supervisor stays small.
     backstop(Box::pin(async {
         let mut connection = shared
@@ -399,6 +566,7 @@ async fn send_outcome(
         .map_err(OperationError::from)
     }))
     .await
+    .map_err(Some)
 }
 
 async fn execute(

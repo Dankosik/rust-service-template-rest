@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use infra_postgres::{Tx, connection};
+use infra_postgres::{Tx, connection, statement_succeeded};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sqlx::postgres::PgPool;
@@ -42,6 +42,12 @@ pub struct JobId(uuid::Uuid);
 impl JobId {
     pub(crate) fn encode<'a>(&self, buffer: &'a mut [u8; 36]) -> &'a str {
         self.0.hyphenated().encode_lower(buffer)
+    }
+
+    /// A time-ordered id: consecutive enqueues append to the primary key
+    /// instead of writing random index pages.
+    pub(crate) fn new_v7() -> Self {
+        Self(uuid::Uuid::now_v7())
     }
 
     /// The id as the database returns it (`id::text`).
@@ -140,6 +146,7 @@ impl<K: JobKind> Job<K> {
             .await?
             .rows_affected();
         if affected == 1 {
+            statement_succeeded(tx);
             Ok(())
         } else {
             Err(CompleteError::StaleClaim)
@@ -319,6 +326,7 @@ impl Kinds {
                 handler: Arc::new(handler),
                 _kind: PhantomData,
             }),
+            metrics: std::sync::OnceLock::new(),
         });
         self
     }
@@ -473,6 +481,9 @@ pub(crate) struct Registered {
     pub(crate) name: &'static str,
     pub(crate) policy: Policy,
     pub(crate) dispatch: Box<dyn Dispatch>,
+    /// Handles for every completed attempt, registered once the engine starts
+    /// under the installed recorder.
+    pub(crate) metrics: std::sync::OnceLock<crate::attempt::KindMetrics>,
 }
 
 pub(crate) type HandlerFuture =

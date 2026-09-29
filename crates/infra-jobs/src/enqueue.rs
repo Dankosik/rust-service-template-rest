@@ -1,10 +1,11 @@
 //! The one insert path. It runs on the caller's open transaction and never
 //! opens, commits, or rolls one back.
 
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-use infra_postgres::{Tx, connection};
-use sqlx::Row;
+use infra_postgres::{Tx, connection, statement_succeeded};
 
 use crate::kind::{self, JobId, JobKind};
 use crate::trace_context;
@@ -18,12 +19,15 @@ pub const MAX_DELAY: Duration = Duration::from_hours(36_500 * 24);
 
 /// One insert on the caller's connection. A conflict with a live unique key
 /// returns no row.
-const ENQUEUE: &str = "INSERT INTO background_jobs (kind, payload, unique_key, not_before, trace_context, trace_state) \
-     VALUES ($1, $2::jsonb, $3::text COLLATE \"C\", \
+const ENQUEUE: &str = "INSERT INTO background_jobs (id, kind, payload, unique_key, not_before, trace_context, trace_state) \
+     VALUES ($7::uuid, $1, $2::jsonb, $3::text COLLATE \"C\", \
              statement_timestamp() + ($4 * interval '1 microsecond'), $5, $6) \
      ON CONFLICT (kind, unique_key) WHERE unique_key IS NOT NULL AND state IN ('pending', 'running') \
      DO NOTHING \
-     RETURNING id::text AS id";
+     RETURNING 1 AS created";
+
+/// Wake idle workers of this kind when the caller's transaction commits.
+const WAKE: &str = "SELECT pg_notify($1, $2)";
 
 /// Compare one live job's stored payload while retaining its row lock.
 const COMPARE_LIVE_PAYLOAD: &str = "SELECT payload = $3::jsonb \
@@ -123,6 +127,8 @@ pub async fn enqueue<K: JobKind>(
 ) -> Result<Enqueued, EnqueueError> {
     let prepared = prepare(payload, options)?;
     let (traceparent, tracestate) = trace_context::capture();
+    let id = JobId::new_v7();
+    let mut encoded = [0; 36];
     let row = sqlx::query(ENQUEUE)
         .bind(K::NAME)
         .bind(prepared.payload)
@@ -130,18 +136,23 @@ pub async fn enqueue<K: JobKind>(
         .bind(prepared.delay_micros)
         .bind(traceparent.as_deref())
         .bind(tracestate.as_deref())
+        .bind(id.encode(&mut encoded))
         .fetch_optional(&mut *connection(tx))
         .await
         .map_err(EnqueueError::Database)?;
-    let Some(row) = row else {
+    let Some(_created) = row else {
+        statement_succeeded(tx);
         return Ok(Enqueued::Duplicate);
     };
-    let id: String = row.try_get("id").map_err(EnqueueError::Database)?;
-    let Some(id) = JobId::parse(&id) else {
-        return Err(EnqueueError::Database(sqlx::Error::Decode(
-            "job id is not a uuid".into(),
-        )));
-    };
+    if prepared.delay_micros == 0 && wake_due() {
+        sqlx::query(WAKE)
+            .bind(crate::claim::WAKE_CHANNEL)
+            .bind(K::NAME)
+            .execute(&mut *connection(tx))
+            .await
+            .map_err(EnqueueError::Database)?;
+    }
+    statement_succeeded(tx);
     Ok(Enqueued::Created(id))
 }
 
@@ -175,11 +186,33 @@ pub async fn compare_live_payload<K: JobKind>(
         .fetch_optional(&mut *connection(tx))
         .await
         .map_err(EnqueueError::Database)?;
+    statement_succeeded(tx);
     Ok(match same {
         Some(true) => LivePayloadComparison::Same,
         Some(false) => LivePayloadComparison::Different,
         None => LivePayloadComparison::NoLongerLive,
     })
+}
+
+/// At most one wake notification per process in this interval, the claim
+/// cooldown: a job whose notification was skipped becomes due while the
+/// worker woken by the previous one keeps claiming.
+const WAKE_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Whether this enqueue sends the wake notification. Every notifying commit
+/// takes PostgreSQL's notify queue lock, so notifying each enqueue would
+/// serialize concurrent committers (measured: -50% at 16 connections).
+fn wake_due() -> bool {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    static LAST_MICROS: AtomicU64 = AtomicU64::new(0);
+    let origin = *ORIGIN.get_or_init(Instant::now);
+    // Offset by the interval so the first enqueue always notifies.
+    let now = u64::try_from((origin.elapsed() + WAKE_INTERVAL).as_micros()).unwrap_or(u64::MAX);
+    let last = LAST_MICROS.load(Ordering::Relaxed);
+    now.saturating_sub(last) >= u64::try_from(WAKE_INTERVAL.as_micros()).unwrap_or(u64::MAX)
+        && LAST_MICROS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
 }
 
 #[derive(Debug)]
