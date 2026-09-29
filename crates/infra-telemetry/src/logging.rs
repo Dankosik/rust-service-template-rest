@@ -1,14 +1,15 @@
 //! The process logger.
 //!
-//! One subscriber per process: an `EnvFilter` built from the typed level
-//! directive, a JSON or text formatting layer, and, when a tracer provider
+//! One subscriber per process: a filter from the typed level directive
+//! (`EnvFilter` grammar), a JSON or text formatting layer, and, when a tracer provider
 //! exists, the OpenTelemetry layer that gives every span an OpenTelemetry context so
 //! JSON records carry `traceId` and `spanId`. `log` records are bridged by
 //! `tracing-subscriber`'s `tracing-log` feature during `try_init`.
 
+mod json;
+
 use crate::traces::TracerProviderHandle;
-use opentelemetry::trace::TraceContextExt as _;
-use std::sync::{Arc, OnceLock};
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
@@ -56,6 +57,8 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
         directive: options.level.to_owned(),
         source,
     })?;
+    let targets = static_targets(options.level);
+    let filter = targets.is_none().then_some(filter);
     // Source location, thread, and busy/idle timings would be added to every
     // span, sampled or not, at about 2% of a small request's instructions;
     // no dashboard or runbook reads them.
@@ -66,31 +69,34 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
             .with_threads(false)
             .with_tracked_inactivity(false)
     });
-    let trace_dispatch = Arc::new(OnceLock::new());
     let format: Box<dyn Layer<_> + Send + Sync> = match options.format {
-        LoggingFormat::Json => {
-            let mut layer = json_subscriber::layer()
-                .flatten_event(true)
-                .with_current_span(false)
-                .flatten_span_list_on_top_level(true);
-            add_trace_ids(layer.inner_layer_mut(), Arc::clone(&trace_dispatch));
-            Box::new(layer)
-        }
+        LoggingFormat::Json => Box::new(json::JsonLayer::new(std::io::stdout)),
         LoggingFormat::Text => Box::new(tracing_subscriber::fmt::layer().with_target(false)),
     };
-    let dispatch = tracing::Dispatch::new(
-        Registry::default()
-            .with(filter)
-            // template:begin object-storage:telemetry-sdk-log-cap-apply
-            .with(sdk_log_cap(options.level))
-            // template:end object-storage:telemetry-sdk-log-cap-apply
-            .with(otel)
-            .with(format),
-    );
-    let _ = trace_dispatch.set(dispatch.downgrade());
-    dispatch
+    Registry::default()
+        .with(targets)
+        .with(filter)
+        // template:begin object-storage:telemetry-sdk-log-cap-apply
+        .with(sdk_log_cap(options.level))
+        // template:end object-storage:telemetry-sdk-log-cap-apply
+        .with(otel)
+        .with(format)
         .try_init()
         .map_err(|_| LoggingError::AlreadyInstalled)
+}
+
+/// The directive as `Targets` when that filters exactly like `EnvFilter`.
+///
+/// `EnvFilter` takes a shared lock on every span creation, enter, exit,
+/// record, and close to track span directives (`target[span{field}]`);
+/// `Targets` decides once per callsite. `Targets` reads an empty segment
+/// (`info,`) as `error` where `EnvFilter` skips it, so such a directive stays
+/// with `EnvFilter` too.
+fn static_targets(directive: &str) -> Option<Targets> {
+    if directive.contains('[') || directive.split(',').any(str::is_empty) {
+        return None;
+    }
+    directive.parse().ok()
 }
 
 // template:begin object-storage:telemetry-sdk-log-cap
@@ -124,40 +130,6 @@ fn sdk_log_cap(level: &str) -> SdkCap {
 }
 // template:end object-storage:telemetry-sdk-log-cap
 
-// json-subscriber's built-in bridge currently ends at tracing-opentelemetry
-// 0.33. Its dynamic-field API preserves the same wire shape with our 0.34
-// bridge. A weak dispatch avoids both subscriber recursion and a reference cycle.
-fn add_trace_ids<S, W>(
-    layer: &mut json_subscriber::JsonLayer<S, W>,
-    dispatch: Arc<OnceLock<tracing::dispatcher::WeakDispatch>>,
-) where
-    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-{
-    layer.add_multiple_dynamic_fields(move |event, context, writer| {
-        let Some(span) = context.event_span(event) else {
-            return;
-        };
-        let Some(dispatch) = dispatch
-            .get()
-            .and_then(tracing::dispatcher::WeakDispatch::upgrade)
-        else {
-            return;
-        };
-        let Some(otel) = tracing_opentelemetry::get_otel_context(&span.id(), &dispatch) else {
-            return;
-        };
-        let span = otel.span();
-        let ids = span.span_context();
-        let _ = writer.write_field(
-            "openTelemetry",
-            std::collections::BTreeMap::from([
-                ("traceId", ids.trace_id().to_string()),
-                ("spanId", ids.span_id().to_string()),
-            ]),
-        );
-    });
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -166,10 +138,10 @@ mod tests {
     )]
 
     use super::*;
-    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
     use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
     use std::io;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use tracing_opentelemetry::OpenTelemetrySpanExt as _;
     use tracing_subscriber::fmt::MakeWriter;
 
@@ -230,20 +202,10 @@ mod tests {
                 Sampling::NotSampled => Sampler::AlwaysOff,
             })
             .build();
-        let trace_dispatch = Arc::new(OnceLock::new());
-        let mut layer = json_subscriber::layer()
-            .with_writer(buffer.clone())
-            .flatten_event(true)
-            .with_current_span(false)
-            .flatten_span_list_on_top_level(true);
-        add_trace_ids(layer.inner_layer_mut(), Arc::clone(&trace_dispatch));
         let subscriber = Registry::default()
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")))
-            .with(layer);
+            .with(json::JsonLayer::new(buffer.clone()));
         let dispatch = tracing::Dispatch::new(subscriber);
-        trace_dispatch
-            .set(dispatch.downgrade())
-            .expect("trace dynamic field receives one dispatch");
 
         let (trace_id, span_id, sampled) = tracing::dispatcher::with_default(&dispatch, || {
             let span = tracing::info_span!("correlation_parent");
@@ -269,17 +231,8 @@ mod tests {
 
     fn emit_event_without_otel_context(with_span: bool) -> String {
         let buffer = Buffer::default();
-        let trace_dispatch = Arc::new(OnceLock::new());
-        let mut layer = json_subscriber::layer()
-            .with_writer(buffer.clone())
-            .flatten_event(true)
-            .with_current_span(false)
-            .flatten_span_list_on_top_level(true);
-        add_trace_ids(layer.inner_layer_mut(), Arc::clone(&trace_dispatch));
-        let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
-        trace_dispatch
-            .set(dispatch.downgrade())
-            .expect("trace dynamic field receives one dispatch");
+        let dispatch =
+            tracing::Dispatch::new(Registry::default().with(json::JsonLayer::new(buffer.clone())));
 
         tracing::dispatcher::with_default(&dispatch, || {
             if with_span {
@@ -326,6 +279,115 @@ mod tests {
         }
     }
 
+    #[test]
+    fn json_logs_omit_otel_correlation_without_a_span_or_provider() {
+        for (name, with_span) in [("no span", false), ("no provider", true)] {
+            let record = emit_event_without_otel_context(with_span);
+            assert!(
+                !record.contains("\"openTelemetry\""),
+                "{name} must not emit empty or invalid trace ids: {record}"
+            );
+        }
+    }
+
+    #[test]
+    fn json_line_sorts_event_fields_then_merged_span_fields() {
+        let buffer = Buffer::default();
+        let dispatch =
+            tracing::Dispatch::new(Registry::default().with(json::JsonLayer::new(buffer.clone())));
+        tracing::dispatcher::with_default(&dispatch, || {
+            let outer = tracing::info_span!(
+                "outer",
+                request_id = "r-1",
+                shared = "outer",
+                name = "overwritten by the span name",
+                later = tracing::field::Empty,
+                log.target = ?"dropped like a log bridge field",
+                r#kind = ?"k",
+            );
+            let _outer = outer.enter();
+            outer.record("later", 7_u64);
+            tracing::info_span!("inner", shared = "inner").in_scope(|| {
+                tracing::info!(
+                    target: "a\"b",
+                    zeta = 1,
+                    alpha = true,
+                    ratio = f64::NAN,
+                    text = "q\"\n",
+                    "done"
+                );
+            });
+        });
+        let record = buffer.records();
+        let (head, rest) = record
+            .split_once(r#""timestamp":""#)
+            .expect("the line has a timestamp");
+        let (timestamp, tail) = rest.split_once('"').expect("the timestamp is quoted");
+        assert_eq!(
+            head, r#"{"level":"INFO","target":"a\"b","#,
+            "level and target come first: {record}"
+        );
+        assert_eq!(
+            tail,
+            concat!(
+                r##","alpha":true,"message":"done","ratio":null,"text":"q\"\n","zeta":1,"##,
+                r##""kind":"\"k\"","later":7,"name":"inner","request_id":"r-1","shared":"inner"}"##,
+                "\n"
+            ),
+            "event fields, then span fields with the nearest value of a repeated key: {record}"
+        );
+        // RFC 3339 in UTC with microseconds, as tracing-subscriber's timer.
+        let shape: String = timestamp
+            .chars()
+            .map(|c| if c.is_ascii_digit() { '0' } else { c })
+            .collect();
+        assert_eq!(shape, "0000-00-00T00:00:00.000000Z", "{timestamp}");
+    }
+
+    #[test]
+    fn json_line_keeps_the_last_of_many_span_records() {
+        let buffer = Buffer::default();
+        let dispatch =
+            tracing::Dispatch::new(Registry::default().with(json::JsonLayer::new(buffer.clone())));
+        tracing::dispatcher::with_default(&dispatch, || {
+            let span = tracing::info_span!("job", attempt = 0_u64, kind = "email");
+            for attempt in 1..=1000_u64 {
+                span.record("attempt", attempt);
+            }
+            span.in_scope(|| tracing::info!("retrying"));
+        });
+        let record = buffer.records();
+        assert!(
+            record
+                .trim_end()
+                .ends_with(r#""message":"retrying","attempt":1000,"kind":"email","name":"job"}"#),
+            "{record}"
+        );
+    }
+
+    #[test]
+    fn only_directives_without_span_filters_or_empty_segments_become_targets() {
+        for directive in [
+            "info",
+            "info,hyper=warn",
+            "warn,app=debug",
+            "off",
+            "app",
+            "3",
+        ] {
+            assert!(static_targets(directive).is_some(), "{directive}");
+        }
+        for directive in [
+            "info,",
+            ",",
+            "info,,hyper=warn",
+            ",info",
+            "info,[request]=debug",
+        ] {
+            assert!(static_targets(directive).is_none(), "{directive}");
+        }
+    }
+
     // template:begin object-storage:telemetry-sdk-log-cap-test
     #[test]
     fn sdk_debug_records_stay_out_unless_the_directive_names_them() {
@@ -360,15 +422,4 @@ mod tests {
         assert!(!quiet.contains("sdk info"), "{quiet}");
     }
     // template:end object-storage:telemetry-sdk-log-cap-test
-
-    #[test]
-    fn json_logs_omit_otel_correlation_without_a_span_or_provider() {
-        for (name, with_span) in [("no span", false), ("no provider", true)] {
-            let record = emit_event_without_otel_context(with_span);
-            assert!(
-                !record.contains("\"openTelemetry\""),
-                "{name} must not emit empty or invalid trace ids: {record}"
-            );
-        }
-    }
 }
