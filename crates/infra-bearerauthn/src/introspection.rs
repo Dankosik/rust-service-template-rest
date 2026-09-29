@@ -8,7 +8,6 @@ use std::{
 
 use moka::{Expiry, future::Cache};
 use secrecy::ExposeSecret;
-use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
 use crate::{
@@ -148,7 +147,9 @@ impl IntrospectionVerifier {
         let Some(cache) = &self.cache else {
             return self.introspect(token).await;
         };
-        let key: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, token.as_bytes());
+        let mut key = [0_u8; 32];
+        key.copy_from_slice(digest.as_ref());
         cache
             .try_get_with(key, self.introspect(token))
             .await

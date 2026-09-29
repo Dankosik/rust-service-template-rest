@@ -183,30 +183,51 @@ pub(crate) fn describe_verification() {
     );
 }
 
-pub(crate) fn record_verification(
+fn record_verification(
     mode: &'static str,
+    verified: &metrics::Counter,
     result: Result<Principal, VerificationError>,
 ) -> Result<Principal, Failure> {
-    let reason = result
-        .as_ref()
-        .map_or_else(|error| error.reason.label(), |_| "verified");
-    let outcome = if result.is_ok() { "success" } else { "failure" };
-    let counter = match (mode, outcome, reason) {
-        ("jwt", "success", "verified") => {
-            metrics::counter!("authn_token_verifications_total", "mode" => "jwt", "outcome" => "success", "reason" => "verified")
+    let error = match result {
+        Ok(principal) => {
+            verified.increment(1);
+            return Ok(principal);
         }
-        ("introspection", "success", "verified") => {
-            metrics::counter!("authn_token_verifications_total", "mode" => "introspection", "outcome" => "success", "reason" => "verified")
-        }
-        _ => {
-            metrics::counter!("authn_token_verifications_total", "mode" => mode, "outcome" => outcome, "reason" => reason)
-        }
+        Err(error) => error,
     };
-    counter.increment(1);
-    if result.is_err() {
-        tracing::debug!(mode, reason, "authn_verification_failed");
+    let reason = error.reason.label();
+    metrics::counter!("authn_token_verifications_total", "mode" => mode, "outcome" => "failure", "reason" => reason)
+        .increment(1);
+    tracing::debug!(mode, reason, "authn_verification_failed");
+    Err(error.failure)
+}
+
+/// Success counters, registered once at preparation: a success is the hot
+/// path, and a registry lookup per request costs more than the increment.
+/// Bootstrap installs the recorder before it prepares a verifier.
+struct SuccessCounters {
+    verified: metrics::Counter,
+    http: metrics::Counter,
+    grpc: metrics::Counter,
+}
+
+impl SuccessCounters {
+    fn new(mode: &'static str) -> Arc<Self> {
+        let transport = |transport: &'static str| metrics::counter!(authenticate::AUTHN_VERIFICATIONS_METRIC, "transport" => transport, "result" => "success", "failure" => "none");
+        Arc::new(Self {
+            verified: metrics::counter!("authn_token_verifications_total", "mode" => mode, "outcome" => "success", "reason" => "verified"),
+            http: transport("http"),
+            grpc: transport("grpc"),
+        })
     }
-    result.map_err(|error| error.failure)
+
+    pub(crate) fn transport(&self, transport: &str) -> Option<&metrics::Counter> {
+        match transport {
+            "http" => Some(&self.http),
+            "grpc" => Some(&self.grpc),
+            _ => None,
+        }
+    }
 }
 
 /// A verified identity. Construction remains crate-private so callers cannot
@@ -224,7 +245,7 @@ struct Identity {
     subject: Option<String>,
     client_id: Option<String>,
     scopes: Vec<String>,
-    payload: Arc<str>,
+    payload: String,
 }
 
 impl Principal {
@@ -234,7 +255,7 @@ impl Principal {
         client_id: Option<String>,
         scopes: Vec<String>,
         expiry_epoch_seconds: u64,
-        payload: Arc<str>,
+        payload: String,
     ) -> Self {
         Self {
             identity: Arc::new(Identity {
@@ -360,7 +381,10 @@ pub mod test_support {
 
 /// A prepared real authentication engine.
 #[derive(Clone)]
-pub struct Verifier(Engine);
+pub struct Verifier {
+    engine: Engine,
+    counters: Arc<SuccessCounters>,
+}
 
 #[derive(Clone)]
 enum Engine {
@@ -375,13 +399,19 @@ enum Engine {
 impl Verifier {
     // template:begin oidc-jwt:authn-jwt-verifier
     pub(crate) fn jwt(engine: jwt::JwtVerifier) -> Self {
-        Self(Engine::Jwt(Arc::new(engine)))
+        Self {
+            engine: Engine::Jwt(Arc::new(engine)),
+            counters: SuccessCounters::new("jwt"),
+        }
     }
     // template:end oidc-jwt:authn-jwt-verifier
 
     // template:begin oidc-introspection:authn-introspection-verifier
     pub(crate) fn introspection(engine: introspection::IntrospectionVerifier) -> Self {
-        Self(Engine::Introspection(Arc::new(engine)))
+        Self {
+            engine: Engine::Introspection(Arc::new(engine)),
+            counters: SuccessCounters::new("introspection"),
+        }
     }
     // template:end oidc-introspection:authn-introspection-verifier
 
@@ -390,7 +420,7 @@ impl Verifier {
     /// # Errors
     /// Returns [`Failure`] for invalid token evidence or an unavailable provider.
     pub async fn verify(&self, token: &BearerToken<'_>) -> Result<Principal, Failure> {
-        let (mode, result) = match &self.0 {
+        let (mode, result) = match &self.engine {
             // template:begin oidc-jwt:authn-jwt-verify
             Engine::Jwt(engine) => ("jwt", engine.verify(token).await),
             // template:end oidc-jwt:authn-jwt-verify
@@ -398,7 +428,7 @@ impl Verifier {
             Engine::Introspection(engine) => ("introspection", engine.verify(token).await),
             // template:end oidc-introspection:authn-introspection-verify
         };
-        record_verification(mode, result)
+        record_verification(mode, &self.counters.verified, result)
     }
 }
 
