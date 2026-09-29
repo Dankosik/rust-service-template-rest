@@ -117,7 +117,7 @@ outcome is unknown by construction.
 
 | Decision | Choice and reason |
 | --- | --- |
-| Retry | The SDK standard retryer, three attempts, for get, head, delete, and a bytes put without a condition (replaying identical bytes is idempotent). A create-only put runs exactly one attempt through a per-operation `config_override`, so a 412 can never answer a retry of this call's own lost success (Go F3). A streamed body cannot be replayed, so the SDK makes one attempt. |
+| Retry | The SDK standard retryer, three attempts with each delay capped at 1 s (the SDK default of 20 s would outlast an interactive timeout), for get, head, delete, and a bytes put without a condition (replaying identical bytes is idempotent). A create-only put runs exactly one attempt through a per-operation `config_override`, so a 412 can never answer a retry of this call's own lost success (Go F3). A streamed body cannot be replayed, so the SDK makes one attempt. |
 | Timeouts | `object_storage.operation_timeout` bounds one call from start to response headers, retries included: default `5s` (pricing's put, head, and delete budgets), inclusive `1s` to `15m`. Connect is the SDK's 3.1 s from the pinned behavior version. A download body is bounded by the SDK's stalled-stream protection (no progress for 5 s fails it), not by the operation timeout. |
 | Behavior version | `BehaviorVersion::v2026_01_12()` in code, not the `behavior-version-latest` feature, so an SDK bump cannot silently change retry, timeout, or proxy defaults. |
 | Admission | Reject, do not queue: `Semaphore::try_acquire_owned` refuses excess work with `Busy`. `object_storage.max_concurrency`, default 8, inclusive 1 to 512. Go's fixed 4 is too low for document-processing's per-request reads. The permit is held through a download's body. Worst-case buffered memory is `max_concurrency × max_object_bytes` (64 MiB by default); the guide states the formula. |
@@ -127,7 +127,10 @@ outcome is unknown by construction.
 
 - The SDK computes and validates checksums; the adapter computes none.
   Both `request_checksum_calculation` and `response_checksum_validation` are
-  `WhenRequired`, so nothing the provider has not proven is sent by default.
+  `WhenRequired` on the client, so nothing the provider has not proven is
+  sent by default. Under `WhenRequired` the SDK sends a named algorithm as a
+  header without computing it (found while implementing), so a put that
+  carries CRC64NVME switches that one call to `WhenSupported`.
 - Uploads name CRC64NVME explicitly where the provider accepts it: always on
   Amazon (header for bytes, `aws-chunked` trailer for a stream); on R2 only
   for a bytes body, where the SDK sends it as a signed header (R2 supports
@@ -188,11 +191,10 @@ outcome is unknown by construction.
   `outcome`, and `error.type`. No key, bucket, endpoint, URL, or provider
   message is ever recorded.
 - The SDK logs endpoint parameters, which include the object key, at DEBUG
-  and the whole request at TRACE. When the profile is retained, the
-  composition root caps `aws_smithy_runtime`, `aws_smithy_runtime_api`,
-  `aws_sigv4`, and `aws_sdk_s3` at `info` unless `log.level` names one of
-  them, so a global `debug` never exports keys. Features still keep personal
-  data out of keys.
+  and the whole request at TRACE. When the profile is retained, the process
+  subscriber (both binaries) keeps every `aws_*` target at INFO or quieter
+  unless `log.level` names an `aws_` target, so a global `debug` never
+  records or exports keys. Features still keep personal data out of keys.
 
 ### Proof
 
