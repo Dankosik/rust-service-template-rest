@@ -1,4 +1,75 @@
-# Bearer authentication allocation reductions
+# Bearer authentication performance
+
+## Parsed-key JWS verification
+
+A second September 28, 2026 pass started from `4824ffc`. Profiling showed that
+outside the signature arithmetic, `jsonwebtoken::decode` rebuilt the aws-lc
+RSA key (including its Montgomery setup) on every call, parsed the JOSE header
+three times and the payload three times, and cloned the decoding key. The
+retained changes are:
+
+- Each admitted JWK is parsed once into an aws-lc `ParsedPublicKey` per
+  algorithm it serves; the signature is verified against it directly.
+- The header is decoded once with `jsonwebtoken`'s `Header` type, so header
+  admission rules are unchanged. The payload is decoded once and read once:
+  registered claims follow the rules `jsonwebtoken` applied, and claim strings
+  borrow from the payload instead of being copied.
+- Success counters are registered once per verifier; each request increments a
+  handle instead of looking the key up in the recorder registry.
+- The introspection cache key uses aws-lc SHA-256, which has vector code,
+  instead of the portable `sha2` implementation.
+- The bearer grammar check is one vectorizable pass, and the principal keeps
+  the decoded payload instead of copying it into a second allocation.
+
+Measured on a dedicated DigitalOcean c-4 (lon1, Xeon Platinum 8168, Ubuntu
+24.04, Rust 1.98.1, workspace release profile with symbols). Each figure is the
+median of five interleaved baseline/candidate process rounds, pinned to one
+core. Instructions come from `perf stat` with setup subtracted. Both sides were
+built with branch and function alignment
+(`-mbranches-within-32B-boundaries`, 64-byte functions), because an unaligned
+build of an unchanged tree moved RS256 between about 27.7 and 31 µs from code
+placement alone.
+
+| Workload | Time per operation | Instructions | Allocations (bytes) |
+| --- | --- | --- | --- |
+| RS256 authenticate | 39.8 → 23.6 µs (−41%) | −28% | 43 → 21 (3746 → 1382) |
+| PS256 authenticate | 41.9 → 25.7 µs (−39%) | −26% | 43 → 21 |
+| RS256, RFC 9068 profile | 39.7 → 23.6 µs (−40%) | −28% | 43 → 21 |
+| ES256 authenticate | 76.0 → 63.8 µs (−16%) | −10% | 42 → 21 |
+| EdDSA authenticate | 55.5 → 46.1 µs (−17%) | −12% | 42 → 21 |
+| Cached introspection, 43-byte token | 1110 → 636 ns (−43%) | −42% | 3 → 1 |
+| Cached introspection, 1 KiB token | 7.33 → 3.42 µs (−53%) | −50% | 3 → 1 |
+| RS256, 4 threads, per operation | 18.5 → 11.8 µs (−36%) | | |
+| Cached introspection, 4 threads | 720 → 426 ns (−41%) | | |
+
+A default (unaligned) build gave RS256 −35%, ES256 −12% and cached
+introspection −45%. Four threads on the four vCPUs ran RS256 about 2.1 times
+faster than one thread both before and after the change; the cause (likely
+host hyperthreads) was not investigated, and key-set sharing was not changed. The JWT path now spends about 76% of its time in aws-lc
+signature arithmetic and hashing; cached introspection spends about a quarter
+in SHA-256 (this CPU has no SHA extensions) and a quarter in `moka`.
+
+Semantics were checked with a differential corpus of 1298 cases: signed tokens
+varying every read claim through 31 value shapes, check-order pairs, duplicate
+members, header members, the compact form and signature encodings, under both
+token profiles, plus introspection responses. Every accept, reject and failure
+class matched the baseline. Only the diagnostic `reason` label changed for some
+malformed tokens: a wrongly typed `iss`, `aud` or `exp` is `malformed_claims`
+rather than `missing_claim`, a fractional `exp` is `malformed_claims` rather
+than `expired`, and an undecodable signature is `signature` rather than
+`malformed_claims`. An undecodable signature is also rejected before key
+lookup, so with an unknown `kid` it no longer requests a JWKS refresh.
+
+Rejected or not retained:
+
+- Parsing only the header members the verifier reads: about 3% fewer
+  instructions, but it accepted signed headers whose unused members
+  `jsonwebtoken` rejects, such as a non-array `x5c`.
+- A faster cache or a non-cryptographic cache key: `moka` owns the coalesced
+  fill and zero-lifetime retention, and the SHA-256 key keeps raw tokens out of
+  memory.
+
+## Allocation reductions
 
 The September 28, 2026 investigation compared `infra-bearerauthn` at
 `9631b0020e9efbf5df5026e005d898d083ce0db5` with eleven isolated hypotheses and
@@ -19,7 +90,7 @@ metric label, redaction or custom-claim duplicate-member rule is relaxed.
 The delivery uses the measured request-path mechanisms; startup/test setup
 reuses one ClaimPolicy instead of temporary clones, and formatting is normalized.
 
-## Measurement scope
+### Measurement scope
 
 The test host was one dedicated DigitalOcean c-4 in lon1: four vCPUs, 8 GiB RAM,
 Intel Xeon Platinum 8280, Ubuntu 24.04, Rust 1.98.1. Release builds used the

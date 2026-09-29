@@ -4,7 +4,7 @@
 
 use crate::{Failure, Principal, VerificationError, VerificationReason};
 use serde::Deserialize;
-use std::sync::Arc;
+use std::{borrow::Cow, fmt};
 // template:begin oidc-jwt:authn-claims-jwt-import
 use crate::TokenProfile;
 // template:end oidc-jwt:authn-claims-jwt-import
@@ -21,38 +21,92 @@ impl ClaimPolicy {
     pub(crate) fn new(issuer: String, audiences: Vec<String>) -> Self {
         Self { issuer, audiences }
     }
-    // template:begin oidc-jwt:authn-claims-jwt-policy-accessors
-    pub(crate) fn issuer(&self) -> &str {
-        &self.issuer
-    }
-    pub(crate) fn audiences(&self) -> &[String] {
-        &self.audiences
-    }
-    // template:end oidc-jwt:authn-claims-jwt-policy-accessors
 }
 
-/// A `scope` or `scp` value: one space-delimited string or an array of strings.
+/// A claim holding one string or an array of strings: `aud`, and `scope` or
+/// `scp`, whose single string is space-delimited. Strings borrow from the
+/// payload unless they contain escapes.
+enum Values<'a> {
+    One(Cow<'a, str>),
+    Many(Vec<Cow<'a, str>>),
+}
+
+impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor<'a>(std::marker::PhantomData<Values<'a>>);
+        impl<'de: 'a, 'a> serde::de::Visitor<'de> for Visitor<'a> {
+            type Value = Values<'a>;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a string or an array of strings")
+            }
+            fn visit_borrowed_str<E: serde::de::Error>(
+                self,
+                value: &'de str,
+            ) -> Result<Self::Value, E> {
+                Ok(Values::One(Cow::Borrowed(value)))
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(Values::One(Cow::Owned(value.to_owned())))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut values = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(64));
+                while let Some(Borrowed(value)) = seq.next_element()? {
+                    values.push(value);
+                }
+                Ok(Values::Many(values))
+            }
+        }
+        deserializer.deserialize_any(Visitor(std::marker::PhantomData))
+    }
+}
+
+/// A string that borrows from the payload unless it contains escapes.
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum Scope {
-    Delimited(String),
-    List(Vec<String>),
+struct Borrowed<'a>(#[serde(borrow)] Cow<'a, str>);
+
+impl Values<'_> {
+    fn contains_any(&self, accepted: &[String]) -> bool {
+        match self {
+            Self::One(value) => accepted.iter().any(|accepted| accepted == value),
+            Self::Many(values) => values
+                .iter()
+                .any(|value| accepted.iter().any(|accepted| accepted == value)),
+        }
+    }
 }
 
 // template:begin oidc-jwt:authn-claims-jwt-type
-/// The JWT claims this crate reads. jsonwebtoken's `Validation` has already
-/// checked issuer, audience, expiry and not-before.
+/// The JWT claims this crate reads, after the signature has been verified.
 #[derive(Deserialize)]
-pub(crate) struct JwtClaims {
-    exp: u64,
-    sub: Option<String>,
-    client_id: Option<String>,
-    azp: Option<String>,
-    appid: Option<String>,
-    cid: Option<String>,
-    scope: Option<Scope>,
-    scp: Option<Scope>,
-    jti: Option<String>,
+pub(crate) struct JwtClaims<'a> {
+    /// A string or, as jsonwebtoken reads it, an array naming the issuer.
+    #[serde(borrow)]
+    iss: Option<Values<'a>>,
+    #[serde(borrow)]
+    aud: Option<Values<'a>>,
+    exp: Option<u64>,
+    /// A `null` or non-numeric `nbf` is malformed, not absent.
+    #[serde(default, deserialize_with = "numeric_date")]
+    nbf: Option<u64>,
+    #[serde(borrow)]
+    sub: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    client_id: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    azp: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    appid: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    cid: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    scope: Option<Values<'a>>,
+    #[serde(borrow)]
+    scp: Option<Values<'a>>,
+    #[serde(borrow)]
+    jti: Option<Cow<'a, str>>,
     iat: Option<u64>,
 }
 // template:end oidc-jwt:authn-claims-jwt-type
@@ -66,45 +120,42 @@ struct Envelope {
 
 /// The claims an active RFC 7662 response must or may supply.
 #[derive(Deserialize)]
-struct ActiveClaims {
-    iss: Option<String>,
-    aud: Option<Audience>,
+struct ActiveClaims<'a> {
+    #[serde(borrow)]
+    iss: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    aud: Option<Values<'a>>,
     exp: Option<u64>,
     nbf: Option<u64>,
-    sub: Option<String>,
-    client_id: Option<String>,
-    scope: Option<Scope>,
-    scp: Option<Scope>,
+    #[serde(borrow)]
+    sub: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    client_id: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    scope: Option<Values<'a>>,
+    #[serde(borrow)]
+    scp: Option<Values<'a>>,
 }
 // template:end oidc-introspection:authn-claims-introspection-envelope
 
-// template:begin oidc-introspection:authn-claims-audience-values
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Audience {
-    One(String),
-    Many(Vec<String>),
-}
-
-impl Audience {
-    fn values(&self) -> &[String] {
-        match self {
-            Self::One(value) => std::slice::from_ref(value),
-            Self::Many(values) => values,
-        }
-    }
-}
-// template:end oidc-introspection:authn-claims-audience-values
-
 // template:begin oidc-jwt:authn-claims-jwt-validation
+/// Validates a verified JWT payload: registered claims in RFC 7519 order,
+/// then identity and the selected token profile.
 pub(crate) fn validate_jwt_claims(
-    payload: &str,
+    payload: Vec<u8>,
     policy: &ClaimPolicy,
     token_profile: TokenProfile,
     now: u64,
 ) -> Result<Principal, VerificationError> {
-    let claims: JwtClaims = serde_json::from_str(payload)
-        .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))?;
+    let invalid = VerificationError::invalid;
+    let payload =
+        String::from_utf8(payload).map_err(|_| invalid(VerificationReason::MalformedClaims))?;
+    let claims: JwtClaims<'_> =
+        serde_json::from_str(&payload).map_err(|_| invalid(VerificationReason::MalformedClaims))?;
+    let (Some(issuer), Some(audience), Some(expiry)) = (claims.iss, claims.aud, claims.exp) else {
+        return Err(invalid(VerificationReason::MissingClaim));
+    };
+    check_registered_claims(&issuer, &audience, expiry, claims.nbf, policy, now)?;
     let subject = non_empty(claims.sub);
     let has_client_id = claims
         .client_id
@@ -135,9 +186,58 @@ pub(crate) fn validate_jwt_claims(
         subject,
         client_id,
         scopes,
-        claims.exp,
-        Arc::from(payload),
+        expiry,
+        payload,
     ))
+}
+
+/// A `NumericDate`: an unsigned integer, or a finite non-negative number rounded
+/// to one, as jsonwebtoken reads `nbf`.
+fn numeric_date<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    struct Visitor;
+    impl serde::de::Visitor<'_> for Visitor {
+        type Value = Option<u64>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a NumericDate")
+        }
+        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+            Ok(Some(value))
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+            if value.is_finite() && value >= 0.0 && value < u64::MAX as f64 {
+                Ok(Some(value.round() as u64))
+            } else {
+                Err(E::custom("NumericDate out of range"))
+            }
+        }
+    }
+    deserializer.deserialize_any(Visitor)
+}
+
+/// JWT registered-claim order: lifetime first, then issuer and audience.
+fn check_registered_claims(
+    issuer: &Values<'_>,
+    audience: &Values<'_>,
+    expiry: u64,
+    not_before: Option<u64>,
+    policy: &ClaimPolicy,
+    now: u64,
+) -> Result<(), VerificationError> {
+    check_lifetime(expiry, not_before, now)?;
+    if !issuer.contains_any(std::slice::from_ref(&policy.issuer)) {
+        return Err(VerificationError::invalid(VerificationReason::Issuer));
+    }
+    if !audience.contains_any(&policy.audiences) {
+        return Err(VerificationError::invalid(VerificationReason::Audience));
+    }
+    Ok(())
 }
 // template:end oidc-jwt:authn-claims-jwt-validation
 
@@ -161,29 +261,17 @@ pub(crate) fn validate_introspection_claims(
     if !envelope.active {
         return Err(invalid(VerificationReason::Inactive));
     }
-    let claims: ActiveClaims = serde_json::from_str(payload).map_err(|_| malformed())?;
+    let claims: ActiveClaims<'_> = serde_json::from_str(payload).map_err(|_| malformed())?;
     let (Some(issuer), Some(audience), Some(expiry)) = (claims.iss, claims.aud, claims.exp) else {
         return Err(invalid(VerificationReason::MissingClaim));
     };
     if issuer != policy.issuer {
         return Err(invalid(VerificationReason::Issuer));
     }
-    if !audience
-        .values()
-        .iter()
-        .any(|value| policy.audiences.contains(value))
-    {
+    if !audience.contains_any(&policy.audiences) {
         return Err(invalid(VerificationReason::Audience));
     }
-    if now > expiry.saturating_add(LEEWAY_SECONDS) {
-        return Err(invalid(VerificationReason::Expired));
-    }
-    if claims
-        .nbf
-        .is_some_and(|not_before| not_before > now.saturating_add(LEEWAY_SECONDS))
-    {
-        return Err(invalid(VerificationReason::NotYetValid));
-    }
+    check_lifetime(expiry, claims.nbf, now)?;
     let subject = non_empty(claims.sub);
     let client_id = non_empty(claims.client_id);
     if subject.is_none() && client_id.is_none() {
@@ -196,25 +284,36 @@ pub(crate) fn validate_introspection_claims(
         client_id,
         scopes,
         expiry,
-        Arc::from(payload),
+        payload.to_owned(),
     ))
 }
 // template:end oidc-introspection:authn-claims-introspection-validation
 
-fn non_empty(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.is_empty())
+/// Expiry and not-before, each with the same clock-skew leeway.
+fn check_lifetime(expiry: u64, not_before: Option<u64>, now: u64) -> Result<(), VerificationError> {
+    if now > expiry.saturating_add(LEEWAY_SECONDS) {
+        return Err(VerificationError::invalid(VerificationReason::Expired));
+    }
+    if not_before.is_some_and(|not_before| not_before > now.saturating_add(LEEWAY_SECONDS)) {
+        return Err(VerificationError::invalid(VerificationReason::NotYetValid));
+    }
+    Ok(())
+}
+
+fn non_empty(value: Option<Cow<'_, str>>) -> Option<String> {
+    value.filter(|value| !value.is_empty()).map(Cow::into_owned)
 }
 
 /// Returns sorted, unique RFC 6749 scope tokens with their exact case.
 fn normalize_scopes(
-    scope: Option<Scope>,
+    scope: Option<Values<'_>>,
     malformed: Failure,
 ) -> Result<Vec<String>, VerificationError> {
-    let mut values = match scope {
+    let mut values: Vec<String> = match scope {
         None => Vec::new(),
-        Some(Scope::Delimited(value)) if value.is_empty() => Vec::new(),
-        Some(Scope::Delimited(value)) => value.split(' ').map(ToOwned::to_owned).collect(),
-        Some(Scope::List(values)) => values,
+        Some(Values::One(value)) if value.is_empty() => Vec::new(),
+        Some(Values::One(value)) => value.split(' ').map(ToOwned::to_owned).collect(),
+        Some(Values::Many(values)) => values.into_iter().map(Cow::into_owned).collect(),
     };
     if !values.iter().all(|value| is_scope_token(value)) {
         return Err(VerificationError::new(malformed, VerificationReason::Scope));
@@ -251,9 +350,11 @@ mod tests {
     // template:begin oidc-jwt:authn-claims-jwt-normalization-test
     #[test]
     fn jwt_identity_uses_the_first_nonempty_client_alias_and_treats_null_as_absent() {
-        let verify = |claims: serde_json::Value| {
+        let verify = |mut claims: serde_json::Value| {
+            claims["iss"] = "https://issuer.example".into();
+            claims["aud"] = "api".into();
             validate_jwt_claims(
-                &claims.to_string(),
+                claims.to_string().into_bytes(),
                 &policy(),
                 TokenProfile::ResourceServer,
                 100,
@@ -275,17 +376,104 @@ mod tests {
     }
 
     #[test]
+    fn registered_claims_follow_the_jsonwebtoken_rules_in_its_order() {
+        let verify = |extra: serde_json::Value| {
+            let mut claims = serde_json::json!({
+                "iss": "https://issuer.example", "aud": "api", "exp": 1000, "sub": "subject",
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                claims[key] = value.clone();
+            }
+            validate_jwt_claims(
+                claims.to_string().into_bytes(),
+                &policy(),
+                TokenProfile::ResourceServer,
+                1000,
+            )
+            .map(|principal| principal.expires_at())
+            .map_err(|error| error.reason)
+        };
+        for (extra, expected) in [
+            (serde_json::json!({}), Ok(1000)),
+            (serde_json::json!({"aud": ["other", "api"]}), Ok(1000)),
+            (serde_json::json!({"exp": 970, "nbf": 1030}), Ok(970)),
+            (serde_json::json!({"nbf": 1030.4}), Ok(1000)),
+            (
+                serde_json::json!({"iss": null}),
+                Err(VerificationReason::MissingClaim),
+            ),
+            (
+                serde_json::json!({"aud": null}),
+                Err(VerificationReason::MissingClaim),
+            ),
+            (
+                serde_json::json!({"exp": 969}),
+                Err(VerificationReason::Expired),
+            ),
+            (
+                serde_json::json!({"nbf": 1031}),
+                Err(VerificationReason::NotYetValid),
+            ),
+            (
+                serde_json::json!({"iss": "https://issuer.example/"}),
+                Err(VerificationReason::Issuer),
+            ),
+            (
+                serde_json::json!({"aud": ["other"]}),
+                Err(VerificationReason::Audience),
+            ),
+            (
+                serde_json::json!({"aud": []}),
+                Err(VerificationReason::Audience),
+            ),
+            // Lifetime is checked before issuer and audience.
+            (
+                serde_json::json!({"exp": 1, "iss": "other"}),
+                Err(VerificationReason::Expired),
+            ),
+            (
+                serde_json::json!({"nbf": "1"}),
+                Err(VerificationReason::MalformedClaims),
+            ),
+            (
+                serde_json::json!({"exp": 1000.5}),
+                Err(VerificationReason::MalformedClaims),
+            ),
+            (
+                serde_json::json!({"iss": ["other", "https://issuer.example"]}),
+                Ok(1000),
+            ),
+            (
+                serde_json::json!({"iss": []}),
+                Err(VerificationReason::Issuer),
+            ),
+            (
+                serde_json::json!({"aud": [1]}),
+                Err(VerificationReason::MalformedClaims),
+            ),
+        ] {
+            assert_eq!(verify(extra.clone()), expected, "{extra}");
+        }
+    }
+
+    #[test]
     fn rfc9068_requires_its_claims_and_a_past_issue_time() {
         let verify = |extra: serde_json::Value| {
             let mut claims = serde_json::json!({
+                "iss": "https://issuer.example", "aud": "api",
                 "exp": 200, "sub": "subject", "client_id": "client", "jti": "id", "iat": 100,
             });
             claims
                 .as_object_mut()
                 .unwrap()
                 .extend(extra.as_object().unwrap().clone());
-            validate_jwt_claims(&claims.to_string(), &policy(), TokenProfile::Rfc9068, 100)
-                .map_err(|error| error.reason)
+            validate_jwt_claims(
+                claims.to_string().into_bytes(),
+                &policy(),
+                TokenProfile::Rfc9068,
+                100,
+            )
+            .map_err(|error| error.reason)
         };
         assert!(verify(serde_json::json!({})).is_ok());
         for missing in ["sub", "client_id", "jti", "iat"] {
@@ -456,7 +644,7 @@ mod tests {
             // template:begin oidc-jwt:authn-claims-scope-jwt-assertion
             {
                 let result = validate_jwt_claims(
-                    &response.to_string(),
+                    response.to_string().into_bytes(),
                     &policy(),
                     TokenProfile::ResourceServer,
                     100,

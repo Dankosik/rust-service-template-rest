@@ -1,18 +1,14 @@
-//! OIDC discovery, library-backed JWT verification, and key admission.
+//! OIDC discovery, JWS verification with pre-parsed aws-lc keys, and key admission.
 
 use std::{fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
-use aws_lc_rs::signature::{self, ParsedPublicKey, RsaPublicKeyComponents};
+use aws_lc_rs::signature::{self, ParsedPublicKey, RsaParameters, RsaPublicKeyComponents};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::{
-    Algorithm, DecodingKey, Validation,
-    crypto::aws_lc::DEFAULT_PROVIDER,
-    decode, decode_header,
-    errors::ErrorKind,
+    Algorithm, Header,
     jwk::{AlgorithmParameters, EllipticCurve, Jwk, KeyAlgorithm, KeyOperations, PublicKeyUse},
 };
 use serde::Deserialize;
-use serde_json::value::RawValue;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -66,7 +62,6 @@ pub(crate) struct JwtVerifier {
     claim_policy: ClaimPolicy,
     token_profile: TokenProfile,
     algorithms: Vec<JwtAlgorithm>,
-    validations: Vec<Validation>,
     keys: Arc<KeyStore>,
 }
 
@@ -76,14 +71,12 @@ impl fmt::Debug for JwtVerifier {
     }
 }
 
-/// Why no installed key yielded a verified payload.
+/// Why no installed key verified the signature.
 enum DecodeError {
     /// No installed key has the token's `kid` and algorithm.
     NoCandidate,
     /// Candidate keys exist, but none verified the signature.
     BadSignature,
-    /// A key verified the signature and the library rejected the claims.
-    Rejected(VerificationError),
 }
 
 impl DecodeError {
@@ -94,7 +87,6 @@ impl DecodeError {
         match self {
             Self::NoCandidate => true,
             Self::BadSignature => kid.is_none(),
-            Self::Rejected(_) => false,
         }
     }
 }
@@ -104,7 +96,6 @@ impl From<DecodeError> for VerificationError {
         match error {
             DecodeError::NoCandidate => Self::invalid(VerificationReason::UnknownKey),
             DecodeError::BadSignature => Self::invalid(VerificationReason::Signature),
-            DecodeError::Rejected(error) => error,
         }
     }
 }
@@ -114,10 +105,15 @@ impl JwtVerifier {
         &self,
         token: &BearerToken<'_>,
     ) -> Result<Principal, VerificationError> {
-        let header = decode_header(token.as_bytes())
-            .map_err(|_| VerificationError::invalid(VerificationReason::Header))?;
+        let malformed = || VerificationError::invalid(VerificationReason::Header);
+        let token = token.as_bytes();
+        let (message, signature) = split_last_dot(token).ok_or_else(malformed)?;
+        let (header, payload) = split_last_dot(message).ok_or_else(malformed)?;
+        let header = URL_SAFE_NO_PAD.decode(header).map_err(|_| malformed())?;
+        // jsonwebtoken's `Header` keeps the library's header admission rules.
+        let header: Header = serde_json::from_slice(&header).map_err(|_| malformed())?;
         if header.crit.as_ref().is_some_and(|crit| !crit.is_empty()) {
-            return Err(VerificationError::invalid(VerificationReason::Header));
+            return Err(malformed());
         }
         let algorithm = JwtAlgorithm::from_jsonwebtoken(header.alg)
             .filter(|algorithm| self.algorithms.contains(algorithm))
@@ -127,60 +123,43 @@ impl JwtVerifier {
         {
             return Err(VerificationError::invalid(VerificationReason::Profile));
         }
+        let mut signature_bytes = [0_u8; MAX_SIGNATURE_BYTES];
+        let signature = URL_SAFE_NO_PAD
+            .decode_slice(signature, &mut signature_bytes)
+            .map(|length| &signature_bytes[..length])
+            .map_err(|_| VerificationError::invalid(VerificationReason::Signature))?;
         let kid = header.kid.as_deref();
-        let payload = match self.decode(&self.keys.keys(), token, kid, algorithm) {
-            Ok(payload) => payload,
+        match self.keys.keys().verify(message, signature, kid, algorithm) {
+            Ok(()) => {}
             Err(miss) if miss.may_need_new_keys(kid) => {
-                self.decode_after_refresh(token, kid, algorithm, miss)
-                    .await?
+                self.decode_after_refresh(message, signature, kid, algorithm, miss)
+                    .await?;
             }
             Err(error) => return Err(error.into()),
-        };
+        }
+        let payload = URL_SAFE_NO_PAD
+            .decode(payload)
+            .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))?;
         validate_jwt_claims(
-            payload.get(),
+            payload,
             &self.claim_policy,
             self.token_profile,
             jsonwebtoken::get_current_timestamp(),
         )
     }
 
-    /// Tries every installed key that fits the token; the first valid signature wins.
-    fn decode(
-        &self,
-        keys: &KeySet,
-        token: &BearerToken<'_>,
-        kid: Option<&str>,
-        algorithm: JwtAlgorithm,
-    ) -> Result<Box<RawValue>, DecodeError> {
-        let validation = self
-            .validations
-            .iter()
-            .find(|validation| validation.algorithms.contains(&algorithm.jsonwebtoken()))
-            .ok_or(DecodeError::NoCandidate)?;
-        let mut miss = DecodeError::NoCandidate;
-        for key in keys.candidates(kid, algorithm) {
-            match decode::<Box<RawValue>>(token.as_bytes(), &key.decoding_key, validation) {
-                Ok(data) => return Ok(data.claims),
-                Err(error) if *error.kind() == ErrorKind::InvalidSignature => {
-                    miss = DecodeError::BadSignature;
-                }
-                Err(error) => {
-                    return Err(DecodeError::Rejected(jwt_validation_error(error.kind())));
-                }
-            }
-        }
-        Err(miss)
-    }
-
     async fn decode_after_refresh(
         &self,
-        token: &BearerToken<'_>,
+        message: &[u8],
+        signature: &[u8],
         kid: Option<&str>,
         algorithm: JwtAlgorithm,
         miss: DecodeError,
-    ) -> Result<Box<RawValue>, VerificationError> {
+    ) -> Result<(), VerificationError> {
         match self.keys.refresh_for_unknown_key().await {
-            UnknownKeyRefresh::Refreshed(keys) => Ok(self.decode(&keys, token, kid, algorithm)?),
+            UnknownKeyRefresh::Refreshed(keys) => {
+                Ok(keys.verify(message, signature, kid, algorithm)?)
+            }
             UnknownKeyRefresh::StillUnknown => Err(miss.into()),
             UnknownKeyRefresh::Unavailable => Err(VerificationError::new(
                 Failure::Unavailable,
@@ -190,22 +169,13 @@ impl JwtVerifier {
     }
 }
 
-fn jwt_validation_error(error: &ErrorKind) -> VerificationError {
-    let reason = match error {
-        ErrorKind::MissingRequiredClaim(_) => VerificationReason::MissingClaim,
-        ErrorKind::ExpiredSignature => VerificationReason::Expired,
-        ErrorKind::ImmatureSignature => VerificationReason::NotYetValid,
-        ErrorKind::InvalidIssuer => VerificationReason::Issuer,
-        ErrorKind::InvalidAudience => VerificationReason::Audience,
-        ErrorKind::InvalidAlgorithm
-        | ErrorKind::InvalidAlgorithmName
-        | ErrorKind::UnsupportedAlgorithm
-        | ErrorKind::MissingAlgorithm => VerificationReason::Algorithm,
-        ErrorKind::InvalidSignature => VerificationReason::Signature,
-        _ => VerificationReason::MalformedClaims,
-    };
-    VerificationError::invalid(reason)
+fn split_last_dot(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    let dot = bytes.iter().rposition(|byte| *byte == b'.')?;
+    Some((&bytes[..dot], &bytes[dot + 1..]))
 }
+
+/// The largest signature an admitted key produces: RSA-8192.
+const MAX_SIGNATURE_BYTES: usize = 1024;
 
 /// Prepares initial trust before traffic admission and returns the one refresh
 /// future for bootstrap to spawn through its process tracker.
@@ -218,7 +188,6 @@ pub async fn prepare_jwt(
     options: JwtOptions,
     cancel: CancellationToken,
 ) -> Result<(Verifier, RefreshTask), PreparationError> {
-    ensure_crypto_provider()?;
     let provider = ProviderClient::new()?;
     prepare_with_provider(options, provider, cancel).await
 }
@@ -266,14 +235,8 @@ async fn prepare_with_provider(
     })?;
     let keys = KeyStore::new(Arc::new(keys));
     let claim_policy = ClaimPolicy::new(options.issuer.as_str().to_owned(), options.audiences);
-    let validations = options
-        .algorithms
-        .iter()
-        .map(|algorithm| validation_for(*algorithm, &claim_policy))
-        .collect();
     let verifier = JwtVerifier {
         claim_policy,
-        validations,
         token_profile: options.token_profile,
         algorithms: options.algorithms.clone(),
         keys: keys.clone(),
@@ -299,17 +262,6 @@ impl PreparationError {
             configured: configured.as_str().to_owned(),
             discovered,
         }
-    }
-}
-
-fn ensure_crypto_provider() -> Result<(), PreparationError> {
-    match DEFAULT_PROVIDER.install_default() {
-        Ok(()) => Ok(()),
-        Err(installed) if std::ptr::eq(installed, &raw const DEFAULT_PROVIDER) => Ok(()),
-        Err(_) => Err(PreparationError::new(
-            PreparationPhase::Client,
-            PreparationReason::Client,
-        )),
     }
 }
 
@@ -341,17 +293,17 @@ fn is_access_token_type(value: &str) -> bool {
 
 struct JwtKey {
     kid: Option<String>,
-    family: KeyFamily,
-    /// The JWK's own `alg`; without one the key serves every configured
-    /// algorithm of its family, as Nimbus and go-oidc do.
-    algorithm: Option<JwtAlgorithm>,
-    decoding_key: DecodingKey,
+    /// One aws-lc key per algorithm the key serves. A JWK without `alg` serves
+    /// every configured algorithm of its family, as Nimbus and go-oidc do.
+    /// Parsing once keeps RSA Montgomery setup off the request path.
+    verifiers: Vec<(JwtAlgorithm, ParsedPublicKey)>,
 }
 
 impl JwtKey {
-    fn accepts(&self, algorithm: JwtAlgorithm) -> bool {
-        self.algorithm
-            .map_or(algorithm.matches(self.family), |bound| bound == algorithm)
+    fn verifier(&self, algorithm: JwtAlgorithm) -> Option<&ParsedPublicKey> {
+        self.verifiers
+            .iter()
+            .find_map(|(bound, key)| (*bound == algorithm).then_some(key))
     }
 }
 
@@ -365,10 +317,29 @@ impl KeySet {
         &'a self,
         kid: Option<&'a str>,
         algorithm: JwtAlgorithm,
-    ) -> impl Iterator<Item = &'a JwtKey> {
-        self.keys.iter().filter(move |key| {
-            key.accepts(algorithm) && kid.is_none_or(|kid| key.kid.as_deref() == Some(kid))
-        })
+    ) -> impl Iterator<Item = &'a ParsedPublicKey> {
+        self.keys
+            .iter()
+            .filter(move |key| kid.is_none_or(|kid| key.kid.as_deref() == Some(kid)))
+            .filter_map(move |key| key.verifier(algorithm))
+    }
+
+    /// Tries every installed key that fits the token; the first valid signature wins.
+    fn verify(
+        &self,
+        message: &[u8],
+        signature: &[u8],
+        kid: Option<&str>,
+        algorithm: JwtAlgorithm,
+    ) -> Result<(), DecodeError> {
+        let mut miss = DecodeError::NoCandidate;
+        for key in self.candidates(kid, algorithm) {
+            if key.verify_sig(message, signature).is_ok() {
+                return Ok(());
+            }
+            miss = DecodeError::BadSignature;
+        }
+        Err(miss)
     }
 
     #[cfg(test)]
@@ -443,27 +414,35 @@ pub(crate) fn parse_key_set(
     Ok(KeySet { keys })
 }
 
-fn admit_key(mut jwk: Jwk, configured: &[JwtAlgorithm]) -> Result<JwtKey, KeyRejection> {
+fn admit_key(jwk: Jwk, configured: &[JwtAlgorithm]) -> Result<JwtKey, KeyRejection> {
     if !signature_usage(&jwk) {
         return Err(KeyRejection::IncompatibleUsage);
     }
     let family = KeyFamily::from_jwk(&jwk).ok_or(KeyRejection::UnsupportedFamily)?;
-    let algorithm = match jwk.common.key_algorithm {
-        Some(explicit) => Some(
+    let algorithms = match jwk.common.key_algorithm {
+        Some(explicit) => vec![
             JwtAlgorithm::from_key_algorithm(explicit)
                 .filter(|algorithm| configured.contains(algorithm) && algorithm.matches(family))
                 .ok_or(KeyRejection::AlgorithmBinding)?,
-        ),
-        None if configured.iter().any(|algorithm| algorithm.matches(family)) => None,
-        None => return Err(KeyRejection::AlgorithmBinding),
+        ],
+        None => configured
+            .iter()
+            .copied()
+            .filter(|algorithm| algorithm.matches(family))
+            .collect(),
     };
-    admit_material(&mut jwk).ok_or(KeyRejection::InvalidMaterial)?;
-    let decoding_key = DecodingKey::from_jwk(&jwk).map_err(|_| KeyRejection::InvalidMaterial)?;
+    if algorithms.is_empty() {
+        return Err(KeyRejection::AlgorithmBinding);
+    }
+    let material = key_material(&jwk.algorithm).ok_or(KeyRejection::InvalidMaterial)?;
+    let verifiers = algorithms
+        .into_iter()
+        .map(|algorithm| Some((algorithm, material.parse(algorithm)?)))
+        .collect::<Option<_>>()
+        .ok_or(KeyRejection::InvalidMaterial)?;
     Ok(JwtKey {
         kid: jwk.common.key_id,
-        family,
-        algorithm,
-        decoding_key,
+        verifiers,
     })
 }
 
@@ -526,12 +505,11 @@ impl JwtAlgorithm {
         }
     }
 
-    fn jsonwebtoken(self) -> Algorithm {
+    fn rsa_parameters(self) -> Option<&'static RsaParameters> {
         match self {
-            Self::Rs256 => Algorithm::RS256,
-            Self::Ps256 => Algorithm::PS256,
-            Self::Es256 => Algorithm::ES256,
-            Self::EdDsa => Algorithm::EdDSA,
+            Self::Rs256 => Some(&signature::RSA_PKCS1_2048_8192_SHA256),
+            Self::Ps256 => Some(&signature::RSA_PSS_2048_8192_SHA256),
+            Self::Es256 | Self::EdDsa => None,
         }
     }
 
@@ -545,28 +523,45 @@ impl JwtAlgorithm {
     }
 }
 
-/// Checks key material with aws-lc at admission, so an unusable entry is
-/// skipped instead of failing every token that names it.
-fn admit_material(jwk: &mut Jwk) -> Option<()> {
-    match &mut jwk.algorithm {
+/// Decoded public key material, checked with aws-lc at admission so an
+/// unusable entry is skipped instead of failing every token that names it.
+enum KeyMaterial {
+    Rsa { modulus: Vec<u8>, exponent: Vec<u8> },
+    Raw(Vec<u8>),
+}
+
+impl KeyMaterial {
+    fn parse(&self, algorithm: JwtAlgorithm) -> Option<ParsedPublicKey> {
+        match self {
+            Self::Rsa { modulus, exponent } => RsaPublicKeyComponents {
+                n: modulus.as_slice(),
+                e: exponent.as_slice(),
+            }
+            .to_parsed_public_key(algorithm.rsa_parameters()?)
+            .ok(),
+            Self::Raw(bytes) => {
+                let verification: &'static dyn signature::VerificationAlgorithm = match algorithm {
+                    JwtAlgorithm::Es256 => &signature::ECDSA_P256_SHA256_FIXED,
+                    JwtAlgorithm::EdDsa => &signature::ED25519,
+                    JwtAlgorithm::Rs256 | JwtAlgorithm::Ps256 => return None,
+                };
+                ParsedPublicKey::new(verification, bytes).ok()
+            }
+        }
+    }
+}
+
+fn key_material(parameters: &AlgorithmParameters) -> Option<KeyMaterial> {
+    match parameters {
         AlgorithmParameters::RSA(parameters) => {
+            // Some IdPs emit a leading zero byte; install the minimal encoding.
             let modulus = without_leading_zeros(&URL_SAFE_NO_PAD.decode(&parameters.n).ok()?)?;
             let exponent = without_leading_zeros(&URL_SAFE_NO_PAD.decode(&parameters.e).ok()?)?;
             // aws-lc parsing does not bound the size; its verifiers accept 2048–8192 bits.
             let bits = modulus.len() * 8 - modulus[0].leading_zeros() as usize;
-            if !(2048..=8192).contains(&bits) {
-                return None;
-            }
-            RsaPublicKeyComponents {
-                n: modulus.as_slice(),
-                e: exponent.as_slice(),
-            }
-            .to_parsed_public_key(&signature::RSA_PKCS1_2048_8192_SHA256)
-            .ok()?;
-            // Some IdPs emit a leading zero byte; jsonwebtoken 11 with aws-lc then
-            // reports every signature as invalid, so install the minimal encoding.
-            parameters.n = URL_SAFE_NO_PAD.encode(&modulus);
-            parameters.e = URL_SAFE_NO_PAD.encode(&exponent);
+            (2048..=8192)
+                .contains(&bits)
+                .then_some(KeyMaterial::Rsa { modulus, exponent })
         }
         AlgorithmParameters::EllipticCurve(parameters) => {
             let x = URL_SAFE_NO_PAD.decode(&parameters.x).ok()?;
@@ -574,31 +569,18 @@ fn admit_material(jwk: &mut Jwk) -> Option<()> {
             if x.len() != 32 || y.len() != 32 {
                 return None;
             }
-            let point = [[4].as_slice(), &x, &y].concat();
-            ParsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, point).ok()?;
+            Some(KeyMaterial::Raw([[4].as_slice(), &x, &y].concat()))
         }
-        AlgorithmParameters::OctetKeyPair(parameters) => {
-            let x = URL_SAFE_NO_PAD.decode(&parameters.x).ok()?;
-            ParsedPublicKey::new(&signature::ED25519, &x).ok()?;
-        }
-        _ => return None,
+        AlgorithmParameters::OctetKeyPair(parameters) => Some(KeyMaterial::Raw(
+            URL_SAFE_NO_PAD.decode(&parameters.x).ok()?,
+        )),
+        _ => None,
     }
-    Some(())
 }
 
 fn without_leading_zeros(bytes: &[u8]) -> Option<Vec<u8>> {
     let start = bytes.iter().position(|byte| *byte != 0)?;
     Some(bytes[start..].to_vec())
-}
-
-fn validation_for(algorithm: JwtAlgorithm, policy: &ClaimPolicy) -> Validation {
-    let mut validation = Validation::new(algorithm.jsonwebtoken());
-    validation.set_required_spec_claims(&["iss", "aud", "exp"]);
-    validation.set_issuer(&[policy.issuer()]);
-    validation.set_audience(policy.audiences());
-    validation.leeway = 30;
-    validation.validate_nbf = true;
-    validation
 }
 
 #[cfg(test)]
@@ -608,13 +590,16 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
 
-    use super::{
-        ClaimPolicy, JwtAlgorithm, JwtVerifier, KeyStore, TokenProfile, ensure_crypto_provider,
-        parse_key_set,
-    };
+    use super::{ClaimPolicy, JwtAlgorithm, JwtVerifier, KeyStore, TokenProfile, parse_key_set};
     use crate::{Failure, VerificationReason, parse_bearer, refresh::UnknownKeyRefresh};
 
     const JWT_SIGNING_DER: &[u8] = include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
+
+    /// Fixture signing uses jsonwebtoken, which needs its crypto provider;
+    /// verification itself does not.
+    fn ensure_crypto_provider() {
+        let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
+    }
 
     fn rsa_signing() -> EncodingKey {
         EncodingKey::from_rsa_der(JWT_SIGNING_DER)
@@ -645,7 +630,7 @@ mod tests {
     }
 
     fn key_set(keys: &[serde_json::Value], configured: &[JwtAlgorithm]) -> Arc<super::KeySet> {
-        ensure_crypto_provider().unwrap();
+        ensure_crypto_provider();
         let bytes = serde_json::to_vec(&serde_json::json!({ "keys": keys })).unwrap();
         Arc::new(parse_key_set(&bytes, configured).unwrap())
     }
@@ -663,13 +648,8 @@ mod tests {
     fn verifier(keys: Arc<super::KeySet>, algorithms: &[JwtAlgorithm]) -> JwtVerifier {
         let claim_policy =
             ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()]);
-        let validations = algorithms
-            .iter()
-            .map(|algorithm| super::validation_for(*algorithm, &claim_policy))
-            .collect();
         JwtVerifier {
             claim_policy,
-            validations,
             token_profile: TokenProfile::ResourceServer,
             algorithms: algorithms.to_vec(),
             keys: KeyStore::new(keys),
@@ -829,7 +809,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn jsonwebtoken_owns_registered_claims_and_null_identity_is_absent() {
+    async fn registered_claim_nulls_keep_jsonwebtoken_rules_and_null_identity_is_absent() {
         let verifier = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
         for (extra, expected) in [
             (
@@ -849,6 +829,57 @@ mod tests {
             let result = check(&verifier, &token).await;
             let client_id = result.as_ref().map(crate::Principal::client_id);
             assert_eq!(client_id.map_err(|error| *error), expected, "{extra}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_compact_form_and_header_are_checked_before_any_key() {
+        let verifier = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
+        let token = signed(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("fixture"),
+            &serde_json::json!({}),
+        );
+        let (message, signature) = token.rsplit_once('.').unwrap();
+        let (_, payload) = message.split_once('.').unwrap();
+        let header = |json: &str| URL_SAFE_NO_PAD.encode(json);
+        for (token, expected) in [
+            (format!("{token}.x"), VerificationReason::Header),
+            (message.to_owned(), VerificationReason::Header),
+            (
+                format!(
+                    "{}.{payload}.{signature}",
+                    header(r#"{"alg":"RS256","crit":["exp"]}"#)
+                ),
+                VerificationReason::Header,
+            ),
+            (
+                format!("{}.{payload}.{signature}", header(r#"{"alg":"none"}"#)),
+                VerificationReason::Header,
+            ),
+            // jsonwebtoken's header rules also reject malformed unused members.
+            (
+                format!(
+                    "{}.{payload}.{signature}",
+                    header(r#"{"alg":"RS256","kid":"fixture","x5c":5}"#)
+                ),
+                VerificationReason::Header,
+            ),
+            (
+                format!("{message}.{signature}~"),
+                VerificationReason::Signature,
+            ),
+            (
+                format!("{message}.{}", URL_SAFE_NO_PAD.encode([7_u8; 1025])),
+                VerificationReason::Signature,
+            ),
+        ] {
+            assert_eq!(
+                check(&verifier, &token).await.unwrap_err(),
+                expected,
+                "{token}"
+            );
         }
     }
 
@@ -1165,7 +1196,6 @@ mod tests {
         let diagnostics = Diagnostics::default();
         let engine = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
         engine.keys.permit_unknown_refresh_for_test();
-        let verifier = crate::Verifier::jwt(engine);
         let token = signed(
             &rsa_signing(),
             Algorithm::RS256,
@@ -1185,6 +1215,8 @@ mod tests {
             .build()
             .unwrap();
         metrics::with_local_recorder(&diagnostics, || {
+            // Success counters bind to the recorder installed at preparation.
+            let verifier = crate::Verifier::jwt(engine);
             runtime.block_on(async {
                 for transport in ["http", "grpc", "custom"] {
                     verifier
