@@ -84,6 +84,20 @@ Stop does not cancel a claim already invoked: it settles within its existing
 backstop, and an acknowledged locally-valid row transfers to its supervisor
 even if stop arrived in flight. No subsequent polling round starts after stop.
 
+Claims follow the last round's result: a round that filled every free slot
+claims again at once, a round that found work claims again 25 ms after it
+started, and an empty round waits for the one-second poll or a wake. Enqueue
+wakes idle workers with `NOTIFY background_jobs` (payload: the kind name),
+debounced to once per 25 ms per process and sent as a separate statement only
+by the enqueue that wins the debounce. Every notifying commit takes
+PostgreSQL's notify queue lock: notifying each enqueue halved concurrent
+enqueue throughput at 16 connections, and a wake per notification turned
+into a claim storm at 1000 jobs/s. Each engine listens on one connection
+outside its pool; polling remains the recovery path. On DigitalOcean c-4
+(PostgreSQL 18, 16 slots) pickup latency at 50 jobs/s went from p50 486 ms /
+p99 981 ms to p50 15 ms / p99 28 ms, and debounced enqueue cost stayed within
+noise.
+
 Claims lock while they scan, the canonical `SKIP LOCKED` queue form: each
 registered kind's due pending rows and expired running rows are read in
 `not_before, id` order by a lateral scan that takes `FOR UPDATE SKIP LOCKED`
@@ -102,10 +116,15 @@ an indexed expired range can sort. There is deliberately no cursor, quota,
 priority, fairness, or execution-order protocol.
 
 Each admitted supervisor owns one claim, slot, immutable deadline, handler
-join handle, and intended outcome until cleanup ends. It captures the outcome
-arguments once. On timeout or forced drain it first cancels the handler and
+future, and intended outcome until cleanup ends. It captures the outcome
+arguments once. The handler runs on the supervisor's task behind
+`catch_unwind`, which removed one task spawn per attempt (-11% worker CPU per
+job at 64 slots). On timeout or forced drain it first cancels the handler and
 allows up to 100 ms of cooperative completion inside the existing deadline,
-then aborts only a still-running task. A handler result that joins before the
+then drops a still-running handler. The slot returns when the handler's result
+is known, before the outcome write, as River frees a worker before its batch
+completer writes; the supervisor still owns that write and the drain still
+waits for it (+17-23% jobs/s at 4-16 slots). A handler result that joins before the
 cancellation is known and wins over force/timeout. After the cancellation only
 a successful join is known; an error, snooze, or panic that answers it takes
 the cancellation's disposition, so a forced drain releases the job however a
@@ -114,7 +133,15 @@ and can never replace it with a release. A panic before cancellation is a
 known failure. When joining or persistence cannot finish
 inside its deadline, it writes nothing further and expiry recovers the row.
 
-Every transition is fenced by `(id, claim_generation, state = 'running')`.
+Every transition is fenced by `(id, claim_generation, claim_expires_at IS
+NOT NULL)`; the table CHECK makes the last term equal to `state = 'running'`.
+The literal state predicate let the planner prove the partial running index
+and scan all of it, dead entries of every job claimed since the last VACUUM
+included, so each outcome write grew with the backlog (1 ms per COMPLETE after
+20k jobs; fixing it raised 64-slot throughput from 3.3k to 8.3k jobs/s).
+Completions queued while one completion write is in flight go out together in
+the next `UPDATE ... FROM unnest(...)` (group commit, like River's batch
+completer): at 64 slots database CPU per job fell from 305 to 97 us.
 An acknowledged one-row write is applied; an acknowledged zero-row write is
 unchanged and makes no attribution claim. Errors or unavailable acknowledgement
 retry the fenced write at the existing one-second cadence only until

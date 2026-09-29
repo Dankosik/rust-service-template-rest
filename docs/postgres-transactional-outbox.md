@@ -107,7 +107,7 @@ design.
 With ordinary jobs and outbox active, the shared PostgreSQL pool requires
 `jobs.max_workers + 5` connections: the ordinary `N + 2` allowance, one
 publisher, and two management connections. An outbox-only worker requires
-three. Separate registrations and claim loops ensure that occupied webhook
+three. Each engine also keeps one `LISTEN` connection outside the pool. Separate registrations and claim loops ensure that occupied webhook
 slots do not prevent due publication; this makes no throughput or latency SLO.
 
 The two engines, NATS consumer work, and dependency resources share the

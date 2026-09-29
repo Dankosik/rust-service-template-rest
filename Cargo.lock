@@ -2450,6 +2450,7 @@ dependencies = [
 name = "infra-jobs"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "humantime",
  "infra-postgres",
  "metrics",
@@ -2474,6 +2475,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "domain-events",
+ "foldhash",
  "futures-util",
  "health",
  "infra-jobs",
@@ -2570,7 +2572,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
- "tracing",
  "url",
 ]
 

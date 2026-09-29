@@ -103,12 +103,34 @@ pub fn decode_envelope(
     if !valid_subject(subject) {
         return Err(MessagingError::Envelope("subject is invalid"));
     }
-    validate_header_bytes(headers)?;
-    let message_id = required_header(headers, name::MESSAGE_ID)?;
-    let event_type = required_header(headers, name::EVENT_TYPE)?;
-    let schema = required_header(headers, name::EVENT_SCHEMA)?;
-    let created_at = header_value(headers, name::CREATED_AT);
-    let _publication_id = required_header(headers, name::NATS_MSG_ID)?;
+    // One pass reads the five identity headers and sums the encoded size;
+    // each `HeaderMap::get` would hash the name with SipHash.
+    let mut encoded = "NATS/1.0\r\n\r\n".len();
+    let mut found: [Option<&str>; 5] = [None; 5];
+    for (header, values) in headers.iter() {
+        let header: &str = header.as_ref();
+        for value in values {
+            encoded += header.len() + 2 + value.as_str().len() + 2;
+        }
+        let slot = match header {
+            MESSAGE_ID => 0,
+            EVENT_TYPE => 1,
+            EVENT_SCHEMA => 2,
+            CREATED_AT => 3,
+            NATS_MSG_ID => 4,
+            _ => continue,
+        };
+        found[slot] = values.first().map(async_nats::HeaderValue::as_str);
+    }
+    if encoded > HEADER_LIMIT_BYTES {
+        return Err(MessagingError::Envelope("encoded headers exceed 8 KiB"));
+    }
+    let [message_id, event_type, schema, created_at, publication_id] = found;
+    let message_id = required_value(message_id)?;
+    let event_type = required_value(event_type)?;
+    let schema = required_value(schema)?;
+    let created_at = created_at.unwrap_or("");
+    let _publication_id = required_value(publication_id)?;
     let schema_version = parse_schema(schema)?;
     let occurred_at = parse_timestamp(created_at)?;
     if is_zero_time(occurred_at) {
@@ -242,6 +264,12 @@ pub(crate) fn header_value(headers: &HeaderMap, name: HeaderName) -> &str {
     headers.get(name).map_or("", |value| value.as_str())
 }
 
+fn required_value(value: Option<&str>) -> Result<&str, MessagingError> {
+    let value = value.ok_or(MessagingError::Envelope("required header is missing"))?;
+    validate_text(value)?;
+    Ok(value)
+}
+
 fn required_header(headers: &HeaderMap, name: HeaderName) -> Result<&str, MessagingError> {
     let value = headers
         .get(name)
@@ -265,10 +293,29 @@ fn parse_schema(value: &str) -> Result<u16, MessagingError> {
 }
 
 pub(crate) fn validate_text(value: &str) -> Result<(), MessagingError> {
-    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+    if !valid_text(value) {
         return Err(MessagingError::Envelope("header identity is invalid"));
     }
     Ok(())
+}
+
+/// Whether `value` is 1..=256 bytes without a control character. `Cc` is
+/// U+0000..=U+001F and U+007F..=U+009F; in UTF-8 the last range is 0x7F or
+/// 0xC2 followed by 0x80..=0x9F, so no character needs decoding.
+pub(crate) const fn valid_text(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > 256 {
+        return false;
+    }
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte < 0x20 || byte == 0x7f || (byte == 0xc2 && bytes[index + 1] < 0xa0) {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 pub(crate) fn encoded_header_bytes(headers: &HeaderMap) -> usize {
@@ -294,7 +341,7 @@ fn validate_header_bytes(headers: &HeaderMap) -> Result<(), MessagingError> {
     Ok(())
 }
 
-fn format_timestamp(value: OffsetDateTime) -> Result<String, MessagingError> {
+pub(crate) fn format_timestamp(value: OffsetDateTime) -> Result<String, MessagingError> {
     value
         .checked_to_offset(UtcOffset::UTC)
         .and_then(|value| value.format(&Rfc3339).ok())
@@ -340,6 +387,73 @@ pub(crate) fn prefixed_digest_hex(prefix: &str, digest: &[u8]) -> String {
     id
 }
 
-fn is_zero_time(value: OffsetDateTime) -> bool {
+pub(crate) fn is_zero_time(value: OffsetDateTime) -> bool {
     value.year() == 1 && value.ordinal() == 1 && value.time() == time::Time::MIDNIGHT
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "fixed valid fixtures")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_text_rejects_exactly_the_unicode_control_characters() {
+        for control in ['\0', '\u{1f}', '\u{7f}', '\u{80}', '\u{85}', '\u{9f}'] {
+            assert!(!valid_text(&format!("id{control}x")), "{control:?}");
+        }
+        for allowed in ["\u{a0}", "caf\u{e9}", "\u{2028}", "\u{1F600}", "~"] {
+            assert!(valid_text(allowed), "{allowed:?}");
+        }
+        assert!(!valid_text(""));
+        assert!(valid_text(&"x".repeat(256)));
+        assert!(!valid_text(&"x".repeat(257)));
+    }
+
+    fn envelope_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(name::MESSAGE_ID, "event-1");
+        headers.insert(name::EVENT_TYPE, "order.created");
+        headers.insert(name::EVENT_SCHEMA, "v2");
+        headers.insert(name::CREATED_AT, "2026-09-29T10:00:00Z");
+        headers.insert(name::NATS_MSG_ID, "event-1");
+        headers
+    }
+
+    #[test]
+    fn decode_reads_the_first_value_of_each_identity_header_and_ignores_others() {
+        let mut headers = envelope_headers();
+        headers.append(name::MESSAGE_ID, "event-2");
+        headers.insert(
+            "Traceparent",
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+        );
+        let envelope = decode_envelope("orders.created", &headers, Bytes::new()).unwrap();
+        assert_eq!(envelope.message_id(), "event-1");
+        assert_eq!(envelope.event_type(), "order.created");
+        assert_eq!(envelope.schema_version(), 2);
+    }
+
+    #[test]
+    fn decode_rejects_a_missing_or_invalid_identity_header() {
+        for missing in [
+            MESSAGE_ID,
+            EVENT_TYPE,
+            EVENT_SCHEMA,
+            CREATED_AT,
+            NATS_MSG_ID,
+        ] {
+            let headers: HeaderMap = envelope_headers()
+                .iter()
+                .filter(|(name, _)| AsRef::<str>::as_ref(*name) != missing)
+                .map(|(name, values)| (name.clone(), values[0].clone()))
+                .collect();
+            assert!(
+                decode_envelope("orders.created", &headers, Bytes::new()).is_err(),
+                "{missing}"
+            );
+        }
+        let mut headers = envelope_headers();
+        headers.insert(name::EVENT_TYPE, "order\u{85}created");
+        assert!(decode_envelope("orders.created", &headers, Bytes::new()).is_err());
+    }
 }

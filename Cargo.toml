@@ -82,6 +82,8 @@ oauth2 = { version = "5.0.0", default-features = false }
 # Runtime and transport
 # template:begin messaging:workspace-messaging-client
 async-nats = { version = "=0.50.0", default-features = false }
+# Seeded fast hasher for the event registry maps; hashbrown already uses it.
+foldhash = { version = "0.2.0", default-features = false }
 # template:end messaging:workspace-messaging-client
 # template:begin cache:workspace-cache-client
 redis = { version = "1.7.1", default-features = false }

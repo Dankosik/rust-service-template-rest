@@ -36,6 +36,10 @@ impl PreparedEvent {
                 T::SCHEMA_VERSION > 0,
                 "event schema version must be positive"
             );
+            assert!(
+                crate::wire::valid_text(T::EVENT_TYPE),
+                "event type must be 1 to 256 bytes without control characters"
+            );
         }
         let subject = subject.into();
         if !crate::wire::valid_subject(&subject) {
@@ -54,18 +58,22 @@ impl PreparedEvent {
             .ok_or(crate::MessagingError::Envelope(
                 "occurrence time is out of range",
             ))?;
-        let mut prepared = Self {
+        // The event type was checked at compile time and the publication ID
+        // is the message ID, so only the ID and time need checking here.
+        crate::wire::validate_text(&event.id)?;
+        if crate::wire::is_zero_time(occurred_at) {
+            return Err(crate::MessagingError::Envelope("event identity is invalid"));
+        }
+        Ok(Self {
             subject,
             message_id: event.id.clone(),
             publication_id: event.id.clone(),
             event_type: Cow::Borrowed(T::EVENT_TYPE),
             schema_version: T::SCHEMA_VERSION,
             occurred_at,
-            created_at: String::new(),
+            created_at: crate::wire::format_timestamp(occurred_at)?,
             payload: payload.into(),
-        };
-        prepared.created_at = crate::wire::validate_prepared(&prepared)?;
-        Ok(prepared)
+        })
     }
     #[must_use]
     pub fn subject(&self) -> &str {
