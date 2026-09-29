@@ -51,6 +51,10 @@ Do not create a crate, module, or directory before its first real artifact.
 | Bytes-only RESP cache client, DSN admission, and namespace get/set/delete | `crates/infra-cache`; the feature owns keys, serialization, TTL, and invalidation ([guide](cache.md)) |
 | Cache connect, startup check, shutdown drop, and optional readiness probe | `crates/service/src/bootstrap/`; only composition decides whether `cache.probe()` joins readiness |
 <!-- template:end cache:docs-structure-cache-placement -->
+<!-- template:begin object-storage:docs-structure-object-storage-placement -->
+| S3-compatible provider admission and put/get/head/delete/presigned GET | `crates/infra-object-storage`; the feature owns keys, authorization, retention, and create-only intent ([guide](object-storage.md)) |
+| Object storage construction, shutdown drop, and optional readiness probe | `crates/service/src/bootstrap/`; only composition decides whether `storage.probe()` joins readiness |
+<!-- template:end object-storage:docs-structure-object-storage-placement -->
 
 | Ordinary behavior and boundary tests | `#[cfg(test)] mod tests` beside the owner |
 | Black-box tests of one crate's public surface, including the built binary | `crates/<crate>/tests/<owner>.rs` (`crates/service/tests/lifecycle.rs` drives the binary; `openapi.rs` holds the contract tests) |

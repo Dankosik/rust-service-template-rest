@@ -39,6 +39,9 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 <!-- template:begin cache:docs-boundaries-cache-owner -->
 | `infra-cache` (`crates/infra-cache`) | Bytes-only RESP admission, a lazy `ConnectionManager`, namespace `get`/`set`/`delete`, the `cache` probe, and sanitized observation ([guide](../cache.md)). | Keys, serialization, TTL policy, invalidation, a generic `Cache<K, V>`, get-or-load, locks, rate limits, configuration loading, or readiness policy. |
 <!-- template:end cache:docs-boundaries-cache-owner -->
+<!-- template:begin object-storage:docs-boundaries-object-storage-owner -->
+| `infra-object-storage` (`crates/infra-object-storage`) | Provider admission, one `aws-sdk-s3` client per bucket, put/get/head/delete/presigned GET, the closed failure set, admission, the `object_storage` probe, and sanitized observation ([guide](../object-storage.md)). | Keys, authorization, content policy, retention, create-only intent, presign recipients, listing, multipart, configuration loading, or readiness policy. |
+<!-- template:end object-storage:docs-boundaries-object-storage-owner -->
 <!-- template:begin outbox:docs-boundaries-outbox-owner -->
 | `infra-messaging::outbox` | The private versioned/base64 immutable publication intent, prepared enqueue, and publication handler ([guide](../postgres-transactional-outbox.md)). | The `background_jobs` SQL, caller transaction control, a second connection, business-closure retries, consumer effect deduplication, or stream administration. |
 <!-- template:end outbox:docs-boundaries-outbox-owner -->
@@ -85,6 +88,13 @@ integration proof uses Compose and has no PostgreSQL prerequisite. The service
 process test observes startup degradation and production plaintext refusal
 rather than server internals.
 <!-- template:end cache:docs-boundaries-cache-tests -->
+<!-- template:begin object-storage:docs-boundaries-object-storage-tests -->
+`infra-object-storage` owns admission, classification, redaction, and adapter
+tests over an in-process HTTP stub, so `make test` needs no credentials or
+Docker. Its emulator proof runs versitygw through Compose; its live provider
+test is ignored and runs only by explicit authorization. The service process
+test observes that startup sends nothing and refuses a production emulator.
+<!-- template:end object-storage:docs-boundaries-object-storage-tests -->
 
 ## Dependency Direction
 
@@ -112,6 +122,11 @@ service -> infra-messaging only for optional producer/probe composition
 service -> infra-cache for connect, the startup check, shutdown drop, and optional probe registration
 a feature -> infra-cache for namespace get, set, and delete
 <!-- template:end cache:docs-boundaries-cache-edges -->
+<!-- template:begin object-storage:docs-boundaries-object-storage-edges -->
+  -> infra-object-storage -> aws-sdk-s3, aws-smithy-http-client, health, secrecy, metrics, tracing, tokio
+service -> infra-object-storage for construction, shutdown drop, and optional probe registration
+a feature -> infra-object-storage for put, get, head, delete, and presigned GET
+<!-- template:end object-storage:docs-boundaries-object-storage-edges -->
 <!-- template:begin outbox:docs-boundaries-outbox-edges -->
 infra-messaging::outbox -> domain-events, infra-jobs, infra-postgres, base64
 <!-- template:end outbox:docs-boundaries-outbox-edges -->

@@ -94,6 +94,15 @@ guide](docs/cache.md) owns configuration, budgets, and removal; the [decision
 record](docs/cache-decisions.md) records the library choices. `CACHE=none`
 removes the capability.
 <!-- template:end cache:docs-readme-cache-profile -->
+<!-- template:begin object-storage:docs-readme-object-storage-profile -->
+`OBJECT_STORAGE=s3` retains an S3-compatible object storage client for one
+bucket at one fixed endpoint: Amazon S3, Cloudflare R2, or Railway Buckets. It
+is inert until `object_storage.provider` is set, sends nothing at startup, and
+is not a readiness dependency. The [object storage guide](docs/object-storage.md)
+owns configuration, failure semantics, and proof; the [decision
+record](docs/object-storage-decisions.md) records the library and provider
+choices. `OBJECT_STORAGE=none` removes the capability.
+<!-- template:end object-storage:docs-readme-object-storage-profile -->
 <!-- template:begin outbox:docs-readme-outbox-profile -->
 `OUTBOX=postgres` requires `DATABASE=postgres`, `JOBS=postgres`, and
 `MESSAGING=nats-jetstream`. It records publication intent in the business

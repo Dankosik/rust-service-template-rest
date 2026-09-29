@@ -91,6 +91,24 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   URLs are not admitted. A CA path requires TLS. DSN form checks stay in `infra-cache`. The
   [guide](cache.md) owns admission.
 <!-- template:end cache:docs-config-cache-source -->
+<!-- template:begin object-storage:docs-config-object-storage-source -->
+- `object_storage` is an optional typed section, inert while `provider` is
+  `none`. `object_storage.secret_access_key` is `SecretString`,
+  environment-only (`APP__OBJECT_STORAGE__SECRET_ACCESS_KEY`), and redacted;
+  a nonempty file value is refused because `secret` is secret-like.
+  `provider`, `bucket`, `region`, `endpoint`, `expected_bucket_owner`, and
+  `access_key_id` use normal file/environment precedence. Each provider
+  accepts only its own keys: `amazon_s3` takes `region` and
+  `expected_bucket_owner` and no endpoint, `cloudflare_r2` and `railway` take
+  `endpoint`, and a key another provider owns fails startup instead of being
+  ignored. `local` (an emulator, plaintext allowed) is accepted only when
+  `app.env` is `local` or `development`. The client is built from these keys
+  alone: the global `AWS_*` variables, AWS profile files, and instance
+  metadata are never read. On Railway, map the bucket's `${{Bucket.X}}`
+  variables onto `APP__OBJECT_STORAGE__*`. Value shapes (endpoint origin,
+  region, bucket name, owner account) are admitted by `infra-object-storage`.
+  The [guide](object-storage.md) owns admission.
+<!-- template:end object-storage:docs-config-object-storage-source -->
 <!-- template:begin outbox:docs-config-outbox-source -->
 - `OUTBOX=postgres` is initializer/profile selection, not a configuration
   section or runtime switch. It requires the retained PostgreSQL, jobs, and
@@ -288,6 +306,21 @@ every record inside a request) or `text` (local development).
   outage each call costs at most `command_timeout`. There is no per-command
   retry. See the [cache guide](cache.md).
 <!-- template:end cache:docs-config-cache-budget -->
+<!-- template:begin object-storage:docs-config-object-storage-budget -->
+- `object_storage.operation_timeout` (environment
+  `APP__OBJECT_STORAGE__OPERATION_TIMEOUT`, default `5s`, inclusive `1s` to
+  `15m`) bounds one call up to its response headers, the SDK's three attempts
+  included; connect stays a `3.1s` constant and a download body is bounded by
+  the SDK's stalled-stream protection instead. On a request path the handler
+  budget still applies: a put dropped by `http.request_timeout` has an unknown
+  outcome. `object_storage.max_concurrency` (default `8`, `1..512`) admits
+  that many calls at once and refuses the excess without queueing; a download
+  holds its slot until its body ends. `object_storage.max_object_bytes`
+  (default `8 MiB`, at most 4.995 GiB, the smallest single-upload limit of the
+  supported providers) bounds a put and a get. Buffered reads cost up to
+  `max_concurrency * max_object_bytes` of memory. See the
+  [object storage guide](object-storage.md).
+<!-- template:end object-storage:docs-config-object-storage-budget -->
 
 ## Adding A Config Key
 
