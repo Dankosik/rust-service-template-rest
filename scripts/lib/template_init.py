@@ -28,6 +28,7 @@ from template_state import (
     INBOUND_WEBHOOKS_CHOICES,
     JOBS_CHOICES,
     CACHE_CHOICES,
+    OBJECT_STORAGE_CHOICES,
     MESSAGING_CHOICES,
     OUTBOX_CHOICES,
     LOCK_NAME,
@@ -103,6 +104,7 @@ class InitInputs:
     webhooks: str
     inbound_webhooks: str
     cache: str
+    object_storage: str
     agent_harness: str
 
     def identity(self) -> dict[str, str]:
@@ -127,6 +129,7 @@ class InitInputs:
             "webhooks": self.webhooks,
             "inbound_webhooks": self.inbound_webhooks,
             "cache": self.cache,
+            "object_storage": self.object_storage,
             "agent_harness": self.agent_harness,
         }
 
@@ -172,6 +175,7 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         webhooks=_argument_value(arguments, "webhooks", default="none"),
         inbound_webhooks=_argument_value(arguments, "inbound_webhooks", default="none"),
         cache=_argument_value(arguments, "cache", default="none"),
+        object_storage=_argument_value(arguments, "object_storage", default="none"),
         agent_harness=_argument_value(arguments, "agent_harness", default="all"),
     )
     if inputs.database not in DATABASE_CHOICES:
@@ -202,6 +206,7 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
             webhooks=inputs.webhooks,
             inbound_webhooks=inputs.inbound_webhooks,
             cache=inputs.cache,
+            object_storage=inputs.object_storage,
             agent_harness=inputs.agent_harness,
         )
     if inputs.http_idempotency not in HTTP_IDEMPOTENCY_CHOICES:
@@ -214,6 +219,8 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         raise Refusal("MESSAGING is unsupported")
     if inputs.cache not in CACHE_CHOICES:
         raise Refusal("CACHE is unsupported")
+    if inputs.object_storage not in OBJECT_STORAGE_CHOICES:
+        raise Refusal("OBJECT_STORAGE is unsupported")
     if inputs.outbox not in OUTBOX_CHOICES:
         raise Refusal("OUTBOX is unsupported")
     if inputs.webhooks not in WEBHOOKS_CHOICES:
@@ -329,6 +336,7 @@ _GRPC_PROFILE_INVENTORY_KEYS = _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS | {
     "client-integrations",
 }
 _CACHE_PROFILE_INVENTORY_KEYS = _GRPC_PROFILE_INVENTORY_KEYS | {"cache", "rustls"}
+_OBJECT_STORAGE_PROFILE_INVENTORY_KEYS = _CACHE_PROFILE_INVENTORY_KEYS | {"object-storage"}
 
 
 def _profile_data(
@@ -349,7 +357,21 @@ def _profile_data(
         raise Refusal("template profile inventory has an unsupported schema")
     keys = frozenset(raw)
     include_cache = False
-    if keys == _CACHE_PROFILE_INVENTORY_KEYS:
+    include_object_storage = False
+    if keys == _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS:
+        include_authn = True
+        include_outbound = True
+        include_outbound_auth = True
+        include_grpc = True
+        include_tls_fixtures = True
+        include_http_idempotency = True
+        include_jobs = True
+        include_webhooks = True
+        include_messaging = True
+        include_outbox = True
+        include_cache = True
+        include_object_storage = True
+    elif keys == _CACHE_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
         include_outbound_auth = True
@@ -626,6 +648,14 @@ def _profile_data(
             raise Refusal("template cache inventory has an unsupported shape")
         removals["cache"] = tuple(_path_list(section["remove_when_unselected"], "cache remove_when_unselected"))
         markers.extend(_markers("cache", section["markers"]))
+    if include_object_storage:
+        section = raw["object-storage"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template object-storage inventory has an unsupported shape")
+        removals["object-storage"] = tuple(
+            _path_list(section["remove_when_unselected"], "object-storage remove_when_unselected")
+        )
+        markers.extend(_markers("object-storage", section["markers"]))
     if "rustls" in keys:
         section = raw["rustls"]
         if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
@@ -824,6 +854,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("worker")
     if inputs.cache == "redis":
         selected.add("cache")
+    if inputs.object_storage == "s3":
+        selected.add("object-storage")
     if inputs.grpc == "enabled" or inputs.cache == "redis" or inputs.outbound_http == "bounded":
         selected.add("rustls")
     if (
@@ -831,9 +863,15 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         or inputs.messaging == "nats-jetstream"
         or inputs.grpc == "enabled"
         or inputs.cache == "redis"
+        or inputs.object_storage == "s3"
     ):
         selected.add("service-secrets")
-    if inputs.database == "postgres" or inputs.messaging == "nats-jetstream" or inputs.cache == "redis":
+    if (
+        inputs.database == "postgres"
+        or inputs.messaging == "nats-jetstream"
+        or inputs.cache == "redis"
+        or inputs.object_storage == "s3"
+    ):
         selected.add("integration")
     if inputs.webhooks == "durable" or inputs.inbound_webhooks == "standard-webhooks":
         selected.add("webhooks-common")
@@ -1436,6 +1474,23 @@ def _project_feature_edge(
 def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInputs) -> None:
     """Remove only source-anchored feature edges made unreachable by a profile."""
 
+    if inputs.object_storage == "none":
+        # The S3 SDK alone enables sha2's OID support, lru's default hasher,
+        # and hyper-rustls's native roots. Later projections see the lock as
+        # it was before the profile existed.
+        _project_feature_edge(
+            records, "digest", "0.11.3",
+            ["block-buffer 0.12.1", "const-oid 0.10.2", "crypto-common 0.2.2", "ctutils"],
+            ["block-buffer 0.12.1", "crypto-common 0.2.2", "ctutils"],
+        )
+        _project_feature_edge(records, "hashbrown", "0.17.1", ["foldhash"], [])
+        _project_feature_edge(
+            records,
+            "hyper-rustls",
+            "0.27.9",
+            ["http", "hyper", "hyper-util", "rustls", "rustls-native-certs", "rustls-platform-verifier", "tokio", "tokio-rustls", "tower-service"],
+            ["http", "hyper", "hyper-util", "rustls", "rustls-platform-verifier", "tokio", "tokio-rustls", "tower-service"],
+        )
     if inputs.cache == "none":
         # redis alone enables combine's tokio parser features. The retained
         # jni/combine edge does not.
@@ -1458,12 +1513,16 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
         for name, version, expected, retained in (
             ("bitflags", "2.13.2", ["serde_core"], []),
             ("either", "1.18.0", ["serde"], []),
-            # PostgreSQL HMAC enables digest/mac; introspection SHA-256 alone does not.
-            ("digest", "0.11.3", ["block-buffer 0.12.1", "crypto-common 0.2.2", "ctutils"], ["block-buffer 0.12.1", "crypto-common 0.2.2"]),
             ("hashbrown", "0.16.1", ["allocator-api2", "equivalent", "foldhash"], ["foldhash"]),
             ("smallvec", "1.16.1", ["serde"], []),
         ):
             _project_feature_edge(records, name, version, expected, retained)
+    if inputs.database == "none" and inputs.object_storage == "none":
+        # PostgreSQL and SigV4 HMAC enable digest/mac; introspection SHA-256 alone does not.
+        _project_feature_edge(
+            records, "digest", "0.11.3",
+            ["block-buffer 0.12.1", "crypto-common 0.2.2", "ctutils"], ["block-buffer 0.12.1", "crypto-common 0.2.2"],
+        )
     if inputs.authn != "oidc-jwt":
         _project_feature_edge(records, "zeroize", "1.9.0", ["zeroize_derive"], [])
     if inputs.grpc == "none":
@@ -1509,12 +1568,13 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
     if inputs.outbound_http == "none":
         # The bounded outbound client alone enables hyper-rustls's platform
         # verifier; reqwest keeps hyper-rustls for the retained consumers.
+        native_roots = ["rustls-native-certs"] if inputs.object_storage == "s3" else []
         _project_feature_edge(
             records,
             "hyper-rustls",
             "0.27.9",
-            ["http", "hyper", "hyper-util", "rustls", "rustls-platform-verifier", "tokio", "tokio-rustls", "tower-service"],
-            ["http", "hyper", "hyper-util", "rustls", "tokio", "tokio-rustls", "tower-service"],
+            ["http", "hyper", "hyper-util", "rustls", *native_roots, "rustls-platform-verifier", "tokio", "tokio-rustls", "tower-service"],
+            ["http", "hyper", "hyper-util", "rustls", *native_roots, "tokio", "tokio-rustls", "tower-service"],
         )
     if inputs.outbound_auth == "none":
         # oauth2 enables url's serde feature; the source still uses url through
@@ -1713,6 +1773,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--webhooks", action=SingleValue)
     parser.add_argument("--inbound-webhooks", action=SingleValue)
     parser.add_argument("--cache", action=SingleValue)
+    parser.add_argument("--object-storage", action=SingleValue)
     parser.add_argument("--agent-harness", action=SingleValue)
     return parser
 

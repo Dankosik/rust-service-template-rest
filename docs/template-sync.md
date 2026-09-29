@@ -126,6 +126,15 @@ section, the digest-pinned Compose Valkey service, the integration proof, and
 the [cache guide](cache.md). It does not require PostgreSQL or jobs. Selection
 starts no client; a configured DSN does. `none` removes that closure.
 <!-- template:end cache:docs-template-init-cache -->
+<!-- template:begin object-storage:docs-template-init-object-storage -->
+`OBJECT_STORAGE` defaults to `none` and accepts `none` or `s3`; the direct
+entry takes `--object-storage`. `s3` retains the `infra-object-storage` crate,
+the `[object_storage]` section, the digest-pinned Compose versitygw service,
+the emulator and live-provider proofs, and the [object storage
+guide](object-storage.md). It does not require PostgreSQL or jobs. Selection
+creates no client; a configured provider does, without a request. `none`
+removes that closure.
+<!-- template:end object-storage:docs-template-init-object-storage -->
 
 
 Service names are lowercase ASCII, start with a letter, use single hyphens
@@ -177,6 +186,12 @@ mean `none`; changing it after initialization is a refused profile migration.
 The lock records the selected `cache` value. Historical records without it
 mean `none`; changing it after initialization is a refused profile migration.
 <!-- template:end cache:docs-template-init-cache-lock -->
+
+<!-- template:begin object-storage:docs-template-init-object-storage-lock -->
+The lock records the selected `object_storage` value. Historical records
+without it mean `none`; changing it after initialization is a refused profile
+migration.
+<!-- template:end object-storage:docs-template-init-object-storage-lock -->
 
 <!-- template:begin authn:docs-template-init-authn-lock -->
 The lock records the selected `authn` value. Historical records without it
