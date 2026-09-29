@@ -3,8 +3,8 @@
 //! JSON `null` means absent for every consumed claim.
 
 use crate::{
-    Actor, Failure, PreparationError, PreparationPhase, PreparationReason, Principal, VerificationError,
-    VerificationReason,
+    Actor, Failure, PreparationError, PreparationPhase, PreparationReason, Principal,
+    VerificationError, VerificationReason,
 };
 use serde::Deserialize;
 use std::{borrow::Cow, fmt};

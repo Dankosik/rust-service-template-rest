@@ -225,7 +225,7 @@ fn map_attempted(
         Err(AttemptError::Unavailable) => {
             Answer::boundary_problem(unavailable(), Outcome::Unavailable)
         }
-        Err(AttemptError::Internal) => {
+        Err(AttemptError::Internal) | Ok(Attempted::RolledBack(Rollback::Unstorable)) => {
             Answer::boundary_problem(sanitized_internal_error(), Outcome::NotStored)
         }
         Err(AttemptError::Integrity) => integrity_failure(),
@@ -242,9 +242,6 @@ fn map_attempted(
         }
         Ok(Attempted::RolledBack(Rollback::Response(response))) => {
             Answer::operation_response(response, Outcome::NotStored)
-        }
-        Ok(Attempted::RolledBack(Rollback::Unstorable)) => {
-            Answer::boundary_problem(sanitized_internal_error(), Outcome::NotStored)
         }
         Ok(Attempted::Committed(stored)) => Answer::operation_response(
             mark_provenance(stored.into_response(), Provenance::Executed),
