@@ -1,11 +1,15 @@
 use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::Request;
+use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
+use bytes::Bytes;
+use http_body_util::BodyExt as _;
+use tokio::sync::Semaphore;
 use tonic::server::NamedService as _;
 
 use crate::Error;
@@ -67,27 +71,25 @@ pub fn router(
     verifier: infra_bearerauthn::Verifier,
     // template:end authn:grpc-router-verifier
 ) -> axum::Router {
-    let business = services.routes.routes().into_axum_router().layer(
-        tower::ServiceBuilder::new()
-            .layer(axum::error_handling::HandleErrorLayer::new(capacity_error))
-            .load_shed()
-            .layer(tower::limit::GlobalConcurrencyLimitLayer::new(
-                BUSINESS_CONCURRENCY,
-            ))
-            .layer(axum::middleware::from_fn(enforce_deadline))
-            .map_response(crate::observe::mark_dispatched),
-    );
+    let business =
+        services
+            .routes
+            .routes()
+            .into_axum_router()
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(Semaphore::new(BUSINESS_CONCURRENCY)),
+                admit,
+            ));
     // template:begin authn:grpc-router-authenticate
     let business = business.layer(axum::middleware::from_fn(move |request, next| {
         let verifier = verifier.clone();
         async move { authenticate(verifier, request, next).await }
     }));
     // template:end authn:grpc-router-authenticate
-    with_health(business, readiness, &services.names)
-        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
-            panic_response,
-        ))
-        .layer(axum::middleware::from_fn(crate::observe::observe))
+    with_health(business, readiness, &services.names).layer(axum::middleware::from_fn_with_state(
+        Arc::new(crate::observe::Series::server()),
+        crate::observe::observe,
+    ))
 }
 
 /// Fixed listener options for the gRPC port.
@@ -144,26 +146,47 @@ fn with_health(
     router.route_service(&format!("/{}/{{*rest}}", HealthServer::NAME), health)
 }
 
-async fn capacity_error(error: axum::BoxError) -> Response {
-    if error.is::<tower::load_shed::error::Overloaded>() {
+/// Sheds a business call at the concurrency limit without queueing, and bounds
+/// its time to response headers by the deadline. The permit is held until the
+/// response headers, as `tower::limit` holds it.
+async fn admit(State(limit): State<Arc<Semaphore>>, request: Request, next: Next) -> Response {
+    let Ok(_permit) = limit.try_acquire_owned() else {
         crate::observe::record_shed();
-        return tonic::Status::resource_exhausted(service_failure::AT_CAPACITY_DETAIL).into_http();
-    }
-    tonic::Status::internal("request failed").into_http()
-}
-
-async fn enforce_deadline(request: Request, next: Next) -> Response {
+        let status = tonic::Status::resource_exhausted(service_failure::AT_CAPACITY_DETAIL);
+        return reject(request, status).await;
+    };
     let budget = grpc_timeout(request.headers())
         .unwrap_or(CALL_DEADLINE_CAP)
         .min(CALL_DEADLINE_CAP);
     match tokio::time::timeout(budget, next.run(request)).await {
-        Ok(response) => response,
+        Ok(response) => crate::observe::mark_dispatched(response),
         Err(_elapsed) => tonic::Status::deadline_exceeded("request deadline exceeded").into_http(),
     }
 }
 
-fn panic_response(_panic: Box<dyn std::any::Any + Send>) -> Response {
-    tonic::Status::internal("request failed").into_http()
+/// Longest wait for the rest of a rejected call's request body.
+const REJECT_DRAIN: Duration = Duration::from_millis(100);
+/// Most request bytes read from a rejected call before giving up.
+const REJECT_DRAIN_BYTES: usize = 64 * 1024;
+
+/// Answers a call rejected before its handler, after reading the rest of its
+/// request body within a small bound. A caller sends its request DATA after
+/// the headers, so an immediate answer closes the stream while that DATA is
+/// in flight; h2 answers the late DATA with a stream reset, and after 1024
+/// such resets on one connection closes it, with every other call on it.
+async fn reject(request: Request, status: tonic::Status) -> Response {
+    let mut body = request.into_body();
+    let _ = tokio::time::timeout(REJECT_DRAIN, async {
+        let mut read = 0;
+        while let Some(Ok(frame)) = body.frame().await {
+            read += frame.data_ref().map_or(0, Bytes::len);
+            if read > REJECT_DRAIN_BYTES {
+                break;
+            }
+        }
+    })
+    .await;
+    status.into_http()
 }
 
 // template:begin authn:grpc-authenticate
@@ -179,7 +202,7 @@ async fn authenticate(
         .map(http::HeaderValue::as_bytes);
     let principal = match verifier.authenticate(authorization, "grpc").await {
         Ok(principal) => principal,
-        Err(failure) => return authentication_status(failure).into_http(),
+        Err(failure) => return reject(request, authentication_status(failure)).await,
     };
     request.extensions_mut().insert(principal);
     request.headers_mut().remove(http::header::AUTHORIZATION);

@@ -1,14 +1,17 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use http::{Request, Response};
+use opentelemetry::trace::SpanKind;
 use secrecy::{ExposeSecret as _, SecretString};
 use tonic::body::Body;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tower::ServiceExt as _;
 use tracing::Instrument as _;
+use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 
 use crate::Error;
 
@@ -47,6 +50,7 @@ pub struct ClientIdentity {
 #[derive(Clone, Debug)]
 pub struct Client {
     channel: Channel,
+    series: Arc<crate::observe::Series>,
 }
 
 impl Client {
@@ -64,7 +68,9 @@ impl Client {
             .connect_timeout(Duration::from_secs(5))
             .tcp_keepalive(Some(Duration::from_secs(60)))
             .http2_keep_alive_interval(Duration::from_secs(20))
-            .keep_alive_timeout(Duration::from_secs(20));
+            .keep_alive_timeout(Duration::from_secs(20))
+            // Receive windows follow the bandwidth-delay product, as the server's do.
+            .http2_adaptive_window(true);
         let expected_scheme = match security {
             ClientSecurity::Plaintext => "http",
             ClientSecurity::Tls(_) => "https",
@@ -79,6 +85,7 @@ impl Client {
         }
         Ok(Self {
             channel: endpoint.connect_lazy(),
+            series: Arc::new(crate::observe::Series::client()),
         })
     }
 }
@@ -88,22 +95,24 @@ impl tower::Service<Request<Body>> for Client {
     type Error = tonic::Status;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
+    /// Always ready: each call waits for the channel itself, so a wrapper may
+    /// clone this client and call it without driving readiness first.
     fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
+        let span = crate::observe::make_span(&request, &SpanKind::Client);
+        otel_http::inject_context(
+            &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(&span),
+            request.headers_mut(),
+        );
+        let started = Instant::now();
+        // Shares the request's bytes; the path is read after the call.
+        let uri = request.uri().clone();
         let mut channel = self.channel.clone();
+        let series = Arc::clone(&self.series);
         Box::pin(async move {
-            let span = tracing_opentelemetry_instrumentation_sdk::http::grpc_client::make_span_from_request(
-                &request,
-            );
-            tracing_opentelemetry_instrumentation_sdk::http::inject_context(
-                &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(&span),
-                request.headers_mut(),
-            );
-            let started = Instant::now();
-            let path = request.uri().path().to_owned();
             let result = async {
                 let ready = channel.ready().await.map_err(transport_status)?;
                 ready.call(request).await.map_err(transport_status)
@@ -111,15 +120,11 @@ impl tower::Service<Request<Body>> for Client {
             .instrument(span.clone())
             .await;
             let code = match &result {
-                Ok(response) => {
-                    tracing_opentelemetry_instrumentation_sdk::http::grpc::update_span_from_response(
-                        &span, response, false,
-                    );
-                    crate::observe::code_from_headers(response.headers())
-                }
+                Ok(response) => crate::observe::code_from_headers(response.headers()),
                 Err(status) => status.code(),
             };
-            crate::observe::record_client(&path, code, started.elapsed());
+            crate::observe::update_span(&span, code, false);
+            series.record(uri.path(), code, started.elapsed());
             result
         })
     }

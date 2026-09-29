@@ -557,6 +557,47 @@ async fn missing_and_malformed_bearers_are_unauthenticated_and_health_is_public(
 }
 // template:end authn:grpc-transport-test-unauthenticated
 
+// template:begin authn:grpc-transport-test-rejection-flood
+/// Each rejected call is answered before its request DATA arrives. Without
+/// reading that DATA first, h2 resets every such stream and closes the
+/// connection after 1024 resets, failing the calls still on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_calls_do_not_close_the_shared_connection() {
+    let fixture = Fixture::plaintext().await;
+    let echo = fixture.echo_client();
+    let mut callers = Vec::new();
+    for _ in 0..16 {
+        let mut echo = echo.clone();
+        callers.push(tokio::spawn(async move {
+            let mut codes = Vec::new();
+            for _ in 0..1000 {
+                let rejected = echo
+                    .unary(Request::new(UnaryRequest {
+                        message: "missing".to_owned(),
+                    }))
+                    .await
+                    .unwrap_err();
+                codes.push(rejected.code());
+            }
+            codes
+        }));
+    }
+    timeout(FILL, async {
+        for caller in callers {
+            let codes = caller.await.expect("caller joins");
+            assert!(
+                codes.iter().all(|code| *code == Code::Unauthenticated),
+                "{codes:?}"
+            );
+        }
+    })
+    .await
+    .expect("rejected calls finish");
+    drop(echo);
+    fixture.stop().await;
+}
+// template:end authn:grpc-transport-test-rejection-flood
+
 #[tokio::test]
 async fn business_limit_sheds_the_next_call_without_starving_health() {
     let fixture = Fixture::plaintext().await;

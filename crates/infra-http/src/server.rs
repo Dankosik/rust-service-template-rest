@@ -194,7 +194,11 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
         // uncompressed HTTP/2 header-list size, not the HTTP/1 read buffer
         // whose overflow is hyper-native 431.
         .keep_alive_interval(Some(HTTP2_KEEP_ALIVE_INTERVAL))
-        .keep_alive_timeout(HTTP2_KEEP_ALIVE_TIMEOUT);
+        .keep_alive_timeout(HTTP2_KEEP_ALIVE_TIMEOUT)
+        // Grow the receive windows to the measured bandwidth-delay product,
+        // as grpc-go does, so a large request is not limited to one fixed
+        // window per round trip.
+        .adaptive_window(true);
     builder
 }
 
@@ -279,16 +283,14 @@ where
                 continue;
             }
         };
-        // hyper writes HTTP/2 headers, data and trailers as separate small
-        // segments; with Nagle on, a follow-up write waits for the peer's
-        // delayed ACK (about 40 ms). Tonic's own server sets this too.
-        if let Err(err) = stream.set_nodelay(true) {
-            tracing::debug!(%peer, error = %err, "TCP_NODELAY not set");
-        }
         let watcher = graceful.watcher();
         let builder = builder.clone();
         let app = app.clone();
         let upgrade = upgrade.clone();
+        // HTTP/2 writes headers, data, and trailers as separate small
+        // segments; with Nagle on, each can wait for the peer's delayed ACK
+        // (about 40 ms). Failing to set it only costs latency.
+        let _ = stream.set_nodelay(true);
         tokio::spawn(async move {
             let _permit = permit;
             if !wait_for_first_byte(&stream, options.header_read_timeout).await {

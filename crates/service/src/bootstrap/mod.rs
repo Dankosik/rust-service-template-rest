@@ -222,6 +222,16 @@ async fn serve(
             infra_outbound_http::REQUEST_DURATION_BUCKETS,
         ),
         // template:end outbound-http:service-bootstrap-outbound-histogram
+        // template:begin grpc:bootstrap-grpc-histograms
+        (
+            infra_grpc::SERVER_HANDLING_SECONDS,
+            infra_grpc::HANDLING_SECONDS_BUCKETS,
+        ),
+        (
+            infra_grpc::CLIENT_HANDLING_SECONDS,
+            infra_grpc::HANDLING_SECONDS_BUCKETS,
+        ),
+        // template:end grpc:bootstrap-grpc-histograms
         // template:begin cache:service-bootstrap-cache-histogram
         (
             infra_cache::OPERATION_DURATION_METRIC,
