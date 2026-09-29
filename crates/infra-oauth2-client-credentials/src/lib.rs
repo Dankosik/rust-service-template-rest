@@ -232,6 +232,14 @@ impl Signer {
         Ok(signer)
     }
 
+    fn form_fields<'a>(&'a self, assertion: &'a str) -> [(&'static str, &'a str); 3] {
+        [
+            ("client_id", self.client_id.as_str()),
+            ("client_assertion_type", CLIENT_ASSERTION_TYPE),
+            ("client_assertion", assertion),
+        ]
+    }
+
     /// Signs one fresh assertion. Never cached: RFC 7523bis requires a
     /// single-use `jti` and every shortlisted server enforces it.
     fn sign(&self) -> Result<String, AcquisitionError> {
@@ -335,7 +343,7 @@ impl Expiry<[u8; 32], Arc<Token>> for ExchangedExpiry {
         // an unbounded number of subjects' entries outlive their session with
         // no expiry to bound them, evictable only by a 401 that may never
         // come. Zero retention reuses the introspection cache's identical
-        // trick for an oversized entry: `try_get_with` still returns the
+        // trick for an oversized entry: the coalesced initializer returns the
         // value to every caller coalesced into this exchange, but Moka treats
         // the entry as expired for every later lookup.
         Some(token.reuse_until.map_or(Duration::ZERO, |until| {
@@ -408,7 +416,7 @@ impl Credentials {
                 let token = self.exchange(key, &subject, deadline).await?;
                 Acquired::Exchanged { key, token }
             }
-            None => Acquired::Service(self.token(deadline).await?),
+            None => Acquired::Service(self.service_token(deadline).await?),
         };
         headers.insert(AUTHORIZATION, acquired.token().header.clone());
         Ok(acquired)
@@ -417,12 +425,12 @@ impl Credentials {
     /// Returns the cached service token while it is reusable, otherwise
     /// requests a new one. Waiting for another caller's request spends this
     /// caller's deadline.
-    async fn token(&self, deadline: Instant) -> Result<Arc<Token>, AcquisitionError> {
+    async fn service_token(&self, deadline: Instant) -> Result<Arc<Token>, AcquisitionError> {
         let now = Instant::now();
         if now >= deadline {
             return Err(AcquisitionError::Timeout);
         }
-        if let Some(token) = self.reusable(now) {
+        if let Some(token) = self.reusable_service_token(now) {
             return Ok(token);
         }
         // Boxed so that the reuse path above keeps a small future.
@@ -434,16 +442,16 @@ impl Credentials {
             .await
             .map_err(|_| AcquisitionError::Timeout)?;
         // The caller that held the lock may have just stored a reusable token.
-        if let Some(token) = self.reusable(Instant::now()) {
+        if let Some(token) = self.reusable_service_token(Instant::now()) {
             return Ok(token);
         }
-        Ok(self.store(self.0.fetch(deadline).await?))
+        Ok(self.store(self.0.fetch_service_token(deadline).await?))
     }
 
     /// Returns the cached service token while it is reusable. The first
     /// caller to find it past its refresh time also starts a background
     /// refresh.
-    fn reusable(&self, now: Instant) -> Option<Arc<Token>> {
+    fn reusable_service_token(&self, now: Instant) -> Option<Arc<Token>> {
         let mut cached = self.cached();
         let token = cached
             .token
@@ -474,7 +482,10 @@ impl Credentials {
                 .as_ref()
                 .is_some_and(|token| Arc::ptr_eq(token, &current));
             if unchanged
-                && let Ok(token) = credentials.0.fetch(Instant::now() + FETCH_TIMEOUT).await
+                && let Ok(token) = credentials
+                    .0
+                    .fetch_service_token(Instant::now() + FETCH_TIMEOUT)
+                    .await
             {
                 credentials.store(token);
                 // A provider may return a token already inside its own
@@ -495,7 +506,7 @@ impl Credentials {
     }
 
     /// Forgets the service token `used` unless a newer token already replaced it.
-    fn reject(&self, used: &Arc<Token>) {
+    fn reject_service_token(&self, used: &Arc<Token>) {
         let mut cached = self.cached();
         if cached
             .token
@@ -514,7 +525,7 @@ impl Credentials {
     /// from, unless a newer token already replaced it there.
     async fn reject_acquired(&self, acquired: &Acquired) {
         match acquired {
-            Acquired::Service(token) => self.reject(token),
+            Acquired::Service(token) => self.reject_service_token(token),
             Acquired::Exchanged { key, token } => self.reject_exchanged(*key, token).await,
         }
     }
@@ -623,7 +634,10 @@ impl AuthenticatedClient {
 impl Inner {
     /// Performs one client-credentials token request, bounded by the
     /// caller's deadline and [`FETCH_TIMEOUT`], and records its outcome.
-    async fn fetch(&self, caller_deadline: Instant) -> Result<Token, AcquisitionError> {
+    async fn fetch_service_token(
+        &self,
+        caller_deadline: Instant,
+    ) -> Result<Token, AcquisitionError> {
         let started = Instant::now();
         let deadline = caller_deadline.min(started + FETCH_TIMEOUT);
         let mut metric = AttemptMetric::new(GRANT_CLIENT_CREDENTIALS, deadline);
@@ -639,12 +653,8 @@ impl Inner {
     ) -> Result<Token, AcquisitionError> {
         let assertion = self.signer.sign()?;
         let scope = joined_scopes(&self.scopes);
-        let mut fields = vec![
-            ("grant_type", GRANT_CLIENT_CREDENTIALS),
-            ("client_id", self.signer.client_id.as_str()),
-            ("client_assertion_type", CLIENT_ASSERTION_TYPE),
-            ("client_assertion", assertion.as_str()),
-        ];
+        let mut fields = vec![("grant_type", GRANT_CLIENT_CREDENTIALS)];
+        fields.extend(self.signer.form_fields(&assertion));
         if let Some(scope) = &scope {
             fields.push(("scope", scope.as_str()));
         }
@@ -656,9 +666,9 @@ impl Inner {
     }
 
     /// Performs one token-exchange request for `subject`, bounded by
-    /// `deadline`, and records its outcome. Called only as the `init` future
-    /// of [`Credentials::exchange`]'s `try_get_with`, so it runs at most once
-    /// per coalesced group of concurrent callers for one subject.
+    /// `deadline`, and records its outcome. Called only as the initializer
+    /// of [`Credentials::exchanged_or_fetch`]'s `or_try_insert_with`, so it
+    /// runs at most once per coalesced group of concurrent callers for one subject.
     async fn fetch_exchange(
         &self,
         subject: &SecretString,
@@ -693,9 +703,7 @@ impl Inner {
         if let Some(audience) = &self.audience {
             fields.push(("audience", audience.as_str()));
         }
-        fields.push(("client_id", self.signer.client_id.as_str()));
-        fields.push(("client_assertion_type", CLIENT_ASSERTION_TYPE));
-        fields.push(("client_assertion", assertion.as_str()));
+        fields.extend(self.signer.form_fields(&assertion));
         let response = self.post_form(&fields, deadline).await?;
         into_token(&response, started, Some(TOKEN_TYPE_ACCESS_TOKEN))
     }

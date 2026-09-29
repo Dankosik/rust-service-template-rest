@@ -66,7 +66,7 @@ impl Service<Request<Body>> for AuthenticatedClient {
         // called now, without cloning it or rewriting grpc-timeout.
         if on_behalf_of.is_none()
             && started < deadline
-            && let Some(token) = credentials.reusable(started)
+            && let Some(token) = credentials.reusable_service_token(started)
         {
             request
                 .headers_mut()
@@ -75,7 +75,7 @@ impl Service<Request<Body>> for AuthenticatedClient {
             return Box::pin(async move {
                 let response = response.await?;
                 if unauthenticated(&response) {
-                    credentials.reject(&token);
+                    credentials.reject_service_token(&token);
                 }
                 Ok(response)
             });

@@ -522,7 +522,7 @@ async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
     );
     credentials
-        .token(Instant::now() + Duration::from_secs(10))
+        .service_token(Instant::now() + Duration::from_secs(10))
         .await
         .unwrap();
     resource.release();

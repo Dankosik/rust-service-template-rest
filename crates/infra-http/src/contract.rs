@@ -141,30 +141,34 @@ fn access(document: &OpenApi, operation: &Operation) -> Result<Access, FinalizeE
     let bearer_scheme = scheme
         .as_ref()
         .is_some_and(|scheme| scheme["type"] == "http" && scheme["scheme"] == "bearer");
-    let alternatives = bearer_scheme
-        .then(|| value.as_array())
-        .flatten()
-        .and_then(|requirements| {
-            requirements
-                .iter()
-                .map(|requirement| {
-                    let requirement = requirement.as_object()?;
-                    if requirement.len() != 1 {
-                        return None;
-                    }
-                    requirement
-                        .get("bearerAuth")?
-                        .as_array()?
-                        .iter()
-                        .map(|scope| scope.as_str().map(ToOwned::to_owned))
-                        .collect::<Option<Box<[String]>>>()
-                })
-                .collect::<Option<Vec<_>>>()
-        });
-    match alternatives {
-        Some(alternatives) => Ok(Access::Protected(alternatives.into())),
-        None => Err(FinalizeError::InvalidPolicy),
+    if !bearer_scheme {
+        return Err(FinalizeError::InvalidPolicy);
     }
+    let requirements = value.as_array().ok_or(FinalizeError::InvalidPolicy)?;
+    let mut alternatives = Vec::with_capacity(requirements.len());
+    for requirement in requirements {
+        let requirement = requirement
+            .as_object()
+            .ok_or(FinalizeError::InvalidPolicy)?;
+        if requirement.len() != 1 {
+            return Err(FinalizeError::InvalidPolicy);
+        }
+        let scopes = requirement
+            .get("bearerAuth")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(FinalizeError::InvalidPolicy)?;
+        let scopes = scopes
+            .iter()
+            .map(|scope| {
+                scope
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or(FinalizeError::InvalidPolicy)
+            })
+            .collect::<Result<Box<[String]>, _>>()?;
+        alternatives.push(scopes);
+    }
+    Ok(Access::Protected(alternatives.into()))
 }
 
 #[cfg(test)]
