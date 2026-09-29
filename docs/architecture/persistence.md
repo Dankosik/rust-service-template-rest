@@ -62,7 +62,6 @@ different ones changes them in one reviewed place.
 | `statement_timeout` | 8 s | Session default in the startup packet of every pooled connection |
 | `idle_in_transaction_session_timeout` | 8 s | Same duration as `statement_timeout` by policy; a separate constant |
 | Slow statement warning | 1 s | `warn` with SQL text and duration; statement logging is otherwise off |
-| Rollback after a failed closure | 3 s | `tokio::time::timeout` around `Transaction::rollback`; a failed or late rollback discards the connection |
 | Readiness probe | health `probe_budget` | The refresher bounds the acquire plus ping |
 | Pool close at shutdown | 5 s (`DEPENDENCY_CLOSE`) | After background tasks joined, before the telemetry flush |
 | Migration `statement_timeout`, idle-in-transaction | 2 min | Session defaults of the one migration connection |
@@ -89,23 +88,29 @@ failure class (`no connection available inside the acquire budget`,
 opaque `&mut Tx`. The provider adapter obtains a scoped connection through
 `infra_postgres::connection(tx)`; the handle exposes no constructor or
 transaction-control methods. The boundary commits on `Ok` and rolls back on
-`Err` inside the rollback budget, returning the closure's error. A rollback
-that fails or overruns the budget closes the physical connection instead of
-returning it to the pool in an unknown state; the same guard discards a
-connection whose `BEGIN` future was cancelled, which sqlx 0.9 would return
-to the pool inside an open transaction. Rollback failure logs contain only
-a bounded cause category and sanitized SQLSTATE.
+`Err`, returning the closure's error at once: dropping the sqlx transaction
+queues the `ROLLBACK`, and the pool's return ping sends it with its own
+round trip instead of the caller waiting for one. A rollback the server
+rejects fails that ping, and the pool closes the connection instead of
+reusing it. A guard discards a connection whose `BEGIN` future was
+cancelled, which sqlx 0.9 would return to the pool inside an open
+transaction.
 
 Before `COMMIT` of a read-write transaction the boundary runs `SELECT 1`.
 PostgreSQL answers `COMMIT` in an aborted transaction with a silent
 `ROLLBACK` and `sqlx` does not check the command tag, so a closure that
 swallowed a failed statement and returned `Ok` would look committed (pgx
 reports the same case as `ErrTxCommitRollback`). The probe turns it into
-`TxError::CommitFailed` with SQLSTATE `25P02` for one extra round trip.
-Read-only transactions skip it: nothing they did can be lost. So does a
-closure that calls `statement_succeeded(tx)` right after its last statement
-succeeded: that success already proves the transaction is not aborted, and
-borrowing `connection(tx)` again withdraws the proof. A closure that expects
+`TxError::CommitFailed` with SQLSTATE `25P02`. Probe and commit travel in
+one simple query, `SELECT 1; COMMIT; BEGIN`, so the probe costs no round
+trip: after an error the server skips the rest of the message, and the
+trailing `BEGIN` keeps the server inside the transaction sqlx still tracks,
+which the dropped sqlx transaction rolls back with the pool's return ping.
+Read-only transactions skip the probe: nothing they did can be lost. So
+does a closure that calls `statement_succeeded(tx)` right after its last
+statement succeeded: that success already proves the transaction is not
+aborted, spares the server three statements, and borrowing
+`connection(tx)` again withdraws the proof. A closure that expects
 a statement to fail runs it under a savepoint (`connection(tx).begin()`).
 `in_tx_with(&pool, TxOptions { isolation, read_only }, work)` renders the `BEGIN`
 statement for `Connection::begin_with`. `Isolation::ServerDefault` omits the
@@ -305,12 +310,15 @@ scratch project against `postgres:18.4`):
   one second idle, as pgx does; the `sqlx` default (`test_before_acquire`)
   pings on every acquire and doubled the round trips of a single-statement
   request. The idle ping still discards a connection the server or a proxy
-  closed while it sat in the pool.
+  closed while it sat in the pool. On release the pool shrinks a
+  connection's read and write buffers back to the driver's default: sqlx
+  keeps them at the largest message the connection ever carried, so one
+  1 MiB body per connection kept about 3 MiB resident per connection.
 - **`in_tx` takes an `AsyncFnOnce`** (edition 2024): the closure borrows the
   opaque provider-owned `Tx`, the future is `Send` when the closure's is, and callers pass
   their own error type through `E: From<TxError>`. The Go template joined
   the callback error with the rollback error; Rust returns the callback
-  error and logs the rollback failure.
+  error, and a rollback the server rejects closes the connection.
 - **Embedded migrations, forward-only**: `sqlx::migrate!` replaces the Go
   template's runtime directory with its symlink and nesting checks; a
   `build.rs` `rerun-if-changed=../../migrations` is required because the

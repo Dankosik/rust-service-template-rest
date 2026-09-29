@@ -28,8 +28,8 @@ use infra_postgres::{
 };
 use integration_tests::{DATABASE_URL, dsn_for, fixture_dir};
 use migrate::{HistoryError, MIGRATOR, RunError, RunOptions};
-use sqlx::Executor;
 use sqlx::migrate::{Migrate, MigrateError, Migrator};
+use sqlx::{Connection, Executor};
 use url::Url;
 
 const APP: &str = "integration-tests";
@@ -256,6 +256,74 @@ async fn in_tx_commits_on_ok_and_rolls_back_on_err(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(count, 1, "the failed closure's insert was rolled back");
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_finished_transaction_returns_its_connection_outside_any_transaction(pool: PgPool) {
+    pool.execute("CREATE TABLE t (id int PRIMARY KEY)")
+        .await
+        .unwrap();
+    // One connection, so every step below reuses the one the previous
+    // transaction returned.
+    let ours = template_pool(&dsn_for(&pool).await, 1).await;
+    let serializable = TxOptions {
+        isolation: Isolation::Serializable,
+        read_only: false,
+    };
+
+    let committed: Result<(), AppError> = in_tx(&ours, async |tx| {
+        connection(tx).execute("INSERT INTO t VALUES (1)").await?;
+        Ok(())
+    })
+    .await;
+    assert!(committed.is_ok(), "{committed:?}");
+    // An explicit `BEGIN` is refused inside a transaction sqlx still tracks.
+    let explicit: Result<(), AppError> = in_tx_with(&ours, serializable, async |tx| {
+        connection(tx).execute("INSERT INTO t VALUES (2)").await?;
+        Ok(())
+    })
+    .await;
+    assert!(explicit.is_ok(), "{explicit:?}");
+
+    let failed: Result<(), AppError> = in_tx_with(&ours, serializable, async |tx| {
+        connection(tx).execute("INSERT INTO t VALUES (3)").await?;
+        Err(AppError::Business)
+    })
+    .await;
+    assert!(matches!(failed, Err(AppError::Business)), "{failed:?}");
+    // Autocommit on the same connection, visible at once to another one:
+    // neither the probed commit nor the queued rollback left it inside a
+    // transaction.
+    ours.execute("INSERT INTO t VALUES (4)").await.unwrap();
+    let ids: Vec<i32> = sqlx::query_scalar("SELECT id FROM t ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(ids, [1, 2, 4]);
+    assert_eq!(ours.size(), 1, "no connection was discarded");
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_savepoint_inside_the_transaction_contains_an_expected_failure(pool: PgPool) {
+    pool.execute("CREATE TABLE t (id int PRIMARY KEY)")
+        .await
+        .unwrap();
+    let result: Result<(), AppError> = in_tx(&pool, async |tx| {
+        connection(tx).execute("INSERT INTO t VALUES (1)").await?;
+        let mut savepoint = connection(tx).begin().await?;
+        let duplicate = (&mut *savepoint).execute("INSERT INTO t VALUES (1)").await;
+        assert!(duplicate.is_err());
+        savepoint.rollback().await?;
+        connection(tx).execute("INSERT INTO t VALUES (2)").await?;
+        Ok(())
+    })
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+    let ids: Vec<i32> = sqlx::query_scalar("SELECT id FROM t ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(ids, [1, 2]);
 }
 
 #[sqlx::test(migrations = false)]

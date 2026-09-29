@@ -10,18 +10,11 @@
 //! retried; a commit whose outcome is unknown must be reconciled against the
 //! operation's own identity instead.
 
-use std::time::Duration;
-
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnection, PgPool};
 use sqlx::{Connection, Executor, Postgres};
 
-use crate::{failure_cause, sqlstate};
-
-/// Bound on the rollback issued after the closure failed. A rollback that
-/// fails or overruns this budget discards the physical connection instead
-/// of returning it to the pool in an unknown state.
-const ROLLBACK_TIMEOUT: Duration = Duration::from_secs(3);
+use crate::sqlstate;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
@@ -63,7 +56,7 @@ pub fn connection<'a>(tx: &'a mut Tx<'_>) -> &'a mut PgConnection {
 /// Record that the statement just run through [`connection`] succeeded.
 ///
 /// That success proves the transaction is not aborted, so a commit that
-/// follows skips its probe statement and one round trip. Borrowing
+/// follows skips its probe statement. Borrowing
 /// [`connection`] again withdraws the proof.
 pub fn statement_succeeded(tx: &mut Tx<'_>) {
     tx.live = true;
@@ -75,8 +68,7 @@ pub fn statement_succeeded(tx: &mut Tx<'_>) {
 /// sqlx 0.9 does not roll back a `BEGIN` whose future is cancelled: its
 /// guard only acts once the transaction depth was incremented, which happens
 /// after the server answered. The pool's return ping succeeds, so the
-/// connection would re-enter the pool inside an open transaction. The same
-/// holds for a rollback that failed or overran [`ROLLBACK_TIMEOUT`].
+/// connection would re-enter the pool inside an open transaction.
 struct DiscardOnDrop {
     connection: PoolConnection<Postgres>,
     discard: bool,
@@ -147,8 +139,7 @@ impl TxOptions {
 ///
 /// # Errors
 ///
-/// The closure's error after a bounded rollback, or a [`TxError`] converted
-/// into it.
+/// The closure's error, or a [`TxError`] converted into it.
 pub async fn in_tx<T, E, F>(pool: &PgPool, f: F) -> Result<T, E>
 where
     F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
@@ -161,8 +152,7 @@ where
 ///
 /// # Errors
 ///
-/// The closure's error after a bounded rollback, or a [`TxError`] converted
-/// into it.
+/// The closure's error, or a [`TxError`] converted into it.
 pub async fn in_tx_with<T, E, F>(pool: &PgPool, options: TxOptions, f: F) -> Result<T, E>
 where
     F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
@@ -183,52 +173,29 @@ where
         conn: &mut tx,
         live: false,
     };
-    let result = f(&mut handle).await;
-    let live = handle.live;
-    match result {
-        Ok(value) => {
-            if !options.read_only && !live {
-                // PostgreSQL answers `COMMIT` in an aborted transaction with
-                // a silent `ROLLBACK`, and sqlx does not check the command
-                // tag (pgx reports it as `ErrTxCommitRollback`). One
-                // statement first turns that state into an error: a closure
-                // that swallowed a failed statement must not look committed.
-                (&mut *tx)
-                    .execute("SELECT 1")
-                    .await
-                    .map_err(TxError::CommitFailed)?;
-            }
-            tx.commit().await.map_err(classify_commit)?;
-            Ok(value)
-        }
-        Err(err) => {
-            let rolled_back = match tokio::time::timeout(ROLLBACK_TIMEOUT, tx.rollback()).await {
-                Ok(Ok(())) => true,
-                Ok(Err(rollback)) => {
-                    log_rollback_failure("rollback_failed", Some(&rollback));
-                    false
-                }
-                Err(_elapsed) => {
-                    log_rollback_failure("rollback_timeout", None);
-                    false
-                }
-            };
-            guard.discard = !rolled_back;
-            Err(err)
-        }
+    // On `Err`, dropping `tx` queues the rollback and the pool's return ping
+    // sends it, so the caller does not wait a round trip for it. A rollback
+    // the server rejects fails that ping, and the pool closes the connection
+    // instead of reusing it.
+    let value = f(&mut handle).await?;
+    if options.read_only || handle.live {
+        tx.commit().await.map_err(classify_commit)?;
+    } else {
+        // PostgreSQL answers `COMMIT` in an aborted transaction with a silent
+        // `ROLLBACK`, and sqlx does not check the command tag (pgx reports it
+        // as `ErrTxCommitRollback`). The probe statement turns that state into
+        // `25P02` and the server skips the rest of the message: a closure that
+        // swallowed a failed statement must not look committed. One simple
+        // query carries probe and commit in one round trip; its trailing
+        // `BEGIN` keeps the server in the transaction sqlx still tracks, and
+        // dropping `tx` rolls that empty transaction back with the pool's
+        // return ping, without a round trip of its own.
+        (&mut *tx)
+            .execute("SELECT 1; COMMIT; BEGIN")
+            .await
+            .map_err(classify_commit)?;
     }
-}
-
-fn log_rollback_failure(failure_class: &'static str, err: Option<&sqlx::Error>) {
-    let code = err.and_then(sqlstate);
-    let cause = err.map_or("deadline", failure_cause);
-    tracing::warn!(
-        event = "postgres_transaction_failure",
-        phase = "rollback",
-        failure_class,
-        sqlstate = code.as_deref(),
-        cause
-    );
+    Ok(value)
 }
 
 /// Preserve failures known to have rejected the commit and mark every other
@@ -237,9 +204,12 @@ fn log_rollback_failure(failure_class: &'static str, err: Option<&sqlx::Error>) 
 /// A deferred constraint (class `23`) or a transaction rollback (class `40`)
 /// reported by `COMMIT` means the server rolled back. `40003` (statement
 /// completion unknown) is the exception, as is every transport failure.
+/// `25P02` comes from the probe ahead of `COMMIT`: the transaction was
+/// already aborted and the server skipped the commit.
 fn classify_commit(err: sqlx::Error) -> TxError {
-    let rejected = sqlstate(&err)
-        .is_some_and(|code| code.starts_with("23") || (code.starts_with("40") && code != "40003"));
+    let rejected = sqlstate(&err).is_some_and(|code| {
+        code.starts_with("23") || (code.starts_with("40") && code != "40003") || code == "25P02"
+    });
     if rejected {
         TxError::CommitFailed(err)
     } else {
@@ -249,10 +219,6 @@ fn classify_commit(err: sqlx::Error) -> TxError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     use super::*;
 
     #[test]
@@ -301,7 +267,7 @@ mod tests {
 
     #[test]
     fn commit_classification_by_sqlstate() {
-        for code in ["23505", "23503", "40001", "40P01"] {
+        for code in ["23505", "23503", "40001", "40P01", "25P02"] {
             let err = classify_commit(crate::error::tests::database(code));
             assert!(matches!(err, TxError::CommitFailed(_)), "{code}");
         }
@@ -311,50 +277,5 @@ mod tests {
         }
         let err = classify_commit(sqlx::Error::Io(std::io::Error::other("reset")));
         assert!(matches!(err, TxError::CommitUnknown(_)), "{err}");
-    }
-
-    struct RollbackDiagnostic(Arc<AtomicBool>);
-
-    impl tracing::Subscriber for RollbackDiagnostic {
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
-        fn event(&self, event: &tracing::Event<'_>) {
-            let mut fields = BTreeMap::new();
-            event.record(
-                &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
-                    fields.insert(field.name(), format!("{value:?}"));
-                },
-            );
-            assert_eq!(
-                fields,
-                BTreeMap::from([
-                    ("event", "\"postgres_transaction_failure\"".to_owned()),
-                    ("phase", "\"rollback\"".to_owned()),
-                    ("failure_class", "\"rollback_failed\"".to_owned()),
-                    ("cause", "\"protocol\"".to_owned()),
-                ])
-            );
-            self.0.store(true, Ordering::Relaxed);
-        }
-    }
-
-    #[test]
-    fn rollback_failure_diagnostic_does_not_render_driver_text() {
-        let emitted = Arc::new(AtomicBool::new(false));
-        tracing::subscriber::with_default(RollbackDiagnostic(Arc::clone(&emitted)), || {
-            log_rollback_failure(
-                "rollback_failed",
-                Some(&sqlx::Error::Protocol("sensitive bound value".to_owned())),
-            );
-        });
-        assert!(emitted.load(Ordering::Relaxed));
     }
 }
