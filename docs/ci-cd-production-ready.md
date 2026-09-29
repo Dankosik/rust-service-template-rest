@@ -277,7 +277,10 @@ that stage owns); the switch is two `--target` lines and the base digest.
 Builder and runtime share one Debian release because a trixie-built binary
 does not start on `cc-debian12`. `cargo-chef` cooks the dependency layer as
 a plain layer because BuildKit does not export `RUN --mount=type=cache` to
-`type=gha`; a source-only change rebuilds in about ten seconds.
+`type=gha`; a source-only change rebuilds only the workspace crates, which with
+the fat-LTO release profile took 489 s for the service, `/migrate`, and
+`/jobs-worker` on a 4-vCPU host (286 s without LTO); see the profile comment in
+`Cargo.toml`.
 `rust-toolchain.toml` stays out of the context because rustup would download
 `clippy` and `rustfmt` in every stage (*verified*). Two `--no-cache` builds
 produced byte-identical binaries (`CARGO_INCREMENTAL=0`, fixed `/src`,
