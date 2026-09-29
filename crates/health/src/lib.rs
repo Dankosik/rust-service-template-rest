@@ -347,7 +347,7 @@ impl ReadinessReader {
     /// # Errors
     ///
     /// [`OwnerDropped`] when the last [`Readiness`] sender is gone.
-    pub async fn changed_verdict(&mut self) -> Result<(), OwnerDropped> {
+    pub async fn wait_for_verdict_event(&mut self) -> Result<(), OwnerDropped> {
         if self.rx.has_changed().map_err(|_| OwnerDropped)? {
             return self.rx.changed().await.map_err(|_| OwnerDropped);
         }
@@ -634,15 +634,15 @@ mod tests {
 
     // template:begin grpc:health-changed-verdict-test
     #[tokio::test(start_paused = true)]
-    async fn changed_verdict_delivers_drain_once_then_waits_without_losing_drain() {
+    async fn wait_for_verdict_event_delivers_drain_once_then_waits_without_losing_drain() {
         let (readiness, _, calls) = flaky(true);
         readiness.refresh().await;
         let mut reader = readiness.reader();
 
         readiness.start_drain();
-        assert_eq!(reader.changed_verdict().await, Ok(()));
+        assert_eq!(reader.wait_for_verdict_event().await, Ok(()));
 
-        let waiter = tokio::spawn(async move { reader.changed_verdict().await });
+        let waiter = tokio::spawn(async move { reader.wait_for_verdict_event().await });
         tokio::task::yield_now().await;
         assert!(
             !waiter.is_finished(),
@@ -662,12 +662,12 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn changed_verdict_delivers_each_stale_edge_once_without_a_probe() {
+    async fn wait_for_verdict_event_delivers_each_stale_edge_once_without_a_probe() {
         let (readiness, _, calls) = flaky(true);
         readiness.refresh().await;
         let mut reader = readiness.reader();
         let waiter = tokio::spawn(async move {
-            let result = reader.changed_verdict().await;
+            let result = reader.wait_for_verdict_event().await;
             (reader, result)
         });
         tokio::task::yield_now().await;
@@ -683,7 +683,7 @@ mod tests {
             .expect("stale boundary waiter must not panic");
         assert_eq!(result, Ok(()));
 
-        let waiter = tokio::spawn(async move { reader.changed_verdict().await });
+        let waiter = tokio::spawn(async move { reader.wait_for_verdict_event().await });
         tokio::task::yield_now().await;
         assert!(
             !waiter.is_finished(),
@@ -702,11 +702,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changed_verdict_reports_when_the_owner_is_dropped() {
+    async fn wait_for_verdict_event_reports_when_the_owner_is_dropped() {
         let readiness = Readiness::new(Vec::new(), policy());
         let mut reader = readiness.reader();
         drop(readiness);
-        assert_eq!(reader.changed_verdict().await, Err(OwnerDropped));
+        assert_eq!(reader.wait_for_verdict_event().await, Err(OwnerDropped));
     }
     // template:end grpc:health-changed-verdict-test
 }
