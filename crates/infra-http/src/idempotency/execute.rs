@@ -170,7 +170,9 @@ pub(super) enum Rollback {
 struct Answer {
     response: Response,
     outcome: Outcome,
-    problem: bool,
+    // Only Problems synthesized by this boundary yield to the outer timeout.
+    // A handler's non-2xx response, even a Problem, follows the computed path.
+    yield_to_timeout: bool,
 }
 
 impl Answer {
@@ -178,7 +180,7 @@ impl Answer {
         Self {
             response,
             outcome,
-            problem: true,
+            yield_to_timeout: true,
         }
     }
 
@@ -186,12 +188,15 @@ impl Answer {
         Self {
             response,
             outcome,
-            problem: false,
+            yield_to_timeout: false,
         }
     }
 
     async fn send(self, deadline: Instant, guard: OutcomeGuard) -> Response {
-        if self.problem && Instant::now() >= deadline {
+        if self.yield_to_timeout && Instant::now() >= deadline {
+            // Let tower's existing timeout produce the 504 instead of returning
+            // a late store failure. Cancellation drops the guard and records
+            // Abandoned; recording this answer would mislabel a timed-out attempt.
             return std::future::pending().await;
         }
         guard.record(self.outcome);
@@ -337,7 +342,7 @@ mod tests {
 
     async fn assert_problem(answer: Answer, outcome: Outcome, code: Code, retry_after: bool) {
         assert_eq!(answer.outcome, outcome);
-        assert!(answer.problem);
+        assert!(answer.yield_to_timeout);
         assert_eq!(answer.response.status(), http_status(code));
         assert_eq!(
             answer.response.headers().get(CONTENT_TYPE),
