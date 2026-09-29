@@ -238,8 +238,8 @@ let client = EchoServiceClient::new(authenticated);
 A caller-supplied `Authorization` is `INVALID_ARGUMENT` before any token or
 resource I/O. The acquisition deadline is `grpc-timeout` when that header is
 present and well formed; otherwise it is the owner's five-second fetch
-timeout. Token wait spends that deadline: `grpc-timeout` is rewritten to the
-remaining budget before dispatch. Acquisition failure prevents dispatch. One bearer is inserted at
+timeout. Token wait spends that deadline: a wait of at least a millisecond
+rewrites `grpc-timeout` to the remaining budget before dispatch. Acquisition failure prevents dispatch. One bearer is inserted at
 opening and is not refreshed mid-stream.
 
 Eviction runs only on the initial response: `grpc-status` `UNAUTHENTICATED`,
