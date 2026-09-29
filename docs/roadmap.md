@@ -820,8 +820,8 @@ deployment is claimed.
 - `criterion` microbenchmarks with `make benchmark-capture` and
   `benchmark-compare`; k6 HTTP harness with `make benchmark-http`; evidence
   owner and workload contract in `docs/benchmarking.md`.
-- Release profile decision (LTO, codegen units, allocator) from measurements,
-  and optional PGO via `cargo-pgo` with the same verification discipline the
+- Release profile: fat LTO with one codegen unit is decided from measurements
+  (see `Cargo.toml`); the allocator decision remains, and optional PGO via `cargo-pgo` with the same verification discipline the
   Go template applies to its profile manifest.
 
 ### Stage 12: First release and derived-repository verification
