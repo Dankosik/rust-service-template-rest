@@ -802,13 +802,22 @@ async fn unreachable_endpoint_is_unavailable_for_reads_and_unknown_for_writes() 
 #[tokio::test]
 async fn presign_is_bounded_and_redacted() {
     let stub = Stub::start(|_, _| ok_empty()).await;
-    let storage = stub.storage(|_| {});
+    let mut storage = stub.storage(|_| {});
+    // As on Amazon S3: the owner header would have to travel with the URL.
+    std::sync::Arc::get_mut(&mut storage.inner)
+        .unwrap()
+        .expected_bucket_owner = Some("123456789012".to_owned());
     let url = storage
         .presign_get(&key(), Duration::from_secs(60))
         .await
         .unwrap();
     assert!(url.expose().contains("X-Amz-Signature="), "presigned query");
     assert!(url.expose().contains("X-Amz-Expires=60"));
+    assert!(
+        url.expose().contains("X-Amz-SignedHeaders=host&"),
+        "{}",
+        url.expose()
+    );
     assert_eq!(format!("{url:?}"), "PresignedUrl([REDACTED])");
     for expires_in in [Duration::ZERO, Duration::from_secs(7 * 24 * 60 * 60 + 1)] {
         assert_eq!(

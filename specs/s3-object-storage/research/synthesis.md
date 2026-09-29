@@ -148,7 +148,7 @@ outcome is unknown by construction.
 
 | Provider | Endpoint | Region | Addressing | Other |
 | --- | --- | --- | --- | --- |
-| `amazon_s3` | Empty; the SDK resolves the regional endpoint | Required, commercial (`^[a-z]{2}-[a-z]+-\d+$`; no `gov` or `cn`) | Virtual-hosted | `expected_bucket_owner` required (12 digits), sent on every request and signed into presigned URLs |
+| `amazon_s3` | Empty; the SDK resolves the regional endpoint | Required, commercial (`^[a-z]{2}-[a-z]+-\d+$`; no `gov` or `cn`) | Virtual-hosted | `expected_bucket_owner` required (12 digits), sent on every call. Not in presigned URLs: the Rust SDK signs it as a header the recipient would have to send (the Go SDK hoists it into the query) |
 | `cloudflare_r2` | `https://<32 hex>[.eu\|.fedramp].r2.cloudflarestorage.com`, exact origin | `auto` | Virtual-hosted | No expected-owner header: R2 does not implement it |
 | `railway` | Required HTTPS origin, taken from the bucket's `ENDPOINT` (`https://t3.storageapi.dev` today) | Default `auto`; the bucket's `REGION` | Virtual-hosted | Railway Buckets run on Tigris; `BUCKET` is the hashed S3 name, never `RAILWAY_BUCKET_NAME` |
 | `local` | `http://` or `https://` origin | Default `us-east-1` | Path-style | `app.env` must be `local` or `development`; for an emulator only |

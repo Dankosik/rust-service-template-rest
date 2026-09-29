@@ -184,8 +184,10 @@ already do in PostgreSQL.
 7 days, the cross-provider cap (Railway would allow 90 days). The URL is a
 bearer credential until it expires: `PresignedUrl` redacts `Debug`, and the
 feature hands `expose()` only to the intended recipient and never logs it.
-There is no presigned PUT, because the provider cannot enforce the object
-size limit on it.
+The URL needs no extra header, so it carries no expected bucket owner even on
+Amazon S3: the Rust SDK signs that check as a header the recipient would have
+to send. There is no presigned PUT, because the provider cannot enforce the
+object size limit on it.
 
 ## Readiness and shutdown
 
@@ -251,7 +253,7 @@ only to debug the SDK, and only where the keys may be seen.
 | --- | --- | --- | --- |
 | Create-only (`If-None-Match: *`, 412) | documented | documented | Tigris documents it; Railway does not |
 | Upload checksum used | CRC64NVME | CRC64NVME, bytes only | none |
-| Expected bucket owner | sent and signed into presigned URLs | not supported | not supported |
+| Expected bucket owner | sent on every call; not in presigned URLs, which must work without headers | not supported | not supported |
 | Single-upload limit | 5 GB | 4.995 GiB | not documented |
 | Throttling | 503 `SlowDown` | 429 on more than one write per second to one key; 503 | not documented |
 | Notes | | Jurisdiction buckets answer only on their jurisdiction endpoint | Tigris behind it; public network only; no versioning, object lock, or lifecycle rules; bucket access is suspended when the plan's usage limit is reached |

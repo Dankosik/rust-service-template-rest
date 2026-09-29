@@ -56,7 +56,7 @@ Every MSRV fits workspace Rust 1.98.
 | Typed credentials: `access_key_id` and environment-only `secret_access_key`; no session token and no ambient chain | The global `AWS_*` variables would bypass typed configuration and block a second store per process; Railway injects per-bucket values; R2 temporary credentials and Amazon STS expire and need a refresher. | An Amazon adopter needs workload identity: add `aws-config` for that provider only. |
 | The HTTPS client is built explicitly: no proxy, no redirect | The pinned behavior version's default client reads `HTTP(S)_PROXY`. A signed request must reach only the configured origin. | A deployment needs an egress proxy. |
 | Presign is GET only, 1 s to 7 days | SigV4 and R2 cap at 7 days; Railway allows 90. A presigned PUT cannot enforce the size limit. | A consumer needs uploads from clients. |
-| Expected bucket owner only for `amazon_s3`, required there | Confused-deputy protection on Amazon; R2 does not implement the header. | A recorded run shows Railway honors it. |
+| Expected bucket owner only for `amazon_s3`, required there, and not in presigned URLs | Confused-deputy protection on Amazon; R2 does not implement the header. The Rust SDK signs it as a header, not a query parameter, so a presigned URL carrying it would fail without that header; a presigned URL is refused if it needs any header. | A recorded run shows Railway honors it, or the SDK hoists `x-amz-*` headers into presigned queries. |
 
 ## Observability
 

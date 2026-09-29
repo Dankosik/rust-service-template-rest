@@ -500,7 +500,9 @@ impl ObjectStorage {
     }
 
     /// Presign a GET for `expires_in`, between 1 second and 7 days. This is a
-    /// local signature: nothing is sent, and no admission slot is used.
+    /// local signature: nothing is sent, and no admission slot is used. The
+    /// URL works without extra headers, so it carries no expected bucket
+    /// owner even on Amazon S3.
     ///
     /// # Errors
     ///
@@ -523,10 +525,15 @@ impl ObjectStorage {
             .get_object()
             .bucket(&self.inner.bucket)
             .key(key.as_str())
-            .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
             .presigned(config)
             .await
         {
+            // The URL must work alone. The SDK signs headers as headers, not
+            // query parameters, so a header here (such as the expected bucket
+            // owner, which is therefore not sent) would have to accompany it.
+            Ok(request) if request.headers().next().is_some() => {
+                Err(guard.fail(ObjectStorageError::Rejected, "presigned_headers"))
+            }
             Ok(request) => {
                 guard.succeed();
                 Ok(PresignedUrl(request.uri().to_owned()))
