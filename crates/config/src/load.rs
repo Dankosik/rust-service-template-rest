@@ -603,6 +603,76 @@ mod tests {
     }
     // template:end cache:load-cache-environment
 
+    // template:begin object-storage:load-object-storage-environment
+    #[test]
+    fn object_storage_environment_maps_railway_bucket_variables() {
+        use secrecy::ExposeSecret as _;
+
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__OBJECT_STORAGE__PROVIDER", "railway"),
+                ("APP__OBJECT_STORAGE__BUCKET", "results-jdhhd8oe18xi"),
+                ("APP__OBJECT_STORAGE__ENDPOINT", "https://t3.storageapi.dev"),
+                ("APP__OBJECT_STORAGE__REGION", "auto"),
+                ("APP__OBJECT_STORAGE__ACCESS_KEY_ID", "tid_example"),
+                ("APP__OBJECT_STORAGE__SECRET_ACCESS_KEY", "hunter2"),
+                ("APP__OBJECT_STORAGE__MAX_OBJECT_BYTES", "2 MiB"),
+                ("APP__OBJECT_STORAGE__MAX_CONCURRENCY", "32"),
+                ("APP__OBJECT_STORAGE__OPERATION_TIMEOUT", "10s"),
+            ]),
+        )
+        .unwrap();
+        let storage = &cfg.object_storage;
+        assert_eq!(storage.provider, crate::ObjectStorageProvider::Railway);
+        assert_eq!(storage.bucket, "results-jdhhd8oe18xi");
+        assert_eq!(
+            storage.secret_access_key.as_ref().unwrap().expose_secret(),
+            "hunter2"
+        );
+        assert_eq!(storage.max_object_bytes.as_u64(), 2 * 1024 * 1024);
+        assert_eq!(storage.max_concurrency, 32);
+        assert_eq!(storage.operation_timeout, Duration::from_secs(10));
+        assert!(!format!("{cfg:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn object_storage_secret_in_a_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let leaked = write(
+            &dir,
+            "leaked.toml",
+            "[object_storage]\nsecret_access_key = \"hunter2\"\n",
+        );
+        let err = load_from(
+            &LoadOptions {
+                config: Some(leaked),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::SecretInFile { key, .. } if key == "object_storage.secret_access_key"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn object_storage_unknown_provider_fails_loading() {
+        assert!(matches!(
+            load_from(
+                &LoadOptions::default(),
+                BUILD,
+                env(&[("APP__OBJECT_STORAGE__PROVIDER", "minio")]),
+            ),
+            Err(Error::Deserialize(_))
+        ));
+    }
+    // template:end object-storage:load-object-storage-environment
+
     // template:begin outbound-auth:load-integrations-environment
     #[test]
     fn oauth_environment_builds_a_named_tuple_and_redacts_its_values() {

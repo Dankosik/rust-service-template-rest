@@ -691,6 +691,9 @@ fi
 if is_true cache_integration; then
 	add_command make test-integration-cache "cache adapter, Compose, or cache proof changed" "make test-integration-cache" docker true true
 fi
+if is_true object_storage_integration; then
+	add_command make test-integration-object-storage "object storage adapter, Compose, or emulator proof changed" "make test-integration-object-storage" docker true true
+fi
 if is_true runtime_image || is_true migrations; then
 	image=${VERIFY_RUNTIME_IMAGE:-service:verify}
 	if is_true runtime_image; then

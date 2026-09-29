@@ -70,6 +70,7 @@ def check(root: Path) -> None:
         "config-url": "remove_when_unselected",
         "integration": "remove_when_unselected",
         "cache": "remove_when_unselected",
+        "object-storage": "remove_when_unselected",
         "rustls": "remove_when_unselected",
         "jsonwebtoken": "remove_when_unselected",
         "webhooks-common": "remove_when_unselected",

@@ -58,6 +58,7 @@ jobs:
       db_integration: ${{ steps.surfaces.outputs.db_integration }}
       messaging_integration: ${{ steps.surfaces.outputs.messaging_integration }}
       cache_integration: ${{ steps.surfaces.outputs.cache_integration }}
+      object_storage_integration: ${{ steps.surfaces.outputs.object_storage_integration }}
       migrations: ${{ steps.surfaces.outputs.migrations }}
       agent_instructions: ${{ steps.surfaces.outputs.agent_instructions }}
       documentation: ${{ steps.surfaces.outputs.documentation }}
@@ -524,7 +525,8 @@ jobs:
     if: >-
       needs.changes.outputs.db_integration == 'true' ||
       needs.changes.outputs.messaging_integration == 'true' ||
-      needs.changes.outputs.cache_integration == 'true'
+      needs.changes.outputs.cache_integration == 'true' ||
+      needs.changes.outputs.object_storage_integration == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -553,6 +555,7 @@ jobs:
           DATABASE_SELECTED: ${{ needs.changes.outputs.db_integration }}
           MESSAGING_SELECTED: ${{ needs.changes.outputs.messaging_integration }}
           CACHE_SELECTED: ${{ needs.changes.outputs.cache_integration }}
+          OBJECT_STORAGE_SELECTED: ${{ needs.changes.outputs.object_storage_integration }}
         run: |
           set -euo pipefail
           OUTBOX_SELECTED=$(python3 scripts/lib/template_state.py profile --repo . --field outbox)
@@ -564,6 +567,9 @@ jobs:
           fi
           if [[ "${CACHE_SELECTED}" == true ]]; then
             VALKEY_PORT=6379 docker compose -f env/docker-compose.yml up -d --wait valkey
+          fi
+          if [[ "${OBJECT_STORAGE_SELECTED}" == true ]]; then
+            VERSITYGW_PORT=7070 docker compose -f env/docker-compose.yml up -d --wait versitygw
           fi
       - name: Integration startup diagnostics
         if: failure() && steps.integration-services.outcome == 'failure'
@@ -589,6 +595,12 @@ jobs:
           bash ./scripts/ci/measure.sh integration-cache --
           env REQUIRE_DOCKER=1 CACHE_URL=redis://127.0.0.1:6379
           make test-integration-cache
+      - name: Object storage proof
+        if: needs.changes.outputs.object_storage_integration == 'true'
+        run: >-
+          bash ./scripts/ci/measure.sh integration-object-storage --
+          env REQUIRE_DOCKER=1 OBJECT_STORAGE_TEST_ENDPOINT=http://127.0.0.1:7070
+          make test-integration-object-storage
       - name: JetStream proof
         if: needs.changes.outputs.messaging_integration == 'true'
         run: >-
@@ -651,14 +663,16 @@ jobs:
       fail-fast: false
       matrix:
         # Together the parts are `make template-init-check`: the source
-        # suites with the canonical projections and sixty-three runtime graphs.
+        # suites with the canonical projections and sixty-five runtime graphs.
         # Graphs 1-46 retain the established database, idempotency, jobs, and
         # webhook representatives. Graphs 47-49 retain messaging and outbox;
         # 50-53 retain OAuth; 54 proves messaging plus OAuth without PostgreSQL;
         # and 55 proves the full outbox/OAuth neighboring pack. Graph 56 compiles
         # the jobs/messaging integration fixture with outbox absent. Graph 62 is
         # cache only and stays in database-none; graph 63 is graph 61 plus cache.
-        # Broker, Go-wire, and Valkey behavior stay in the selected integration job.
+        # Graph 64 is object storage only and stays in database-none; graph 65
+        # is graph 63 plus object storage. Broker, Go-wire, Valkey, and
+        # versitygw behavior stay in the selected integration job.
         # `source`, `database-none`, and
         # `database-postgres` keep their own warm target caches. Every part
         # with `cache` restores that part's cache (database-postgres) and
@@ -667,7 +681,7 @@ jobs:
         include:
           - part: source
           - part: database-none
-            graphs: 1,2,3,4,5,6,47,50,51,52,54,57,58,59,60,62
+            graphs: 1,2,3,4,5,6,47,50,51,52,54,57,58,59,60,62,64
           - part: database-postgres
             graphs: 7,8,9,10,11,12
           - part: http-idempotency
@@ -687,7 +701,7 @@ jobs:
             cache: database-postgres
             docker: true
           - part: jobs-http-idempotency-2
-            graphs: 25,26,28,34,38,42,46,49,53,55,61,63
+            graphs: 25,26,28,34,38,42,46,49,53,55,61,63,65
             cache: database-postgres
             docker: true
     steps:

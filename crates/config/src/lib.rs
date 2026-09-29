@@ -27,6 +27,9 @@ pub mod messaging;
 // template:begin cache:config-module
 pub mod cache;
 // template:end cache:config-module
+// template:begin object-storage:config-module
+pub mod object_storage;
+// template:end object-storage:config-module
 // template:begin client-integrations:config-module
 pub mod integrations;
 // template:end client-integrations:config-module
@@ -87,6 +90,9 @@ pub use messaging::MessagingConfig;
 // template:begin cache:config-export
 pub use cache::CacheConfig;
 // template:end cache:config-export
+// template:begin object-storage:config-export
+pub use object_storage::{ObjectStorageConfig, ObjectStorageProvider};
+// template:end object-storage:config-export
 // template:begin authn:config-export
 pub use authn::{Audiences, AuthnConfig};
 // template:end authn:config-export
@@ -128,6 +134,9 @@ pub struct Config {
     // template:begin cache:config-field
     pub cache: CacheConfig,
     // template:end cache:config-field
+    // template:begin object-storage:config-field
+    pub object_storage: ObjectStorageConfig,
+    // template:end object-storage:config-field
     // template:begin client-integrations:config-field
     #[serde(default, deserialize_with = "integrations::deserialize_integrations")]
     pub integrations: std::collections::BTreeMap<String, IntegrationConfig>,
@@ -190,6 +199,9 @@ impl Config {
             }
         }
         // template:end cache:config-request-budget
+        // template:begin object-storage:config-validate
+        self.object_storage.validate(&self.app.env)?;
+        // template:end object-storage:config-validate
         // template:begin client-integrations:config-validate
         integrations::validate_integrations(&self.integrations)?;
         // template:end client-integrations:config-validate

@@ -1591,5 +1591,41 @@
     "markers": [
       {"path": "Cargo.toml", "id": "workspace-jsonwebtoken"}
     ]
+  },
+  "object-storage": {
+    "remove_when_unselected": [
+      "crates/infra-object-storage/",
+      "crates/config/src/object_storage.rs",
+      "scripts/ci/test-integration-object-storage.sh",
+      "docs/object-storage.md",
+      "docs/object-storage-decisions.md"
+    ],
+    "markers": [
+      {"path": "Cargo.toml", "ids": ["workspace-object-storage-crate", "workspace-object-storage-client"]},
+      {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
+      {"path": "crates/config/src/load.rs", "ids": ["load-object-storage-environment"]},
+      {"path": "crates/service/Cargo.toml", "ids": ["service-object-storage-dependency"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["service-bootstrap-object-storage-imports", "service-bootstrap-object-storage-errors", "service-bootstrap-object-storage-histogram", "service-bootstrap-object-storage-startup", "service-bootstrap-object-storage-functions"]},
+      {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["service-shutdown-object-storage-imports", "service-shutdown-dependencies-object-storage-field", "service-shutdown-dependencies-object-storage-destructure", "service-shutdown-dependencies-object-storage-close"]},
+      {"path": "crates/service/tests/lifecycle.rs", "ids": ["service-object-storage-lifecycle-admission"]},
+      {"path": "crates/infra-telemetry/src/logging.rs", "ids": ["telemetry-sdk-log-cap", "telemetry-sdk-log-cap-apply", "telemetry-sdk-log-cap-test"]},
+      {"path": "env/config/local.toml", "ids": ["local-config"]},
+      {"path": "env/docker-compose.yml", "ids": ["compose-versitygw-service"]},
+      {"path": "README.md", "ids": ["docs-readme-object-storage-profile"]},
+      {"path": "CONTRIBUTING.md", "ids": ["contributing-object-storage-prerequisites", "contributing-object-storage-proof"]},
+      {"path": "docs/object-storage.md", "ids": ["docs-object-storage"]},
+      {"path": "docs/object-storage-decisions.md", "ids": ["docs-object-storage-decisions"]},
+      {"path": "docs/template-sync.md", "ids": ["docs-template-init-object-storage", "docs-template-init-object-storage-lock"]},
+      {"path": "docs/repo-architecture.md", "ids": ["docs-architecture-object-storage-leaf"]},
+      {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-object-storage-owner", "docs-boundaries-object-storage-tests", "docs-boundaries-object-storage-edges"]},
+      {"path": "docs/architecture/integration.md", "ids": ["docs-integration-object-storage"]},
+      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-object-storage"]},
+      {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-object-storage", "docs-library-selection-object-storage-rejection"]},
+      {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-object-storage"]},
+      {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-object-storage-gates"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-object-storage-source", "docs-config-object-storage-budget"]},
+      {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-object-storage-placement"]},
+      {"path": "docs/roadmap.md", "ids": ["roadmap-stage-10-9-object-storage", "roadmap-stage-10-9-object-storage-note"]}
+    ]
   }
 }

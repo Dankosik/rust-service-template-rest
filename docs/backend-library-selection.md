@@ -118,6 +118,9 @@ rather than assuming any SeaORM release can share the current pool.
 <!-- template:begin cache:docs-library-selection-cache -->
 | Distributed cache across replicas | `redis` 1.7.1 in `infra-cache`, default features off, only `tokio-comp`, `connection-manager`, and `tokio-rustls-comp` | One multiplexed `ConnectionManager`. No pool. Bytes only; the feature owns keys, serialization, and TTL. `moka` remains the process-local cache. |
 <!-- template:end cache:docs-library-selection-cache -->
+<!-- template:begin object-storage:docs-library-selection-object-storage -->
+| S3-compatible object storage | `aws-sdk-s3` 1.150.0 in `infra-object-storage`, default features off, only `rt-tokio` and `default-https-client`, with `aws-smithy-http-client` (`rustls-aws-lc`) building the HTTPS client | One client per bucket, pinned `BehaviorVersion`, no `aws-config`, no multipart. The feature owns keys and retention. |
+<!-- template:end object-storage:docs-library-selection-object-storage -->
 | Tests of an outbound HTTP contract | [`wiremock`](https://docs.rs/wiremock/latest/wiremock/) | Local mock server, bounded waits and actual status/body/header behavior. Recheck maintenance at adoption; do not use it to replace inbound-router tests. |
 | A complex stable output warrants a reviewed snapshot | [`insta`](https://docs.rs/insta/latest/insta/) | Assert important semantics separately. Redact only irrelevant nondeterminism; never hide the ID or timestamp relationship being tested. Do not create a second snapshot authority for the already committed OpenAPI document. |
 | A parser/transformation has useful algebraic or grammar invariants | [`proptest`](https://docs.rs/proptest/latest/proptest/) | State the property independently of the implementation, retain useful explicit boundary cases, and bound generation. It is not mandatory for every helper. |
@@ -179,6 +182,14 @@ pushed on 2025-02-27. One multiplexed connection already pipelines get, set,
 and delete. Container proof uses the existing Compose Valkey service. See
 [Cache decisions](cache-decisions.md).
 <!-- template:end cache:docs-library-selection-cache-rejection -->
+<!-- template:begin object-storage:docs-library-selection-object-storage-rejection -->
+Do not add `object_store`, `opendal`, `rust-s3`, `minio`, or
+`aws-sdk-s3-transfer-manager` for object storage, and do not enable the SDK's
+default features. `object_store` reports a create-only put retried after a 5xx
+as already existing, `opendal` is a breaking 0.x with transport errors in one
+kind, and the default SDK features bring hyper 0.14, rustls 0.21, and ring. See
+[Object storage decisions](object-storage-decisions.md).
+<!-- template:end object-storage:docs-library-selection-object-storage-rejection -->
 
 ## Acceptance for a library-driven refactor
 

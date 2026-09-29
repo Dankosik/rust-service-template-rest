@@ -76,6 +76,9 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
     Registry::default()
         .with(targets)
         .with(filter)
+        // template:begin object-storage:telemetry-sdk-log-cap-apply
+        .with(sdk_log_cap(options.level))
+        // template:end object-storage:telemetry-sdk-log-cap-apply
         .with(otel)
         .with(format)
         .try_init()
@@ -95,6 +98,37 @@ fn static_targets(directive: &str) -> Option<Targets> {
     }
     directive.parse().ok()
 }
+
+// template:begin object-storage:telemetry-sdk-log-cap
+/// A global filter that caps the AWS SDK's targets.
+type SdkCap =
+    tracing_subscriber::filter::FilterFn<Box<dyn Fn(&tracing::Metadata<'_>) -> bool + Send + Sync>>;
+
+/// The AWS SDK logs S3 endpoint parameters, which include object keys, at
+/// DEBUG and whole requests at TRACE. Its `aws_*` targets stay at INFO or
+/// quieter, so a global `debug` never records or exports a key. A target
+/// the directive names (`aws_smithy_runtime=debug`) is exempt with
+/// everything under it; an unnamed sibling stays capped.
+fn sdk_log_cap(level: &str) -> SdkCap {
+    let named: Vec<String> = level
+        .split(',')
+        .filter_map(|directive| {
+            let target = directive.split(['=', '[']).next()?.trim();
+            target.starts_with("aws_").then(|| target.to_owned())
+        })
+        .collect();
+    tracing_subscriber::filter::filter_fn(Box::new(move |metadata: &tracing::Metadata<'_>| {
+        let target = metadata.target();
+        *metadata.level() <= tracing::Level::INFO
+            || !target.starts_with("aws_")
+            || named.iter().any(|name| {
+                target
+                    .strip_prefix(name.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+            })
+    }))
+}
+// template:end object-storage:telemetry-sdk-log-cap
 
 #[cfg(test)]
 mod tests {
@@ -353,4 +387,39 @@ mod tests {
             assert!(static_targets(directive).is_none(), "{directive}");
         }
     }
+
+    // template:begin object-storage:telemetry-sdk-log-cap-test
+    #[test]
+    fn sdk_debug_records_stay_out_unless_the_directive_names_them() {
+        let emit = |level: &str| {
+            let buffer = Buffer::default();
+            let filter = EnvFilter::try_new(level).expect("valid directive");
+            let layer = tracing_subscriber::fmt::layer()
+                .with_writer(buffer.clone())
+                .with_ansi(false);
+            let dispatch = tracing::Dispatch::new(
+                Registry::default()
+                    .with(filter)
+                    .with(sdk_log_cap(level))
+                    .with(layer),
+            );
+            tracing::dispatcher::with_default(&dispatch, || {
+                tracing::debug!(target: "aws_smithy_runtime::client::orchestrator::endpoints", "sdk debug with key");
+                tracing::info!(target: "aws_smithy_runtime::client", "sdk info");
+                tracing::debug!(target: "service::feature", "service debug");
+            });
+            buffer.records()
+        };
+        let capped = emit("debug");
+        assert!(!capped.contains("sdk debug with key"), "{capped}");
+        assert!(capped.contains("sdk info"), "{capped}");
+        assert!(capped.contains("service debug"), "{capped}");
+        let named = emit("debug,aws_smithy_runtime=debug");
+        assert!(named.contains("sdk debug with key"), "{named}");
+        let sibling = emit("debug,aws_config=warn");
+        assert!(!sibling.contains("sdk debug with key"), "{sibling}");
+        let quiet = emit("warn");
+        assert!(!quiet.contains("sdk info"), "{quiet}");
+    }
+    // template:end object-storage:telemetry-sdk-log-cap-test
 }

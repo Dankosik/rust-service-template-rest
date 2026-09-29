@@ -92,6 +92,9 @@ only for stable domain decisions.
 <!-- template:begin cache:docs-architecture-cache-leaf -->
 | Distributed cache, Valkey or Redis operation, or cache degradation | [Cache](cache.md) and [Component Boundaries](architecture/boundaries.md) |
 <!-- template:end cache:docs-architecture-cache-leaf -->
+<!-- template:begin object-storage:docs-architecture-object-storage-leaf -->
+| Object storage, an S3-compatible provider, or bucket credentials | [Object storage](object-storage.md) and [Component Boundaries](architecture/boundaries.md) |
+<!-- template:end object-storage:docs-architecture-object-storage-leaf -->
 
 Queue, job, outbox, and event architecture (`architecture/async.md`) exists
 only where a profile that owns it is retained; otherwise there is no owner to
