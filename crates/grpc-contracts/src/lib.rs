@@ -1,8 +1,17 @@
 //! Committed native gRPC contracts generated from `api/proto` by
 //! `make grpc-generate`. Modules mirror protobuf packages, so `example.v1` is
 //! `example::v1`.
+//!
+//! Change schemas in `api/proto`, regenerate with `make grpc-generate`, and
+//! keep schema and generated Rust together. `make grpc-check` verifies drift
+//! and compatibility. Normal service builds use the committed Rust.
+//! Handlers own input validation; `infra-grpc` owns transport policy.
 
-#![allow(
+pub mod codec;
+
+// Keep generated-code lint exceptions off the handwritten codec. Re-export
+// packages at the crate root so callers still use their protobuf package paths.
+#[allow(
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
@@ -10,7 +19,7 @@
     rustdoc::all,
     reason = "prost and tonic output is regenerated, checked for drift and never edited by hand"
 )]
+#[path = "generated/_includes.rs"]
+mod generated;
 
-pub mod codec;
-
-include!("generated/_includes.rs");
+pub use generated::*;
