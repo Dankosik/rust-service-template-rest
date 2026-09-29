@@ -42,7 +42,7 @@ Do not create a crate, module, or directory before its first real artifact.
 | A job kind's payload type and handler | the adapter crate that enqueues it, `crates/infra-<provider>`, which calls the feature's use case |
 <!-- template:end jobs:docs-structure-jobs-placement -->
 <!-- template:begin messaging:docs-structure-messaging-placement -->
-| Immutable typed event contract | `crates/domain-events`; it has no broker, runtime, or configuration dependency |
+| Typed domain event contract | `crates/domain-events`; it has no broker, runtime, or configuration dependency |
 | Go-compatible JetStream wire, prepared producer, registry, consumer, DLQ/restore, and connection admission | `crates/infra-messaging`; it has no feature, SQL, stream-administration, or generic event-bus responsibility |
 | Messaging producer/client and worker resource composition | existing `crates/service/src/bootstrap/` and `crates/jobs-worker`; only composition knows selected configuration and process lifecycle |
 | Actual Go wire fixtures and the scratch bridge | `crates/infra-messaging/tests/fixtures/go-wire/` and its CI script; they adapt real Go code and do not become a second wire implementation |
