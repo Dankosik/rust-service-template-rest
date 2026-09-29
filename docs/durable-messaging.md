@@ -211,6 +211,43 @@ bytes less code per payload type but no faster), sharing route subject bytes
 through `async_nats::Subject` (about 1% fewer instructions, public signature
 change), and one route-and-handler map (about 40 ns per delivery).
 
+### Identity checks and lookups
+
+The payload type's event type is checked at compile time, so `prepare` checks
+only the event ID, once, and the occurrence time. Header text is checked byte
+by byte: a control character is a byte below 0x20, 0x7F, or 0xC2 followed by
+0x80–0x9F, which are exactly the characters `char::is_control` rejects. Decoding
+reads the five identity headers and the encoded size in one pass over the
+header map; each `HeaderMap::get` would hash the name with SipHash. The
+registry maps use foldhash: every key is a payload type's constant, so no
+caller can choose colliding keys.
+
+Measured on 2026-09-29 on a DigitalOcean c-4 in London (Intel Xeon Platinum
+8280, Ubuntu 24.04, Rust 1.98.1, fat LTO, locked dependencies) with the
+events above: medians of 15 interleaved rounds pinned to one CPU. Both sides
+were built with 64-byte function alignment and
+`-x86-branches-within-32B-boundaries`. Without it, a change that does not touch
+`prepare` moved the 40-item and 450-item prepare by 11%, from code layout alone.
+
+| Operation | Before | After | Instructions |
+| --- | ---: | ---: | ---: |
+| Prepare, one item | 521 ns | 428 ns | −15% |
+| Prepare and encode headers, one item | 1.35 µs | 1.27 µs | −7% |
+| Decode normal envelope | 316 ns | 169 ns | −39% |
+| Decode and dispatch, one item | 1.03 µs | 0.85 µs | −21% |
+| Decode and dispatch, 40 items | 7.64 µs | 7.47 µs | −2% |
+| Route lookup | 30 ns | 10 ns | −66% |
+
+Allocations did not change. Larger events spend their time in `serde_json`.
+
+Rejected alternatives: sonic-rs for payload JSON (30% less consume CPU and 7%
+less prepare CPU for 40 items, but it serializes a `serde_json::value::RawValue`
+field as a private marker object, cannot deserialize one, reads `-0.0` as `0.0`
+and rounds some decimals differently), building the `Event-Schema` value
+without `format!` (no change), and mimalloc as the global allocator (15–20% less
+CPU for one-item events, but it is a binary-wide choice with a larger resident
+set, measured with the HTTP path).
+
 <!-- template:end messaging:docs-durable-messaging -->
 
 <!-- template:begin outbox:docs-durable-messaging-outbox -->
