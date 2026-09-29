@@ -192,9 +192,7 @@ or performance gain without a measured comparison.
 
 ## Telemetry compatibility
 
-`json-subscriber` 0.3's built-in OpenTelemetry bridge ends at
-`tracing-opentelemetry` 0.33. The telemetry crate keeps the existing nested
-`openTelemetry.traceId` and `openTelemetry.spanId` JSON shape through its
-documented dynamic-field API and the active dispatch for the selected 0.34
-bridge. This is a compatibility repair, not a new logging dependency or a
-second telemetry subscriber.
+The telemetry crate's JSON layer reads the nested `openTelemetry.traceId` and
+`openTelemetry.spanId` through `tracing_opentelemetry::get_otel_context` with
+the active dispatch, so the log line does not depend on a logging crate's
+bridge to a particular `tracing-opentelemetry` minor.
