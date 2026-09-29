@@ -111,7 +111,7 @@ impl PreparedEvent {
     /// contention result when no live row remains to compare, or the canonical
     /// jobs enqueue error.
     pub async fn enqueue(&self, tx: &mut Tx<'_>) -> Result<OutboxEnqueued, OutboxEnqueueError> {
-        let intent = PublishDomainEvent::from(self);
+        let mut intent = PublishDomainEvent::metadata(self);
         let max_bytes = max_payload_bytes(&intent)?;
         if self.payload.len() > max_bytes {
             return Err(OutboxEnqueueError::PayloadTooLarge {
@@ -119,6 +119,7 @@ impl PreparedEvent {
                 max_bytes,
             });
         }
+        intent.payload_base64 = STANDARD.encode(&self.payload);
         let key = event_key(&intent.message_id);
         match enqueue(
             tx,
@@ -215,17 +216,18 @@ impl PublishDomainEvent {
             .decode(&self.payload_base64)
             .map(Bytes::from)
             .map_err(|_| StoredIntentError)?;
-        serde_json::from_slice::<serde_json::Value>(&payload).map_err(|_| StoredIntentError)?;
-        let event = PreparedEvent {
+        serde_json::from_slice::<serde::de::IgnoredAny>(&payload).map_err(|_| StoredIntentError)?;
+        let mut event = PreparedEvent {
             subject: self.subject.clone(),
             message_id: self.message_id.clone(),
             publication_id: self.publication_id.clone(),
             event_type: self.event_type.clone().into(),
             schema_version: self.schema_version,
             occurred_at,
+            created_at: String::new(),
             payload,
         };
-        validate_prepared(&event).map_err(|_| StoredIntentError)?;
+        event.created_at = validate_prepared(&event).map_err(|_| StoredIntentError)?;
         Ok(event)
     }
 }
@@ -237,18 +239,13 @@ fn event_key(message_id: &str) -> String {
     prefixed_digest_hex("event-", &Sha256::digest(message_id.as_bytes()))
 }
 
+/// Standard base64 never needs a JSON escape, so the stored payload adds
+/// exactly its own length to the serialized intent.
 fn max_payload_bytes(intent: &PublishDomainEvent) -> Result<usize, infra_jobs::EnqueueError> {
-    let metadata = PublishDomainEvent {
-        payload_base64: String::new(),
-        subject: intent.subject.clone(),
-        message_id: intent.message_id.clone(),
-        publication_id: intent.publication_id.clone(),
-        event_type: intent.event_type.clone(),
-        ..*intent
-    };
-    let overhead = serde_json::to_vec(&metadata)
+    let overhead = serde_json::to_vec(intent)
         .map_err(infra_jobs::EnqueueError::Serialize)?
-        .len();
+        .len()
+        - intent.payload_base64.len();
     let available = infra_jobs::MAX_PAYLOAD_BYTES.saturating_sub(overhead);
     Ok((available / 4) * 3)
 }
@@ -271,6 +268,7 @@ mod tests {
             event_type: "example.created".into(),
             schema_version: 1,
             occurred_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+            created_at: "2023-11-14T22:13:20Z".to_owned(),
             payload,
         }
     }

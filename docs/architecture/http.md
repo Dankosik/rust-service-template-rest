@@ -16,8 +16,9 @@ alternatives they beat, are recorded at the end of this document.
    drain.
 3. The hardened chain (`crates/infra-http/src/harden.rs`) owns request-level
    policy, outermost first: request-id admission and propagation, `nosniff`,
-   the OpenTelemetry server span, HTTP metrics, the access log, problem
-   completion (fills `request_id` into every Problem), error mapping
+   one observation middleware (the OpenTelemetry server span, HTTP metrics,
+   problem completion that fills `request_id` into every Problem, and the
+   access log), the `traceparent` response header, error mapping
    (`503` shedding with `Retry-After`, `504` timeout with code
    `request_timeout`), load shedding, the in-flight limit, the request timeout,
    panic recovery (`500`), the tower-http body limit, and the extractor body
@@ -187,6 +188,8 @@ one only with new evidence.
 | No `CorsLayer` | an empty `CorsLayer` | an empty layer answers every `OPTIONS` with `200`; browser cross-origin requests are fail-closed by omission until a profile decides |
 | Inbound `X-Request-ID` accepted only within `^[A-Za-z0-9._~-]{1,128}$`, otherwise replaced by a UUIDv4 | tower-http's default, which trusts any present header | a caller-provided id is data, not identity; the grammar bounds log and header size |
 | Template-owned one-line access log with `Option<MatchedPath>` and route-based probe suppression | tower-http `TraceLayer` alone | route templates, not raw paths, keep label cardinality bounded; `MatchedPath` is absent in `Router::fallback`, so unmatched requests carry an explicit label |
+| One observation middleware (`observe.rs`) opens the server span from `tracing-opentelemetry-instrumentation-sdk` pieces with `http.route`, `otel.name`, and `request_id` set at creation, and emits the HTTP metrics through the `metrics` facade under the `axum-prometheus` names and labels, as `infra-grpc`'s `observe` does | `axum-tracing-opentelemetry`'s `OtelAxumLayer` plus `axum-prometheus` plus separate access-log and problem-completion layers | every `Span::record` re-serializes the span in `json-subscriber`, `axum-prometheus` allocates about two dozen times per request, and each `from_fn` layer clones the inner stack; on a dedicated 4-vCPU host with JSON logs and an always-on tracer this removed about 16% of the instructions and 19% of the allocations of a small request. Reopen if the upstream layer takes creation-time fields |
+| Only `otel.name`, `otel.kind`, and `request_id` are `tracing` fields of the server span; the other HTTP attributes and the error status are set with `OpenTelemetrySpanExt`, and the `tracing-opentelemetry` layer adds no source location, thread, or busy/idle attributes | every HTTP attribute as a span field, flattened into each JSON log record | `json-subscriber` serializes every span field and repeats it on each record inside the request, so the access line carried `url.path`, `user_agent.original`, and `server.*` twice over its own fields; exported spans keep the same HTTP attributes (`exported_server_span_keeps_the_http_attributes_and_the_error_status`). On a dedicated 4-vCPU host with JSON logs this removed about 29% of a small request's instructions. Log records keep `request_id`, trace and span ids, and the fields of other spans such as `job_attempt`; the Go template logs the same correlation set |
 | tower-http `RequestBodyLimitLayer` plus axum `DefaultBodyLimit` at `http.max_body_bytes`; problem completion maps their `text/plain` `413` to the `Problem` envelope | a template-owned body-limit middleware | the stock layer already short-circuits on `Content-Length` and caps streamed bodies; only the envelope is template policy |
 | Template-owned `Problem` (`code`, `request_id`, `invalid_params`) with a closed `Code` catalog | `problem_details` 0.10 (acceptable), `problemdetails` 0.7 (pins tower-http 0.6) | about sixty lines; nothing submitted by the caller is echoed; a new code is a reviewed contract change |
 | Template-owned accept loop over `hyper_util::server::conn::auto` with `TokioTimer`, a `Semaphore(max_connections)` permit per connection, and a bounded `peek` before hyper sees the socket | `axum::serve` | `axum::serve` sets no timer and exposes no limits (axum #2741); the `auto` builder starts no timer until the first byte (hyper #3756), so a silent client would hold a connection forever |
@@ -267,6 +270,6 @@ generated OpenAPI document remains handler-derived and must not be hand-edited.
 9. utoipa takes a handler's doc comment as the operation description and a
    type's doc comment as the schema description: write them as contract
    text and keep implementation notes in `//` comments.
-10. `axum-tracing-opentelemetry` spans are TRACE-level without the
-    `tracing_level_info` feature; `global::set_text_map_propagator` must be
+10. `tracing-opentelemetry-instrumentation-sdk` spans are TRACE-level without
+    the `tracing_level_info` feature; `global::set_text_map_propagator` must be
     called explicitly or every request starts a new root trace.

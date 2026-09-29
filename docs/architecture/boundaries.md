@@ -116,7 +116,7 @@ a feature -> infra-cache for namespace get, set, and delete
 infra-messaging::outbox -> domain-events, infra-jobs, infra-postgres, base64
 <!-- template:end outbox:docs-boundaries-outbox-edges -->
 <!-- template:begin outbound-http:docs-boundaries-outbound-edges -->
-infra-outbound-http -> reqwest, http, bytes, url, tokio, metrics, tracing
+infra-outbound-http -> hyper-util, hyper-rustls, rustls, http, bytes, url, tokio, metrics, tracing
 <!-- template:end outbound-http:docs-boundaries-outbound-edges -->
 <!-- template:begin outbound-auth:docs-boundaries-outbound-auth-edges -->
 infra-oauth2-client-credentials -> infra-outbound-http, oauth2, http, bytes, tokio, secrecy

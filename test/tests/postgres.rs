@@ -24,7 +24,7 @@ use commit_proxy::CommitProxy;
 use health::Probe;
 use infra_postgres::{
     ACQUIRE_TIMEOUT, Dsn, Isolation, PgPool, PoolOptions, PostgresProbe, TxError, TxOptions,
-    connection, in_tx, in_tx_with, retryable,
+    connection, in_tx, in_tx_with, retryable, statement_succeeded,
 };
 use integration_tests::{DATABASE_URL, dsn_for, fixture_dir};
 use migrate::{HistoryError, MIGRATOR, RunError, RunOptions};
@@ -187,6 +187,31 @@ async fn pool_default_isolation_survives_replacement_and_explicit_transactions_o
 }
 
 #[sqlx::test(migrations = false)]
+async fn an_idle_connection_the_server_closed_is_replaced_before_use(pool: PgPool) {
+    let dsn = dsn_for(&pool).await;
+    let ours = template_pool(&dsn, 1).await;
+    let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&ours)
+        .await
+        .unwrap();
+
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(first_pid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(terminated);
+    // Past the pool's one-second idle threshold, so the next acquire pings.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&ours)
+        .await
+        .expect("the idle ping discards the closed connection");
+    assert_ne!(first_pid, second_pid);
+}
+
+#[sqlx::test(migrations = false)]
 async fn probe_is_ready_and_fails_generically_when_the_pool_is_exhausted(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     let ours = template_pool(&dsn, 1).await;
@@ -284,6 +309,37 @@ async fn a_swallowed_statement_failure_is_commit_failed_not_success(pool: PgPool
         .await
         .unwrap();
     assert_eq!(count, 0);
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_later_statement_withdraws_the_proof_that_skips_the_commit_probe(pool: PgPool) {
+    pool.execute("CREATE TABLE t (id int PRIMARY KEY)")
+        .await
+        .unwrap();
+    let result: Result<(), AppError> = in_tx(&pool, async |tx| {
+        connection(tx).execute("INSERT INTO t VALUES (1)").await?;
+        statement_succeeded(tx);
+        let _ = connection(tx).execute("INSERT INTO t VALUES (1)").await;
+        Ok(())
+    })
+    .await;
+    assert!(
+        matches!(result, Err(AppError::Tx(TxError::CommitFailed(_)))),
+        "{result:?}"
+    );
+
+    let proven: Result<(), AppError> = in_tx(&pool, async |tx| {
+        connection(tx).execute("INSERT INTO t VALUES (2)").await?;
+        statement_succeeded(tx);
+        Ok(())
+    })
+    .await;
+    assert!(proven.is_ok(), "{proven:?}");
+    let ids: Vec<i32> = sqlx::query_scalar("SELECT id FROM t")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(ids, [2]);
 }
 
 #[sqlx::test(migrations = false)]

@@ -1,9 +1,9 @@
 //! Prometheus metrics through the `metrics` facade.
 //!
-//! One recorder per process. HTTP server metrics come from `axum-prometheus`
-//! in the HTTP adapter, process metrics from `metrics-process`, runtime
-//! metrics from `tokio-metrics`; this module owns the recorder, the
-//! periodic upkeep, and the scrape route. Each crate that emits a histogram
+//! One recorder per process. HTTP server metrics come from the HTTP adapter,
+//! process metrics from `metrics-process`, runtime metrics from
+//! `tokio-metrics`; this module owns the recorder, the periodic upkeep, and
+//! the scrape route. Each crate that emits a histogram
 //! owns its name and buckets.
 
 use std::time::Duration;

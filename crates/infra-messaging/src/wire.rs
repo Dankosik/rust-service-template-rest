@@ -56,22 +56,24 @@ pub struct DeadLetterRecord {
 
 /// Builds the exact five normal identity headers from an immutable prepared event.
 ///
+/// Every constructor of [`PreparedEvent`] has already validated its identity
+/// and formatted its creation time.
+///
 /// # Errors
-/// Rejects invalid identity, creation time or an oversized encoded header set.
+/// Rejects an oversized encoded header set.
 pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, MessagingError> {
-    let created_at = validate_prepared(event)?;
     let mut headers = HeaderMap::new();
     headers.insert(name::MESSAGE_ID, event.message_id());
     headers.insert(name::EVENT_TYPE, event.event_type());
     headers.insert(name::EVENT_SCHEMA, event.schema());
-    headers.insert(name::CREATED_AT, created_at);
+    headers.insert(name::CREATED_AT, event.created_at.as_str());
     headers.insert(name::NATS_MSG_ID, event.publication_id());
     validate_header_bytes(&headers)?;
     Ok(headers)
 }
 
-/// Checks that [`encode_prepared`] accepts `event`, without building headers.
-/// Returns the formatted creation time.
+/// Checks the identity every [`PreparedEvent`] carries. Returns the formatted
+/// creation time.
 ///
 /// Each text value is at most 256 bytes, so the five headers stay far below
 /// [`HEADER_LIMIT_BYTES`]; `encode_prepared` still checks the encoded bytes.
@@ -182,6 +184,7 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, Me
         event_type: event_type.to_owned().into(),
         schema_version,
         occurred_at,
+        created_at: format_timestamp(occurred_at)?,
         payload: record.payload,
     })
 }
