@@ -207,26 +207,15 @@ fn record_verification(
 /// Bootstrap installs the recorder before it prepares a verifier.
 struct SuccessCounters {
     verified: metrics::Counter,
-    http: metrics::Counter,
-    grpc: metrics::Counter,
+    transport: authenticate::TransportSuccessCounters,
 }
 
 impl SuccessCounters {
     fn new(mode: &'static str) -> Arc<Self> {
-        let transport = |transport: &'static str| metrics::counter!(authenticate::AUTHN_VERIFICATIONS_METRIC, "transport" => transport, "result" => "success", "failure" => "none");
         Arc::new(Self {
             verified: metrics::counter!("authn_token_verifications_total", "mode" => mode, "outcome" => "success", "reason" => "verified"),
-            http: transport("http"),
-            grpc: transport("grpc"),
+            transport: authenticate::TransportSuccessCounters::new(),
         })
-    }
-
-    pub(crate) fn transport(&self, transport: &str) -> Option<&metrics::Counter> {
-        match transport {
-            "http" => Some(&self.http),
-            "grpc" => Some(&self.grpc),
-            _ => None,
-        }
     }
 }
 
