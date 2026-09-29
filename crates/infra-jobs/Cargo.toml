@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+futures-util = { workspace = true, features = ["std"] }
 humantime = { workspace = true }
 infra-postgres = { workspace = true }
 metrics = { workspace = true }
@@ -24,7 +25,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["std"] }
 tracing-opentelemetry = { workspace = true }
-uuid = { workspace = true, features = ["std", "v4"] }
+uuid = { workspace = true, features = ["std", "v4", "v7"] }
 
 [dev-dependencies]
 serde = { workspace = true, features = ["derive"] }

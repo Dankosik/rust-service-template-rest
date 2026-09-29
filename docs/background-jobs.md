@@ -101,7 +101,7 @@ uses the persisted retry policy; a permanent error becomes terminal.
 
 `job.cancellation()` fires at the kind's timeout and when a forced drain
 cancels the attempt. The handler then has up to 100 ms to return before its
-task is aborted, which takes effect at its next `.await`. Returning `Ok(())`
+future is dropped, which stops it at its next `.await`. Returning `Ok(())`
 in that window completes the job; any other return counts as the cancellation
 itself, so a forced drain still releases the job and refunds the attempt.
 Work started with `tokio::task::spawn_blocking` is not
@@ -201,7 +201,9 @@ remain unclaimed; terminal retention is independent of registered kinds.
 defaults to 1 and ranges from 1 to 500. The worker requires
 `postgres.max_connections >= jobs.max_workers + 2`. The two additional
 connections cover engine statements and readiness; there is no upkeep
-connection. `http.grace_period` must cover `http.drain_timeout` plus the fixed
+connection. Each engine also keeps one `LISTEN` connection outside the pool,
+so the database sees one more session per engine (two when the outbox
+publisher runs beside ordinary jobs). `http.grace_period` must cover `http.drain_timeout` plus the fixed
 17-second cleanup, listener, join, pool-close, and telemetry tail.
 
 ## Run and stop the worker
@@ -225,10 +227,24 @@ new claim round begins after stop. Claims lock rows while they scan with
 `SKIP LOCKED`, so concurrent workers take disjoint jobs and a row another
 session holds is skipped rather than stalling the claim.
 
-One supervisor owns each admitted claim, slot, handler join, deadline, and
-intended queue transition through cleanup. On timeout or forced drain it first
-cancels the handler, gives it up to 100 ms of cooperative completion inside the
-existing deadline, and aborts only a still-running task. It records a known
+Enqueue of a job due at once sends `NOTIFY background_jobs` with the kind
+name, at most once per 25 ms per process, and it takes effect when the
+caller commits. A worker with that kind registered claims at once instead of
+at its next one-second poll. After a claim that found work but did not fill
+every free slot, the next claim starts 25 ms after the previous one; after a
+claim that filled every slot, at once; after an empty claim, at the next
+notification or poll. A lost notification or listener connection delays a
+job only until the next poll.
+
+One supervisor owns each admitted claim, slot, handler, deadline, and
+intended queue transition through cleanup. The handler runs on the
+supervisor's task. On timeout or forced drain it first cancels the handler,
+gives it up to 100 ms of cooperative completion inside the existing deadline,
+and drops only a still-running handler. The slot returns as soon as the
+handler's result is known, so the next claim does not wait for the outcome
+write; the supervisor keeps that write, and a drain still waits for it.
+Completions queued while an earlier completion write is in flight share the
+next write. It records a known
 handler result once and gives that result precedence over force or timeout.
 After the cancellation only success is known: an error, snooze, or panic that
 answers it is recorded as the timeout or, in a forced drain, as a release.
@@ -255,7 +271,9 @@ The canonical migration stores `payload` as `jsonb`, `unique_key` as
 `text COLLATE "C"`, `created_at`, nullable UUID `attempted_by`, and
 `trace_state text`; it uses the running index `(kind, claim_expires_at,
 not_before, id)`. JSONB's semantic normalization is intentional. `created_at`
-is the enqueue database time and `attempted_by` is the stable random UUID for
+is the enqueue database time. Enqueue generates `id` as a UUIDv7, so the
+primary key grows in insertion order (its first 48 bits are the enqueue
+time in milliseconds). `attempted_by` is the stable random UUID for
 the worker process that most recently claimed the row. An expired running row
 gets a bounded payload-free rescue marker in `error_summary`; a normal later
 outcome may replace it. Pending rows are never marked as rescued.
@@ -275,7 +293,7 @@ listener:
 | `jobs_attempt_duration_seconds` | `kind` | Handler run time. |
 | `jobs_claim_duration_seconds` | none | Claim request duration through acknowledgement or failure. |
 | `jobs_queue_wait_seconds` | `kind` | Claimed-row database time minus its current `not_before`, floored at zero. |
-| `jobs_worker_operation_failures_total` | `operation` | Failed `claim`, `record`, `release`, `retention`, or `sample` statements. |
+| `jobs_worker_operation_failures_total` | `operation` | Failed `claim`, `record`, `release`, `retention`, or `sample` statements, and failed `listen` connections. |
 
 Records never carry the payload: `job_failed` (`warn`), `job_attempt_failed`
 (`info`), `job_attempt_finished` (`info`, snooze and cancellation),

@@ -1,9 +1,11 @@
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use domain_events::{Event, EventPayload};
+// Every key is a compile-time constant, so a caller cannot choose colliding
+// keys; SipHash would cost two thirds of each lookup.
+use foldhash::HashMap;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{HandlerError, RegistryError};
@@ -69,7 +71,7 @@ impl Registry {
     /// # Errors
     /// Rejects duplicate routes or invalid type, schema and subject declarations.
     pub fn new(routes: impl IntoIterator<Item = Route>) -> Result<Self, RegistryError> {
-        let mut mapped = HashMap::new();
+        let mut mapped = HashMap::default();
         for route in routes {
             if crate::wire::validate_text(route.key.0).is_err() {
                 return Err(RegistryError::InvalidRoute("event type is invalid"));
@@ -87,7 +89,7 @@ impl Registry {
         }
         Ok(Self {
             routes: mapped,
-            handlers: HashMap::new(),
+            handlers: HashMap::default(),
         })
     }
 
