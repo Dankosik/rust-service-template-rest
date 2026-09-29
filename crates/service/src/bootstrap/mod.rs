@@ -72,7 +72,7 @@ const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 /// and any blocking tracer-provider shutdown that outlived its budget.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Interval for Prometheus histogram upkeep and Tokio runtime metrics.
+/// Interval for the Tokio runtime and connection pool metrics.
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
 // template:begin cache:service-bootstrap-cache-startup-budget
 const CACHE_STARTUP_CHECK: Duration = Duration::from_secs(1);
@@ -247,11 +247,7 @@ async fn serve(
 
     let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
-    tracker.spawn(
-        metrics
-            .clone()
-            .upkeep(METRICS_MAINTENANCE_INTERVAL, cancel.child_token()),
-    );
+    tracker.spawn(metrics.clone().upkeep(cancel.child_token()));
     tracker.spawn(runtime_metrics(
         METRICS_MAINTENANCE_INTERVAL,
         cancel.child_token(),

@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 axum = { workspace = true, features = ["http1", "tokio"] }
-json-subscriber = { workspace = true, features = ["tracing-log"] }
+humantime = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 metrics-process = { workspace = true, features = ["metrics-rs"] }
@@ -25,6 +25,8 @@ opentelemetry-otlp = { workspace = true, features = ["http-proto", "reqwest-bloc
 opentelemetry-semantic-conventions = { workspace = true, features = ["semconv_experimental"] }
 opentelemetry_sdk = { workspace = true, features = ["trace"] }
 secrecy = { workspace = true }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "macros"] }
 tokio-util = { workspace = true }
