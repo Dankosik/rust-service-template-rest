@@ -72,7 +72,7 @@ pub(crate) async fn observe(
     }
     .unwrap_or_else(|_panic| tonic::Status::internal("request failed").into_http());
     let code = code_from_headers(response.headers());
-    update_span(&span, code, true);
+    update_span(&span, code, &SpanKind::Server);
     let dispatched = response.extensions().get::<Dispatched>().is_some();
     let path = if dispatched && code != Code::Unimplemented {
         uri.path()
@@ -110,9 +110,9 @@ pub(crate) fn make_span<B>(request: &http::Request<B>, kind: &SpanKind) -> traci
 
 /// The status code attribute, and an error status for the codes the RPC
 /// semantic conventions treat as errors on that side of the call.
-pub(crate) fn update_span(span: &tracing::Span, code: Code, server: bool) {
+pub(crate) fn update_span(span: &tracing::Span, code: Code, kind: &SpanKind) {
     span.set_attribute("rpc.grpc.status_code", i64::from(code as i32));
-    if otel_http::grpc::status_is_error(code as u16, server) {
+    if otel_http::grpc::status_is_error(code as u16, matches!(kind, SpanKind::Server)) {
         span.set_status(opentelemetry::trace::Status::error(""));
     }
 }
@@ -132,9 +132,10 @@ pub(crate) fn code_from_headers(headers: &HeaderMap) -> Code {
 const UNKNOWN_PATH: &str = "";
 
 /// Metric handles by call path, registered on first use so a call does not
-/// rebuild label strings and look its series up in the recorder. Callers
-/// record only paths a generated service answered, so the map is bounded by
-/// the methods.
+/// rebuild label strings and look its series up in the recorder. The server
+/// records recognized, dispatched methods or `unknown`; the client records
+/// outbound paths, which are fixed method paths when using generated tonic
+/// clients. The client's `Service<Request<Body>>` API does not restrict paths.
 pub(crate) struct Series {
     handled: &'static str,
     handling_seconds: &'static str,
