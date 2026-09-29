@@ -131,6 +131,15 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
                 Ok(true)
             })
         })
+        // sqlx grows a connection's read and write buffers to the largest
+        // message it carried and keeps them until the connection closes; one
+        // large body per connection would otherwise stay resident for the
+        // connection's lifetime. Shrinking on release keeps idle connections
+        // at the driver's default buffer size.
+        .after_release(|conn, _meta| {
+            conn.shrink_buffers();
+            Box::pin(async { Ok(true) })
+        })
         .connect_with(connect_options)
         .await
         .map_err(|err| match err {
