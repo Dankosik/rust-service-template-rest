@@ -73,6 +73,8 @@ impl KeyStore {
     pub(crate) async fn refresh_for_unknown_key(&self) -> UnknownKeyRefresh {
         let mut ticket = None;
         let mut answer = UnknownKeyRefresh::Unavailable;
+        // Inspect the cooldown and claim or join a ticket under the same watch
+        // write lock. Returning false can still mean this caller joined a fetch.
         let started = self.state.send_if_modified(|state| {
             if state.stopped {
                 return false;
@@ -98,6 +100,8 @@ impl KeyStore {
         if started {
             self.wake.notify_one();
         }
+        // wait_for checks the current snapshot too, covering a fetch that finished
+        // before this subscription. Dropping this waiter leaves the worker running.
         let mut state = self.state.subscribe();
         match state
             .wait_for(|state| state.stopped || state.finished >= ticket)

@@ -127,6 +127,8 @@ impl JwtVerifier {
         {
             return Err(VerificationError::invalid(VerificationReason::Profile));
         }
+        // Decode into bounded stack storage; admitted keys cap the signature size.
+        // Keep `message` as the original encoded bytes that the issuer signed.
         let mut signature_bytes = [0_u8; MAX_SIGNATURE_BYTES];
         let signature = URL_SAFE_NO_PAD
             .decode_slice(signature, &mut signature_bytes)
@@ -153,6 +155,7 @@ impl JwtVerifier {
         )
     }
 
+    /// Retries only the signature check; the caller validates the payload once.
     async fn verify_signature_after_refresh(
         &self,
         message: &[u8],
