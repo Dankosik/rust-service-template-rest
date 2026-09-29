@@ -1,81 +1,86 @@
 # Outbound machine authentication decisions
 
 <!-- template:begin outbound-auth:docs-outbound-machine-authentication-decisions -->
-Stage 10.8 library and lifecycle decisions, recorded 2026-09-26.
+Stage 10.8 library and lifecycle decisions, recorded 2026-09-26; client
+authentication and token exchange (D1–D3a, D7 below) were revised 2026-09-29
+from research recorded against `origin/main` 3c220db. The [research
+synthesis](https://github.com/Dankosik/rust-service-template-rest/blob/e4be7060311f3d33486b437b9bfb033db204708c/specs/service-to-service-auth/research/synthesis.md)
+keeps the claim-level evidence; this record keeps only the accepted decisions
+and their reopen conditions.
 [Guide](outbound-machine-authentication.md) owns adoption and observable
-behavior. This record retains the accepted choices and their reopen conditions.
+behavior.
 
 ## Selection and cost
 
 | Decision | Alternative and decisive evidence | Accepted cost and reopen condition |
 | --- | --- | --- |
-| `oauth2` 5.0.0, defaults disabled, no transport feature | Handwritten protocol duplicates Basic encoding, form construction, and standard response handling. `openidconnect` 4.0.1 adds discovery/JWT beyond this grant; `yup-oauth2` 12.1.2 has no generic Basic client-credentials authenticator. | General protocol dependencies remain even for this small grant. Reopen if resolved admission fails or an actual required provider cannot use the supported hook. |
-| Existing `infra-outbound-http` through oauth2's async HTTP hook | oauth2's default reqwest pulls 0.12 alongside workspace 0.13.5. A separate direct reqwest client repeats fixed-origin/deadline/body/observation policy. | A narrow request/response conversion preserves the current transport proof. Reopen only if its supported API prevents a required invariant. |
+| D1: private-key client assertion (`private_key_jwt`, RFC 7523) only; no client-secret mode kept beside it | RFC 9700 §2.5 recommends asymmetric client authentication so the authorization server holds no shared secret; every shortlisted server supports a key-based method. A shared secret is the same credential class as the static-bearer and HS256 schemes this work replaces. | Amazon Cognito and other secret-only providers cannot use this profile. Reopen when a required provider supports only shared secrets. |
+| D1: one request form for both grants — `grant_type`, `client_id`, `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`, `client_assertion`, plus `scope`/`audience` when configured (RFC 7523 §2.2, RFC 7521 §4.2) | Keycloak, Hydra, Authelia, Spring Authorization Server, Duende, Okta and Auth0 (Enterprise) accept this form; one registered client and key cover both client credentials and token exchange. | Zitadel does not fit: its service users need the JWT-bearer grant, and only a second OIDC application with its own key can call token exchange. Reopen if Zitadel is chosen — the gap is the JWT-bearer grant form plus a separate exchange identity. |
+| D2: assertion claims `iss=sub=client_id`, single-string `aud` = the authorization server's issuer identifier (not its token endpoint), `iat=nbf=now`, `exp=now+60s`, a fresh `jti` per request; header `alg`, `kid`, `typ: client-authentication+jwt` | rfc7523bis §4 and the 2025-01-24 OIDF disclosure (CVE-2025-27370/27371) require a single-string audience naming the issuer, so a malicious server cannot obtain an assertion another server accepts; Keycloak caps assertion age at 60 s and requires a single-use `jti`, as do Hydra, Authelia, Duende, Auth0 and Entra. | A server accepting only its token endpoint (Hydra v26, Okta, Entra) gets that URL instead — safe because each integration is configured against one authorization server. Reopen if a required server rejects the typed `typ` header (Spring Authorization Server 1.5.x on Spring Security 6.5 does). |
+| D3/D3a: RFC 8693 token exchange authenticated with the same client assertion, cached per credential owner keyed by SHA-256 of the subject token, bounded to 1024 entries, reused until the same ten-second-margin cutoff as the service token, concurrent misses per subject coalesced, a resource 401 evicting only that subject's entry, no `actor_token` | Keycloak 26.7.4 standard token exchange V2 (GA since 26.2) authenticates the requester as a confidential client and requires it in the subject token's `aud`; Spring's `TokenExchangeOAuth2AuthorizedClientProvider` also reuses an exchanged token until it expires; no maintained Rust crate implements an RFC 8693 client. | Zitadel emits `act` only for an `actor_token` under its impersonation permission, and authentik authenticates the exchange only with a client secret — neither fits D1, so `actor_token` and a configurable requested token type are not added. Reopen if a required server emits `act` under D1's constraints. |
 | One cached token behind a double-checked refresh lock, as Go's `oauth2.ReuseTokenSource` and yup-oauth2 do | Moka's one-key `try_get_with`/`Expiry` cache shared failures, but its retention depended on initializer internals, a zero-lifetime trick, and a second clock that Tokio test time cannot move. | After a failed token request, queued callers retry one at a time, never concurrently, each within its own deadline. Reopen if provider load during an outage is measured as a problem. |
 | One detached refresh once at most five minutes, or a quarter, of reuse remains, as Azure.Core's bearer policy refreshes early without blocking callers | Refreshing only at the cutoff made every concurrent caller wait for the provider. On a DigitalOcean c-4 with 64 concurrent callers and a 100 ms provider, each refresh held 64 requests for over 20 ms; with the early refresh only the first acquisition does. An inline early refresh would spend one caller's deadline on the provider. | One bounded attempt outlives its initiating caller and is cancelled with the runtime, not joined. One-hour tokens are fetched about 9% more often, short ones up to a third more. Reopen if detached work must join shutdown or the provider rate limits these requests. |
 | One new provider crate, independent of inbound authentication | Extending inbound auth joins separate trust and credential lifetimes; placing OAuth in outbound HTTP makes an optional protocol a dependency of every bare HTTP consumer. | Explicit crate/profile pruning keeps independent adoption; remove speculative traits and unused registry/generator paths. |
 
-Registry/maintenance evidence: oauth2 5.0.0 released 2025-01-21 (MIT OR
-Apache-2.0, repository unarchived, pushed 2026-02-22); openidconnect 4.0.1 released
-2025-07-06 (MIT, unarchived, pushed 2025-11-08); yup-oauth2 12.1.2 released
-2026-01-07 (MIT OR Apache-2.0, unarchived, pushed 2026-02-06); Moka 0.12.16
-released 2026-08-09 (MIT OR Apache-2.0 plus Apache-2.0, unarchived, pushed
-2026-08-09). This reuses Definition's registry/repository inspection, not a new
-maintenance certification.
+Authorization-server evidence: versions checked were Zitadel v4.19.2,
+Keycloak 26.7.4, Hydra v26.2.0, authentik 2026.8.3, Authelia v4.39.28, Spring
+Authorization Server 7.1.1, Duende 8.0.9, plus Auth0, Okta, Entra and Cognito
+documentation (2026-09-29). The [service-to-service authentication
+guide](service-to-service-authentication.md#choosing-an-authorization-server)
+carries the shortlist, the not-shortlisted list with reasons, and Keycloak
+registration notes for this path.
 
-[oauth2's manifest](https://github.com/ramosbugs/oauth2-rs/blob/5.0.0/Cargo.toml)
-requires rand 0.8, sha2 0.10, thiserror 1, base64 below 0.23, chrono, and
-serde_path_to_error. Baseline lock already contains rand 0.8.8, sha2 0.10.9,
-compatible base64, chrono, and serde_path_to_error, plus patched crossbeam-epoch
-0.9.21 for Moka. The baseline has only thiserror/thiserror-impl 2.0.20: oauth2
-adds the 1.x family alongside it, an accepted transitive duplicate required by
-the chosen protocol library. Thus source evidence predicts no new transport
-or cryptographic family; it does not claim a resolved candidate graph. Admission
-must inspect the actual locked tree/features, keep rand at least 0.8.6 and
-crossbeam-epoch at least 0.9.20, and pass existing advisory/license gates without
-waivers. OAuth MSRV 1.65 fits workspace Rust 1.98. No unrelated version bump is
-needed. Disabled profiles prune actual dependency reachability, including OAuth's
-older sha2/thiserror families only when no other retained consumer needs them;
-never delete a shared workspace utility declaration merely because OAuth is off.
+## Crate choices and named custom gaps
+
+| Need | Options examined | Decision |
+| --- | --- | --- |
+| Token requests (two grant forms) | `oauth2` 5.0.0 (2025-01-21, MIT OR Apache-2.0): `AuthType` is only `BasicAuth`/`RequestBody`; `private_key_jwt` is a FIXME at `src/endpoint.rs:110`; every builder hard-codes `grant_type`; no token-exchange or JWT-bearer request and no generic grant; the maintainer keeps JWT signing and DPoP out of the crate (#211, #265). `openidconnect` 4.0.1 (2025-07-06): neither feature, and its signing uses RustCrypto `rsa` (RUSTSEC-2023-0071). | Remove `oauth2`; one template-owned form POST (see below). |
+| Assertion signing | `jsonwebtoken` 11.1.0 (already locked, aws-lc backend): `encode` with `Header { typ, kid }`, RS/PS/ES; `use_pem` adds `simple_asn1` and `pem` 3.0.6 (a reported duplicate beside rcgen's `pem` 4.0.0; `num-bigint` and `time` already locked) and reads PKCS#1/PKCS#8 RSA and PKCS#8 EC. `josekit` (OpenSSL), `jwt-simple` (second crypto family), `biscuit`/`aliri`/`openid` (`ring`), and `jose-jws`/`jwt-compact` (stale) were rejected. | `jsonwebtoken::encode` with `use_pem`. Reopen the duplicate `pem` when `jsonwebtoken` moves to `pem` 4. |
+| Token exchange client | No maintained Rust crate implements an RFC 8693 client (crates.io/docs.rs survey); Go exposes it only in `google/internal/stsexchange`, while Nimbus, Spring and Duende IdentityModel are precedents for a template-owned request. | Template-owned request on the shared form POST. |
+| Exchanged-token cache | Moka 0.12.16 (2026-08-09, MIT OR Apache-2.0 plus Apache-2.0; already locked and used by the introspection cache with SHA-256 keys, per-entry expiry and coalescing). | Moka `future::Cache` with `Expiry`, 1024 entries. |
+| Assertion `jti` | `uuid` (workspace), aws-lc random. | `uuid` v4. |
+| Inbound `act` | Extends the existing borrowed-claims parser. | Template-owned claim model, not a mechanism. |
+| DPoP | No maintained Rust client crate. | Deferred; see below. |
+
+**Why `oauth2` goes although it could carry the assertion.** Keeping it for
+`client_credentials` with `add_extra_param` was previously accepted because
+hand-written code would duplicate "Basic encoding, form construction, and
+standard response handling." That rationale no longer holds: Basic encoding
+disappears with the secret, and form construction and response parsing must
+be template-owned anyway for token exchange, which `oauth2` cannot send.
+Keeping the crate would add a second request path (its `AsyncHttpClient`
+adapter plus its error mapping) beside the exchange path, and keep the
+`thiserror` 1.x duplicate, without removing any template code. One form POST
+over the existing bounded client, with `url::form_urlencoded` and one serde
+response type, is the fewer-mechanism design. Reopen if a maintained crate
+offers both a client-assertion hook and RFC 8693 requests.
+
+The template-owned gaps are: the assertion claims and signing call; the two
+grant forms and their response type; the exchanged-token cache wiring; the
+`act` claim model; configuration and initializer integration; sanitized
+outcomes. There is no custom protocol serializer/parser beyond one serde
+response type, no flight state machine, no retry loop, and no general
+token-source abstraction.
+
+## Deferred with reopen conditions (D7)
+
+| Item | Decision | Reopen |
+| --- | --- | --- |
+| DPoP (RFC 9449) | Not adopted. Audience-bound tokens of minutes lifetime on a private network; per-request proof signing, nonce state and one retry on both token and resource calls; no maintained Rust client. Keycloak offers it; Zitadel, Hydra and authentik do not. | Tokens leave the private network, a compliance regime requires sender constraint, or the chosen authorization server and a maintained Rust client support DPoP for client credentials. |
+| mTLS-bound tokens (RFC 8705), SPIFFE, WIMSE | Not adopted. No per-service certificates or mesh on the target platform; WIMSE drafts split in late 2025 and have no mainstream implementation. | The platform issues workload identity. |
+| Transaction Tokens | Not adopted: draft-ietf-oauth-transaction-tokens-11 (2026-07-30) is not an RFC, no shortlisted authorization server issues them, and a Txn-Token is not an access token. | Published and a chosen authorization server issues them. |
+| Private JWK key input | PEM only. | An authorization server hands out keys only as JWK. |
+| Introspection client secret (inbound opaque-token mode) | Unchanged; this is a different mechanism from outbound client authentication — [Service-to-service authentication](service-to-service-authentication.md) requires JWT access tokens and `oidc-jwt` for this path. | Introspection becomes part of a service-to-service path. |
 
 ## Resolved dependency graph
 
-The implementation lock admits `oauth2` 5.0.0 with no OAuth transport feature.
-Its only new registry packages relative to the stage base are `oauth2`,
-`thiserror` 1.0.69 and `thiserror-impl` 1.0.69; the existing 2.0.20 error family
-remains. The protocol uses the already locked rand 0.8.8, sha2 0.10.9 and base64
-0.22.1. The adapter no longer depends on Moka. No second reqwest family is added.
-OAuth enables URL's serde feature; this is an explicit feature cost of the
-protocol library. Locked offline feature-tree inspection confirms that the
-adapter is OAuth's sole workspace consumer and no OAuth default/transport
-feature is enabled. Advisory/license gates and executable profile proof remain
-CI-owned; these graph observations do not claim their success.
-
-## Supported extension points and named custom gaps
-
-Use BasicClient with token endpoint set, explicit BasicAuth, nonempty secret,
-`exchange_client_credentials`, scopes, and `add_extra_param("audience", ...)`.
-The [protocol source](https://github.com/ramosbugs/oauth2-rs/blob/5.0.0/src/endpoint.rs)
-constructs encoded Basic credentials and a form POST. The hook receives an
-absolute `Request<Vec<u8>>` for the configured endpoint: replace its URI with the
-endpoint path/query computed once at construction, for the fixed-origin
-transport, mark Authorization sensitive,
-and convert bounded response bytes back for oauth2. Do not expose raw library
-errors or attach them as sources.
-
-The standard parser owns mandatory fields, optional expiry, media type, and
-unknown members. Compare the library token-type representation case-insensitively
-with `bearer`; do not depend solely on a case-sensitive enum match. The token
-must be nonempty and form a `HeaderValue`, as reqwest's `bearer_auth` requires;
-there is no stricter RFC 6750 grammar check. Retain only that sensitive header
-and its reuse cutoff,
-not the parsed token object, extras, refresh token, or provider error text.
-
-The template-owned gaps are: fixed-transport conversion; immutable-owner binding;
-the one-token cache and its monotonic reuse cutoff; conditional 401 eviction;
-Authorization injection; config and initializer integration; sanitized outcomes.
-There is no custom protocol serializer/parser, flight state machine, retry loop,
-resolver, or general token-source abstraction.
+The lock removes `oauth2`, `thiserror` 1.0.69 and `thiserror-impl` 1.0.69; the
+`thiserror` 2.x family remains. It adds `simple_asn1` 0.6.4 and `pem` 3.0.6
+through `jsonwebtoken`'s `use_pem` feature; `pem` 3.0.6 duplicates rcgen's
+`pem` 4.0.0, which `cargo deny` reports as a warning. `url` no longer carries
+the `serde` feature OAuth used to enable. Advisory/license gates and executable
+profile proof remain CI-owned; these graph observations do not claim their
+success.
 
 ## Cache, budgets, and finality
 
@@ -94,12 +99,11 @@ their deadlines. The first caller past the refresh time moves it thirty seconds
 on and spawns the one background attempt, which rechecks under the lock that
 its token is still cached.
 
-The private per-exchange `TokenHttp` owns the fixed endpoint path, a clone of
-the shared outbound HTTP client, and the absolute attempt deadline. It
-implements `oauth2::AsyncHttpClient` directly for every call lifetime, exposing
-a boxed `Send` associated future as in oauth2's
-[supported async adapter](https://github.com/ramosbugs/oauth2-rs/blob/5.0.0/src/reqwest_client.rs).
-A 5xx token response is `Unavailable`; any other non-2xx is `Rejected`.
+The private `post_form(&self, fields, deadline)` uses the fixed endpoint, the
+owner's bounded token client and the absolute attempt deadline; it sends `application/x-www-form-urlencoded`
+(`url::form_urlencoded::Serializer`) with `Accept: application/json` for
+either grant and decodes one private serde `TokenResponse`. A 5xx token
+response is `Unavailable`; any other non-2xx is `Rejected`.
 
 `Token` holds the private sensitive header and an optional Tokio monotonic reuse
 cutoff; one clock governs every expiry decision. Representable positive expiry
@@ -118,6 +122,16 @@ Go's keep-until-expiry, so a revoked or rotated token does not fail every call
 until its provider lifetime ends. A 403 is a permission result and keeps the
 token.
 The ten-second rule is a refresh preference, never a minimum accepted token TTL.
+
+Exchanged tokens use the same `Token` and cutoff in a Moka cache keyed by the
+subject token's SHA-256 digest. Moka's own clock only reclaims memory: a hit is
+used only while `is_reusable` holds on the Tokio clock, and a stale hit is
+invalidated and exchanged once more. A token the calling request itself just
+fetched serves that request even inside its margin (Moka's `Entry::is_fresh`),
+so a short-lived token never loops. A token without `expires_in` is stored with
+zero retention: the requests coalesced into its exchange use it, later ones
+exchange again. The shared exchange is bounded by its own start plus five
+seconds; each caller stops waiting at its own deadline.
 
 The caller's resource deadline is forwarded unchanged after acquisition.
 The token client uses constants: five seconds, 64 response headers, 1 MiB encoded body. One MiB matches the existing provider envelope and
@@ -144,16 +158,22 @@ the service adopts one loader-wide diagnostic policy for every section.
 
 Runtime errors separate caller Authorization conflict, acquisition failure,
 and existing resource transport failure. Acquisition reasons and all public
-Debug/Display are closed. Record `oauth2_token_acquisitions_total{outcome}` once
-per token request, with finite success/timeout/transport/limit/unavailable/
-rejected/invalid/cancelled outcomes. No scope/audience/URL/integration label or response content
+Debug/Display are closed. Record
+`oauth2_token_acquisitions_total{grant, outcome}` once per token request,
+with `grant` in `client_credentials | token_exchange` and finite
+success/timeout/transport/limit/unavailable/rejected/invalid/cancelled/assertion
+outcomes. No scope/audience/URL/integration label or response content
 is emitted. Existing resource transport error policy remains unchanged.
 
 The production adapter's local token/resource-server proof covers encoding,
 audience and scope omission, permissive RFC success parsing, shared success and
 serialized failure, reuse cutoff, missing expiry, cancellation replacement, per-waiter
 budget, owner isolation, Bearer injection, 401 eviction that spares a newer
-token, and 401/403 without replay. Reuse existing TLS/transport tests unless that implementation changes.
+token, and 401/403 without replay. It also verifies the assertion
+header and claims with the matching public key, distinct `jti` values, key and
+algorithm refusal, both request forms, the issued-token-type check, per-subject
+reuse and coalescing, single-subject eviction, uncached exchange failures, one
+exchange for a short-lived token, and gRPC on-behalf dispatch. Reuse existing TLS/transport tests unless that implementation changes.
 Negative proof
 covers Authorization conflict, secret files, safe diagnostics, token redirect,
 limit/timeout, and absence of resource dispatch. Test constructors remain

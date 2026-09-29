@@ -668,6 +668,9 @@ markers, tests, and initializer support. Order by expected demand:
    **Implemented in [PR #64](https://github.com/Dankosik/rust-service-template-rest/pull/64).**
    `OUTBOUND_AUTH=oauth2-client-credentials` retains private per-integration
    token reuse over bounded outbound HTTP; it is otherwise absent. The
+   profile now authenticates only with a private-key client assertion and
+   carries user context through RFC 8693 token exchange, per [Service-to-service
+   authentication](service-to-service-authentication.md). The
    [adoption guide](outbound-machine-authentication.md) and [decision
    record](outbound-machine-authentication-decisions.md) define the profile.
 <!-- template:end outbound-auth:roadmap-stage-10-8-outbound-auth -->

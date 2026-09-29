@@ -35,6 +35,7 @@ docs/outbound-http.md
 docs/outbound-http-decisions.md
 docs/outbound-machine-authentication.md
 docs/outbound-machine-authentication-decisions.md
+docs/service-to-service-authentication.md
 docs/http-idempotency.md
 docs/background-jobs.md
 docs/outbound-webhooks.md

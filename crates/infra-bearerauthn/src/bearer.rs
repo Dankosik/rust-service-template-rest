@@ -21,6 +21,13 @@ impl<'a> BearerToken<'a> {
     pub(crate) fn as_bytes(&self) -> &'a [u8] {
         self.bytes
     }
+
+    /// The exact presented token text, for a verified engine to retain on its
+    /// principal. `valid_token` already restricts these bytes to the RFC 6750
+    /// token alphabet, which is ASCII, so this never loses data.
+    pub(crate) fn access_token(&self) -> secrecy::SecretString {
+        String::from_utf8_lossy(self.bytes).into_owned().into()
+    }
 }
 
 /// Parses exactly one Authorization header value as a bearer envelope.

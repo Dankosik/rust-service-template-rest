@@ -175,7 +175,7 @@ impl IntrospectionVerifier {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| provider_error(Failure::Unavailable))?;
-        validate_introspection_claims(&response, &self.policy, now.as_secs())
+        validate_introspection_claims(&response, &self.policy, now.as_secs(), token.access_token())
     }
 }
 
@@ -479,6 +479,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn access_token_equals_the_presented_bearer_text() {
+        use secrecy::ExposeSecret;
+        let fixture = Fixture::new().await;
+        let uncached = fixture.verifier(None);
+        let principal = verify(&uncached, b"Bearer first").await.unwrap();
+        assert_eq!(principal.access_token().expose_secret(), "first");
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
     async fn caching_is_opt_in_shared_only_by_clones_and_exact_token() {
         let fixture = Fixture::new().await;
         let uncached = fixture.verifier(None);
@@ -718,7 +728,13 @@ mod tests {
         let policy = ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()]);
         let principal = |custom: &str| {
             let response = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"sub":"subject","custom":custom});
-            validate_introspection_claims(response.to_string().as_bytes(), &policy, 100).unwrap()
+            validate_introspection_claims(
+                response.to_string().as_bytes(),
+                &policy,
+                100,
+                secrecy::SecretString::from("presented-token"),
+            )
+            .unwrap()
         };
         let small = principal("");
         let at = |millis| UNIX_EPOCH + Duration::from_millis(millis);
@@ -737,6 +753,7 @@ mod tests {
             format!(r#"{{"active":true,"iss":"https://issuer.example","aud":"api","exp":{},"sub":"subject"}}"#, u64::MAX).as_bytes(),
             &policy,
             100,
+            secrecy::SecretString::from("presented-token"),
         )
         .unwrap();
         assert_eq!(retention(&unbounded, ttl, at(100_500)), ttl);
@@ -747,7 +764,13 @@ mod tests {
             let prefix = r#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"sub":"subject","custom":""#;
             let response = format!("{prefix}{}\"}}", "x".repeat(length - prefix.len() - 2));
             let padded = format!(" \t\r\n{response}\n\r\t ");
-            let principal = validate_introspection_claims(padded.as_bytes(), &policy, 100).unwrap();
+            let principal = validate_introspection_claims(
+                padded.as_bytes(),
+                &policy,
+                100,
+                secrecy::SecretString::from("presented-token"),
+            )
+            .unwrap();
             assert_eq!(principal.payload_len(), length);
             assert_eq!(retention(&principal, ttl, at(100_500)), expected);
         }

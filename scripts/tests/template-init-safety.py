@@ -433,6 +433,7 @@ def assert_profile_packs(
         source, target, "outbound-auth-grpc", grpc == "enabled" and outbound_auth == "oauth2-client-credentials"
     )
     assert_profile_pack(source, target, "config-url", messaging == "nats-jetstream" or outbound_auth == "oauth2-client-credentials")
+    assert_profile_pack(source, target, "jsonwebtoken", authn == "oidc-jwt" or outbound_auth == "oauth2-client-credentials")
     shared_selected = authn != "none" or outbound_http == "bounded" or grpc == "enabled" or cache == "redis"
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
     assert_profile_pack(
@@ -1132,6 +1133,7 @@ def check(source: Path) -> None:
         assert_profile_pack(source, cache_target, "service-secrets", True)
         assert_profile_pack(source, cache_target, "rustls", True)
         assert_profile_pack(source, cache_target, "config-url", False)
+        assert_profile_pack(source, cache_target, "jsonwebtoken", False)
         lock = json.loads((cache_target / "template.lock").read_text(encoding="utf-8"))
         if lock["profiles"].get("cache") != "redis":
             raise AssertionError("template.lock did not record cache=redis")

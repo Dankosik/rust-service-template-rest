@@ -2,7 +2,7 @@
 //!
 //! JSON `null` means absent for every consumed claim.
 
-use crate::{Failure, Principal, VerificationError, VerificationReason};
+use crate::{Actor, Failure, Principal, VerificationError, VerificationReason};
 use serde::Deserialize;
 use std::{borrow::Cow, fmt};
 // template:begin oidc-jwt:authn-claims-jwt-import
@@ -67,6 +67,32 @@ impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
 #[derive(Deserialize)]
 struct Borrowed<'a>(#[serde(borrow)] Cow<'a, str>);
 
+/// The outermost RFC 8693 `act` object, shared by JWT and introspection
+/// evidence. A non-object `act` fails to deserialize, which the caller reads
+/// as malformed claims; `sub` and `client_id` accept only string values, and
+/// any other member, including a nested `act`, is ignored.
+#[derive(Deserialize)]
+struct RawAct<'a> {
+    #[serde(borrow)]
+    sub: Cow<'a, str>,
+    #[serde(borrow)]
+    client_id: Option<Cow<'a, str>>,
+}
+
+impl RawAct<'_> {
+    /// `sub` must be non-empty; an empty value is malformed evidence, not an
+    /// absent actor, so the caller maps `Err` to its own malformed reason.
+    fn into_actor(self) -> Result<Actor, ()> {
+        if self.sub.is_empty() {
+            return Err(());
+        }
+        Ok(Actor::new(
+            self.sub.into_owned(),
+            self.client_id.map(Cow::into_owned),
+        ))
+    }
+}
+
 impl Values<'_> {
     fn contains_any(&self, accepted: &[String]) -> bool {
         match self {
@@ -108,6 +134,8 @@ pub(crate) struct JwtClaims<'a> {
     #[serde(borrow)]
     jti: Option<Cow<'a, str>>,
     iat: Option<u64>,
+    #[serde(borrow)]
+    act: Option<RawAct<'a>>,
 }
 // template:end oidc-jwt:authn-claims-jwt-type
 
@@ -135,6 +163,8 @@ struct ActiveClaims<'a> {
     scope: Option<Values<'a>>,
     #[serde(borrow)]
     scp: Option<Values<'a>>,
+    #[serde(borrow)]
+    act: Option<RawAct<'a>>,
 }
 // template:end oidc-introspection:authn-claims-introspection-envelope
 
@@ -146,6 +176,7 @@ pub(crate) fn validate_jwt_claims(
     policy: &ClaimPolicy,
     token_profile: TokenProfile,
     now: u64,
+    access_token: secrecy::SecretString,
 ) -> Result<Principal, VerificationError> {
     let invalid = VerificationError::invalid;
     let payload =
@@ -181,6 +212,11 @@ pub(crate) fn validate_jwt_claims(
         }
     }
     let scopes = normalize_scopes(claims.scope.or(claims.scp), Failure::Invalid)?;
+    let actor = claims
+        .act
+        .map(RawAct::into_actor)
+        .transpose()
+        .map_err(|()| invalid(VerificationReason::MalformedClaims))?;
     Ok(Principal::new(
         policy.issuer.clone(),
         subject,
@@ -188,6 +224,8 @@ pub(crate) fn validate_jwt_claims(
         scopes,
         expiry,
         payload,
+        access_token,
+        actor,
     ))
 }
 
@@ -248,6 +286,7 @@ pub(crate) fn validate_introspection_claims(
     bytes: &[u8],
     policy: &ClaimPolicy,
     now: u64,
+    access_token: secrecy::SecretString,
 ) -> Result<Principal, VerificationError> {
     let malformed =
         || VerificationError::new(Failure::Unavailable, VerificationReason::MalformedClaims);
@@ -278,6 +317,11 @@ pub(crate) fn validate_introspection_claims(
         return Err(invalid(VerificationReason::MissingClaim));
     }
     let scopes = normalize_scopes(claims.scope.or(claims.scp), Failure::Unavailable)?;
+    let actor = claims
+        .act
+        .map(RawAct::into_actor)
+        .transpose()
+        .map_err(|()| malformed())?;
     Ok(Principal::new(
         policy.issuer.clone(),
         subject,
@@ -285,6 +329,8 @@ pub(crate) fn validate_introspection_claims(
         scopes,
         expiry,
         payload.to_owned(),
+        access_token,
+        actor,
     ))
 }
 // template:end oidc-introspection:authn-claims-introspection-validation
@@ -347,6 +393,11 @@ mod tests {
         ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()])
     }
 
+    /// A fixed access token for tests that do not exercise its exact value.
+    fn access_token() -> secrecy::SecretString {
+        secrecy::SecretString::from("presented-token")
+    }
+
     // template:begin oidc-jwt:authn-claims-jwt-normalization-test
     #[test]
     fn jwt_identity_uses_the_first_nonempty_client_alias_and_treats_null_as_absent() {
@@ -358,6 +409,7 @@ mod tests {
                 &policy(),
                 TokenProfile::ResourceServer,
                 100,
+                access_token(),
             )
         };
         let principal = verify(serde_json::json!({
@@ -389,6 +441,7 @@ mod tests {
                 &policy(),
                 TokenProfile::ResourceServer,
                 1000,
+                access_token(),
             )
             .map(|principal| principal.expires_at())
             .map_err(|error| error.reason)
@@ -472,6 +525,7 @@ mod tests {
                 &policy(),
                 TokenProfile::Rfc9068,
                 100,
+                access_token(),
             )
             .map_err(|error| error.reason)
         };
@@ -488,6 +542,79 @@ mod tests {
             Err(VerificationReason::Profile)
         );
     }
+
+    #[test]
+    fn jwt_act_identifies_the_outermost_actor_and_rejects_malformed_evidence() {
+        let verify = |extra: serde_json::Value| {
+            let mut claims = serde_json::json!({
+                "iss": "https://issuer.example", "aud": "api", "exp": 1000, "sub": "subject",
+            });
+            claims
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            validate_jwt_claims(
+                claims.to_string().into_bytes(),
+                &policy(),
+                TokenProfile::ResourceServer,
+                100,
+                access_token(),
+            )
+        };
+        let principal = verify(serde_json::json!({
+            "act": {"sub": "service-a", "client_id": "gateway", "act": {"sub": "nested"}},
+        }))
+        .unwrap();
+        let actor = principal.actor().unwrap();
+        assert_eq!(actor.subject(), "service-a");
+        assert_eq!(actor.client_id(), Some("gateway"));
+        assert_eq!(format!("{actor:?}"), "Actor([REDACTED])");
+        for absent in [serde_json::json!({}), serde_json::json!({"act": null})] {
+            assert!(verify(absent).unwrap().actor().is_none());
+        }
+        assert_eq!(
+            verify(serde_json::json!({"act": {"sub": "solo"}}))
+                .unwrap()
+                .actor()
+                .unwrap()
+                .client_id(),
+            None
+        );
+        for malformed in [
+            serde_json::json!({"act": "not-an-object"}),
+            serde_json::json!({"act": []}),
+            serde_json::json!({"act": {}}),
+            serde_json::json!({"act": {"sub": ""}}),
+            serde_json::json!({"act": {"sub": 5}}),
+            serde_json::json!({"act": {"sub": "x", "client_id": 5}}),
+        ] {
+            assert_eq!(
+                verify(malformed.clone()).unwrap_err().reason,
+                VerificationReason::MalformedClaims,
+                "{malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn jwt_access_token_returns_the_exact_presented_token() {
+        use secrecy::ExposeSecret;
+        let claims = serde_json::json!({
+            "iss": "https://issuer.example", "aud": "api", "exp": 1000, "sub": "subject",
+        });
+        let principal = validate_jwt_claims(
+            claims.to_string().into_bytes(),
+            &policy(),
+            TokenProfile::ResourceServer,
+            100,
+            secrecy::SecretString::from("verified-bearer-text"),
+        )
+        .unwrap();
+        assert_eq!(
+            principal.access_token().expose_secret(),
+            "verified-bearer-text"
+        );
+    }
     // template:end oidc-jwt:authn-claims-jwt-normalization-test
 
     // template:begin oidc-introspection:authn-claims-introspection-shape-test
@@ -499,7 +626,8 @@ mod tests {
             br#"{"active":false,"sub":"one","sub":"two"}"#,
         ] {
             assert_eq!(
-                validate_introspection_claims(response, &policy(), 100).unwrap_err(),
+                validate_introspection_claims(response, &policy(), 100, access_token())
+                    .unwrap_err(),
                 crate::VerificationError::invalid(VerificationReason::Inactive)
             );
         }
@@ -519,7 +647,9 @@ mod tests {
             br#"{"active":true,"iss":1,"aud":"api","exp":130,"sub":"subject"}"#,
             br#"{"active":true,"iss":"https://issuer.example","aud":false,"exp":130,"sub":"subject"}"#,
         ] {
-            let error = validate_introspection_claims(response, &policy(), 100).unwrap_err();
+            let error =
+                validate_introspection_claims(response, &policy(), 100, access_token())
+                    .unwrap_err();
             assert_eq!(error.failure, Failure::Unavailable, "{response:?}");
         }
     }
@@ -539,7 +669,7 @@ mod tests {
         }
         let principal = validate_introspection_claims(
             br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":["write","read","read"],"tenant":"old","tenant":"private-value"}"#,
-            &policy(), 100,
+            &policy(), 100, access_token(),
         ).unwrap();
         let claims = principal.claims::<ApplicationClaims>().unwrap();
         assert_eq!(claims.tenant, "private-value");
@@ -550,6 +680,74 @@ mod tests {
         assert_eq!(error, crate::ClaimAccessError::InvalidShape);
         assert!(!format!("{error:?} {error} {principal:?}").contains("private-value"));
     }
+
+    #[test]
+    fn introspection_act_identifies_the_outermost_actor_and_rejects_malformed_evidence() {
+        let verify = |extra: serde_json::Value| {
+            let mut response = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject"});
+            response
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            validate_introspection_claims(
+                response.to_string().as_bytes(),
+                &policy(),
+                100,
+                access_token(),
+            )
+        };
+        let principal = verify(serde_json::json!({
+            "act": {"sub": "service-a", "client_id": "gateway", "act": {"sub": "nested"}},
+        }))
+        .unwrap();
+        let actor = principal.actor().unwrap();
+        assert_eq!(actor.subject(), "service-a");
+        assert_eq!(actor.client_id(), Some("gateway"));
+        for absent in [serde_json::json!({}), serde_json::json!({"act": null})] {
+            assert!(verify(absent).unwrap().actor().is_none());
+        }
+        assert_eq!(
+            verify(serde_json::json!({"act": {"sub": "solo"}}))
+                .unwrap()
+                .actor()
+                .unwrap()
+                .client_id(),
+            None
+        );
+        for malformed in [
+            serde_json::json!({"act": "not-an-object"}),
+            serde_json::json!({"act": []}),
+            serde_json::json!({"act": {}}),
+            serde_json::json!({"act": {"sub": ""}}),
+            serde_json::json!({"act": {"sub": 5}}),
+            serde_json::json!({"act": {"sub": "x", "client_id": 5}}),
+        ] {
+            let error = verify(malformed.clone()).unwrap_err();
+            assert_eq!(error.failure, Failure::Unavailable, "{malformed}");
+            assert_eq!(
+                error.reason,
+                VerificationReason::MalformedClaims,
+                "{malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn introspection_access_token_returns_the_exact_presented_token() {
+        use secrecy::ExposeSecret;
+        let response = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject"});
+        let principal = validate_introspection_claims(
+            response.to_string().as_bytes(),
+            &policy(),
+            100,
+            secrecy::SecretString::from("verified-bearer-text"),
+        )
+        .unwrap();
+        assert_eq!(
+            principal.access_token().expose_secret(),
+            "verified-bearer-text"
+        );
+    }
     // template:end oidc-introspection:authn-claims-introspection-shape-test
 
     // template:begin oidc-introspection:authn-claims-introspection-missing-test
@@ -557,9 +755,14 @@ mod tests {
     fn active_claims_are_required_and_null_means_absent() {
         let complete = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject"});
         let reason = |response: &serde_json::Value| {
-            validate_introspection_claims(response.to_string().as_bytes(), &policy(), 100)
-                .map(|_| ())
-                .map_err(|error| (error.failure, error.reason))
+            validate_introspection_claims(
+                response.to_string().as_bytes(),
+                &policy(),
+                100,
+                access_token(),
+            )
+            .map(|_| ())
+            .map_err(|error| (error.failure, error.reason))
         };
         for claim in ["iss", "aud", "exp", "sub"] {
             for absent in [None, Some(serde_json::Value::Null)] {
@@ -633,6 +836,7 @@ mod tests {
                     &serde_json::to_vec(&response).unwrap(),
                     &policy(),
                     100,
+                    access_token(),
                 );
                 if let Some(expected) = &expected {
                     assert_eq!(result.unwrap().scopes(), expected.as_slice());
@@ -648,6 +852,7 @@ mod tests {
                     &policy(),
                     TokenProfile::ResourceServer,
                     100,
+                    access_token(),
                 );
                 if let Some(expected) = &expected {
                     assert_eq!(result.unwrap().scopes(), expected.as_slice());

@@ -65,7 +65,7 @@ pub use http::HttpConfig;
 pub use grpc::{GrpcConfig, GrpcSecurity};
 // template:end grpc:config-export
 // template:begin outbound-auth:config-export
-pub use integrations::{OAuthConfig, Scopes};
+pub use integrations::{OAuthAlgorithm, OAuthConfig, Scopes};
 // template:end outbound-auth:config-export
 // template:begin client-integrations:config-integration-export
 pub use integrations::IntegrationConfig;

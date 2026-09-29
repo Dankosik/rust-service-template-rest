@@ -22,6 +22,7 @@ infra-webhooks = { workspace = true }
 # template:end inbound-webhooks:http-webhooks-dependency
 # template:begin authn:http-authn-dependency
 infra-bearerauthn = { workspace = true }
+secrecy = { workspace = true }
 # template:end authn:http-authn-dependency
 # template:begin http-idempotency:http-idempotency-dependencies
 infra-idempotency-store = { workspace = true }

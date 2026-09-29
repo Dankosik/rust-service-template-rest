@@ -13,7 +13,7 @@ use tokio::time::Instant;
 use tonic::{Code, Status, body::Body};
 use tower::Service;
 
-use crate::{AcquisitionError, Credentials, FETCH_TIMEOUT};
+use crate::{AcquisitionError, Credentials, FETCH_TIMEOUT, OnBehalfOf};
 
 const GRPC_TIMEOUT: HeaderName = HeaderName::from_static("grpc-timeout");
 
@@ -59,11 +59,12 @@ impl Service<Request<Body>> for AuthenticatedClient {
                     "authorization conflicts with client credentials",
                 ));
             }
+            let on_behalf_of = request.extensions_mut().remove::<OnBehalfOf>();
             let budget = infra_grpc::grpc_timeout(request.headers());
             let started = Instant::now();
             let deadline = started + budget.unwrap_or(FETCH_TIMEOUT);
-            let token = credentials
-                .authorize(request.headers_mut(), deadline)
+            let acquired = credentials
+                .authorize(request.headers_mut(), on_behalf_of, deadline)
                 .await
                 .map_err(acquisition_status)?;
             let now = Instant::now();
@@ -83,7 +84,7 @@ impl Service<Request<Body>> for AuthenticatedClient {
                 }) || (response.status() == StatusCode::UNAUTHORIZED
                     && !response.headers().contains_key("grpc-status"));
             if unauthenticated {
-                credentials.reject(&token);
+                credentials.reject_acquired(&acquired).await;
             }
             Ok(response)
         })

@@ -1,8 +1,11 @@
 # Outbound machine authentication
 
 <!-- template:begin outbound-auth:docs-outbound-machine-authentication-guide -->
-Stage 10.8 provides default-off OAuth2 client-credentials authentication for
-bounded outbound integrations.
+Stage 10.8 provides default-off private-key client authentication for bounded
+outbound integrations, with RFC 8693 token exchange to carry a verified
+user's context downstream. [Service-to-service
+authentication](service-to-service-authentication.md) states the mandate this
+profile implements and forbids the schemes it replaces.
 [Decisions](outbound-machine-authentication-decisions.md) own library and lifecycle
 choices. This capability does not change inbound authentication.
 
@@ -26,19 +29,34 @@ entries. No separate integration-name slug grammar is imposed.
 [integrations.billing.oauth]
 token_url = "https://identity.example/oauth2/token"
 client_id = "billing-service"
+key_id = "billing-service-2026"
+algorithm = "RS256"
+assertion_audience = "https://identity.example/"
 scopes = ["billing.read"]
 # audience = "https://billing-api.example"
 ```
 
-Supply the secret only through
-`APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_SECRET`; nonempty file secrets are
-rejected by the recursive secret guard. Other keys use normal file/environment
-layering. Environment scopes use one space-separated string, for example
-`APP__INTEGRATIONS__BILLING__OAUTH__SCOPES=billing.read billing.write`; TOML uses
-a list. Omitted or empty scopes send no scope parameter. Each list member is
-an RFC 6749 scope token; a configured audience must be nonempty. Credentials
-and configuration are immutable; rotate by restart. Client IDs and secrets
-are nonempty without additional length or character restrictions.
+Supply the private key only through
+`APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY`; nonempty file secrets are
+rejected by the recursive secret guard. `client_secret` is an unknown key and
+fails startup: this profile authenticates only with a private key, never a
+shared secret ([mandate](service-to-service-authentication.md#mandate)).
+`key_id` and `assertion_audience` are required; `algorithm` is `RS256`
+(default), `PS256`, or `ES256` — one algorithm per key. Other keys use normal
+file/environment layering. Environment scopes use one space-separated string,
+for example `APP__INTEGRATIONS__BILLING__OAUTH__SCOPES=billing.read
+billing.write`; TOML uses a list. Omitted or empty scopes send no scope
+parameter. Each list member is an RFC 6749 scope token; a configured audience
+must be nonempty. Credentials and configuration are immutable; rotate by
+restart. Client IDs are nonempty without additional length or character
+restrictions; the private key must be a PKCS#8 or PKCS#1 PEM matching
+`algorithm`, or construction fails with a sanitized configuration error
+naming `private_key` before any I/O happens.
+
+Rotate a key by registering the new public key at the authorization server
+beside the old one, deploying the new `private_key` and `key_id` together,
+then deleting the old public key. No `jwks_uri` endpoint is served by this
+profile.
 
 `token_url` is fixed trusted operator input: HTTPS with host, no userinfo,
 fragment, whitespace, or controls. Paths and queries are retained. System DNS
@@ -77,8 +95,19 @@ its endpoint; constructing an authenticated client remains the real integration'
 composition-root work. Direct adapter construction repeats admission at that
 independent public boundary rather than trusting arbitrary caller options.
 
-An existing Authorization header is refused before token or resource I/O.
-Otherwise acquisition supplies exactly one sensitive Bearer header. The
+To call an integration on behalf of a verified user instead of as the
+service itself, attach `OnBehalfOf::new(principal.access_token().clone())` to
+the outbound request's extensions
+(`http::Request::extensions_mut`) before calling `execute`; the gRPC binding
+takes the same value through `tonic::Request::extensions_mut`. With it
+present, `execute`/`call` exchange the carried token for one addressed to
+this integration (see [Token exchange](#token-exchange-for-user-context))
+instead of sending the service's own token; without it, the existing
+service-token path below runs unchanged.
+
+An existing Authorization header is refused before token or resource I/O,
+whether or not `OnBehalfOf` is attached. Otherwise acquisition supplies
+exactly one sensitive Bearer header. The
 resource client's origin check, body limit, transport policy, and original
 absolute caller deadline remain authoritative. Token wait consumes that deadline;
 it never resets it. Completed resource results, including 401 and 403, pass
@@ -88,13 +117,23 @@ newer one already replaced it, so the next operation acquires a fresh token; a
 
 ## Acquisition and reuse
 
-The first call posts the RFC 6749 client-credentials form with Basic client
-authentication. Scopes and audience are sent only when configured. Each token
-attempt has one five-second cap through body completion, narrowed by its
-initiating caller's remaining deadline. The token transport has one active
-exchange, 64 response headers, and a 1 MiB encoded body maximum. The shared
-transport enforces header count, not a configurable aggregate header-byte limit.
-These are implementation constants, not operator tuning keys.
+The first call signs a fresh client assertion and posts the RFC 6749
+client-credentials form with `grant_type=client_credentials`, `client_id`,
+`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`,
+and `client_assertion`; there is no `Authorization` header. Scopes and
+audience are sent only when configured. Each token attempt has one
+five-second cap through body completion, narrowed by its initiating caller's
+remaining deadline. The token transport has one active exchange, 64 response
+headers, and a 1 MiB encoded body maximum. The shared transport enforces
+header count, not a configurable aggregate header-byte limit. These are
+implementation constants, not operator tuning keys.
+
+The assertion header is `{alg, kid, typ: "client-authentication+jwt"}`; its
+claims are `iss` = `sub` = the client ID, `aud` = the configured
+`assertion_audience` as one JSON string, `iat` = `nbf` = now, `exp` = now +
+60 seconds, and `jti` = a fresh random UUID v4. A new assertion is signed for
+every token request and never cached or reused; two requests never share a
+`jti`.
 
 One owner never runs two token requests at once. Callers that arrive while a
 request is in flight wait for it, then reuse its token if it is reusable. After
@@ -126,15 +165,40 @@ dispatch. Hits never slide expiry. Failed attempts are not cached, and no token
 is reused past its cutoff. A later operation may fetch again. Unknown response
 fields and refresh tokens are discarded; JWT claims are not interpreted. Only
 case-insensitive Bearer tokens that are nonempty and form a valid header value
-are admitted. No custom TTL ceiling or stricter JSON,
-duplicate-field, or media-type parser is added around the protocol library.
+are admitted. A present Content-Type must be `application/json`; there is no
+custom TTL ceiling or stricter JSON or duplicate-field rule.
+
+## Token exchange for user context
+
+With `OnBehalfOf` attached (see [Compose an
+integration](#compose-an-integration)), acquisition posts
+`grant_type=urn:ietf:params:oauth:grant-type:token-exchange`,
+`subject_token` (the carried token), `subject_token_type` and
+`requested_token_type` both
+`urn:ietf:params:oauth:token-type:access_token`, the integration's configured
+`scope`/`audience`, and the same client assertion fields as client
+credentials. The response is admitted only with a Bearer `token_type`, a
+nonempty token that forms a header value, and `issued_token_type` equal to
+the access-token type URI; anything else is an invalid-response failure and
+no token is used.
+
+Exchanged tokens are cached per credential owner, keyed by the SHA-256 digest
+of the subject token, bounded to 1024 entries, each until its own reuse
+cutoff (the same ten-second margin as above). Concurrent requests for one
+subject share a single in-flight exchange. A resource 401 evicts only that
+subject's cache entry, not the whole cache. An exchanged token with no
+`expires_in` serves only the request that fetched it and is never stored;
+failed exchanges are never cached.
 
 ## Failure and observation
 
 Configuration errors identify the integration/key with a bounded static reason,
-never its value. Runtime token failures use closed reasons for deadline,
-transport, response limit, provider unavailability (5xx), provider rejection,
-and invalid response. Resource
+never its value. A key that is not PEM, or that does not match `algorithm`,
+fails construction with a sanitized configuration error naming
+`private_key`; no I/O happens. Runtime token failures use closed reasons for
+deadline, transport, response limit, provider unavailability (5xx), provider
+rejection, invalid response, and `assertion` for an assertion-signing
+failure. Resource
 transport errors remain distinct; concrete integrations own business/HTTP error
 mapping. No inbound Problem code is added.
 
@@ -142,31 +206,41 @@ Raw OAuth errors can contain provider bytes and must be consumed and discarded
 inside the adapter. Debug, Display, error sources, metrics, and logs expose no
 credentials, tokens, scope/audience values, response bodies, endpoint path/query,
 or arbitrary provider text. Credential, option, cache, and authenticated-client
-Debug implementations are redacted. Token attempt metrics use only a finite
-outcome label and no integration/URL label; existing safe outbound transport
-observation remains enabled. Cancellation records an outcome without claiming a
-provider result. No new diagnostic route or body/header logging is introduced.
+Debug implementations are redacted. Token attempt metrics are
+`oauth2_token_acquisitions_total{grant, outcome}`, with `grant` in
+`client_credentials | token_exchange` and a finite outcome label; there is no integration/URL label. Existing safe
+outbound transport observation remains enabled. Cancellation records an
+outcome without claiming a provider result. No new diagnostic route or
+body/header logging is introduced.
 
 ## Documented provider compatibility
 
 | Provider | Required registration and request choices |
 | --- | --- |
-| [Entra v2](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow) | Tenant token endpoint, client secret Basic, one resource URI `/.default` scope; no legacy resource parameter. |
-| [Okta custom authorization server](https://developer.okta.com/docs/guides/implement-grant-type/clientcreds/main/) | Service application, Basic, custom authorization-server token endpoint and granted scope. Org-server service apps requiring private-key JWT are outside this profile. |
-| [Keycloak](https://www.keycloak.org/docs/latest/server_admin/#_service_accounts) | Confidential client, service account enabled, assigned roles/client scopes, realm token endpoint, Basic. |
-| [Auth0](https://auth0.com/docs/get-started/authentication-and-authorization-flow/client-credentials-flow/call-your-api-using-the-client-credentials-flow) | M2M application granted the API, configured audience, optional scopes, application authentication method Client Secret Basic. |
-| [Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/token-endpoint.html) | Client credentials enabled, client secret, custom resource-server scopes, domain token endpoint. |
+| [Keycloak](https://www.keycloak.org/docs/latest/server_admin/#_service_accounts) | Confidential client, client authenticator "Signed JWT" with the service's public key or JWKS URL, service account enabled; standard token exchange V2 (GA since 26.2) supports `OnBehalfOf`. |
+| [Okta custom authorization server](https://developer.okta.com/docs/guides/implement-grant-type/clientcreds/main/) | Service application with a registered public key (`private_key_jwt`) and the custom authorization-server token endpoint as `assertion_audience`; per-service audiences need the paid API Access Management add-on; `act` in exchanged tokens is undocumented. |
+| [Auth0 (Enterprise)](https://auth0.com/docs/get-started/authentication-and-authorization-flow/client-credentials-flow/call-your-api-using-the-client-credentials-flow) | `private_key_jwt` client authentication is an Enterprise-plan feature; configure the M2M application's public key and audience. |
+| [Spring Authorization Server](https://docs.spring.io/spring-authorization-server/reference/) | JWT client assertion authentication is supported protocol-natively; `act` emission and audience mapping on exchange are operator-owned custom code. |
+| Hydra | Supports `private_key_jwt` client credentials; has no RFC 8693 token exchange (issue open since 2018), so `OnBehalfOf` is unavailable. |
+| Cognito — unsupported | Secret-only client authentication; does not support `private_key_jwt`. |
+| Entra — unsupported | Requires an `x5t#S256` certificate-thumbprint header this profile does not send, and offers no token exchange that emits `act`. |
 
 These are official-documentation compatibility findings, not live-provider
 certification. Adopters own registration, grants/scopes, credentials, rotation,
 network/TLS policy, capacity, readiness criticality, and live-provider acceptance.
-Other authentication methods require a separate accepted behavior decision.
+See [Choosing an authorization
+server](service-to-service-authentication.md#choosing-an-authorization-server)
+for the full shortlist and the evidence behind it. Other authentication
+methods require a separate accepted behavior decision.
 
 <!-- template:end outbound-auth:docs-outbound-machine-authentication-guide -->
 <!-- template:begin outbound-auth-grpc:docs-oauth-grpc-binding -->
 With `GRPC=enabled`, `Credentials::grpc` binds the same private acquisition owner
 to an `infra_grpc::Client`. Each call spends `grpc-timeout` when that header is
-present, otherwise the owner's fetch timeout. Token failure prevents resource
+present, otherwise the owner's fetch timeout. `OnBehalfOf` set on the call's
+extensions through `tonic::Request::extensions_mut` selects the same token
+exchange as the HTTP binding; without it, the service token is sent. Token
+failure prevents resource
 dispatch. Eviction inspects only the initial response and never replays the
 call. When acquisition waited at least a millisecond, `grpc-timeout` is
 rewritten to the remaining budget; a reused token forwards it unchanged.

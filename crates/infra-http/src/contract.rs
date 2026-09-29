@@ -1,6 +1,7 @@
 //! Final security policy compiled from the assembled upstream OpenAPI document.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Request, State};
@@ -31,11 +32,11 @@ where
     S: Clone + Send + Sync + 'static,
 {
     let policy = Policy::compile(contract.get_openapi())?;
-    if policy
-        .0
-        .values()
-        .any(|methods| methods.values().any(|public| !public))
-    {
+    if policy.0.values().any(|methods| {
+        methods
+            .values()
+            .any(|access| matches!(access, Access::Protected(_)))
+    }) {
         return Err(FinalizeError::NonPublicOperation);
     }
     let (router, _) = contract.split_for_parts();
@@ -45,8 +46,17 @@ where
     Ok(router.route_layer(middleware::from_fn_with_state(policy, enforce_public)))
 }
 
+/// One operation's compiled access: open to any caller, or gated behind at
+/// least one alternative of required scopes (OpenAPI 3.1 §4.8.30: OR across
+/// alternatives, AND within one; an empty list is any authenticated caller).
 #[derive(Clone)]
-pub(crate) struct Policy(BTreeMap<String, BTreeMap<&'static str, bool>>);
+pub(crate) enum Access {
+    Public,
+    Protected(Arc<[Box<[String]>]>),
+}
+
+#[derive(Clone)]
+pub(crate) struct Policy(BTreeMap<String, BTreeMap<&'static str, Access>>);
 
 impl Policy {
     pub(crate) fn compile(document: &OpenApi) -> Result<Self, FinalizeError> {
@@ -64,7 +74,7 @@ impl Policy {
                 ("TRACE", &item.trace),
             ] {
                 if let Some(operation) = operation {
-                    methods.insert(method, is_public(document, operation)?);
+                    methods.insert(method, access(document, operation)?);
                 }
             }
             table.insert(
@@ -79,23 +89,21 @@ impl Policy {
         Ok(Self(table))
     }
 
-    pub(crate) fn public(&self, path: &str, method: &Method) -> Option<bool> {
+    pub(crate) fn access(&self, path: &str, method: &Method) -> Option<&Access> {
         let methods = self.0.get(path)?;
-        methods
-            .get(method.as_str())
-            .or_else(|| {
-                (method == Method::HEAD)
-                    .then(|| methods.get("GET"))
-                    .flatten()
-            })
-            .copied()
+        methods.get(method.as_str()).or_else(|| {
+            (method == Method::HEAD)
+                .then(|| methods.get("GET"))
+                .flatten()
+        })
     }
 }
 
 async fn enforce_public(State(policy): State<Policy>, request: Request, next: Next) -> Response {
-    let public =
-        contract_path(request.extensions()).and_then(|path| policy.public(path, request.method()));
-    if public == Some(true) {
+    let public = contract_path(request.extensions())
+        .and_then(|path| policy.access(path, request.method()))
+        .is_some_and(|access| matches!(access, Access::Public));
+    if public {
         next.run(request).await
     } else {
         Problem::new(Code::InternalServerError)
@@ -114,10 +122,15 @@ pub(crate) fn contract_path(extensions: &axum::http::Extensions) -> Option<&str>
     Some(inner)
 }
 
-fn is_public(document: &OpenApi, operation: &Operation) -> Result<bool, FinalizeError> {
+/// An operation's effective security as one of `Access`. A requirement object
+/// must have exactly one `bearerAuth` key whose value is an array of scope
+/// strings (possibly empty); any other scheme, an anonymous `{}`, a
+/// multi-key (AND-of-schemes) requirement, or a non-string scope is
+/// unsupported and fails finalization instead of silently narrowing access.
+fn access(document: &OpenApi, operation: &Operation) -> Result<Access, FinalizeError> {
     let security = operation.security.as_ref().or(document.security.as_ref());
     let Some(requirements) = security.filter(|requirements| !requirements.is_empty()) else {
-        return Ok(true);
+        return Ok(Access::Public);
     };
     let value = serde_json::to_value(requirements).map_err(|_| FinalizeError::InvalidPolicy)?;
     let scheme = document
@@ -128,18 +141,29 @@ fn is_public(document: &OpenApi, operation: &Operation) -> Result<bool, Finalize
     let bearer_scheme = scheme
         .as_ref()
         .is_some_and(|scheme| scheme["type"] == "http" && scheme["scheme"] == "bearer");
-    let bearer_only = value.as_array().is_some_and(|requirements| {
-        requirements.iter().all(|requirement| {
-            requirement.as_object().is_some_and(|requirement| {
-                requirement.len() == 1
-                    && requirement.get("bearerAuth") == Some(&serde_json::Value::Array(Vec::new()))
-            })
-        })
-    });
-    if bearer_scheme && bearer_only {
-        Ok(false)
-    } else {
-        Err(FinalizeError::InvalidPolicy)
+    let alternatives = bearer_scheme
+        .then(|| value.as_array())
+        .flatten()
+        .and_then(|requirements| {
+            requirements
+                .iter()
+                .map(|requirement| {
+                    let requirement = requirement.as_object()?;
+                    if requirement.len() != 1 {
+                        return None;
+                    }
+                    requirement
+                        .get("bearerAuth")?
+                        .as_array()?
+                        .iter()
+                        .map(|scope| scope.as_str().map(ToOwned::to_owned))
+                        .collect::<Option<Box<[String]>>>()
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+    match alternatives {
+        Some(alternatives) => Ok(Access::Protected(alternatives.into())),
+        None => Err(FinalizeError::InvalidPolicy),
     }
 }
 
@@ -250,11 +274,28 @@ mod tests {
             if public {
                 assert!(result.is_ok(), "{document}");
             } else {
-                let expected = if document["security"] == serde_json::json!([{"bearerAuth": []}])
-                    && document["paths"]["/_test/policy"]["get"]
-                        .get("security")
-                        .is_none()
-                {
+                // A well-formed bearer requirement (scoped or not) compiles to
+                // `Access::Protected` and fails finalization only because this
+                // contract must be all-public; any other shape never compiles
+                // to an access decision at all.
+                let effective = document["paths"]["/_test/policy"]["get"]
+                    .get("security")
+                    .unwrap_or(&document["security"]);
+                let supported_bearer_requirement =
+                    effective.as_array().is_some_and(|requirements| {
+                        !requirements.is_empty()
+                            && requirements.iter().all(|requirement| {
+                                requirement.as_object().is_some_and(|object| {
+                                    object.len() == 1
+                                        && object.get("bearerAuth").is_some_and(|scopes| {
+                                            scopes.as_array().is_some_and(|scopes| {
+                                                scopes.iter().all(serde_json::Value::is_string)
+                                            })
+                                        })
+                                })
+                            })
+                    });
+                let expected = if supported_bearer_requirement {
                     FinalizeError::NonPublicOperation
                 } else {
                     FinalizeError::InvalidPolicy

@@ -238,7 +238,11 @@ let client = EchoServiceClient::new(authenticated);
 ```
 
 A caller-supplied `Authorization` is `INVALID_ARGUMENT` before any token or
-resource I/O. The acquisition deadline is `grpc-timeout` when that header is
+resource I/O. To call on behalf of a verified user instead of as the service
+itself, attach `OnBehalfOf::new(principal.access_token().clone())` to the
+call's extensions through `tonic::Request::extensions_mut` before dispatch;
+the client then sends an exchanged token addressed to this integration
+instead of the service token. The acquisition deadline is `grpc-timeout` when that header is
 present and well formed; otherwise it is the owner's five-second fetch
 timeout. Token wait spends that deadline: a wait of at least a millisecond
 rewrites `grpc-timeout` to the remaining budget before dispatch. Acquisition failure prevents dispatch. One bearer is inserted at

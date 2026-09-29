@@ -116,10 +116,13 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   inactive boundary needs no value.
 <!-- template:end http-idempotency:docs-config-http-idempotency -->
 <!-- template:begin outbound-auth:docs-config-outbound-auth -->
-- `integrations.<name>.oauth` is an immutable optional OAuth2 client-credentials
-  tuple. Empty integration maps and entries without `oauth` are inert; a present
-  tuple must contain valid `token_url`, `client_id`, and an environment-only
-  nonempty `APP__INTEGRATIONS__<NAME>__OAUTH__CLIENT_SECRET`. Nonsecret
+- `integrations.<name>.oauth` is an immutable optional OAuth2 client tuple
+  authenticated only by a private key, never a shared secret. Empty
+  integration maps and entries without `oauth` are inert; a present tuple
+  must contain valid `token_url`, `client_id`, `key_id`, `algorithm` (`RS256`
+  default, `PS256`, or `ES256`), `assertion_audience`, and an environment-only
+  nonempty `APP__INTEGRATIONS__<NAME>__OAUTH__PRIVATE_KEY`. `client_secret` is
+  an unknown key and fails startup. Nonsecret
   `scopes` and optional `audience` follow normal TOML/environment layering;
   scopes use a TOML list or one space-separated environment value. File secrets
   are refused by the recursive secret guard. The [outbound machine-authentication

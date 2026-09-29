@@ -12,9 +12,28 @@ issuer, subject, client ID, `scopes()` and `expires_at()`. Its immutable
 application type, with a sanitized `ClaimAccessError` on incompatible shape.
 Custom duplicate members use last-member semantics; duplicates of a claim the
 verifier reads reject verification. Access never changes normalized identity or scopes,
-and Debug never exposes claims. Authentication does not create role or tenant policy. A handler may use `infra_http::authn::require_scope` for
-one explicit scope decision; a missing scope is `403 forbidden` with the
-standard insufficient-scope bearer challenge.
+and Debug never exposes claims. Authentication does not create role or tenant policy.
+
+`access_token()` returns the verified bearer token itself, as a
+`&SecretString` with a redacted Debug. It exists for one purpose: RFC 8693
+token exchange when calling another service on behalf of the caller
+(service-to-service authentication). A handler must never forward it as an
+outbound `Authorization` header to any other party.
+
+`actor()` returns the outermost `act` object's `sub` and `client_id` when the
+verified evidence carries one, for JWT and introspection alike. A present
+`act` that is not an object, whose `sub` is missing, empty or not a string,
+or whose `client_id` is not a string, is malformed evidence with the existing
+failure class of each engine — an invalid JWT or unavailable introspection
+evidence. The outermost actor is the current one and may inform access
+decisions (RFC 8693 §4.1); nested actors are informational and are not
+exposed, and `may_act` is an authorization-server input that is not read.
+
+Required scopes for a protected operation come from its OpenAPI security
+requirement, not a handler-called helper: a request whose principal satisfies
+none of the operation's requirements gets `403 forbidden` with the standard
+insufficient-scope bearer challenge before the handler runs; see [Route and
+failure contract](#route-and-failure-contract).
 
 ## Route and failure contract
 
@@ -23,8 +42,13 @@ profile, its root bearer security is the protected default: an operation that
 does not override `security` inherits it. An operation is public only with an
 explicit `security: []`; public probes ignore `Authorization` and make no
 provider call. `x-security-decision`, when an author supplies it, must agree
-with that effective policy in the OpenAPI gate. Ambiguous effective security,
-unknown schemes and unsupported scoped or anonymous alternatives fail startup;
+with that effective policy in the OpenAPI gate. A security requirement's
+scopes, for example `{bearerAuth: [billing.write]}`, are the route's declared
+policy: several requirement objects are alternatives joined by OR, and the
+scopes within one are joined by AND; an empty scope list means any
+authenticated caller. Ambiguous effective security, an unknown scheme, and a
+mixed requirement — `bearerAuth` combined with another scheme, or an
+anonymous `{}` alternative beside a protected one — still fail startup;
 response completeness and extension consistency are documentation checks.
 
 The final HTTP layer enforces the resulting policy before idempotency admission

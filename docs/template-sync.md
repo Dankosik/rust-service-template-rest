@@ -65,8 +65,9 @@ supplies no provider configuration or automatic request.
 <!-- template:begin outbound-auth:docs-template-init-outbound-auth -->
 `OUTBOUND_AUTH` defaults to `none` and accepts `none` or
 `oauth2-client-credentials`; the direct entry takes `--outbound-auth`.
-Selecting OAuth2 retains its [guide](outbound-machine-authentication.md),
-[decision record](outbound-machine-authentication-decisions.md), provider
+Selecting OAuth2 retains its [guide](outbound-machine-authentication.md), the
+[service-to-service authentication mandate](service-to-service-authentication.md),
+its [decision record](outbound-machine-authentication-decisions.md), provider
 crate, configuration, tests, and bounded outbound HTTP prerequisite. It
 persists the effective `OUTBOUND_HTTP=bounded` choice even when its input was
 `none`. `none` removes the complete profile. Selection creates no provider,
@@ -238,8 +239,8 @@ or profile-marked guide and decision record. The target lock remains authoritati
 <!-- template:end outbound-http:docs-template-init-outbound-sync -->
 <!-- template:begin outbound-auth:docs-template-init-outbound-auth-sync -->
 Portable sync cannot restore a pruned OAuth2 machine-authentication profile,
-its configuration, provider crate, or profile-marked guide and decision record.
-The target lock remains authoritative.
+its configuration, provider crate, or profile-marked guide, service-to-service
+mandate, and decision record. The target lock remains authoritative.
 <!-- template:end outbound-auth:docs-template-init-outbound-auth-sync -->
 <!-- template:begin http-idempotency:docs-template-init-http-idempotency-sync -->
 Portable sync cannot restore a pruned idempotency pack, its schema
