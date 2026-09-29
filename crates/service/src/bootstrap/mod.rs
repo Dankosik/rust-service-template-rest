@@ -23,6 +23,10 @@ use infra_http::{
 // template:begin cache:service-bootstrap-cache-imports
 use infra_cache::{Cache, CacheError, CacheOptions};
 // template:end cache:service-bootstrap-cache-imports
+// template:begin object-storage:service-bootstrap-object-storage-imports
+use infra_object_storage::{ObjectStorage, ObjectStorageOptions, Provider};
+use service_config::ObjectStorageProvider;
+// template:end object-storage:service-bootstrap-object-storage-imports
 // template:begin inbound-webhooks:bootstrap-webhooks-imports
 use infra_http::webhooks::WebhookState;
 use infra_webhooks::inbound::Receiver;
@@ -92,6 +96,10 @@ pub(crate) enum BootstrapError {
     #[error("cache startup: {0}")]
     Cache(#[from] CacheError),
     // template:end cache:service-bootstrap-cache-errors
+    // template:begin object-storage:service-bootstrap-object-storage-errors
+    #[error("object storage configuration: {0}")]
+    ObjectStorage(#[from] infra_object_storage::ConfigError),
+    // template:end object-storage:service-bootstrap-object-storage-errors
     #[error("startup admission: {0}")]
     Admission(health::NotReady),
     #[error("configuration is invalid: {0}")]
@@ -238,6 +246,12 @@ async fn serve(
             infra_cache::OPERATION_DURATION_BUCKETS,
         ),
         // template:end cache:service-bootstrap-cache-histogram
+        // template:begin object-storage:service-bootstrap-object-storage-histogram
+        (
+            infra_object_storage::OPERATION_DURATION_METRIC,
+            infra_object_storage::OPERATION_DURATION_BUCKETS,
+        ),
+        // template:end object-storage:service-bootstrap-object-storage-histogram
     ])?;
     metrics.record_trace_exporter_initialized(matches!(
         tracer_provider.exporter_state,
@@ -331,6 +345,9 @@ async fn serve_until_stopped(
     // template:begin cache:service-bootstrap-cache-startup
     dependencies.cache = open_cache(config).await?;
     // template:end cache:service-bootstrap-cache-startup
+    // template:begin object-storage:service-bootstrap-object-storage-startup
+    dependencies.object_storage = open_object_storage(config)?;
+    // template:end object-storage:service-bootstrap-object-storage-startup
     // template:begin http-idempotency:bootstrap-http-idempotency-composer
     let mut composer = prepare_http_idempotency(config, dependencies.postgres.as_ref());
     // template:end http-idempotency:bootstrap-http-idempotency-composer
@@ -766,6 +783,52 @@ async fn open_cache(config: &Config) -> Result<Option<Cache>, BootstrapError> {
     Ok(Some(cache))
 }
 // template:end cache:service-bootstrap-cache-functions
+
+// template:begin object-storage:service-bootstrap-object-storage-functions
+/// Build the optional object storage client. Nothing is sent: the bucket is
+/// not a readiness dependency, and a service that cannot serve without it
+/// pushes `storage.probe()` into the readiness probes instead.
+fn open_object_storage(config: &Config) -> Result<Option<ObjectStorage>, BootstrapError> {
+    let settings = &config.object_storage;
+    let provider = match settings.provider {
+        ObjectStorageProvider::None => return Ok(None),
+        ObjectStorageProvider::AmazonS3 => Provider::AmazonS3 {
+            region: settings.region.clone(),
+            expected_bucket_owner: settings.expected_bucket_owner.clone(),
+        },
+        ObjectStorageProvider::CloudflareR2 => Provider::CloudflareR2 {
+            endpoint: settings.endpoint.clone(),
+        },
+        ObjectStorageProvider::Railway => Provider::Railway {
+            endpoint: settings.endpoint.clone(),
+            region: settings.region.clone(),
+        },
+        ObjectStorageProvider::Local => Provider::Local {
+            endpoint: settings.endpoint.clone(),
+            region: settings.region.clone(),
+        },
+    };
+    let Some(secret_access_key) = settings.secret_access_key.clone() else {
+        return Err(infra_object_storage::ConfigError::SecretAccessKey.into());
+    };
+    let storage = ObjectStorage::new(ObjectStorageOptions {
+        provider,
+        bucket: settings.bucket.clone(),
+        access_key_id: settings.access_key_id.clone(),
+        secret_access_key,
+        max_object_bytes: settings.max_object_bytes.as_u64(),
+        max_concurrency: usize::try_from(settings.max_concurrency).unwrap_or(usize::MAX),
+        operation_timeout: settings.operation_timeout,
+    })?;
+    tracing::info!(
+        object_storage.provider = storage.provider(),
+        object_storage.max_object_bytes = settings.max_object_bytes.as_u64(),
+        object_storage.max_concurrency = settings.max_concurrency,
+        "object_storage_configured"
+    );
+    Ok(Some(storage))
+}
+// template:end object-storage:service-bootstrap-object-storage-functions
 
 // template:begin http-idempotency:bootstrap-http-idempotency-functions
 /// The composer through which idempotent operations join the contract. It

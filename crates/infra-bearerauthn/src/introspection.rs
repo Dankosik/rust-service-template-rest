@@ -115,18 +115,13 @@ impl IntrospectionVerifier {
         options: IntrospectionOptions,
         provider: ProviderClient,
     ) -> Result<Self, PreparationError> {
-        if options.audiences.is_empty() || options.audiences.iter().any(String::is_empty) {
-            return Err(PreparationError::new(
-                crate::PreparationPhase::Options,
-                crate::PreparationReason::Parse,
-            ));
-        }
+        let policy = ClaimPolicy::new(options.issuer.as_str().to_owned(), options.audiences)?;
         crate::describe_verification();
         Ok(Self {
             endpoint: options.endpoint,
             client_id: options.client_id,
             client_secret: options.client_secret,
-            policy: ClaimPolicy::new(options.issuer.as_str().to_owned(), options.audiences),
+            policy,
             provider,
             permits: Semaphore::new(options.provider_concurrency.get()),
             cache: options.cache.map(|cache| {
@@ -725,7 +720,8 @@ mod tests {
 
     #[test]
     fn retention_ends_at_the_earlier_of_ttl_and_token_expiry() {
-        let policy = ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()]);
+        let policy =
+            ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()]).unwrap();
         let principal = |custom: &str| {
             let response = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"sub":"subject","custom":custom});
             validate_introspection_claims(

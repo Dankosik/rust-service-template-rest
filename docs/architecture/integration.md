@@ -109,6 +109,25 @@ The integration proof uses Compose Valkey. It proves a round trip, expiry,
 probe success, and that an unreachable or silent server returns `Unavailable`
 inside the command timeout. It does not certify a deployed memory policy.
 <!-- template:end cache:docs-integration-cache -->
+<!-- template:begin object-storage:docs-integration-object-storage -->
+## Object storage boundary
+
+The bucket and its endpoint are operator-fixed, never caller-selected.
+`infra-object-storage` admits one provider tuple (Amazon S3, Cloudflare R2,
+Railway Buckets, or a local emulator) and builds the SDK client directly, so
+no ambient `AWS_*` variable, profile file, instance metadata, or proxy
+variable can redirect a signed request. The SDK owns signing, retries,
+checksums, and presigning; the crate owns size and concurrency bounds, the
+failure mapping, and observation. The feature owns keys, authorization,
+retention, and create-only intent. Bootstrap builds the client without I/O and
+drops it at shutdown. Storage does not gate readiness; a service that cannot
+serve without it pushes `storage.probe()` itself. See the
+[guide](../object-storage.md).
+
+The emulator proof uses Compose versitygw: signing, create-only, CRC64NVME in a
+header and a trailer, validation at EOF, and presigned expiry. It does not
+certify a provider; each provider has its own live conformance run.
+<!-- template:end object-storage:docs-integration-object-storage -->
 
 <!-- template:begin authn:docs-integration-authn-provider -->
 Inbound authentication's provider destination is fixed by configuration or an

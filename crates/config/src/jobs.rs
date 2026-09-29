@@ -2,7 +2,7 @@
 //!
 //! Every binary validates it with the rest of the snapshot; only the
 //! `jobs-worker` binary uses it. The pool bound it implies is checked by
-//! the worker alone through [`JobsConfig::required_connections`], as
+//! the worker alone through [`JobsConfig::validate_pool_capacity`], as
 //! `http_idempotency.retention` is checked only where it is served.
 
 use std::num::NonZeroU32;
@@ -38,7 +38,7 @@ impl JobsConfig {
     ///
     /// Returns `postgres.max_connections` when the pool is below
     /// `jobs.max_workers` plus 2.
-    pub fn required_connections(&self, postgres: &PostgresConfig) -> Result<(), ValidationError> {
+    pub fn validate_pool_capacity(&self, postgres: &PostgresConfig) -> Result<(), ValidationError> {
         let required = u64::from(self.max_workers.get()) + 2;
         if u64::from(postgres.max_connections.get()) < required {
             return Err(ValidationError::new(
@@ -58,7 +58,7 @@ impl JobsConfig {
     ///
     /// Returns `postgres.max_connections` below three for publication alone,
     /// or below `jobs.max_workers + 5` when ordinary work is also registered.
-    pub fn required_connections_with_outbox(
+    pub fn validate_pool_capacity_with_outbox(
         &self,
         postgres: &PostgresConfig,
         ordinary_jobs: bool,
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn one_worker_needs_three_connections() {
-        let err = workers(1).required_connections(&postgres(2)).unwrap_err();
+        let err = workers(1).validate_pool_capacity(&postgres(2)).unwrap_err();
         assert_eq!(err.key, "postgres.max_connections");
         assert_eq!(
             err.message,
@@ -169,29 +169,29 @@ mod tests {
 
     #[test]
     fn one_worker_accepts_three_connections() {
-        workers(1).required_connections(&postgres(3)).unwrap();
+        workers(1).validate_pool_capacity(&postgres(3)).unwrap();
     }
 
     #[test]
     fn eight_workers_need_ten_connections() {
         let jobs = workers(8);
-        let err = jobs.required_connections(&postgres(9)).unwrap_err();
+        let err = jobs.validate_pool_capacity(&postgres(9)).unwrap_err();
         assert_eq!(err.key, "postgres.max_connections");
         assert!(err.message.contains("(10)"), "{err}");
-        jobs.required_connections(&postgres(10)).unwrap();
+        jobs.validate_pool_capacity(&postgres(10)).unwrap();
     }
 
     #[test]
     fn defaults_satisfy_the_pool_bound() {
         JobsConfig::default()
-            .required_connections(&PostgresConfig::default())
+            .validate_pool_capacity(&PostgresConfig::default())
             .unwrap();
     }
 
     #[test]
     fn five_hundred_workers_refuse_five_hundred_connections() {
         let err = workers(500)
-            .required_connections(&postgres(500))
+            .validate_pool_capacity(&postgres(500))
             .unwrap_err();
         assert_eq!(err.key, "postgres.max_connections");
     }
@@ -208,10 +208,10 @@ mod tests {
     ) {
         let jobs = workers(max_workers);
         let error = jobs
-            .required_connections_with_outbox(&postgres(required - 1), ordinary_jobs)
+            .validate_pool_capacity_with_outbox(&postgres(required - 1), ordinary_jobs)
             .unwrap_err();
         assert_eq!(error.key, "postgres.max_connections");
-        jobs.required_connections_with_outbox(&postgres(required), ordinary_jobs)
+        jobs.validate_pool_capacity_with_outbox(&postgres(required), ordinary_jobs)
             .unwrap();
     }
     // template:end outbox:jobs-outbox-capacity-tests

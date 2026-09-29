@@ -125,7 +125,7 @@ impl Registry {
                 };
                 let event = Event {
                     id: envelope.message_id,
-                    occurred_at: envelope.occurred_at,
+                    occurred_at: envelope.occurred_at.to_utc(),
                     payload,
                 };
                 Box::pin(handler(event, cancel))

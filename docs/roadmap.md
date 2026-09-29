@@ -24,7 +24,7 @@ is not a supported template state.
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | done |
 | 9 | Template initializer, profiles, and template sync | done on merge after required CI |
-| 10 | Optional capability profiles | 10.1, 10.2, 10.3, 10.4, 10.6 and 10.8 merged; 10.7 and 10.11 implemented; remaining profiles planned |
+| 10 | Optional capability profiles | 10.1, 10.2, 10.3, 10.4, 10.6 and 10.8 merged; 10.7, 10.9 and 10.11 implemented; remaining profiles planned |
 | 11 | Benchmarking and performance evidence | planned |
 | 12 | First release and derived-repository verification | planned |
 
@@ -674,7 +674,17 @@ markers, tests, and initializer support. Order by expected demand:
    [adoption guide](outbound-machine-authentication.md) and [decision
    record](outbound-machine-authentication-decisions.md) define the profile.
 <!-- template:end outbound-auth:roadmap-stage-10-8-outbound-auth -->
-9. S3-compatible object storage with one fixed endpoint.
+<!-- template:begin object-storage:roadmap-stage-10-9-object-storage -->
+9. S3-compatible object storage with one fixed endpoint:
+   `OBJECT_STORAGE=none|s3`. `s3` retains one `aws-sdk-s3` client per bucket
+   for Amazon S3, Cloudflare R2, and Railway Buckets: put (create-only in one
+   attempt), streaming get, head, delete, presigned GET, and an opt-in bucket
+   probe. The [guide](object-storage.md) and [decision
+   record](object-storage-decisions.md) own adoption; the
+   [research synthesis](../specs/s3-object-storage/research/synthesis.md)
+   records the crate and provider comparison. Implemented; delivery pending
+   review and CI.
+<!-- template:end object-storage:roadmap-stage-10-9-object-storage -->
 10. `examples/reference-service`: one isolated vertical slice.
 <!-- template:begin cache:roadmap-stage-10-11-cache -->
 11. Optional cache profile: `CACHE=none|redis`. `redis` retains a bytes-only
@@ -817,6 +827,18 @@ timeout. It does not add a generic cache trait, get-or-load, a serializer, a
 global TTL, locks, or rate limits. No CI result, merge, publication, or
 deployment is claimed.
 <!-- template:end cache:roadmap-stage-10-11-cache-note -->
+
+<!-- template:begin object-storage:roadmap-stage-10-9-object-storage-note -->
+Stage 10.9 adds `OBJECT_STORAGE=none|s3`. The research ran before the
+implementation and chose `aws-sdk-s3` with default features off over
+`object_store` and `opendal`, single-request uploads over multipart (no
+consumer exceeds 2 MiB), and typed `APP__OBJECT_STORAGE__*` credentials over
+the ambient AWS chain. The client is inert, sends nothing at startup, and is
+not a readiness dependency. Credential-free proof is the in-process HTTP stub
+in `make test` and the versitygw emulator in the integration job; live
+provider conformance is prepared and requires separate authorization. No live
+provider run, CI result, merge, publication, or deployment is claimed.
+<!-- template:end object-storage:roadmap-stage-10-9-object-storage-note -->
 
 ### Stage 11: Benchmarking and performance evidence
 

@@ -1,8 +1,9 @@
 //! Optional Redis-compatible cache client.
 //!
 //! The contract is bytes in and bytes out. The calling feature owns key
-//! shape, serialization, TTL policy, and invalidation. A miss and an outage
-//! are both [`Unavailable`] or `Ok(None)`: this crate does not gate readiness.
+//! shape, serialization, TTL policy, and invalidation. A miss returns `Ok(None)`;
+//! an outage or timeout returns `Err(Unavailable)`. The caller chooses how to
+//! degrade; this crate does not gate readiness.
 //! Standalone TCP only — no Sentinel, Cluster, or Unix socket.
 //!
 //! Each namespace stores keys as `{namespace}:{key}` so two features sharing
@@ -100,7 +101,8 @@ pub enum CacheError {
     Client,
 }
 
-/// A cache call that the caller should treat as a miss and continue without.
+/// An outage or timeout, distinct from a cache miss (`Ok(None)`).
+/// The caller chooses a fallback or rejects an operation that requires the cache.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("cache unavailable")]
 pub struct Unavailable;
@@ -158,7 +160,9 @@ impl std::fmt::Debug for Link {
 }
 
 impl Link {
-    fn manager(&self) -> ConnectionManager {
+    /// Clone the multiplexed handle, sharing its connection and reconnect state.
+    /// The lock is released before the caller waits on any network I/O.
+    fn clone_manager(&self) -> ConnectionManager {
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -174,6 +178,8 @@ impl Link {
         if state.replaced_at.is_some_and(|at| at.elapsed() < MAX_DELAY) {
             return;
         }
+        // Keep the spacing check and replacement under one lock so concurrent
+        // failures cannot each replace the manager. Lazy construction does no I/O.
         if let Ok(fresh) =
             ConnectionManager::new_lazy_with_config(self.client.clone(), self.config.clone())
         {
@@ -261,6 +267,7 @@ impl Cache {
     /// A named view of this connection.
     ///
     /// Keys are stored as `{name}:{key}`. `name` is the `cache` metric label.
+    /// Reuse or clone this view to retain its lazily registered histogram handles.
     ///
     /// # Panics
     ///
@@ -295,6 +302,10 @@ impl Cache {
 }
 
 /// One feature's keys on a shared connection.
+///
+/// Install the intended metrics recorder before using namespace operations.
+/// Each operation/outcome histogram handle binds to the recorder on its first
+/// recorded result and remains shared by clones of this namespace.
 #[derive(Clone, Debug)]
 pub struct CacheNamespace {
     cache: Cache,
@@ -309,6 +320,8 @@ impl CacheNamespace {
     ///
     /// Returns [`Unavailable`] when the command times out or the server cannot be used.
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Unavailable> {
+        // Cmd reserves argument slots and payload bytes, excluding RESP framing.
+        // Reserving both avoids buffer growth while writing GET and the prefixed key.
         let mut command = redis::Cmd::with_capacity(2, 3 + self.name.len() + 1 + key.len());
         command.arg("GET").arg(self.stored_key(key));
         self.run(Operation::Get, command, |value: &Option<Vec<u8>>| {
@@ -340,7 +353,8 @@ impl CacheNamespace {
         );
         let milliseconds = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
         let options = SetOptions::default().with_expiration(SetExpiry::PX(milliseconds));
-        // A PX expiry fits in at most 20 decimal digits.
+        // Five arguments: SET, prefixed key, value, PX, and expiry. Reserve their
+        // payload bytes; the u64 expiry fits in at most 20 decimal digits.
         let mut command = redis::Cmd::with_capacity(
             5,
             3 + self.name.len() + 1 + key.len() + value.len() + 2 + 20,
@@ -380,7 +394,7 @@ impl CacheNamespace {
             operation,
             &self.cache.link.server,
         );
-        let mut manager = self.cache.link.manager();
+        let mut manager = self.cache.link.clone_manager();
         // The span is not entered while polling: redis emits nothing on the
         // command path, and entering on every poll costs each subscriber layer
         // an enter and an exit.
@@ -426,7 +440,7 @@ impl health::Probe for CacheProbe {
     }
 
     async fn check(&self) -> Result<(), health::ProbeError> {
-        let mut manager = self.cache.link.manager();
+        let mut manager = self.cache.link.clone_manager();
         redis::Cmd::ping()
             .query_async::<()>(&mut manager)
             .await
@@ -534,7 +548,8 @@ fn valid_namespace(name: &str) -> bool {
         && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
-/// One Redis argument written directly into the command buffer.
+/// Write the prefixed key as one Redis argument without a temporary String.
+/// Cmd's `write_arg_fmt` writes directly into its preallocated payload buffer.
 struct NamespacedKey<'a> {
     namespace: &'static str,
     key: &'a str,

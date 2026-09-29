@@ -14,6 +14,9 @@ use infra_http::{Drained, Server};
 // template:begin cache:service-shutdown-cache-imports
 use infra_cache::Cache;
 // template:end cache:service-shutdown-cache-imports
+// template:begin object-storage:service-shutdown-object-storage-imports
+use infra_object_storage::ObjectStorage;
+// template:end object-storage:service-shutdown-object-storage-imports
 // template:begin postgres:shutdown-imports
 use infra_postgres::{Closed, PgPool};
 // template:end postgres:shutdown-imports
@@ -161,6 +164,10 @@ pub(crate) struct Dependencies {
     /// Not a readiness probe; the connection closes when it drops.
     pub(crate) cache: Option<Cache>,
     // template:end cache:service-shutdown-dependencies-cache-field
+    // template:begin object-storage:service-shutdown-dependencies-object-storage-field
+    /// Not a readiness probe; idle connections close when it drops.
+    pub(crate) object_storage: Option<ObjectStorage>,
+    // template:end object-storage:service-shutdown-dependencies-object-storage-field
 }
 
 impl Dependencies {
@@ -178,10 +185,16 @@ impl Dependencies {
             // template:begin cache:service-shutdown-dependencies-cache-destructure
             cache,
             // template:end cache:service-shutdown-dependencies-cache-destructure
+            // template:begin object-storage:service-shutdown-dependencies-object-storage-destructure
+            object_storage,
+            // template:end object-storage:service-shutdown-dependencies-object-storage-destructure
         } = self;
         // template:begin cache:service-shutdown-dependencies-cache-close
         drop(cache);
         // template:end cache:service-shutdown-dependencies-cache-close
+        // template:begin object-storage:service-shutdown-dependencies-object-storage-close
+        drop(object_storage);
+        // template:end object-storage:service-shutdown-dependencies-object-storage-close
         let postgres_close = async {
             // template:begin postgres:shutdown-dependencies-postgres-close
             if let Some(pool) = postgres {

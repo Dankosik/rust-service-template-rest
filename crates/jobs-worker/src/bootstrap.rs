@@ -297,13 +297,13 @@ async fn admit_pool(
             unused_variables,
             reason = "retained outbox supplies the combined admission"
         )]
-        let capacity = || config.jobs.required_connections(&config.postgres);
+        let capacity = || config.jobs.validate_pool_capacity(&config.postgres);
         // template:end jobs:worker-bootstrap-pool-admission
         // template:begin outbox:worker-bootstrap-outbox-capacity
         let capacity = || {
             config
                 .jobs
-                .required_connections_with_outbox(&config.postgres, registrations.jobs.is_some())
+                .validate_pool_capacity_with_outbox(&config.postgres, registrations.jobs.is_some())
         };
         // template:end outbox:worker-bootstrap-outbox-capacity
         // template:begin jobs:worker-bootstrap-pool-capacity

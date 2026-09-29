@@ -42,7 +42,7 @@ Do not create a crate, module, or directory before its first real artifact.
 | A job kind's payload type and handler | the adapter crate that enqueues it, `crates/infra-<provider>`, which calls the feature's use case |
 <!-- template:end jobs:docs-structure-jobs-placement -->
 <!-- template:begin messaging:docs-structure-messaging-placement -->
-| Immutable typed event contract | `crates/domain-events`; it has no broker, runtime, or configuration dependency |
+| Typed domain event contract | `crates/domain-events`; it has no broker, runtime, or configuration dependency |
 | Go-compatible JetStream wire, prepared producer, registry, consumer, DLQ/restore, and connection admission | `crates/infra-messaging`; it has no feature, SQL, stream-administration, or generic event-bus responsibility |
 | Messaging producer/client and worker resource composition | existing `crates/service/src/bootstrap/` and `crates/jobs-worker`; only composition knows selected configuration and process lifecycle |
 | Actual Go wire fixtures and the scratch bridge | `crates/infra-messaging/tests/fixtures/go-wire/` and its CI script; they adapt real Go code and do not become a second wire implementation |
@@ -51,6 +51,10 @@ Do not create a crate, module, or directory before its first real artifact.
 | Bytes-only RESP cache client, DSN admission, and namespace get/set/delete | `crates/infra-cache`; the feature owns keys, serialization, TTL, and invalidation ([guide](cache.md)) |
 | Cache connect, startup check, shutdown drop, and optional readiness probe | `crates/service/src/bootstrap/`; only composition decides whether `cache.probe()` joins readiness |
 <!-- template:end cache:docs-structure-cache-placement -->
+<!-- template:begin object-storage:docs-structure-object-storage-placement -->
+| S3-compatible provider admission and put/get/head/delete/presigned GET | `crates/infra-object-storage`; the feature owns keys, authorization, retention, and create-only intent ([guide](object-storage.md)) |
+| Object storage construction, shutdown drop, and optional readiness probe | `crates/service/src/bootstrap/`; only composition decides whether `storage.probe()` joins readiness |
+<!-- template:end object-storage:docs-structure-object-storage-placement -->
 
 | Ordinary behavior and boundary tests | `#[cfg(test)] mod tests` beside the owner |
 | Black-box tests of one crate's public surface, including the built binary | `crates/<crate>/tests/<owner>.rs` (`crates/service/tests/lifecycle.rs` drives the binary; `openapi.rs` holds the contract tests) |

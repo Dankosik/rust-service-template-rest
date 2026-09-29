@@ -15,7 +15,7 @@ use super::Tx;
 use super::stored::{self, Stored};
 #[cfg(test)]
 use crate::problem::http_status;
-use crate::problem::{Code, Problem, SANITIZED_DETAIL};
+use crate::problem::{Code, Problem, sanitized_internal_error};
 
 /// Idempotent request outcomes at the HTTP idempotency boundary.
 pub const HTTP_IDEMPOTENCY_OUTCOMES_METRIC: &str = "http_idempotency_outcomes_total";
@@ -109,17 +109,29 @@ where
                 failure = "attempt_missing",
                 "http_idempotency_wiring_failed"
             );
-            sanitized()
+            sanitized_internal_error()
         }))
     }
 }
 
 impl Idempotency {
-    /// Run work at most once for this captured caller, key, and request.
+    /// Commit participating work at most once for this captured caller, key,
+    /// and request during the configured retention period.
     ///
     /// Authorization and validation remain in the handler before this call,
     /// including on replay. The closure receives the provider-owned
     /// transaction only when no live record decided the attempt.
+    ///
+    /// Only a storable 2xx response permits committing work and its replay
+    /// record together. A non-2xx work response rolls back and is returned
+    /// unchanged; an unstorable success rolls back and becomes a sanitized
+    /// failure, subject to the outer request timeout.
+    ///
+    /// Only effects issued through the supplied [`Tx`] share this guarantee.
+    /// External effects are not covered, and work may run again on a retry
+    /// after rollback. A timeout during COMMIT does not guarantee rollback.
+    /// See the [idempotency guide](https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/http-idempotency.md#transaction-outcomes-and-replay)
+    /// for storage limits, transaction outcomes, and replay policy.
     pub async fn execute<W, R>(self, work: W) -> Response
     where
         W: AsyncFnOnce(&mut Tx<'_>) -> R,
@@ -170,28 +182,33 @@ pub(super) enum Rollback {
 struct Answer {
     response: Response,
     outcome: Outcome,
-    problem: bool,
+    // Only Problems synthesized by this boundary yield to the outer timeout.
+    // A handler's non-2xx response, even a Problem, follows the computed path.
+    yield_to_request_timeout: bool,
 }
 
 impl Answer {
-    fn problem(response: Response, outcome: Outcome) -> Self {
+    fn boundary_problem(response: Response, outcome: Outcome) -> Self {
         Self {
             response,
             outcome,
-            problem: true,
+            yield_to_request_timeout: true,
         }
     }
 
-    fn computed(response: Response, outcome: Outcome) -> Self {
+    fn operation_response(response: Response, outcome: Outcome) -> Self {
         Self {
             response,
             outcome,
-            problem: false,
+            yield_to_request_timeout: false,
         }
     }
 
     async fn send(self, deadline: Instant, guard: OutcomeGuard) -> Response {
-        if self.problem && Instant::now() >= deadline {
+        if self.yield_to_request_timeout && Instant::now() >= deadline {
+            // Let the outer tower timeout produce the final 504 for an expired
+            // boundary failure. Its cancellation drops the guard and records
+            // abandonment; completed work and replay responses bypass this wait.
             return std::future::pending().await;
         }
         guard.record(self.outcome);
@@ -205,27 +222,28 @@ fn map_attempted(
     operation: &str,
 ) -> Answer {
     match attempted {
-        Err(AttemptError::Unavailable) => Answer::problem(unavailable(), Outcome::Unavailable),
-        Err(AttemptError::Internal) => Answer::problem(sanitized(), Outcome::NotStored),
+        Err(AttemptError::Unavailable) => {
+            Answer::boundary_problem(unavailable(), Outcome::Unavailable)
+        }
+        Err(AttemptError::Internal) | Ok(Attempted::RolledBack(Rollback::Unstorable)) => {
+            Answer::boundary_problem(sanitized_internal_error(), Outcome::NotStored)
+        }
         Err(AttemptError::Integrity) => integrity_failure(),
-        Ok(Attempted::Mismatch) => Answer::problem(key_mismatch(), Outcome::KeyMismatch),
+        Ok(Attempted::Mismatch) => Answer::boundary_problem(key_mismatch(), Outcome::KeyMismatch),
         Ok(Attempted::Replay(record)) => match stored::decode(record) {
-            Ok(stored) => Answer::computed(
+            Ok(stored) => Answer::operation_response(
                 mark_provenance(stored.into_response(), Provenance::Replayed),
                 Outcome::Replayed,
             ),
             Err(stored::Undecodable) => integrity_failure(),
         },
         Ok(Attempted::InProgress) => {
-            Answer::problem(in_progress(scope, operation), Outcome::InProgress)
+            Answer::boundary_problem(in_progress(scope, operation), Outcome::InProgress)
         }
         Ok(Attempted::RolledBack(Rollback::Response(response))) => {
-            Answer::computed(response, Outcome::NotStored)
+            Answer::operation_response(response, Outcome::NotStored)
         }
-        Ok(Attempted::RolledBack(Rollback::Unstorable)) => {
-            Answer::problem(sanitized(), Outcome::NotStored)
-        }
-        Ok(Attempted::Committed(stored)) => Answer::computed(
+        Ok(Attempted::Committed(stored)) => Answer::operation_response(
             mark_provenance(stored.into_response(), Provenance::Executed),
             Outcome::Executed,
         ),
@@ -239,14 +257,7 @@ pub(super) fn mark_provenance(mut response: Response, provenance: Provenance) ->
 
 fn integrity_failure() -> Answer {
     tracing::error!(failure = "integrity", "http_idempotency_integrity_failed");
-    Answer::problem(sanitized(), Outcome::Integrity)
-}
-
-/// The sanitized 500 for wiring, persistence, and record faults.
-pub(super) fn sanitized() -> Response {
-    Problem::new(Code::InternalServerError)
-        .detail(SANITIZED_DETAIL)
-        .into_response()
+    Answer::boundary_problem(sanitized_internal_error(), Outcome::Integrity)
 }
 
 fn unavailable() -> Response {
@@ -337,7 +348,7 @@ mod tests {
 
     async fn assert_problem(answer: Answer, outcome: Outcome, code: Code, retry_after: bool) {
         assert_eq!(answer.outcome, outcome);
-        assert!(answer.problem);
+        assert!(answer.yield_to_request_timeout);
         assert_eq!(answer.response.status(), http_status(code));
         assert_eq!(
             answer.response.headers().get(CONTENT_TYPE),

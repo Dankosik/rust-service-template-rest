@@ -159,6 +159,19 @@ certify a deployment. A local server is
 Use `make help` for the exact retained command surface. See the
 [guide](cache.md).
 <!-- template:end cache:docs-commands-cache -->
+<!-- template:begin object-storage:docs-commands-object-storage -->
+With `OBJECT_STORAGE=s3`, `infra-object-storage` is a package name for
+`make test-package`. `ALLOW_HEAVY=1 make test-integration-object-storage` is
+the versitygw proof when the current Make owner retains that target; it
+requires Docker and does not certify a provider. A local emulator is
+`docker compose -f env/docker-compose.yml up -d versitygw` (root credentials
+`template`/`template-secret`, port `VERSITYGW_PORT`, default 7070).
+`make test-object-storage-conformance PROVIDER=amazon_s3|cloudflare_r2|railway`
+runs the ignored live-provider test against the bucket named by the
+service's `APP__OBJECT_STORAGE__*` variables. It writes under a unique prefix,
+refuses unless `OBJECT_STORAGE_CONFORMANCE_WRITES=allow` is set, and needs
+separate authorization for that bucket. See the [guide](object-storage.md).
+<!-- template:end object-storage:docs-commands-object-storage -->
 
 ## Guards and variables
 

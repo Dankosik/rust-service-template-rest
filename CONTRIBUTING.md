@@ -31,6 +31,12 @@ repository surface that can prove them.
   a heavy check; CI owns it unless the task specifically requests local
   execution.
   <!-- template:end cache:contributing-cache-prerequisites -->
+  <!-- template:begin object-storage:contributing-object-storage-prerequisites -->
+  Object storage integration proof uses the retained Docker Compose versitygw
+  image. It is a heavy check; CI owns it unless the task specifically requests
+  local execution. The live-provider conformance run writes to a real bucket
+  and needs separate authorization.
+  <!-- template:end object-storage:contributing-object-storage-prerequisites -->
   Unit tests never need Docker.
 
 Every tool version is pinned once in `tools/versions.env`; `make` and CI read
@@ -103,6 +109,18 @@ unreachable and silent-server degradation, recovery, and TLS trust. It does
 not certify a deployed memory policy or the feature's key and invalidation
 rules. See the [cache guide](docs/cache.md).
 <!-- template:end cache:contributing-cache-proof -->
+
+<!-- template:begin object-storage:contributing-object-storage-proof -->
+A change to `crates/infra-object-storage`, object storage configuration,
+versitygw Compose, or its profile closure keeps normal crate tests local and
+selects CI's `object_storage_integration` surface. That gate runs
+`make test-integration-object-storage` against Compose versitygw. It checks
+the round trip, create-only puts, a streamed upload with a trailing checksum,
+presigned GET expiry, rejected credentials, and the bucket probe. It does not
+certify a provider: `make test-object-storage-conformance PROVIDER=<provider>`
+records one live bucket's behavior and never runs in CI. See the
+[object storage guide](docs/object-storage.md).
+<!-- template:end object-storage:contributing-object-storage-proof -->
 
 A change to an HTTP operation is made in the handler's `#[utoipa::path]`
 attributes and schema derives, then `make openapi-generate` rewrites
