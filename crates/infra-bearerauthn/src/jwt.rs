@@ -72,14 +72,14 @@ impl fmt::Debug for JwtVerifier {
 }
 
 /// Why no installed key verified the signature.
-enum DecodeError {
+enum SignatureError {
     /// No installed key has the token's `kid` and algorithm.
     NoCandidate,
     /// Candidate keys exist, but none verified the signature.
     BadSignature,
 }
 
-impl DecodeError {
+impl SignatureError {
     /// A new `kid`, or a kid-less token during key rotation, can need keys the
     /// installed set lacks (the go-oidc rule). A known `kid` with a bad
     /// signature cannot.
@@ -91,11 +91,11 @@ impl DecodeError {
     }
 }
 
-impl From<DecodeError> for VerificationError {
-    fn from(error: DecodeError) -> Self {
+impl From<SignatureError> for VerificationError {
+    fn from(error: SignatureError) -> Self {
         match error {
-            DecodeError::NoCandidate => Self::invalid(VerificationReason::UnknownKey),
-            DecodeError::BadSignature => Self::invalid(VerificationReason::Signature),
+            SignatureError::NoCandidate => Self::invalid(VerificationReason::UnknownKey),
+            SignatureError::BadSignature => Self::invalid(VerificationReason::Signature),
         }
     }
 }
@@ -123,6 +123,8 @@ impl JwtVerifier {
         {
             return Err(VerificationError::invalid(VerificationReason::Profile));
         }
+        // Decode into bounded stack storage; admitted keys cap the signature size.
+        // Keep `message` as the original encoded bytes that the issuer signed.
         let mut signature_bytes = [0_u8; MAX_SIGNATURE_BYTES];
         let signature = URL_SAFE_NO_PAD
             .decode_slice(signature, &mut signature_bytes)
@@ -132,7 +134,7 @@ impl JwtVerifier {
         match self.keys.keys().verify(message, signature, kid, algorithm) {
             Ok(()) => {}
             Err(miss) if miss.may_need_new_keys(kid) => {
-                self.decode_after_refresh(message, signature, kid, algorithm, miss)
+                self.verify_signature_after_refresh(message, signature, kid, algorithm, miss)
                     .await?;
             }
             Err(error) => return Err(error.into()),
@@ -148,13 +150,14 @@ impl JwtVerifier {
         )
     }
 
-    async fn decode_after_refresh(
+    /// Retries only the signature check; the caller validates the payload once.
+    async fn verify_signature_after_refresh(
         &self,
         message: &[u8],
         signature: &[u8],
         kid: Option<&str>,
         algorithm: JwtAlgorithm,
-        miss: DecodeError,
+        miss: SignatureError,
     ) -> Result<(), VerificationError> {
         match self.keys.refresh_for_unknown_key().await {
             UnknownKeyRefresh::Refreshed(keys) => {
@@ -331,13 +334,13 @@ impl KeySet {
         signature: &[u8],
         kid: Option<&str>,
         algorithm: JwtAlgorithm,
-    ) -> Result<(), DecodeError> {
-        let mut miss = DecodeError::NoCandidate;
+    ) -> Result<(), SignatureError> {
+        let mut miss = SignatureError::NoCandidate;
         for key in self.candidates(kid, algorithm) {
             if key.verify_sig(message, signature).is_ok() {
                 return Ok(());
             }
-            miss = DecodeError::BadSignature;
+            miss = SignatureError::BadSignature;
         }
         Err(miss)
     }

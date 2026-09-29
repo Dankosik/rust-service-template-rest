@@ -3,6 +3,11 @@
 //! This crate owns the sealed transition from an inbound bearer envelope to a
 //! verified identity. HTTP routing, configuration loading, and authorization
 //! policy remain with their existing owners.
+//!
+//! Transports enter through [`Verifier::authenticate`]: parse one bearer envelope,
+//! run the prepared engine, and record the transport outcome even on cancellation.
+//! [`Verifier::verify`] accepts an already parsed envelope and records only the
+//! engine decision. Both return a sealed [`Principal`] or a closed [`Failure`].
 
 mod authenticate;
 mod bearer;
@@ -34,7 +39,7 @@ pub use jwt::{JwtAlgorithm, JwtOptions, RefreshTask, TokenProfile, prepare_jwt};
 // template:end oidc-jwt:authn-jwt-prepare-export
 pub use provider::{EndpointUrl, IssuerUrl};
 
-/// The fixed authentication outcomes exposed to the HTTP adapter.
+/// The fixed authentication outcomes each inbound transport maps to its response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Failure {
     #[error("bearer authentication is required")]
@@ -270,10 +275,13 @@ impl Principal {
     }
 
     /// Deserializes immutable claims from the accepted provider evidence.
+    /// Duplicate custom members use the last value, before decoding the requested type.
     ///
     /// # Errors
     /// Returns a sanitized error when the application type cannot read the claims.
     pub fn claims<T: serde::de::DeserializeOwned>(&self) -> Result<T, ClaimAccessError> {
+        // The Value pass preserves last-member-wins semantics. Decoding T directly
+        // from JSON would reject duplicate fields in application structs.
         let value: serde_json::Value = serde_json::from_str(&self.identity.payload)
             .map_err(|_| ClaimAccessError::InvalidShape)?;
         serde_json::from_value(value).map_err(|_| ClaimAccessError::InvalidShape)
