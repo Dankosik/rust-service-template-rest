@@ -66,10 +66,17 @@ impl fmt::Debug for GrpcClientConfig {
 pub struct OAuthConfig {
     /// Fixed token endpoint, admitted before any adapter construction.
     pub token_url: String,
-    /// Client identifier sent through HTTP Basic authentication by the adapter.
+    /// Client identifier posted as a form field and asserted as the client
+    /// assertion's `iss` and `sub`.
     pub client_id: String,
-    /// Environment-only client secret.
-    pub client_secret: SecretString,
+    /// Environment-only PEM private key used to sign the client assertion.
+    pub private_key: SecretString,
+    /// Key identifier carried in the client-assertion header as `kid`.
+    pub key_id: String,
+    /// Client-assertion signing algorithm; defaults to RS256 when omitted.
+    pub algorithm: OAuthAlgorithm,
+    /// Audience claim asserted in the signed client assertion.
+    pub assertion_audience: String,
     /// Optional RFC 6749 scopes, retained in their configured order.
     pub scopes: Scopes,
     /// Optional OAuth audience parameter.
@@ -80,6 +87,18 @@ impl fmt::Debug for OAuthConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OAuthConfig").finish_non_exhaustive()
     }
+}
+
+/// Client-assertion signing algorithm, decoded from its RFC 7518 identifier.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OAuthAlgorithm {
+    /// RSASSA-PKCS1-v1_5 using SHA-256.
+    #[default]
+    Rs256,
+    /// RSASSA-PSS using SHA-256.
+    Ps256,
+    /// ECDSA using the P-256 curve and SHA-256.
+    Es256,
 }
 
 /// RFC 6749 scope tokens supplied as a list or an environment string.
@@ -188,8 +207,15 @@ fn decode_oauth(value: config::Value, prefix: &str) -> Result<OAuthConfig, Strin
     let mut fields = into_table(value, prefix)?;
     let token_url = take_text(&mut fields, "token_url", prefix)?.unwrap_or_default();
     let client_id = take_text(&mut fields, "client_id", prefix)?.unwrap_or_default();
-    let client_secret =
-        SecretString::from(take_text(&mut fields, "client_secret", prefix)?.unwrap_or_default());
+    let private_key =
+        SecretString::from(take_text(&mut fields, "private_key", prefix)?.unwrap_or_default());
+    let key_id = take_text(&mut fields, "key_id", prefix)?.unwrap_or_default();
+    let algorithm = take_text(&mut fields, "algorithm", prefix)?
+        .map(|value| parse_oauth_algorithm(&value, prefix))
+        .transpose()?
+        .unwrap_or_default();
+    let assertion_audience =
+        take_text(&mut fields, "assertion_audience", prefix)?.unwrap_or_default();
     let audience = take_text(&mut fields, "audience", prefix)?;
     let scopes = fields
         .remove("scopes")
@@ -204,10 +230,22 @@ fn decode_oauth(value: config::Value, prefix: &str) -> Result<OAuthConfig, Strin
     Ok(OAuthConfig {
         token_url,
         client_id,
-        client_secret,
+        private_key,
+        key_id,
+        algorithm,
+        assertion_audience,
         scopes,
         audience,
     })
+}
+
+fn parse_oauth_algorithm(value: &str, prefix: &str) -> Result<OAuthAlgorithm, String> {
+    match value {
+        "RS256" => Ok(OAuthAlgorithm::Rs256),
+        "PS256" => Ok(OAuthAlgorithm::Ps256),
+        "ES256" => Ok(OAuthAlgorithm::Es256),
+        _ => Err(format!("{prefix}.algorithm: must be RS256, PS256 or ES256")),
+    }
 }
 // template:end outbound-auth:config-integration-oauth-parser
 
@@ -372,9 +410,21 @@ impl OAuthConfig {
                 "cannot be empty",
             ));
         }
-        if self.client_secret.expose_secret().trim().is_empty() {
+        if self.private_key.expose_secret().trim().is_empty() {
             return Err(ValidationError::new(
-                &format!("{prefix}.client_secret"),
+                &format!("{prefix}.private_key"),
+                "cannot be empty",
+            ));
+        }
+        if self.key_id.trim().is_empty() {
+            return Err(ValidationError::new(
+                &format!("{prefix}.key_id"),
+                "cannot be empty",
+            ));
+        }
+        if self.assertion_audience.trim().is_empty() {
+            return Err(ValidationError::new(
+                &format!("{prefix}.assertion_audience"),
                 "cannot be empty",
             ));
         }
@@ -447,16 +497,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn whitespace_only_client_secret_is_refused() {
+    fn whitespace_only_private_key_is_refused() {
         let config = OAuthConfig {
             token_url: "https://identity.example/token".to_owned(),
             client_id: "billing-service".to_owned(),
-            client_secret: SecretString::from("   "),
+            private_key: SecretString::from("   "),
+            key_id: "key-1".to_owned(),
+            algorithm: OAuthAlgorithm::default(),
+            assertion_audience: "https://identity.example".to_owned(),
             scopes: Scopes::default(),
             audience: None,
         };
         let err = config.validate("integrations.billing.oauth").unwrap_err();
-        assert_eq!(err.key, "integrations.billing.oauth.client_secret");
+        assert_eq!(err.key, "integrations.billing.oauth.private_key");
         assert_eq!(err.message, "cannot be empty");
     }
 }

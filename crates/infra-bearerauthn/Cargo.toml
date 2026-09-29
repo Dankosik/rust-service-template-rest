@@ -28,8 +28,10 @@ jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 aws-lc-rs = { workspace = true, features = ["alloc", "aws-lc-sys", "prebuilt-nasm"] }
 metrics = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
-# template:begin oidc-introspection:authn-secret-dependency
+# `Principal::access_token()` retains the presented bearer token as a secret
+# regardless of the selected engine, so this dependency is unconditional.
 secrecy = { workspace = true }
+# template:begin oidc-introspection:authn-secret-dependency
 moka = { workspace = true, features = ["future"] }
 # template:end oidc-introspection:authn-secret-dependency
 serde = { workspace = true, features = ["std", "derive"] }

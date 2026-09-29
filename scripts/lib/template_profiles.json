@@ -284,7 +284,6 @@
     ],
     "markers": [
       {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-jwt-import", "authn-claims-jwt-type", "authn-claims-jwt-validation", "authn-claims-jwt-test-imports", "authn-claims-jwt-normalization-test", "authn-claims-scope-jwt-assertion"]},
-      {"path": "Cargo.toml", "ids": ["workspace-authn-jwt"]},
       {"path": "crates/config/src/authn.rs", "ids": ["authn-token-profile", "authn-algorithm", "authn-config-jwt-variant", "authn-default-algorithms", "authn-config-jwt-validation", "authn-config-jwt-tests", "authn-config-jwt-debug"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-jwt-input-exports"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-token-profile-import", "load-jwt-token-profile-environment", "load-jwt-token-profile-file"]},
@@ -779,15 +778,10 @@
     "remove_when_unselected": [
       "crates/infra-oauth2-client-credentials/",
       "docs/outbound-machine-authentication.md",
-      "docs/outbound-machine-authentication-decisions.md"
+      "docs/outbound-machine-authentication-decisions.md",
+      "docs/service-to-service-authentication.md"
     ],
     "markers": [
-      {
-        "path": "Cargo.toml",
-        "ids": [
-          "workspace-oauth2-dependency"
-        ]
-      },
       {
         "path": "crates/config/src/lib.rs",
         "ids": [
@@ -863,6 +857,10 @@
       {
         "path": "docs/outbound-machine-authentication-decisions.md",
         "id": "docs-outbound-machine-authentication-decisions"
+      },
+      {
+        "path": "docs/service-to-service-authentication.md",
+        "id": "docs-service-to-service-authentication"
       },
       {
         "path": "docs/ci-cd-production-ready.md",
@@ -1586,6 +1584,12 @@
       {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-cache-source", "docs-config-cache-budget"]},
       {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-cache-placement"]},
       {"path": "docs/roadmap.md", "ids": ["roadmap-stage-10-11-cache", "roadmap-stage-10-11-cache-note"]}
+    ]
+  },
+  "jsonwebtoken": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "Cargo.toml", "id": "workspace-jsonwebtoken"}
     ]
   }
 }

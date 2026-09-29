@@ -329,6 +329,7 @@ _GRPC_PROFILE_INVENTORY_KEYS = _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS | {
     "client-integrations",
 }
 _CACHE_PROFILE_INVENTORY_KEYS = _GRPC_PROFILE_INVENTORY_KEYS | {"cache", "rustls"}
+_JSONWEBTOKEN_PROFILE_INVENTORY_KEYS = _CACHE_PROFILE_INVENTORY_KEYS | {"jsonwebtoken"}
 
 
 def _profile_data(
@@ -349,7 +350,19 @@ def _profile_data(
         raise Refusal("template profile inventory has an unsupported schema")
     keys = frozenset(raw)
     include_cache = False
-    if keys == _CACHE_PROFILE_INVENTORY_KEYS:
+    if keys == _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS:
+        include_authn = True
+        include_outbound = True
+        include_outbound_auth = True
+        include_grpc = True
+        include_tls_fixtures = True
+        include_http_idempotency = True
+        include_jobs = True
+        include_webhooks = True
+        include_messaging = True
+        include_outbox = True
+        include_cache = True
+    elif keys == _CACHE_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
         include_outbound_auth = True
@@ -632,6 +645,14 @@ def _profile_data(
             raise Refusal("template rustls inventory has an unsupported shape")
         removals["rustls"] = tuple(_path_list(section["remove_when_unselected"], "rustls remove_when_unselected"))
         markers.extend(_markers("rustls", section["markers"]))
+    if "jsonwebtoken" in keys:
+        section = raw["jsonwebtoken"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template jsonwebtoken inventory has an unsupported shape")
+        removals["jsonwebtoken"] = tuple(
+            _path_list(section["remove_when_unselected"], "jsonwebtoken remove_when_unselected")
+        )
+        markers.extend(_markers("jsonwebtoken", section["markers"]))
     identity = raw["identity"]
     if not isinstance(identity, list):
         raise Refusal("template identity inventory has an unsupported shape")
@@ -797,6 +818,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("grpc-none")
     if inputs.messaging == "nats-jetstream" or inputs.outbound_auth == "oauth2-client-credentials":
         selected.add("config-url")
+    if inputs.authn == "oidc-jwt" or inputs.outbound_auth == "oauth2-client-credentials":
+        selected.add("jsonwebtoken")
     if (
         inputs.authn != "none"
         or inputs.outbound_http == "bounded"
@@ -1464,7 +1487,9 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
             ("smallvec", "1.16.1", ["serde"], []),
         ):
             _project_feature_edge(records, name, version, expected, retained)
-    if inputs.authn != "oidc-jwt":
+    if inputs.authn != "oidc-jwt" and inputs.outbound_auth != "oauth2-client-credentials":
+        # jsonwebtoken unconditionally enables zeroize's derive feature; the
+        # JWT authn engine and the outbound OAuth crate each keep jsonwebtoken.
         _project_feature_edge(records, "zeroize", "1.9.0", ["zeroize_derive"], [])
     if inputs.grpc == "none":
         _project_feature_edge(
@@ -1488,13 +1513,17 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
             ["aws-lc-rs", "log", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
             ["aws-lc-rs", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
         )
-        _project_feature_edge(
-            records,
-            "rcgen",
-            "0.14.10",
-            ["aws-lc-rs", "pem", "rustls-pki-types", "time", "x509-parser", "yasna"],
-            ["aws-lc-rs", "rustls-pki-types", "time", "x509-parser", "yasna"],
-        )
+        if inputs.outbound_auth != "oauth2-client-credentials":
+            # The outbound OAuth crate's own TLS test fixtures also enable
+            # rcgen's pem feature, independent of gRPC; keep the edge when
+            # that crate is retained even though gRPC's fixtures are not.
+            _project_feature_edge(
+                records,
+                "rcgen",
+                "0.14.10",
+                ["aws-lc-rs", "pem 4.0.0", "rustls-pki-types", "time", "x509-parser", "yasna"],
+                ["aws-lc-rs", "rustls-pki-types", "time", "x509-parser", "yasna"],
+            )
     if (
         inputs.authn == "none"
         and inputs.outbound_http == "none"
@@ -1516,15 +1545,16 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
             ["http", "hyper", "hyper-util", "rustls", "rustls-platform-verifier", "tokio", "tokio-rustls", "tower-service"],
             ["http", "hyper", "hyper-util", "rustls", "tokio", "tokio-rustls", "tower-service"],
         )
-    if inputs.outbound_auth == "none":
-        # oauth2 enables url's serde feature; the source still uses url through
-        # retained shared consumers, so remove only that profile-specific edge.
+    if inputs.outbound_auth == "none" and inputs.authn == "oidc-jwt":
+        # The outbound OAuth crate alone enables jsonwebtoken's use_pem
+        # feature (pem, simple_asn1); the JWT authn engine keeps jsonwebtoken
+        # with only aws_lc_rs.
         _project_feature_edge(
             records,
-            "url",
-            "2.5.8",
-            ["form_urlencoded", "idna", "percent-encoding", "serde", "serde_derive"],
-            ["form_urlencoded", "idna", "percent-encoding", "serde"],
+            "jsonwebtoken",
+            "11.1.0",
+            ["aws-lc-rs", "base64 0.22.1", "getrandom 0.2.17", "js-sys", "pem 3.0.6", "serde", "serde_json", "signature", "simple_asn1", "zeroize"],
+            ["aws-lc-rs", "base64 0.22.1", "getrandom 0.2.17", "js-sys", "serde", "serde_json", "signature", "zeroize"],
         )
 
 

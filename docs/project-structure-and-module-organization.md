@@ -25,7 +25,7 @@ Do not create a crate, module, or directory before its first real artifact.
 | Fixed trusted-origin bounded HTTP exchanges and attempt observation | `crates/infra-outbound-http`; provider policy uses its standard `Request<Bytes>`/`Response<Bytes>` API ([guide](outbound-http.md)) |
 <!-- template:end outbound-http:docs-structure-outbound-placement -->
 <!-- template:begin outbound-auth:docs-structure-outbound-auth-placement -->
-| OAuth2 client-credentials exchange, private token reuse, and authenticated bounded requests | `crates/infra-oauth2-client-credentials`; concrete provider adapters compose it and feature code never receives a token ([guide](outbound-machine-authentication.md)) |
+| Private-key client-assertion acquisition, RFC 8693 token exchange, private token reuse, and authenticated bounded requests | `crates/infra-oauth2-client-credentials`; concrete provider adapters compose it and feature code never receives a token ([guide](outbound-machine-authentication.md)) |
 <!-- template:end outbound-auth:docs-structure-outbound-auth-placement -->
 <!-- template:begin request-budget:docs-structure-request-budget -->
 | Readonly inbound request deadline | `crates/infra-http/src/harden.rs`; exported as `infra_http::RequestDeadline` |

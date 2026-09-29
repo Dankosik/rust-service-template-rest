@@ -3,7 +3,6 @@
 use std::{
     future::Future,
     pin::Pin,
-    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
@@ -14,7 +13,7 @@ use tokio::time::Instant;
 use tonic::{Code, Status, body::Body};
 use tower::Service;
 
-use crate::{AcquisitionError, Credentials, FETCH_TIMEOUT, Token};
+use crate::{AcquisitionError, Credentials, FETCH_TIMEOUT, OnBehalfOf};
 
 const GRPC_TIMEOUT: HeaderName = HeaderName::from_static("grpc-timeout");
 const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
@@ -58,25 +57,33 @@ impl Service<Request<Body>> for AuthenticatedClient {
                 "authorization conflicts with client credentials",
             ))));
         }
+        let on_behalf_of = request.extensions_mut().remove::<OnBehalfOf>();
         let budget = infra_grpc::grpc_timeout(request.headers());
         let started = Instant::now();
         let deadline = started + budget.unwrap_or(FETCH_TIMEOUT);
         let credentials = self.credentials.clone();
-        // A reusable token spends none of the budget, so the resource is
+        // A reusable service token spends none of the budget, so the resource is
         // called now, without cloning it or rewriting grpc-timeout.
-        if started < deadline
-            && let Some(token) = credentials.reusable(started)
+        if on_behalf_of.is_none()
+            && started < deadline
+            && let Some(token) = credentials.reusable_service_token(started)
         {
             request
                 .headers_mut()
                 .insert(AUTHORIZATION, token.header.clone());
             let response = self.resource.call(request);
-            return Box::pin(async move { Ok(checked(&credentials, &token, response.await?)) });
+            return Box::pin(async move {
+                let response = response.await?;
+                if unauthenticated(&response) {
+                    credentials.reject_service_token(&token);
+                }
+                Ok(response)
+            });
         }
         let mut resource = self.resource.clone();
         Box::pin(async move {
-            let token = credentials
-                .authorize(request.headers_mut(), deadline)
+            let acquired = credentials
+                .authorize(request.headers_mut(), on_behalf_of, deadline)
                 .await
                 .map_err(acquisition_status)?;
             let now = Instant::now();
@@ -89,27 +96,23 @@ impl Service<Request<Body>> for AuthenticatedClient {
                     .headers_mut()
                     .insert(GRPC_TIMEOUT, grpc_timeout_value(remaining)?);
             }
-            Ok(checked(&credentials, &token, resource.call(request).await?))
+            let response = resource.call(request).await?;
+            if unauthenticated(&response) {
+                credentials.reject_acquired(&acquired).await;
+            }
+            Ok(response)
         })
     }
 }
 
-/// Evicts `token` when the resource reports it unauthenticated.
-fn checked(
-    credentials: &Credentials,
-    token: &Arc<Token>,
-    response: Response<Body>,
-) -> Response<Body> {
-    let unauthenticated = response
+/// Whether the resource reports the dispatched token unauthenticated.
+fn unauthenticated(response: &Response<Body>) -> bool {
+    response
         .headers()
         .get(GRPC_STATUS)
         .is_some_and(|status| Code::from_bytes(status.as_bytes()) == Code::Unauthenticated)
         || (response.status() == StatusCode::UNAUTHORIZED
-            && !response.headers().contains_key(GRPC_STATUS));
-    if unauthenticated {
-        credentials.reject(token);
-    }
-    response
+            && !response.headers().contains_key(GRPC_STATUS))
 }
 
 fn acquisition_status(error: AcquisitionError) -> Status {

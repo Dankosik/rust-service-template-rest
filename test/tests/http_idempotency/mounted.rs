@@ -104,6 +104,12 @@ const ALICE_REVOKED: &str = "alice-revoked-client-token";
 const BOB: &str = "bob-token";
 /// A verified caller with no scope required by this operation.
 const NO_SCOPE: &str = "no-scope-token";
+/// Both scopes of the first `scoped_alternatives` alternative.
+const SCOPE_A_AND_B: &str = "scope-a-and-b-token";
+/// Only the second alternative's scope.
+const SCOPE_C: &str = "scope-c-only-token";
+/// One of the two AND-ed scopes, satisfying neither alternative.
+const SCOPE_A_ONLY: &str = "scope-a-only-token";
 const INACTIVE: &str = "inactive-token";
 const HELD_PROVIDER: &str = "held-provider-token";
 const REVOKED_CLIENT: &str = "revoked-client";
@@ -193,7 +199,7 @@ impl CreateWidgets for SqlWidgets {
     operation_id = "createWidget",
     tag = "widgets",
     request_body = NewWidget,
-    security(("bearerAuth" = [])),
+    security(("bearerAuth" = ["widgets:write"])),
     extensions(
         ("x-security-decision" = json!({
             "exposure": "protected",
@@ -211,10 +217,9 @@ async fn create_widget(
     Extension(widgets): Extension<Arc<dyn CreateWidgets>>,
     Json(input): Json<NewWidget>,
 ) -> Response {
-    // Every attempt is authorized before the seam, so a replay never skips it.
-    if let Err(response) = infra_http::require_scope(&principal, "widgets:write") {
-        return response;
-    }
+    // The route's declared `widgets:write` scope is checked by the final
+    // authentication layer before this handler runs; only the operation's own
+    // authorization (revoked-client denial) remains here.
     if !may_create(&principal) {
         return forbidden();
     }
@@ -506,6 +511,9 @@ fn introspection(token: &str) -> String {
         ALICE_REVOKED => ("alice", REVOKED_CLIENT, "widgets:write"),
         BOB => ("bob", "widgets-app", "widgets:write"),
         NO_SCOPE => ("scope-less", "widgets-app", ""),
+        SCOPE_A_AND_B => ("scoped", "widgets-app", "scope-a scope-b"),
+        SCOPE_C => ("scoped", "widgets-app", "scope-c"),
+        SCOPE_A_ONLY => ("scoped", "widgets-app", "scope-a"),
         _ => return json!({"active": false}).to_string(),
     };
     json!({
@@ -809,6 +817,7 @@ async fn until_free(request: impl Fn() -> TestRequest) -> (TestResponse, u64) {
     get,
     path = "/_test/authorization",
     operation_id = "authorizationWithoutIdempotency",
+    security(("bearerAuth" = ["widgets:write"])),
     responses(
         (status = 200, description = "verified", content_type = "text/plain", body = String),
         infra_http::problem::responses::ProtectedOperationProblemResponses,
@@ -824,9 +833,8 @@ async fn authorized_without_idempotency(
         tenant: Value,
         scope: String,
     }
-    if let Err(response) = infra_http::require_scope(&principal, "widgets:write") {
-        return response;
-    }
+    // The route's declared `widgets:write` scope is checked by the final
+    // authentication layer before this handler runs.
     assert!(!headers.contains_key(axum::http::header::AUTHORIZATION));
     let claims = principal
         .claims::<ApplicationClaims>()
@@ -836,11 +844,34 @@ async fn authorized_without_idempotency(
     assert_eq!(claims.scope, "widgets:write");
     assert_eq!(principal.scopes(), ["widgets:write"]);
     assert!(principal.claims::<BTreeMap<String, u64>>().is_err());
+    // The verified token stays available only as a token-exchange subject.
+    assert!(!secrecy::ExposeSecret::expose_secret(principal.access_token()).is_empty());
+    assert!(principal.actor().is_none());
     (
         StatusCode::OK,
         principal.subject().unwrap_or_default().to_owned(),
     )
         .into_response()
+}
+
+/// Two alternatives: `scope-a` AND `scope-b`, OR `scope-c` alone. Counts its
+/// own calls so a denied request can prove the handler never ran.
+#[utoipa::path(
+    get,
+    path = "/_test/scoped-alternatives",
+    operation_id = "scopedAlternatives",
+    security(
+        ("bearerAuth" = ["scope-a", "scope-b"]),
+        ("bearerAuth" = ["scope-c"]),
+    ),
+    responses(
+        (status = 200, description = "granted", content_type = "text/plain", body = String),
+        infra_http::problem::responses::ProtectedOperationProblemResponses,
+    )
+)]
+async fn scoped_alternatives(Extension(calls): Extension<Arc<AtomicUsize>>) -> &'static str {
+    calls.fetch_add(1, Ordering::SeqCst);
+    "granted"
 }
 
 fn bearer_document() -> utoipa::openapi::OpenApi {
@@ -1105,6 +1136,59 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
         [(1, 0), (2, 0), (3, 1), (4, 2)],
         "each request records one HTTP outcome; only a parsed token reaches engine verification"
     );
+}
+
+/// Alternatives are joined by OR and the scopes within one by AND; a
+/// caller granted by neither is refused before the handler runs.
+#[tokio::test(flavor = "current_thread")]
+async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
+    let provider = Provider::start().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let contract = OpenApiRouter::with_openapi(bearer_document())
+        .merge(infra_http::router())
+        .routes(routes!(scoped_alternatives));
+    let router = infra_http::authn::finalize(contract, provider.verifier())
+        .expect("the scoped-alternatives contract finalizes")
+        .layer(Extension(Arc::clone(&calls)))
+        .with_state(readiness_reader());
+    let server = TestServer::new(harden(
+        router,
+        &HardenOptions {
+            max_body_bytes: MAX_BODY_BYTES,
+            request_timeout: BUDGET,
+            max_in_flight: NonZeroU32::new(16),
+            log_health_probes: false,
+        },
+    ));
+
+    let granted_by_and = server
+        .get("/_test/scoped-alternatives")
+        .authorization_bearer(SCOPE_A_AND_B)
+        .await;
+    assert_eq!(granted_by_and.status_code(), StatusCode::OK);
+    assert_eq!(granted_by_and.text(), "granted");
+    let granted_by_or = server
+        .get("/_test/scoped-alternatives")
+        .authorization_bearer(SCOPE_C)
+        .await;
+    assert_eq!(granted_by_or.status_code(), StatusCode::OK);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let denied = server
+        .get("/_test/scoped-alternatives")
+        .authorization_bearer(SCOPE_A_ONLY)
+        .await;
+    problem_body(&denied, StatusCode::FORBIDDEN, "forbidden");
+    assert_eq!(
+        denied.header(WWW_AUTHENTICATE),
+        HeaderValue::from_static("Bearer error=\"insufficient_scope\"")
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the handler must not run when every alternative is denied"
+    );
+    provider.stop().await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

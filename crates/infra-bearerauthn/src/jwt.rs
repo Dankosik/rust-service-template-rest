@@ -106,8 +106,8 @@ impl JwtVerifier {
         token: &BearerToken<'_>,
     ) -> Result<Principal, VerificationError> {
         let malformed = || VerificationError::invalid(VerificationReason::Header);
-        let token = token.as_bytes();
-        let (message, signature) = split_last_dot(token).ok_or_else(malformed)?;
+        let bytes = token.as_bytes();
+        let (message, signature) = split_last_dot(bytes).ok_or_else(malformed)?;
         let (header, payload) = split_last_dot(message).ok_or_else(malformed)?;
         let header = URL_SAFE_NO_PAD.decode(header).map_err(|_| malformed())?;
         // jsonwebtoken's `Header` keeps the library's header admission rules.
@@ -145,6 +145,7 @@ impl JwtVerifier {
             &self.claim_policy,
             self.token_profile,
             jsonwebtoken::get_current_timestamp(),
+            token.access_token(),
         )
     }
 
@@ -911,6 +912,20 @@ mod tests {
             assert!(!rendered.contains("verified-tenant"));
             assert!(!rendered.contains("permissions"));
         }
+    }
+
+    #[tokio::test]
+    async fn access_token_equals_the_presented_bearer_text() {
+        use secrecy::ExposeSecret;
+        let verifier = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
+        let token = signed(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("fixture"),
+            &serde_json::json!({}),
+        );
+        let principal = check(&verifier, &token).await.unwrap();
+        assert_eq!(principal.access_token().expose_secret(), token);
     }
 
     #[test]

@@ -239,16 +239,38 @@ pub struct Principal {
     expiry_epoch_seconds: u64,
 }
 
-#[derive(Eq, PartialEq)]
 struct Identity {
     issuer: String,
     subject: Option<String>,
     client_id: Option<String>,
     scopes: Vec<String>,
     payload: String,
+    access_token: secrecy::SecretString,
+    actor: Option<Actor>,
 }
 
+// `secrecy::SecretString` intentionally has no `PartialEq`, so this compares
+// its exposed text alongside the other verified fields.
+impl PartialEq for Identity {
+    fn eq(&self, other: &Self) -> bool {
+        use secrecy::ExposeSecret;
+        self.issuer == other.issuer
+            && self.subject == other.subject
+            && self.client_id == other.client_id
+            && self.scopes == other.scopes
+            && self.payload == other.payload
+            && self.access_token.expose_secret() == other.access_token.expose_secret()
+            && self.actor == other.actor
+    }
+}
+
+impl Eq for Identity {}
+
 impl Principal {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one crate-private constructor for the verified evidence every engine reads"
+    )]
     pub(crate) fn new(
         issuer: String,
         subject: Option<String>,
@@ -256,6 +278,8 @@ impl Principal {
         scopes: Vec<String>,
         expiry_epoch_seconds: u64,
         payload: String,
+        access_token: secrecy::SecretString,
+        actor: Option<Actor>,
     ) -> Self {
         Self {
             identity: Arc::new(Identity {
@@ -264,6 +288,8 @@ impl Principal {
                 client_id,
                 scopes,
                 payload,
+                access_token,
+                actor,
             }),
             expiry_epoch_seconds,
         }
@@ -308,11 +334,59 @@ impl Principal {
     pub const fn expires_at(&self) -> u64 {
         self.expiry_epoch_seconds
     }
+
+    /// The exact bearer token text this principal was verified from. It is
+    /// the subject token of an RFC 8693 exchange; never forward it as an
+    /// outbound `Authorization` header.
+    #[must_use]
+    pub fn access_token(&self) -> &secrecy::SecretString {
+        &self.identity.access_token
+    }
+
+    /// The outermost RFC 8693 `act` claim's identity, when the verified
+    /// evidence named one. Nested actors are not exposed.
+    #[must_use]
+    pub fn actor(&self) -> Option<&Actor> {
+        self.identity.actor.as_ref()
+    }
 }
 
 impl fmt::Debug for Principal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("Principal([VERIFIED_IDENTITY_REDACTED])")
+    }
+}
+
+/// The current actor delegated to act on a subject's behalf (RFC 8693 §4.1).
+/// `may_act` is an authorization-server input, not receiver evidence, and is
+/// never exposed here.
+#[derive(Clone, Eq, PartialEq)]
+pub struct Actor {
+    subject: String,
+    client_id: Option<String>,
+}
+
+impl Actor {
+    pub(crate) fn new(subject: String, client_id: Option<String>) -> Self {
+        Self { subject, client_id }
+    }
+
+    /// The actor's non-empty `sub`.
+    #[must_use]
+    pub fn subject(&self) -> &str {
+        &self.subject
+    }
+
+    /// The actor's `client_id`, when the evidence supplied one.
+    #[must_use]
+    pub fn client_id(&self) -> Option<&str> {
+        self.client_id.as_deref()
+    }
+}
+
+impl fmt::Debug for Actor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Actor([REDACTED])")
     }
 }
 

@@ -113,11 +113,15 @@ The inbound direction is documented in
 
 <!-- template:begin outbound-auth:readme-outbound-auth-profile -->
 The optional outbound machine-authentication profile is selected by
-`OUTBOUND_AUTH=none|oauth2-client-credentials`, defaulting to `none`.
-Selecting OAuth2 also retains bounded outbound HTTP, but starts no provider
+`OUTBOUND_AUTH=none|oauth2-client-credentials`, defaulting to `none`. It
+authenticates only with a private key, never a client secret, and carries a
+verified user's context downstream through RFC 8693 token exchange.
+Selecting it also retains bounded outbound HTTP, but starts no provider
 call, task, listener, or readiness dependency. Concrete integrations compose
-their own private authenticated client. See [Outbound machine
-authentication](docs/outbound-machine-authentication.md) and its [decision
+their own private authenticated client. See [Service-to-service
+authentication](docs/service-to-service-authentication.md) for the mandate,
+[Outbound machine authentication](docs/outbound-machine-authentication.md)
+for adoption, and its [decision
 record](docs/outbound-machine-authentication-decisions.md).
 <!-- template:end outbound-auth:readme-outbound-auth-profile -->
 

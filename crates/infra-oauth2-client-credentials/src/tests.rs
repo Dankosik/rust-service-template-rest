@@ -17,6 +17,7 @@ use std::{
 use bytes::Bytes;
 use http::{Request, StatusCode, header};
 use infra_outbound_http::Client;
+use rcgen::{KeyPair, PKCS_RSA_SHA256};
 use secrecy::SecretString;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -27,7 +28,10 @@ use tokio::{
 };
 use url::Url;
 
-use super::{AcquisitionError, Cached, Credentials, Error, FETCH_TIMEOUT, Options, TOKEN_LIMITS};
+use super::{
+    AcquisitionError, Algorithm, Cached, Credentials, Error, FETCH_TIMEOUT, OnBehalfOf, Options,
+    TOKEN_LIMITS,
+};
 
 // template:begin outbound-auth-grpc:oauth-grpc-tests-module
 #[cfg(feature = "grpc")]
@@ -36,6 +40,13 @@ mod grpc;
 
 const TOKEN_PATH: &str = "/token";
 const RESOURCE_PATH: &str = "/resource";
+const ASSERTION_AUDIENCE: &str = "https://issuer.example";
+/// Independent of the crate's own constants, so a typo in one does not hide
+/// behind an identical typo in the other.
+const GRANT_TYPE_CLIENT_CREDENTIALS: &str = "client_credentials";
+const GRANT_TYPE_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
+const CLIENT_ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
 
 #[derive(Clone, Debug)]
 struct CapturedRequest {
@@ -69,6 +80,7 @@ struct Fixture {
     state: Arc<FixtureState>,
     shutdown: oneshot::Sender<()>,
     task: JoinHandle<()>,
+    key: KeyPair,
 }
 
 impl Fixture {
@@ -102,6 +114,7 @@ impl Fixture {
             state,
             shutdown,
             task,
+            key: KeyPair::generate_for(&PKCS_RSA_SHA256).unwrap(),
         }
     }
 
@@ -109,7 +122,10 @@ impl Fixture {
         let options = Options {
             token_url: self.endpoint.to_string(),
             client_id: "client:id".to_owned(),
-            client_secret: SecretString::from("secret value"),
+            private_key: SecretString::from(self.key.serialize_pem()),
+            key_id: "key-1".to_owned(),
+            algorithm: Algorithm::Rs256,
+            assertion_audience: ASSERTION_AUDIENCE.to_owned(),
             scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
             audience: audience.map(str::to_owned),
         };
@@ -129,6 +145,15 @@ impl Fixture {
         Request::get(self.origin.join(RESOURCE_PATH).unwrap().as_str())
             .body(Bytes::new())
             .unwrap()
+    }
+
+    /// A resource request acting on behalf of `subject`.
+    fn on_behalf_of_request(&self, subject: &str) -> Request<Bytes> {
+        let mut request = self.request();
+        request
+            .extensions_mut()
+            .insert(OnBehalfOf::new(SecretString::from(subject)));
+        request
     }
 
     fn token_json(&self, status: &str, body: &serde_json::Value) {
@@ -302,6 +327,17 @@ fn json_response(status: &str, body: &serde_json::Value) -> Vec<u8> {
     response(status, &serde_json::to_vec(body).unwrap())
 }
 
+/// A token-exchange response admitted by [`super::into_token`]'s
+/// `issued_token_type` check.
+fn exchange_response(access_token: &str) -> serde_json::Value {
+    serde_json::json!({
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": 60,
+        "issued_token_type": ACCESS_TOKEN_TYPE,
+    })
+}
+
 fn deadline(after: Duration) -> Instant {
     Instant::now() + after
 }
@@ -315,69 +351,140 @@ async fn poll_pending<T>(mut future: Pin<&mut impl Future<Output = T>>) {
     );
 }
 
+/// Order-preserving decode of a `x-www-form-urlencoded` body.
+fn form_pairs(body: &[u8]) -> Vec<(String, String)> {
+    url::form_urlencoded::parse(body).into_owned().collect()
+}
+
+fn form_value<'a>(pairs: &'a [(String, String)], key: &str) -> &'a str {
+    pairs
+        .iter()
+        .find(|(name, _)| name == key)
+        .unwrap_or_else(|| panic!("missing form field {key}"))
+        .1
+        .as_str()
+}
+
+#[derive(serde::Deserialize)]
+struct DecodedAssertion {
+    iss: String,
+    sub: String,
+    aud: String,
+    iat: u64,
+    nbf: u64,
+    exp: u64,
+    jti: String,
+}
+
+/// Decodes and verifies a captured request's `client_assertion` field with
+/// the fixture's matching public key.
+fn decode_assertion(
+    fixture: &Fixture,
+    request: &CapturedRequest,
+) -> (jsonwebtoken::Header, DecodedAssertion) {
+    let pairs = form_pairs(&request.body);
+    let assertion = form_value(&pairs, "client_assertion");
+    let header = jsonwebtoken::decode_header(assertion).unwrap();
+    let mut validation = jsonwebtoken::Validation::new(header.alg);
+    validation.set_audience(&[ASSERTION_AUDIENCE]);
+    let key =
+        jsonwebtoken::DecodingKey::from_rsa_pem(fixture.key.public_key_pem().as_bytes()).unwrap();
+    let data = jsonwebtoken::decode::<DecodedAssertion>(assertion, &key, &validation).unwrap();
+    (header, data.claims)
+}
+
+fn valid_options() -> Options {
+    Options {
+        token_url: "https://identity.example/token".to_owned(),
+        client_id: "client".to_owned(),
+        private_key: SecretString::from("placeholder"),
+        key_id: "key-1".to_owned(),
+        algorithm: Algorithm::default(),
+        assertion_audience: "https://issuer.example".to_owned(),
+        scopes: Vec::new(),
+        audience: None,
+    }
+}
+
 #[test]
 fn direct_construction_repeats_sensitive_option_admission() {
-    for (mut options, key) in [
+    for (options, key) in [
         (
             Options {
-                token_url: "https://identity.example/token".to_owned(),
                 client_id: String::new(),
-                client_secret: SecretString::from("secret"),
-                scopes: Vec::new(),
-                audience: None,
+                ..valid_options()
             },
             "client_id",
         ),
         (
             Options {
-                token_url: "https://identity.example/token".to_owned(),
-                client_id: "client".to_owned(),
-                client_secret: SecretString::from(""),
-                scopes: Vec::new(),
-                audience: None,
+                key_id: String::new(),
+                ..valid_options()
             },
-            "client_secret",
+            "key_id",
         ),
         (
             Options {
-                token_url: "https://identity.example/token".to_owned(),
-                client_id: "client".to_owned(),
-                client_secret: SecretString::from("secret"),
+                assertion_audience: String::new(),
+                ..valid_options()
+            },
+            "assertion_audience",
+        ),
+        (
+            Options {
+                private_key: SecretString::from(""),
+                ..valid_options()
+            },
+            "private_key",
+        ),
+        (
+            Options {
                 scopes: vec!["bad scope".to_owned()],
-                audience: None,
+                ..valid_options()
             },
             "scopes",
         ),
         (
             Options {
                 token_url: "https://user:secret@identity.example/token".to_owned(),
-                client_id: "client".to_owned(),
-                client_secret: SecretString::from("secret"),
-                scopes: Vec::new(),
-                audience: None,
+                ..valid_options()
             },
             "token_url",
         ),
         (
             Options {
-                token_url: "https://identity.example/token".to_owned(),
-                client_id: "client".to_owned(),
-                client_secret: SecretString::from("secret"),
-                scopes: Vec::new(),
                 audience: Some(String::new()),
+                ..valid_options()
             },
             "audience",
         ),
     ] {
+        let mut options = options;
         let error = Credentials::new(options.clone()).unwrap_err();
         assert_eq!(error.key, key);
-        options.client_secret = SecretString::from("different-secret");
+        options.private_key = SecretString::from("different-secret");
         assert!(!format!("{options:?} {error:?}").contains("different-secret"));
     }
 }
 
+#[test]
+fn a_key_mismatched_with_its_algorithm_or_not_pem_is_refused_at_construction() {
+    let ec_pem = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+        .unwrap()
+        .serialize_pem();
+    for private_key in [ec_pem, "not a pem key".to_owned()] {
+        let options = Options {
+            private_key: SecretString::from(private_key),
+            algorithm: Algorithm::Rs256,
+            ..valid_options()
+        };
+        let error = Credentials::new(options).unwrap_err();
+        assert_eq!(error.key, "private_key");
+    }
+}
+
 #[tokio::test]
-async fn token_exchange_encodes_basic_scopes_and_audience_then_injects_bearer() {
+async fn client_credentials_request_has_no_authorization_header_and_expected_fields() {
     let fixture = Fixture::new().await;
     fixture.token_json(
         "200 OK",
@@ -385,7 +492,6 @@ async fn token_exchange_encodes_basic_scopes_and_audience_then_injects_bearer() 
             "access_token": "token+/_~.=",
             "token_type": "bEaReR",
             "expires_in": 60,
-            "provider_extension": { "nested": ["ignored"] },
             "refresh_token": "private-refresh",
         }),
     );
@@ -398,13 +504,34 @@ async fn token_exchange_encodes_basic_scopes_and_audience_then_injects_bearer() 
     assert_eq!(response.status(), StatusCode::OK);
     let token = fixture.token_requests().pop().unwrap();
     assert_eq!(token.target, TOKEN_PATH);
+    assert!(token.header("authorization").is_none());
+    let pairs = form_pairs(&token.body);
+    let keys = pairs.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>();
     assert_eq!(
-        token.header("authorization"),
-        Some("Basic Y2xpZW50JTNBaWQ6c2VjcmV0K3ZhbHVl")
+        keys,
+        [
+            "grant_type",
+            "client_id",
+            "client_assertion_type",
+            "client_assertion",
+            "scope",
+            "audience",
+        ]
     );
     assert_eq!(
-        std::str::from_utf8(&token.body).unwrap(),
-        "grant_type=client_credentials&scope=read+write&audience=https%3A%2F%2Fapi.example%2Fresource"
+        form_value(&pairs, "grant_type"),
+        GRANT_TYPE_CLIENT_CREDENTIALS
+    );
+    assert_eq!(form_value(&pairs, "client_id"), "client:id");
+    assert_eq!(
+        form_value(&pairs, "client_assertion_type"),
+        CLIENT_ASSERTION_TYPE
+    );
+    assert!(!form_value(&pairs, "client_assertion").is_empty());
+    assert_eq!(form_value(&pairs, "scope"), "read write");
+    assert_eq!(
+        form_value(&pairs, "audience"),
+        "https://api.example/resource"
     );
     assert_eq!(
         fixture.resource_requests()[0].header("authorization"),
@@ -414,7 +541,7 @@ async fn token_exchange_encodes_basic_scopes_and_audience_then_injects_bearer() 
 }
 
 #[tokio::test]
-async fn optional_scope_and_audience_are_omitted_from_the_form() {
+async fn optional_scope_and_audience_are_omitted_from_the_client_credentials_form() {
     let fixture = Fixture::new().await;
     fixture
         .credentials(&[], None)
@@ -422,10 +549,305 @@ async fn optional_scope_and_audience_are_omitted_from_the_form() {
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
         .unwrap();
+    let pairs = form_pairs(&fixture.token_requests()[0].body);
+    let keys = pairs.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>();
     assert_eq!(
-        std::str::from_utf8(&fixture.token_requests()[0].body).unwrap(),
-        "grant_type=client_credentials"
+        keys,
+        [
+            "grant_type",
+            "client_id",
+            "client_assertion_type",
+            "client_assertion"
+        ]
     );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn assertion_header_and_claims_are_verifiable_and_two_requests_differ_in_jti() {
+    let fixture = Fixture::new().await;
+    for _ in 0..2 {
+        fixture
+            .credentials(&[], None)
+            .http(fixture.resource_client())
+            .execute(fixture.request(), deadline(Duration::from_secs(10)))
+            .await
+            .unwrap();
+    }
+    let requests = fixture.token_requests();
+    assert_eq!(requests.len(), 2);
+    let decoded = requests
+        .iter()
+        .map(|request| decode_assertion(&fixture, request))
+        .collect::<Vec<_>>();
+    for (header, claims) in &decoded {
+        assert_eq!(header.alg, jsonwebtoken::Algorithm::RS256);
+        assert_eq!(header.kid.as_deref(), Some("key-1"));
+        assert_eq!(header.typ.as_deref(), Some("client-authentication+jwt"));
+        assert_eq!(claims.iss, "client:id");
+        assert_eq!(claims.sub, "client:id");
+        assert_eq!(claims.aud, ASSERTION_AUDIENCE);
+        assert_eq!(claims.exp - claims.iat, 60);
+        assert_eq!(claims.iat, claims.nbf);
+        assert!(!claims.jti.is_empty());
+    }
+    assert_ne!(decoded[0].1.jti, decoded[1].1.jti);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn token_exchange_request_has_expected_form_fields() {
+    let fixture = Fixture::new().await;
+    fixture.token_json("200 OK", &exchange_response("exchanged"));
+    fixture
+        .credentials(&["read"], Some("https://api.example/resource"))
+        .http(fixture.resource_client())
+        .execute(
+            fixture.on_behalf_of_request("subject-token"),
+            deadline(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    let token = fixture.token_requests().pop().unwrap();
+    assert!(token.header("authorization").is_none());
+    let pairs = form_pairs(&token.body);
+    let keys = pairs.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>();
+    assert_eq!(
+        keys,
+        [
+            "grant_type",
+            "subject_token",
+            "subject_token_type",
+            "requested_token_type",
+            "scope",
+            "audience",
+            "client_id",
+            "client_assertion_type",
+            "client_assertion",
+        ]
+    );
+    assert_eq!(form_value(&pairs, "grant_type"), GRANT_TYPE_TOKEN_EXCHANGE);
+    assert_eq!(form_value(&pairs, "subject_token"), "subject-token");
+    assert_eq!(form_value(&pairs, "subject_token_type"), ACCESS_TOKEN_TYPE);
+    assert_eq!(
+        form_value(&pairs, "requested_token_type"),
+        ACCESS_TOKEN_TYPE
+    );
+    assert_eq!(form_value(&pairs, "scope"), "read");
+    assert_eq!(
+        form_value(&pairs, "audience"),
+        "https://api.example/resource"
+    );
+    assert_eq!(form_value(&pairs, "client_id"), "client:id");
+    assert_eq!(
+        form_value(&pairs, "client_assertion_type"),
+        CLIENT_ASSERTION_TYPE
+    );
+    assert!(!form_value(&pairs, "client_assertion").is_empty());
+    assert_eq!(
+        fixture.resource_requests()[0].header("authorization"),
+        Some("Bearer exchanged")
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn exchange_without_the_access_token_issued_type_is_refused() {
+    let fixture = Fixture::new().await;
+    for issued_token_type in [None, Some("urn:ietf:params:oauth:token-type:jwt")] {
+        let mut body = serde_json::json!({
+            "access_token": "x",
+            "token_type": "Bearer",
+            "expires_in": 60,
+        });
+        if let Some(value) = issued_token_type {
+            body["issued_token_type"] = value.into();
+        }
+        fixture.token_json("200 OK", &body);
+        let result = fixture
+            .credentials(&[], None)
+            .http(fixture.resource_client())
+            .execute(
+                fixture.on_behalf_of_request("subject"),
+                deadline(Duration::from_secs(10)),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(Error::Acquisition(AcquisitionError::InvalidResponse))
+        ));
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn an_exchanged_token_is_reused_per_subject_but_not_across_subjects() {
+    let fixture = Fixture::new().await;
+    fixture.token_json("200 OK", &exchange_response("first"));
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    client
+        .execute(
+            fixture.on_behalf_of_request("alice"),
+            deadline(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            fixture.on_behalf_of_request("alice"),
+            deadline(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fixture.token_requests().len(), 1);
+    fixture.token_json("200 OK", &exchange_response("second"));
+    client
+        .execute(
+            fixture.on_behalf_of_request("bob"),
+            deadline(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fixture.token_requests().len(), 2);
+    let authorizations = fixture
+        .resource_requests()
+        .into_iter()
+        .map(|request| request.header("authorization").unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        authorizations,
+        ["Bearer first", "Bearer first", "Bearer second"]
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn a_short_lived_exchanged_token_serves_its_own_request_after_one_exchange() {
+    let fixture = Fixture::new().await;
+    let mut short = exchange_response("short");
+    short["expires_in"] = serde_json::json!(5);
+    fixture.token_json("200 OK", &short);
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    for expected_exchanges in 1..=2 {
+        client
+            .execute(
+                fixture.on_behalf_of_request("alice"),
+                deadline(Duration::from_secs(10)),
+            )
+            .await
+            .unwrap();
+        // Inside its reuse margin, it is never reused, nor fetched twice.
+        assert_eq!(fixture.token_requests().len(), expected_exchanges);
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
+    let fixture = Fixture::new().await;
+    fixture.token_json("200 OK", &exchange_response("shared"));
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    let gate = fixture.block_tokens();
+    let mut leader = Box::pin(client.execute(
+        fixture.on_behalf_of_request("subject"),
+        deadline(Duration::from_secs(10)),
+    ));
+    tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
+    let mut waiter = Box::pin(client.execute(
+        fixture.on_behalf_of_request("subject"),
+        deadline(Duration::from_secs(10)),
+    ));
+    poll_pending(waiter.as_mut()).await;
+    assert_eq!(fixture.token_requests().len(), 1);
+    gate.add_permits(2);
+    let (leader, waiter) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(leader, waiter)
+    })
+    .await
+    .unwrap();
+    leader.unwrap();
+    waiter.unwrap();
+    assert_eq!(fixture.token_requests().len(), 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn a_resource_401_evicts_only_that_subjects_exchanged_token() {
+    let fixture = Fixture::new().await;
+    fixture.token_json("200 OK", &exchange_response("shared"));
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    client
+        .execute(
+            fixture.on_behalf_of_request("alice"),
+            deadline(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            fixture.on_behalf_of_request("bob"),
+            deadline(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fixture.token_requests().len(), 2);
+    fixture.resource_status("401 Unauthorized");
+    client
+        .execute(
+            fixture.on_behalf_of_request("alice"),
+            deadline(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    fixture.resource_status("200 OK");
+    let before = fixture.token_requests().len();
+    client
+        .execute(
+            fixture.on_behalf_of_request("alice"),
+            deadline(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fixture.token_requests().len(), before + 1);
+    client
+        .execute(
+            fixture.on_behalf_of_request("bob"),
+            deadline(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fixture.token_requests().len(), before + 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn a_failed_exchange_is_not_cached() {
+    let fixture = Fixture::new().await;
+    fixture.token_raw(response("500 Internal Server Error", b"{}"));
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    for _ in 0..2 {
+        let result = client
+            .execute(
+                fixture.on_behalf_of_request("subject"),
+                deadline(Duration::from_secs(10)),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(Error::Acquisition(AcquisitionError::Unavailable))
+        ));
+    }
+    assert_eq!(fixture.token_requests().len(), 2);
     fixture.finish().await;
 }
 
@@ -893,19 +1315,20 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
 #[tokio::test]
 async fn caller_authorization_conflict_refuses_before_token_or_resource_io() {
     let fixture = Fixture::new().await;
-    let mut conflicting = fixture.request();
-    conflicting.headers_mut().insert(
-        header::AUTHORIZATION,
-        "Bearer caller-token".parse().unwrap(),
-    );
-    assert!(matches!(
-        fixture
-            .credentials(&[], None)
-            .http(fixture.resource_client())
-            .execute(conflicting, deadline(Duration::from_secs(10)))
-            .await,
-        Err(Error::AuthorizationConflict)
-    ));
+    for mut conflicting in [fixture.request(), fixture.on_behalf_of_request("subject")] {
+        conflicting.headers_mut().insert(
+            header::AUTHORIZATION,
+            "Bearer caller-token".parse().unwrap(),
+        );
+        assert!(matches!(
+            fixture
+                .credentials(&[], None)
+                .http(fixture.resource_client())
+                .execute(conflicting, deadline(Duration::from_secs(10)))
+                .await,
+            Err(Error::AuthorizationConflict)
+        ));
+    }
     assert!(fixture.token_requests().is_empty());
     assert!(fixture.resource_requests().is_empty());
     fixture.finish().await;
@@ -965,7 +1388,7 @@ async fn a_late_401_does_not_evict_a_newer_token() {
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
     );
     credentials
-        .token(Instant::now() + Duration::from_secs(10))
+        .service_token(Instant::now() + Duration::from_secs(10))
         .await
         .unwrap();
 

@@ -621,8 +621,13 @@ mod tests {
                     "billing-service",
                 ),
                 (
-                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_SECRET",
-                    "test-client-secret",
+                    "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+                    "test-private-key",
+                ),
+                ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
+                    "https://identity.example",
                 ),
                 (
                     "APP__INTEGRATIONS__BILLING__OAUTH__SCOPES",
@@ -646,7 +651,10 @@ mod tests {
             "https://identity.example/oauth2/token?tenant=blue"
         );
         assert_eq!(oauth.client_id, "billing-service");
-        assert_eq!(oauth.client_secret.expose_secret(), "test-client-secret");
+        assert_eq!(oauth.private_key.expose_secret(), "test-private-key");
+        assert_eq!(oauth.key_id, "key-1");
+        assert_eq!(oauth.algorithm, crate::OAuthAlgorithm::Rs256);
+        assert_eq!(oauth.assertion_audience, "https://identity.example");
         assert_eq!(oauth.scopes.as_slice(), ["billing.read", "billing.write"]);
         assert_eq!(
             oauth.audience.as_deref(),
@@ -655,7 +663,7 @@ mod tests {
 
         let debug = format!("{cfg:?}");
         for value in [
-            "test-client-secret",
+            "test-private-key",
             "billing.read",
             "https://billing-api.example",
             "identity.example/oauth2/token",
@@ -668,12 +676,152 @@ mod tests {
     }
 
     #[test]
-    fn oauth_secret_in_a_file_is_refused() {
+    fn oauth_default_algorithm_is_rs256() {
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+                    "https://identity.example/token",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
+                    "billing-service",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+                    "test-private-key",
+                ),
+                ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
+                    "https://identity.example",
+                ),
+            ]),
+        )
+        .unwrap();
+        let oauth = cfg
+            .integrations
+            .get("billing")
+            .and_then(|integration| integration.oauth.as_ref())
+            .expect("named OAuth tuple");
+        assert_eq!(oauth.algorithm, crate::OAuthAlgorithm::Rs256);
+    }
+
+    #[test]
+    fn oauth_algorithm_accepts_ps256_and_es256() {
+        for (value, expected) in [
+            ("PS256", crate::OAuthAlgorithm::Ps256),
+            ("ES256", crate::OAuthAlgorithm::Es256),
+        ] {
+            let cfg = load_from(
+                &LoadOptions::default(),
+                BUILD,
+                env(&[
+                    (
+                        "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+                        "https://identity.example/token",
+                    ),
+                    (
+                        "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
+                        "billing-service",
+                    ),
+                    (
+                        "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+                        "test-private-key",
+                    ),
+                    ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
+                    (
+                        "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
+                        "https://identity.example",
+                    ),
+                    ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", value),
+                ]),
+            )
+            .unwrap();
+            let oauth = cfg
+                .integrations
+                .get("billing")
+                .and_then(|integration| integration.oauth.as_ref())
+                .expect("named OAuth tuple");
+            assert_eq!(oauth.algorithm, expected, "algorithm {value}");
+        }
+    }
+
+    #[test]
+    fn oauth_bad_algorithm_fails_without_echoing_the_value() {
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+                    "https://identity.example/token",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
+                    "billing-service",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+                    "test-private-key",
+                ),
+                ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
+                    "https://identity.example",
+                ),
+                ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "HS256"),
+            ]),
+        )
+        .unwrap_err();
+        assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+        let rendered = err.to_string();
+        assert!(
+            rendered
+                .contains("integrations.billing.oauth.algorithm: must be RS256, PS256 or ES256"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("HS256"), "{rendered}");
+    }
+
+    #[test]
+    fn oauth_client_secret_is_refused_as_an_unknown_key() {
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+                    "https://identity.example/token",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
+                    "billing-service",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_SECRET",
+                    "test-client-secret",
+                ),
+            ]),
+        )
+        .unwrap_err();
+        assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+        assert!(
+            err.to_string()
+                .contains("integrations.billing.oauth.client_secret: unknown key"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn oauth_private_key_in_a_file_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let leaked = write(
             &dir,
             "leaked.toml",
-            "[integrations.billing.oauth]\nclient_secret = \"test-client-secret\"\n",
+            "[integrations.billing.oauth]\nprivate_key = \"test-private-key\"\n",
         );
         let err = load_from(
             &LoadOptions {
@@ -685,7 +833,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(&err, Error::SecretInFile { key, .. } if key == "integrations.billing.oauth.client_secret"),
+            matches!(&err, Error::SecretInFile { key, .. } if key == "integrations.billing.oauth.private_key"),
             "{err}"
         );
     }
@@ -704,10 +852,17 @@ mod tests {
                 ..LoadOptions::default()
             },
             BUILD,
-            env(&[(
-                "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_SECRET",
-                "test-client-secret",
-            )]),
+            env(&[
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+                    "test-private-key",
+                ),
+                ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
+                    "https://identity.example",
+                ),
+            ]),
         )
         .unwrap_err();
         assert!(
@@ -741,10 +896,17 @@ mod tests {
                 ..LoadOptions::default()
             },
             BUILD,
-            env(&[(
-                "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_SECRET",
-                "test-client-secret",
-            )]),
+            env(&[
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+                    "test-private-key",
+                ),
+                ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
+                    "https://identity.example",
+                ),
+            ]),
         )
         .unwrap_err();
         assert!(matches!(&err, Error::Deserialize(_)), "{err}");
@@ -780,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_scope_presence_and_userinfo_validation_stays_private() {
+    fn oauth_scope_presence_and_client_id_validation_stays_private() {
         let dir = tempfile::tempdir().unwrap();
         let invalid_scope = write(
             &dir,
@@ -793,10 +955,17 @@ mod tests {
                 ..LoadOptions::default()
             },
             BUILD,
-            env(&[(
-                "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_SECRET",
-                "test-client-secret",
-            )]),
+            env(&[
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+                    "test-private-key",
+                ),
+                ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
+                    "https://identity.example",
+                ),
+            ]),
         )
         .unwrap_err();
         assert!(
@@ -818,7 +987,82 @@ mod tests {
             matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.client_id" && error.message == "cannot be empty"),
             "{err}"
         );
+    }
 
+    #[test]
+    fn oauth_blank_new_required_keys_are_refused() {
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+                    "https://identity.example/token",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
+                    "billing-service",
+                ),
+            ]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.private_key" && error.message == "cannot be empty"),
+            "{err}"
+        );
+
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+                    "https://identity.example/token",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
+                    "billing-service",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+                    "test-private-key",
+                ),
+            ]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.key_id" && error.message == "cannot be empty"),
+            "{err}"
+        );
+
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+                    "https://identity.example/token",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
+                    "billing-service",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+                    "test-private-key",
+                ),
+                ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
+            ]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.assertion_audience" && error.message == "cannot be empty"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn oauth_userinfo_validation_stays_private() {
         let err = load_from(
             &LoadOptions::default(),
             BUILD,
@@ -832,8 +1076,13 @@ mod tests {
                     "billing-service",
                 ),
                 (
-                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_SECRET",
-                    "test-client-secret",
+                    "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+                    "test-private-key",
+                ),
+                ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
+                    "https://identity.example",
                 ),
             ]),
         )

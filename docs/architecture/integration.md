@@ -141,9 +141,13 @@ startup call.
 <!-- template:begin outbound-auth:docs-integration-outbound-auth -->
 An integration that needs OAuth2 client credentials composes its named immutable
 configuration into `infra-oauth2-client-credentials` and binds it to its
-existing bounded resource client. The adapter alone holds credentials; feature
-code receives its existing provider port, never a token or generic token source.
-The token endpoint is fixed operator input and uses the same trusted HTTPS
+existing bounded resource client. The adapter authenticates to the
+authorization server only with a private-key client assertion, never a
+shared secret; it alone holds the key. Feature code receives its existing
+provider port, never a token or generic token source. Attaching `OnBehalfOf`
+to a request's extensions selects RFC 8693 token exchange instead of the
+service's own token, for calls made on behalf of a verified user. The token
+endpoint is fixed operator input and uses the same trusted HTTPS
 transport boundary. Selection adds neither a provider registration nor live
 provider certification.
 <!-- template:end outbound-auth:docs-integration-outbound-auth -->

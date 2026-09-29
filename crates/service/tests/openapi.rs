@@ -56,9 +56,10 @@ fn is_public(document: &Value, operation: &Value) -> bool {
     effective_security(document, operation).is_empty()
 }
 
-/// Every alternative is exactly one `http`/`bearer` scheme without scopes.
-/// An anonymous alternative, a scope, an unknown scheme, another scheme
-/// type, or an AND-combination is not the wired bearer path.
+/// Every alternative is exactly one `http`/`bearer` scheme, with a scope list
+/// of strings (possibly empty). An anonymous alternative, an unknown scheme,
+/// another scheme type, a non-string scope, or an AND-combination is not the
+/// wired bearer path.
 fn uses_bearer_only(document: &Value, operation: &Value) -> bool {
     let requirements = effective_security(document, operation);
     if requirements.is_empty() {
@@ -73,7 +74,9 @@ fn uses_bearer_only(document: &Value, operation: &Value) -> bool {
         }
         requirement.iter().all(|(name, scopes)| {
             let scheme = &document["components"]["securitySchemes"][name];
-            scopes.as_array().is_some_and(Vec::is_empty)
+            scopes
+                .as_array()
+                .is_some_and(|scopes| scopes.iter().all(Value::is_string))
                 && scheme["type"]
                     .as_str()
                     .is_some_and(|t| t.eq_ignore_ascii_case("http"))
@@ -348,14 +351,15 @@ fn declares_idempotency_key(operation: &Value) -> bool {
 // template:end http-idempotency:service-openapi-http-idempotency-contract
 
 /// The classifier fails closed on every alternative that is not exactly the
-/// wired bearer scheme, so a protected operation cannot slip through with
-/// an anonymous or unsupported path.
+/// wired bearer scheme with a scope array, so a protected operation cannot
+/// slip through with an anonymous or unsupported path.
 #[rstest::rstest]
 #[case::inherited_bearer(&json!({}), false, true)]
 #[case::explicit_bearer(&json!({"security": [{"bearerAuth": []}]}), false, true)]
 #[case::explicit_public(&json!({"security": []}), true, false)]
 #[case::anonymous_alternative(&json!({"security": [{"bearerAuth": []}, {}]}), false, false)]
-#[case::unauthorized_scopes(&json!({"security": [{"bearerAuth": ["admin"]}]}), false, false)]
+#[case::scoped_bearer(&json!({"security": [{"bearerAuth": ["admin"]}]}), false, true)]
+#[case::non_string_scope(&json!({"security": [{"bearerAuth": [1]}]}), false, false)]
 #[case::unknown_scheme(&json!({"security": [{"missingAuth": []}]}), false, false)]
 #[case::unsupported_alternative(&json!({"security": [{"apiKeyAuth": []}]}), false, false)]
 #[case::unsupported_and_requirement(

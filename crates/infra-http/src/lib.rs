@@ -34,7 +34,7 @@ pub use harden::{
     HardenOptions, SHED_REQUESTS_METRIC, harden,
 };
 // template:begin authn:infra-http-authn-exports
-pub use authn::{VerifiedPrincipal, require_scope};
+pub use authn::VerifiedPrincipal;
 // template:end authn:infra-http-authn-exports
 // template:begin request-budget:infra-http-request-deadline-export
 pub use harden::RequestDeadline;

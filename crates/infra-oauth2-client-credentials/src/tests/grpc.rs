@@ -28,7 +28,10 @@ use tokio::{
 use tonic::{Code, Request, Response, Status, body::Body};
 use tower::service_fn;
 
+use secrecy::SecretString;
+
 use super::{Credentials, Fixture};
+use crate::OnBehalfOf;
 
 #[derive(Clone)]
 struct Peer {
@@ -519,7 +522,7 @@ async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
     );
     credentials
-        .token(Instant::now() + Duration::from_secs(10))
+        .service_token(Instant::now() + Duration::from_secs(10))
         .await
         .unwrap();
     resource.release();
@@ -586,6 +589,28 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
         );
         assert_eq!(resource.calls(), before_calls + 2);
     }
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
+async fn on_behalf_of_dispatches_the_exchanged_token_instead_of_the_service_token() {
+    let tokens = Fixture::new().await;
+    tokens.token_json("200 OK", &super::exchange_response("exchanged-token"));
+    let resource = Resource::new().await;
+    let credentials = tokens.credentials(&[], None);
+    let mut request = rpc(
+        UnaryRequest {
+            message: "one".to_owned(),
+        },
+        Duration::from_secs(10),
+    );
+    request
+        .extensions_mut()
+        .insert(OnBehalfOf::new(SecretString::from("subject-token")));
+    resource.client(&credentials).unary(request).await.unwrap();
+    assert_eq!(resource.authorizations(), ["Bearer exchanged-token"]);
+    assert_eq!(tokens.token_requests().len(), 1);
     resource.finish().await;
     tokens.finish().await;
 }

@@ -1,5 +1,7 @@
 //! Final contract-driven inbound bearer authentication.
 
+use std::sync::Arc;
+
 use axum::Router;
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
@@ -9,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use infra_bearerauthn::{Failure, Principal, Verifier};
 use utoipa_axum::router::OpenApiRouter;
 
-use crate::contract::{FinalizeError, Policy};
+use crate::contract::{Access, FinalizeError, Policy};
 use crate::problem::{Code, Problem, SANITIZED_DETAIL};
 
 const AUTHENTICATION_REQUIRED_DETAIL: &str = "bearer authentication is required";
@@ -66,6 +68,19 @@ impl VerifiedPrincipal {
     pub fn expires_at(&self) -> u64 {
         self.0.expires_at()
     }
+
+    /// The verified bearer token, only as the subject of an RFC 8693 token
+    /// exchange; never forward it as an outbound `Authorization` header.
+    #[must_use]
+    pub fn access_token(&self) -> &secrecy::SecretString {
+        self.0.access_token()
+    }
+
+    /// The current RFC 8693 actor, when the verified evidence names one.
+    #[must_use]
+    pub fn actor(&self) -> Option<&infra_bearerauthn::Actor> {
+        self.0.actor()
+    }
 }
 
 impl<S> FromRequestParts<S> for VerifiedPrincipal
@@ -91,34 +106,6 @@ where
                 }),
         )
     }
-}
-
-/// Require one scope without adding route-policy or role machinery.
-///
-/// The named scope is application policy, never inbound request data. A
-/// verified principal missing it receives the standard insufficient-scope
-/// challenge and the closed 403 Problem.
-///
-/// # Errors
-///
-/// Returns the ready HTTP 403 response when the verified principal lacks the
-/// required scope.
-#[expect(
-    clippy::result_large_err,
-    reason = "the HTTP helper returns the ready denial response without an extra allocation or error conversion"
-)]
-pub fn require_scope(principal: &VerifiedPrincipal, required: &str) -> Result<(), Response> {
-    if principal.scopes().iter().any(|scope| scope == required) {
-        return Ok(());
-    }
-    let mut response = Problem::new(Code::Forbidden)
-        .detail(INSUFFICIENT_SCOPE_DETAIL)
-        .into_response();
-    response.headers_mut().insert(
-        WWW_AUTHENTICATE,
-        axum::http::HeaderValue::from_static("Bearer error=\"insufficient_scope\""),
-    );
-    Err(response)
 }
 
 /// Consume an assembled contract, validate its effective security policy, and
@@ -163,26 +150,58 @@ async fn authenticate(
     let Some(path) = crate::contract::contract_path(request.extensions()) else {
         return wiring_failure();
     };
-    match state.policy.public(path, request.method()) {
-        Some(true) => next.run(request).await,
+    match state.policy.access(path, request.method()).cloned() {
+        Some(Access::Public) => next.run(request).await,
         None => wiring_failure(),
-        Some(false) => authenticate_protected(state, request, next).await,
+        Some(Access::Protected(alternatives)) => {
+            authenticate_protected(state.verifier, alternatives, request, next).await
+        }
     }
 }
 
-async fn authenticate_protected(state: AuthState, mut request: Request, next: Next) -> Response {
+async fn authenticate_protected(
+    verifier: Verifier,
+    alternatives: Arc<[Box<[String]>]>,
+    mut request: Request,
+    next: Next,
+) -> Response {
     let authorization = request
         .headers()
         .get_all(AUTHORIZATION)
         .iter()
         .map(axum::http::HeaderValue::as_bytes);
-    let principal = match state.verifier.authenticate(authorization, "http").await {
+    let principal = match verifier.authenticate(authorization, "http").await {
         Ok(principal) => principal,
         Err(failure) => return failure_response(failure),
     };
+    if !grants_any(&alternatives, &principal) {
+        return insufficient_scope_response();
+    }
     request.headers_mut().remove(AUTHORIZATION);
     request.extensions_mut().insert(principal);
     next.run(request).await
+}
+
+/// At least one alternative's scopes must all be present in the sorted,
+/// deduplicated `principal.scopes()`; an alternative with no scopes is any
+/// authenticated caller.
+fn grants_any(alternatives: &[Box<[String]>], principal: &Principal) -> bool {
+    alternatives.iter().any(|scopes| {
+        scopes
+            .iter()
+            .all(|scope| principal.scopes().binary_search(scope).is_ok())
+    })
+}
+
+fn insufficient_scope_response() -> Response {
+    let mut response = Problem::new(Code::Forbidden)
+        .detail(INSUFFICIENT_SCOPE_DETAIL)
+        .into_response();
+    response.headers_mut().insert(
+        WWW_AUTHENTICATE,
+        axum::http::HeaderValue::from_static("Bearer error=\"insufficient_scope\""),
+    );
+    response
 }
 
 fn wiring_failure() -> Response {
