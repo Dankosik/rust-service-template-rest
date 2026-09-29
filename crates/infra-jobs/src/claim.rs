@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::FromRow;
+use sqlx::postgres::{PgListener, PgPool, PgPoolOptions};
 use tokio::sync::{OwnedSemaphorePermit, SemaphorePermit};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -135,10 +136,23 @@ pub(crate) async fn run_claim_loop(shared: Arc<Shared>, stop: CancellationToken)
     let _close = CloseTracker(&shared.attempt_tracker);
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut wait_for_tick = true;
+    let mut next = Next::Idle;
+    let mut last_claim = Instant::now();
     loop {
-        if wait_for_tick && !await_tick(&stop, &mut ticker).await {
-            return;
+        match next {
+            Next::Now => {}
+            Next::Soon => {
+                if !cooldown(&stop, last_claim).await {
+                    return;
+                }
+            }
+            Next::Idle => {
+                if !await_tick(&shared, &stop, &mut ticker).await
+                    || !cooldown(&stop, last_claim).await
+                {
+                    return;
+                }
+            }
         }
         let Some(mut slots) = take_slots(&shared, &stop).await else {
             return;
@@ -150,9 +164,32 @@ pub(crate) async fn run_claim_loop(shared: Arc<Shared>, stop: CancellationToken)
         if stop.is_cancelled() {
             return;
         }
+        last_claim = Instant::now();
         let round = send_claim(&shared, as_i64(requested)).await;
-        wait_for_tick = finish_round(&shared, &mut slots, requested, round);
+        next = finish_round(&shared, &mut slots, requested, round);
         drop(permit);
+    }
+}
+
+/// When the claim loop sends its next claim.
+#[derive(Clone, Copy)]
+enum Next {
+    /// The last round filled every free slot: more work is likely due.
+    Now,
+    /// The last round found work: poll again after the cooldown.
+    Soon,
+    /// The last round found nothing: wait for a wake or the poll tick.
+    Idle,
+}
+
+/// The shortest gap between the starts of two claims that do not follow a full round.
+const CLAIM_COOLDOWN: Duration = Duration::from_millis(25);
+
+async fn cooldown(stop: &CancellationToken, last_claim: Instant) -> bool {
+    tokio::select! {
+        biased;
+        () = stop.cancelled() => false,
+        () = tokio::time::sleep_until(last_claim + CLAIM_COOLDOWN) => true,
     }
 }
 
@@ -164,14 +201,72 @@ impl Drop for CloseTracker<'_> {
     }
 }
 
-async fn await_tick(stop: &CancellationToken, ticker: &mut tokio::time::Interval) -> bool {
+async fn await_tick(
+    shared: &Shared,
+    stop: &CancellationToken,
+    ticker: &mut tokio::time::Interval,
+) -> bool {
     tokio::select! {
         biased;
         () = stop.cancelled() => return false,
+        () = shared.wake.notified() => ticker.reset(),
         _ = ticker.tick() => {}
     }
     !stop.is_cancelled()
 }
+
+/// Wake the claim loop when enqueue commits a due job of a registered kind.
+///
+/// The listener holds one connection of its own, outside the engine pool,
+/// opened with the pool's connect options. Polling stays the recovery path:
+/// a lost connection or notification only delays a claim until the next tick.
+pub(crate) async fn run_listener(shared: Arc<Shared>, cancel: CancellationToken) {
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .connect_lazy_with(shared.pool.connect_options().as_ref().clone());
+    let _ = Box::pin(cancel.run_until_cancelled(listen(&shared, &pool))).await;
+    pool.close().await;
+}
+
+async fn listen(shared: &Shared, pool: &PgPool) {
+    loop {
+        match subscribe(pool).await {
+            Ok(mut listener) => {
+                observe_recovery(shared, Operation::Listen);
+                // Anything committed while no listener was attached is due now.
+                shared.wake.notify_one();
+                loop {
+                    match listener.try_recv().await {
+                        Ok(Some(notification)) => {
+                            if shared.registry.get(notification.payload()).is_some() {
+                                shared.wake.notify_one();
+                            }
+                        }
+                        // Reconnected after a lost connection.
+                        Ok(None) => shared.wake.notify_one(),
+                        Err(error) => {
+                            observe_failure(shared, Operation::Listen, &error.into());
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(error) => observe_failure(shared, Operation::Listen, &error.into()),
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn subscribe(pool: &PgPool) -> Result<PgListener, sqlx::Error> {
+    let mut listener = PgListener::connect_with(pool).await?;
+    listener.listen(WAKE_CHANNEL).await?;
+    Ok(listener)
+}
+
+/// The channel enqueue notifies with the kind name of a job due at once.
+pub(crate) const WAKE_CHANNEL: &str = "background_jobs";
 
 async fn take_slots(shared: &Shared, stop: &CancellationToken) -> Option<OwnedSemaphorePermit> {
     let one = tokio::select! {
@@ -265,17 +360,23 @@ fn finish_round(
     slots: &mut OwnedSemaphorePermit,
     requested: usize,
     round: ClaimRound,
-) -> bool {
+) -> Next {
     match round {
         ClaimRound::Known { sent, rows } => {
             observe_recovery(shared, Operation::Claim);
-            let filled = rows.len() == requested;
+            let next = if rows.len() == requested {
+                Next::Now
+            } else if rows.is_empty() {
+                Next::Idle
+            } else {
+                Next::Soon
+            };
             dispatch_known(shared, slots, rows, sent);
-            !filled
+            next
         }
         ClaimRound::Failed(error) => {
             observe_failure(shared, Operation::Claim, &error);
-            true
+            Next::Idle
         }
     }
 }
@@ -322,7 +423,11 @@ fn dispatch_known(
                     trace_state,
                     slot,
                 };
-                metrics::histogram!(QUEUE_WAIT_METRIC, "kind" => kind).record(queue_wait.max(0.0));
+                match crate::attempt::kind_metrics(shared, kind) {
+                    Some(handles) => handles.queue_wait.record(queue_wait.max(0.0)),
+                    None => metrics::histogram!(QUEUE_WAIT_METRIC, "kind" => kind)
+                        .record(queue_wait.max(0.0)),
+                }
                 shared.attempt_tracker.spawn(attempt::supervise(
                     Arc::clone(shared),
                     claimed,

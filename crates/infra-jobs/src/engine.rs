@@ -137,6 +137,8 @@ impl Engine {
                 counters: Counters::default(),
                 attempt_tracker: TaskTracker::new(),
                 failing: Failing::new(),
+                completions: crate::attempt::Completions::default(),
+                wake: tokio::sync::Notify::new(),
             }),
         }
     }
@@ -168,6 +170,11 @@ impl Engine {
     #[must_use]
     pub fn start(&self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
         crate::attempt::describe_metrics();
+        for registered in self.shared.registry.iter() {
+            let _ = registered
+                .metrics
+                .set(crate::attempt::KindMetrics::new(registered.name));
+        }
         claim::describe_metrics();
         maintenance::init_metrics(&self.shared);
         metrics::describe_counter!(
@@ -188,6 +195,10 @@ impl Engine {
         tracker.spawn(maintenance::run_retention(
             Arc::clone(&self.shared),
             retention_cancel,
+        ));
+        tracker.spawn(claim::run_listener(
+            Arc::clone(&self.shared),
+            cancel.child_token(),
         ));
         let sample_cancel = cancel.child_token();
         tracker.spawn(maintenance::run_sampling(
@@ -324,6 +335,9 @@ pub(crate) struct Shared {
     pub(crate) counters: Counters,
     pub(crate) attempt_tracker: TaskTracker,
     pub(crate) failing: Failing,
+    pub(crate) completions: crate::attempt::Completions,
+    /// Set when a due job of a registered kind was committed.
+    pub(crate) wake: tokio::sync::Notify,
 }
 
 impl fmt::Debug for Shared {
@@ -352,6 +366,7 @@ pub(crate) enum Operation {
     Release,
     Retention,
     Sample,
+    Listen,
 }
 
 impl Operation {
@@ -363,6 +378,7 @@ impl Operation {
             Self::Release => "release",
             Self::Retention => "retention",
             Self::Sample => "sample",
+            Self::Listen => "listen",
         }
     }
 }
@@ -374,6 +390,7 @@ pub(crate) struct Failing {
     release: AtomicBool,
     retention: AtomicBool,
     sample: AtomicBool,
+    listen: AtomicBool,
 }
 
 impl Failing {
@@ -384,6 +401,7 @@ impl Failing {
             release: AtomicBool::new(false),
             retention: AtomicBool::new(false),
             sample: AtomicBool::new(false),
+            listen: AtomicBool::new(false),
         }
     }
 
@@ -394,6 +412,7 @@ impl Failing {
             Operation::Release => &self.release,
             Operation::Retention => &self.retention,
             Operation::Sample => &self.sample,
+            Operation::Listen => &self.listen,
         }
     }
 }
