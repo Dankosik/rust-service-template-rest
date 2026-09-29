@@ -178,8 +178,9 @@ struct ActiveClaims<'a> {
 // template:end oidc-introspection:authn-claims-introspection-envelope
 
 // template:begin oidc-jwt:authn-claims-jwt-validation
-/// Validates a verified JWT payload: registered claims in RFC 7519 order,
-/// then identity and the selected token profile.
+/// Validates a payload after signature verification. Required registered claims
+/// precede lifetime, issuer, and audience checks, preserving jsonwebtoken's order;
+/// identity, the selected token profile, and scopes follow.
 pub(crate) fn validate_jwt_claims(
     payload: Vec<u8>,
     policy: &ClaimPolicy,
@@ -197,7 +198,9 @@ pub(crate) fn validate_jwt_claims(
     };
     check_registered_claims(&issuer, &audience, expiry, claims.nbf, policy, now)?;
     let subject = non_empty(claims.sub);
-    let has_client_id = claims
+    // Resource-server identity accepts aliases; RFC 9068 requires `client_id`
+    // itself. Remember its presence before moving the alias fields below.
+    let has_standard_client_id = claims
         .client_id
         .as_ref()
         .is_some_and(|value| !value.is_empty());
@@ -211,7 +214,7 @@ pub(crate) fn validate_jwt_claims(
         let (Some(iat), Some(_), Some(()), Some(_)) = (
             claims.iat,
             &subject,
-            has_client_id.then_some(()),
+            has_standard_client_id.then_some(()),
             non_empty(claims.jti),
         ) else {
             return Err(VerificationError::invalid(VerificationReason::MissingClaim));
@@ -305,6 +308,8 @@ pub(crate) fn validate_introspection_claims(
     let payload = std::str::from_utf8(bytes)
         .map_err(|_| malformed())?
         .trim_matches([' ', '\t', '\r', '\n']);
+    // Decode active claims separately so an inactive response may omit them or
+    // give them other shapes; unreadable active evidence is unavailable trust.
     let envelope: Envelope = serde_json::from_str(payload).map_err(|_| malformed())?;
     if !envelope.active {
         return Err(invalid(VerificationReason::Inactive));

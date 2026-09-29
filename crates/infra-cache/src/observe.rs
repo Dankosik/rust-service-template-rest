@@ -25,6 +25,7 @@ pub(crate) enum Operation {
 }
 
 impl Operation {
+    // Keep in sync with the variants: their dense discriminants index Histograms.
     const COUNT: usize = 3;
 
     /// The `operation` metric label.
@@ -58,6 +59,7 @@ pub(crate) enum Outcome {
 }
 
 impl Outcome {
+    // Keep in sync with the variants: their dense discriminants index Histograms.
     const COUNT: usize = 6;
 
     fn label(self) -> &'static str {
@@ -88,6 +90,8 @@ impl std::fmt::Debug for Histograms {
 
 impl Histograms {
     fn get(&self, namespace: &'static str, operation: Operation, outcome: Outcome) -> &Histogram {
+        // Each operation occupies one row of Outcome::COUNT handles. The enums
+        // must keep contiguous discriminants starting at zero for this indexing.
         self.0[operation as usize * Outcome::COUNT + outcome as usize].get_or_init(|| {
             metrics::histogram!(
                 OPERATION_DURATION_METRIC,

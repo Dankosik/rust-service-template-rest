@@ -62,13 +62,15 @@ impl Verifier {
         authorization: impl IntoIterator<Item = &'a [u8]>,
         transport: &'static str,
     ) -> Result<Principal, Failure> {
-        let mut outcome = Outcome::new(transport);
+        let mut outcome = OutcomeGuard::new(transport);
         let result = match parse_bearer(authorization) {
             Ok(token) => self.verify(&token).await,
             Err(failure) => Err(failure),
         };
         match (&result, self.counters.transport.get(transport)) {
             (Ok(_), Some(success)) => {
+                // Known transports use a prepared handle, avoiding a registry
+                // lookup. Disarm the guard so drop does not also count cancellation.
                 success.increment(1);
                 outcome.recorded = true;
             }
@@ -79,12 +81,12 @@ impl Verifier {
 }
 
 /// Records `cancelled` on drop unless an outcome was recorded.
-struct Outcome {
+struct OutcomeGuard {
     transport: &'static str,
     recorded: bool,
 }
 
-impl Outcome {
+impl OutcomeGuard {
     fn new(transport: &'static str) -> Self {
         DESCRIBE.call_once(|| {
             metrics::describe_counter!(
@@ -112,7 +114,7 @@ impl Outcome {
     }
 }
 
-impl Drop for Outcome {
+impl Drop for OutcomeGuard {
     fn drop(&mut self) {
         if !self.recorded {
             self.count("cancelled", "cancelled");
