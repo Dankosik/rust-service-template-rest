@@ -146,6 +146,8 @@ Fixed listener options, shared with HTTP except for the values below:
   listener does not set its own, and hyper does not treat that number as stable.
 - Tonic's default 4 MiB decode limit on business RPCs and health. The
   transport sets no encode cap.
+- 2 KiB initial codec buffers per call, from `grpc_contracts::codec`,
+  instead of tonic's 8 KiB. Larger messages grow the buffer.
 
 ## Handler validation
 
