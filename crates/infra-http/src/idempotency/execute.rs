@@ -182,6 +182,8 @@ pub(super) enum Rollback {
 struct Answer {
     response: Response,
     outcome: Outcome,
+    // Only Problems synthesized by this boundary yield to the outer timeout.
+    // A handler's non-2xx response, even a Problem, follows the computed path.
     yield_to_request_timeout: bool,
 }
 

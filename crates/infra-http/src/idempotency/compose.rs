@@ -267,6 +267,9 @@ fn unreadable_body() -> Response {
 }
 
 fn normalize_response(mut response: Response, operation: &str) -> Response {
+    // Seal replay metadata after the handler returns. Neither a supplied header
+    // nor a 2xx status proves replay: a success must carry execute's private
+    // provenance.
     let provenance = response.extensions_mut().remove::<Provenance>();
     response.headers_mut().remove(REPLAYED_HEADER);
     if !response.status().is_success() {
