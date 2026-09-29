@@ -230,7 +230,14 @@ print_stderr = "warn"
 module_name_repetitions = "allow"
 
 [profile.release]
-# Matches the Go template's stripped release binary. LTO and codegen-unit
-# choices wait for the delivery stage, where image size and build time are
-# measured rather than assumed.
+# Stripped like the Go template's release binary. Fat LTO over one codegen
+# unit, measured on a dedicated 4-vCPU host with the service's contract
+# fixtures: 24-48% less CPU per request (PostgreSQL read and write, plain,
+# JSON) and a 32% smaller binary. Two builds with the default 16 units
+# differed by 20% on the same code, so one unit also makes release
+# performance reproducible. The cost is build time: a clean service build
+# goes from 260 to 340 s and the image's three binaries from 286 to 489 s
+# after a source change. Thin LTO kept about half the gain for +124 s.
+lto = "fat"
+codegen-units = 1
 strip = true

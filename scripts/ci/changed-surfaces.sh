@@ -241,8 +241,11 @@ classify() {
 		case "${file}" in
 		tools/versions.env | scripts/ci/tools-check.sh | build/docker/Dockerfile) mark tool_manifest ;;
 		esac
+		# Only the image build compiles the root manifest's release profile
+		# (tests use the dev profile), and its workspace dependency table is
+		# the shipped dependency set Trivy scans.
 		case "${file}" in
-		.dockerignore | build/docker/* | scripts/ci/runtime-image-*.sh) mark runtime_image ;;
+		.dockerignore | build/docker/* | scripts/ci/runtime-image-*.sh | Cargo.toml) mark runtime_image ;;
 		esac
 		case "${file}" in
 		.github/workflows/* | .github/actions/*) mark github_workflows ;;
@@ -522,7 +525,7 @@ EOF
 		"rust_source" \
 		"cargo_dependencies lint_config documentation"
 	assert_case Cargo.toml \
-		"cargo_dependencies lint_config module_initializer initializer_runtime" \
+		"cargo_dependencies lint_config module_initializer initializer_runtime runtime_image" \
 		"rust_source dependency_policy documentation"
 	assert_case Cargo.lock \
 		"cargo_dependencies" \
@@ -697,7 +700,7 @@ EOF
 	done
 
 	output="$(printf '%s\n' Cargo.toml | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
-	has_line "${output}" 'surface_count=4'
+	has_line "${output}" 'surface_count=5'
 	output="$(printf '%s\n' LICENSE | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
 	has_line "${output}" 'surface_count=0'
 	has_line "${output}" 'classified=true'

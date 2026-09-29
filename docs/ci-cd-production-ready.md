@@ -28,7 +28,7 @@ version) and starts only the jobs its surfaces select:
 | `security` | manifests, `deny.toml`, workflows; tool manifest and image on pull requests | cargo-deny (advisories, licenses, bans, sources); Dependency Review, fail on high, pull requests only; zizmor with the online audits |
 | `secrets` | every event except a schedule without a policy change | Gitleaks over the commits since the base; the whole history on tags, manual runs, and a push without a readable base |
 | `delivery` | shell, workflows, tool manifest, image, publication metadata | actionlint; ShellCheck over the changed scripts; `tools-check`; BuildKit Dockerfile checks; the publication metadata self-test |
-| `image` | Docker/image sources and any selected profile image path | one local-default image: cached build, hardened lifecycle asserting `app.commit`, and Trivy for image changes; retained profile details below |
+| `image` | Docker/image sources, the root `Cargo.toml` (release profile and workspace dependencies), and any selected profile image path | one local-default image: cached build, hardened lifecycle asserting `app.commit`, and Trivy for image changes; retained profile details below |
 | `docs` | any `*.md`, `docs/`, `specs/` | every relative link and `#fragment` resolves (lychee, offline, pinned container); no toolchain |
 <!-- template:begin grpc:docs-ci-grpc-gates -->
 | `grpc` | schema, generated contracts, generator, Buf configuration | Buf format/lint, repeat deterministic generation, committed drift and FILE compatibility against the actual PR base |
@@ -277,7 +277,10 @@ that stage owns); the switch is two `--target` lines and the base digest.
 Builder and runtime share one Debian release because a trixie-built binary
 does not start on `cc-debian12`. `cargo-chef` cooks the dependency layer as
 a plain layer because BuildKit does not export `RUN --mount=type=cache` to
-`type=gha`; a source-only change rebuilds in about ten seconds.
+`type=gha`; a source-only change rebuilds only the workspace crates, which with
+the fat-LTO release profile took 489 s for the service, `/migrate`, and
+`/jobs-worker` on a 4-vCPU host (286 s without LTO); see the profile comment in
+`Cargo.toml`.
 `rust-toolchain.toml` stays out of the context because rustup would download
 `clippy` and `rustfmt` in every stage (*verified*). Two `--no-cache` builds
 produced byte-identical binaries (`CARGO_INCREMENTAL=0`, fixed `/src`,
