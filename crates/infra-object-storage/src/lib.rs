@@ -108,6 +108,7 @@ struct Inner {
     expected_bucket_owner: Option<String>,
     checksum: UploadChecksum,
     max_object_bytes: u64,
+    operation_timeout: Duration,
     admission: Arc<Semaphore>,
     histograms: Arc<Histograms>,
 }
@@ -320,6 +321,7 @@ impl ObjectStorage {
                 expected_bucket_owner: admitted.expected_bucket_owner,
                 checksum: admitted.checksum,
                 max_object_bytes,
+                operation_timeout,
                 admission: Arc::new(Semaphore::new(max_concurrency)),
                 histograms: Arc::default(),
             }),
@@ -352,13 +354,24 @@ impl ObjectStorage {
         }
         let _permit = self.admit(&mut guard)?;
         // hyper never polls a body declared empty, so the length check in
-        // the body cannot see extra bytes: read it here instead.
+        // the body cannot see extra bytes: read it here, under the same
+        // bound as a call, before anything is sent.
         let mut body = body;
         if !body.in_memory && body.len == 0 {
-            if body.stream.next().await.is_some() {
-                return Err(guard.fail(ObjectStorageError::Rejected, "body_length"));
+            let first =
+                tokio::time::timeout(self.inner.operation_timeout, body.stream.next()).await;
+            let length_mismatch = body
+                .mismatch
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire));
+            match first {
+                Err(_elapsed) => return Err(guard.fail(ObjectStorageError::Unavailable, "timeout")),
+                Ok(Some(_)) if length_mismatch => {
+                    return Err(guard.fail(ObjectStorageError::Rejected, "body_length"));
+                }
+                Ok(Some(_)) => return Err(guard.fail(ObjectStorageError::Rejected, "body")),
+                Ok(None) => body = PutBody::from(Bytes::new()),
             }
-            body = PutBody::from(Bytes::new());
         }
         let checksum = match (self.inner.checksum, body.in_memory) {
             (UploadChecksum::Always, _) | (UploadChecksum::BytesOnly, true) => {

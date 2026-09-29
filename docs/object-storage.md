@@ -111,7 +111,10 @@ let body = storage.get(&key).await?.bytes().await?;
 `put` takes `Bytes` (or `Vec<u8>`) directly. A stream uses
 `PutBody::stream(len, body)` with any `http_body::Body<Data = Bytes>`; a body
 that yields more or fewer than `len` bytes fails the put with `Rejected`
-instead of storing a truncated object. A `Download` can be read chunk by chunk
+instead of storing a truncated object. To check the length exactly, the frame
+that completes it is sent only once the stream has ended, so a stream that
+delivers its last byte but ends late delays the upload (and fails through the
+5 s stall bound or `operation_timeout`). A `Download` can be read chunk by chunk
 with `next_chunk()`, for example to stream it into an HTTP response; after a
 failure every later call returns the same error, so a cut body never reads as
 a clean end.
