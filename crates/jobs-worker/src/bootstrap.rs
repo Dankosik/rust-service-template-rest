@@ -605,11 +605,7 @@ fn register_capabilities(
 }
 
 fn spawn_metrics_tasks(metrics: &Metrics, cancel: &CancellationToken, tracker: &TaskTracker) {
-    tracker.spawn(
-        metrics
-            .clone()
-            .upkeep(METRICS_MAINTENANCE_INTERVAL, cancel.child_token()),
-    );
+    tracker.spawn(metrics.clone().upkeep(cancel.child_token()));
     tracker.spawn(runtime_metrics(
         METRICS_MAINTENANCE_INTERVAL,
         cancel.child_token(),

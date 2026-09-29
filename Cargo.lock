@@ -2189,7 +2189,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
- "json-subscriber",
+ "humantime",
  "metrics",
  "metrics-exporter-prometheus",
  "metrics-process",
@@ -2198,6 +2198,8 @@ dependencies = [
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
  "secrecy",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tokio-metrics",
@@ -2522,22 +2524,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
-]
-
-[[package]]
-name = "json-subscriber"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1a3442048fd2d18bf39b182881bea8de640062f86cbacf6d949478af61651d6"
-dependencies = [
- "serde",
- "serde_json",
- "tracing",
- "tracing-core",
- "tracing-log",
- "tracing-serde",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -5130,16 +5116,6 @@ dependencies = [
  "opentelemetry-semantic-conventions",
  "tracing",
  "tracing-opentelemetry",
-]
-
-[[package]]
-name = "tracing-serde"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
-dependencies = [
- "serde",
- "tracing-core",
 ]
 
 [[package]]
