@@ -402,17 +402,21 @@ async fn channel(address: &str, certificate: String) -> Result<Channel, tonic::S
         .map_err(|_| tonic::Status::unavailable("client connect failed"))
 }
 
-fn listener_addresses(example: &Example) -> (String, String) {
+fn listener_addresses(example: &Example) -> (String, String, String) {
     let http = example.await_record("http listener bound")["addr"]
         .as_str()
         .expect("HTTP address")
+        .to_owned();
+    let diagnostics = example.await_record("diagnostics listener bound")["addr"]
+        .as_str()
+        .expect("diagnostics address")
         .to_owned();
     let grpc = example.await_record("grpc listener bound")["addr"]
         .as_str()
         .expect("gRPC address")
         .to_owned();
     example.await_record("service_ready");
-    (http, grpc)
+    (http, diagnostics, grpc)
 }
 
 fn logged_messages(lines: &[String]) -> Vec<String> {
@@ -429,7 +433,7 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
     let oidc = OidcFixture::new(1);
     let (certificate, private_key) = tls_material();
     let example = Example::spawn(&oidc, &certificate, &private_key);
-    let (http, grpc) = listener_addresses(&example);
+    let (http, diagnostics, grpc) = listener_addresses(&example);
     let ready = format!("http://{http}/health/ready");
     assert!(
         poll_status(&ready, 200, Duration::from_secs(5)),
@@ -442,6 +446,19 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
     assert_eq!(
         unary(&grpc, certificate.clone(), &oidc.token).expect("authenticated unary"),
         "process echo"
+    );
+    // The handling time is a histogram, as grpc-ecosystem dashboards query it.
+    let metrics = ureq::get(&format!("http://{diagnostics}/metrics"))
+        .call()
+        .expect("metrics scrape")
+        .into_body()
+        .read_to_string()
+        .expect("metrics text");
+    assert!(
+        metrics.contains(
+            r#"grpc_server_handling_seconds_bucket{grpc_service="example.v1.EchoService",grpc_method="Unary",le="0.005"}"#
+        ),
+        "{metrics}"
     );
 
     // A worker thread keeps serving the client connection while the test

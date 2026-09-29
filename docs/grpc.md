@@ -91,7 +91,7 @@ With authentication retained, a successful verify inserts
 Outermost to innermost:
 
 1. Observation.
-2. Panic recovery. The response is `INTERNAL` / `request failed`. The payload
+2. Panic recovery, inside the observation layer. The response is `INTERNAL` / `request failed`. The payload
    goes to the normal panic hook, as on HTTP. There is no suppressing hook.
 3. Business routes only: bearer authentication, when that profile is
    retained. Health is outside it. Missing, malformed and invalid bearers are
@@ -109,6 +109,12 @@ Outermost to innermost:
    handler returns response headers. Expiry is `DEADLINE_EXCEEDED` /
    `request deadline exceeded`. A malformed `grpc-timeout`, including more
    than eight digits, counts as absent and the eight-second cap applies.
+
+An authentication failure or a shed call is answered after reading the rest
+of its request body, for at most 100 ms and 64 KiB. A caller sends request
+DATA after the headers; answering first would make h2 reset each stream when
+that DATA arrives, and after 1024 such resets hyper closes the connection
+with every other call on it.
 
 ## Deadlines
 
@@ -133,6 +139,9 @@ Fixed listener options, shared with HTTP except for the values below:
   A handshake error or timeout closes the connection without a response.
 - 16 KiB of request metadata.
 - HTTP/2 PING keepalive every 20 seconds, with a 20 second timeout.
+- `TCP_NODELAY`, so response headers, data, and trailers do not wait for the
+  peer's delayed ACK, and HTTP/2 adaptive receive windows sized to the
+  bandwidth-delay product, as grpc-go does. Both apply to the HTTP listener too.
 - Hyper's default concurrent-stream limit, 200 in locked hyper 1.11.1. This
   listener does not set its own, and hyper does not treat that number as stable.
 - Tonic's default 4 MiB decode limit on business RPCs and health. The
@@ -194,9 +203,9 @@ connection. TLS uses tonic `ClientTlsConfig`: normal certificate and hostname
 verification, native roots unless a CA is supplied, and an optional
 `ClientIdentity` whose key is a `SecretString`. Unusable PEM input fails
 construction with the variant that names it. The server remains TLS 1.3-only; the client does not. Construction
-sets a 5 second connect timeout, a 60 second TCP keepalive, and HTTP/2
-keepalive at 20 seconds with a 20 second timeout. Clones share the lazy
-channel.
+sets a 5 second connect timeout, a 60 second TCP keepalive, HTTP/2
+keepalive at 20 seconds with a 20 second timeout, and adaptive receive
+windows. Clones share the lazy channel and its metric handles.
 
 Set the call budget with tonic `Request::set_timeout`. That writes
 `grpc-timeout`. The server still applies `min(grpc-timeout, 8s)`.
@@ -229,8 +238,8 @@ let client = EchoServiceClient::new(authenticated);
 A caller-supplied `Authorization` is `INVALID_ARGUMENT` before any token or
 resource I/O. The acquisition deadline is `grpc-timeout` when that header is
 present and well formed; otherwise it is the owner's five-second fetch
-timeout. Token wait spends that deadline: `grpc-timeout` is rewritten to the
-remaining budget before dispatch. Acquisition failure prevents dispatch. One bearer is inserted at
+timeout. Token wait spends that deadline: a wait of at least a millisecond
+rewrites `grpc-timeout` to the remaining budget before dispatch. Acquisition failure prevents dispatch. One bearer is inserted at
 opening and is not refreshed mid-stream.
 
 Eviction runs only on the initial response: `grpc-status` `UNAUTHENTICATED`,
@@ -264,9 +273,13 @@ In-flight calls may finish; health watchers do not hold the drain. An overrun
 votes in the existing degraded shutdown. There is no second budget and no
 separate gRPC cleanup stage.
 
-Server spans come from
-`tracing_opentelemetry_instrumentation_sdk` gRPC helpers. The parent is the
-extracted incoming context. Metrics follow the grpc-ecosystem Prometheus
+The server span, like the HTTP one, carries only `otel.name` and `otel.kind`
+as `tracing` fields, so the JSON log layer does not serialize and repeat the
+RPC attributes on every record; `rpc.system`, `rpc.service`, `rpc.method`,
+`rpc.grpc.status_code`, `server.address`, `server.port` and
+`user_agent.original` go to the OpenTelemetry span alone. The parent is the
+extracted incoming context, kept current even when the span is disabled.
+Client spans are built the same way. Metrics follow the grpc-ecosystem Prometheus
 names, so standard gRPC dashboards and alerts apply:
 `grpc_server_handled_total` and `grpc_client_handled_total`
 (`grpc_service`, `grpc_method`, `grpc_code`), the histograms
@@ -274,7 +287,9 @@ names, so standard gRPC dashboards and alerts apply:
 (`grpc_service`, `grpc_method`), and `grpc_server_shed_requests_total`.
 `grpc_code` is the grpc-go code name, one of all 17: `OK`, `Canceled`,
 `InvalidArgument`, `FailedPrecondition` and so on. The histograms measure time
-to response headers.
+to response headers, with the Prometheus default buckets that
+`go-grpc-middleware` uses (`HANDLING_SECONDS_BUCKETS`, registered by the
+bootstrap). Metric handles are kept per method after the first call.
 
 On the server, `grpc_service` and `grpc_method` come from the request path
 only when the call was dispatched to a registered service or to health and the

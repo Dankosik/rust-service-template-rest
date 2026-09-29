@@ -13,24 +13,26 @@ workspace = true
 
 [dependencies]
 axum = { workspace = true }
+bytes = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }
 health = { workspace = true }
 http = { workspace = true }
+http-body-util = { workspace = true }
 infra-http = { workspace = true }
 # template:begin authn:grpc-bearer-dependency
 infra-bearerauthn = { workspace = true }
 # template:end authn:grpc-bearer-dependency
 metrics = { workspace = true }
+opentelemetry = { workspace = true, features = ["trace"] }
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 secrecy = { workspace = true }
 service-failure = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 tonic = { workspace = true, features = ["router", "channel", "server", "codegen", "tls-aws-lc", "tls-native-roots"] }
 tonic-health = { workspace = true }
 tonic-types = { workspace = true }
-tower = { workspace = true, features = ["util", "limit", "load-shed"] }
-tower-http = { workspace = true, features = ["catch-panic"] }
+tower = { workspace = true, features = ["util"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-opentelemetry = { workspace = true }
 tracing-opentelemetry-instrumentation-sdk = { workspace = true }

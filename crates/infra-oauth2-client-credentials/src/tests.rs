@@ -27,7 +27,7 @@ use tokio::{
 };
 use url::Url;
 
-use super::{AcquisitionError, Credentials, Error, FETCH_TIMEOUT, Options, TOKEN_LIMITS};
+use super::{AcquisitionError, Cached, Credentials, Error, FETCH_TIMEOUT, Options, TOKEN_LIMITS};
 
 // template:begin outbound-auth-grpc:oauth-grpc-tests-module
 #[cfg(feature = "grpc")]
@@ -530,6 +530,107 @@ async fn a_cached_token_is_refreshed_after_its_reuse_cutoff() {
 }
 
 #[tokio::test]
+async fn near_its_cutoff_a_token_is_replaced_in_the_background_while_callers_reuse_it() {
+    let fixture = Fixture::new().await;
+    fixture.token_json(
+        "200 OK",
+        &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 3600}),
+    );
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    client
+        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    // Just inside the five minutes before the 3590 s reuse cutoff.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(3291)).await;
+    tokio::time::resume();
+    fixture.token_json(
+        "200 OK",
+        &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 3600}),
+    );
+    let gate = fixture.block_tokens();
+    for _ in 0..2 {
+        client
+            .execute(fixture.request(), deadline(Duration::from_secs(10)))
+            .await
+            .unwrap();
+    }
+    fixture.token_received().await;
+    assert_eq!(fixture.token_requests().len(), 2);
+    gate.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            client
+                .execute(fixture.request(), deadline(Duration::from_secs(10)))
+                .await
+                .unwrap();
+            let requests = fixture.resource_requests();
+            if requests.last().unwrap().header("authorization") == Some("Bearer second") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fixture.token_requests().len(), 2);
+    let authorizations = fixture
+        .resource_requests()
+        .iter()
+        .map(|request| request.header("authorization").unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        authorizations[..3]
+            .iter()
+            .all(|value| value == "Bearer first")
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn a_failed_background_refresh_keeps_the_token_and_retries_after_a_pause() {
+    let fixture = Fixture::new().await;
+    fixture.token_json(
+        "200 OK",
+        &serde_json::json!({"access_token": "kept", "token_type": "Bearer", "expires_in": 3600}),
+    );
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    client
+        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    fixture.token_raw(response("503 Service Unavailable", b"{}"));
+    let gate = fixture.block_tokens();
+    gate.add_permits(Semaphore::MAX_PERMITS / 2);
+    for (advance, token_requests) in [(3291, 2), (0, 2), (31, 3)] {
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(advance)).await;
+        tokio::time::resume();
+        let before = fixture.token_requests().len();
+        client
+            .execute(fixture.request(), deadline(Duration::from_secs(10)))
+            .await
+            .unwrap();
+        if token_requests > before {
+            fixture.token_received().await;
+        }
+        assert_eq!(fixture.token_requests().len(), token_requests);
+    }
+    assert!(
+        fixture
+            .resource_requests()
+            .iter()
+            .all(|request| request.header("authorization") == Some("Bearer kept"))
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn zero_or_expired_during_acquisition_never_authorizes_dispatch() {
     let fixture = Fixture::new().await;
     fixture.token_json(
@@ -858,7 +959,7 @@ async fn a_late_401_does_not_evict_a_newer_token() {
     let mut stale = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
     tokio::select! { () = fixture.resource_received() => {}, result = &mut stale => panic!("response must be gated: {result:?}"), }
 
-    *credentials.cached() = None;
+    *credentials.cached() = Cached::default();
     fixture.token_json(
         "200 OK",
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
