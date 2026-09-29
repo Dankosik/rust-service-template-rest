@@ -6,11 +6,13 @@ use axum::Router;
 use axum::extract::{Request, State};
 use axum::http::Method;
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use utoipa::openapi::{OpenApi, path::Operation};
 use utoipa_axum::router::OpenApiRouter;
 
-use crate::problem::{Code, Problem, SANITIZED_DETAIL};
+#[cfg(test)]
+use crate::problem::SANITIZED_DETAIL;
+use crate::problem::sanitized_internal_error;
 
 /// A closed finalization error; no partially served contract is returned.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -84,9 +86,11 @@ impl Policy {
         methods
             .get(method.as_str())
             .or_else(|| {
-                (method == Method::HEAD)
-                    .then(|| methods.get("GET"))
-                    .flatten()
+                if method == Method::HEAD {
+                    methods.get("GET")
+                } else {
+                    None
+                }
             })
             .copied()
     }
@@ -98,9 +102,7 @@ async fn enforce_public(State(policy): State<Policy>, request: Request, next: Ne
     if public == Some(true) {
         next.run(request).await
     } else {
-        Problem::new(Code::InternalServerError)
-            .detail(SANITIZED_DETAIL)
-            .into_response()
+        sanitized_internal_error()
     }
 }
 

@@ -319,6 +319,13 @@ impl IntoResponse for Problem {
     }
 }
 
+/// The sanitized 500 for wiring, middleware, persistence, and record faults.
+pub(crate) fn sanitized_internal_error() -> Response {
+    Problem::new(Code::InternalServerError)
+        .detail(SANITIZED_DETAIL)
+        .into_response()
+}
+
 /// Reusable problem responses (`#/components/responses/<Name>`) and their
 /// registration in the document.
 ///

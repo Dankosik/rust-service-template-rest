@@ -36,7 +36,9 @@ use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::observe::{self, AccessLogOptions};
-use crate::problem::{AT_CAPACITY_DETAIL, Code, Problem, SANITIZED_DETAIL};
+#[cfg(test)]
+use crate::problem::SANITIZED_DETAIL;
+use crate::problem::{AT_CAPACITY_DETAIL, Code, Problem, sanitized_internal_error};
 use crate::request_id;
 
 // template:begin request-budget:http-request-deadline
@@ -202,9 +204,7 @@ async fn middleware_error(err: BoxError) -> Response {
             .into_response();
     }
     tracing::error!(error = %err, "unclassified middleware error");
-    Problem::new(Code::InternalServerError)
-        .detail(SANITIZED_DETAIL)
-        .into_response()
+    sanitized_internal_error()
 }
 
 /// Complete every Problem the chain or a handler returns: a bare 413 from
@@ -242,9 +242,7 @@ fn panic_to_problem(payload: Box<dyn Any + Send + 'static>) -> Response {
         .or_else(|| payload.downcast_ref::<&str>().copied())
         .unwrap_or("non-string panic payload");
     tracing::error!(panic = message, "handler panicked");
-    Problem::new(Code::InternalServerError)
-        .detail(SANITIZED_DETAIL)
-        .into_response()
+    sanitized_internal_error()
 }
 
 async fn not_found() -> Response {
