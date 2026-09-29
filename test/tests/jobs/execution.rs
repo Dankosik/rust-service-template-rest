@@ -773,6 +773,59 @@ async fn x2_idle_engine_claims_within_poll_interval(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn x2_wake_notification_claims_before_the_next_poll(pool: PgPool) {
+    let jobs = open(&pool, 1).await;
+    prepare(&jobs).await;
+    let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
+    until("the engine listens", super::WAIT, async || {
+        let listening: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = current_database() AND application_name = $1 \
+               AND query LIKE 'LISTEN%'",
+        )
+        .bind(super::APP)
+        .fetch_one(&jobs)
+        .await
+        .expect("the listener observation");
+        (listening > 0).then_some(())
+    })
+    .await;
+    // Three wakes in a row, each well inside the one-second poll: polling
+    // alone would meet the bound for all three about once in 60 runs.
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let id: String = sqlx::query_scalar(
+            "WITH job AS ( \
+                 INSERT INTO background_jobs (kind, payload, not_before) \
+                 VALUES ($1, $2::jsonb, statement_timestamp()) RETURNING id \
+             ) \
+             SELECT job.id::text FROM job, LATERAL (SELECT pg_notify('background_jobs', $1)) AS wake",
+        )
+        .bind(Probe::NAME)
+        .bind(probe_json(ProbeAction::Succeed))
+        .fetch_one(&jobs)
+        .await
+        .expect("a due job and its wake commit");
+        let committed = Instant::now();
+        until(
+            "the woken engine claims",
+            Duration::from_secs(3),
+            async || {
+                let view = load(&jobs, &id).await;
+                (view.attempts > 0).then_some(())
+            },
+        )
+        .await;
+        assert!(
+            committed.elapsed() < Duration::from_millis(250),
+            "pickup took {:?}",
+            committed.elapsed()
+        );
+    }
+    finish(run, &[&jobs]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn e2_uncommitted_enqueue_is_not_run(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     let caller = open(&pool, 1).await;
