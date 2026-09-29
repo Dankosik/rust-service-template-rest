@@ -28,7 +28,7 @@ version) and starts only the jobs its surfaces select:
 | `security` | manifests, `deny.toml`, workflows; tool manifest and image on pull requests | cargo-deny (advisories, licenses, bans, sources); Dependency Review, fail on high, pull requests only; zizmor with the online audits |
 | `secrets` | every event except a schedule without a policy change | Gitleaks over the commits since the base; the whole history on tags, manual runs, and a push without a readable base |
 | `delivery` | shell, workflows, tool manifest, image, publication metadata | actionlint; ShellCheck over the changed scripts; `tools-check`; BuildKit Dockerfile checks; the publication metadata self-test |
-| `image` | Docker/image sources and any selected profile image path | one local-default image: cached build, hardened lifecycle asserting `app.commit`, and Trivy for image changes; retained profile details below |
+| `image` | Docker/image sources, the root `Cargo.toml` (release profile and workspace dependencies), and any selected profile image path | one local-default image: cached build, hardened lifecycle asserting `app.commit`, and Trivy for image changes; retained profile details below |
 | `docs` | any `*.md`, `docs/`, `specs/` | every relative link and `#fragment` resolves (lychee, offline, pinned container); no toolchain |
 <!-- template:begin grpc:docs-ci-grpc-gates -->
 | `grpc` | schema, generated contracts, generator, Buf configuration | Buf format/lint, repeat deterministic generation, committed drift and FILE compatibility against the actual PR base |
