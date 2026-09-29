@@ -12,6 +12,7 @@ behavior. This record retains the accepted choices and their reopen conditions.
 | `oauth2` 5.0.0, defaults disabled, no transport feature | Handwritten protocol duplicates Basic encoding, form construction, and standard response handling. `openidconnect` 4.0.1 adds discovery/JWT beyond this grant; `yup-oauth2` 12.1.2 has no generic Basic client-credentials authenticator. | General protocol dependencies remain even for this small grant. Reopen if resolved admission fails or an actual required provider cannot use the supported hook. |
 | Existing `infra-outbound-http` through oauth2's async HTTP hook | oauth2's default reqwest pulls 0.12 alongside workspace 0.13.5. A separate direct reqwest client repeats fixed-origin/deadline/body/observation policy. | A narrow request/response conversion preserves the current transport proof. Reopen only if its supported API prevents a required invariant. |
 | One cached token behind a double-checked refresh lock, as Go's `oauth2.ReuseTokenSource` and yup-oauth2 do | Moka's one-key `try_get_with`/`Expiry` cache shared failures, but its retention depended on initializer internals, a zero-lifetime trick, and a second clock that Tokio test time cannot move. | After a failed token request, queued callers retry one at a time, never concurrently, each within its own deadline. Reopen if provider load during an outage is measured as a problem. |
+| One detached refresh once at most five minutes, or a quarter, of reuse remains, as Azure.Core's bearer policy refreshes early without blocking callers | Refreshing only at the cutoff made every concurrent caller wait for the provider. On a DigitalOcean c-4 with 64 concurrent callers and a 100 ms provider, each refresh held 64 requests for over 20 ms; with the early refresh only the first acquisition does. An inline early refresh would spend one caller's deadline on the provider. | One bounded attempt outlives its initiating caller and is cancelled with the runtime, not joined. One-hour tokens are fetched about 9% more often, short ones up to a third more. Reopen if detached work must join shutdown or the provider rate limits these requests. |
 | One new provider crate, independent of inbound authentication | Extending inbound auth joins separate trust and credential lifetimes; placing OAuth in outbound HTTP makes an optional protocol a dependency of every bare HTTP consumer. | Explicit crate/profile pruning keeps independent adoption; remove speculative traits and unused registry/generator paths. |
 
 Registry/maintenance evidence: oauth2 5.0.0 released 2025-01-21 (MIT OR
@@ -74,12 +75,13 @@ The template-owned gaps are: fixed-transport conversion; immutable-owner binding
 the one-token cache and its monotonic reuse cutoff; conditional 401 eviction;
 Authorization injection; config and initializer integration; sanitized outcomes.
 There is no custom protocol serializer/parser, flight state machine, retry loop,
-resolver, background refresher, or general token-source abstraction.
+resolver, or general token-source abstraction.
 
 ## Cache, budgets, and finality
 
-`Inner` owns `cached: std::sync::Mutex<Option<Arc<Token>>>`, never held across
-an `.await`, and `refresh: tokio::sync::Mutex<()>`. A caller returns a
+`Inner` owns `cached: std::sync::Mutex<Cached>`, the token and the time of the
+next background refresh, never held across an `.await`, and
+`refresh: tokio::sync::Mutex<()>`. A caller returns a
 reusable cached token without waiting. Otherwise it waits for `refresh` under
 its own `timeout_at(deadline)`, checks the cache again because the previous
 holder may have just stored a token, and only then requests one within
@@ -87,8 +89,10 @@ holder may have just stored a token, and only then requests one within
 success is shared with every later caller while it is reusable. A failure is
 never cached: each queued caller then makes its own request in turn. Dropping
 the holder cancels its request and releases the lock, so the next waiter
-proceeds; there is no detached task. Bound all active callers by the existing
-inbound/job admission and their deadlines.
+proceeds. Bound all active callers by the existing inbound/job admission and
+their deadlines. The first caller past the refresh time moves it thirty seconds
+on and spawns the one background attempt, which rechecks under the lock that
+its token is still cached.
 
 The private per-exchange `TokenHttp` owns the fixed endpoint path, a clone of
 the shared outbound HTTP client, and the absolute attempt deadline. It
@@ -174,8 +178,9 @@ publication is implied by template proof.
 The concrete gRPC binding stays inside `Credentials`. It injects one bearer,
 does not replay, and evicts only from the initial `UNAUTHENTICATED` status or
 HTTP 401 without `grpc-status`. The call deadline is `grpc-timeout` or the
-owner's fetch timeout; after acquisition, `grpc-timeout` is rewritten to the
-remaining budget, as gRPC clients propagate a context deadline. Its optional dependency points from OAuth to
+owner's fetch timeout; when acquisition waited at least a millisecond, the
+header's resolution, `grpc-timeout` is rewritten to the remaining budget, as gRPC
+clients propagate a context deadline. A reused token forwards it unchanged. Its optional dependency points from OAuth to
 `infra-grpc`; removing either profile removes the bridge. Generated clients
 take the concrete authenticated `Service`. See the [transport decision
 record](grpc-decisions.md).
