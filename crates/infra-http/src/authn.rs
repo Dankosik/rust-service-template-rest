@@ -12,7 +12,7 @@ use infra_bearerauthn::{Failure, Principal, Verifier};
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::contract::{Access, FinalizeError, Policy};
-use crate::problem::{Code, Problem, SANITIZED_DETAIL};
+use crate::problem::{Code, Problem, sanitized_internal_error};
 
 const AUTHENTICATION_REQUIRED_DETAIL: &str = "bearer authentication is required";
 const AUTHENTICATION_MALFORMED_DETAIL: &str = "bearer authentication is malformed";
@@ -99,11 +99,7 @@ where
                 .get::<Principal>()
                 .cloned()
                 .map(Self)
-                .ok_or_else(|| {
-                    Problem::new(Code::InternalServerError)
-                        .detail(SANITIZED_DETAIL)
-                        .into_response()
-                }),
+                .ok_or_else(sanitized_internal_error),
         )
     }
 }
@@ -205,9 +201,7 @@ fn insufficient_scope_response() -> Response {
 }
 
 fn wiring_failure() -> Response {
-    Problem::new(Code::InternalServerError)
-        .detail(SANITIZED_DETAIL)
-        .into_response()
+    sanitized_internal_error()
 }
 
 fn failure_response(failure: Failure) -> Response {
