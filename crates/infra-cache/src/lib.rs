@@ -1,8 +1,9 @@
 //! Optional Redis-compatible cache client.
 //!
 //! The contract is bytes in and bytes out. The calling feature owns key
-//! shape, serialization, TTL policy, and invalidation. A miss and an outage
-//! are both [`Unavailable`] or `Ok(None)`: this crate does not gate readiness.
+//! shape, serialization, TTL policy, and invalidation. A miss returns `Ok(None)`;
+//! an outage or timeout returns `Err(Unavailable)`. Callers normally fall back
+//! to their source of truth in either case. This crate does not gate readiness.
 //! Standalone TCP only — no Sentinel, Cluster, or Unix socket.
 //!
 //! Each namespace stores keys as `{namespace}:{key}` so two features sharing
@@ -295,6 +296,10 @@ impl Cache {
 }
 
 /// One feature's keys on a shared connection.
+///
+/// Install the intended metrics recorder before using namespace operations.
+/// Each operation/outcome histogram handle binds to the recorder on its first
+/// recorded result and remains shared by clones of this namespace.
 #[derive(Clone, Debug)]
 pub struct CacheNamespace {
     cache: Cache,
