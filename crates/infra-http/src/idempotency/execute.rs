@@ -170,7 +170,7 @@ pub(super) enum Rollback {
 struct Answer {
     response: Response,
     outcome: Outcome,
-    problem: bool,
+    yield_to_request_timeout: bool,
 }
 
 impl Answer {
@@ -178,7 +178,7 @@ impl Answer {
         Self {
             response,
             outcome,
-            problem: true,
+            yield_to_request_timeout: true,
         }
     }
 
@@ -186,12 +186,12 @@ impl Answer {
         Self {
             response,
             outcome,
-            problem: false,
+            yield_to_request_timeout: false,
         }
     }
 
     async fn send(self, deadline: Instant, guard: OutcomeGuard) -> Response {
-        if self.problem && Instant::now() >= deadline {
+        if self.yield_to_request_timeout && Instant::now() >= deadline {
             return std::future::pending().await;
         }
         guard.record(self.outcome);
@@ -337,7 +337,7 @@ mod tests {
 
     async fn assert_problem(answer: Answer, outcome: Outcome, code: Code, retry_after: bool) {
         assert_eq!(answer.outcome, outcome);
-        assert!(answer.problem);
+        assert!(answer.yield_to_request_timeout);
         assert_eq!(answer.response.status(), http_status(code));
         assert_eq!(
             answer.response.headers().get(CONTENT_TYPE),
