@@ -731,6 +731,13 @@ async fn get_without_a_checksum_is_readable() {
     let storage = stub.storage(|_| {});
     let body = storage.get(&key()).await.unwrap().bytes().await.unwrap();
     assert_eq!(body, Bytes::from_static(b"legacy"));
+
+    let mut download = storage.get(&key()).await.unwrap();
+    let first = download.next_chunk().await.unwrap().unwrap();
+    assert_eq!(
+        download.bytes().await.unwrap(),
+        Bytes::from_static(b"legacy").slice(first.len()..)
+    );
 }
 
 #[tokio::test]
@@ -828,7 +835,11 @@ async fn admission_refuses_excess_and_a_download_holds_its_slot() {
     assert_eq!(storage.head(&key()).await, Err(ObjectStorageError::Busy));
     assert_eq!(stub.seen().len(), 1);
     drop(held);
-    storage.get(&key()).await.unwrap().bytes().await.unwrap();
+    let mut completed = storage.get(&key()).await.unwrap();
+    while completed.next_chunk().await.unwrap().is_some() {}
+    assert_eq!(completed.next_chunk().await.unwrap(), None);
+    // A completed download releases admission even while the value is retained.
+    storage.head(&key()).await.unwrap();
 }
 
 #[tokio::test]
@@ -907,6 +918,13 @@ async fn metrics_carry_only_operation_and_outcome() {
         // Handles bind on first use, so resolve them under this recorder.
         let guard = storage.start(crate::observe::Operation::Head);
         drop(guard);
+        storage.start(crate::observe::Operation::Head).succeed();
+        storage
+            .start(crate::observe::Operation::Head)
+            .fail(ObjectStorageError::NotFound, "404");
+        storage
+            .start(crate::observe::Operation::Head)
+            .fail(ObjectStorageError::Integrity, "content_length");
     });
     let rendered = handle.render();
     assert!(
@@ -914,4 +932,12 @@ async fn metrics_carry_only_operation_and_outcome() {
         "{rendered}"
     );
     assert!(!rendered.contains("results/op-1.json"));
+    for outcome in ["ok", "not_found", "integrity"] {
+        assert!(
+            rendered.contains(&format!(
+                "object_storage_operation_duration_seconds_count{{operation=\"head\",outcome=\"{outcome}\"}} 1"
+            )),
+            "{rendered}"
+        );
+    }
 }

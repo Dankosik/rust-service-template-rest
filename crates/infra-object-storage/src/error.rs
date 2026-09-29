@@ -40,17 +40,24 @@ pub enum ObjectStorageError {
 }
 
 impl ObjectStorageError {
+    pub(crate) const COUNT: usize = 8;
+
     /// The bounded `outcome` metric label and span field.
     pub(crate) fn label(self) -> &'static str {
+        self.metric_slot().1
+    }
+
+    /// The cached histogram column and its label have one owner.
+    pub(crate) fn metric_slot(self) -> (usize, &'static str) {
         match self {
-            Self::NotFound => "not_found",
-            Self::AlreadyExists => "already_exists",
-            Self::TooLarge => "too_large",
-            Self::Busy => "busy",
-            Self::Unavailable => "unavailable",
-            Self::Rejected => "rejected",
-            Self::OutcomeUnknown => "outcome_unknown",
-            Self::Integrity => "integrity",
+            Self::NotFound => (0, "not_found"),
+            Self::AlreadyExists => (1, "already_exists"),
+            Self::TooLarge => (2, "too_large"),
+            Self::Busy => (3, "busy"),
+            Self::Unavailable => (4, "unavailable"),
+            Self::Rejected => (5, "rejected"),
+            Self::OutcomeUnknown => (6, "outcome_unknown"),
+            Self::Integrity => (7, "integrity"),
         }
     }
 }

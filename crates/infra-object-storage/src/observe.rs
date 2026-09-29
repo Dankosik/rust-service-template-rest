@@ -70,23 +70,32 @@ impl Operation {
 }
 
 /// `ok`, `cancelled`, and every [`ObjectStorageError`] label.
-const OUTCOMES: [&str; 10] = [
-    "ok",
-    "cancelled",
-    "not_found",
-    "already_exists",
-    "too_large",
-    "busy",
-    "unavailable",
-    "rejected",
-    "outcome_unknown",
-    "integrity",
-];
+#[derive(Clone, Copy)]
+enum Outcome {
+    Ok,
+    Cancelled,
+    Failure(ObjectStorageError),
+}
+
+impl Outcome {
+    const COUNT: usize = 2 + ObjectStorageError::COUNT;
+
+    fn metric_slot(self) -> (usize, &'static str) {
+        match self {
+            Self::Ok => (0, "ok"),
+            Self::Cancelled => (1, "cancelled"),
+            Self::Failure(error) => {
+                let (column, label) = error.metric_slot();
+                (2 + column, label)
+            }
+        }
+    }
+}
 
 /// Histogram handles, registered on first use so the scrape shows only
 /// recorded series. A handle stays bound to the recorder of its first use;
 /// bootstrap installs the recorder before it builds the client.
-pub(crate) struct Histograms([OnceLock<Histogram>; Operation::COUNT * OUTCOMES.len()]);
+pub(crate) struct Histograms([OnceLock<Histogram>; Operation::COUNT * Outcome::COUNT]);
 
 impl Default for Histograms {
     fn default() -> Self {
@@ -101,16 +110,13 @@ impl std::fmt::Debug for Histograms {
 }
 
 impl Histograms {
-    fn get(&self, operation: Operation, outcome: &'static str) -> &Histogram {
-        let column = OUTCOMES
-            .iter()
-            .position(|label| *label == outcome)
-            .unwrap_or_default();
-        self.0[operation as usize * OUTCOMES.len() + column].get_or_init(|| {
+    fn get(&self, operation: Operation, outcome: Outcome) -> &Histogram {
+        let (column, label) = outcome.metric_slot();
+        self.0[operation as usize * Outcome::COUNT + column].get_or_init(|| {
             metrics::histogram!(
                 OPERATION_DURATION_METRIC,
                 "operation" => operation.label(),
-                "outcome" => outcome,
+                "outcome" => label,
             )
         })
     }
@@ -158,7 +164,7 @@ impl OperationGuard {
     }
 
     pub(crate) fn succeed(&mut self) {
-        self.finish("ok");
+        self.finish(Outcome::Ok);
     }
 
     /// Record a failure. `error_type` is bounded: a provider error code, an
@@ -170,7 +176,7 @@ impl OperationGuard {
     ) -> ObjectStorageError {
         self.span.record("error.type", error_type);
         self.span.record("otel.status_code", "ERROR");
-        self.finish(error.label());
+        self.finish(Outcome::Failure(error));
         self.span.in_scope(|| {
             tracing::debug!(
                 object_storage.operation = self.operation.label(),
@@ -182,9 +188,10 @@ impl OperationGuard {
         error
     }
 
-    fn finish(&mut self, outcome: &'static str) {
+    fn finish(&mut self, outcome: Outcome) {
         self.finalized = true;
-        self.span.record("object_storage.outcome", outcome);
+        self.span
+            .record("object_storage.outcome", outcome.metric_slot().1);
         self.histograms
             .get(self.operation, outcome)
             .record(self.started.elapsed().as_secs_f64());
@@ -194,7 +201,7 @@ impl OperationGuard {
 impl Drop for OperationGuard {
     fn drop(&mut self) {
         if !self.finalized {
-            self.finish("cancelled");
+            self.finish(Outcome::Cancelled);
         }
     }
 }

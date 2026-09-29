@@ -30,7 +30,7 @@ use aws_sdk_s3::config::{
     StalledStreamProtectionConfig,
 };
 use aws_sdk_s3::presigning::PresigningConfig;
-use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::primitives::{ByteStream, DateTime};
 use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode};
 use aws_smithy_http_client::tls;
 use bytes::Bytes;
@@ -128,10 +128,17 @@ impl std::fmt::Debug for ObjectStorage {
 #[derive(Debug)]
 pub struct PutBody {
     len: u64,
-    in_memory: bool,
     stream: ByteStream,
-    /// Set when a streamed body did not match `len`.
-    mismatch: Option<Arc<AtomicBool>>,
+    source: UploadSource,
+}
+
+#[derive(Debug)]
+enum UploadSource {
+    InMemory,
+    Streamed {
+        /// Set when the body did not match its declared length.
+        mismatch: Arc<AtomicBool>,
+    },
 }
 
 impl PutBody {
@@ -146,9 +153,8 @@ impl PutBody {
         let (body, mismatch) = body::ExactLength::new(len, body);
         Self {
             len,
-            in_memory: false,
             stream: ByteStream::from_body_1_x(body),
-            mismatch: Some(mismatch),
+            source: UploadSource::Streamed { mismatch },
         }
     }
 
@@ -163,6 +169,31 @@ impl PutBody {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+
+    /// hyper never polls a body declared empty, so validate an empty stream
+    /// before sending and normalize its EOF to an in-memory body.
+    async fn prepare_empty_stream(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<(), (ObjectStorageError, &'static str)> {
+        let UploadSource::Streamed { mismatch } = &self.source else {
+            return Ok(());
+        };
+        if self.len != 0 {
+            return Ok(());
+        }
+        let first = tokio::time::timeout(timeout, self.stream.next()).await;
+        let length_mismatch = mismatch.load(Ordering::Acquire);
+        match first {
+            Err(_elapsed) => Err((ObjectStorageError::Unavailable, "timeout")),
+            Ok(Some(_)) if length_mismatch => Err((ObjectStorageError::Rejected, "body_length")),
+            Ok(Some(_)) => Err((ObjectStorageError::Rejected, "body")),
+            Ok(None) => {
+                *self = Self::from(Bytes::new());
+                Ok(())
+            }
+        }
+    }
 }
 
 /// In-memory bytes. The SDK can sign a checksum of them as a header.
@@ -170,9 +201,8 @@ impl From<Bytes> for PutBody {
     fn from(bytes: Bytes) -> Self {
         Self {
             len: bytes.len() as u64,
-            in_memory: true,
             stream: ByteStream::from(bytes),
-            mismatch: None,
+            source: UploadSource::InMemory,
         }
     }
 }
@@ -220,6 +250,26 @@ pub struct ObjectMetadata {
     pub last_modified: Option<SystemTime>,
     /// Entity tag, if the provider sent one.
     pub e_tag: Option<String>,
+}
+
+impl ObjectMetadata {
+    /// GET and HEAD share one interpretation of the provider's metadata.
+    fn from_response_fields(
+        content_length: Option<i64>,
+        content_type: Option<&str>,
+        last_modified: Option<&DateTime>,
+        e_tag: Option<&str>,
+    ) -> Result<Self, ObjectStorageError> {
+        let size = content_length
+            .and_then(|size| u64::try_from(size).ok())
+            .ok_or(ObjectStorageError::Integrity)?;
+        Ok(Self {
+            size,
+            content_type: content_type.map(str::to_owned),
+            last_modified: last_modified.and_then(|at| SystemTime::try_from(*at).ok()),
+            e_tag: e_tag.map(str::to_owned),
+        })
+    }
 }
 
 /// A presigned GET URL. It is a bearer credential until it expires: hand it
@@ -353,31 +403,16 @@ impl ObjectStorage {
             return Err(guard.fail(ObjectStorageError::TooLarge, "too_large"));
         }
         let _permit = self.admit(&mut guard)?;
-        // hyper never polls a body declared empty, so the length check in
-        // the body cannot see extra bytes: read it here, under the same
-        // bound as a call, before anything is sent.
         let mut body = body;
-        if !body.in_memory && body.len == 0 {
-            let first =
-                tokio::time::timeout(self.inner.operation_timeout, body.stream.next()).await;
-            let length_mismatch = body
-                .mismatch
-                .as_ref()
-                .is_some_and(|flag| flag.load(Ordering::Acquire));
-            match first {
-                Err(_elapsed) => return Err(guard.fail(ObjectStorageError::Unavailable, "timeout")),
-                Ok(Some(_)) if length_mismatch => {
-                    return Err(guard.fail(ObjectStorageError::Rejected, "body_length"));
-                }
-                Ok(Some(_)) => return Err(guard.fail(ObjectStorageError::Rejected, "body")),
-                Ok(None) => body = PutBody::from(Bytes::new()),
-            }
-        }
-        let checksum = match (self.inner.checksum, body.in_memory) {
-            (UploadChecksum::Always, _) | (UploadChecksum::BytesOnly, true) => {
+        body.prepare_empty_stream(self.inner.operation_timeout)
+            .await
+            .map_err(|(error, error_type)| guard.fail(error, error_type))?;
+        let checksum = match (self.inner.checksum, &body.source) {
+            (UploadChecksum::Always, _) | (UploadChecksum::BytesOnly, UploadSource::InMemory) => {
                 Some(ChecksumAlgorithm::Crc64Nvme)
             }
-            (UploadChecksum::BytesOnly, false) | (UploadChecksum::Never, _) => None,
+            (UploadChecksum::BytesOnly, UploadSource::Streamed { .. })
+            | (UploadChecksum::Never, _) => None,
         };
         // Under the client's `WhenRequired` the SDK sends the named
         // algorithm but computes no checksum value. An upload that carries
@@ -393,7 +428,10 @@ impl ObjectStorage {
         } else {
             Call::Mutation
         };
-        let mismatch = body.mismatch.clone();
+        let mismatch = match &body.source {
+            UploadSource::InMemory => None,
+            UploadSource::Streamed { mismatch } => Some(Arc::clone(mismatch)),
+        };
         let result = self
             .inner
             .client
@@ -450,32 +488,24 @@ impl ObjectStorage {
         if output.content_range().is_some() {
             return Err(guard.fail(ObjectStorageError::Integrity, "content_range"));
         }
-        let Some(size) = output
-            .content_length()
-            .and_then(|size| u64::try_from(size).ok())
-        else {
-            return Err(guard.fail(ObjectStorageError::Integrity, "content_length"));
-        };
-        if size > self.inner.max_object_bytes {
+        let metadata = ObjectMetadata::from_response_fields(
+            output.content_length(),
+            output.content_type(),
+            output.last_modified(),
+            output.e_tag(),
+        )
+        .map_err(|error| guard.fail(error, "content_length"))?;
+        if metadata.size > self.inner.max_object_bytes {
             return Err(guard.fail(ObjectStorageError::TooLarge, "too_large"));
         }
-        let metadata = ObjectMetadata {
-            size,
-            content_type: output.content_type().map(str::to_owned),
-            last_modified: output
-                .last_modified()
-                .and_then(|at| SystemTime::try_from(*at).ok()),
-            e_tag: output.e_tag().map(str::to_owned),
-        };
         Ok(Download {
+            remaining: metadata.size,
             metadata,
-            remaining: size,
             body: output.body,
-            end: Some(End {
+            state: DownloadState::Open(End {
                 guard,
                 _permit: permit,
             }),
-            failed: None,
         })
     }
 
@@ -502,21 +532,15 @@ impl ObjectStorage {
             Ok(output) => output,
             Err(failure) => return Err(Self::fail(&mut guard, Call::Read, &failure)),
         };
-        let Some(size) = output
-            .content_length()
-            .and_then(|size| u64::try_from(size).ok())
-        else {
-            return Err(guard.fail(ObjectStorageError::Integrity, "content_length"));
-        };
+        let metadata = ObjectMetadata::from_response_fields(
+            output.content_length(),
+            output.content_type(),
+            output.last_modified(),
+            output.e_tag(),
+        )
+        .map_err(|error| guard.fail(error, "content_length"))?;
         guard.succeed();
-        Ok(ObjectMetadata {
-            size,
-            content_type: output.content_type().map(str::to_owned),
-            last_modified: output
-                .last_modified()
-                .and_then(|at| SystemTime::try_from(*at).ok()),
-            e_tag: output.e_tag().map(str::to_owned),
-        })
+        Ok(metadata)
     }
 
     /// Delete an object. A missing key is success, as in S3.
@@ -643,9 +667,15 @@ pub struct Download {
     metadata: ObjectMetadata,
     remaining: u64,
     body: ByteStream,
-    end: Option<End>,
-    /// The failure that ended the body, returned again on every later call.
-    failed: Option<ObjectStorageError>,
+    state: DownloadState,
+}
+
+#[derive(Debug)]
+enum DownloadState {
+    Open(End),
+    Succeeded,
+    /// The failure returned again on every later call.
+    Failed(ObjectStorageError),
 }
 
 /// What a download releases when it ends.
@@ -671,11 +701,10 @@ impl Download {
     /// failure, a body shorter than its headers, or a stalled body. After an error every call returns the
     /// same error; after the end, `Ok(None)`.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, ObjectStorageError> {
-        if let Some(error) = self.failed {
-            return Err(error);
-        }
-        let Some(end) = self.end.as_mut() else {
-            return Ok(None);
+        let end = match &mut self.state {
+            DownloadState::Open(end) => end,
+            DownloadState::Succeeded => return Ok(None),
+            DownloadState::Failed(error) => return Err(*error),
         };
         let failure = match self.body.next().await {
             Some(Ok(chunk)) => match self.remaining.checked_sub(chunk.len() as u64) {
@@ -691,18 +720,19 @@ impl Download {
             Some(Err(_)) => (ObjectStorageError::Unavailable, "body"),
             None if self.remaining == 0 => {
                 end.guard.succeed();
-                self.end = None;
+                self.state = DownloadState::Succeeded;
                 return Ok(None);
             }
             None => (ObjectStorageError::Integrity, "content_length"),
         };
         let error = end.guard.fail(failure.0, failure.1);
-        self.end = None;
-        self.failed = Some(error);
+        self.state = DownloadState::Failed(error);
         Err(error)
     }
 
-    /// Collect the whole body. `max_object_bytes` bounds it.
+    /// Consume the download and collect its remaining body. Chunks already
+    /// returned by [`Download::next_chunk`] are not included.
+    /// `max_object_bytes` bounds the collection.
     ///
     /// # Errors
     ///
