@@ -193,28 +193,28 @@ fn require_components(url: &Url) -> Result<(), DsnError> {
 /// `sqlx` adds it to the bundled webpki roots and ignores it under
 /// `require`, so it is admitted only where it is actually verified.
 fn check_parameters(url: &Url) -> Result<(), DsnError> {
-    let mut ssl_mode = None;
-    let mut root_cert = false;
+    let mut verifies_certificate = None;
+    let mut has_root_cert = false;
     for (key, value) in url.query_pairs() {
         match key.as_ref() {
-            "sslmode" if ssl_mode.is_none() => {
-                ssl_mode = Some(match value.as_ref() {
+            "sslmode" if verifies_certificate.is_none() => {
+                verifies_certificate = Some(match value.as_ref() {
                     "disable" | "require" => false,
                     "verify-ca" | "verify-full" => true,
                     _ => return Err(DsnError::SslMode),
                 });
             }
-            "sslrootcert" if !root_cert => {
+            "sslrootcert" if !has_root_cert => {
                 if !Path::new(value.as_ref()).is_absolute() {
                     return Err(DsnError::RootCertPath);
                 }
-                root_cert = true;
+                has_root_cert = true;
             }
             _ => return Err(DsnError::Parameter(bounded(&key))),
         }
     }
-    let verifies = ssl_mode.ok_or(DsnError::Missing("sslmode"))?;
-    if root_cert && !verifies {
+    let verifies_certificate = verifies_certificate.ok_or(DsnError::Missing("sslmode"))?;
+    if has_root_cert && !verifies_certificate {
         return Err(DsnError::RootCertWithoutVerification);
     }
     Ok(())

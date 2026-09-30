@@ -42,14 +42,14 @@ pub enum TxError {
 pub struct Tx<'c> {
     conn: &'c mut PgConnection,
     /// Set by [`statement_succeeded`] and cleared by [`connection`].
-    live: bool,
+    last_statement_succeeded: bool,
 }
 
 /// The connection borrowed by `tx` for a provider adapter's statement.
 ///
 /// Do not issue transaction-control SQL through this connection.
 pub fn connection<'a>(tx: &'a mut Tx<'_>) -> &'a mut PgConnection {
-    tx.live = false;
+    tx.last_statement_succeeded = false;
     tx.conn
 }
 
@@ -59,7 +59,7 @@ pub fn connection<'a>(tx: &'a mut Tx<'_>) -> &'a mut PgConnection {
 /// follows skips its probe statement. Borrowing
 /// [`connection`] again withdraws the proof.
 pub fn statement_succeeded(tx: &mut Tx<'_>) {
-    tx.live = true;
+    tx.last_statement_succeeded = true;
 }
 
 /// A pooled connection that is closed instead of returned to the pool
@@ -171,14 +171,14 @@ where
 
     let mut handle = Tx {
         conn: &mut tx,
-        live: false,
+        last_statement_succeeded: false,
     };
     // On `Err`, dropping `tx` queues the rollback and the pool's return ping
     // sends it, so the caller does not wait a round trip for it. A rollback
     // the server rejects fails that ping, and the pool closes the connection
     // instead of reusing it.
     let value = f(&mut handle).await?;
-    if options.read_only || handle.live {
+    if options.read_only || handle.last_statement_succeeded {
         tx.commit().await.map_err(classify_commit)?;
     } else {
         // PostgreSQL answers `COMMIT` in an aborted transaction with a silent
