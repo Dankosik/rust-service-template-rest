@@ -1188,7 +1188,7 @@ async fn a_waiter_shares_a_reusable_token_but_retries_a_failure_after_the_leader
 }
 
 #[tokio::test]
-async fn cancelling_the_initiator_allows_a_waiter_to_replace_the_token_exchange() {
+async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
     let fixture = Fixture::new().await;
     let client = fixture
         .credentials(&[], None)
