@@ -230,7 +230,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     stop_work(http, readiness, &resources);
     let mut degraded = drain(&mut resources, http.drain_timeout, &budget, signals).await;
     if degraded {
-        let _ = finish_work(&mut resources, Instant::now() + budget.remaining(CLEANUP)).await;
+        finish_work(&mut resources, Instant::now() + budget.remaining(CLEANUP)).await;
     }
     // template:begin messaging:worker-shutdown-drop-consumer
     // Exhausted cleanup still aborts the owner before dependencies close.
@@ -264,7 +264,7 @@ pub(crate) async fn abort_startup(
     cancel: &CancellationToken,
     tracker: &TaskTracker,
 ) {
-    let _ = finish_work(&mut resources, Instant::now() + CLEANUP).await;
+    finish_work(&mut resources, Instant::now() + CLEANUP).await;
     // template:begin messaging:worker-shutdown-abort-drop-consumer
     drop(resources.consumer.take());
     // template:end messaging:worker-shutdown-abort-drop-consumer
@@ -351,22 +351,17 @@ async fn drain(
     }
 }
 
-async fn finish_work(resources: &mut Resources, deadline: Instant) -> bool {
+async fn finish_work(resources: &mut Resources, deadline: Instant) {
     let jobs = async {
-        #[allow(unused_variables, reason = "retained jobs supply cleanup results")]
-        let failed = false;
         // template:begin jobs:worker-shutdown-finish-jobs
-        let failed = futures_util::future::join_all(
+        futures_util::future::join_all(
             resources
                 .started
                 .iter()
                 .map(|engine| finish_attempts(engine, deadline)),
         )
-        .await
-        .into_iter()
-        .any(|timed_out| timed_out);
+        .await;
         // template:end jobs:worker-shutdown-finish-jobs
-        failed
     };
     let messages = async {
         // template:begin messaging:worker-shutdown-finish-messaging
@@ -374,18 +369,15 @@ async fn finish_work(resources: &mut Resources, deadline: Instant) -> bool {
             consumer.abort();
             if consumer.finish(deadline).await.is_err() {
                 tracing::warn!("messaging consumer cleanup failed");
-                return true;
             }
         }
         // template:end messaging:worker-shutdown-finish-messaging
-        false
     };
-    let (jobs_failed, messaging_failed) = tokio::join!(jobs, messages);
-    jobs_failed || messaging_failed
+    tokio::join!(jobs, messages);
 }
 
 // template:begin jobs:worker-shutdown-finish-attempts
-async fn finish_attempts(started: &Started, deadline: Instant) -> bool {
+async fn finish_attempts(started: &Started, deadline: Instant) {
     let end = started
         .cancel_and_finish(deadline.saturating_duration_since(Instant::now()))
         .await;
@@ -408,7 +400,6 @@ async fn finish_attempts(started: &Started, deadline: Instant) -> bool {
             "attempts_finished"
         );
     }
-    end.timed_out
 }
 // template:end jobs:worker-shutdown-finish-attempts
 
