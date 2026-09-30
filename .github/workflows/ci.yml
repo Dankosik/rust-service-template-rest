@@ -545,6 +545,7 @@ jobs:
           DATABASE_SELECTED: ${{ needs.changes.outputs.db_integration }}
           MESSAGING_SELECTED: ${{ needs.changes.outputs.messaging_integration }}
           CACHE_SELECTED: ${{ needs.changes.outputs.cache_integration }}
+          OBJECT_STORAGE_SELECTED: ${{ needs.changes.outputs.object_storage_integration }}
         run: |
           set -euo pipefail
           OUTBOX_SELECTED=$(python3 scripts/lib/template_state.py profile --repo . --field outbox)
@@ -556,6 +557,9 @@ jobs:
           fi
           if [[ "${CACHE_SELECTED}" == true ]]; then
             VALKEY_PORT=6379 docker compose -f env/docker-compose.yml up -d --wait valkey
+          fi
+          if [[ "${OBJECT_STORAGE_SELECTED}" == true ]]; then
+            VERSITYGW_PORT=7070 docker compose -f env/docker-compose.yml up -d --wait versitygw
           fi
       - name: Integration startup diagnostics
         if: failure() && steps.integration-services.outcome == 'failure'
