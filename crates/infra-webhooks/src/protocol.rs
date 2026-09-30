@@ -124,9 +124,9 @@ impl KeyRing {
         now: SystemTime,
     ) -> Result<VerifiedMessage, ProtocolError> {
         ensure_body_size(body)?;
-        let message_id = single_header(headers, "webhook-id")?;
+        let message_id = unambiguous_header(headers, "webhook-id")?;
         ensure_message_id(message_id.as_bytes())?;
-        let timestamp = parse_timestamp(single_header(headers, "webhook-timestamp")?)?;
+        let timestamp = parse_timestamp(unambiguous_header(headers, "webhook-timestamp")?)?;
         ensure_timestamp_window(timestamp, now)?;
         let message = signed_message(message_id.as_bytes(), timestamp, body)?;
 
@@ -214,7 +214,7 @@ fn ensure_body_size(body: &[u8]) -> Result<(), ProtocolError> {
         .ok_or(ProtocolError::BodyTooLarge)
 }
 
-fn single_header<'a>(
+fn unambiguous_header<'a>(
     headers: &'a HeaderMap,
     name: &'static str,
 ) -> Result<&'a HeaderValue, ProtocolError> {
