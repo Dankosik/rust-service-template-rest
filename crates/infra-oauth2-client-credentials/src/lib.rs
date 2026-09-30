@@ -434,10 +434,13 @@ impl Credentials {
             return Ok(token);
         }
         // Boxed so that the reuse path above keeps a small future.
-        Box::pin(self.acquire(deadline)).await
+        Box::pin(self.acquire_service_token(deadline)).await
     }
 
-    async fn acquire(&self, deadline: Instant) -> Result<Arc<Token>, AcquisitionError> {
+    async fn acquire_service_token(
+        &self,
+        deadline: Instant,
+    ) -> Result<Arc<Token>, AcquisitionError> {
         let _refresh = tokio::time::timeout_at(deadline, self.0.refresh.lock())
             .await
             .map_err(|_| AcquisitionError::Timeout)?;
@@ -445,7 +448,7 @@ impl Credentials {
         if let Some(token) = self.reusable_service_token(Instant::now()) {
             return Ok(token);
         }
-        Ok(self.store(self.0.fetch_service_token(deadline).await?))
+        Ok(self.store_service_token(self.0.fetch_service_token(deadline).await?))
     }
 
     /// Returns the cached service token while it is reusable. The first
@@ -487,7 +490,7 @@ impl Credentials {
                     .fetch_service_token(Instant::now() + FETCH_TIMEOUT)
                     .await
             {
-                credentials.store(token);
+                credentials.store_service_token(token);
                 // A provider may return a token already inside its own
                 // refresh window; still wait before the next attempt.
                 let retry = Instant::now() + REFRESH_RETRY;
@@ -497,7 +500,7 @@ impl Credentials {
         });
     }
 
-    fn store(&self, token: Token) -> Arc<Token> {
+    fn store_service_token(&self, token: Token) -> Arc<Token> {
         let token = Arc::new(token);
         let mut cached = self.cached();
         cached.refresh_after = token.refresh_after;
