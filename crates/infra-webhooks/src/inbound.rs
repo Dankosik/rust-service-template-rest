@@ -192,19 +192,19 @@ impl Receiver {
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
         let mut removed = 0;
         loop {
-            let batch = in_tx(&self.pool, async |tx| -> Result<u64, Failed> {
+            let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupFailure> {
                 sqlx::query(CLEANUP_STATEMENT_TIMEOUT)
                     .execute(connection(tx))
                     .await
-                    .map_err(|_| Failed(CleanupError::Statement))?;
+                    .map_err(|_| CleanupFailure(CleanupError::Statement))?;
                 let deleted = sqlx::query(CLEANUP_BATCH)
                     .execute(connection(tx))
                     .await
-                    .map_err(|_| Failed(CleanupError::Statement))?;
+                    .map_err(|_| CleanupFailure(CleanupError::Statement))?;
                 Ok(deleted.rows_affected())
             })
             .await
-            .map_err(|Failed(failure)| failure)?;
+            .map_err(|CleanupFailure(failure)| failure)?;
             removed += batch;
             if batch < CLEANUP_BATCH_ROWS {
                 return Ok(removed);
@@ -495,9 +495,9 @@ pub enum CleanupError {
 
 /// A failed cleanup batch, by class, which leaves the batch's transaction as
 /// an error.
-struct Failed(CleanupError);
+struct CleanupFailure(CleanupError);
 
-impl From<TxError> for Failed {
+impl From<TxError> for CleanupFailure {
     fn from(err: TxError) -> Self {
         Self(match err {
             TxError::Acquire(_) => CleanupError::Acquire,
