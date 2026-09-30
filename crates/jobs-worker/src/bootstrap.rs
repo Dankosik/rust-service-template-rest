@@ -349,11 +349,7 @@ async fn connect_messaging(
         resources.messaging = connected.ok();
         return Ok((None, true));
     }
-    resources.messaging = Some(connected?);
-    let messaging = resources
-        .messaging
-        .as_ref()
-        .ok_or(MessagingError::Connection)?;
+    let messaging = resources.messaging.insert(connected?);
     if let Some(registry) = messages.take() {
         let admit_consumer = messaging.consumer(registry);
         tokio::pin!(admit_consumer);
