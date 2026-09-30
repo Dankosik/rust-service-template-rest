@@ -61,6 +61,7 @@ jobs:
       db_integration: ${{ steps.surfaces.outputs.db_integration }}
       messaging_integration: ${{ steps.surfaces.outputs.messaging_integration }}
       cache_integration: ${{ steps.surfaces.outputs.cache_integration }}
+      object_storage_integration: ${{ steps.surfaces.outputs.object_storage_integration }}
       migrations: ${{ steps.surfaces.outputs.migrations }}
       agent_instructions: ${{ steps.surfaces.outputs.agent_instructions }}
       documentation: ${{ steps.surfaces.outputs.documentation }}
@@ -580,6 +581,12 @@ jobs:
           bash ./scripts/ci/measure.sh integration-cache --
           env REQUIRE_DOCKER=1 CACHE_URL=redis://127.0.0.1:6379
           make test-integration-cache
+      - name: Object storage proof
+        if: needs.changes.outputs.object_storage_integration == 'true'
+        run: >-
+          bash ./scripts/ci/measure.sh integration-object-storage --
+          env REQUIRE_DOCKER=1 OBJECT_STORAGE_TEST_ENDPOINT=http://127.0.0.1:7070
+          make test-integration-object-storage
       - name: JetStream proof
         if: needs.changes.outputs.messaging_integration == 'true'
         run: >-
