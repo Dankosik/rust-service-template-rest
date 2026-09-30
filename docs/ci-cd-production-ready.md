@@ -56,6 +56,11 @@ not a Cartesian multiplication of every profile, database, and harness.
 With the cache profile retained, the `cache_integration` surface runs
 `make test-integration-cache` against Compose Valkey in the integration job.
 <!-- template:end cache:docs-ci-cache-gates -->
+<!-- template:begin object-storage:docs-ci-object-storage-gates -->
+With the object storage profile retained, the `object_storage_integration`
+surface runs `make test-integration-object-storage` against Compose versitygw
+in the integration job. No CI job writes to a live provider bucket.
+<!-- template:end object-storage:docs-ci-object-storage-gates -->
 <!-- template:begin outbox:docs-ci-outbox-gates -->
 With the outbox profile retained, the database-and-NATS integration selection
 covers transactional commit/rollback, live-key same/conflict/lost outcomes,
@@ -112,8 +117,10 @@ focused locked offline metadata and all-target compile path with
 `integration-tests/integration`, so the fixture callback's optional registry
 argument is compiled. It adds no live PostgreSQL or NATS scenario. Graph 62
 joins baseline for cache alone, and graph 63 joins webhooks-messaging
-for the maximal profile set plus cache. Neither adds a database suite. Seven
-runtime parts cover 63 runtime representatives.
+for the maximal profile set plus cache. Graph 64 joins baseline for object
+storage alone, and graph 65 joins webhooks-messaging for graph 63 plus
+object storage. None adds a database suite. Seven runtime parts cover 65
+runtime representatives.
 
 A change to projected text alone selects `module_initializer` without the
 runtime surface and runs the Cargo-free `initializer (projections)` job.

@@ -14,6 +14,9 @@ use infra_http::{Drained, Server};
 // template:begin cache:service-shutdown-cache-imports
 use infra_cache::Cache;
 // template:end cache:service-shutdown-cache-imports
+// template:begin object-storage:service-shutdown-object-storage-imports
+use infra_object_storage::ObjectStorage;
+// template:end object-storage:service-shutdown-object-storage-imports
 // template:begin postgres:shutdown-imports
 use infra_postgres::{Closed, PgPool};
 // template:end postgres:shutdown-imports
@@ -161,11 +164,19 @@ pub(crate) struct Dependencies {
     /// Not a readiness probe; the connection closes when it drops.
     pub(crate) cache: Option<Cache>,
     // template:end cache:service-shutdown-dependencies-cache-field
+    // template:begin object-storage:service-shutdown-dependencies-object-storage-field
+    /// Not a readiness probe; idle connections close when it drops.
+    pub(crate) object_storage: Option<ObjectStorage>,
+    // template:end object-storage:service-shutdown-dependencies-object-storage-field
 }
 
 impl Dependencies {
-    /// Close every opened dependency concurrently. Returns whether one
+    /// Close every opened dependency. Returns whether one
     /// outlived `deadline`.
+    #[allow(
+        clippy::unused_async,
+        reason = "profiles without PostgreSQL have no asynchronous dependency close"
+    )]
     async fn close(
         self,
         #[allow(unused_variables, reason = "dependency-free profiles perform no close")]
@@ -178,33 +189,36 @@ impl Dependencies {
             // template:begin cache:service-shutdown-dependencies-cache-destructure
             cache,
             // template:end cache:service-shutdown-dependencies-cache-destructure
+            // template:begin object-storage:service-shutdown-dependencies-object-storage-destructure
+            object_storage,
+            // template:end object-storage:service-shutdown-dependencies-object-storage-destructure
         } = self;
         // template:begin cache:service-shutdown-dependencies-cache-close
         drop(cache);
         // template:end cache:service-shutdown-dependencies-cache-close
-        let postgres_close = async {
-            // template:begin postgres:shutdown-dependencies-postgres-close
-            if let Some(pool) = postgres {
-                return match infra_postgres::close(
-                    &pool,
-                    deadline.saturating_duration_since(Instant::now()),
-                )
-                .await
-                {
-                    Closed::Complete => {
-                        tracing::info!("postgres_pool_closed");
-                        false
-                    }
-                    Closed::TimedOut => {
-                        tracing::warn!("postgres pool outlived its close budget");
-                        true
-                    }
-                };
-            }
-            // template:end postgres:shutdown-dependencies-postgres-close
-            false
-        };
-        postgres_close.await
+        // template:begin object-storage:service-shutdown-dependencies-object-storage-close
+        drop(object_storage);
+        // template:end object-storage:service-shutdown-dependencies-object-storage-close
+        // template:begin postgres:shutdown-dependencies-postgres-close
+        if let Some(pool) = postgres {
+            return match infra_postgres::close(
+                &pool,
+                deadline.saturating_duration_since(Instant::now()),
+            )
+            .await
+            {
+                Closed::Complete => {
+                    tracing::info!("postgres_pool_closed");
+                    false
+                }
+                Closed::TimedOut => {
+                    tracing::warn!("postgres pool outlived its close budget");
+                    true
+                }
+            };
+        }
+        // template:end postgres:shutdown-dependencies-postgres-close
+        false
     }
 }
 

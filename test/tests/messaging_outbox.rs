@@ -194,7 +194,7 @@ fn nats_url() -> String {
 fn event(id: &str, value: &str) -> Event<Created> {
     Event {
         id: id.to_owned(),
-        occurred_at: time::OffsetDateTime::from_unix_timestamp(1_700_000_000)
+        occurred_at: time::UtcDateTime::from_unix_timestamp(1_700_000_000)
             .expect("fixed occurrence is valid"),
         payload: Created {
             value: value.to_owned(),

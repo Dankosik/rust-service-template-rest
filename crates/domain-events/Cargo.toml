@@ -1,6 +1,6 @@
 [package]
 name = "domain-events"
-description = "Immutable provider-free typed event identity and payload."
+description = "Provider-free typed domain event contract: payload type and version plus logical ID, occurrence time and payload."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

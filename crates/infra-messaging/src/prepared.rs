@@ -52,12 +52,7 @@ impl PreparedEvent {
                 "payload exceeds configured maximum",
             ));
         }
-        let occurred_at = event
-            .occurred_at
-            .checked_to_offset(time::UtcOffset::UTC)
-            .ok_or(crate::MessagingError::Envelope(
-                "occurrence time is out of range",
-            ))?;
+        let occurred_at = event.occurred_at.to_offset(time::UtcOffset::UTC);
         // The event type was checked at compile time and the publication ID
         // is the message ID, so only the ID and time need checking here.
         crate::wire::validate_text(&event.id)?;

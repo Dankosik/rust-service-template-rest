@@ -21,12 +21,12 @@ use infra_idempotency_store::Store;
 use utoipa::OpenApi as _;
 
 use super::declaration::{self, CompositionError};
-use super::execute::{Attempt, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, Provenance, sanitized};
+use super::execute::{Attempt, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, Provenance};
 use super::identity;
 use super::openapi::{IdempotencyComponents, KEY_HEADER, REPLAYED_HEADER};
 use crate::authn::VerifiedPrincipal;
 use crate::harden::RequestDeadline;
-use crate::problem::{Code, Problem};
+use crate::problem::{Code, Problem, sanitized_internal_error};
 use utoipa_axum::router::UtoipaMethodRouter;
 
 const INVALID_KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
@@ -267,6 +267,9 @@ fn unreadable_body() -> Response {
 }
 
 fn normalize_response(mut response: Response, operation: &str) -> Response {
+    // Seal replay metadata after the handler returns. Neither a supplied header
+    // nor a 2xx status proves replay: a success must carry execute's private
+    // provenance.
     let provenance = response.extensions_mut().remove::<Provenance>();
     response.headers_mut().remove(REPLAYED_HEADER);
     if !response.status().is_success() {
@@ -286,7 +289,7 @@ fn normalize_response(mut response: Response, operation: &str) -> Response {
 
 fn wiring_failure(operation: &str, failure: &'static str) -> Response {
     tracing::error!(operation, failure, "http_idempotency_wiring_failed");
-    sanitized()
+    sanitized_internal_error()
 }
 
 #[cfg(test)]

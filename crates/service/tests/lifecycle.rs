@@ -230,6 +230,98 @@ fn production_plaintext_cache_dsn_exits_before_the_listener() {
 }
 // template:end cache:service-cache-lifecycle-admission
 
+// template:begin object-storage:service-object-storage-lifecycle-admission
+#[test]
+fn an_unreachable_bucket_still_becomes_ready_without_a_request() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("closed port");
+    let port = listener.local_addr().expect("closed port").port();
+    drop(listener);
+    let endpoint = format!("http://127.0.0.1:{port}");
+    let service = Service::spawn(&[
+        ("APP__APP__ENV", "local"),
+        ("APP__OBJECT_STORAGE__PROVIDER", "local"),
+        ("APP__OBJECT_STORAGE__ENDPOINT", &endpoint),
+        ("APP__OBJECT_STORAGE__BUCKET", "template-bucket"),
+        ("APP__OBJECT_STORAGE__ACCESS_KEY_ID", "template"),
+        (
+            "APP__OBJECT_STORAGE__SECRET_ACCESS_KEY",
+            "hunter2-object-storage",
+        ),
+    ]);
+    let configured = service.await_record("object_storage_configured");
+    assert_eq!(
+        configured["object_storage.provider"], "local",
+        "{configured}"
+    );
+    let api = service.await_record("http listener bound")["addr"]
+        .as_str()
+        .expect("addr field")
+        .to_owned();
+    service.await_record("service_ready");
+    let ready = format!("http://{api}/health/ready");
+    assert!(
+        poll_until(&ready, 200, Duration::from_secs(5)),
+        "object storage is not a readiness dependency"
+    );
+    service.terminate();
+    let (code, stderr) = service.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("hunter2-object-storage"),
+        "the secret must not reach logs: {stderr}"
+    );
+}
+
+#[test]
+fn production_emulator_provider_exits_before_the_listener() {
+    let (code, stderr) = Service::spawn(&[
+        ("APP__APP__ENV", "production"),
+        ("APP__OBJECT_STORAGE__PROVIDER", "local"),
+        ("APP__OBJECT_STORAGE__ENDPOINT", "http://127.0.0.1:7070"),
+        ("APP__OBJECT_STORAGE__BUCKET", "template-bucket"),
+        ("APP__OBJECT_STORAGE__ACCESS_KEY_ID", "template"),
+        (
+            "APP__OBJECT_STORAGE__SECRET_ACCESS_KEY",
+            "hunter2-object-storage",
+        ),
+    ])
+    .wait();
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("object_storage.provider"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("hunter2-object-storage"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn an_r2_endpoint_outside_cloudflare_exits_before_the_listener() {
+    let (code, stderr) = Service::spawn(&[
+        ("APP__APP__ENV", "production"),
+        ("APP__OBJECT_STORAGE__PROVIDER", "cloudflare_r2"),
+        (
+            "APP__OBJECT_STORAGE__ENDPOINT",
+            "https://storage.example.com",
+        ),
+        ("APP__OBJECT_STORAGE__BUCKET", "template-bucket"),
+        ("APP__OBJECT_STORAGE__ACCESS_KEY_ID", "template"),
+        (
+            "APP__OBJECT_STORAGE__SECRET_ACCESS_KEY",
+            "hunter2-object-storage",
+        ),
+    ])
+    .wait();
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("object_storage.endpoint"),
+        "stderr: {stderr}"
+    );
+}
+// template:end object-storage:service-object-storage-lifecycle-admission
+
 // template:begin inbound-webhooks:service-webhooks-lifecycle-tests
 #[test]
 fn active_inbound_webhook_endpoint_refuses_without_postgres_before_listener_admission() {

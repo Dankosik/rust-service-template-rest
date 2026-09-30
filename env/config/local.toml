@@ -88,3 +88,17 @@ max_connections = 4
 # allow_unauthenticated = true
 # command_timeout = "100ms"
 # template:end cache:local-config
+
+# template:begin object-storage:local-config
+# Object storage is inert until a provider is selected. The secret is
+# environment-only. With the emulator from `make compose-up`:
+#   APP__OBJECT_STORAGE__SECRET_ACCESS_KEY=template-secret make run
+# [object_storage]
+# provider = "local"
+# endpoint = "http://127.0.0.1:7070"
+# bucket = "template-bucket"
+# access_key_id = "template"
+# max_object_bytes = "8 MiB"
+# max_concurrency = 8
+# operation_timeout = "5s"
+# template:end object-storage:local-config

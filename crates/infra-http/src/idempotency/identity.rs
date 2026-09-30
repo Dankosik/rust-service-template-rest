@@ -1,4 +1,8 @@
 //! Private request identity framing for HTTP idempotency.
+//!
+//! Domain strings, caller tags, query-presence bytes, and length prefixes are
+//! a persistent format: changing them changes identity against live records.
+//! Preserve the exact framing pinned by the scope/request test vectors.
 
 use axum::http::{Method, Uri};
 use infra_idempotency_store::{CallerIdentity, CallerKind, Digest, ScopeKey};

@@ -72,14 +72,14 @@ impl fmt::Debug for JwtVerifier {
 }
 
 /// Why no installed key verified the signature.
-enum DecodeError {
+enum SignatureVerificationError {
     /// No installed key has the token's `kid` and algorithm.
     NoCandidate,
     /// Candidate keys exist, but none verified the signature.
     BadSignature,
 }
 
-impl DecodeError {
+impl SignatureVerificationError {
     /// A new `kid`, or a kid-less token during key rotation, can need keys the
     /// installed set lacks (the go-oidc rule). A known `kid` with a bad
     /// signature cannot.
@@ -91,11 +91,15 @@ impl DecodeError {
     }
 }
 
-impl From<DecodeError> for VerificationError {
-    fn from(error: DecodeError) -> Self {
+impl From<SignatureVerificationError> for VerificationError {
+    fn from(error: SignatureVerificationError) -> Self {
         match error {
-            DecodeError::NoCandidate => Self::invalid(VerificationReason::UnknownKey),
-            DecodeError::BadSignature => Self::invalid(VerificationReason::Signature),
+            SignatureVerificationError::NoCandidate => {
+                Self::invalid(VerificationReason::UnknownKey)
+            }
+            SignatureVerificationError::BadSignature => {
+                Self::invalid(VerificationReason::Signature)
+            }
         }
     }
 }
@@ -123,6 +127,8 @@ impl JwtVerifier {
         {
             return Err(VerificationError::invalid(VerificationReason::Profile));
         }
+        // Decode into bounded stack storage; admitted keys cap the signature size.
+        // Keep `message` as the original encoded bytes that the issuer signed.
         let mut signature_bytes = [0_u8; MAX_SIGNATURE_BYTES];
         let signature = URL_SAFE_NO_PAD
             .decode_slice(signature, &mut signature_bytes)
@@ -132,7 +138,7 @@ impl JwtVerifier {
         match self.keys.keys().verify(message, signature, kid, algorithm) {
             Ok(()) => {}
             Err(miss) if miss.may_need_new_keys(kid) => {
-                self.decode_after_refresh(message, signature, kid, algorithm, miss)
+                self.verify_signature_after_refresh(message, signature, kid, algorithm, miss)
                     .await?;
             }
             Err(error) => return Err(error.into()),
@@ -149,13 +155,14 @@ impl JwtVerifier {
         )
     }
 
-    async fn decode_after_refresh(
+    /// Retries only the signature check; the caller validates the payload once.
+    async fn verify_signature_after_refresh(
         &self,
         message: &[u8],
         signature: &[u8],
         kid: Option<&str>,
         algorithm: JwtAlgorithm,
-        miss: DecodeError,
+        miss: SignatureVerificationError,
     ) -> Result<(), VerificationError> {
         match self.keys.refresh_for_unknown_key().await {
             UnknownKeyRefresh::Refreshed(keys) => {
@@ -203,10 +210,8 @@ async fn prepare_with_provider(
         "authn_jwks_key_rejections_total",
         "Rejected JWKS entries by closed reason"
     );
-    if options.audiences.is_empty()
-        || options.audiences.iter().any(String::is_empty)
-        || options.algorithms.is_empty()
-    {
+    let claim_policy = ClaimPolicy::new(options.issuer.as_str().to_owned(), options.audiences)?;
+    if options.algorithms.is_empty() {
         return Err(PreparationError::new(
             PreparationPhase::Options,
             PreparationReason::Parse,
@@ -235,7 +240,6 @@ async fn prepare_with_provider(
         })
     })?;
     let keys = KeyStore::new(Arc::new(keys));
-    let claim_policy = ClaimPolicy::new(options.issuer.as_str().to_owned(), options.audiences);
     let verifier = JwtVerifier {
         claim_policy,
         token_profile: options.token_profile,
@@ -332,13 +336,13 @@ impl KeySet {
         signature: &[u8],
         kid: Option<&str>,
         algorithm: JwtAlgorithm,
-    ) -> Result<(), DecodeError> {
-        let mut miss = DecodeError::NoCandidate;
+    ) -> Result<(), SignatureVerificationError> {
+        let mut miss = SignatureVerificationError::NoCandidate;
         for key in self.candidates(kid, algorithm) {
             if key.verify_sig(message, signature).is_ok() {
                 return Ok(());
             }
-            miss = DecodeError::BadSignature;
+            miss = SignatureVerificationError::BadSignature;
         }
         Err(miss)
     }
@@ -648,7 +652,7 @@ mod tests {
 
     fn verifier(keys: Arc<super::KeySet>, algorithms: &[JwtAlgorithm]) -> JwtVerifier {
         let claim_policy =
-            ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()]);
+            ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()]).unwrap();
         JwtVerifier {
             claim_policy,
             token_profile: TokenProfile::ResourceServer,

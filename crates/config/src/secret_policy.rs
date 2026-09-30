@@ -89,6 +89,7 @@ mod tests {
             "auth.token",
             "http.authorization",
             "messaging.credentials",
+            "object_storage.secret_access_key",
         ] {
             assert!(is_secret_like_key(key), "{key} should be secret-like");
         }
@@ -100,6 +101,7 @@ mod tests {
             "http.addr",
             "observability.otel.exporter.otlp_endpoint",
             "cache.key_prefix",
+            "object_storage.access_key_id",
             "keyboard.layout",
         ] {
             assert!(!is_secret_like_key(key), "{key} should not be secret-like");

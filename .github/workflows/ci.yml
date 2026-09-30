@@ -1,12 +1,10 @@
 name: ci
-
 # Jobs are selected by the changed surfaces that scripts/ci/changed-surfaces.sh
 # reports; `make verify` reads the same classifier. `required` is the one
 # status to protect: it fails on any failed or cancelled gate and accepts a
 # gate the surfaces did not select. A draft pull request defers the heavy
 # gates (initializer, image, integration) until it is ready for review. Job
 # layout and the reason for each gate: docs/ci-cd-production-ready.md.
-
 on:
   push:
     branches: [main]
@@ -20,14 +18,11 @@ on:
     # Weekly: advisory databases move without a commit, so every surface runs.
     - cron: "41 4 * * 2"
   workflow_dispatch:
-
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 permissions:
   contents: read
-
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
@@ -37,7 +32,6 @@ env:
   # restores artifacts built at another one.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   RUST_BACKTRACE: short
-
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -75,11 +69,7 @@ jobs:
           persist-credentials: false
       - name: Fetch exact comparison base
         if: >-
-          !startsWith(github.ref, 'refs/tags/') &&
-          github.event_name != 'workflow_dispatch' &&
-          github.event_name != 'schedule' &&
-          (github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before) != '' &&
-          (github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before) != '0000000000000000000000000000000000000000'
+          !startsWith(github.ref, 'refs/tags/') && github.event_name != 'workflow_dispatch' && github.event_name != 'schedule' && (github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before) != '' && (github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before) != '0000000000000000000000000000000000000000'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         run: git fetch --no-tags --depth=1 origin "${BASE_SHA}"
@@ -109,7 +99,6 @@ jobs:
           if grep -qx 'initializer_runtime=true' "${surfaces}"; then
             python3 ./scripts/ci/initializer-matrix.py "${plan[@]}" <"${paths}" | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
           fi
-
   # template:begin grpc:ci-grpc-job
   grpc:
     needs: changes
@@ -145,18 +134,13 @@ jobs:
   quality:
     needs: changes
     if: >-
-      needs.changes.outputs.rust_source == 'true' ||
-      needs.changes.outputs.cargo_dependencies == 'true' ||
-      needs.changes.outputs.lint_config == 'true' ||
-      needs.changes.outputs.openapi == 'true' ||
-      needs.changes.outputs.migrations == 'true' ||
-      needs.changes.outputs.agent_instructions == 'true' ||
-      needs.changes.outputs.validation_system == 'true'
+      needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true' || needs.changes.outputs.lint_config == 'true' || needs.changes.outputs.openapi == 'true' || needs.changes.outputs.migrations == 'true' || needs.changes.outputs.agent_instructions == 'true' || needs.changes.outputs.validation_system == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       RUST_SELECTED: >-
         ${{ needs.changes.outputs.rust_source == 'true' ||
+
             needs.changes.outputs.cargo_dependencies == 'true' ||
             needs.changes.outputs.lint_config == 'true' ||
             needs.changes.outputs.openapi == 'true' ||
@@ -187,7 +171,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
           cache-bin: "false"
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.head_ref == 'claude/ci-speed' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
         uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
@@ -195,18 +179,14 @@ jobs:
           tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Format
         if: >-
-          needs.changes.outputs.rust_source == 'true' ||
-          needs.changes.outputs.cargo_dependencies == 'true' ||
-          needs.changes.outputs.lint_config == 'true'
+          needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true' || needs.changes.outputs.lint_config == 'true'
         run: bash ./scripts/ci/measure.sh quality-format -- make fmt-check
       - name: Affected crates
         # Pull requests select the changed crates and their dependents; every
         # other event, and any manifest, lockfile, or toolchain change, runs
         # the workspace.
         if: >-
-          (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
-          needs.changes.outputs.rust_source == 'true' &&
-          needs.changes.outputs.cargo_dependencies != 'true'
+          (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.rust_source == 'true' && needs.changes.outputs.cargo_dependencies != 'true'
         id: affected
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
@@ -217,9 +197,7 @@ jobs:
       - name: Lint, build, test
         id: lint-build-test
         if: >-
-          needs.changes.outputs.rust_source == 'true' ||
-          needs.changes.outputs.cargo_dependencies == 'true' ||
-          needs.changes.outputs.lint_config == 'true'
+          needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true' || needs.changes.outputs.lint_config == 'true'
         env:
           EVENT_NAME: ${{ github.event_name }}
           CARGO_DEPENDENCIES: ${{ needs.changes.outputs.cargo_dependencies }}
@@ -305,14 +283,11 @@ jobs:
       - name: Validation routing
         if: needs.changes.outputs.validation_system == 'true'
         run: bash ./scripts/ci/measure.sh quality-validation-system -- make changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
-
   security:
     needs: changes
     if: >-
-      needs.changes.outputs.cargo_dependencies == 'true' ||
-      needs.changes.outputs.dependency_policy == 'true' ||
-      needs.changes.outputs.github_workflows == 'true' ||
-      (github.event_name == 'pull_request' && (
+      needs.changes.outputs.cargo_dependencies == 'true' || needs.changes.outputs.dependency_policy == 'true' || needs.changes.outputs.github_workflows == 'true' || (github.event_name == 'pull_request' && (
+
         needs.changes.outputs.tool_manifest == 'true' ||
         needs.changes.outputs.runtime_image == 'true'
       ))
@@ -329,6 +304,7 @@ jobs:
         # and the workflow action pins.
         if: >-
           github.event_name == 'pull_request' && (
+
             needs.changes.outputs.cargo_dependencies == 'true' ||
             needs.changes.outputs.tool_manifest == 'true' ||
             needs.changes.outputs.github_workflows == 'true' ||
@@ -362,7 +338,6 @@ jobs:
           # Enables the online audits (known-vulnerable-actions, impostor-commit).
           GH_TOKEN: ${{ github.token }}
         run: bash ./scripts/ci/measure.sh security-zizmor -- make zizmor
-
   secrets:
     needs: changes
     if: github.event_name != 'schedule' || needs.changes.outputs.secret_scanning == 'true'
@@ -398,24 +373,17 @@ jobs:
           fi
       - name: Save Go tool caches
         if: >-
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/main' &&
-          steps.go-cache.outputs.cache-hit != 'true'
+          github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
-
   delivery:
     needs: changes
     if: >-
-      needs.changes.outputs.shell == 'true' ||
-      needs.changes.outputs.github_workflows == 'true' ||
-      needs.changes.outputs.tool_manifest == 'true' ||
-      needs.changes.outputs.runtime_image == 'true' ||
-      needs.changes.outputs.publication_metadata == 'true'
+      needs.changes.outputs.shell == 'true' || needs.changes.outputs.github_workflows == 'true' || needs.changes.outputs.tool_manifest == 'true' || needs.changes.outputs.runtime_image == 'true' || needs.changes.outputs.publication_metadata == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -464,7 +432,6 @@ jobs:
       - name: Publication metadata
         if: needs.changes.outputs.publication_metadata == 'true'
         run: bash ./scripts/ci/measure.sh delivery-publication-metadata -- make publish-image-metadata-check
-
   image:
     needs: changes
     if: needs.changes.outputs.runtime_image == 'true' && github.event.pull_request.draft != true
@@ -511,15 +478,16 @@ jobs:
       - name: Image vulnerabilities
         if: needs.changes.outputs.runtime_image == 'true'
         run: bash ./scripts/ci/measure.sh image-security -- make container-security
-
   # template:begin integration:ci-integration-job
   integration:
     needs: changes
     if: >-
       github.event.pull_request.draft != true && (
+
         needs.changes.outputs.db_integration == 'true' ||
         needs.changes.outputs.messaging_integration == 'true' ||
-        needs.changes.outputs.cache_integration == 'true'
+        needs.changes.outputs.cache_integration == 'true' ||
+        needs.changes.outputs.object_storage_integration == 'true'
       )
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -536,7 +504,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
           cache-bin: "false"
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.head_ref == 'claude/ci-speed' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Start selected integration services
         id: integration-services
         env:
@@ -568,23 +536,15 @@ jobs:
       - name: Database-backed proof
         if: needs.changes.outputs.db_integration == 'true'
         run: >-
-          bash ./scripts/ci/measure.sh integration-db --
-          env INTEGRATION_COMPOSE_MANAGED=1
-          DATABASE_URL='postgres://app:app@127.0.0.1:5432/app?sslmode=disable'
-          NATS_URL=nats://127.0.0.1:4222
-          make test-integration-db
+          bash ./scripts/ci/measure.sh integration-db -- env INTEGRATION_COMPOSE_MANAGED=1 DATABASE_URL='postgres://app:app@127.0.0.1:5432/app?sslmode=disable' NATS_URL=nats://127.0.0.1:4222 make test-integration-db
       - name: Cache proof
         if: needs.changes.outputs.cache_integration == 'true'
         run: >-
-          bash ./scripts/ci/measure.sh integration-cache --
-          env REQUIRE_DOCKER=1 CACHE_URL=redis://127.0.0.1:6379
-          make test-integration-cache
+          bash ./scripts/ci/measure.sh integration-cache -- env REQUIRE_DOCKER=1 CACHE_URL=redis://127.0.0.1:6379 make test-integration-cache
       - name: JetStream proof
         if: needs.changes.outputs.messaging_integration == 'true'
         run: >-
-          bash ./scripts/ci/measure.sh integration-messaging --
-          env REQUIRE_DOCKER=1 NATS_URL=nats://127.0.0.1:4222
-          make test-integration-messaging
+          bash ./scripts/ci/measure.sh integration-messaging -- env REQUIRE_DOCKER=1 NATS_URL=nats://127.0.0.1:4222 make test-integration-messaging
       - name: Install Go for wire compatibility
         if: needs.changes.outputs.messaging_integration == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -647,7 +607,7 @@ jobs:
         with:
           key: ${{ matrix.part }}
           cache-bin: "false"
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.head_ref == 'claude/ci-speed' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Fetch locked Cargo packages
         run: cargo fetch --locked
       - name: Source suites and canonical projections
@@ -668,7 +628,6 @@ jobs:
           # rather than refuse if it is ever missing.
           REQUIRE_DOCKER: "1"
         run: bash ./scripts/ci/measure.sh "template-initializer-${PART}" -- bash ./scripts/ci/template-init-check.sh --runtime-graphs "${GRAPHS}"
-
   initializer-projections:
     # Only projected text changed (documentation, instructions, harness
     # carriers, workflow and image metadata): the canonical projections prove
@@ -676,8 +635,7 @@ jobs:
     # alter an initialized service's build or the initializer itself.
     needs: changes
     if: >-
-      needs.changes.outputs.module_initializer == 'true' &&
-      needs.changes.outputs.initializer_runtime != 'true'
+      needs.changes.outputs.module_initializer == 'true' && needs.changes.outputs.initializer_runtime != 'true'
     name: initializer (projections)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -688,7 +646,6 @@ jobs:
           persist-credentials: false
       - name: Canonical projections
         run: bash ./scripts/ci/measure.sh template-initializer-projections -- make template-init-projections
-
   docs:
     needs: changes
     if: needs.changes.outputs.documentation == 'true'
@@ -701,7 +658,6 @@ jobs:
       - name: Links
         # Relative links and #fragments only (offline); no toolchain.
         run: bash ./scripts/ci/measure.sh docs-links -- make docs-check
-
   required:
     if: always()
     needs:
@@ -729,9 +685,7 @@ jobs:
       - name: Require selected initializer matrix success
         # A draft defers the matrix; ready_for_review runs it.
         if: >-
-          needs.changes.outputs.initializer_runtime == 'true' &&
-          github.event.pull_request.draft != true &&
-          needs.initializer.result != 'success'
+          needs.changes.outputs.initializer_runtime == 'true' && github.event.pull_request.draft != true && needs.initializer.result != 'success'
         run: exit 1
       # template:begin grpc:ci-required-grpc-success
       - name: Require selected protobuf contract success
@@ -740,9 +694,7 @@ jobs:
       # template:end grpc:ci-required-grpc-success
       - name: Require selected initializer projections success
         if: >-
-          needs.changes.outputs.module_initializer == 'true' &&
-          needs.changes.outputs.initializer_runtime != 'true' &&
-          needs.initializer-projections.result != 'success'
+          needs.changes.outputs.module_initializer == 'true' && needs.changes.outputs.initializer_runtime != 'true' && needs.initializer-projections.result != 'success'
         run: exit 1
       - name: Accept passed and intentionally skipped gates
         run: echo "all applicable CI gates passed"

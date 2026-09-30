@@ -391,7 +391,7 @@ fn rust_production_records() -> Vec<WireRecord> {
 fn bridge_event(id: impl Into<String>) -> Event<BridgePayload> {
     Event {
         id: id.into(),
-        occurred_at: parse_timestamp("2026-09-26T12:34:56.123456789Z"),
+        occurred_at: parse_timestamp("2026-09-26T12:34:56.123456789Z").to_utc(),
         payload: BridgePayload {
             amount: 1.0,
             escaped: "\\u0041".to_owned(),

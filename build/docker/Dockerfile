@@ -25,6 +25,9 @@ ARG SERVICE_PACKAGE=service
 
 FROM rust:1.98.1-slim-trixie@sha256:3999a7ff854f315cf5f2b9a58071cb71196fdfc2ccd32fa20eedce8e754fd62a AS chef
 WORKDIR /src
+# jemalloc (the service allocator) builds with configure and make; slim has gcc only.
+RUN apt-get update && apt-get install -y --no-install-recommends make \
+ && rm -rf /var/lib/apt/lists/*
 ARG CARGO_CHEF_VERSION=0.1.78
 ARG CARGO_AUDITABLE_VERSION=0.7.6
 RUN cargo install --locked cargo-chef --version "${CARGO_CHEF_VERSION}" \

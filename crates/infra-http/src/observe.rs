@@ -12,8 +12,9 @@
 //! afterwards, since every record re-serializes the span's fields.
 //!
 //! The metrics keep the names and labels `axum-prometheus` defined: requests
-//! and their duration by method, route template, and status, and in-flight
-//! requests by method and route template, held until the response body ends.
+//! and their response-head duration by method, route template, and status,
+//! and in-flight requests by method and route template, held until the
+//! response body is dropped (including after consumption or cancellation).
 //!
 //! The access-log line is written inside the span, so it carries the trace
 //! and span ids through the subscriber, and outside the shedder and timeout,
@@ -62,6 +63,8 @@ pub(crate) async fn observe(
 ) -> Response {
     let started = Instant::now();
     let method = request.method().clone();
+    // Own the accepted header while the request moves into the next service;
+    // the borrowed string also remains available for response completion.
     let request_id = request.extensions().get::<RequestId>().cloned();
     let request_id = request_id
         .as_ref()
@@ -86,7 +89,9 @@ pub(crate) async fn observe(
         }
     };
 
-    // Completed here, before the metrics and the line below read it.
+    // Complete the Problem before metrics and logging read the response head.
+    // These observations do not wait for a streaming body; only the pending
+    // gauge below follows the body's lifetime.
     let response = complete_problem(response, request_id);
     let status = response.status();
     record(method_label(&method), endpoint, status, started.elapsed());
@@ -166,8 +171,7 @@ fn update_span_from_response(span: &tracing::Span, status: StatusCode) {
     }
 }
 
-/// The in-flight gauge of one request, held until its response body ends or
-/// is dropped.
+/// The in-flight gauge of one request, held until its response body is dropped.
 struct Pending(metrics::Gauge);
 
 impl Pending {

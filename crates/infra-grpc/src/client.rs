@@ -123,7 +123,7 @@ impl tower::Service<Request<Body>> for Client {
                 Ok(response) => crate::observe::code_from_headers(response.headers()),
                 Err(status) => status.code(),
             };
-            crate::observe::update_span(&span, code, false);
+            crate::observe::update_span(&span, code, &SpanKind::Client);
             series.record(uri.path(), code, started.elapsed());
             result
         })

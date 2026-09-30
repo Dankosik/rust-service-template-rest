@@ -12,6 +12,11 @@
 //!
 //! The state travels through [`tokio::sync::watch`], so a streaming reader
 //! can wait for the next publication.
+//!
+//! Bootstrap owns admission through [`Readiness::refresh`], then runs
+//! [`Readiness::refresh_until`] in a tracked background task. Handlers read
+//! the cached result with [`ReadinessReader::verdict`]. Teardown
+//! calls [`Readiness::start_drain`] before cancelling the refresher.
 
 use std::fmt;
 use std::sync::Arc;
@@ -127,12 +132,13 @@ struct State {
     last_check: Option<Check>,
 }
 
-/// The published result of the latest check.
+/// The latest completed probe round after applying the failure threshold.
 #[derive(Clone, Debug)]
 struct Check {
+    /// Completion time, not start time: readers measure the cache's age.
     at: Instant,
-    /// What readers are told. A failure absorbed by `failure_threshold` is
-    /// published as ready.
+    /// A failure below `failure_threshold` may still be published as ready.
+    /// Readers apply drain and staleness before returning this verdict.
     verdict: Result<(), NotReady>,
     /// Failed checks in a row, including absorbed ones.
     consecutive_failures: u32,
@@ -162,6 +168,8 @@ pub struct ReadinessReader {
     rx: watch::Receiver<State>,
     stale_after: Duration,
     // template:begin grpc:health-reader-stale-edge
+    /// Timestamp of the check whose stale notification was already delivered.
+    /// Prevents the same expired check from waking a stream repeatedly.
     stale_edge_for: Option<Instant>,
     // template:end grpc:health-reader-stale-edge
 }
@@ -203,26 +211,31 @@ impl Readiness {
         });
     }
 
-    /// Check every probe once and publish the verdict.
+    /// Check probes in registration order, stopping at the first failure or
+    /// timeout, and publish the verdict after applying the failure threshold.
+    /// All probes share one deadline, so adding a probe does not multiply the
+    /// refresh budget.
     ///
     /// Startup admission calls this and then reads
-    /// [`ReadinessReader::verdict`], so the first probe after bind is
-    /// answered from a real check.
+    /// [`ReadinessReader::verdict`] before announcing readiness.
     pub async fn refresh(&self) {
         let observed = self.check_probes().await;
         let at = Instant::now();
         let failure_threshold = self.policy.failure_threshold;
-        let mut flipped_to = None;
+        let mut transition_to_log = None;
+        // Publish every completed round, even when readiness stays the same:
+        // its timestamp is the refresher's heartbeat for staleness detection.
         self.tx.send_modify(|state| {
-            let next = next_check(state.last_check.as_ref(), observed, failure_threshold, at);
+            let next =
+                apply_failure_threshold(state.last_check.as_ref(), observed, failure_threshold, at);
             // While draining, readers are told "draining" whatever the probes say.
             if !state.draining {
-                flipped_to = flip(state.last_check.as_ref(), &next);
+                transition_to_log = readiness_transition(state.last_check.as_ref(), &next);
             }
             state.last_check = Some(next);
         });
         // Logged after the write lock is released so readers never wait on it.
-        match flipped_to {
+        match transition_to_log {
             Some(Ok(())) => tracing::info!("readiness recovered"),
             Some(Err(reason)) => tracing::warn!(%reason, "readiness lost"),
             None => {}
@@ -279,9 +292,11 @@ impl Readiness {
     }
 }
 
-/// Fold one observed result into the published check. After a ready verdict,
-/// failures are absorbed until `failure_threshold` of them come in a row.
-fn next_check(
+/// Keep a published ready verdict through failures below the threshold.
+/// An instance without a ready verdict fails immediately; any success resets
+/// the streak and restores readiness. Drain and staleness are reader policy,
+/// so this fold considers the previous published verdict only.
+fn apply_failure_threshold(
     previous: Option<&Check>,
     observed: Result<(), NotReady>,
     failure_threshold: u32,
@@ -292,18 +307,19 @@ fn next_check(
         (Err(_), Some(previous)) => previous.consecutive_failures + 1,
         (Err(_), None) => 1,
     };
-    let was_ready = previous.is_some_and(|previous| previous.verdict.is_ok());
-    let absorbed = was_ready && observed.is_err() && consecutive_failures < failure_threshold;
+    let was_published_ready = previous.is_some_and(|previous| previous.verdict.is_ok());
+    let hold_ready =
+        was_published_ready && observed.is_err() && consecutive_failures < failure_threshold;
     Check {
         at,
-        verdict: if absorbed { Ok(()) } else { observed },
+        verdict: if hold_ready { Ok(()) } else { observed },
         consecutive_failures,
     }
 }
 
 /// The new verdict when it flips between ready and not ready. The first
 /// check at startup is not a flip; admission logs its own outcome.
-fn flip(previous: Option<&Check>, next: &Check) -> Option<Result<(), NotReady>> {
+fn readiness_transition(previous: Option<&Check>, next: &Check) -> Option<Result<(), NotReady>> {
     let previous = previous?;
     (previous.verdict.is_ok() != next.verdict.is_ok()).then(|| next.verdict.clone())
 }
@@ -340,6 +356,9 @@ impl ReadinessReader {
     /// Resolve for an unseen publication or once when the current check
     /// reaches its stale boundary.
     ///
+    /// A publication may keep the same readiness verdict; it still updates
+    /// freshness. The caller decides whether its transport needs a new answer.
+    ///
     /// This observes the cached state only; it never checks a probe. A caller
     /// must re-read [`Self::verdict`] after this future resolves, which makes
     /// a publication race use the current monotone drain state.
@@ -347,12 +366,14 @@ impl ReadinessReader {
     /// # Errors
     ///
     /// [`OwnerDropped`] when the last [`Readiness`] sender is gone.
-    pub async fn changed_verdict(&mut self) -> Result<(), OwnerDropped> {
+    pub async fn wait_for_verdict_event(&mut self) -> Result<(), OwnerDropped> {
         if self.rx.has_changed().map_err(|_| OwnerDropped)? {
             return self.rx.changed().await.map_err(|_| OwnerDropped);
         }
         // Draining is monotone and never goes stale; nothing goes stale
         // before the first check.
+        // Release watch's read guard before waiting: a retained guard would
+        // block refresh and drain from publishing their state.
         let checked_at = {
             let state = self.rx.borrow();
             state
@@ -634,15 +655,15 @@ mod tests {
 
     // template:begin grpc:health-changed-verdict-test
     #[tokio::test(start_paused = true)]
-    async fn changed_verdict_delivers_drain_once_then_waits_without_losing_drain() {
+    async fn wait_for_verdict_event_delivers_drain_once_then_waits_without_losing_drain() {
         let (readiness, _, calls) = flaky(true);
         readiness.refresh().await;
         let mut reader = readiness.reader();
 
         readiness.start_drain();
-        assert_eq!(reader.changed_verdict().await, Ok(()));
+        assert_eq!(reader.wait_for_verdict_event().await, Ok(()));
 
-        let waiter = tokio::spawn(async move { reader.changed_verdict().await });
+        let waiter = tokio::spawn(async move { reader.wait_for_verdict_event().await });
         tokio::task::yield_now().await;
         assert!(
             !waiter.is_finished(),
@@ -662,12 +683,12 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn changed_verdict_delivers_each_stale_edge_once_without_a_probe() {
+    async fn wait_for_verdict_event_delivers_each_stale_edge_once_without_a_probe() {
         let (readiness, _, calls) = flaky(true);
         readiness.refresh().await;
         let mut reader = readiness.reader();
         let waiter = tokio::spawn(async move {
-            let result = reader.changed_verdict().await;
+            let result = reader.wait_for_verdict_event().await;
             (reader, result)
         });
         tokio::task::yield_now().await;
@@ -683,7 +704,7 @@ mod tests {
             .expect("stale boundary waiter must not panic");
         assert_eq!(result, Ok(()));
 
-        let waiter = tokio::spawn(async move { reader.changed_verdict().await });
+        let waiter = tokio::spawn(async move { reader.wait_for_verdict_event().await });
         tokio::task::yield_now().await;
         assert!(
             !waiter.is_finished(),
@@ -702,11 +723,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changed_verdict_reports_when_the_owner_is_dropped() {
+    async fn wait_for_verdict_event_reports_when_the_owner_is_dropped() {
         let readiness = Readiness::new(Vec::new(), policy());
         let mut reader = readiness.reader();
         drop(readiness);
-        assert_eq!(reader.changed_verdict().await, Err(OwnerDropped));
+        assert_eq!(reader.wait_for_verdict_event().await, Err(OwnerDropped));
     }
     // template:end grpc:health-changed-verdict-test
 }

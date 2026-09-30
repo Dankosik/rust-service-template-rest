@@ -16,40 +16,24 @@ pub fn classified_status(failure: ClassifiedFailure) -> Status {
     if let Some(retry_after) = failure.retry_after() {
         details.set_retry_info(Some(retry_after));
     }
-    Status::with_error_details(
-        code(failure.meaning()),
-        safe_message(failure.meaning()),
-        details,
-    )
+    let (code, message) = status_parts(failure.meaning());
+    Status::with_error_details(code, message, details)
 }
 
-const fn code(meaning: Meaning) -> Code {
+const fn status_parts(meaning: Meaning) -> (Code, &'static str) {
     match meaning {
-        Meaning::BadRequest => Code::InvalidArgument,
-        Meaning::Unauthenticated => Code::Unauthenticated,
-        Meaning::PermissionDenied => Code::PermissionDenied,
-        Meaning::NotFound => Code::NotFound,
-        Meaning::AlreadyExists => Code::AlreadyExists,
-        Meaning::Conflict => Code::Aborted,
-        Meaning::Unimplemented => Code::Unimplemented,
-        Meaning::ResourceExhausted => Code::ResourceExhausted,
-        Meaning::Unavailable => Code::Unavailable,
-        Meaning::DeadlineExceeded => Code::DeadlineExceeded,
-        Meaning::Internal => Code::Internal,
-    }
-}
-
-const fn safe_message(meaning: Meaning) -> &'static str {
-    match meaning {
-        Meaning::ResourceExhausted => service_failure::AT_CAPACITY_DETAIL,
-        Meaning::DeadlineExceeded => "request deadline exceeded",
-        Meaning::Unavailable => "service is unavailable",
-        Meaning::Unauthenticated => "authentication failed",
-        Meaning::PermissionDenied => "permission denied",
-        Meaning::NotFound => "not found",
-        Meaning::AlreadyExists => "already exists",
-        Meaning::Conflict => "request conflict",
-        Meaning::Unimplemented => "method is not implemented",
-        Meaning::BadRequest | Meaning::Internal => SANITIZED_DETAIL,
+        Meaning::BadRequest => (Code::InvalidArgument, SANITIZED_DETAIL),
+        Meaning::Unauthenticated => (Code::Unauthenticated, "authentication failed"),
+        Meaning::PermissionDenied => (Code::PermissionDenied, "permission denied"),
+        Meaning::NotFound => (Code::NotFound, "not found"),
+        Meaning::AlreadyExists => (Code::AlreadyExists, "already exists"),
+        Meaning::Conflict => (Code::Aborted, "request conflict"),
+        Meaning::Unimplemented => (Code::Unimplemented, "method is not implemented"),
+        Meaning::ResourceExhausted => {
+            (Code::ResourceExhausted, service_failure::AT_CAPACITY_DETAIL)
+        }
+        Meaning::Unavailable => (Code::Unavailable, "service is unavailable"),
+        Meaning::DeadlineExceeded => (Code::DeadlineExceeded, "request deadline exceeded"),
+        Meaning::Internal => (Code::Internal, SANITIZED_DETAIL),
     }
 }

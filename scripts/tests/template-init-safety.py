@@ -142,6 +142,7 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("webhooks", None)
     lock["profiles"].pop("inbound_webhooks", None)
     lock["profiles"].pop("cache", None)
+    lock["profiles"].pop("object_storage", None)
     lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
@@ -163,6 +164,7 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("webhooks", None)
     lock["profiles"].pop("inbound_webhooks", None)
     lock["profiles"].pop("cache", None)
+    lock["profiles"].pop("object_storage", None)
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -266,6 +268,7 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
         webhooks="none",
         inbound_webhooks="none",
         cache="none",
+        object_storage="none",
         agent_harness="core",
     )
     for label, contents in (
@@ -317,6 +320,7 @@ def assert_preflight_extraction(source: Path, work: Path) -> None:
             webhooks="none",
             inbound_webhooks="none",
             cache="none",
+            object_storage="none",
             agent_harness="core",
         )
 
@@ -374,7 +378,8 @@ def must_refuse(
             "duplicate-http-idempotency", "duplicate-jobs", "jobs-flag-and-environment", "duplicate-messaging",
             "messaging-flag-and-environment", "duplicate-outbox", "outbox-flag-and-environment",
             "duplicate-webhooks", "webhooks-flag-and-environment", "duplicate-inbound-webhooks",
-            "duplicate-cache", "cache-flag-and-environment",
+            "duplicate-cache", "cache-flag-and-environment", "duplicate-object-storage",
+            "object-storage-flag-and-environment",
         }
         and "may be supplied once" in result.stderr
     ):
@@ -420,7 +425,7 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
 def assert_profile_packs(
     source: Path, target: Path, *, database: str, authn: str, outbound_http: str, http_idempotency: str,
     jobs: str, outbound_auth: str = "none", grpc: str = "none", messaging: str = "none", outbox: str = "none",
-    webhooks: str = "none", inbound_webhooks: str = "none", cache: str = "none",
+    webhooks: str = "none", inbound_webhooks: str = "none", cache: str = "none", object_storage: str = "none",
 ) -> None:
     assert_profile_pack(source, target, "postgres", database == "postgres")
     assert_profile_pack(source, target, "authn", authn != "none")
@@ -453,14 +458,16 @@ def assert_profile_packs(
     assert_profile_pack(source, target, "outbox", outbox == "postgres")
     assert_profile_pack(source, target, "messaging", messaging == "nats-jetstream")
     assert_profile_pack(source, target, "cache", cache == "redis")
+    assert_profile_pack(source, target, "object-storage", object_storage == "s3")
     assert_profile_pack(source, target, "worker", jobs == "postgres" or messaging == "nats-jetstream")
     assert_profile_pack(
         source, target, "service-secrets",
-        database == "postgres" or messaging == "nats-jetstream" or grpc == "enabled" or cache == "redis",
+        database == "postgres" or messaging == "nats-jetstream" or grpc == "enabled" or cache == "redis"
+        or object_storage == "s3",
     )
     assert_profile_pack(
         source, target, "integration",
-        database == "postgres" or messaging == "nats-jetstream" or cache == "redis",
+        database == "postgres" or messaging == "nats-jetstream" or cache == "redis" or object_storage == "s3",
     )
     assert_profile_pack(source, target, "jobs-messaging", jobs == "postgres" and messaging == "nats-jetstream")
     assert_profile_pack(source, target, "webhooks-common", webhooks == "durable" or inbound_webhooks == "standard-webhooks")
@@ -713,6 +720,18 @@ def check(source: Path) -> None:
         must_refuse(
             source, work, "cache-flag-and-environment", "--cache", "none",
             environment={"CACHE": "none"}, expected="CACHE may be supplied once, by flag or environment",
+        )
+        must_refuse(
+            source, work, "unknown-object-storage", "--object-storage", "gcs", expected="OBJECT_STORAGE is unsupported",
+        )
+        must_refuse(
+            source, work, "duplicate-object-storage", "--object-storage", "none", "--object-storage", "s3",
+            expected="--object-storage may be supplied once",
+        )
+        must_refuse(
+            source, work, "object-storage-flag-and-environment", "--object-storage", "none",
+            environment={"OBJECT_STORAGE": "none"},
+            expected="OBJECT_STORAGE may be supplied once, by flag or environment",
         )
         must_refuse(
             source, work, "duplicate-messaging", "--messaging", "none", "--messaging", "nats-jetstream",
@@ -1144,6 +1163,28 @@ def check(source: Path) -> None:
         )
         if cache_replay.returncode or state(cache_target) != cache_before:
             raise AssertionError("complete cache lock replay changed target bytes")
+        object_storage_target = work / "object-storage-replay"
+        clone(source, object_storage_target)
+        object_storage_result = init(
+            source, object_storage_target, "--database", "none", "--jobs", "none",
+            "--object-storage", "s3", "--agent-harness", "core",
+        )
+        if object_storage_result.returncode:
+            raise AssertionError(f"object-storage-only initialization failed: {object_storage_result.stderr}")
+        assert_profile_packs(
+            source, object_storage_target, database="none", authn="none", outbound_http="none",
+            http_idempotency="none", jobs="none", object_storage="s3",
+        )
+        lock = json.loads((object_storage_target / "template.lock").read_text(encoding="utf-8"))
+        if lock["profiles"].get("object_storage") != "s3":
+            raise AssertionError("template.lock did not record object_storage=s3")
+        object_storage_before = state(object_storage_target)
+        object_storage_replay = init(
+            source, object_storage_target, "--database", "none", "--jobs", "none",
+            "--object-storage", "s3", "--agent-harness", "core",
+        )
+        if object_storage_replay.returncode or state(object_storage_target) != object_storage_before:
+            raise AssertionError("complete object storage lock replay changed target bytes")
         outbox_target = work / "outbox-replay"
         clone(source, outbox_target)
         outbox_result = init(

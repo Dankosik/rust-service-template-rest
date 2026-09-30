@@ -450,21 +450,21 @@ fn uncertain(shared: &Shared, attempt: &AttemptId) {
 
 /// Completions waiting for the next batch, and the one batch in flight.
 ///
-/// The first waiter that holds `flush` writes every queued completion in one
+/// The first waiter that holds `writer` writes every queued completion in one
 /// statement; completions queued meanwhile go in the next batch. A waiter
 /// whose completion another waiter wrote finds the queue empty and reads its
 /// answer. A batch whose writer was dropped answers nobody, and each of its
 /// waiters retries as after a failed statement.
 #[derive(Default)]
 pub(crate) struct Completions {
-    queued: std::sync::Mutex<Vec<Queued>>,
-    flush: tokio::sync::Mutex<()>,
+    queued: std::sync::Mutex<Vec<QueuedCompletion>>,
+    writer: tokio::sync::Mutex<()>,
 }
 
-struct Queued {
+struct QueuedCompletion {
     id: JobId,
     generation: i64,
-    applied: tokio::sync::oneshot::Sender<Result<bool, ()>>,
+    reply: tokio::sync::oneshot::Sender<Result<bool, ()>>,
 }
 
 /// `Err(None)`: the batch failed and its writer already observed the error.
@@ -472,25 +472,25 @@ async fn complete_batched(
     shared: &Shared,
     attempt: &AttemptId,
 ) -> Result<u64, Option<OperationError>> {
-    let (applied, answer) = tokio::sync::oneshot::channel();
-    queued(shared).push(Queued {
+    let (reply, response) = tokio::sync::oneshot::channel();
+    lock_completion_queue(shared).push(QueuedCompletion {
         id: attempt.id,
         generation: attempt.generation,
-        applied,
+        reply,
     });
-    let flush = shared.completions.flush.lock().await;
-    let batch = std::mem::take(&mut *queued(shared));
+    let writer = shared.completions.writer.lock().await;
+    let batch = std::mem::take(&mut *lock_completion_queue(shared));
     if !batch.is_empty() {
         write_batch(shared, batch).await;
     }
-    drop(flush);
-    match answer.await {
+    drop(writer);
+    match response.await {
         Ok(Ok(applied)) => Ok(u64::from(applied)),
         Ok(Err(())) | Err(_) => Err(None),
     }
 }
 
-fn queued(shared: &Shared) -> std::sync::MutexGuard<'_, Vec<Queued>> {
+fn lock_completion_queue(shared: &Shared) -> std::sync::MutexGuard<'_, Vec<QueuedCompletion>> {
     shared
         .completions
         .queued
@@ -498,7 +498,7 @@ fn queued(shared: &Shared) -> std::sync::MutexGuard<'_, Vec<Queued>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-async fn write_batch(shared: &Shared, batch: Vec<Queued>) {
+async fn write_batch(shared: &Shared, batch: Vec<QueuedCompletion>) {
     let mut ids = Vec::with_capacity(batch.len());
     let mut generations = Vec::with_capacity(batch.len());
     for queued in &batch {
@@ -531,13 +531,13 @@ async fn write_batch(shared: &Shared, batch: Vec<Queued>) {
                 }
             }
             for (queued, applied) in batch.into_iter().zip(applied) {
-                let _ = queued.applied.send(Ok(applied));
+                let _ = queued.reply.send(Ok(applied));
             }
         }
         Err(error) => {
             observe_failure(shared, Operation::Record, &error);
             for queued in batch {
-                let _ = queued.applied.send(Err(()));
+                let _ = queued.reply.send(Err(()));
             }
         }
     }

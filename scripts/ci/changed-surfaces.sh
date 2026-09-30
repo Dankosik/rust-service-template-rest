@@ -24,7 +24,7 @@ names=(
 	grpc_schema
 	# template:end grpc:classifier-grpc-surface
 	github_workflows dependency_automation shell runtime_image publication_metadata secret_scanning
-	db_integration messaging_integration cache_integration migrations
+	db_integration messaging_integration cache_integration object_storage_integration migrations
 	agent_instructions documentation validation_system module_initializer initializer_runtime no_validation_required
 )
 
@@ -55,6 +55,22 @@ profile_cache() {
 	none | redis) printf '%s\n' "${cache}" ;;
 	*)
 		echo "invalid selected cache profile: ${cache}" >&2
+		return 2
+		;;
+	esac
+}
+
+profile_object_storage() {
+	local root object_storage
+	root=$(pwd)
+	object_storage=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field object_storage) || {
+		echo "cannot resolve selected object storage profile" >&2
+		return 2
+	}
+	case "${object_storage}" in
+	none | s3) printf '%s\n' "${object_storage}" ;;
+	*)
+		echo "invalid selected object storage profile: ${object_storage}" >&2
 		return 2
 		;;
 	esac
@@ -93,10 +109,11 @@ profile_outbox() {
 }
 
 all_surfaces() {
-	local database messaging cache outbox source_only=false
+	local database messaging cache object_storage outbox source_only=false
 	database=$(profile_database)
 	messaging=$(profile_messaging)
 	cache=$(profile_cache)
+	object_storage=$(profile_object_storage)
 	outbox=$(profile_outbox)
 	[[ -f make/source.mk ]] && source_only=true
 	reset
@@ -106,6 +123,7 @@ all_surfaces() {
 	fi
 	[[ ${messaging} == nats-jetstream ]] || clear_surface messaging_integration
 	[[ ${cache} == redis ]] || clear_surface cache_integration
+	[[ ${object_storage} == s3 ]] || clear_surface object_storage_integration
 	[[ ${source_only} == true ]] || clear_surface module_initializer initializer_runtime
 	emit
 }
@@ -154,10 +172,11 @@ has_line() {
 }
 
 classify() {
-	local file matched database messaging cache outbox source_only=false p9_retained=false
+	local file matched database messaging cache object_storage outbox source_only=false p9_retained=false
 	database=$(profile_database)
 	messaging=$(profile_messaging)
 	cache=$(profile_cache)
+	object_storage=$(profile_object_storage)
 	outbox=$(profile_outbox)
 	[[ -f make/source.mk ]] && source_only=true
 	[[ -f test/tests/http_idempotency/mounted.rs ]] && p9_retained=true
@@ -211,6 +230,13 @@ classify() {
 	crates/service/Cargo.toml | crates/service/src/bootstrap/* | env/docker-compose.yml | \
 	scripts/ci/test-integration-cache.sh | make/template.mk | .github/workflows/ci.yml)
 		mark cache_integration
+		;;
+	esac; fi
+	# The versitygw proof runs only the object storage crate's emulator suite.
+	if [[ ${object_storage} == s3 ]]; then case "${file}" in
+	Cargo.toml | Cargo.lock | crates/infra-object-storage/* | env/docker-compose.yml | \
+	scripts/ci/test-integration-object-storage.sh | make/template.mk | .github/workflows/ci.yml)
+		mark object_storage_integration
 		;;
 	esac; fi
 	if [[ ${outbox} == postgres ]]; then case "${file}" in
@@ -292,7 +318,7 @@ classify() {
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
 		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
 		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/domain-events/* | crates/infra-messaging/* | crates/infra-cache/* | \
-		crates/service-failure/* | crates/infra-oauth2-client-credentials/* | \
+		crates/infra-object-storage/* | crates/infra-telemetry/src/logging.rs | crates/service-failure/* | crates/infra-oauth2-client-credentials/* | \
 		test/* | migrations/*)
 			mark module_initializer initializer_runtime
 			;;
@@ -475,6 +501,21 @@ EOF
 		"shell cache_integration" \
 		"db_integration messaging_integration"
 	rm -rf "${classifier_root}/crates/infra-cache"
+	mkdir -p "${classifier_root}/crates/infra-object-storage/src"
+	: >"${classifier_root}/crates/infra-object-storage/src/lib.rs"
+	assert_case crates/infra-object-storage/src/lib.rs \
+		"rust_source object_storage_integration module_initializer initializer_runtime" \
+		"cargo_dependencies db_integration messaging_integration cache_integration migrations"
+	assert_case scripts/ci/test-integration-object-storage.sh \
+		"shell object_storage_integration" \
+		"db_integration messaging_integration cache_integration"
+	assert_case crates/service/src/bootstrap/mod.rs \
+		"rust_source module_initializer initializer_runtime" \
+		"object_storage_integration"
+	assert_case crates/infra-telemetry/src/logging.rs \
+		"rust_source module_initializer initializer_runtime" \
+		"object_storage_integration cargo_dependencies"
+	rm -rf "${classifier_root}/crates/infra-object-storage"
 	# P9 only mounts infra-http and infra-bearerauthn against a real
 	# database while the introspection-only fixture is retained.
 	mkdir -p "${classifier_root}/test/tests/http_idempotency"
@@ -757,8 +798,30 @@ PY_LOCK
 	classifier_root=${source_fixture}
 	mv "${derived_fixture}/template.lock.before-cache" "${derived_fixture}/template.lock"
 
+	# Object-storage-only derivations must select versitygw even when PostgreSQL is absent.
+	cp "${derived_fixture}/template.lock" "${derived_fixture}/template.lock.before-object-storage"
+	python3 - "${derived_fixture}/template.lock" <<'PY_LOCK'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+lock = json.loads(path.read_text())
+lock["profiles"].update({
+    "authn": "none", "outbound_http": "none", "outbound_auth": "none", "grpc": "none",
+    "http_idempotency": "none", "jobs": "none", "messaging": "none", "outbox": "none",
+    "webhooks": "none", "inbound_webhooks": "none", "cache": "none", "object_storage": "s3",
+})
+path.write_text(json.dumps(lock) + "\n")
+PY_LOCK
+	classifier_root=${derived_fixture}
+	assert_case crates/infra-object-storage/src/lib.rs \
+		"rust_source object_storage_integration" \
+		"db_integration messaging_integration cache_integration migrations module_initializer initializer_runtime"
+	classifier_root=${source_fixture}
+	mv "${derived_fixture}/template.lock.before-object-storage" "${derived_fixture}/template.lock"
+
 	# All applicable source surfaces includes a retained messaging capability.
-	mkdir -p "${source_fixture}/crates/infra-messaging" "${source_fixture}/crates/infra-cache"
+	mkdir -p "${source_fixture}/crates/infra-messaging" "${source_fixture}/crates/infra-cache" "${source_fixture}/crates/infra-object-storage"
 	output="$(cd "${source_fixture}" && bash scripts/ci/changed-surfaces.sh --all)"
 	for name in "${names[@]}"; do
 		has_line "${output}" "${name}=true"
@@ -767,6 +830,7 @@ PY_LOCK
 	has_line "${output}" 'db_integration=false'
 	has_line "${output}" 'messaging_integration=false'
 	has_line "${output}" 'cache_integration=false'
+	has_line "${output}" 'object_storage_integration=false'
 	has_line "${output}" 'migrations=false'
 	has_line "${output}" 'module_initializer=false'
 	has_line "${output}" 'initializer_runtime=false'

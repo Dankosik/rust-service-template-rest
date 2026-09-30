@@ -80,8 +80,8 @@ pub struct Server {
 impl Server {
     /// Bind `addr` and start accepting on the current Tokio runtime.
     ///
-    /// Returns once the listener is bound, so the caller can flip readiness
-    /// and log the resolved address before any request arrives.
+    /// Returns once the listener is bound. Initialize request-visible state
+    /// before calling: the accept task can serve requests before this returns.
     ///
     /// # Errors
     ///
@@ -202,11 +202,13 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
     builder
 }
 
+// Plain HTTP passes the socket through; TLS performs its bounded handshake.
+// The callback returns None to close a connection before hyper owns it.
 async fn bind_listener<F, Fut, IO>(
     addr: SocketAddr,
     app: Router,
     options: ServerOptions,
-    upgrade: F,
+    prepare_io: F,
 ) -> Result<Server, ServerError>
 where
     F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
@@ -225,7 +227,7 @@ where
         app,
         options,
         stop_accepting.clone(),
-        upgrade,
+        prepare_io,
     ));
     Ok(Server {
         local_addr,
@@ -239,7 +241,7 @@ async fn accept_loop<F, Fut, IO>(
     app: Router,
     options: ServerOptions,
     stop: CancellationToken,
-    upgrade: F,
+    prepare_io: F,
 ) -> GracefulShutdown
 where
     F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
@@ -286,17 +288,19 @@ where
         let watcher = graceful.watcher();
         let builder = builder.clone();
         let app = app.clone();
-        let upgrade = upgrade.clone();
+        let prepare_io = prepare_io.clone();
         // HTTP/2 writes headers, data, and trailers as separate small
         // segments; with Nagle on, each can wait for the peer's delayed ACK
         // (about 40 ms). Failing to set it only costs latency.
         let _ = stream.set_nodelay(true);
         tokio::spawn(async move {
+            // Keep admission for the first-byte wait, TLS handshake, and the
+            // entire hyper connection, releasing it on every exit path.
             let _permit = permit;
             if !wait_for_first_byte(&stream, options.header_read_timeout).await {
                 return;
             }
-            let Some(io) = upgrade(stream).await else {
+            let Some(io) = prepare_io(stream).await else {
                 return;
             };
             let connection = builder

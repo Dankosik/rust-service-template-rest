@@ -133,6 +133,7 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("webhooks", None)
     lock["profiles"].pop("inbound_webhooks", None)
     lock["profiles"].pop("cache", None)
+    lock["profiles"].pop("object_storage", None)
     lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
@@ -154,6 +155,7 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("webhooks", None)
     lock["profiles"].pop("inbound_webhooks", None)
     lock["profiles"].pop("cache", None)
+    lock["profiles"].pop("object_storage", None)
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -197,6 +199,7 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
 def assert_profile_output(
     source: Path, target: Path, authn: str, outbound_http: str, http_idempotency: str = "none",
     jobs: str = "none", webhooks: str = "none", inbound_webhooks: str = "none", cache: str = "none",
+    object_storage: str = "none",
 ) -> None:
     for profile, selected in (("authn", authn != "none"), ("oidc-jwt", authn == "oidc-jwt"), ("oidc-introspection", authn == "oidc-introspection")):
         assert_profile_pack(source, target, profile, selected)
@@ -217,6 +220,7 @@ def assert_profile_output(
     shared_selected = authn != "none" or outbound_http == "bounded" or cache == "redis"
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
     assert_profile_pack(source, target, "cache", cache == "redis")
+    assert_profile_pack(source, target, "object-storage", object_storage == "s3")
     assert_profile_pack(
         source, target, "request-budget", outbound_http == "bounded" or http_idempotency == "postgres"
     )

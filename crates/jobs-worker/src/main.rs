@@ -3,6 +3,11 @@
 
 use std::process::ExitCode;
 
+// jemalloc: 3-11% less worker CPU per job than glibc malloc, with no more
+// resident memory over a 20-minute soak; see docs/backend-library-selection.md.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 // template:begin inbound-webhooks:worker-webhooks-inbound-imports
 use infra_webhooks::inbound::Processor;
 // template:end inbound-webhooks:worker-webhooks-inbound-imports

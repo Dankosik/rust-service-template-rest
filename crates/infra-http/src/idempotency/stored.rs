@@ -122,6 +122,8 @@ impl Stored {
             fingerprint,
             status,
             headers,
+            // Share the captured Bytes with persistence while Stored retains
+            // the first response; cloning here must not copy up to 1 MiB.
             body: self.body.clone(),
         })
     }

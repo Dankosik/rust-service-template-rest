@@ -25,6 +25,7 @@ pub(crate) enum Operation {
 }
 
 impl Operation {
+    // Keep in sync with the variants: their dense discriminants index Histograms.
     const COUNT: usize = 3;
 
     /// The `operation` metric label.
@@ -58,6 +59,7 @@ pub(crate) enum Outcome {
 }
 
 impl Outcome {
+    // Keep in sync with the variants: their dense discriminants index Histograms.
     const COUNT: usize = 6;
 
     fn label(self) -> &'static str {
@@ -87,11 +89,13 @@ impl std::fmt::Debug for Histograms {
 }
 
 impl Histograms {
-    fn get(&self, cache: &'static str, operation: Operation, outcome: Outcome) -> &Histogram {
+    fn get(&self, namespace: &'static str, operation: Operation, outcome: Outcome) -> &Histogram {
+        // Each operation occupies one row of Outcome::COUNT handles. The enums
+        // must keep contiguous discriminants starting at zero for this indexing.
         self.0[operation as usize * Outcome::COUNT + outcome as usize].get_or_init(|| {
             metrics::histogram!(
                 OPERATION_DURATION_METRIC,
-                "cache" => cache,
+                "cache" => namespace,
                 "operation" => operation.label(),
                 "outcome" => outcome.label(),
             )
@@ -137,7 +141,7 @@ impl Failure {
 /// an outcome records `cancelled`.
 pub(crate) struct OperationGuard<'a> {
     started: Instant,
-    cache: &'static str,
+    namespace: &'static str,
     histograms: &'a Histograms,
     operation: Operation,
     span: Span,
@@ -146,7 +150,7 @@ pub(crate) struct OperationGuard<'a> {
 
 impl<'a> OperationGuard<'a> {
     pub(crate) fn start(
-        cache: &'static str,
+        namespace: &'static str,
         histograms: &'a Histograms,
         operation: Operation,
         server: &ServerIdentity,
@@ -156,7 +160,7 @@ impl<'a> OperationGuard<'a> {
             otel.kind = "client",
             db.system.name = "redis",
             db.operation.name = operation.command(),
-            cache.name = cache,
+            cache.name = namespace,
             server.address = server.host.as_str(),
             server.port = server.port,
             cache.outcome = tracing::field::Empty,
@@ -165,7 +169,7 @@ impl<'a> OperationGuard<'a> {
         );
         Self {
             started: Instant::now(),
-            cache,
+            namespace,
             histograms,
             operation,
             span,
@@ -184,7 +188,7 @@ impl<'a> OperationGuard<'a> {
         self.finish(failure.outcome());
         self.span.in_scope(|| {
             tracing::debug!(
-                cache.name = self.cache,
+                cache.name = self.namespace,
                 cache.operation = self.operation.label(),
                 error.type = error_type,
                 "cache_operation_failed"
@@ -197,7 +201,7 @@ impl<'a> OperationGuard<'a> {
         self.finalized = true;
         self.span.record("cache.outcome", outcome.label());
         self.histograms
-            .get(self.cache, self.operation, outcome)
+            .get(self.namespace, self.operation, outcome)
             .record(self.started.elapsed().as_secs_f64());
     }
 }

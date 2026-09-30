@@ -1,0 +1,228 @@
+//! A streamed upload body held to its declared length.
+//!
+//! The request carries `Content-Length`, and hyper stops polling a body once
+//! that many bytes are through, without an error. A longer body would be
+//! stored truncated on a provider that receives no checksum. This body holds
+//! back the frame that completes the declared length until the inner body
+//! confirms its end, fails the request otherwise, and records why, so the put
+//! reports a refused input rather than an unknown outcome.
+
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
+
+use bytes::{Buf, Bytes};
+use http_body::{Body, Frame, SizeHint};
+use http_body_util::BodyExt;
+use http_body_util::combinators::BoxBody;
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The body yielded more or fewer bytes than declared.
+#[derive(Debug, thiserror::Error)]
+#[error("upload body length differs from the declared length")]
+struct LengthMismatch;
+
+pub(crate) struct ExactLength {
+    inner: BoxBody<Bytes, BoxError>,
+    remaining: u64,
+    /// The data frame that completed the declared length, held until the
+    /// inner body shows it has nothing more.
+    held: Option<Frame<Bytes>>,
+    /// Trailers seen while confirming the end, returned after `held`.
+    trailers: Option<Frame<Bytes>>,
+    /// The inner body has ended.
+    ended: bool,
+    mismatch: Arc<AtomicBool>,
+}
+
+impl ExactLength {
+    pub(crate) fn new<B, E>(len: u64, body: B) -> (Self, Arc<AtomicBool>)
+    where
+        B: Body<Data = Bytes, Error = E> + Send + Sync + 'static,
+        E: Into<BoxError> + 'static,
+    {
+        let mismatch = Arc::new(AtomicBool::new(false));
+        let body = Self {
+            inner: BoxBody::new(body.map_err(Into::into)),
+            remaining: len,
+            held: None,
+            trailers: None,
+            ended: false,
+            mismatch: Arc::clone(&mismatch),
+        };
+        (body, mismatch)
+    }
+
+    fn refuse(&mut self) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+        self.mismatch.store(true, Ordering::Release);
+        self.ended = true;
+        self.held = None;
+        Poll::Ready(Some(Err(Box::new(LengthMismatch))))
+    }
+}
+
+impl Body for ExactLength {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+        loop {
+            if self.ended {
+                if let Some(frame) = self.held.take() {
+                    return Poll::Ready(Some(Ok(frame)));
+                }
+                return Poll::Ready(self.trailers.take().map(Ok));
+            }
+            let polled = match Pin::new(&mut self.inner).poll_frame(context) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(polled) => polled,
+            };
+            match polled {
+                Some(Ok(frame)) => {
+                    let Some(data) = frame.data_ref() else {
+                        // Trailers end the data; the held frame goes first.
+                        if self.remaining != 0 {
+                            return self.refuse();
+                        }
+                        self.ended = true;
+                        if self.held.is_some() {
+                            self.trailers = Some(frame);
+                            continue;
+                        }
+                        return Poll::Ready(Some(Ok(frame)));
+                    };
+                    let len = data.remaining() as u64;
+                    if len == 0 {
+                        continue;
+                    }
+                    if self.held.is_some() {
+                        return self.refuse();
+                    }
+                    let Some(remaining) = self.remaining.checked_sub(len) else {
+                        return self.refuse();
+                    };
+                    self.remaining = remaining;
+                    if remaining == 0 {
+                        self.held = Some(frame);
+                        continue;
+                    }
+                    return Poll::Ready(Some(Ok(frame)));
+                }
+                Some(Err(error)) => return Poll::Ready(Some(Err(error))),
+                None if self.remaining != 0 => return self.refuse(),
+                None => self.ended = true,
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.ended && self.held.is_none() && self.trailers.is_none()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        let held = self
+            .held
+            .as_ref()
+            .and_then(Frame::data_ref)
+            .map_or(0, |data| data.remaining() as u64);
+        SizeHint::with_exact(self.remaining + held)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::collections::VecDeque;
+
+    use super::*;
+
+    /// A body that yields its frames one per poll, like a network stream.
+    struct Frames(VecDeque<Frame<Bytes>>);
+
+    impl Body for Frames {
+        type Data = Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+            Poll::Ready(self.0.pop_front().map(Ok))
+        }
+    }
+
+    fn frames(chunks: &[&'static [u8]]) -> Frames {
+        Frames(
+            chunks
+                .iter()
+                .map(|chunk| Frame::data(Bytes::from_static(chunk)))
+                .collect(),
+        )
+    }
+
+    /// Poll the way hyper does: stop as soon as `len` bytes are through.
+    fn send(len: u64, body: Frames) -> (Result<u64, ()>, bool) {
+        let (mut body, mismatch) = ExactLength::new(len, body);
+        let waker = std::task::Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut sent = 0;
+        while sent < len {
+            match Pin::new(&mut body).poll_frame(&mut context) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    sent += frame.data_ref().map_or(0, |data| data.len() as u64);
+                }
+                Poll::Ready(Some(Err(_))) => return (Err(()), mismatch.load(Ordering::Acquire)),
+                Poll::Ready(None) | Poll::Pending => break,
+            }
+        }
+        (Ok(sent), mismatch.load(Ordering::Acquire))
+    }
+
+    #[test]
+    fn an_exact_body_passes_in_any_framing() {
+        assert_eq!(send(8, frames(&[b"abcdefgh"])), (Ok(8), false));
+        assert_eq!(send(8, frames(&[b"abcd", b"", b"efgh"])), (Ok(8), false));
+        assert_eq!(send(0, frames(&[])), (Ok(0), false));
+    }
+
+    #[test]
+    fn a_frame_past_the_declared_length_fails_the_body() {
+        // The first frame completes the length; hyper would stop there.
+        assert_eq!(send(4, frames(&[b"abcd", b"efgh"])), (Err(()), true));
+        assert_eq!(send(4, frames(&[b"abcdefgh"])), (Err(()), true));
+    }
+
+    #[test]
+    fn a_short_body_fails_the_body() {
+        assert_eq!(send(8, frames(&[b"abcd"])), (Err(()), true));
+    }
+
+    #[test]
+    fn trailers_follow_the_held_frame() {
+        let mut trailers = axum::http::HeaderMap::new();
+        trailers.insert("x-checksum", axum::http::HeaderValue::from_static("1"));
+        let body = Frames(VecDeque::from([
+            Frame::data(Bytes::from_static(b"abcd")),
+            Frame::trailers(trailers),
+        ]));
+        let (mut body, mismatch) = ExactLength::new(4, body);
+        let waker = std::task::Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let first = Pin::new(&mut body).poll_frame(&mut context);
+        assert!(matches!(first, Poll::Ready(Some(Ok(ref frame))) if frame.is_data()));
+        let second = Pin::new(&mut body).poll_frame(&mut context);
+        assert!(matches!(second, Poll::Ready(Some(Ok(ref frame))) if frame.is_trailers()));
+        assert!(matches!(
+            Pin::new(&mut body).poll_frame(&mut context),
+            Poll::Ready(None)
+        ));
+        assert!(body.is_end_stream());
+        assert!(!mismatch.load(Ordering::Acquire));
+    }
+}

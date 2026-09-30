@@ -1,6 +1,7 @@
 # template:begin integration:compose-file
 # Local retained-profile services. PostgreSQL is selected by `DATABASE=postgres`;
-# JetStream is selected by `MESSAGING=nats-jetstream`; cache is selected by `CACHE=redis`.
+# JetStream is selected by `MESSAGING=nats-jetstream`; cache is selected by `CACHE=redis`;
+# the S3 emulator is selected by `OBJECT_STORAGE=s3`.
 # template:end integration:compose-file
 # template:begin postgres:compose-postgres-header
 # Local PostgreSQL for the profile: `make compose-up`, then
@@ -57,3 +58,23 @@ services:
       timeout: 3s
       retries: 20
   # template:end cache:compose-valkey-service
+  # template:begin object-storage:compose-versitygw-service
+  # S3 emulator for `make test-integration-object-storage`. The posix backend
+  # keeps objects and their metadata (extended attributes) under /data, an
+  # anonymous volume that `down -v` removes.
+  versitygw:
+    image: versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
+    command: ["--port", ":7070", "--health", "/health", "posix", "/data"]
+    environment:
+      ROOT_ACCESS_KEY: template
+      ROOT_SECRET_KEY: template-secret
+    ports:
+      - "${VERSITYGW_PORT:-7070}:7070"
+    volumes:
+      - /data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:7070/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+  # template:end object-storage:compose-versitygw-service

@@ -336,7 +336,7 @@ def _compare_lock(reference: bytes, actual: bytes, harness: str, initializer) ->
 def _inputs(
     initializer, database: str, authn: str, outbound_http: str, http_idempotency: str,
     jobs: str, webhooks: str, inbound_webhooks: str, harness: str, outbound_auth: str = "none", grpc: str = "none",
-    messaging: str = "none", outbox: str = "none", cache: str = "none",
+    messaging: str = "none", outbox: str = "none", cache: str = "none", object_storage: str = "none",
 ):
     # Canonical projection identities remain stable across harness comparisons.
     # Runtime representatives use their graph number to stay within the name bound.
@@ -373,6 +373,7 @@ def _inputs(
         webhooks=webhooks,
         inbound_webhooks=inbound_webhooks,
         cache=cache,
+        object_storage=object_storage,
         agent_harness=harness,
     )
 
@@ -407,6 +408,7 @@ def _refused_namespace(
         messaging="none",
         outbox="none",
         cache="none",
+        object_storage="none",
         webhooks=webhooks,
         inbound_webhooks=inbound_webhooks,
         agent_harness="core",
@@ -805,6 +807,73 @@ def _project_selection(
             tree_result="equal",
             lock_result="agent_harness_only",
         )
+def _check_object_storage_projections(source: Path, candidate: str, initializer, work: Path) -> None:
+    """Project object storage alone, with PostgreSQL, and with the maximal profile set."""
+
+    profile_data = initializer._profile_data(source)
+    object_storage_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["object-storage"])
+    integration_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["integration"])
+    tls_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["tls-fixtures"])
+    scenarios = (
+        ("none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
+        ("postgres", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
+        (
+            "postgres", "oidc-introspection", "bounded", "oauth2-client-credentials", "postgres", "postgres",
+            "nats-jetstream", "postgres", "durable", "standard-webhooks", "enabled", "redis",
+        ),
+    )
+    for index, (
+        database, authn, outbound_http, outbound_auth, http_idempotency, jobs, messaging, outbox, webhooks,
+        inbound_webhooks, grpc, cache,
+    ) in enumerate(scenarios, 1):
+        inputs = _inputs(
+            initializer, database, authn, outbound_http, http_idempotency, jobs, webhooks, inbound_webhooks,
+            "core", outbound_auth=outbound_auth, grpc=grpc, messaging=messaging, outbox=outbox, cache=cache,
+            object_storage="s3",
+        )
+        with tempfile.TemporaryDirectory(prefix=f"object-storage-{index}-", dir=work) as selection:
+            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+        _assert_profile_output(initializer, nodes, "object-storage", object_storage_paths)
+        _assert_profile_output(initializer, nodes, "integration", integration_paths)
+        if index == 1:
+            # The S3 client carries its own TLS stack; object storage alone
+            # retains neither the shared TLS fixtures nor the config url edge.
+            _assert_no_profile_output(initializer, nodes, "tls-fixtures", tls_paths)
+            config_manifest = nodes.get("crates/config/Cargo.toml")
+            payload = config_manifest.payload if config_manifest is not None and isinstance(config_manifest.payload, bytes) else b""
+            if b"url = { workspace = true" in payload:
+                raise initializer.Refusal("object-storage-only projection retained the config url dependency")
+        profiles = inputs.profiles()
+        if profiles["object_storage"] != "s3":
+            raise initializer.Refusal("object storage projection did not retain its s3 selection")
+        _emit(
+            "object-storage-selection",
+            scenario=index,
+            database=database,
+            authn=authn,
+            outbound_http=outbound_http,
+            outbound_auth=outbound_auth,
+            http_idempotency=http_idempotency,
+            jobs=jobs,
+            messaging=messaging,
+            outbox=outbox,
+            webhooks=webhooks,
+            inbound_webhooks=inbound_webhooks,
+            grpc=grpc,
+            cache=cache,
+            profiles=profiles,
+            tree_sha256=_tree_digest(nodes),
+            lock_sha256=hashlib.sha256(initializer._lock_bytes(inputs, candidate, "complete")).hexdigest(),
+        )
+    refused = _refused_namespace("none", "none", "none", "none", "none", "none", "none")
+    refused.object_storage = "gcs"
+    try:
+        initializer.parse_inputs(refused)
+    except initializer.Refusal as error:
+        if "OBJECT_STORAGE is unsupported" not in str(error):
+            raise initializer.Refusal(f"unknown OBJECT_STORAGE refusal did not name the selector: {error}") from error
+    else:
+        raise initializer.Refusal("unknown OBJECT_STORAGE was accepted")
 
 
 def check(source: Path) -> None:
@@ -897,6 +966,7 @@ def check(source: Path) -> None:
         _check_oauth_projections(source, candidate, initializer, work)
         _check_grpc_projections(source, candidate, initializer, work)
         _check_cache_projections(source, candidate, initializer, work)
+        _check_object_storage_projections(source, candidate, initializer, work)
 
 
 def _expect_refusal(initializer, action, label: str) -> None:

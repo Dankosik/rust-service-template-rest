@@ -304,6 +304,20 @@ the drop does not add to `DEPENDENCY_CLOSE`. The same drop runs on the
 startup-failure and stopped-startup paths. The [guide](../cache.md) shows the
 readiness opt-in.
 <!-- template:end cache:docs-lifecycle-cache -->
+<!-- template:begin object-storage:docs-lifecycle-object-storage -->
+## Object storage lifecycle
+
+`ObjectStorage::new` admits the provider tuple and builds the SDK client. It
+does no network I/O, and startup runs no bucket check: a misconfiguration
+fails startup before the listener, while a provider outage is left to the
+calls that need the bucket. Storage is not a readiness probe unless
+composition pushes `storage.probe()`; it is never a liveness check.
+
+Shutdown drops `Option<ObjectStorage>` inside `Dependencies::close`, after the
+HTTP drain and the background join, so an in-flight call has finished or been
+dropped. Idle connections close with the last clone. The same drop runs on the
+startup-failure and stopped-startup paths.
+<!-- template:end object-storage:docs-lifecycle-object-storage -->
 <!-- template:begin outbox:docs-lifecycle-outbox -->
 With the outbox profile retained, worker startup admits the mode-aware pool
 capacity before starting either engine: `N + 5` with ordinary jobs and outbox,
