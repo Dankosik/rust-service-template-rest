@@ -92,7 +92,7 @@ pub use messaging::MessagingConfig;
 pub use cache::CacheConfig;
 // template:end cache:config-export
 // template:begin object-storage:config-export
-pub use object_storage::{ObjectStorageConfig, ObjectStorageProvider};
+pub use object_storage::{ObjectStorageConfig, ObjectStorageCredentials, ObjectStorageProvider};
 // template:end object-storage:config-export
 // template:begin authn:config-export
 pub use authn::{Audiences, AuthnConfig};

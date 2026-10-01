@@ -15,7 +15,8 @@ use std::task::{Context, Poll};
 use bytes::{Buf, Bytes};
 use http_body::{Body, Frame, SizeHint};
 use http_body_util::BodyExt;
-use http_body_util::combinators::BoxBody;
+use http_body_util::combinators::UnsyncBoxBody;
+use sync_wrapper::SyncWrapper;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -25,7 +26,10 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 struct LengthMismatch;
 
 pub(crate) struct ExactLength {
-    inner: BoxBody<Bytes, BoxError>,
+    /// The SDK requires a `Sync` body, and a request body (axum's `Body`)
+    /// is not one. The wrapper is sound here: a body is polled only through
+    /// `&mut`.
+    inner: SyncWrapper<UnsyncBoxBody<Bytes, BoxError>>,
     remaining: u64,
     /// The data frame that completed the declared length, held until the
     /// inner body shows it has nothing more.
@@ -40,12 +44,12 @@ pub(crate) struct ExactLength {
 impl ExactLength {
     pub(crate) fn new<B, E>(len: u64, body: B) -> (Self, Arc<AtomicBool>)
     where
-        B: Body<Data = Bytes, Error = E> + Send + Sync + 'static,
+        B: Body<Data = Bytes, Error = E> + Send + 'static,
         E: Into<BoxError> + 'static,
     {
         let mismatch = Arc::new(AtomicBool::new(false));
         let body = Self {
-            inner: BoxBody::new(body.map_err(Into::into)),
+            inner: SyncWrapper::new(UnsyncBoxBody::new(body.map_err(Into::into))),
             remaining: len,
             held: None,
             trailers: None,
@@ -78,7 +82,7 @@ impl Body for ExactLength {
                 }
                 return Poll::Ready(self.trailers.take().map(Ok));
             }
-            let polled = match Pin::new(&mut self.inner).poll_frame(context) {
+            let polled = match Pin::new(self.inner.get_mut()).poll_frame(context) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(polled) => polled,
             };
