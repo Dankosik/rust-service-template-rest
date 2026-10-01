@@ -1715,22 +1715,33 @@ mod tests {
 
     // template:begin oidc-jwt:load-jwt-token-profile-environment
     #[test]
-    fn jwt_environment_preserves_a_supplied_token_profile() {
-        let jwt = load_from(
-            &LoadOptions::default(),
-            BUILD,
+    fn jwt_environment_preserves_a_supplied_token_profile_and_jwks_uri() {
+        let jwt_environment = |jwks_uri: &'static str| {
             env(&[
                 ("APP__AUTHN__MODE", "oidc-jwt"),
                 ("APP__AUTHN__ISSUER", "https://issuer.example/tenant"),
                 ("APP__AUTHN__AUDIENCE", "service"),
                 ("APP__AUTHN__TOKEN_PROFILE", "rfc9068"),
-            ]),
+                ("APP__AUTHN__JWKS_URI", jwks_uri),
+            ])
+        };
+        let jwt = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            jwt_environment("https://issuer.example/keys"),
         )
         .unwrap();
-        let AuthnConfig::OidcJwt { token_profile, .. } = jwt.authn else {
+        let AuthnConfig::OidcJwt {
+            token_profile,
+            jwks_uri,
+            ..
+        } = jwt.authn
+        else {
             panic!("expected OIDC JWT configuration");
         };
         assert_eq!(token_profile, TokenProfile::Rfc9068);
+        assert_eq!(jwks_uri.as_deref(), Some("https://issuer.example/keys"));
+        assert!(load_from(&LoadOptions::default(), BUILD, jwt_environment(" ")).is_err());
     }
     // template:end oidc-jwt:load-jwt-token-profile-environment
 
