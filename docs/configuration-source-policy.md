@@ -111,9 +111,9 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   region, or behavior. Under `workload_identity` the AWS SDK's own providers
   read what the platform injects for the workload's role
   (`AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, the
-  `AWS_CONTAINER_*` variables, the instance metadata endpoint), only to
-  obtain credentials; environment access keys and profile files are still
-  not sources. On Railway, map the bucket's `${{Bucket.X}}`
+  `AWS_CONTAINER_*` variables) and the fixed instance metadata endpoint,
+  only to obtain credentials; environment access keys are still not a
+  source, and no profile file is read. On Railway, map the bucket's `${{Bucket.X}}`
   variables onto `APP__OBJECT_STORAGE__*`. Value shapes (endpoint origin,
   region, bucket name, owner account) are admitted by `infra-object-storage`.
   The [guide](object-storage.md) owns admission.

@@ -84,12 +84,17 @@ them before they expire:
 | --- | --- | --- |
 | EKS IAM roles for service accounts | `AssumeRoleWithWebIdentity` at the region's STS endpoint | `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_ARN`, optional `AWS_ROLE_SESSION_NAME` |
 | ECS task roles, EKS Pod Identity | the container credentials endpoint | `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` or `AWS_CONTAINER_CREDENTIALS_FULL_URI`, with `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` |
-| EC2 instance profile | the instance metadata service, IMDSv2 only | nothing; `AWS_EC2_METADATA_DISABLED=true` turns it off |
+| EC2 instance profile | the instance metadata service at `http://169.254.169.254`, IMDSv2 only | nothing; `AWS_EC2_METADATA_DISABLED=true` turns it off |
 
 Environment access keys (`AWS_ACCESS_KEY_ID`), profile files, SSO, and
-`credential_process` are not sources. Startup still sends nothing: the first
-call loads the credentials. When none can be loaded the call fails with
-`Unavailable` and `error.type` `credentials`, and nothing reaches S3. The
+`credential_process` are not sources, and no profile file is read: the
+metadata endpoint is fixed, so `AWS_EC2_METADATA_SERVICE_ENDPOINT` and an
+IPv6-only metadata service are not supported. Startup still sends nothing:
+the first call loads the credentials. When the source answers that it has
+none, the call fails with `Unavailable` and `error.type` `credentials`, and
+nothing reaches S3. A source that does not answer inside the call's budget
+reads as a timeout instead, which for a put or delete is `OutcomeUnknown`
+although nothing was sent. The
 providers are the AWS SDK's own (`aws-config`); they log their failures under
 the `aws_config` target. This path has no credential-free proof: verify it in
 the target account before relying on it.
@@ -262,7 +267,7 @@ already do in PostgreSQL.
 
 ## Presigned URLs
 
-`presign_get` signs locally; nothing is sent. The lifetime is 1 second to
+`presign_get` signs locally; nothing is sent to the store. The lifetime is 1 second to
 7 days, the cross-provider cap (Railway would allow 90 days). The URL is a
 bearer credential until it expires: `PresignedUrl` redacts `Debug`, and the
 feature hands `expose()` only to the intended recipient and never logs it.

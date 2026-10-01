@@ -376,7 +376,7 @@ impl ObjectStorage {
                 SharedCredentialsProvider::new(workload_identity(
                     &admitted.region,
                     http_client.clone(),
-                ))
+                )?)
             }
         };
         Ok(Self::build(options, admitted, http_client, credentials))
@@ -656,7 +656,9 @@ impl ObjectStorage {
     }
 
     /// Presign a GET for `expires_in`, between 1 second and 7 days. This is a
-    /// local signature: nothing is sent, and no admission slot is used. The
+    /// local signature: nothing is sent to the store, and no admission slot
+    /// is used. Under [`CredentialSource::WorkloadIdentity`] it may first
+    /// load the credentials. The
     /// URL works without extra headers, so it carries no expected bucket
     /// owner even on Amazon S3.
     ///
@@ -753,16 +755,29 @@ fn https_client() -> SharedHttpClient {
         .build_https()
 }
 
+/// The instance metadata service at its IPv4 link-local address. Left to
+/// resolve its endpoint, the SDK's client would read it from an AWS profile
+/// file.
+const INSTANCE_METADATA_ENDPOINT: &str = "http://169.254.169.254";
+
 /// The workload's AWS identity, in the SDK default chain's order. Unlike that
 /// chain it has no environment access keys and no profile files: the
 /// providers read only what the platform injects for the identity
 /// (`AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, the
-/// `AWS_CONTAINER_*` variables, the instance metadata endpoint).
-fn workload_identity(region: &str, http_client: SharedHttpClient) -> CredentialsProviderChain {
+/// `AWS_CONTAINER_*` variables) and the fixed instance metadata endpoint.
+fn workload_identity(
+    region: &str,
+    http_client: SharedHttpClient,
+) -> Result<CredentialsProviderChain, ConfigError> {
     let config = ProviderConfig::without_region()
         .with_region(Some(Region::new(region.to_owned())))
         .with_http_client(http_client);
-    CredentialsProviderChain::first_try(
+    let instance_metadata = aws_config::imds::Client::builder()
+        .configure(&config)
+        .endpoint(INSTANCE_METADATA_ENDPOINT)
+        .map_err(|_| ConfigError::Credentials)?
+        .build();
+    Ok(CredentialsProviderChain::first_try(
         "WebIdentityToken",
         WebIdentityTokenCredentialsProvider::builder()
             .configure(&config)
@@ -776,8 +791,9 @@ fn workload_identity(region: &str, http_client: SharedHttpClient) -> Credentials
         "Ec2InstanceMetadata",
         ImdsCredentialsProvider::builder()
             .configure(&config)
+            .imds_client(instance_metadata)
             .build(),
-    )
+    ))
 }
 
 /// An open download. Dropping it releases the admission slot and the
