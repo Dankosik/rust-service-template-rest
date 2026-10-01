@@ -8,7 +8,7 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | --- | --- | --- |
 | Service package (`crates/service/Cargo.toml`) | The main binary named by that manifest: `main` maps the bootstrap result to an exit code; `bootstrap` composes configuration, telemetry, readiness, the route tree, the two listeners, background tasks, signals, and the staged teardown; `api` merges every `OpenApiRouter` into the one contract and finalizes its served router; the `openapi` binary renders its document; the process tests drive the built binary. | Business behavior, request handling beyond composition, provider details. |
 | `service-config` (`crates/config`) | One validated immutable snapshot: section types with defaults and validation in `<section>.rs`, loader precedence, the `APP__` name pre-scan, the secret-in-file refusal, `SecretString` fields, human-form durations and sizes, build metadata (`app.version`, `app.commit`). | Feature behavior, dependency wiring, request handling, telemetry construction. |
-| `health` (`crates/health`) | The readiness refresher over `tokio::sync::watch`: probe trait, failure threshold, staleness guard, drain flag, O(1) snapshot reads. | Probe implementations, HTTP handlers, the schedule (bootstrap owns the policy values). |
+| `health` (`crates/health`) | The readiness refresher over `tokio::sync::watch`: probe trait, failure threshold, staleness guard, drain flag, O(1) snapshot reads, the `readiness_checks_total` counter and the readiness log events. | Probe implementations, HTTP handlers, the schedule (bootstrap owns the policy values). |
 | `service-failure` (`crates/service-failure`) | Closed failure identity, wire code spelling and transport-neutral meaning. | HTTP response metadata, tonic Status, arbitrary detail text, configuration or provider calls. |
 <!-- template:begin grpc:docs-boundaries-grpc-owners -->
 | `infra-grpc` (`crates/infra-grpc`) | Tonic route assembly, auth/deadline/capacity middleware, health projection, server TLS config and lazy clients. | Configuration loading, handler validation, feature behavior, OAuth tokens, process signals or a second lifecycle budget. |
@@ -101,7 +101,7 @@ test observes that startup sends nothing and refuses a production emulator.
 ```text
 main binary (crates/service, composition root)
   -> service-config
-  -> health
+  -> health          -> tokio, tokio-util, metrics, tracing
   -> infra-http      -> health, axum, tower, tower-http, hyper-util, utoipa, utoipa-axum
   -> infra-telemetry -> opentelemetry*, tracing*, metrics*
   -> crates/<feature> (future; depends on infra-http's inbound contract
