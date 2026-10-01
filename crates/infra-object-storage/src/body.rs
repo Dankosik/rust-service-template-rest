@@ -1,31 +1,124 @@
-//! A streamed upload body held to its declared length.
+//! Upload bodies: in-memory bytes, or a stream held to its declared length.
 //!
 //! The request carries `Content-Length`, and hyper stops polling a body once
 //! that many bytes are through, without an error. A longer body would be
-//! stored truncated on a provider that receives no checksum. This body holds
-//! back the frame that completes the declared length until the inner body
-//! confirms its end, fails the request otherwise, and records why, so the put
-//! reports a refused input rather than an unknown outcome.
+//! stored truncated on a provider that receives no checksum. A streamed body
+//! holds back the frame that completes the declared length until the inner
+//! body confirms its end, fails the request otherwise, and records why, so
+//! the put reports a refused input rather than an unknown outcome.
 
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
+use aws_sdk_s3::primitives::ByteStream;
 use bytes::{Buf, Bytes};
 use http_body::{Body, Frame, SizeHint};
 use http_body_util::BodyExt;
 use http_body_util::combinators::UnsyncBoxBody;
 use sync_wrapper::SyncWrapper;
+use tokio::time::{Instant, timeout_at};
+
+use crate::ObjectStorageError;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// An upload body with its exact length.
+#[derive(Debug)]
+pub struct PutBody {
+    pub(crate) len: u64,
+    pub(crate) stream: ByteStream,
+    pub(crate) source: UploadSource,
+}
+
+#[derive(Debug)]
+pub(crate) enum UploadSource {
+    InMemory,
+    Streamed {
+        /// Set when the body did not match its declared length.
+        mismatch: Arc<AtomicBool>,
+    },
+}
+
+impl PutBody {
+    /// A streamed body that must yield exactly `len` bytes. A body that
+    /// yields more or fewer fails the put with
+    /// [`ObjectStorageError::Rejected`] instead of storing a truncated object.
+    pub fn stream<B, E>(len: u64, body: B) -> Self
+    where
+        B: Body<Data = Bytes, Error = E> + Send + 'static,
+        E: Into<BoxError> + 'static,
+    {
+        let (body, mismatch) = ExactLength::new(len, body);
+        Self {
+            len,
+            stream: ByteStream::from_body_1_x(body),
+            source: UploadSource::Streamed { mismatch },
+        }
+    }
+
+    /// Declared length in bytes.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether the body is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// hyper never polls a body declared empty, so validate an empty stream
+    /// before sending and normalize its EOF to an in-memory body.
+    pub(crate) async fn prepare_empty_stream(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<(), (ObjectStorageError, &'static str)> {
+        let UploadSource::Streamed { mismatch } = &self.source else {
+            return Ok(());
+        };
+        if self.len != 0 {
+            return Ok(());
+        }
+        let first = timeout_at(deadline, self.stream.next()).await;
+        let length_mismatch = mismatch.load(Ordering::Acquire);
+        match first {
+            Err(_elapsed) => Err((ObjectStorageError::Unavailable, "timeout")),
+            Ok(Some(_)) if length_mismatch => Err((ObjectStorageError::Rejected, "body_length")),
+            Ok(Some(_)) => Err((ObjectStorageError::Rejected, "body")),
+            Ok(None) => {
+                *self = Self::from(Bytes::new());
+                Ok(())
+            }
+        }
+    }
+}
+
+/// In-memory bytes. The SDK can sign a checksum of them as a header.
+impl From<Bytes> for PutBody {
+    fn from(bytes: Bytes) -> Self {
+        Self {
+            len: bytes.len() as u64,
+            stream: ByteStream::from(bytes),
+            source: UploadSource::InMemory,
+        }
+    }
+}
+
+impl From<Vec<u8>> for PutBody {
+    fn from(bytes: Vec<u8>) -> Self {
+        Bytes::from(bytes).into()
+    }
+}
 
 /// The body yielded more or fewer bytes than declared.
 #[derive(Debug, thiserror::Error)]
 #[error("upload body length differs from the declared length")]
 struct LengthMismatch;
 
-pub(crate) struct ExactLength {
+struct ExactLength {
     /// The SDK requires a `Sync` body, and a request body (axum's `Body`)
     /// is not one. The wrapper is sound here: a body is polled only through
     /// `&mut`.
@@ -42,7 +135,7 @@ pub(crate) struct ExactLength {
 }
 
 impl ExactLength {
-    pub(crate) fn new<B, E>(len: u64, body: B) -> (Self, Arc<AtomicBool>)
+    fn new<B, E>(len: u64, body: B) -> (Self, Arc<AtomicBool>)
     where
         B: Body<Data = Bytes, Error = E> + Send + 'static,
         E: Into<BoxError> + 'static,

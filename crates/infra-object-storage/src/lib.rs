@@ -15,6 +15,8 @@
 //! without an adapter.
 
 mod body;
+mod credentials;
+mod download;
 mod error;
 mod key;
 mod observe;
@@ -23,34 +25,28 @@ mod provider;
 #[cfg(test)]
 mod tests;
 
-use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll, ready};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
-use aws_config::ecs::EcsCredentialsProvider;
-use aws_config::imds::credentials::ImdsCredentialsProvider;
-use aws_config::meta::credentials::CredentialsProviderChain;
-use aws_config::provider_config::ProviderConfig;
-use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::config::{
-    BehaviorVersion, Credentials, Region, RequestChecksumCalculation, ResponseChecksumValidation,
+    BehaviorVersion, Region, RequestChecksumCalculation, ResponseChecksumValidation,
     SharedCredentialsProvider, SharedHttpClient, StalledStreamProtectionConfig,
 };
 use aws_sdk_s3::presigning::PresigningConfig;
-use aws_sdk_s3::primitives::{ByteStream, DateTime};
+use aws_sdk_s3::primitives::DateTime;
 use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode};
 use aws_smithy_http_client::tls;
-use bytes::Bytes;
-use http_body::{Frame, SizeHint};
-use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Instant, timeout_at};
 
+pub use self::body::PutBody;
+use self::body::UploadSource;
+pub use self::credentials::CredentialSource;
+pub use self::download::Download;
 use self::error::Call;
 pub use self::error::ObjectStorageError;
 pub use self::key::{ContentType, InvalidContentType, InvalidObjectKey, ObjectKey};
@@ -112,32 +108,6 @@ impl std::fmt::Debug for ObjectStorageOptions {
     }
 }
 
-/// How the client authenticates. [`Debug`] prints the variant only.
-pub enum CredentialSource {
-    /// A long-lived access key pair.
-    AccessKey {
-        /// Access key id.
-        access_key_id: String,
-        /// Secret access key.
-        secret_access_key: SecretString,
-    },
-    /// The AWS identity the platform gives the workload, refreshed by the
-    /// SDK before it expires: a web identity token (EKS IAM roles for service
-    /// accounts), the container credentials endpoint (ECS task roles, EKS
-    /// Pod Identity), then the EC2 instance profile. [`Provider::AmazonS3`]
-    /// only.
-    WorkloadIdentity,
-}
-
-impl std::fmt::Debug for CredentialSource {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::AccessKey { .. } => "AccessKey",
-            Self::WorkloadIdentity => "WorkloadIdentity",
-        })
-    }
-}
-
 /// A client for one bucket. Cheap to clone; clones share admission.
 #[derive(Clone)]
 pub struct ObjectStorage {
@@ -164,95 +134,6 @@ impl std::fmt::Debug for ObjectStorage {
             .field("provider", &self.inner.provider)
             .field("max_object_bytes", &self.inner.max_object_bytes)
             .finish_non_exhaustive()
-    }
-}
-
-/// An upload body with its exact length.
-#[derive(Debug)]
-pub struct PutBody {
-    len: u64,
-    stream: ByteStream,
-    source: UploadSource,
-}
-
-#[derive(Debug)]
-enum UploadSource {
-    InMemory,
-    Streamed {
-        /// Set when the body did not match its declared length.
-        mismatch: Arc<AtomicBool>,
-    },
-}
-
-impl PutBody {
-    /// A streamed body that must yield exactly `len` bytes. A body that
-    /// yields more or fewer fails the put with
-    /// [`ObjectStorageError::Rejected`] instead of storing a truncated object.
-    pub fn stream<B, E>(len: u64, body: B) -> Self
-    where
-        B: http_body::Body<Data = Bytes, Error = E> + Send + 'static,
-        E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
-    {
-        let (body, mismatch) = body::ExactLength::new(len, body);
-        Self {
-            len,
-            stream: ByteStream::from_body_1_x(body),
-            source: UploadSource::Streamed { mismatch },
-        }
-    }
-
-    /// Declared length in bytes.
-    #[must_use]
-    pub fn len(&self) -> u64 {
-        self.len
-    }
-
-    /// Whether the body is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// hyper never polls a body declared empty, so validate an empty stream
-    /// before sending and normalize its EOF to an in-memory body.
-    async fn prepare_empty_stream(
-        &mut self,
-        deadline: Instant,
-    ) -> Result<(), (ObjectStorageError, &'static str)> {
-        let UploadSource::Streamed { mismatch } = &self.source else {
-            return Ok(());
-        };
-        if self.len != 0 {
-            return Ok(());
-        }
-        let first = timeout_at(deadline, self.stream.next()).await;
-        let length_mismatch = mismatch.load(Ordering::Acquire);
-        match first {
-            Err(_elapsed) => Err((ObjectStorageError::Unavailable, "timeout")),
-            Ok(Some(_)) if length_mismatch => Err((ObjectStorageError::Rejected, "body_length")),
-            Ok(Some(_)) => Err((ObjectStorageError::Rejected, "body")),
-            Ok(None) => {
-                *self = Self::from(Bytes::new());
-                Ok(())
-            }
-        }
-    }
-}
-
-/// In-memory bytes. The SDK can sign a checksum of them as a header.
-impl From<Bytes> for PutBody {
-    fn from(bytes: Bytes) -> Self {
-        Self {
-            len: bytes.len() as u64,
-            stream: ByteStream::from(bytes),
-            source: UploadSource::InMemory,
-        }
-    }
-}
-
-impl From<Vec<u8>> for PutBody {
-    fn from(bytes: Vec<u8>) -> Self {
-        Bytes::from(bytes).into()
     }
 }
 
@@ -350,35 +231,10 @@ impl ObjectStorage {
     pub fn new(options: ObjectStorageOptions) -> Result<Self, ConfigError> {
         let admitted = provider::admit(&options.provider, &options.bucket)?;
         let http_client = https_client();
-        let credentials = match &options.credentials {
-            CredentialSource::AccessKey {
-                access_key_id,
-                secret_access_key,
-            } => {
-                if access_key_id.trim().is_empty() {
-                    return Err(ConfigError::AccessKeyId);
-                }
-                if secret_access_key.expose_secret().trim().is_empty() {
-                    return Err(ConfigError::SecretAccessKey);
-                }
-                SharedCredentialsProvider::new(Credentials::new(
-                    access_key_id,
-                    secret_access_key.expose_secret(),
-                    None,
-                    None,
-                    "object_storage",
-                ))
-            }
-            CredentialSource::WorkloadIdentity => {
-                if !matches!(options.provider, Provider::AmazonS3 { .. }) {
-                    return Err(ConfigError::Credentials);
-                }
-                SharedCredentialsProvider::new(workload_identity(
-                    &admitted.region,
-                    http_client.clone(),
-                )?)
-            }
-        };
+        let credentials =
+            options
+                .credentials
+                .provider(&options.provider, &admitted.region, &http_client)?;
         Ok(Self::build(options, admitted, http_client, credentials))
     }
 
@@ -573,16 +429,7 @@ impl ObjectStorage {
         if metadata.size > self.inner.max_object_bytes {
             return Err(guard.fail(ObjectStorageError::TooLarge, "too_large"));
         }
-        Ok(Download {
-            remaining: metadata.size,
-            metadata,
-            body: output.body,
-            last: None,
-            state: DownloadState::Open(End {
-                guard,
-                _permit: permit,
-            }),
-        })
+        Ok(Download::open(metadata, output.body, guard, permit))
     }
 
     /// Read an object's metadata. The size is reported even above
@@ -753,181 +600,6 @@ fn https_client() -> SharedHttpClient {
             tls::rustls_provider::CryptoMode::AwsLc,
         ))
         .build_https()
-}
-
-/// The instance metadata service at its IPv4 link-local address. Left to
-/// resolve its endpoint, the SDK's client would read it from an AWS profile
-/// file.
-const INSTANCE_METADATA_ENDPOINT: &str = "http://169.254.169.254";
-
-/// The workload's AWS identity, in the SDK default chain's order. Unlike that
-/// chain it has no environment access keys and no profile files: the
-/// providers read only what the platform injects for the identity
-/// (`AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, the
-/// `AWS_CONTAINER_*` variables) and the fixed instance metadata endpoint.
-fn workload_identity(
-    region: &str,
-    http_client: SharedHttpClient,
-) -> Result<CredentialsProviderChain, ConfigError> {
-    let config = ProviderConfig::without_region()
-        .with_region(Some(Region::new(region.to_owned())))
-        .with_http_client(http_client);
-    let instance_metadata = aws_config::imds::Client::builder()
-        .configure(&config)
-        .endpoint(INSTANCE_METADATA_ENDPOINT)
-        .map_err(|_| ConfigError::Credentials)?
-        .build();
-    Ok(CredentialsProviderChain::first_try(
-        "WebIdentityToken",
-        WebIdentityTokenCredentialsProvider::builder()
-            .configure(&config)
-            .build(),
-    )
-    .or_else(
-        "EcsContainer",
-        EcsCredentialsProvider::builder().configure(&config).build(),
-    )
-    .or_else(
-        "Ec2InstanceMetadata",
-        ImdsCredentialsProvider::builder()
-            .configure(&config)
-            .imds_client(instance_metadata)
-            .build(),
-    ))
-}
-
-/// An open download. Dropping it releases the admission slot and the
-/// connection; the operation is recorded as `cancelled` unless the body
-/// already ended.
-///
-/// It is an [`http_body::Body`] of exactly [`ObjectMetadata::size`] bytes,
-/// so it can be returned as a response body. The chunk that completes the
-/// object is released only after the provider's body has ended and its
-/// checksum, when one came back, has been validated: a reader that stops at
-/// the declared length never holds a complete object that failed the check.
-#[derive(Debug)]
-pub struct Download {
-    metadata: ObjectMetadata,
-    remaining: u64,
-    body: ByteStream,
-    /// The chunk that completed the object, until the body confirms its end.
-    last: Option<Bytes>,
-    state: DownloadState,
-}
-
-#[derive(Debug)]
-enum DownloadState {
-    Open(End),
-    Succeeded,
-    /// The failure returned again on every later call.
-    Failed(ObjectStorageError),
-}
-
-/// What a download releases when it ends.
-#[derive(Debug)]
-struct End {
-    guard: OperationGuard,
-    _permit: OwnedSemaphorePermit,
-}
-
-impl Download {
-    /// Metadata from the response headers.
-    #[must_use]
-    pub fn metadata(&self) -> &ObjectMetadata {
-        &self.metadata
-    }
-
-    /// The next chunk, or `None` at the end. The download succeeds only at
-    /// the end: the SDK validates a returned full-object checksum there.
-    ///
-    /// # Errors
-    ///
-    /// `Integrity` for a checksum mismatch or a body that differs from its
-    /// headers; `Unavailable` for a transport failure or a stalled body.
-    /// After an error every call returns the same error; after the end,
-    /// `Ok(None)`.
-    pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, ObjectStorageError> {
-        std::future::poll_fn(|context| self.poll_chunk(context)).await
-    }
-
-    fn poll_chunk(
-        &mut self,
-        context: &mut Context<'_>,
-    ) -> Poll<Result<Option<Bytes>, ObjectStorageError>> {
-        loop {
-            let end = match &mut self.state {
-                DownloadState::Open(end) => end,
-                DownloadState::Succeeded => return Poll::Ready(Ok(self.last.take())),
-                DownloadState::Failed(error) => return Poll::Ready(Err(*error)),
-            };
-            let failure = match ready!(Pin::new(&mut self.body).poll_next(context)) {
-                Some(Ok(chunk)) if chunk.is_empty() => continue,
-                Some(Ok(chunk)) => match self.remaining.checked_sub(chunk.len() as u64) {
-                    Some(0) => {
-                        self.remaining = 0;
-                        self.last = Some(chunk);
-                        continue;
-                    }
-                    Some(remaining) => {
-                        self.remaining = remaining;
-                        return Poll::Ready(Ok(Some(chunk)));
-                    }
-                    None => (ObjectStorageError::Integrity, "content_length"),
-                },
-                Some(Err(error)) if error::is_checksum_mismatch(&error) => {
-                    (ObjectStorageError::Integrity, "checksum")
-                }
-                Some(Err(_)) => (ObjectStorageError::Unavailable, "body"),
-                None if self.remaining == 0 => {
-                    end.guard.succeed();
-                    self.state = DownloadState::Succeeded;
-                    continue;
-                }
-                None => (ObjectStorageError::Integrity, "content_length"),
-            };
-            let error = end.guard.fail(failure.0, failure.1);
-            self.last = None;
-            self.state = DownloadState::Failed(error);
-            return Poll::Ready(Err(error));
-        }
-    }
-
-    /// Consume the download and collect its remaining body. Chunks already
-    /// returned by [`Download::next_chunk`] are not included.
-    /// `max_object_bytes` bounds the collection.
-    ///
-    /// # Errors
-    ///
-    /// As [`Download::next_chunk`].
-    pub async fn bytes(mut self) -> Result<Bytes, ObjectStorageError> {
-        let mut buffer = Vec::with_capacity(usize::try_from(self.metadata.size).unwrap_or(0));
-        while let Some(chunk) = self.next_chunk().await? {
-            buffer.extend_from_slice(&chunk);
-        }
-        Ok(Bytes::from(buffer))
-    }
-}
-
-impl http_body::Body for Download {
-    type Data = Bytes;
-    type Error = ObjectStorageError;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, ObjectStorageError>>> {
-        self.poll_chunk(context)
-            .map(|chunk| chunk.map(|chunk| chunk.map(Frame::data)).transpose())
-    }
-
-    fn is_end_stream(&self) -> bool {
-        matches!(self.state, DownloadState::Succeeded) && self.last.is_none()
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        let last = self.last.as_ref().map_or(0, |chunk| chunk.len() as u64);
-        SizeHint::with_exact(self.remaining + last)
-    }
 }
 
 /// `HeadBucket` probe named `object_storage`. Failure text carries only the
