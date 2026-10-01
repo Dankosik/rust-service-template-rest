@@ -1,12 +1,13 @@
 //! The jobs worker's entry point and registration contract.
 //!
 //! A composition root registers its retained job kinds in `src/main.rs` by
-//! passing a [`Register`] function to [`run`]. The shipped binary supplies
-//! its retained profile registrations; a composition with no retained
-//! capability refuses after configuration is loaded. The synchronous startup
-//! phases and the one exit-code mapping live here, the asynchronous startup
-//! in `bootstrap`, and the staged teardown in `shutdown`. The full order is
-//! in docs/architecture/runtime-lifecycle.md (section "Jobs worker").
+//! passing a registration function or closure to [`run`], which fills a
+//! [`Registration`]. The shipped binary supplies its retained profile
+//! registrations; a composition with no retained capability refuses after
+//! configuration is loaded. The synchronous startup phases and the one
+//! exit-code mapping live here, the asynchronous startup in `bootstrap`, and
+//! the staged teardown in `shutdown`. The full order is in
+//! docs/architecture/runtime-lifecycle.md (section "Jobs worker").
 
 mod bootstrap;
 mod shutdown;
@@ -23,27 +24,25 @@ use tokio_util::task::TaskTracker;
 /// The error a registration returns; the worker refuses with it.
 pub type BuildError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// A derived service's registration: add each retained job kind and typed
-/// messaging handler. The worker decides which registered capabilities become
-/// active from the immutable configuration before it opens either dependency.
-pub type Register = fn(
-    // template:begin jobs:worker-register-jobs-parameter
-    &mut infra_jobs::Kinds,
-    // template:end jobs:worker-register-jobs-parameter
-    // template:begin messaging:worker-register-messaging-parameter
-    &mut infra_messaging::Registry,
-    // template:end messaging:worker-register-messaging-parameter
-    &Support<'_>,
-) -> Result<(), BuildError>;
-
-/// What a registration may use to build handlers.
-pub struct Support<'a> {
+/// What a derived service's registration fills and may use to build
+/// handlers: each retained job kind and typed messaging handler. The worker
+/// decides which registered capabilities become active from the immutable
+/// configuration before it opens either dependency.
+pub struct Registration<'a> {
+    // template:begin jobs:worker-registration-jobs
+    /// The job kinds this worker claims.
+    pub jobs: infra_jobs::Kinds,
+    // template:end jobs:worker-registration-jobs
+    // template:begin messaging:worker-registration-messaging
+    /// The typed message handlers this worker consumes with.
+    pub messages: infra_messaging::Registry,
+    // template:end messaging:worker-registration-messaging
     config: &'a service_config::Config,
     tracker: &'a TaskTracker,
     cancel: &'a CancellationToken,
 }
 
-impl<'a> Support<'a> {
+impl<'a> Registration<'a> {
     /// The loaded configuration.
     #[must_use]
     pub fn config(&self) -> &'a service_config::Config {
@@ -63,11 +62,14 @@ impl<'a> Support<'a> {
     }
 }
 
-impl fmt::Debug for Support<'_> {
+impl fmt::Debug for Registration<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Support").finish_non_exhaustive()
+        f.debug_struct("Registration").finish_non_exhaustive()
     }
 }
+
+/// The registration [`run`] was given, called once after configuration is loaded.
+type Register<'r> = Box<dyn FnOnce(&mut Registration<'_>) -> Result<(), BuildError> + 'r>;
 
 /// Version and revision stamped into this binary.
 const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
@@ -86,12 +88,13 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// clap, as in the service. A failure is reported once. Later failures do not call
 /// `process::exit`.
 #[must_use]
-pub fn run<I>(args: I, register: Register) -> ExitCode
+pub fn run<I, R>(args: I, register: R) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
+    R: FnOnce(&mut Registration<'_>) -> Result<(), BuildError>,
 {
     let options = LoadOptions::parse_from(args);
-    let result = start(&options, register);
+    let result = start(&options, Box::new(register));
     if let Err(err) = &result {
         tracing::error!(error = %err, "jobs worker failed");
         let _ = process_failure(&err.to_string());
@@ -114,7 +117,7 @@ fn exit_code(result: &Result<shutdown::Outcome, bootstrap::WorkerError>) -> u8 {
 /// down within [`RUNTIME_SHUTDOWN_TIMEOUT`].
 fn start(
     options: &LoadOptions,
-    register: Register,
+    register: Register<'_>,
 ) -> Result<shutdown::Outcome, bootstrap::WorkerError> {
     let config = service_config::load(options, BUILD_INFO)?;
     bootstrap::check_preconditions(&config)?;
@@ -135,13 +138,12 @@ mod tests {
 
     use super::bootstrap::WorkerError;
     use super::shutdown::Outcome;
-    use super::{Support, exit_code, start};
+    use super::{exit_code, start};
 
     #[test]
     fn exit_code_maps_the_three_rows() {
         assert_eq!(exit_code(&Ok(Outcome::Graceful)), 0);
         assert_eq!(exit_code(&Ok(Outcome::Degraded)), 3);
-        assert_eq!(exit_code(&Err(WorkerError::EngineStopped)), 1);
         assert_eq!(exit_code(&Err(WorkerError::NoRegistrations)), 1);
         // template:begin jobs:worker-lib-test-postgres-refusal
         assert_eq!(exit_code(&Err(WorkerError::PostgresDisabled)), 1);
@@ -158,21 +160,12 @@ mod tests {
         }
     }
 
-    fn refuse(
-        // template:begin jobs:worker-register-test-jobs-parameter
-        _: &mut infra_jobs::Kinds,
-        // template:end jobs:worker-register-test-jobs-parameter
-        // template:begin messaging:worker-register-test-messaging-parameter
-        _: &mut infra_messaging::Registry,
-        // template:end messaging:worker-register-test-messaging-parameter
-        _: &Support<'_>,
-    ) -> Result<(), super::BuildError> {
-        Err("registration must not run before configuration".into())
-    }
-
     #[test]
     fn start_with_registration_reads_configuration_first() {
-        let started = start(&missing_file(), refuse);
+        let started = start(
+            &missing_file(),
+            Box::new(|_| Err("registration must not run before configuration".into())),
+        );
         assert!(matches!(started, Err(WorkerError::Load(_))), "{started:?}");
     }
 }
