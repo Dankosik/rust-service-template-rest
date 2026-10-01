@@ -22,7 +22,9 @@ metrics = { workspace = true }
 # `macros` turns on the driver's offline support, which adds a method to
 # `sqlx::Executor`. `Tx` implements that trait, so the method set has to be
 # the same whichever workspace crates are built together.
-sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros"] }
+# `uuid`: the driver's UUID codec belongs to the PostgreSQL profile, so the
+# resolved sqlx graph is the same whichever optional packs are retained.
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros", "uuid"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time", "macros"] }
 tokio-util = { workspace = true }

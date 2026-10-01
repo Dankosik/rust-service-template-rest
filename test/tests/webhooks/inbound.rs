@@ -821,11 +821,16 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
     .await
     .expect("pairs after");
     assert_eq!(pairs_after, pairs_before);
-    let jobs_after: Vec<serde_json::Value> =
+    let mut jobs_after: Vec<serde_json::Value> =
         sqlx::query_scalar("SELECT to_jsonb(background_jobs) FROM background_jobs ORDER BY id")
             .fetch_all(&pool)
             .await
             .expect("jobs after");
+    // The migration adds the failure-history column; every existing row starts empty.
+    for job in &mut jobs_after {
+        let errors = job.as_object_mut().and_then(|row| row.remove("errors"));
+        assert_eq!(errors, Some(serde_json::json!([])));
+    }
     assert_eq!(jobs_after, jobs_before);
     let approximation: bool = sqlx::query_scalar("SELECT count(DISTINCT received_at) = 1 AND bool_and(received_at >= $1::text::timestamptz AND received_at <= now()) FROM webhook_receipts")
         .bind(before).fetch_one(&pool).await.expect("migration timestamp approximation");

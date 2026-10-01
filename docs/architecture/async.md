@@ -31,7 +31,15 @@ competing queue machinery.
 
 `background_jobs` retains its identity, state, attempt count, generation,
 enqueue-time `created_at`, last successful claimant `attempted_by`, timing,
-terminal history, and live unique-key constraint. Its canonical
+terminal history, the `errors` failure history, and live unique-key
+constraint. `errors` is a JSONB array that the fenced retry and failure
+writes and the claim's lease-expiry rescue append to, one
+`{"attempt", "at", "error"}` entry per spent attempt (River and Oban keep the
+same history); `error_summary` stays the latest entry's text. The successful
+path never writes it. The `id` column has no default: enqueue supplies a
+UUIDv7, and the ids, the worker id, and the completion batch bind through
+sqlx's `uuid` codec, which `infra-postgres` enables for the whole PostgreSQL
+profile so the resolved sqlx graph does not vary with the retained packs. Its canonical
 migration requires a UTF-8 server and stores `payload` as `jsonb`, `unique_key`
 as `text COLLATE "C"`, nullable `trace_state`, and the running index
 `(kind, claim_expires_at, not_before, id) WHERE state = 'running'`. JSON values are the payload contract: PostgreSQL may normalize
@@ -88,12 +96,19 @@ Claims follow the last round's result: a round that filled every free slot
 claims again at once, a round that found work claims again 25 ms after it
 started, and an empty round waits for the one-second poll or a wake. Enqueue
 wakes idle workers with `NOTIFY background_jobs` (payload: the kind name),
-debounced to once per 25 ms per process and sent as a separate statement only
-by the enqueue that wins the debounce. Every notifying commit takes
+debounced to once per 25 ms for each kind in a process and sent as a separate
+statement only by the enqueue that wins the debounce. The debounce is per
+kind because a listener wakes only the engines that register the notified
+kind: one process-wide interval let a transaction's first enqueue suppress
+the wake of its second kind, whose engine then waited for the poll. Every notifying commit takes
 PostgreSQL's notify queue lock: notifying each enqueue halved concurrent
 enqueue throughput at 16 connections, and a wake per notification turned
-into a claim storm at 1000 jobs/s. Each engine listens on one connection
-outside its pool; polling remains the recovery path. On DigitalOcean c-4
+into a claim storm at 1000 jobs/s. A worker process listens on one connection
+outside its pool: the engine built with `Engine::new` owns that listener and
+terminal retention, and an engine built with `Engine::beside` it shares both
+and its worker id instead of repeating them. Polling remains the recovery
+path, and the only path through a transaction-mode pooler, where `LISTEN`
+succeeds and delivers nothing. On DigitalOcean c-4
 (PostgreSQL 18, 16 slots) pickup latency at 50 jobs/s went from p50 486 ms /
 p99 981 ms to p50 15 ms / p99 28 ms, and debounced enqueue cost stayed within
 noise.
@@ -210,11 +225,16 @@ execution-budget, and worker-lifecycle contracts together. A proposed queue,
 online dual-format conversion, or lifecycle extraction needs its own accepted
 design.
 
-graphile_worker 0.13.5 (2026-07, sqlx 0.9, OpenTelemetry 0.32) now enqueues on
-the caller's transaction via `WorkerUtils::with_executor`, but keeps its own
-`graphile_worker` schema and migrator, makes crashed-worker recovery an opt-in
-heartbeat sweeper, has no per-kind attempt deadline with a fenced outcome, and
-has one maintainer; apalis-postgres is still 1.0.0-rc.9.
+Screened again on 2026-10-01 against crates.io and each repository.
+graphile_worker 0.13.6 (sqlx 0.9) enqueues on the caller's transaction via
+`WorkerUtils::with_executor`, but keeps its own `graphile_worker` schema and
+migrator, makes crashed-worker recovery an opt-in heartbeat sweeper, completes
+by id with no fenced outcome, has no per-kind attempt deadline, and has one
+maintainer. apalis-postgres is still 1.0.0-rc.9 (sqlx 0.9, own `apalis`
+schema, acknowledgement fenced only by worker id). awa 0.6.9 fences
+completions by run lease but releases on sqlx 0.8, sets deadlines per queue,
+and has one maintainer. underway 0.2.0 (2025-07) is on sqlx 0.8. Loco 1.2.0
+ships its own PostgreSQL queue rather than one of these.
 
 ## Decisions recorded here
 
@@ -268,8 +288,9 @@ owns only its existing claims, attempts, and terminal history.
 
 <!-- template:begin outbox:docs-async-outbox -->
 The transactional outbox reuses that jobs authority without adding a table,
-queue loop, or transaction owner. A second one-slot engine registers only the
-private publication kind. Combined ordinary jobs plus outbox need `N + 5` pool
+queue loop, or transaction owner. A second one-slot engine, built beside the
+ordinary one so both share one listener, retention loop, and worker id,
+registers only the private publication kind. Combined ordinary jobs plus outbox need `N + 5` pool
 connections; outbox-only needs three. Its claim loop, jobs maintenance, and
 all engines share the worker's existing shutdown deadlines. See
 [PostgreSQL transactional outbox](../postgres-transactional-outbox.md).

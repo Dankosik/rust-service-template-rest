@@ -577,8 +577,8 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     let inserted = sqlx::query(
-        "INSERT INTO background_jobs (kind, payload, state, not_before) \
-         SELECT $1, jsonb_build_object('action', 'succeed'), 'pending', \
+        "INSERT INTO background_jobs (id, kind, payload, state, not_before) \
+         SELECT gen_random_uuid(), $1, jsonb_build_object('action', 'succeed'), 'pending', \
                 statement_timestamp() + interval '1 hour' \
          FROM generate_series(1, 1001)",
     )

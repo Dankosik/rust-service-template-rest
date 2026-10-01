@@ -86,20 +86,26 @@ const CLAIM: &str = "WITH policy AS ( \
          attempts = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempts \
                          ELSE job.attempts + 1 END, \
          attempted_by = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempted_by \
-                             ELSE $5::uuid END, \
+                             ELSE $5 END, \
          error_summary = CASE WHEN job.state = 'running' \
                                    AND job.claim_expires_at <= statement_timestamp() \
                               THEN 'lease expired; rescued' \
                               WHEN job.attempts >= policy.max_attempts \
                               THEN COALESCE(job.error_summary, 'attempt budget spent') \
                               ELSE job.error_summary END, \
+         errors = CASE WHEN job.state = 'running' \
+                            AND job.claim_expires_at <= statement_timestamp() \
+                       THEN job.errors || jsonb_build_object( \
+                                'attempt', job.attempts, 'at', statement_timestamp(), \
+                                'error', 'lease expired; rescued') \
+                       ELSE job.errors END, \
          claim_generation = nextval('background_jobs_claim_generation') \
      FROM policy \
      WHERE job.id = ANY (ARRAY(SELECT picked.id FROM picked)) \
        AND policy.kind = job.kind \
        AND ((job.state = 'pending' AND job.not_before <= statement_timestamp()) \
             OR (job.state = 'running' AND job.claim_expires_at <= statement_timestamp())) \
-     RETURNING job.id::text AS id, job.kind, (job.state = 'failed') AS exhausted, job.attempts, \
+     RETURNING job.id, job.kind, (job.state = 'failed') AS exhausted, job.attempts, \
                job.claim_generation, \
                CASE WHEN job.state = 'running' THEN job.payload::text END AS payload, \
                job.trace_context, job.trace_state, job.error_summary, \
@@ -215,7 +221,8 @@ async fn await_tick(
     !stop.is_cancelled()
 }
 
-/// Wake the claim loop when enqueue commits a due job of a registered kind.
+/// Wake the claim loop of every engine in this process that registers the
+/// kind of a due job enqueue committed.
 ///
 /// The listener holds one connection of its own, outside the engine pool,
 /// opened with the pool's connect options. Polling stays the recovery path:
@@ -236,16 +243,14 @@ async fn listen(shared: &Shared, pool: &PgPool) {
             Ok(mut listener) => {
                 observe_recovery(shared, Operation::Listen);
                 // Anything committed while no listener was attached is due now.
-                shared.wake.notify_one();
+                shared.wake_peers(None);
                 loop {
                     match listener.try_recv().await {
                         Ok(Some(notification)) => {
-                            if shared.registry.get(notification.payload()).is_some() {
-                                shared.wake.notify_one();
-                            }
+                            shared.wake_peers(Some(notification.payload()));
                         }
                         // Reconnected after a lost connection.
-                        Ok(None) => shared.wake.notify_one(),
+                        Ok(None) => shared.wake_peers(None),
                         Err(error) => {
                             observe_failure(shared, Operation::Listen, &error.into());
                             break;
@@ -310,13 +315,12 @@ async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
             .acquire()
             .await
             .map_err(OperationError::Acquire)?;
-        let mut worker_id = [0; 36];
         let rows = sqlx::query(CLAIM)
             .bind(&names)
             .bind(&max_attempts)
             .bind(&timeouts)
             .bind(requested)
-            .bind(&*shared.worker_id.hyphenated().encode_lower(&mut worker_id))
+            .bind(shared.worker_id)
             .bind(lease_reserve_micros())
             .try_map(|row| ClaimRow::from_row(&row)?.into_drawn(&shared.registry))
             .fetch_all(&mut *connection)
@@ -468,7 +472,7 @@ enum Drawn {
 
 #[derive(sqlx::FromRow)]
 struct ClaimRow<'a> {
-    id: &'a str,
+    id: uuid::Uuid,
     kind: &'a str,
     exhausted: bool,
     attempts: i16,
@@ -482,7 +486,7 @@ struct ClaimRow<'a> {
 
 impl ClaimRow<'_> {
     fn into_drawn(self, registry: &crate::Registry) -> Result<Drawn, sqlx::Error> {
-        let id = JobId::parse(self.id).ok_or_else(|| decode("job id is not a uuid"))?;
+        let id = JobId(self.id);
         let Some(registered) = registry.get(self.kind) else {
             return Err(decode("unknown job kind"));
         };

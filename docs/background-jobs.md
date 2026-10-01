@@ -96,7 +96,10 @@ outcome.
 
 A `Handler<K>` returns `Result<(), JobError>`. `Ok(())` requests ordinary
 completion; `JobError::retryable(error)` and `JobError::permanent(error)` keep
-their existing meanings. A retryable error, panic, timeout, or decode failure
+their existing meanings and store `error`'s `Display` text. An error
+propagated with `?` is retryable and its summary also carries each `source()`
+whose text the summary does not already contain, so a cause kept only in
+`#[source]` is not lost and a cause the error prints is not repeated. A retryable error, panic, timeout, or decode failure
 uses the persisted retry policy; a permanent error becomes terminal.
 
 `job.cancellation()` fires at the kind's timeout and when a forced drain
@@ -190,7 +193,12 @@ PostgreSQL computes `attempt^4 * (0.9 + 0.2 * random())` seconds (floored by
 `retry_after_at_least`) when it writes the retry; a re-sent fenced write may
 redraw. Exhaustion and permanent failure are terminal. Summaries replace
 controls with spaces and are limited to 1024 UTF-8 bytes; handlers must not
-include secrets in them.
+include secrets in them. `error_summary` holds the most recent summary. The
+`errors` JSONB array keeps the history: every failed attempt (retry,
+exhaustion, permanent failure, timeout, panic, undecodable payload) and every
+lease-expiry rescue appends one `{"attempt", "at", "error"}` entry. Snooze
+and forced-drain release append nothing, so a job has at most one entry per
+spent attempt, 25 at the largest policy.
 Successful jobs remain for 24 hours and failed jobs for seven days. Retention
 runs every minute in batches of 500 and never deletes live jobs. Unknown kinds
 remain unclaimed; terminal retention is independent of registered kinds.
@@ -201,9 +209,13 @@ remain unclaimed; terminal retention is independent of registered kinds.
 defaults to 1 and ranges from 1 to 500. The worker requires
 `postgres.max_connections >= jobs.max_workers + 2`. The two additional
 connections cover engine statements and readiness; there is no upkeep
-connection. Each engine also keeps one `LISTEN` connection outside the pool,
-so the database sees one more session per engine (two when the outbox
-publisher runs beside ordinary jobs). `http.grace_period` must cover `http.drain_timeout` plus the fixed
+connection. The worker process also keeps one `LISTEN` connection outside
+the pool, so the database sees one more session per worker; the outbox
+publisher engine shares it. `LISTEN` needs a session of its own: through a
+transaction-mode pooler such as PgBouncer the statement succeeds but no
+notification arrives, nothing is reported as failed, and pickup falls back to
+the one-second poll. Give the worker a direct or session-mode connection when
+pickup latency matters. `http.grace_period` must cover `http.drain_timeout` plus the fixed
 17-second cleanup, listener, join, pool-close, and telemetry tail.
 
 ## Run and stop the worker
@@ -228,8 +240,8 @@ new claim round begins after stop. Claims lock rows while they scan with
 session holds is skipped rather than stalling the claim.
 
 Enqueue of a job due at once sends `NOTIFY background_jobs` with the kind
-name, at most once per 25 ms per process, and it takes effect when the
-caller commits. A worker with that kind registered claims at once instead of
+name, at most once per 25 ms for each kind in a process, and it takes effect
+when the caller commits. A worker with that kind registered claims at once instead of
 at its next one-second poll. After a claim that found work but did not fill
 every free slot, the next claim starts 25 ms after the previous one; after a
 claim that filled every slot, at once; after an empty claim, at the next
@@ -268,15 +280,16 @@ on the same row.
 ## Storage, observation, and inspection
 
 The canonical migration stores `payload` as `jsonb`, `unique_key` as
-`text COLLATE "C"`, `created_at`, nullable UUID `attempted_by`, and
+`text COLLATE "C"`, `created_at`, nullable UUID `attempted_by`, the `errors` history, and
 `trace_state text`; it uses the running index `(kind, claim_expires_at,
 not_before, id)`. JSONB's semantic normalization is intentional. `created_at`
 is the enqueue database time. Enqueue generates `id` as a UUIDv7, so the
 primary key grows in insertion order (its first 48 bits are the enqueue
-time in milliseconds). `attempted_by` is the stable random UUID for
-the worker process that most recently claimed the row. An expired running row
-gets a bounded payload-free rescue marker in `error_summary`; a normal later
-outcome may replace it. Pending rows are never marked as rescued.
+time in milliseconds); the column has no default because enqueue is the only
+insert path. `attempted_by` is the random UUID of the worker process that
+most recently claimed the row; the engines of one process share it. An expired running row
+gets a bounded payload-free rescue marker in `error_summary` and in `errors`;
+a normal later outcome may replace the summary, never the history entry. Pending rows are never marked as rescued.
 
 New trace data stores bounded ASCII `trace_context` and `trace_state` only.
 The worker extracts through the installed propagator and creates a span link,
