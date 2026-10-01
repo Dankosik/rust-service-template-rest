@@ -17,6 +17,7 @@ use url::Url;
 // template:end outbound-auth:config-integration-oauth-url-import
 
 use crate::ValidationError;
+use crate::de::VALUE_FREE;
 // template:begin grpc:config-integration-grpc-import
 use crate::GrpcSecurity;
 // template:end grpc:config-integration-grpc-import
@@ -155,7 +156,8 @@ impl<'de> Deserialize<'de> for Scopes {
 // template:end outbound-auth:config-integration-oauth-types
 
 /// Decode through config-rs's value representation so its rejected-value
-/// diagnostics never escape this sensitive section.
+/// diagnostics never escape this sensitive section. Every message written
+/// here names a key and no value, from a file or the environment alike.
 pub(crate) fn deserialize_integrations<'de, D>(
     deserializer: D,
 ) -> Result<BTreeMap<String, IntegrationConfig>, D::Error>
@@ -163,8 +165,12 @@ where
     D: Deserializer<'de>,
 {
     let value = config::Value::deserialize(deserializer)
-        .map_err(|_| D::Error::custom("integrations: invalid configuration value"))?;
-    decode_integrations(value).map_err(D::Error::custom)
+        .map_err(|_| value_free("integrations: invalid configuration value"))?;
+    decode_integrations(value).map_err(value_free)
+}
+
+fn value_free<E: serde::de::Error>(message: impl fmt::Display) -> E {
+    E::custom(format_args!("{VALUE_FREE}{message}"))
 }
 
 fn decode_integrations(

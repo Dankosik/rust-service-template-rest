@@ -28,10 +28,19 @@ Runtime value precedence, last wins:
 An empty `APP__` value is still an explicit final override; it flows into
 validation and fails when the key cannot be empty. Unknown keys from files or
 the environment fail startup (`#[serde(deny_unknown_fields)]` on every
-section), and so does a malformed variable name such as `APP____ADDR` or
-`APP__HTTP__ADDR__`. Because every `APP__*` variable is read, an unrelated
+section), and so does a malformed variable name such as `APP____ADDR`,
+`APP__HTTP__ADDR__`, or `APP__HTTP[0]`: each segment is letters, digits, `_`,
+or `-`. Because every `APP__*` variable is read, an unrelated
 `APP__FOO` in the process environment also fails startup: name the namespace
 for this service only.
+
+A variable name is lowercased and split on `__`, and each segment must be a
+path identifier, so every key in a file must be one a variable can address:
+lowercase letters, digits, `_`, and `-`, without `__` or a trailing `_`. A
+file table named `Partner` fails startup naming the file and the key, because
+a variable segment `__PARTNER__` would set a second entry, `partner`, and the
+file's entry could never receive an environment-only secret or an override.
+The same rule applies to a value that refers to an environment-supplied entry.
 
 Values keep their human forms in both files and the environment: durations
 as `"8s"`, `"250ms"`, `"1m 30s"`; byte sizes as `"1 MiB"`, `"16 KiB"`, or a
@@ -40,15 +49,19 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
 ## Secret Rules
 
 - Do not place secrets in TOML. A secret-like key (any segment `password`,
-  `secret`, `secrets`, `authorization`, `dsn`, `token` unless followed by
-  `profile` or `url`, `key` after `api` or `private`, `headers` after `otlp`)
+  `secret`, `secrets`, `credentials`, `authorization`, `dsn`, `token` unless
+  followed by `url`, `key` after `api` or `private`, `headers` after `otlp`)
   with a non-empty value in any file fails startup. Empty placeholders are
-  allowed so a file can document the key.
+  allowed so a file can document the key. The guard reads key names, not
+  types: a new secret field needs a name it recognizes.
 - Secret fields are `secrecy::SecretString`: `Debug` output and the startup
   summary print `[REDACTED]`, and the value is zeroed on drop.
-- A secret map given a scalar (`APP__WEBHOOKS__SECRETS=value`, the reference
-  segment omitted) fails with its key and a static reason; config-rs's default
-  type diagnostic would echo the value.
+- A value from the environment that fails to decode is never echoed. The
+  message is rebuilt from the key and the expected form (`invalid value,
+  expected a boolean for key ...`); config-rs's own diagnostic would quote the
+  value, which is a secret when a variable omits its last name segment. An
+  unknown or missing key is reported as written, and a rejected file value is
+  still shown.
 - Files are read as the process user; relative paths and symlinks are
   accepted because Kubernetes projected volumes depend on symlinks for atomic
   updates.
@@ -62,6 +75,10 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   service files, socket paths, and client key or certificate files are
   refused at startup, and the diagnostic never carries the value
   ([Persistence](architecture/persistence.md#connection-admission)).
+- The `migrate` binary reads the same files and variables but decodes only
+  `app`, `log`, `observability`, and `postgres`. It needs no other section's
+  secrets, and it does not check the other sections or an unknown section
+  name; the binaries that use them do.
 <!-- template:end postgres:docs-config-postgres-source -->
 <!-- template:begin messaging:docs-config-messaging-source -->
 - `messaging` is an optional typed section. Its non-secret endpoint, stream,
@@ -72,7 +89,7 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   development/test escape hatch, never a production default. Configuration
   validates shape and resource bounds before any provider I/O; the adapter maps
   the admitted snapshot to its client options.
-  `messaging.urls` uses a TOML array or one comma-separated
+  `messaging.urls` uses a list or one comma-separated string, such as an
   `APP__MESSAGING__URLS` value, for example
   `tls://nats-a.example:4222,tls://nats-b.example:4222`. A single URL is written
   directly; JSON array syntax is not an environment format. List parsing is
@@ -96,15 +113,24 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   `none`. `object_storage.secret_access_key` is `SecretString`,
   environment-only (`APP__OBJECT_STORAGE__SECRET_ACCESS_KEY`), and redacted;
   a nonempty file value is refused because `secret` is secret-like.
-  `provider`, `bucket`, `region`, `endpoint`, `expected_bucket_owner`, and
-  `access_key_id` use normal file/environment precedence. Each provider
-  accepts only its own keys: `amazon_s3` takes `region` and
-  `expected_bucket_owner` and no endpoint, `cloudflare_r2` and `railway` take
-  `endpoint`, and a key another provider owns fails startup instead of being
-  ignored. `local` (an emulator, plaintext allowed) is accepted only when
-  `app.env` is `local` or `development`. The client is built from these keys
-  alone: the global `AWS_*` variables, AWS profile files, and instance
-  metadata are never read. On Railway, map the bucket's `${{Bucket.X}}`
+  `provider`, `bucket`, `region`, `endpoint`, `expected_bucket_owner`,
+  `path_style`, `credentials`, and `access_key_id` use normal
+  file/environment precedence. Each provider accepts only its own keys:
+  `amazon_s3` takes `region` and `expected_bucket_owner` and no endpoint,
+  `cloudflare_r2` and `railway` take `endpoint`, `s3_compatible` takes
+  `endpoint` and alone takes `path_style`, and a key another provider owns
+  fails startup instead of being ignored. `local` (an emulator, plaintext
+  allowed) is accepted only when `app.env` is `local` or `development`.
+  `credentials` is `access_key` (default) or, for `amazon_s3` only,
+  `workload_identity`, which refuses a nonempty `access_key_id` or
+  `secret_access_key`. The S3 client is built from these keys alone: the
+  global `AWS_*` variables and AWS profile files never change its endpoint,
+  region, or behavior. Under `workload_identity` the AWS SDK's own providers
+  read what the platform injects for the workload's role
+  (`AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, the
+  `AWS_CONTAINER_*` variables) and the fixed instance metadata endpoint,
+  only to obtain credentials; environment access keys are still not a
+  source, and no profile file is read. On Railway, map the bucket's `${{Bucket.X}}`
   variables onto `APP__OBJECT_STORAGE__*`. Value shapes (endpoint origin,
   region, bucket name, owner account) are admitted by `infra-object-storage`.
   The [guide](object-storage.md) owns admission.
@@ -119,7 +145,8 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
 - `authn.mode` defaults to `none`. A retained initialized profile admits only `none` plus its selected engine. The `none` variant accepts no provider fields; an active engine needs exact, nonblank `authn.issuer` and `authn.audience`. Issuer, audience, and identity values are not trimmed or case-folded. `AuthnConfig` Debug exposes only mode; trust inputs, endpoints, queries and credentials remain redacted.
 <!-- template:end authn:docs-config-authn-source -->
 <!-- template:begin oidc-jwt:docs-config-jwt-source -->
-- JWT mode accepts `authn.token_profile = "resource-server"` or `"rfc9068"`, with `resource-server` as the omitted-value default; it accepts a nonempty `authn.algorithms` list of `RS256`, `ES256`, `PS256`, or `EdDSA`. `authn.audience` accepts one string or a nonempty exact-string list. JWT provider configuration does not accept introspection fields.
+- `authn.token_profile` is a public selector and the one exception to the secret-like `token` rule.
+- JWT mode accepts `authn.token_profile = "resource-server"` or `"rfc9068"`, with `resource-server` as the omitted-value default; it accepts a nonempty `authn.algorithms` list of `RS256`, `ES256`, `PS256`, or `EdDSA`. `authn.audience` accepts one string or a nonempty exact-string list. The optional, nonsecret `authn.jwks_uri` (`APP__AUTHN__JWKS_URI`) names an HTTPS key set endpoint and replaces discovery; a blank value is rejected and the adapter validates its URL grammar. JWT provider configuration does not accept introspection fields.
 <!-- template:end oidc-jwt:docs-config-jwt-source -->
 <!-- template:begin oidc-introspection:docs-config-introspection-source -->
 - Introspection mode requires `authn.introspection_endpoint`, `authn.introspection_client_id`, a nonzero `authn.provider_concurrency` (default 32), and a nonempty `APP__AUTHN__INTROSPECTION_CLIENT_SECRET`. Its client secret is `SecretString`, environment-only, and must never appear in TOML; the mode rejects JWT-only inputs.
@@ -313,7 +340,8 @@ every record inside a request) or `text` (local development).
 - `object_storage.operation_timeout` (environment
   `APP__OBJECT_STORAGE__OPERATION_TIMEOUT`, default `5s`, inclusive `1s` to
   `15m`) bounds one call up to its response headers, a read's three attempts
-  included (a put or delete makes one); connect stays a `3.1s` constant and a
+  included (a put or delete makes one); one read attempt gets half of it, so
+  a hung attempt leaves room for a retry; connect stays a `3.1s` constant and a
   download body is bounded by the SDK's stalled-stream protection (5 s without
   progress) instead. On a request path the handler
   budget still applies: a put dropped by `http.request_timeout` has an unknown
@@ -334,7 +362,9 @@ every record inside a request) or `text` (local development).
    that enforces it.
 2. Add a loader test in `crates/config/src/load.rs` that sets the key through
    the environment and asserts the decoded value, and a validation test for a
-   rejected value.
+   rejected value. For a secret, also add its dotted key to the vectors in
+   `crates/config/src/secret_policy.rs` so the file guard is proven to
+   recognize the name.
 3. Update `env/config/local.toml` only where the key belongs for a non-secret
    local example.
 4. Update this document when the key changes secret-source or runtime-budget
@@ -357,7 +387,8 @@ secret-file guard covers endpoint fields and dynamic maps. There is no
 environment-variable indirection, JSON-in-environment manifest, or remote secret
 provider.
 
-Endpoint IDs and non-secret key references need only be nonempty and NUL-free.
+Endpoint IDs and key references follow the file-key rule above: key
+references name `APP__INBOUND_WEBHOOKS__SECRETS__<REF>` variables.
 <!-- template:end webhooks-common:docs-config-webhooks-snapshot -->
 
 <!-- template:begin webhooks:docs-config-webhooks-outbound -->
@@ -391,7 +422,7 @@ only with new evidence.
 | --- | --- | --- |
 | The `config` crate (`toml` feature only) with `serde`, layered builder, `#[serde(deny_unknown_fields, default)]` per section | `figment` | no release since 2024 and it silently drops a malformed environment name; config-rs reports the unknown field, and the template's pre-scan names the variable |
 | TOML baseline files | YAML | the Rust convention with a maintained crate; `serde_yaml` is archived, `serde_yml` carries RUSTSEC-2025-0068; config-rs's `yaml` feature stays available for a service that must consume YAML |
-| Secrets as `secrecy::SecretString`; environment is the only secret source; each file is pre-scanned for non-empty secret-like keys (`password`, `secret`, `token`, `dsn`, `authorization`, `api_key`, `private_key`, `otlp_headers`) | trusting file contents | a committed baseline cannot leak a credential; `Debug` prints `[REDACTED]` |
+| Secrets as `secrecy::SecretString`; environment is the only secret source; each file is pre-scanned for non-empty secret-like keys (`password`, `secret`, `credentials`, `token`, `dsn`, `authorization`, `api_key`, `private_key`, `otlp_headers`) | trusting file contents | a committed baseline cannot leak a credential; `Debug` prints `[REDACTED]` |
 | `tracing` + `tracing-subscriber` (`EnvFilter` parses `log.level`; a directive without span filters runs as the equivalent `Targets`); the telemetry crate's JSON layer for `log.format = json`, `fmt::layer()` for `text`; `log` records bridged | `json-subscriber` 0.3 (chosen in stage 2) | it wrote the same line but built a JSON value map for the event and another for the span list on every record, and re-serialized all of a span's fields on every `record`: 61% of a small request's instructions. The crate's layer writes the identical line (a differential corpus of 64 records matched byte for byte) with two thirds fewer instructions per record ([Telemetry performance](infra-telemetry-performance.md)). `EnvFilter` takes a shared lock on every span enter, exit, and close even without span directives. Reopen if an upstream layer flattens span fields without per-record maps |
 | Tracer provider always installed; the OTLP HTTP/protobuf batch exporter added only when a typed endpoint or a standard `OTEL_EXPORTER_OTLP_*ENDPOINT` resolves one; `TraceContextPropagator` installed explicitly | exporter `disabled` when no endpoint, provider absent | trace ids in every log line cost nothing without an exporter and avoid connection-refused noise against the SDK's `localhost:4318` default |
 | Ambient `OTEL_EXPORTER_OTLP_*HEADERS` fail validation when the typed endpoint selects the destination; unread trust variables are named in a startup warning | letting the SDK merge them | one collector's credential is never sent to another; the mechanism stays the SDK's, the safety property is a validation rule |

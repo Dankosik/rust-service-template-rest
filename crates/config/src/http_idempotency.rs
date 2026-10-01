@@ -77,8 +77,12 @@ where
 {
     blank_as_none(deserializer)?
         .map(|text| {
-            humantime::parse_duration(&text)
-                .map_err(|err| serde::de::Error::custom(format!("{text:?}: {err}")))
+            humantime::parse_duration(&text).map_err(|_| {
+                serde::de::Error::invalid_value(
+                    serde::de::Unexpected::Str(&text),
+                    &"a duration such as 24h",
+                )
+            })
         })
         .transpose()
 }

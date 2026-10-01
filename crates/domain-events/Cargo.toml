@@ -12,5 +12,4 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-serde = { workspace = true, features = ["std"] }
 time = { workspace = true, features = ["std"] }
