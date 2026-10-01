@@ -322,8 +322,9 @@ jobs:
         if: needs.changes.outputs.agent_instructions == 'true'
         run: bash ./scripts/ci/measure.sh quality-instructions -- make check-instructions
       - name: Validation routing
+        # Four independent self-tests over private fixtures, run side by side.
         if: needs.changes.outputs.validation_system == 'true'
-        run: bash ./scripts/ci/measure.sh quality-validation-system -- make changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
+        run: bash ./scripts/ci/measure.sh quality-validation-system -- make -j4 --output-sync=target changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
 
   security:
     needs: changes

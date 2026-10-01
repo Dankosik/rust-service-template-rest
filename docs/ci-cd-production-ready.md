@@ -78,8 +78,10 @@ build and tests or the initializer itself. Parallel parts together run
 `make template-init-check`, and `scripts/ci/initializer-matrix.py` plans them
 from the same diff: a changed crate, migration, test, or proto path selects
 only the runtime graphs whose profile tuple keeps it (the initializer's own
-removal inventory decides), and any other initializer path selects all. The source part proves the 368 baseline canonical profile
-and harness projections. The 26 existing runtime graphs retain their public
+removal inventory decides), and any other initializer path selects all. The
+Cargo-free `initializer (projections)` job proves the 368 baseline canonical
+profile and harness projections beside the matrix, on every `module_initializer`
+change. The 26 existing runtime graphs retain their public
 initializer, build, test and selected database proof; their numbering and
 baseline command scopes are unchanged.
 
@@ -123,7 +125,7 @@ object storage. None adds a database suite. Seven runtime parts cover 65
 runtime representatives.
 
 A change to projected text alone selects `module_initializer` without the
-runtime surface and runs the Cargo-free `initializer (projections)` job.
+runtime surface and runs only the `initializer (projections)` job.
 Other quality, security, image and database jobs keep their own gates. The
 source-only runner and Make include are removed from derived services, so
 initializer proof cannot recur there. [Initialization validation](template-sync.md#validation-boundary)
@@ -150,7 +152,12 @@ manifest and lockfile, and the `CARGO_*`/`RUST*` environment, and saved only by
 a push to `main` after a successful job. The saved target keeps dependency
 artifacts alone; workspace crates and test binaries rebuild on every checkout
 anyway, and keeping them pushed the repository past its 10 GB cache budget, so
-caches evicted one another and most pull requests started cold.
+caches evicted one another and most pull requests started cold. For the same
+budget the dependencies build without debuginfo (workspace crates keep line
+tables) and the archives are written at zstd level 16. The first save owns a
+key until the lockfile changes, so a save must hold everything its job can
+build: `quality` saves only after a workspace build, and `integration`
+compiles every retained suite before it saves.
 
 [codeql.yml](../.github/workflows/codeql.yml) runs CodeQL for Rust
 (`build-mode: none`) when Rust source or manifests change and for Actions
