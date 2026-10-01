@@ -289,6 +289,7 @@ fn options_with_servers(
     max_payload_bytes: usize,
 ) -> MessagingOptions {
     MessagingOptions {
+        connection_name: "infra-messaging-tests".to_owned(),
         servers,
         credentials: None,
         root_ca_path: None,
@@ -1329,6 +1330,145 @@ async fn consumer_reconciles_its_named_durable_without_stream_administration() {
         .finish(deadline())
         .await
         .expect("empty durable consumer drains within the shared deadline");
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn durable_deleted_between_pulls_stops_the_consumer() {
+    let fixture = Fixture::create(false).await;
+    let cancel = CancellationToken::new();
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer_options(&fixture)), 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect("fixture source stream is admitted");
+    let mut registry = registry(&fixture);
+    registry
+        .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
+        .expect("fixture handler is registered");
+    let consumer = messaging
+        .consumer(registry)
+        .await
+        .expect("adapter creates its named durable consumer");
+    // No pull is waiting yet, so the broker has no request to terminate with
+    // `Consumer Deleted`; the next pull meets a subject nobody answers.
+    fixture
+        .jetstream
+        .delete_consumer_from_stream(&fixture.durable, &fixture.stream)
+        .await
+        .expect("test administrator deletes the durable consumer");
+
+    let handle = consumer.start(&cancel);
+    let failure = timeout(Duration::from_secs(10), handle.failed())
+        .await
+        .expect("a durable the broker reports missing must stop the consumer");
+    assert!(matches!(failure, ConsumerError::ConsumerLost));
+
+    drop(handle);
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn drain_returns_a_prefetched_delivery_before_ack_wait() {
+    let fixture = Fixture::create(false).await;
+    let cancel = CancellationToken::new();
+    let consumer_options = ConsumerOptions {
+        concurrency: 2,
+        ..consumer_options(&fixture)
+    };
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer_options), 1024),
+        Instant::now() + Duration::from_secs(30),
+        cancel.clone(),
+    ))
+    .await
+    .expect("fixture source stream is admitted");
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let release = CancellationToken::new();
+    let mut blocking = registry(&fixture);
+    blocking
+        .register::<ExampleEvent, _, _>({
+            let release = release.clone();
+            move |_, _| {
+                let _ = started_tx.send(());
+                let release = release.clone();
+                async move {
+                    release.cancelled().await;
+                    Ok(())
+                }
+            }
+        })
+        .expect("fixture handler is registered");
+    let mut first = messaging
+        .consumer(blocking)
+        .await
+        .expect("adapter creates its named durable consumer")
+        .start(&cancel);
+    for id in ["event-in-flight-1", "event-in-flight-2", "event-prefetched"] {
+        let prepared = messaging
+            .producer()
+            .prepare(fixture.subject.clone(), &event(id))
+            .expect("fixture event is prepared");
+        messaging
+            .producer()
+            .publish(&prepared, deadline(), &cancel)
+            .await
+            .expect("fixture event publication is acknowledged");
+    }
+    // Both slots are busy, so the third delivery waits in the client's buffer.
+    timeout(Duration::from_secs(3), async {
+        started_rx.recv().await;
+        started_rx.recv().await;
+        let mut cadence = tokio::time::interval(Duration::from_millis(10));
+        loop {
+            cadence.tick().await;
+            let durable: consumer::PullConsumer = fixture
+                .jetstream
+                .get_consumer_from_stream(&fixture.durable, &fixture.stream)
+                .await
+                .expect("the durable consumer exists");
+            if durable.cached_info().num_ack_pending == 3 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the broker must deliver the third message to the busy replica");
+
+    first.drain();
+    release.cancel();
+    first
+        .finish(deadline())
+        .await
+        .expect("the in-flight deliveries settle within the shared deadline");
+
+    let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut recording = registry(&fixture);
+    recording
+        .register::<ExampleEvent, _, _>(move |event, _| {
+            let _ = observed_tx.send(event.id);
+            async { Ok(()) }
+        })
+        .expect("fixture handler is registered");
+    let mut second = messaging
+        .consumer(recording)
+        .await
+        .expect("the durable consumer is admitted again")
+        .start(&cancel);
+    let observed = timeout(Duration::from_secs(10), observed_rx.recv())
+        .await
+        .expect("a prefetched delivery must return long before the 41 s ack wait")
+        .expect("handler completion signal must remain connected");
+    assert_eq!(observed, "event-prefetched");
+
+    second
+        .finish(deadline())
+        .await
+        .expect("bounded consumer drain must join its pull task");
     close(messaging).await;
     fixture.cleanup().await;
 }

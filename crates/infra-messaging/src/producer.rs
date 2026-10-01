@@ -17,7 +17,15 @@ use crate::messaging::{BROKER_OPERATION_BUDGET, Shared};
 use crate::prepared::{PreparedEvent, PublishAck};
 use crate::wire::encode_prepared;
 
-/// Metric label of each publication result; `Producer::publish` records by index.
+/// How one publication ended. The discriminant indexes [`PUBLISH_RESULTS`].
+#[derive(Clone, Copy)]
+enum PublishResult {
+    Acknowledged = 0,
+    Rejected = 1,
+    Ambiguous = 2,
+}
+
+/// Metric label of each [`PublishResult`], indexed by its discriminant.
 pub(crate) const PUBLISH_RESULTS: [&str; 3] = ["acknowledged", "rejected", "ambiguous"];
 
 /// A clonable producer admitted by one live messaging resource.
@@ -92,10 +100,10 @@ impl Producer {
             }
         };
         let outcome = match &result {
-            Ok(_) => 0,
-            Err(PublishError::Rejected) => 1,
-            Err(PublishError::Ambiguous) => 2,
-        };
+            Ok(_) => PublishResult::Acknowledged,
+            Err(PublishError::Rejected) => PublishResult::Rejected,
+            Err(PublishError::Ambiguous) => PublishResult::Ambiguous,
+        } as usize;
         span.record("outcome", PUBLISH_RESULTS[outcome]);
         if result.is_err() {
             span.in_scope(|| {

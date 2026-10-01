@@ -2551,6 +2551,7 @@ dependencies = [
  "metrics",
  "opentelemetry",
  "opentelemetry_sdk",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2 0.11.0",

@@ -36,6 +36,7 @@ foldhash = { workspace = true, features = ["std"] }
 futures-util = { workspace = true, features = ["std"] }
 health = { workspace = true }
 metrics = { workspace = true }
+secrecy = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
