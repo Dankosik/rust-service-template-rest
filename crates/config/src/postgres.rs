@@ -7,6 +7,8 @@
 //! the driver would otherwise read. Timeouts are template constants there
 //! as well; the pool size is the one capacity value without a universal
 //! safe answer, so it is the one an operator sets.
+//!
+//! [`MigrationConfig`] is the narrower snapshot the migration binary loads.
 
 use std::num::NonZeroU32;
 
@@ -15,6 +17,7 @@ use serde::Deserialize;
 
 use crate::de::blank_secret_as_none;
 use crate::validate::{ValidationError, int_range};
+use crate::{AppConfig, LogConfig, ObservabilityConfig};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -73,6 +76,30 @@ impl PostgresConfig {
             500,
         )?;
         Ok(())
+    }
+}
+
+/// The sections the migration binary reads, from the same files and
+/// environment as [`crate::Config`].
+///
+/// Every other section is ignored rather than decoded, so a migration run
+/// holds no secret but the DSN and another section's mistake cannot stop
+/// it; the binaries that use those sections still refuse them at startup.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct MigrationConfig {
+    pub app: AppConfig,
+    pub log: LogConfig,
+    pub observability: ObservabilityConfig,
+    pub postgres: PostgresConfig,
+}
+
+impl MigrationConfig {
+    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        self.app.validate()?;
+        self.log.validate()?;
+        self.observability.validate()?;
+        self.postgres.validate()
     }
 }
 

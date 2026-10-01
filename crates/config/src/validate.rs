@@ -61,6 +61,20 @@ pub(crate) fn non_empty(key: &str, value: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// Whether an `APP__` variable can address the key `name`. The loader
+/// lowercases a variable name, splits it on `__`, and reads each segment as
+/// a config-rs path identifier (ASCII letters, digits, `_`, `-`). A key
+/// outside that form never meets its environment counterpart: the file and
+/// the environment would name two entries.
+pub(crate) fn is_env_addressable(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
+        && !name.contains("__")
+        && !name.ends_with('_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +101,22 @@ mod tests {
             Duration::from_secs(600),
         );
         assert_eq!(result.is_ok(), valid);
+    }
+
+    #[rstest::rstest]
+    #[case::word("partner", true)]
+    #[case::underscore("partner_v2", true)]
+    #[case::hyphen("partner-v2", true)]
+    #[case::leading_underscore("_partner", true)]
+    #[case::path_characters("partner/a", false)]
+    #[case::dot("partner.a", false)]
+    #[case::non_ascii("pärtner", false)]
+    #[case::empty("", false)]
+    #[case::uppercase("Partner", false)]
+    #[case::segment_separator("partner__v2", false)]
+    #[case::trailing_underscore("partner_", false)]
+    fn env_addressable_names(#[case] name: &str, #[case] addressable: bool) {
+        assert_eq!(is_env_addressable(name), addressable);
     }
 
     #[test]

@@ -2,40 +2,53 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::de::DeserializeOwned;
+
 use crate::app::BuildInfo;
+use crate::de::VALUE_FREE;
 use crate::secret_policy::first_secret_like_key;
+use crate::validate::is_env_addressable;
 use crate::{Config, LoadOptions, ValidationError};
 
 /// Environment namespace. `APP__HTTP__ADDR` sets `http.addr`.
 pub const ENV_PREFIX: &str = "APP";
 const ENV_SEPARATOR: &str = "__";
 
+/// Why a snapshot could not be built. `Display` carries the whole cause, so
+/// no variant also exposes it through `source()`.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(
         "environment variable {name} is malformed: empty segment between `{ENV_SEPARATOR}` separators"
     )]
     MalformedEnvName { name: String },
-    #[error("config file {}: {source}", path.display())]
+    #[error("config file {}: {error}", path.display())]
     ReadFile {
         path: PathBuf,
-        #[source]
-        source: std::io::Error,
+        error: std::io::Error,
     },
-    #[error("config file {}: {source}", path.display())]
+    #[error("config file {}: {error}", path.display())]
     ParseFile {
         path: PathBuf,
-        #[source]
-        source: toml::de::Error,
+        error: toml::de::Error,
     },
     #[error("secret-like key `{key}` carries a value in config file {}; secrets come only from the environment", path.display())]
     SecretInFile { key: String, path: PathBuf },
+    #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable, whose name is lowercased and split on `{ENV_SEPARATOR}`; write it in lowercase without `{ENV_SEPARATOR}` or a trailing `_`", path.display())]
+    UnaddressableKey { key: String, path: PathBuf },
     #[error("load configuration: {0}")]
-    Merge(#[source] config::ConfigError),
+    Merge(config::ConfigError),
+    /// The message never carries a value the environment supplied.
     #[error("configuration is invalid: {0}")]
-    Deserialize(#[source] config::ConfigError),
+    Deserialize(String),
     #[error("configuration is invalid: {0}")]
-    Validate(#[from] ValidationError),
+    Validate(ValidationError),
+}
+
+impl From<ValidationError> for Error {
+    fn from(error: ValidationError) -> Self {
+        Self::Validate(error)
+    }
 }
 
 /// Load, merge, and validate the snapshot.
@@ -43,8 +56,9 @@ pub enum Error {
 /// # Errors
 ///
 /// Fails on a malformed `APP__` variable name, an unreadable or
-/// unparsable file, a non-empty secret-like value in a file, an unknown key
-/// anywhere, or a violated validation rule.
+/// unparsable file, a file key the environment cannot address, a non-empty
+/// secret-like value in a file, an unknown key anywhere, or a violated
+/// validation rule.
 pub fn load(options: &LoadOptions, build: BuildInfo) -> Result<Config, Error> {
     load_from(options, build, std::env::vars_os())
 }
@@ -60,51 +74,166 @@ where
     K: Into<std::ffi::OsString>,
     V: Into<std::ffi::OsString>,
 {
+    let mut snapshot: Config = merge(options, environment)?;
+    snapshot.app.apply_build_info(build);
+    snapshot.validate()?;
+    Ok(snapshot)
+}
+
+// template:begin postgres:load-migration
+/// Load only the sections the migration binary reads, so a migration run
+/// needs no other section's secrets and is not stopped by their rules.
+///
+/// # Errors
+///
+/// Fails as [`load`] does, for the sections [`crate::MigrationConfig`] holds.
+pub fn load_migration(
+    options: &LoadOptions,
+    build: BuildInfo,
+) -> Result<crate::MigrationConfig, Error> {
+    load_migration_from(options, build, std::env::vars_os())
+}
+
+/// [`load_migration`] over an explicit environment, for tests.
+pub(crate) fn load_migration_from<I, K, V>(
+    options: &LoadOptions,
+    build: BuildInfo,
+    environment: I,
+) -> Result<crate::MigrationConfig, Error>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<std::ffi::OsString>,
+    V: Into<std::ffi::OsString>,
+{
+    let mut snapshot: crate::MigrationConfig = merge(options, environment)?;
+    snapshot.app.apply_build_info(build);
+    snapshot.validate()?;
+    Ok(snapshot)
+}
+// template:end postgres:load-migration
+
+/// Merge the files and the `APP__` namespace, then decode the result.
+fn merge<T, I, K, V>(options: &LoadOptions, environment: I) -> Result<T, Error>
+where
+    T: DeserializeOwned,
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<std::ffi::OsString>,
+    V: Into<std::ffi::OsString>,
+{
     let namespace = collect_namespace(environment)?;
-    // template:begin messaging:load-messaging-list-namespace
-    let (list_namespace, namespace): (config::Map<_, _>, config::Map<_, _>) = namespace
-        .into_iter()
-        .partition(|(key, _)| key.eq_ignore_ascii_case("APP__MESSAGING__URLS"));
-    // template:end messaging:load-messaging-list-namespace
 
     let mut builder = config::Config::builder();
     for path in options.files() {
-        reject_file_secrets(path)?;
+        scan_file(path)?;
         builder = builder.add_source(
             // config-rs reads the path itself so its errors name the file; the
-            // pre-scan read above serves only the secret rule.
+            // pre-scan read above serves only the file rules.
             config::File::from(path.clone())
                 .format(config::FileFormat::Toml)
                 .required(true),
         );
     }
-    let env_source = config::Environment::with_prefix(ENV_PREFIX)
-        .prefix_separator(ENV_SEPARATOR)
-        .separator(ENV_SEPARATOR)
-        // An empty value is still an explicit override; validation decides.
-        .ignore_empty(false)
-        .source(Some(namespace));
-    // template:begin messaging:load-messaging-list-source
-    // Enable config-rs's list parser only for URLs. Its try_parsing also
-    // coerces scalar numbers/booleans, so secrets stay in the unchanged source.
-    builder = builder.add_source(
-        env_source
-            .clone()
-            .source(Some(list_namespace))
-            .try_parsing(true)
-            .list_separator(",")
-            .with_list_parse_key("messaging.urls"),
-    );
-    // template:end messaging:load-messaging-list-source
     let merged = builder
-        .add_source(env_source)
+        .add_source(
+            config::Environment::with_prefix(ENV_PREFIX)
+                .prefix_separator(ENV_SEPARATOR)
+                .separator(ENV_SEPARATOR)
+                // An empty value is still an explicit override; validation decides.
+                .ignore_empty(false)
+                .source(Some(namespace.clone())),
+        )
         .build()
         .map_err(Error::Merge)?;
 
-    let mut snapshot: Config = merged.try_deserialize().map_err(Error::Deserialize)?;
-    snapshot.app.apply_build_info(build);
-    snapshot.validate()?;
-    Ok(snapshot)
+    merged
+        .try_deserialize()
+        .map_err(|error| Error::Deserialize(describe_rejection(&error, &namespace)))
+}
+
+/// Render a decode failure without a value the environment supplied.
+///
+/// The environment is the only secret source, and config-rs and serde quote
+/// the value they refuse, sometimes lowercased, trimmed, or parsed. So a
+/// failure at a key the environment sets is rebuilt from its key and its
+/// expected form, never from the decoder's text. Only a message that names
+/// keys alone (an unknown or missing field) or carries [`VALUE_FREE`] is
+/// shown as written, as is a failure at a key only a file sets.
+fn describe_rejection(
+    error: &config::ConfigError,
+    namespace: &config::Map<String, String>,
+) -> String {
+    let (key, rejection) = rejection(error);
+    let supplied = key.is_none_or(|key| {
+        // `urls[0]` is an element of the value at `urls`.
+        let key = key.split('[').next().unwrap_or(key);
+        namespace.keys().any(|name| is_at_or_under(name, key))
+    });
+    let place = key.map_or_else(String::new, |key| format!(" for key `{key}`"));
+    match rejection {
+        Rejection::Expected(expected) if supplied => {
+            format!("invalid value, expected {expected}{place} in the environment")
+        }
+        Rejection::Unexplained if supplied => format!("invalid value{place} in the environment"),
+        _ => error.to_string().replace(VALUE_FREE, ""),
+    }
+}
+
+/// What a decode failure may say about the value it refused.
+enum Rejection<'a> {
+    /// The message holds no value.
+    AsWritten,
+    /// The message may quote the value; this is the form it expected.
+    Expected(&'a str),
+    /// The message may quote the value and names no expected form.
+    Unexplained,
+}
+
+/// The key a decode failure names, and what its message may be trusted for.
+fn rejection(error: &config::ConfigError) -> (Option<&str>, Rejection<'_>) {
+    const KEYS_ONLY: [&str; 3] = ["unknown field ", "missing field ", "duplicate field "];
+    const QUOTES_VALUE: [&str; 3] = ["invalid type: ", "invalid value: ", "unknown variant "];
+    match error {
+        config::ConfigError::At { error, key, .. } => {
+            let (inner_key, rejection) = rejection(error);
+            (key.as_deref().or(inner_key), rejection)
+        }
+        config::ConfigError::Type { expected, key, .. } => {
+            (key.as_deref(), Rejection::Expected(expected))
+        }
+        config::ConfigError::NotFound(_) => (None, Rejection::AsWritten),
+        config::ConfigError::Message(message)
+            if message.starts_with(VALUE_FREE)
+                || KEYS_ONLY.iter().any(|form| message.starts_with(form)) =>
+        {
+            (None, Rejection::AsWritten)
+        }
+        // serde ends these forms with its own `, expected <form>`; a value
+        // quoted earlier in the message cannot follow the last one.
+        config::ConfigError::Message(message)
+            if QUOTES_VALUE.iter().any(|form| message.starts_with(form)) =>
+        {
+            let expected = message.rsplit_once(", expected ");
+            (
+                None,
+                expected.map_or(Rejection::Unexplained, |(_, expected)| {
+                    Rejection::Expected(expected)
+                }),
+            )
+        }
+        _ => (None, Rejection::Unexplained),
+    }
+}
+
+/// Whether the variable `name` sets the dotted `key` or a key beneath it.
+fn is_at_or_under(name: &str, key: &str) -> bool {
+    let path = name
+        .strip_prefix(ENV_PREFIX)
+        .and_then(|rest| rest.strip_prefix(ENV_SEPARATOR))
+        .unwrap_or(name)
+        .to_lowercase()
+        .replace(ENV_SEPARATOR, ".");
+    path.strip_prefix(key)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
 }
 
 /// Keep only `APP__*` variables, and refuse names config-rs would otherwise
@@ -137,15 +266,23 @@ where
     Ok(namespace)
 }
 
-fn reject_file_secrets(path: &Path) -> Result<(), Error> {
-    let text = std::fs::read_to_string(path).map_err(|source| Error::ReadFile {
+/// The rules a file must meet before it is merged: every key is one the
+/// environment can also address, and no secret-like key carries a value.
+fn scan_file(path: &Path) -> Result<(), Error> {
+    let text = std::fs::read_to_string(path).map_err(|error| Error::ReadFile {
         path: path.to_owned(),
-        source,
+        error,
     })?;
-    let table: toml::Table = toml::from_str(&text).map_err(|source| Error::ParseFile {
+    let table: toml::Table = toml::from_str(&text).map_err(|error| Error::ParseFile {
         path: path.to_owned(),
-        source,
+        error,
     })?;
+    if let Some(key) = first_unaddressable_key(&table, &mut Vec::new()) {
+        return Err(Error::UnaddressableKey {
+            key,
+            path: path.to_owned(),
+        });
+    }
     if let Some(key) = first_secret_like_key(&table) {
         return Err(Error::SecretInFile {
             key,
@@ -153,6 +290,28 @@ fn reject_file_secrets(path: &Path) -> Result<(), Error> {
         });
     }
     Ok(())
+}
+
+/// The first key, as a dotted path, that no `APP__` variable can name. A
+/// file entry `Partner` and a variable segment `__PARTNER__` would be two
+/// entries, and the file's one could never receive an environment-only
+/// secret or an override.
+fn first_unaddressable_key<'a>(table: &'a toml::Table, path: &mut Vec<&'a str>) -> Option<String> {
+    for (key, value) in table {
+        path.push(key);
+        let found = if is_env_addressable(key) {
+            value
+                .as_table()
+                .and_then(|nested| first_unaddressable_key(nested, path))
+        } else {
+            Some(path.join("."))
+        };
+        path.pop();
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -397,6 +556,80 @@ mod tests {
     }
 
     #[test]
+    fn webhooks_secret_without_its_key_segment_is_not_echoed() {
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[(
+                "APP__WEBHOOKS__ENDPOINTS__PARTNER",
+                "fixture-current-secret",
+            )]),
+        )
+        .unwrap_err();
+        let rendered = err.to_string();
+        assert!(matches!(&err, Error::Deserialize(_)), "{rendered}");
+        assert!(
+            rendered.contains("webhooks.endpoints.partner"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("fixture-current-secret"), "{rendered}");
+        assert!(!format!("{err:?}").contains("fixture-current-secret"));
+    }
+
+    #[test]
+    fn webhooks_endpoint_id_the_environment_cannot_name_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(
+            &dir,
+            "mixed-case.toml",
+            "[webhooks.endpoints.Partner]\nurl = \"https://partner.example/events\"\n",
+        );
+        let err = load_from(
+            &LoadOptions {
+                config: Some(file),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[(
+                "APP__WEBHOOKS__ENDPOINTS__PARTNER__SECRET",
+                "fixture-current-secret",
+            )]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::UnaddressableKey { key, .. } if key == "webhooks.endpoints.Partner"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn webhooks_hyphenated_endpoint_id_meets_its_environment_secret() {
+        use secrecy::ExposeSecret as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(
+            &dir,
+            "hyphen.toml",
+            "[webhooks.endpoints.partner-v2]\nurl = \"https://partner.example/events\"\n",
+        );
+        let cfg = load_from(
+            &LoadOptions {
+                config: Some(file),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[(
+                "APP__WEBHOOKS__ENDPOINTS__PARTNER-V2__SECRET",
+                "fixture-current-secret",
+            )]),
+        )
+        .unwrap();
+        assert_eq!(cfg.webhooks.endpoints.len(), 1);
+        let endpoint = cfg.webhooks.endpoints.get("partner-v2").unwrap();
+        assert_eq!(endpoint.secret.expose_secret(), "fixture-current-secret");
+    }
+
+    #[test]
     fn webhooks_blank_environment_secrets_are_refused() {
         let base = [
             (
@@ -482,6 +715,66 @@ mod tests {
         assert_eq!(cfg.messaging.max_payload_bytes, bytesize::ByteSize::mib(2));
         assert_eq!(cfg.messaging.consumer_concurrency.get(), 2);
         assert!(!format!("{cfg:?}").contains("fixture-credentials"));
+    }
+
+    #[test]
+    fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = write(
+            &dir,
+            "list.toml",
+            "[messaging]\nurls = [\"tls://nats-a.example:4222\", \"tls://nats-b.example:4222\"]\n",
+        );
+        let cfg = load_from(
+            &LoadOptions {
+                config: Some(list.clone()),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        )
+        .unwrap();
+        assert_eq!(cfg.messaging.urls.len(), 2);
+
+        let overridden = load_from(
+            &LoadOptions {
+                config: Some(list),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[("APP__MESSAGING__URLS", "tls://nats-c.example:4222")]),
+        )
+        .unwrap();
+        assert_eq!(overridden.messaging.urls, ["tls://nats-c.example:4222"]);
+
+        let number = write(&dir, "number.toml", "[messaging]\nurls = 4222\n");
+        let err = load_from(
+            &LoadOptions {
+                config: Some(number),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must be a list of strings or a comma-separated string"),
+            "{err}"
+        );
+
+        for blank in ["", "tls://nats-a.example:4222,"] {
+            let err = load_from(
+                &LoadOptions::default(),
+                BUILD,
+                env(&[("APP__MESSAGING__URLS", blank)]),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, Error::Validate(error) if error.key == "messaging.urls"),
+                "{err}"
+            );
+        }
     }
 
     #[test]
@@ -1440,6 +1733,199 @@ mod tests {
         assert_eq!(token_profile, TokenProfile::Rfc9068);
     }
     // template:end oidc-jwt:load-jwt-token-profile-file
+
+    // template:begin postgres:load-migration-test
+    #[test]
+    fn migration_snapshot_ignores_the_sections_it_does_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(
+            &dir,
+            "service.toml",
+            "[http]\nrequest_timeout = \"not a duration\"\n[postgres]\nenabled = true\nmax_connections = 2\n",
+        );
+        let options = LoadOptions {
+            config: Some(file),
+            ..LoadOptions::default()
+        };
+        let variables = [
+            ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+            ("APP__LOG__FORMAT", "text"),
+            ("APP__GRPC__ENABLED", "true"),
+        ];
+        assert!(load_from(&options, BUILD, env(&variables)).is_err());
+
+        let cfg = load_migration_from(&options, BUILD, env(&variables)).unwrap();
+        assert!(cfg.postgres.enabled);
+        assert_eq!(cfg.postgres.max_connections.get(), 2);
+        assert!(cfg.postgres.has_dsn());
+        assert_eq!(cfg.log.format, LogFormat::Text);
+        assert_eq!(cfg.app.version, "1.2.3");
+    }
+
+    #[test]
+    fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
+        let unknown = load_migration_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__POSTGRES__BOGUS", "1")]),
+        )
+        .unwrap_err();
+        assert!(matches!(unknown, Error::Deserialize(_)), "{unknown}");
+
+        let missing_dsn = load_migration_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__POSTGRES__ENABLED", "true")]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&missing_dsn, Error::Validate(error) if error.key == "postgres.dsn"),
+            "{missing_dsn}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let leaked = write(
+            &dir,
+            "leaked.toml",
+            "[grpc]\nprivate_key = \"private-key-material\"\n",
+        );
+        let err = load_migration_from(
+            &LoadOptions {
+                config: Some(leaked),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::SecretInFile { .. }), "{err}");
+    }
+    // template:end postgres:load-migration-test
+
+    #[test]
+    fn rejected_environment_values_are_not_echoed() {
+        // config-rs lowercases a refused boolean and parses a refused
+        // number before quoting it, so no spelling may reach the message.
+        for value in [
+            "Hunter2 \"Quoted\"\nSecret",
+            " hunter2 secret ",
+            "+0055555555555",
+            "x, expected hunter2",
+        ] {
+            for (name, key) in [
+                ("APP__HTTP__MAX_IN_FLIGHT", "http.max_in_flight"),
+                ("APP__HTTP__ADDR", "http.addr"),
+                ("APP__HTTP__REQUEST_TIMEOUT", "http.request_timeout"),
+                (
+                    "APP__HTTP__ACCESS_LOG_HEALTH_PROBES",
+                    "http.access_log_health_probes",
+                ),
+                ("APP__LOG__FORMAT", "log.format"),
+                ("APP__HTTP", "http"),
+            ] {
+                let err =
+                    load_from(&LoadOptions::default(), BUILD, env(&[(name, value)])).unwrap_err();
+                let rendered = err.to_string();
+                assert!(matches!(&err, Error::Deserialize(_)), "{name}: {rendered}");
+                assert!(
+                    rendered.contains(&format!("for key `{key}` in the environment")),
+                    "{name}: {rendered}"
+                );
+                for text in [rendered, format!("{err:?}")] {
+                    let text = text.to_lowercase();
+                    for part in ["hunter2", "secret", "5555"] {
+                        assert!(!text.contains(part), "{name}={value}: {text}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_decode_failure_that_names_only_keys_is_unchanged() {
+        // The unknown field is reported even when a sibling's value happens
+        // to be a word of the message.
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__LOG__LEVL", "level"), ("APP__LOG__LEVEL", "level")]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field `levl`"), "{err}");
+
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__NOPE__X", "app")]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field `nope`"), "{err}");
+    }
+
+    #[test]
+    fn rejected_environment_values_report_the_expected_form() {
+        for (name, expected) in [
+            ("APP__HTTP__MAX_IN_FLIGHT", "an integer"),
+            ("APP__HTTP__REQUEST_TIMEOUT", "a duration"),
+            ("APP__HTTP__ACCESS_LOG_HEALTH_PROBES", "a boolean"),
+            ("APP__HTTP__ADDR", "an IP address and port"),
+        ] {
+            let err =
+                load_from(&LoadOptions::default(), BUILD, env(&[(name, "maybe")])).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("invalid value, expected {expected}")),
+                "{name}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_file_values_stay_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(&dir, "bad.toml", "[log]\nformat = \"yaml\"\n");
+        let err = load_from(
+            &LoadOptions {
+                config: Some(file),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("yaml"), "{err}");
+    }
+
+    #[test]
+    fn file_keys_the_environment_cannot_name_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for (contents, expected) in [
+            ("[HTTP]\naddr = \":1\"\n", "HTTP"),
+            ("[http]\nMax_Body_Bytes = 1\n", "http.Max_Body_Bytes"),
+            ("[observability.Otel.exporter]\n", "observability.Otel"),
+            (
+                "[observability.\"otel/exporter\"]\n",
+                "observability.otel/exporter",
+            ),
+            ("[app]\n\"instance.id\" = \"a\"\n", "app.instance.id"),
+            ("[app]\n\"instance__id\" = \"a\"\n", "app.instance__id"),
+        ] {
+            let file = write(&dir, "unaddressable.toml", contents);
+            let err = load_from(
+                &LoadOptions {
+                    config: Some(file),
+                    ..LoadOptions::default()
+                },
+                BUILD,
+                env(&[]),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, Error::UnaddressableKey { key, .. } if key == expected),
+                "{contents}: {err}"
+            );
+        }
+    }
 
     #[test]
     fn precedence_is_defaults_then_files_in_order_then_env() {
