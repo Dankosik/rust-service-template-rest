@@ -34,7 +34,7 @@ pub enum Error {
     },
     #[error("secret-like key `{key}` carries a value in config file {}; secrets come only from the environment", path.display())]
     SecretInFile { key: String, path: PathBuf },
-    #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable, whose name is lowercased and split on `{ENV_SEPARATOR}`; write it in lowercase without `{ENV_SEPARATOR}` or a trailing `_`", path.display())]
+    #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable, whose name is lowercased and split on `{ENV_SEPARATOR}`; use lowercase letters, digits, `_`, and `-`, without `{ENV_SEPARATOR}` or a trailing `_`", path.display())]
     UnaddressableKey { key: String, path: PathBuf },
     #[error("load configuration: {0}")]
     Merge(config::ConfigError),
