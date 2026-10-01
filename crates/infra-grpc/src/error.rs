@@ -16,6 +16,8 @@ pub enum Error {
         "gRPC client TLS setup failed: native roots, destination host name, or certificate and key pairing"
     )]
     InvalidClientTls,
+    #[error("gRPC reflection file descriptor set is invalid")]
+    InvalidFileDescriptorSet,
     #[error("gRPC service {0} is registered twice")]
     DuplicateService(&'static str),
     #[error("gRPC scope requirement must name a method path of a registered service")]

@@ -64,6 +64,26 @@ impl Services {
         Ok(())
     }
 
+    /// Adds standard server reflection (`grpc.reflection.v1`) over an encoded
+    /// `FileDescriptorSet`, such as `grpc_contracts::FILE_DESCRIPTOR_SET`, so
+    /// `grpcurl` and `buf curl` can call the service without its schema files.
+    /// Health is described too. Reflection is a business route: authenticated,
+    /// limited and deadline-bound like every other registered service.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidFileDescriptorSet`] when the bytes are not a
+    /// usable descriptor set, and [`Error::DuplicateService`] when reflection
+    /// is already registered.
+    pub fn add_reflection(&mut self, encoded_file_descriptor_set: &[u8]) -> Result<(), Error> {
+        let reflection = tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(encoded_file_descriptor_set)
+            .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
+            .build_v1()
+            .map_err(|_| Error::InvalidFileDescriptorSet)?;
+        self.add(reflection)
+    }
+
     // template:begin authn:grpc-services-require-scopes
     /// Requires every scope in `scopes` for calls to `path`, the method's
     /// request path such as `/example.v1.EchoService/Unary`. A principal that
@@ -243,7 +263,10 @@ async fn authenticate(
         .get_all(http::header::AUTHORIZATION)
         .iter()
         .map(http::HeaderValue::as_bytes);
-    let principal = match verifier.authenticate(authorization, "grpc").await {
+    let principal = match verifier
+        .authenticate(authorization, infra_bearerauthn::Transport::Grpc)
+        .await
+    {
         Ok(principal) => principal,
         Err(failure) => return reject(request, authentication_status(failure)).await,
     };
