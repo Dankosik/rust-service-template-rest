@@ -623,6 +623,8 @@ mod tests {
             );
         let mut options = options();
         options.max_in_flight = NonZeroU32::new(1);
+        // The holder must still own its permit when the next request arrives.
+        options.request_timeout = Duration::from_secs(30);
         let app = harden(routes, &options);
 
         let holder = tokio::spawn({

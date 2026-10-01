@@ -125,6 +125,7 @@ generated from it ([HTTP Architecture](architecture/http.md#adding-an-operation)
 
 ```rust
 // crates/greeting/src/http.rs (operation and router; other imports omitted)
+use infra_http::extract::Path;
 use utoipa_axum::router::OpenApiRouter;
 const GREETING_PATH: &str = "/greetings/{name}";
 
