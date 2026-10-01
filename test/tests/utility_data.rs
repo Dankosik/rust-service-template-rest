@@ -156,8 +156,8 @@ fn a_small_problem_snapshot_is_not_a_second_openapi_authority() {
     {
       "code": "bad_request",
       "status": 400,
-      "title": "bad request",
-      "type": "https://www.rfc-editor.org/rfc/rfc9110#section-15.5.1"
+      "title": "Bad Request",
+      "type": "about:blank"
     }
     "###);
 }
