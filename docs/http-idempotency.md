@@ -57,6 +57,9 @@ async fn create_widget(
 }
 ```
 
+`Json` is `infra_http::extract::Json`, so a body that does not fit answers a
+Problem before `execute`.
+
 The handler must return the response from `execute`, or preserve its response
 extensions. A private extension marks a successful response as executed or
 replayed; a handler-created 2xx response without that marker becomes the

@@ -227,8 +227,7 @@ this documentation change:
   Cargo tools resolve, the Dockerfile `ARG` defaults agree, every `FROM`
   carries a digest, and the builder tag equals the toolchain channel.
 - Dependency and secret gates: `deny.toml` + `make deny` (Linux gnu targets,
-  an advisory ignore only with its reopen condition (the `paste` one ended
-  with `utoipa-axum` 0.3), permissive license
+  advisory ignores only with a reopen condition, permissive license
   allow-list, path wildcards allowed, duplicate versions as warnings,
   crates.io only); `make unused-deps` (cargo-shear, which removed the unused
   `http` and `hyper` from `infra-http`); `.gitleaks.toml` + `make secret-scan`

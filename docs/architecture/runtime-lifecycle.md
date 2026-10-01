@@ -101,6 +101,9 @@ telemetry flushes. A failed startup then exits `1`.
 ## Readiness and liveness
 
 `/health/live` is process-only and always `200 ok` while the process runs.
+Both probe routes are admitted without an in-flight permit, so a service
+shedding at `http.max_in_flight` still answers them; a probe's connection
+still counts toward `http.max_connections`.
 `/health/ready` reads the cached verdict published by the `health` crate's
 refresher: ready after every probe passed; a failure is published at once
 while the instance is not ready yet, and after a ready verdict only once

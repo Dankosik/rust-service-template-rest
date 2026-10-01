@@ -103,22 +103,27 @@ fn prepare_key_parameter(
     operation: &mut Operation,
     operation_id: &str,
 ) -> Result<(), CompositionError> {
-    let generated_key = RefOr::T(key_parameter());
+    let generated_key = key_parameter();
+    // A `$ref` parameter is not inspected here: a referenced duplicate of
+    // the key is caught by the OpenAPI lint's unique-parameter rule.
     let mut existing_keys = operation
         .parameters
         .as_deref()
         .into_iter()
         .flatten()
+        .filter_map(|parameter| match parameter {
+            RefOr::T(parameter) => Some(parameter),
+            RefOr::Ref(_) => None,
+        })
         .filter(|parameter| {
-            matches!(parameter, RefOr::T(parameter)
-                if parameter.parameter_in == utoipa::openapi::path::ParameterIn::Header
-                    && parameter.name.eq_ignore_ascii_case(KEY_HEADER))
+            parameter.parameter_in == utoipa::openapi::path::ParameterIn::Header
+                && parameter.name.eq_ignore_ascii_case(KEY_HEADER)
         });
     match (existing_keys.next(), existing_keys.next()) {
         (None, None) => operation
             .parameters
             .get_or_insert_default()
-            .push(generated_key),
+            .push(generated_key.into()),
         (Some(existing), None) if existing == &generated_key => {}
         _ => return Err(CompositionError::new(operation_id, Rule::KeyParameter)),
     }
@@ -174,14 +179,13 @@ fn prepare_success_headers(
         .headers
         .iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case(super::openapi::REPLAYED_HEADER));
-    let generated = RefOr::T(replay_header());
     match (replay_headers.next(), replay_headers.next()) {
         (None, None) => {
             response
                 .headers
-                .insert(super::openapi::REPLAYED_HEADER.to_owned(), generated);
+                .insert(super::openapi::REPLAYED_HEADER.to_owned(), replay_header());
         }
-        (Some((_, header)), None) if header == &generated => {}
+        (Some((_, header)), None) if header == &replay_header() => {}
         _ => return Err(CompositionError::new(operation_id, Rule::ReplayHeader)),
     }
     if response.headers.keys().any(|name| {

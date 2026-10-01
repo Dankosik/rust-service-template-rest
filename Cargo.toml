@@ -138,6 +138,9 @@ config = { version = "0.15.25", default-features = false }
 clap = { version = "4.6.7", default-features = false }
 serde = { version = "1", default-features = false }
 serde_json = { version = "1", default-features = false }
+# axum's own extractors report the failing member through it; infra-http reads
+# that path for `invalid_params` (docs/architecture/http.md).
+serde_path_to_error = { version = "0.1.20", default-features = false }
 toml = { version = "1.1.6", default-features = false }
 humantime = "2.4.0"
 humantime-serde = "1.1.1"

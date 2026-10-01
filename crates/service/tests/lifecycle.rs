@@ -137,8 +137,8 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
     let (status, metrics) = get(&format!("http://{diagnostics}/metrics")).unwrap();
     assert_eq!(status, 200);
     for family in [
-        "axum_http_requests_total",
-        "axum_http_requests_duration_seconds",
+        "http_server_request_duration_seconds_count",
+        "http_server_active_requests",
         "process_resident_memory_bytes",
         "service_startup_trace_exporter_active 0",
     ] {
@@ -148,7 +148,7 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
         );
     }
     assert!(
-        metrics.contains("endpoint=\"<unmatched>\""),
+        metrics.contains("http_route=\"<unmatched>\""),
         "404 must be labelled with the bounded unmatched route:\n{metrics}"
     );
 
