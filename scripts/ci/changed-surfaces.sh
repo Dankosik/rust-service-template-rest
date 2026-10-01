@@ -24,7 +24,7 @@ names=(
 	grpc_schema
 	# template:end grpc:classifier-grpc-surface
 	github_workflows dependency_automation shell runtime_image publication_metadata secret_scanning
-	db_integration messaging_integration cache_integration object_storage_integration migrations
+	db_integration messaging_integration cache_integration object_storage_integration oauth_integration migrations
 	agent_instructions documentation validation_system module_initializer initializer_runtime no_validation_required
 )
 
@@ -76,6 +76,22 @@ profile_object_storage() {
 	esac
 }
 
+profile_outbound_auth() {
+	local root outbound_auth
+	root=$(pwd)
+	outbound_auth=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field outbound_auth) || {
+		echo "cannot resolve selected outbound auth profile" >&2
+		return 2
+	}
+	case "${outbound_auth}" in
+	none | oauth2-client-credentials) printf '%s\n' "${outbound_auth}" ;;
+	*)
+		echo "invalid selected outbound auth profile: ${outbound_auth}" >&2
+		return 2
+		;;
+	esac
+}
+
 profile_messaging() {
 	local root messaging
 	root=$(pwd)
@@ -109,11 +125,12 @@ profile_outbox() {
 }
 
 all_surfaces() {
-	local database messaging cache object_storage outbox source_only=false
+	local database messaging cache object_storage outbound_auth outbox source_only=false
 	database=$(profile_database)
 	messaging=$(profile_messaging)
 	cache=$(profile_cache)
 	object_storage=$(profile_object_storage)
+	outbound_auth=$(profile_outbound_auth)
 	outbox=$(profile_outbox)
 	[[ -f make/source.mk ]] && source_only=true
 	reset
@@ -124,6 +141,7 @@ all_surfaces() {
 	[[ ${messaging} == nats-jetstream ]] || clear_surface messaging_integration
 	[[ ${cache} == redis ]] || clear_surface cache_integration
 	[[ ${object_storage} == s3 ]] || clear_surface object_storage_integration
+	[[ ${outbound_auth} == oauth2-client-credentials ]] || clear_surface oauth_integration
 	[[ ${source_only} == true ]] || clear_surface module_initializer initializer_runtime
 	emit
 }
@@ -172,11 +190,12 @@ has_line() {
 }
 
 classify() {
-	local file matched database messaging cache object_storage outbox source_only=false p9_retained=false
+	local file matched database messaging cache object_storage outbound_auth outbox source_only=false p9_retained=false
 	database=$(profile_database)
 	messaging=$(profile_messaging)
 	cache=$(profile_cache)
 	object_storage=$(profile_object_storage)
+	outbound_auth=$(profile_outbound_auth)
 	outbox=$(profile_outbox)
 	[[ -f make/source.mk ]] && source_only=true
 	[[ -f test/tests/http_idempotency/mounted.rs ]] && p9_retained=true
@@ -237,6 +256,14 @@ classify() {
 	Cargo.toml | Cargo.lock | crates/infra-object-storage/* | env/docker-compose.yml | \
 	scripts/ci/test-integration-object-storage.sh | make/template.mk | .github/workflows/ci.yml)
 		mark object_storage_integration
+		;;
+	esac; fi
+	# The Keycloak proof runs only the OAuth crate's suite, over the bounded
+	# HTTP client it sends token requests through.
+	if [[ ${outbound_auth} == oauth2-client-credentials ]]; then case "${file}" in
+	Cargo.toml | Cargo.lock | crates/infra-oauth2-client-credentials/* | crates/infra-outbound-http/* | \
+	scripts/ci/test-integration-oauth.sh | make/template.mk | .github/workflows/ci.yml)
+		mark oauth_integration
 		;;
 	esac; fi
 	if [[ ${outbox} == postgres ]]; then case "${file}" in
@@ -516,6 +543,18 @@ EOF
 		"rust_source module_initializer initializer_runtime" \
 		"object_storage_integration cargo_dependencies"
 	rm -rf "${classifier_root}/crates/infra-object-storage"
+	mkdir -p "${classifier_root}/crates/infra-oauth2-client-credentials/src"
+	: >"${classifier_root}/crates/infra-oauth2-client-credentials/src/lib.rs"
+	assert_case crates/infra-oauth2-client-credentials/src/lib.rs \
+		"rust_source oauth_integration module_initializer initializer_runtime" \
+		"cargo_dependencies db_integration messaging_integration cache_integration object_storage_integration migrations"
+	assert_case scripts/ci/test-integration-oauth.sh \
+		"shell oauth_integration" \
+		"db_integration messaging_integration cache_integration object_storage_integration"
+	assert_case crates/infra-outbound-http/src/lib.rs \
+		"rust_source oauth_integration module_initializer initializer_runtime" \
+		"cargo_dependencies object_storage_integration"
+	rm -rf "${classifier_root}/crates/infra-oauth2-client-credentials"
 	# P9 only mounts infra-http and infra-bearerauthn against a real
 	# database while the introspection-only fixture is retained.
 	mkdir -p "${classifier_root}/test/tests/http_idempotency"
@@ -820,8 +859,31 @@ PY_LOCK
 	classifier_root=${source_fixture}
 	mv "${derived_fixture}/template.lock.before-object-storage" "${derived_fixture}/template.lock"
 
+	# OAuth-only derivations must select Keycloak even when PostgreSQL is absent.
+	cp "${derived_fixture}/template.lock" "${derived_fixture}/template.lock.before-oauth"
+	python3 - "${derived_fixture}/template.lock" <<'PY_LOCK'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+lock = json.loads(path.read_text())
+lock["profiles"].update({
+    "authn": "none", "outbound_http": "bounded", "outbound_auth": "oauth2-client-credentials", "grpc": "none",
+    "http_idempotency": "none", "jobs": "none", "messaging": "none", "outbox": "none",
+    "webhooks": "none", "inbound_webhooks": "none", "cache": "none", "object_storage": "none",
+})
+path.write_text(json.dumps(lock) + "\n")
+PY_LOCK
+	classifier_root=${derived_fixture}
+	assert_case crates/infra-oauth2-client-credentials/src/lib.rs \
+		"rust_source oauth_integration" \
+		"db_integration messaging_integration cache_integration object_storage_integration migrations module_initializer initializer_runtime"
+	classifier_root=${source_fixture}
+	mv "${derived_fixture}/template.lock.before-oauth" "${derived_fixture}/template.lock"
+
 	# All applicable source surfaces includes a retained messaging capability.
-	mkdir -p "${source_fixture}/crates/infra-messaging" "${source_fixture}/crates/infra-cache" "${source_fixture}/crates/infra-object-storage"
+	mkdir -p "${source_fixture}/crates/infra-messaging" "${source_fixture}/crates/infra-cache" "${source_fixture}/crates/infra-object-storage" \
+		"${source_fixture}/crates/infra-oauth2-client-credentials"
 	output="$(cd "${source_fixture}" && bash scripts/ci/changed-surfaces.sh --all)"
 	for name in "${names[@]}"; do
 		has_line "${output}" "${name}=true"
@@ -831,6 +893,7 @@ PY_LOCK
 	has_line "${output}" 'messaging_integration=false'
 	has_line "${output}" 'cache_integration=false'
 	has_line "${output}" 'object_storage_integration=false'
+	has_line "${output}" 'oauth_integration=false'
 	has_line "${output}" 'migrations=false'
 	has_line "${output}" 'module_initializer=false'
 	has_line "${output}" 'initializer_runtime=false'

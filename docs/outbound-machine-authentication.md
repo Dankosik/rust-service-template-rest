@@ -111,9 +111,11 @@ exactly one sensitive Bearer header. The
 resource client's origin check, body limit, transport policy, and original
 absolute caller deadline remain authoritative. Token wait consumes that deadline;
 it never resets it. Completed resource results, including 401 and 403, pass
-through without replay. A 401 evicts the credential that request used, unless a
-newer one already replaced it, so the next operation acquires a fresh token; a
-403 keeps it.
+through without replay. A 401 evicts the credential that request used once it
+is at least thirty seconds old, unless a newer one already replaced it, so the
+next operation acquires a fresh token; a 403 keeps it. A younger token stays:
+the provider would issue an equivalent one, so a resource that refuses every
+token costs one token request per thirty seconds, not one per call.
 
 ## Acquisition and reuse
 
@@ -130,8 +132,10 @@ implementation constants, not operator tuning keys.
 
 The assertion header is `{alg, kid, typ: "client-authentication+jwt"}`; its
 claims are `iss` = `sub` = the client ID, `aud` = the configured
-`assertion_audience` as one JSON string, `iat` = `nbf` = now, `exp` = now +
-60 seconds, and `jti` = a fresh random UUID v4. A new assertion is signed for
+`assertion_audience` as one JSON string, `iat` = `nbf` = ten seconds before
+now, `exp` = `iat` + 60 seconds, and `jti` = a fresh random UUID v4. Dating it
+back, as Go's `oauth2/jws` does, keeps a provider whose clock is slightly
+behind from reading it as issued in the future. A new assertion is signed for
 every token request and never cached or reused; two requests never share a
 `jti`.
 
@@ -196,28 +200,41 @@ Configuration errors identify the integration/key with a bounded static reason,
 never its value. A key that is not PEM, or that does not match `algorithm`,
 fails construction with a sanitized configuration error naming
 `private_key`; no I/O happens. Runtime token failures use closed reasons for
-deadline, transport, response limit, provider unavailability (5xx), provider
-rejection, invalid response, and `assertion` for an assertion-signing
-failure. Resource
+deadline, transport, response limit, provider unavailability (5xx or 429),
+provider rejection, invalid response, and `assertion` for an assertion-signing
+failure. A rejection carries a closed `Rejection`: the response's `error` code
+when it is `invalid_request`, `invalid_client`, `invalid_grant`,
+`unauthorized_client`, `unsupported_grant_type`, `invalid_scope`, or
+`invalid_target` (RFC 6749 section 5.2, RFC 8693 section 2.2.2), otherwise
+`Other`. A provider reports an unusable `OnBehalfOf` token as
+`invalid_request` (RFC 8693), the same code as a malformed request, so that
+code alone does not prove the user's token expired. Resource
 transport errors remain distinct; concrete integrations own business/HTTP error
 mapping. No inbound Problem code is added.
 
-Raw OAuth errors can contain provider bytes and must be consumed and discarded
+Raw OAuth errors can contain provider bytes: only a registered `error` code
+survives, as its closed variant, and everything else is consumed and discarded
 inside the adapter. Debug, Display, error sources, metrics, and logs expose no
 credentials, tokens, scope/audience values, response bodies, endpoint path/query,
 or arbitrary provider text. Credential, option, cache, and authenticated-client
 Debug implementations are redacted. Token attempt metrics are
 `oauth2_token_acquisitions_total{grant, outcome}`, with `grant` in
-`client_credentials | token_exchange` and a finite outcome label; there is no integration/URL label. Existing safe
+`client_credentials | token_exchange` and a finite outcome label; there is no integration/URL label.
+A rejection's outcome is its registered error code, or `rejected` for `Other`.
+Existing safe
 outbound transport observation remains enabled. Cancellation records an
-outcome without claiming a provider result. No new diagnostic route or
+outcome without claiming a provider result. A caller receives every token
+failure as its error and logs it at its own boundary; only the background
+refresh has no caller, so its failure is the one event this adapter logs:
+`oauth2_background_refresh_failed` at `WARN` with `server.address` (the token
+endpoint host) and `error.type` (the outcome label). No new diagnostic route or
 body/header logging is introduced.
 
 ## Documented provider compatibility
 
 | Provider | Required registration and request choices |
 | --- | --- |
-| [Keycloak](https://www.keycloak.org/docs/latest/server_admin/#_service_accounts) | Confidential client, client authenticator "Signed JWT" with the service's public key or JWKS URL, service account enabled; standard token exchange V2 (GA since 26.2) supports `OnBehalfOf`. |
+| [Keycloak](https://www.keycloak.org/docs/latest/server_admin/#_service_accounts) | Confidential client, client authenticator "Signed JWT" with the service's public key or JWKS URL, service account enabled; standard token exchange V2 (GA since 26.2) supports `OnBehalfOf`. A key registered as a JWKS must declare `use: sig`. Proven against 26.8.0 by the Keycloak suite below. |
 | [Okta custom authorization server](https://developer.okta.com/docs/guides/implement-grant-type/clientcreds/main/) | Service application with a registered public key (`private_key_jwt`) and the custom authorization-server token endpoint as `assertion_audience`; per-service audiences need the paid API Access Management add-on; `act` in exchanged tokens is undocumented. |
 | [Auth0 (Enterprise)](https://auth0.com/docs/get-started/authentication-and-authorization-flow/client-credentials-flow/call-your-api-using-the-client-credentials-flow) | `private_key_jwt` client authentication is an Enterprise-plan feature; configure the M2M application's public key and audience. |
 | [Spring Authorization Server](https://docs.spring.io/spring-authorization-server/reference/) | JWT client assertion authentication is supported protocol-natively; `act` emission and audience mapping on exchange are operator-owned custom code. |
@@ -225,7 +242,13 @@ body/header logging is introduced.
 | Cognito — unsupported | Secret-only client authentication; does not support `private_key_jwt`. |
 | Entra — unsupported | Requires an `x5t#S256` certificate-thumbprint header this profile does not send, and offers no token exchange that emits `act`. |
 
-These are official-documentation compatibility findings, not live-provider
+`ALLOW_HEAVY=1 make test-integration-oauth` runs the adapter against a
+throwaway Keycloak container: `RS256`, `PS256`, and `ES256` assertions, a
+service token, a token exchanged for a real subject token and addressed to the
+configured audience, and the error codes Keycloak reports for an unregistered
+key, an unknown scope, and an unusable subject token. CI runs it as the
+`oauth_integration` surface. The other rows
+are official-documentation compatibility findings, not live-provider
 certification. Adopters own registration, grants/scopes, credentials, rotation,
 network/TLS policy, capacity, readiness criticality, and live-provider acceptance.
 See [Choosing an authorization

@@ -39,7 +39,10 @@ With `OUTBOUND_AUTH=oauth2-client-credentials`,
 `infra-oauth2-client-credentials` is available to
 `make test-package PKG=infra-oauth2-client-credentials`. Its tests consume
 bounded outbound HTTP's dev-only mock support; the profile adds no runtime
-command, provider call, or live-provider certification claim. [Outbound machine
+command or provider call. `ALLOW_HEAVY=1 make test-integration-oauth` is the
+Keycloak proof when the current Make owner retains that target; it starts a
+throwaway container, or uses a running one named by `OAUTH_TEST_KEYCLOAK_URL`,
+and certifies no other provider. [Outbound machine
 authentication](outbound-machine-authentication.md) owns construction and
 compatibility limits.
 <!-- template:end outbound-auth:docs-commands-outbound-auth -->

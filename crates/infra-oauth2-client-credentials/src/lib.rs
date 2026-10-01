@@ -41,6 +41,10 @@ const REUSE_MARGIN: Duration = Duration::from_secs(10);
 const REFRESH_AHEAD: Duration = Duration::from_mins(5);
 /// A background refresh attempt waits this long after the previous one.
 const REFRESH_RETRY: Duration = Duration::from_secs(30);
+/// A resource 401 evicts only a token at least this old. The provider would
+/// answer a younger one with the same token, so a resource that refuses every
+/// token costs one token request per this period, not one per call.
+const EVICTION_MIN_AGE: Duration = Duration::from_secs(30);
 const TOKEN_LIMITS: Limits = Limits {
     operation_timeout: FETCH_TIMEOUT,
     response_header_count: 64,
@@ -51,6 +55,10 @@ const EXCHANGED_CACHE_CAPACITY: u64 = 1024;
 /// RFC 7523 section 2.2 and the OIDF client-assertion notice: one string
 /// audience, a fresh `jti`, and an assertion signed for at most this long.
 const ASSERTION_LIFETIME_SECS: u64 = 60;
+/// An assertion is dated this far back, as Go's `oauth2/jws` does, so a
+/// provider whose clock is slightly behind does not see it as issued in the
+/// future or expiring too late.
+const ASSERTION_BACKDATE_SECS: u64 = 10;
 const ASSERTION_TYP: &str = "client-authentication+jwt";
 const CLIENT_ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 const GRANT_CLIENT_CREDENTIALS: &str = "client_credentials";
@@ -118,8 +126,8 @@ pub enum AcquisitionError {
     ResponseLimit,
     #[error("OAuth2 provider is unavailable")]
     Unavailable,
-    #[error("OAuth2 provider rejected the request")]
-    Rejected,
+    #[error("OAuth2 provider rejected the request: {0}")]
+    Rejected(Rejection),
     #[error("OAuth2 token response is invalid")]
     InvalidResponse,
     #[error("OAuth2 client assertion could not be signed")]
@@ -133,10 +141,70 @@ impl AcquisitionError {
             Self::Transport => "transport",
             Self::ResponseLimit => "limit",
             Self::Unavailable => "unavailable",
-            Self::Rejected => "rejected",
+            Self::Rejected(rejection) => rejection.label(),
             Self::InvalidResponse => "invalid",
             Self::Assertion => "assertion",
         }
+    }
+}
+
+/// Why the provider refused a token request: its `error` code (RFC 6749
+/// section 5.2, RFC 8693 section 2.2.2) when it is one of the registered
+/// ones. The code is the only part of the provider's answer that is kept.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Rejection {
+    InvalidRequest,
+    InvalidClient,
+    InvalidGrant,
+    UnauthorizedClient,
+    UnsupportedGrantType,
+    InvalidScope,
+    InvalidTarget,
+    /// No `error` code, or one outside the registered set.
+    Other,
+}
+
+impl Rejection {
+    fn from_body(body: &[u8]) -> Self {
+        #[derive(serde::Deserialize)]
+        struct ErrorResponse {
+            error: String,
+        }
+        let Ok(response) = serde_json::from_slice::<ErrorResponse>(body) else {
+            return Self::Other;
+        };
+        match response.error.as_str() {
+            "invalid_request" => Self::InvalidRequest,
+            "invalid_client" => Self::InvalidClient,
+            "invalid_grant" => Self::InvalidGrant,
+            "unauthorized_client" => Self::UnauthorizedClient,
+            "unsupported_grant_type" => Self::UnsupportedGrantType,
+            "invalid_scope" => Self::InvalidScope,
+            "invalid_target" => Self::InvalidTarget,
+            _ => Self::Other,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid_request",
+            Self::InvalidClient => "invalid_client",
+            Self::InvalidGrant => "invalid_grant",
+            Self::UnauthorizedClient => "unauthorized_client",
+            Self::UnsupportedGrantType => "unsupported_grant_type",
+            Self::InvalidScope => "invalid_scope",
+            Self::InvalidTarget => "invalid_target",
+            Self::Other => "rejected",
+        }
+    }
+}
+
+impl fmt::Display for Rejection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Other => "unregistered error code",
+            registered => registered.label(),
+        })
     }
 }
 
@@ -243,17 +311,18 @@ impl Signer {
     /// Signs one fresh assertion. Never cached: RFC 7523bis requires a
     /// single-use `jti` and every shortlisted server enforces it.
     fn sign(&self) -> Result<String, AcquisitionError> {
-        let now = SystemTime::now()
+        let issued = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| AcquisitionError::Assertion)?
-            .as_secs();
+            .as_secs()
+            .saturating_sub(ASSERTION_BACKDATE_SECS);
         let claims = AssertionClaims {
             iss: &self.client_id,
             sub: &self.client_id,
             aud: &self.assertion_audience,
-            iat: now,
-            nbf: now,
-            exp: now + ASSERTION_LIFETIME_SECS,
+            iat: issued,
+            nbf: issued,
+            exp: issued + ASSERTION_LIFETIME_SECS,
             jti: Uuid::new_v4().to_string(),
         };
         jsonwebtoken::encode(&self.header, &claims, &self.key)
@@ -290,6 +359,8 @@ struct Cached {
 /// A sensitive `Bearer` header value and the instant it stops being reused.
 struct Token {
     header: HeaderValue,
+    /// When its token request started.
+    acquired: Instant,
     /// `None` when the provider gave no lifetime: reuse until a resource 401.
     reuse_until: Option<Instant>,
     /// When a background refresh first replaces this token. Unused by an
@@ -300,6 +371,11 @@ struct Token {
 impl Token {
     fn is_reusable(&self, now: Instant) -> bool {
         self.reuse_until.is_none_or(|until| now < until)
+    }
+
+    /// Whether a resource 401 may evict it; see [`EVICTION_MIN_AGE`].
+    fn is_evictable(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.acquired) >= EVICTION_MIN_AGE
     }
 }
 
@@ -484,18 +560,28 @@ impl Credentials {
                 .token
                 .as_ref()
                 .is_some_and(|token| Arc::ptr_eq(token, &current));
-            if unchanged
-                && let Ok(token) = credentials
-                    .0
-                    .fetch_service_token(Instant::now() + FETCH_TIMEOUT)
-                    .await
+            if !unchanged {
+                return;
+            }
+            match credentials
+                .0
+                .fetch_service_token(Instant::now() + FETCH_TIMEOUT)
+                .await
             {
-                credentials.store_service_token(token);
-                // A provider may return a token already inside its own
-                // refresh window; still wait before the next attempt.
-                let retry = Instant::now() + REFRESH_RETRY;
-                let mut cached = credentials.cached();
-                cached.refresh_after = cached.refresh_after.map(|after| after.max(retry));
+                Ok(token) => {
+                    credentials.store_service_token(token);
+                    // A provider may return a token already inside its own
+                    // refresh window; still wait before the next attempt.
+                    let retry = Instant::now() + REFRESH_RETRY;
+                    let mut cached = credentials.cached();
+                    cached.refresh_after = cached.refresh_after.map(|after| after.max(retry));
+                }
+                // No caller receives this failure, so it is reported here.
+                Err(error) => tracing::warn!(
+                    server.address = credentials.0.token_endpoint.host_str(),
+                    error.type = error.label(),
+                    "oauth2_background_refresh_failed"
+                ),
             }
         });
     }
@@ -508,8 +594,12 @@ impl Credentials {
         token
     }
 
-    /// Forgets the service token `used` unless a newer token already replaced it.
+    /// Forgets the service token `used` unless it is too young to evict or a
+    /// newer token already replaced it.
     fn reject_service_token(&self, used: &Arc<Token>) {
+        if !used.is_evictable(Instant::now()) {
+            return;
+        }
         let mut cached = self.cached();
         if cached
             .token
@@ -525,7 +615,8 @@ impl Credentials {
     }
 
     /// Forgets whichever token `acquired` used, from whichever cache it came
-    /// from, unless a newer token already replaced it there.
+    /// from, unless it is too young to evict or a newer token already
+    /// replaced it there.
     async fn reject_acquired(&self, acquired: &Acquired) {
         match acquired {
             Acquired::Service(token) => self.reject_service_token(token),
@@ -534,6 +625,9 @@ impl Credentials {
     }
 
     async fn reject_exchanged(&self, key: [u8; 32], used: &Arc<Token>) {
+        if !used.is_evictable(Instant::now()) {
+            return;
+        }
         let current = self.0.exchanged.get(&key).await;
         if current.is_some_and(|token| Arc::ptr_eq(&token, used)) {
             self.0.exchanged.invalidate(&key).await;
@@ -732,11 +826,14 @@ impl Inner {
             .await
             .map_err(|error| map_transport_error(&error))?;
         let status = response.status();
-        if status.is_server_error() {
+        // A throttled request, like a 5xx, may succeed later unchanged.
+        if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
             return Err(AcquisitionError::Unavailable);
         }
         if !status.is_success() {
-            return Err(AcquisitionError::Rejected);
+            return Err(AcquisitionError::Rejected(Rejection::from_body(
+                response.body(),
+            )));
         }
         if let Some(content_type) = response.headers().get(CONTENT_TYPE) {
             let media = content_type
@@ -809,6 +906,7 @@ fn into_token(
         .map(|until| until - REFRESH_AHEAD.min(until.saturating_duration_since(started) / 4));
     Ok(Token {
         header,
+        acquired: started,
         reuse_until,
         refresh_after,
     })
