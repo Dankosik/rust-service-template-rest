@@ -66,6 +66,10 @@ use tonic::{Code, Request, Response, Status};
 use tonic_health::pb::{
     HealthCheckRequest, health_check_response::ServingStatus, health_client::HealthClient,
 };
+use tonic_reflection::pb::v1::{
+    ServerReflectionRequest, server_reflection_client::ServerReflectionClient,
+    server_reflection_request::MessageRequest, server_reflection_response::MessageResponse,
+};
 use tonic_types::StatusExt as _;
 
 // template:begin authn:grpc-transport-test-accepted-token
@@ -298,6 +302,9 @@ impl Fixture {
         services
             .add(EchoServiceServer::new(echo.clone()))
             .expect("echo registers once");
+        services
+            .add_reflection(grpc_contracts::FILE_DESCRIPTOR_SET)
+            .expect("reflection registers once");
         // template:begin authn:grpc-transport-test-scope-requirement
         services
             .require_scopes(UNARY_PATH, &["echo.read"])
@@ -1064,6 +1071,56 @@ fn a_destination_scheme_that_disagrees_with_security_is_rejected() {
     assert_eq!(
         infra_grpc::Client::new("https://127.0.0.1:1", ClientSecurity::Plaintext).unwrap_err(),
         Error::DestinationSecurityMismatch
+    );
+}
+
+#[tokio::test]
+async fn reflection_describes_the_committed_contract_and_health() {
+    let fixture = Fixture::plaintext().await;
+    let mut client = ServerReflectionClient::new(plaintext_client(fixture.address));
+    let ask = |message_request| ServerReflectionRequest {
+        host: String::new(),
+        message_request: Some(message_request),
+    };
+    let asks = tonic::codegen::tokio_stream::iter([
+        ask(MessageRequest::ListServices(String::new())),
+        ask(MessageRequest::FileContainingSymbol(
+            ECHO_SERVICE.to_owned(),
+        )),
+    ]);
+    let mut answers = client
+        .server_reflection_info(request(asks))
+        .await
+        .expect("reflection opens")
+        .into_inner();
+    let mut next = async || {
+        timeout(WAIT, answers.message())
+            .await
+            .expect("reflection answers in time")
+            .expect("reflection stream stays open")
+            .and_then(|answer| answer.message_response)
+            .expect("reflection answers each request")
+    };
+
+    let MessageResponse::ListServicesResponse(listed) = next().await else {
+        panic!("list services is answered with a service list");
+    };
+    let names: Vec<&str> = listed.service.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains(&ECHO_SERVICE), "{names:?}");
+    assert!(names.contains(&"grpc.health.v1.Health"), "{names:?}");
+
+    let MessageResponse::FileDescriptorResponse(files) = next().await else {
+        panic!("a known symbol is answered with its file descriptor");
+    };
+    assert!(!files.file_descriptor_proto.is_empty());
+    fixture.stop().await;
+}
+
+#[test]
+fn reflection_rejects_bytes_that_are_not_a_descriptor_set() {
+    assert_eq!(
+        Services::new().add_reflection(&[0xff]),
+        Err(Error::InvalidFileDescriptorSet)
     );
 }
 
