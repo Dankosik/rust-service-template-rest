@@ -10,6 +10,7 @@ use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::error::{MessagingError, PublishError};
 use crate::messaging::{BROKER_OPERATION_BUDGET, Shared};
@@ -34,7 +35,7 @@ impl Producer {
     /// # Errors
     ///
     /// Returns an error for invalid or oversized intent or a draining dependency.
-    pub fn prepare<T: EventPayload>(
+    pub fn prepare<T: EventPayload + serde::Serialize>(
         &self,
         subject: impl Into<String>,
         event: &Event<T>,
@@ -58,13 +59,23 @@ impl Producer {
         cancel: &CancellationToken,
     ) -> Result<PublishAck, PublishError> {
         let started = Instant::now();
+        let span = tracing::info_span!(
+            "messaging_publish",
+            otel.kind = "producer",
+            messaging.system = "nats",
+            messaging.operation.type = "send",
+            messaging.destination.name = event.subject.as_str(),
+            outcome = tracing::field::Empty,
+        );
         let result = if self.shared.draining.load(Ordering::Acquire)
             || self.shared.failed.load(Ordering::Acquire)
         {
             Err(PublishError::Rejected)
         } else {
             match encode_prepared(event) {
-                Ok(headers) => {
+                Ok(mut headers) => {
+                    // The consumer's delivery span continues this trace.
+                    crate::trace::inject(&span, &mut headers);
                     publish(
                         &self.shared,
                         &event.subject,
@@ -74,6 +85,7 @@ impl Producer {
                         deadline,
                         cancel,
                     )
+                    .instrument(span.clone())
                     .await
                 }
                 Err(_) => Err(PublishError::Rejected),
@@ -84,6 +96,16 @@ impl Producer {
             Err(PublishError::Rejected) => 1,
             Err(PublishError::Ambiguous) => 2,
         };
+        span.record("outcome", PUBLISH_RESULTS[outcome]);
+        if result.is_err() {
+            span.in_scope(|| {
+                tracing::warn!(
+                    subject = event.subject.as_str(),
+                    outcome = PUBLISH_RESULTS[outcome],
+                    "messaging_publish_failed"
+                );
+            });
+        }
         self.shared
             .publish_metrics
             .record(outcome, started.elapsed());

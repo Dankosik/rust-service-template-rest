@@ -57,6 +57,10 @@ pub enum RegistryError {
 }
 
 /// A handler's settled classification.
+///
+/// It carries no cause: the adapter never logs feature errors. Log the cause
+/// in the handler, which runs inside the delivery span, so the record shares
+/// its trace with the adapter's `messaging_delivery_failed` event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HandlerError {
     #[error("event handler requested retry")]

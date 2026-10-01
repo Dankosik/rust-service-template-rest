@@ -655,6 +655,93 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
     fixture.cleanup().await;
 }
 
+/// Installs one process-wide OpenTelemetry layer; a delivery runs in its own task.
+fn install_tracing() {
+    use opentelemetry::trace::TracerProvider as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other test installs a subscriber");
+    });
+}
+
+fn trace_id(span: &tracing::Span) -> opentelemetry::trace::TraceId {
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    span.context().span().span_context().trace_id()
+}
+
+#[tokio::test]
+async fn handler_runs_in_the_trace_of_the_publication() {
+    use tracing::Instrument as _;
+
+    install_tracing();
+    let fixture = Fixture::create(true).await;
+    let cancel = CancellationToken::new();
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer_options(&fixture)), 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect("fixture source stream is admitted");
+    let (observed_tx, observed_rx) = oneshot::channel();
+    let observed_tx = Arc::new(Mutex::new(Some(observed_tx)));
+    let mut registry = registry(&fixture);
+    registry
+        .register::<ExampleEvent, _, _>(move |_, _| {
+            if let Some(sender) = observed_tx
+                .lock()
+                .expect("test completion sender lock must not be poisoned")
+                .take()
+            {
+                let _ = sender.send(trace_id(&tracing::Span::current()));
+            }
+            async { Ok(()) }
+        })
+        .expect("fixture handler is registered");
+    let mut handle = messaging
+        .consumer(registry)
+        .await
+        .expect("operator-provisioned durable consumer is admitted")
+        .start(&cancel);
+    let prepared = messaging
+        .producer()
+        .prepare(fixture.subject.clone(), &event("event-traced"))
+        .expect("fixture event is prepared");
+    let request = tracing::info_span!("request");
+    messaging
+        .producer()
+        .publish(&prepared, deadline(), &cancel)
+        .instrument(request.clone())
+        .await
+        .expect("fixture event publication is acknowledged");
+
+    let observed = timeout(Duration::from_secs(3), observed_rx)
+        .await
+        .expect("typed handler must observe the broker delivery")
+        .expect("handler completion signal must remain connected");
+    assert_ne!(observed, opentelemetry::trace::TraceId::INVALID);
+    assert_eq!(observed, trace_id(&request));
+    wait_for_source_ack(&fixture).await;
+
+    handle
+        .finish(deadline())
+        .await
+        .expect("bounded consumer drain must join its pull task");
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
 #[tokio::test]
 async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked() {
     let fixture = Fixture::create(true).await;
