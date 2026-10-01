@@ -111,6 +111,7 @@ issuer = "https://issuer.example"
 audience = "catalog-api"
 # algorithms = ["RS256"]
 # token_profile = "rfc9068" # omitted means "resource-server"
+# jwks_uri = "https://issuer.example/keys" # omitted means discovery
 ```
 
 JWT mode requires issuer and one or more exact audiences. `audience` accepts a
@@ -120,7 +121,13 @@ default. `token_profile` is `resource-server` by default or `rfc9068` when
 its additional access-token claims are required.
 
 The verifier discovers only metadata whose issuer exactly equals configuration
-and installs usable JWKS before serving. Discovery and JWKS admit bounded
+and installs usable JWKS before serving. Discovery requests the OIDC document
+at `{issuer}/.well-known/openid-configuration`; when the provider answers that
+location with a status other than 200, it requests RFC 8414 metadata at
+`/.well-known/oauth-authorization-server` followed by the issuer path. Set
+`jwks_uri` (`APP__AUTHN__JWKS_URI`) for a provider that publishes neither: the
+verifier then skips discovery and loads keys from that HTTPS endpoint, and a
+token's `iss` is still compared with `issuer` exactly. Discovery and JWKS admit bounded
 HTTP 200 responses with valid expected JSON regardless of Content-Type. A key
 with its own `alg` serves only that configured algorithm; a key without `alg`
 serves every configured algorithm of its type (RSA: `RS256` and `PS256`), as
@@ -139,7 +146,11 @@ not-before or identity evidence is an invalid token. The resource-server
 profile requires a subject or client identity; RFC 9068 also requires
 access-token `typ`, subject, `client_id`, `jti`, and `iat`.
 
-Discovery and initial keys share the six-second startup budget. Refresh runs
+Discovery and initial keys share the six-second startup budget and are not
+retried. JWT mode therefore needs the provider at startup: a replica started
+during a provider outage exits with the preparation error and relies on the
+platform's restart policy, while running replicas keep verifying with their
+installed keys. Refresh runs
 every 15 minutes. A token whose `kid` names no installed key, or a kid-less
 token no installed key verifies, requests a refresh with a 30-second cooldown;
 during the cooldown the token is invalid after a successful fetch and
@@ -155,8 +166,10 @@ algorithm it serves, and a token's signature is checked against those keys
 directly. `jsonwebtoken` 11.1.0 still supplies the JWK, header and algorithm
 types, and the crate reads registered claims with its rules: `iss` and `aud`
 are a string or an array that must name a configured value, `exp` is required,
-a numeric `nbf` may be fractional, and lifetime is checked before issuer and
-audience. The payload is decoded and read once. `jsonwebtoken::decode` was
+a numeric `exp`, `nbf` or `iat` may be fractional (RFC 7519 `NumericDate`) and
+is rounded, and lifetime is checked before issuer and audience. A test signs a
+corpus of claim shapes, payloads and compact forms and compares each decision
+with `jsonwebtoken::decode`; a header the library refuses never passes here. The payload is decoded and read once. `jsonwebtoken::decode` was
 replaced because it rebuilds the aws-lc key on every call and parses the header
 three times and the payload three times; the direct path cut full RS256
 verification by about 40% (see
@@ -218,6 +231,8 @@ are never cached. Expired entries use the normal provider path, including during
 an outage, with no stale fallback. Moka coalesces concurrent misses for the same
 token within one verifier; live hits and coalesced waiters use no extra provider
 permit. Keys are SHA-256 digests rather than raw tokens and are never logged.
+Each retained result also holds the presented token as a `SecretString`,
+because the principal exposes it as the subject of an RFC 8693 token exchange.
 Admission may evict entries, and best-effort capacity can temporarily exceed the
 configured count; there is no strict aggregate memory bound. Each entry's
 verified provider payload, including custom claims, is at most 64 KiB; the other
@@ -234,7 +249,11 @@ evidence with wrong issuer, audience, expiry, or not-before is an invalid-token
 response. Missing required issuer, audience, expiry, or subject/client identity
 also produces an invalid-token response; a null claim counts as missing.
 Wrongly typed supplied claims, duplicate read claims and malformed provider
-evidence are unavailable trust.
+evidence are unavailable trust. A failed provider exchange is unavailable trust
+counted under one closed `reason`: `provider_timeout`, `provider_connect`
+(DNS, TCP or TLS), `provider_status_4xx` (for example rejected client
+credentials), `provider_status_5xx`, `provider_status_other`,
+`provider_media_type`, `provider_too_large` or `provider_transfer`.
 
 Credential components use standard form encoding (RFC 6749 section 2.3.1)
 before `reqwest`'s Basic authentication, which marks the header sensitive. The
@@ -253,7 +272,11 @@ records decisions that reach a verifier engine, with closed `mode`, `outcome`,
 and `reason` labels. Keep these counts separate when querying outcomes.
 Preparation errors identify closed phase/reason values and static field labels;
 an issuer mismatch also names the configured and the discovered issuer, echoing
-the discovered value only when it is an issuer URL of at most 256 bytes.
+the discovered value only when it is an issuer URL of at most 256 bytes. A
+failed provider fetch names one closed class: `Timeout`, `Connect` (DNS, TCP or
+TLS), `Status(code)`, `MediaType`, `TooLarge` or `Transfer`, for example
+`Discovery: Fetch(Status(404))`. A failed JWKS refresh logs the same class as
+`cause`.
 Configuration and provider Debug views redact trust inputs, including endpoint
 queries and audiences. Tokens, credentials, raw key material, response
 bodies and unfiltered provider errors are never diagnostic fields.

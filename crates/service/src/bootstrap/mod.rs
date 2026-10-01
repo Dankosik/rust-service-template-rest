@@ -585,6 +585,7 @@ async fn prepare_auth(
             audience,
             token_profile,
             algorithms,
+            jwks_uri,
         } => {
             let issuer = issuer_url("oidc-jwt", "authn.issuer", issuer)?;
             let (verifier, refresh) = infra_bearerauthn::prepare_jwt(
@@ -598,6 +599,7 @@ async fn prepare_auth(
                         TokenProfile::Rfc9068 => infra_bearerauthn::TokenProfile::Rfc9068,
                     },
                     algorithms: algorithms.iter().copied().map(jwt_algorithm).collect(),
+                    jwks_uri: jwks_endpoint(jwks_uri.as_deref())?,
                 },
                 cancel.child_token(),
             )
@@ -687,6 +689,19 @@ fn issuer_url(
 // template:end authn:bootstrap-auth-provider-url
 
 // template:begin oidc-jwt:bootstrap-auth-jwt-algorithm-converter
+fn jwks_endpoint(
+    value: Option<&str>,
+) -> Result<Option<infra_bearerauthn::EndpointUrl>, BootstrapError> {
+    value
+        .map(infra_bearerauthn::EndpointUrl::parse)
+        .transpose()
+        .map_err(|source| BootstrapError::AuthenticationPreparation {
+            mode: "oidc-jwt",
+            key: "authn.jwks_uri",
+            source,
+        })
+}
+
 const fn jwt_algorithm(algorithm: JwtAlgorithm) -> infra_bearerauthn::JwtAlgorithm {
     match algorithm {
         JwtAlgorithm::Rs256 => infra_bearerauthn::JwtAlgorithm::Rs256,

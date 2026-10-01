@@ -8,7 +8,7 @@ use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::http::request::Parts;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use infra_bearerauthn::{Failure, Principal, Verifier};
+use infra_bearerauthn::{Failure, Principal, Transport, Verifier};
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::contract::{Access, FinalizeError, Policy};
@@ -166,7 +166,7 @@ async fn authenticate_protected(
         .get_all(AUTHORIZATION)
         .iter()
         .map(axum::http::HeaderValue::as_bytes);
-    let principal = match verifier.authenticate(authorization, "http").await {
+    let principal = match verifier.authenticate(authorization, Transport::Http).await {
         Ok(principal) => principal,
         Err(failure) => return failure_response(failure),
     };

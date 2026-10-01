@@ -14,7 +14,7 @@ use crate::{
     BearerToken, Failure, PreparationError, Principal, VerificationError, VerificationReason,
     Verifier,
     claims::{ClaimPolicy, validate_introspection_claims},
-    provider::ProviderClient,
+    provider::{ProviderClient, ProviderFailure},
 };
 
 /// The largest verified provider payload one cache entry retains.
@@ -152,8 +152,6 @@ impl IntrospectionVerifier {
     }
 
     async fn introspect(&self, token: &BearerToken<'_>) -> Result<Principal, VerificationError> {
-        let provider_error =
-            |failure| VerificationError::new(failure, VerificationReason::Provider);
         let _permit = self.permits.try_acquire().map_err(|_| {
             VerificationError::new(Failure::Unavailable, VerificationReason::Capacity)
         })?;
@@ -163,14 +161,17 @@ impl IntrospectionVerifier {
                 self.endpoint.url(),
                 &form_encode(&self.client_id),
                 &form_encode(self.client_secret.expose_secret()),
-                form_body(token).map_err(provider_error)?,
+                form_body(token),
             )
             .await
-            .map_err(provider_error)?;
+            .map_err(|failure| {
+                VerificationError::new(Failure::Unavailable, VerificationReason::Provider(failure))
+            })?;
+        // A clock before the Unix epoch expires every token, which fails closed.
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|_| provider_error(Failure::Unavailable))?;
-        validate_introspection_claims(&response, &self.policy, now.as_secs(), token.access_token())
+            .map_or(u64::MAX, |elapsed| elapsed.as_secs());
+        validate_introspection_claims(&response, &self.policy, now, token.access_token())
     }
 }
 
@@ -212,12 +213,25 @@ fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration 
         .map_or(Duration::ZERO, |remaining| remaining.min(ttl))
 }
 
-fn form_body(token: &BearerToken<'_>) -> Result<String, Failure> {
-    let value = std::str::from_utf8(token.as_bytes()).map_err(|_| Failure::Invalid)?;
-    Ok(url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("token", value)
+/// The closed metric and log label of one provider failure class.
+pub(crate) const fn provider_reason_label(failure: ProviderFailure) -> &'static str {
+    match failure {
+        ProviderFailure::Timeout => "provider_timeout",
+        ProviderFailure::Connect => "provider_connect",
+        ProviderFailure::Status(400..=499) => "provider_status_4xx",
+        ProviderFailure::Status(500..=599) => "provider_status_5xx",
+        ProviderFailure::Status(_) => "provider_status_other",
+        ProviderFailure::MediaType => "provider_media_type",
+        ProviderFailure::TooLarge => "provider_too_large",
+        ProviderFailure::Transfer => "provider_transfer",
+    }
+}
+
+fn form_body(token: &BearerToken<'_>) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("token", &token.as_str())
         .append_pair("token_type_hint", "access_token")
-        .finish())
+        .finish()
 }
 
 /// RFC 6749 section 2.3.1 form-encodes client credentials before Basic encoding.
@@ -244,13 +258,6 @@ mod tests {
         sync::Semaphore,
         task::{JoinHandle, JoinSet},
     };
-    use tokio_rustls::{
-        TlsAcceptor,
-        rustls::{
-            ServerConfig,
-            pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-        },
-    };
     use tokio_util::sync::CancellationToken;
 
     use super::{
@@ -261,8 +268,7 @@ mod tests {
         EndpointUrl, Failure, IssuerUrl,
         claims::{ClaimPolicy, validate_introspection_claims},
         parse_bearer,
-        provider::{ProviderClient, new_fixture_client},
-        tls::TlsMaterial,
+        provider::{ProviderClient, fixture_acceptor, new_fixture_client},
     };
 
     const FIXTURE_HOST: &str = "provider.test";
@@ -282,19 +288,7 @@ mod tests {
         async fn new() -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
-            let material = TlsMaterial::new(FIXTURE_HOST);
-            let config = ServerConfig::builder_with_provider(Arc::new(
-                tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![CertificateDer::from(material.cert)],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key)),
-            )
-            .unwrap();
-            let acceptor = TlsAcceptor::from(Arc::new(config));
+            let (acceptor, root) = fixture_acceptor(FIXTURE_HOST);
             let calls = Arc::new(AtomicUsize::new(0));
             let received = Arc::new(Semaphore::new(0));
             let response = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -365,7 +359,7 @@ mod tests {
                 provider: new_fixture_client(
                     FIXTURE_HOST,
                     address,
-                    &material.root,
+                    &root,
                     CancellationToken::new(),
                 )
                 .unwrap(),
@@ -468,7 +462,7 @@ mod tests {
     fn form_body_keeps_the_token_out_of_the_url() {
         let token = parse_bearer([b"Bearer a+b/=".as_slice()]).unwrap();
         assert_eq!(
-            form_body(&token).unwrap(),
+            form_body(&token),
             "token=a%2Bb%2F%3D&token_type_hint=access_token"
         );
     }
@@ -480,6 +474,31 @@ mod tests {
         let uncached = fixture.verifier(None);
         let principal = verify(&uncached, b"Bearer first").await.unwrap();
         assert_eq!(principal.access_token().expose_secret(), "first");
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_refusing_provider_is_counted_under_its_status_class() {
+        use crate::{ProviderFailure, VerificationError, VerificationReason};
+        let fixture = Fixture::new().await;
+        let verifier = fixture.verifier(None);
+        let token = parse_bearer([b"Bearer first".as_slice()]).unwrap();
+        for (status, code, label) in [
+            ("401 Unauthorized", 401, "provider_status_4xx"),
+            ("503 Service Unavailable", 503, "provider_status_5xx"),
+            ("204 No Content", 204, "provider_status_other"),
+        ] {
+            fixture.respond(status, b"");
+            let error = verifier.verify(&token).await.unwrap_err();
+            assert_eq!(
+                error,
+                VerificationError::new(
+                    Failure::Unavailable,
+                    VerificationReason::Provider(ProviderFailure::Status(code))
+                )
+            );
+            assert_eq!(error.reason.label(), label);
+        }
         fixture.finish().await;
     }
 

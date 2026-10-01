@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     BearerToken, EndpointUrl, Failure, IssuerUrl, PreparationError, PreparationPhase,
-    PreparationReason, Principal, VerificationError, VerificationReason, Verifier,
+    PreparationReason, Principal, ProviderFailure, VerificationError, VerificationReason, Verifier,
     claims::{ClaimPolicy, validate_jwt_claims},
     provider::ProviderClient,
     refresh::{KeyStore, UnknownKeyRefresh, run_refresh_worker},
@@ -47,6 +47,9 @@ pub struct JwtOptions {
     pub audiences: Vec<String>,
     pub token_profile: TokenProfile,
     pub algorithms: Vec<JwtAlgorithm>,
+    /// The key set location. When set, discovery is skipped; a token's `iss`
+    /// is still compared with `issuer` exactly.
+    pub jwks_uri: Option<EndpointUrl>,
 }
 
 impl fmt::Debug for JwtOptions {
@@ -225,21 +228,14 @@ async fn prepare_with_provider(
         ));
     }
     let startup_deadline = Instant::now() + STARTUP_BUDGET;
-    let discovery = fetch_discovery(&provider, &options.issuer, startup_deadline).await?;
-    if discovery.issuer != options.issuer.as_str() {
-        return Err(PreparationError::issuer_mismatch(
-            &options.issuer,
-            &discovery.issuer,
-        ));
-    }
-    let jwks_uri = EndpointUrl::parse(&discovery.jwks_uri).map_err(|_| {
-        PreparationError::new(PreparationPhase::Discovery, PreparationReason::InvalidUrl)
-    })?;
+    let jwks_uri = match options.jwks_uri {
+        Some(jwks_uri) => jwks_uri,
+        None => discover_jwks_uri(&provider, &options.issuer, startup_deadline).await?,
+    };
     let jwks_error = |reason| PreparationError::new(PreparationPhase::Jwks, reason);
-    let bytes = tokio::time::timeout_at(startup_deadline, provider.get_json(jwks_uri.url()))
+    let bytes = fetch_within(&provider, jwks_uri.url(), startup_deadline)
         .await
-        .map_err(|_| jwks_error(PreparationReason::Fetch))?
-        .map_err(|_| jwks_error(PreparationReason::Fetch))?;
+        .map_err(|failure| jwks_error(PreparationReason::Fetch(failure)))?;
     let keys = parse_key_set(&bytes, &options.algorithms).map_err(|error| {
         jwks_error(match error {
             KeySetError::Parse => PreparationReason::Parse,
@@ -277,20 +273,55 @@ impl PreparationError {
     }
 }
 
+/// Reads the issuer's metadata and returns the key set location it names.
+async fn discover_jwks_uri(
+    provider: &ProviderClient,
+    issuer: &IssuerUrl,
+    deadline: Instant,
+) -> Result<EndpointUrl, PreparationError> {
+    let discovery = fetch_discovery(provider, issuer, deadline).await?;
+    if discovery.issuer != issuer.as_str() {
+        return Err(PreparationError::issuer_mismatch(issuer, &discovery.issuer));
+    }
+    EndpointUrl::parse(&discovery.jwks_uri).map_err(|_| {
+        PreparationError::new(PreparationPhase::Discovery, PreparationReason::InvalidUrl)
+    })
+}
+
+/// Requests OIDC discovery metadata. A provider that answers that location
+/// with a status other than 200 is asked for RFC 8414 metadata, whose
+/// well-known segment precedes the issuer path.
 async fn fetch_discovery(
     provider: &ProviderClient,
     issuer: &IssuerUrl,
     deadline: Instant,
 ) -> Result<Discovery, PreparationError> {
     let error = |reason| PreparationError::new(PreparationPhase::Discovery, reason);
-    let mut url = issuer.url().clone();
-    let path = url.path().strip_suffix('/').unwrap_or(url.path());
-    url.set_path(&format!("{path}/.well-known/openid-configuration"));
-    let bytes = tokio::time::timeout_at(deadline, provider.get_json(&url))
-        .await
-        .map_err(|_| error(PreparationReason::Fetch))?
-        .map_err(|_| error(PreparationReason::Fetch))?;
+    let path = issuer.url().path();
+    let path = path.strip_suffix('/').unwrap_or(path);
+    let mut openid = issuer.url().clone();
+    openid.set_path(&format!("{path}/.well-known/openid-configuration"));
+    let bytes = match fetch_within(provider, &openid, deadline).await {
+        Err(ProviderFailure::Status(_)) => {
+            let mut oauth = issuer.url().clone();
+            oauth.set_path(&format!("/.well-known/oauth-authorization-server{path}"));
+            fetch_within(provider, &oauth, deadline).await
+        }
+        result => result,
+    }
+    .map_err(|failure| error(PreparationReason::Fetch(failure)))?;
     serde_json::from_slice(&bytes).map_err(|_| error(PreparationReason::Parse))
+}
+
+/// One provider request inside the startup budget.
+async fn fetch_within(
+    provider: &ProviderClient,
+    url: &url::Url,
+    deadline: Instant,
+) -> Result<Vec<u8>, ProviderFailure> {
+    tokio::time::timeout_at(deadline, provider.get_json(url))
+        .await
+        .unwrap_or(Err(ProviderFailure::Timeout))
 }
 
 #[derive(Deserialize)]
@@ -607,7 +638,7 @@ mod tests {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
 
     use super::{ClaimPolicy, JwtAlgorithm, JwtVerifier, KeyStore, TokenProfile, parse_key_set};
-    use crate::{Failure, VerificationReason, parse_bearer, refresh::UnknownKeyRefresh};
+    use crate::{Failure, Transport, VerificationReason, parse_bearer, refresh::UnknownKeyRefresh};
 
     const JWT_SIGNING_DER: &[u8] = include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
 
@@ -1062,8 +1093,12 @@ mod tests {
     fn preparation_errors_are_closed_and_an_issuer_mismatch_names_both_issuers() {
         use crate::{IssuerUrl, PreparationError, PreparationPhase, PreparationReason};
         assert_eq!(
-            PreparationError::new(PreparationPhase::Jwks, PreparationReason::Fetch).to_string(),
-            "authentication preparation failed during Jwks: Fetch"
+            PreparationError::new(
+                PreparationPhase::Jwks,
+                PreparationReason::Fetch(crate::ProviderFailure::Status(503))
+            )
+            .to_string(),
+            "authentication preparation failed during Jwks: Fetch(Status(503))"
         );
         let configured = IssuerUrl::parse("https://issuer.example").unwrap();
         let error = PreparationError::issuer_mismatch(&configured, "https://issuer.example/");
@@ -1092,6 +1127,376 @@ mod tests {
             parse_key_set(br#"{"keys":[]}"#, &[JwtAlgorithm::Rs256]),
             Err(super::KeySetError::NoUsableKeys)
         ));
+    }
+
+    const FIXTURE_HOST: &str = "authn.fixture.test";
+
+    /// Serves `routes` (request target and JSON body, where `PORT` stands for
+    /// the listening port) over fixture TLS and answers any other target with
+    /// 404. Returns the address, the trusted root and the targets requested.
+    async fn metadata_server(
+        routes: Vec<(&'static str, String)>,
+    ) -> (
+        std::net::SocketAddr,
+        Vec<u8>,
+        Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (acceptor, root) = crate::provider::fixture_acceptor(FIXTURE_HOST);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let port = address.port().to_string();
+        let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
+        tokio::spawn({
+            let requested = Arc::clone(&requested);
+            async move {
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut stream = acceptor.accept(stream).await.unwrap();
+                    let mut request = Vec::new();
+                    let mut chunk = [0_u8; 4096];
+                    while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                        let read = stream.read(&mut chunk).await.unwrap();
+                        assert_ne!(read, 0);
+                        request.extend_from_slice(&chunk[..read]);
+                    }
+                    let request = String::from_utf8(request).unwrap();
+                    let target = request.split(' ').nth(1).unwrap().to_owned();
+                    let response = match routes.iter().find(|(route, _)| *route == target) {
+                        Some((_, body)) => {
+                            let body = body.replace("PORT", &port);
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                        }
+                        None => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                            .to_owned(),
+                    };
+                    requested.lock().unwrap().push(target);
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                    let _ = stream.shutdown().await;
+                }
+            }
+        });
+        (address, root, requested)
+    }
+
+    async fn prepare(
+        address: std::net::SocketAddr,
+        root: &[u8],
+        jwks_uri: Option<&str>,
+    ) -> Result<(crate::Verifier, super::RefreshTask), crate::PreparationError> {
+        let origin = format!("https://{FIXTURE_HOST}:{}", address.port());
+        let options = super::JwtOptions {
+            issuer: crate::IssuerUrl::parse(&format!("{origin}/tenant")).unwrap(),
+            audiences: vec!["api".to_owned()],
+            token_profile: TokenProfile::ResourceServer,
+            algorithms: vec![JwtAlgorithm::Rs256],
+            jwks_uri: jwks_uri
+                .map(|path| crate::EndpointUrl::parse(&format!("{origin}{path}")).unwrap()),
+        };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let provider =
+            crate::provider::new_fixture_client(FIXTURE_HOST, address, root, cancel.clone())
+                .unwrap();
+        super::prepare_with_provider(options, provider, cancel).await
+    }
+
+    #[tokio::test]
+    async fn discovery_falls_back_to_rfc8414_metadata_and_an_explicit_jwks_uri_skips_it() {
+        ensure_crypto_provider();
+        let key = jwk(&rsa_signing(), Algorithm::RS256, Some("fixture"), true);
+        let metadata = format!(
+            r#"{{"issuer":"https://{FIXTURE_HOST}:PORT/tenant","jwks_uri":"https://{FIXTURE_HOST}:PORT/keys"}}"#
+        );
+        let (address, root, requested) = metadata_server(vec![
+            ("/.well-known/oauth-authorization-server/tenant", metadata),
+            ("/keys", serde_json::json!({ "keys": [key] }).to_string()),
+        ])
+        .await;
+        let _prepared = prepare(address, &root, None).await.unwrap();
+        assert_eq!(
+            std::mem::take(&mut *requested.lock().unwrap()),
+            [
+                "/tenant/.well-known/openid-configuration",
+                "/.well-known/oauth-authorization-server/tenant",
+                "/keys"
+            ]
+        );
+        let _prepared = prepare(address, &root, Some("/keys")).await.unwrap();
+        assert_eq!(*requested.lock().unwrap(), ["/keys"]);
+    }
+
+    #[tokio::test]
+    async fn a_provider_without_metadata_fails_preparation_with_its_status() {
+        use crate::{PreparationPhase, PreparationReason, ProviderFailure};
+        let (address, root, requested) = metadata_server(Vec::new()).await;
+        let error = prepare(address, &root, None).await.err().unwrap();
+        assert_eq!(error.phase(), PreparationPhase::Discovery);
+        assert_eq!(
+            error.reason(),
+            PreparationReason::Fetch(ProviderFailure::Status(404))
+        );
+        assert_eq!(requested.lock().unwrap().len(), 2);
+    }
+
+    /// Signs arbitrary header and payload bytes, which `jsonwebtoken::encode`
+    /// cannot produce.
+    fn sign_raw(header: &str, payload: &[u8]) -> String {
+        use aws_lc_rs::{rand::SystemRandom, signature};
+        let key = signature::RsaKeyPair::from_der(JWT_SIGNING_DER).unwrap();
+        let message = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(header),
+            URL_SAFE_NO_PAD.encode(payload)
+        );
+        let mut signed = vec![0; key.public_modulus_len()];
+        key.sign(
+            &signature::RSA_PKCS1_SHA256,
+            &SystemRandom::new(),
+            message.as_bytes(),
+            &mut signed,
+        )
+        .unwrap();
+        format!("{message}.{}", URL_SAFE_NO_PAD.encode(signed))
+    }
+
+    const CORPUS_ISSUER: &str = "https://issuer.example";
+    const CORPUS_HEADER: &str = r#"{"alg":"RS256","kid":"fixture"}"#;
+
+    /// Headers the library reads without a key set or a token type rule.
+    const CORPUS_HEADERS: [&str; 27] = [
+        r#"{"alg":"RS256"}"#,
+        r#"{"alg":"RS256","kid":"unknown"}"#,
+        r#"{"alg":"RS256","kid":5}"#,
+        r#"{"alg":"RS256","kid":null}"#,
+        r#"{"alg":"none","kid":"fixture"}"#,
+        r#"{"alg":"HS256","kid":"fixture"}"#,
+        r#"{"alg":"ES256","kid":"fixture"}"#,
+        r#"{"alg":"PS256","kid":"fixture"}"#,
+        r#"{"alg":"rs256","kid":"fixture"}"#,
+        r#"{"kid":"fixture"}"#,
+        r#"{"alg":"RS256","kid":"fixture","crit":[]}"#,
+        r#"{"alg":"RS256","kid":"fixture","crit":["exp"]}"#,
+        r#"{"alg":"RS256","kid":"fixture","crit":"exp"}"#,
+        r#"{"alg":"RS256","kid":"fixture","typ":"JWT"}"#,
+        r#"{"alg":"RS256","kid":"fixture","typ":"at+jwt"}"#,
+        r#"{"alg":"RS256","kid":"fixture","typ":"dpop+jwt"}"#,
+        r#"{"alg":"RS256","kid":"fixture","typ":1}"#,
+        r#"{"alg":"RS256","kid":"fixture","typ":null}"#,
+        r#"{"alg":"RS256","kid":"fixture","x5c":5}"#,
+        r#"{"alg":"RS256","kid":"fixture","jwk":"x"}"#,
+        r#"{"alg":"RS256","kid":"fixture","cty":"JWT"}"#,
+        r#"{"alg":"RS256","kid":"fixture","zzz":{"a":[1]}}"#,
+        r#"{"alg":"RS256","alg":"RS256","kid":"fixture"}"#,
+        r#"{"alg":"RS256","kid":"fixture","kid":"fixture"}"#,
+        "[1]",
+        "",
+        "{",
+    ];
+
+    /// Every registered claim in every shape, and pairs that fail two checks.
+    fn claim_cases(base: &serde_json::Value, now: u64) -> Vec<(String, String)> {
+        use serde_json::{Value, json};
+        const ISSUER: &str = CORPUS_ISSUER;
+        const HEADER: &str = CORPUS_HEADER;
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "current epoch seconds fit an f64"
+        )]
+        let shapes: Vec<Option<Value>> = vec![
+            None,
+            Some(Value::Null),
+            Some("".into()),
+            Some("api".into()),
+            Some("other".into()),
+            Some(ISSUER.into()),
+            Some("a\"pi\\u0041".into()),
+            Some(42.into()),
+            Some(json!(1.5)),
+            Some(json!(-5)),
+            Some(json!(u64::MAX)),
+            Some(json!(1e30)),
+            Some((now - 100).into()),
+            Some((now - 25).into()),
+            Some((now + 25).into()),
+            Some((now + 100).into()),
+            Some(json!(now as f64 + 100.4)),
+            Some(json!(now as f64 - 1000.6)),
+            Some(json!(["api"])),
+            Some(json!([ISSUER])),
+            Some(json!(["x", "y"])),
+            Some(json!(["x", "api"])),
+            Some(json!(["x", ISSUER])),
+            Some(json!([])),
+            Some(json!([1])),
+            Some(json!([null])),
+            Some(json!({"a": 1})),
+            Some(true.into()),
+        ];
+        let mut exact = Vec::new();
+        for claim in ["iss", "aud", "exp", "nbf"] {
+            for shape in &shapes {
+                let mut claims = base.clone();
+                match shape {
+                    None => drop(claims.as_object_mut().unwrap().remove(claim)),
+                    Some(value) => claims[claim] = value.clone(),
+                }
+                exact.push((
+                    format!("{claim}={shape:?}"),
+                    sign_raw(HEADER, claims.to_string().as_bytes()),
+                ));
+            }
+        }
+        for (first, first_value, second, second_value) in [
+            ("iss", json!("x"), "exp", json!(now - 100)),
+            ("aud", json!("x"), "nbf", json!(now + 100)),
+            ("iss", json!("x"), "aud", json!("x")),
+            ("exp", json!(now - 100), "nbf", json!(now + 100)),
+        ] {
+            let mut claims = base.clone();
+            claims[first] = first_value;
+            claims[second] = second_value;
+            exact.push((
+                format!("{first} and {second}"),
+                sign_raw(HEADER, claims.to_string().as_bytes()),
+            ));
+        }
+        exact
+    }
+
+    /// Payloads that are not one plain claims object, and broken compact forms.
+    fn payload_and_compact_cases(body: &str) -> Vec<(String, String)> {
+        const HEADER: &str = CORPUS_HEADER;
+        let mut exact = Vec::new();
+        let members = &body[1..body.len() - 1];
+        for (name, payload) in [
+            ("duplicate iss", format!(r#"{{{members},"iss":"x"}}"#)),
+            ("duplicate aud", format!(r#"{{{members},"aud":"api"}}"#)),
+            ("duplicate exp", format!(r#"{{{members},"exp":1}}"#)),
+            ("duplicate nbf", format!(r#"{{{members},"nbf":1,"nbf":2}}"#)),
+            ("duplicate custom", format!(r#"{{{members},"t":1,"t":2}}"#)),
+            ("trailing space", format!("{body} ")),
+            ("leading space", format!(" {body}")),
+            ("array", "[1]".to_owned()),
+            ("string", "\"x\"".to_owned()),
+            ("two documents", format!("{body}{body}")),
+            (
+                "deep nesting",
+                format!(
+                    r#"{{{members},"d":{}0{}}}"#,
+                    "[".repeat(200),
+                    "]".repeat(200)
+                ),
+            ),
+        ] {
+            exact.push((name.to_owned(), sign_raw(HEADER, payload.as_bytes())));
+        }
+        exact.push((
+            "payload is not UTF-8".to_owned(),
+            sign_raw(HEADER, &[b'{', b'"', 0xff, b'"', b':', b'1', b'}']),
+        ));
+        let good = sign_raw(HEADER, body.as_bytes());
+        let (message, signature) = good.rsplit_once('.').unwrap();
+        let (header, payload) = message.split_once('.').unwrap();
+        for (name, token) in [
+            ("valid", good.clone()),
+            ("four parts", format!("{good}.x")),
+            ("two parts", message.to_owned()),
+            ("empty signature", format!("{message}.")),
+            ("padded signature", format!("{message}.{signature}=")),
+            (
+                "truncated signature",
+                format!("{message}.{}", &signature[..signature.len() - 4]),
+            ),
+            (
+                "long signature",
+                format!("{message}.{}", URL_SAFE_NO_PAD.encode([7_u8; 1500])),
+            ),
+            (
+                "signature outside the alphabet",
+                format!("{message}.{}~", &signature[..signature.len() - 1]),
+            ),
+            (
+                "another token's signature",
+                format!(
+                    "{message}.{}",
+                    sign_raw(HEADER, b"{}").rsplit_once('.').unwrap().1
+                ),
+            ),
+            (
+                "payload outside the alphabet",
+                format!("{header}.a~b.{signature}"),
+            ),
+            ("empty header", format!(".{payload}.{signature}")),
+            ("padded header", format!("{header}=.{payload}.{signature}")),
+        ] {
+            exact.push((name.to_owned(), token));
+        }
+        exact
+    }
+
+    /// This crate verifies the signature and reads the registered claims
+    /// itself. Its decisions on them must stay those of `jsonwebtoken::decode`,
+    /// and no header that the library refuses may pass here.
+    #[tokio::test]
+    async fn registered_claim_decisions_match_jsonwebtoken_decode() {
+        let verifier = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
+        let key = serde_json::from_value::<Jwk>(jwk(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("fixture"),
+            true,
+        ))
+        .unwrap();
+        let key = jsonwebtoken::DecodingKey::from_jwk(&key).unwrap();
+        let mut validation = jsonwebtoken::Validation::new(Algorithm::RS256);
+        validation.leeway = 30;
+        validation.validate_nbf = true;
+        validation.set_issuer(&[CORPUS_ISSUER]);
+        validation.set_audience(&["api"]);
+        validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+        // `IgnoredAny` keeps the library's own claim rules and adds none.
+        let library = |token: &str| {
+            jsonwebtoken::decode::<serde::de::IgnoredAny>(token, &key, &validation).is_ok()
+        };
+        // A token outside the bearer grammar never reaches the verifier.
+        let accepts = async |token: &str| {
+            let header = format!("Bearer {token}");
+            match parse_bearer([header.as_bytes()]) {
+                Ok(token) => verifier.verify(&token).await.is_ok(),
+                Err(_) => false,
+            }
+        };
+
+        let now = jsonwebtoken::get_current_timestamp();
+        let base = serde_json::json!({
+            "iss": CORPUS_ISSUER, "aud": "api", "exp": now + 600, "sub": "subject",
+        });
+        let body = base.to_string();
+        let mut exact = claim_cases(&base, now);
+        exact.extend(payload_and_compact_cases(&body));
+        let mut differences = Vec::new();
+        for (name, token) in &exact {
+            let (here, there) = (accepts(token).await, library(token));
+            if here != there {
+                differences.push(format!("{name}: {here} here, {there} in jsonwebtoken"));
+            }
+        }
+        // This crate adds key selection and a token type rule, so it may
+        // refuse more headers than the library, never fewer.
+        for header in CORPUS_HEADERS {
+            let token = sign_raw(header, body.as_bytes());
+            if accepts(&token).await && !library(&token) {
+                differences.push(format!("{header}: accepted here, refused by jsonwebtoken"));
+            }
+        }
+        assert!(differences.is_empty(), "{differences:#?}");
+        // The corpus exercises both decisions, not one constant answer.
+        let accepted = exact.iter().filter(|(_, token)| library(token)).count();
+        assert!(accepted > 0 && accepted < exact.len());
     }
 
     #[derive(Clone, Default)]
@@ -1301,24 +1706,26 @@ mod tests {
             // Success counters bind to the recorder installed at preparation.
             let verifier = crate::Verifier::jwt(engine);
             runtime.block_on(async {
-                for transport in ["http", "grpc", "custom"] {
+                for transport in [Transport::Http, Transport::Grpc] {
                     verifier
                         .authenticate([header.as_bytes()], transport)
                         .await
                         .unwrap();
                 }
                 assert_eq!(
-                    verifier.authenticate(std::iter::empty(), "http").await,
+                    verifier
+                        .authenticate(std::iter::empty(), Transport::Http)
+                        .await,
                     Err(Failure::Missing)
                 );
                 assert_eq!(
                     verifier
-                        .authenticate([b"Bearer =".as_slice()], "grpc")
+                        .authenticate([b"Bearer =".as_slice()], Transport::Grpc)
                         .await,
                     Err(Failure::Malformed)
                 );
                 let mut pending =
-                    Box::pin(verifier.authenticate([unknown_header.as_bytes()], "http"));
+                    Box::pin(verifier.authenticate([unknown_header.as_bytes()], Transport::Http));
                 std::future::poll_fn(|cx| {
                     assert!(pending.as_mut().poll(cx).is_pending());
                     Poll::Ready(())
@@ -1332,7 +1739,7 @@ mod tests {
             .iter()
             .filter(|(key, _)| key.name() == "authn_token_verifications_total")
             .collect::<Vec<_>>();
-        assert_eq!(verifications.len(), 3);
+        assert_eq!(verifications.len(), 2);
         assert!(verifications.iter().all(|(key, value)| {
             *value == 1
                 && key
@@ -1349,11 +1756,10 @@ mod tests {
             .iter()
             .filter(|(key, _)| key.name() == crate::AUTHN_VERIFICATIONS_METRIC)
             .collect::<Vec<_>>();
-        assert_eq!(outcomes.len(), 6);
+        assert_eq!(outcomes.len(), 5);
         for (transport, result, failure) in [
             ("http", "success", "none"),
             ("grpc", "success", "none"),
-            ("custom", "success", "none"),
             ("http", "failure", "missing"),
             ("grpc", "failure", "malformed"),
             ("http", "cancelled", "cancelled"),

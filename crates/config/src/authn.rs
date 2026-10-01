@@ -130,6 +130,10 @@ pub enum AuthnConfig {
         /// Accepted signature algorithms. Missing uses `[RS256]`.
         #[serde(default = "default_algorithms")]
         algorithms: Vec<JwtAlgorithm>,
+        /// Explicit JWKS endpoint. Missing uses OIDC discovery, then RFC 8414
+        /// metadata.
+        #[serde(default)]
+        jwks_uri: Option<String>,
     },
     // template:end oidc-jwt:authn-config-jwt-variant
     // template:begin oidc-introspection:authn-config-introspection-variant
@@ -245,10 +249,17 @@ impl AuthnConfig {
                 issuer,
                 audience,
                 algorithms,
+                jwks_uri,
                 ..
             } => {
                 require_nonblank("authn.issuer", issuer, "oidc-jwt")?;
                 validate_audience(audience)?;
+                if jwks_uri.as_deref().is_some_and(|uri| uri.trim().is_empty()) {
+                    return Err(ValidationError::new(
+                        "authn.jwks_uri",
+                        "must not be blank when set",
+                    ));
+                }
                 if algorithms.is_empty() {
                     return Err(ValidationError::new(
                         "authn.algorithms",
@@ -401,6 +412,33 @@ mod tests {
                 format!("mode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = {audience}\n");
             assert!(parse(&source).is_err(), "{source}");
         }
+    }
+
+    #[test]
+    fn jwt_accepts_an_optional_nonblank_jwks_uri() {
+        let source = |extra: &str| {
+            parse(&format!(
+                "mode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\n{extra}"
+            ))
+            .unwrap()
+        };
+        let jwks_uri = |config: AuthnConfig| {
+            let AuthnConfig::OidcJwt { jwks_uri, .. } = config else {
+                panic!("expected OIDC JWT configuration");
+            };
+            jwks_uri
+        };
+        assert_eq!(jwks_uri(source("")), None);
+        let explicit = source("jwks_uri = \"https://issuer.example/keys\"\n");
+        explicit.validate().unwrap();
+        assert_eq!(
+            jwks_uri(explicit).as_deref(),
+            Some("https://issuer.example/keys")
+        );
+        assert_eq!(
+            source("jwks_uri = \"  \"\n").validate().unwrap_err().key,
+            "authn.jwks_uri"
+        );
     }
 
     #[test]
