@@ -46,7 +46,7 @@ env:
   # zstd reads its default level here when actions/cache archives a cache.
   # Only a push to main pays the slower save; restores are not slower, and
   # the smaller archives keep the caches inside the repository's 10 GB.
-  ZSTD_CLEVEL: "16"
+  ZSTD_CLEVEL: "12"
 
 jobs:
   changes:
