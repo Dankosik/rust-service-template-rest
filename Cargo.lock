@@ -2557,6 +2557,8 @@ dependencies = [
  "hyper-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "rcgen",
  "rustls",
  "rustls-platform-verifier",
@@ -2565,6 +2567,9 @@ dependencies = [
  "tokio-rustls",
  "tower",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-opentelemetry-instrumentation-sdk",
+ "tracing-subscriber",
  "url",
 ]
 
