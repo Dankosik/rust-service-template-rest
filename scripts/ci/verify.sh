@@ -694,6 +694,9 @@ fi
 if is_true object_storage_integration; then
 	add_command make test-integration-object-storage "object storage adapter, Compose, or emulator proof changed" "make test-integration-object-storage" docker true true
 fi
+if is_true oauth_integration; then
+	add_command make test-integration-oauth "OAuth adapter, its transport, or Keycloak proof changed" "make test-integration-oauth" docker true true
+fi
 if is_true runtime_image || is_true migrations; then
 	image=${VERIFY_RUNTIME_IMAGE:-service:verify}
 	if is_true runtime_image; then

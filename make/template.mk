@@ -86,7 +86,7 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck docs-check \
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
 	publish-image-metadata-check compose-up compose-down test-integration-db test-integration-messaging test-integration-cache \
-	test-integration-object-storage test-object-storage-conformance migration-check migration-history-self-test migration-validate \
+	test-integration-object-storage test-object-storage-conformance test-integration-oauth migration-check migration-history-self-test migration-validate \
 	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test
 # template:begin grpc:make-grpc-standard-targets
 TEMPLATE_STANDARD_TARGETS += grpc-generate grpc-check
@@ -102,10 +102,12 @@ POSTGRES_PROFILE_TARGETS := compose-up compose-down test-integration-db migratio
 MESSAGING_PROFILE_TARGETS := test-integration-messaging
 CACHE_PROFILE_TARGETS := test-integration-cache
 OBJECT_STORAGE_PROFILE_TARGETS := test-integration-object-storage test-object-storage-conformance
+OUTBOUND_AUTH_PROFILE_TARGETS := test-integration-oauth
 DATABASE_PROFILE := $(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field database))
 MESSAGING_PROFILE := $(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field messaging))
 CACHE_PROFILE := $(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field cache))
 OBJECT_STORAGE_PROFILE := $(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field object_storage))
+OUTBOUND_AUTH_PROFILE := $(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field outbound_auth))
 ifeq ($(DATABASE_PROFILE),postgres)
 include make/profile-postgres.mk
 ACTIVE_TEMPLATE_STANDARD_TARGETS := $(TEMPLATE_STANDARD_TARGETS)
@@ -137,6 +139,14 @@ else ifeq ($(OBJECT_STORAGE_PROFILE),s3)
 OBJECT_STORAGE_LINT_FEATURES := --features infra-object-storage/integration
 else
 $(error unable to select object storage profile; template.lock must be complete and supported)
+endif
+
+ifeq ($(OUTBOUND_AUTH_PROFILE),none)
+ACTIVE_TEMPLATE_STANDARD_TARGETS := $(filter-out $(OUTBOUND_AUTH_PROFILE_TARGETS),$(ACTIVE_TEMPLATE_STANDARD_TARGETS))
+else ifeq ($(OUTBOUND_AUTH_PROFILE),oauth2-client-credentials)
+OUTBOUND_AUTH_LINT_FEATURES := --features infra-oauth2-client-credentials/integration
+else
+$(error unable to select outbound auth profile; template.lock must be complete and supported)
 endif
 
 .PHONY: $(ACTIVE_TEMPLATE_STANDARD_TARGETS)
@@ -203,6 +213,10 @@ test-integration-object-storage: ## S3 adapter proof against a throwaway Compose
 	$(HEAVY_GUARD)
 	$(VALIDATION_LOCK) bash scripts/ci/test-integration-object-storage.sh
 
+test-integration-oauth: ## OAuth adapter proof against a throwaway Keycloak container; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
+	$(HEAVY_GUARD)
+	$(VALIDATION_LOCK) bash scripts/ci/test-integration-oauth.sh
+
 # Writes to a real bucket under a unique prefix with the service's own
 # APP__OBJECT_STORAGE__* variables; never part of an aggregate or CI.
 test-object-storage-conformance: ## Live-provider conformance; PROVIDER=amazon_s3|cloudflare_r2|railway|s3_compatible and OBJECT_STORAGE_CONFORMANCE_WRITES=allow
@@ -221,11 +235,11 @@ fmt-check: ## Fail when formatting differs from rustfmt output
 INTEGRATION_LINT_FEATURES ?=
 
 lint: ## Clippy over all targets, warnings are errors
-	$(CARGO) clippy --workspace --all-targets --keep-going $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
+	$(CARGO) clippy --workspace --all-targets --keep-going $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(OUTBOUND_AUTH_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
 
 lint-changed: ## Clippy over the crates in PKGS="<crate> <crate>", warnings are errors
 	$(REQUIRE_PKGS)
-	$(CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets --keep-going $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
+	$(CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets --keep-going $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(if $(filter infra-oauth2-client-credentials,$(PKGS)),$(OUTBOUND_AUTH_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
 
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py

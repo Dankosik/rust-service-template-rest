@@ -16,10 +16,13 @@ behavior.
 | --- | --- | --- |
 | D1: private-key client assertion (`private_key_jwt`, RFC 7523) only; no client-secret mode kept beside it | RFC 9700 §2.5 recommends asymmetric client authentication so the authorization server holds no shared secret; every shortlisted server supports a key-based method. A shared secret is the same credential class as the static-bearer and HS256 schemes this work replaces. | Amazon Cognito and other secret-only providers cannot use this profile. Reopen when a required provider supports only shared secrets. |
 | D1: one request form for both grants — `grant_type`, `client_id`, `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`, `client_assertion`, plus `scope`/`audience` when configured (RFC 7523 §2.2, RFC 7521 §4.2) | Keycloak, Hydra, Authelia, Spring Authorization Server, Duende, Okta and Auth0 (Enterprise) accept this form; one registered client and key cover both client credentials and token exchange. | Zitadel does not fit: its service users need the JWT-bearer grant, and only a second OIDC application with its own key can call token exchange. Reopen if Zitadel is chosen — the gap is the JWT-bearer grant form plus a separate exchange identity. |
-| D2: assertion claims `iss=sub=client_id`, single-string `aud` = the authorization server's issuer identifier (not its token endpoint), `iat=nbf=now`, `exp=now+60s`, a fresh `jti` per request; header `alg`, `kid`, `typ: client-authentication+jwt` | rfc7523bis §4 and the 2025-01-24 OIDF disclosure (CVE-2025-27370/27371) require a single-string audience naming the issuer, so a malicious server cannot obtain an assertion another server accepts; Keycloak caps assertion age at 60 s and requires a single-use `jti`, as do Hydra, Authelia, Duende, Auth0 and Entra. | A server accepting only its token endpoint (Hydra v26, Okta, Entra) gets that URL instead — safe because each integration is configured against one authorization server. Reopen if a required server rejects the typed `typ` header (Spring Authorization Server 1.5.x on Spring Security 6.5 does). |
+| D2: assertion claims `iss=sub=client_id`, single-string `aud` = the authorization server's issuer identifier (not its token endpoint), `iat=nbf=now-10s`, `exp=iat+60s`, a fresh `jti` per request; header `alg`, `kid`, `typ: client-authentication+jwt` | rfc7523bis §4 and the 2025-01-24 OIDF disclosure (CVE-2025-27370/27371) require a single-string audience naming the issuer, so a malicious server cannot obtain an assertion another server accepts; Keycloak caps assertion age at 60 s and requires a single-use `jti`, as do Hydra, Authelia, Duende, Auth0 and Entra. | A server accepting only its token endpoint (Hydra v26, Okta, Entra) gets that URL instead — safe because each integration is configured against one authorization server. Reopen if a required server rejects the typed `typ` header (Spring Authorization Server 1.5.x on Spring Security 6.5 does). |
 | D3/D3a: RFC 8693 token exchange authenticated with the same client assertion, cached per credential owner keyed by SHA-256 of the subject token, bounded to 1024 entries, reused until the same ten-second-margin cutoff as the service token, concurrent misses per subject coalesced, a resource 401 evicting only that subject's entry, no `actor_token` | Keycloak 26.7.4 standard token exchange V2 (GA since 26.2) authenticates the requester as a confidential client and requires it in the subject token's `aud`; Spring's `TokenExchangeOAuth2AuthorizedClientProvider` also reuses an exchanged token until it expires; no maintained Rust crate implements an RFC 8693 client. | Zitadel emits `act` only for an `actor_token` under its impersonation permission, and authentik authenticates the exchange only with a client secret — neither fits D1, so `actor_token` and a configurable requested token type are not added. Reopen if a required server emits `act` under D1's constraints. |
 | One cached token behind a double-checked refresh lock, as Go's `oauth2.ReuseTokenSource` and yup-oauth2 do | Moka's one-key `try_get_with`/`Expiry` cache shared failures, but its retention depended on initializer internals, a zero-lifetime trick, and a second clock that Tokio test time cannot move. | After a failed token request, queued callers retry one at a time, never concurrently, each within its own deadline. Reopen if provider load during an outage is measured as a problem. |
 | One detached refresh once at most five minutes, or a quarter, of reuse remains, as Azure.Core's bearer policy refreshes early without blocking callers | Refreshing only at the cutoff made every concurrent caller wait for the provider. On a DigitalOcean c-4 with 64 concurrent callers and a 100 ms provider, each refresh held 64 requests for over 20 ms; with the early refresh only the first acquisition does. An inline early refresh would spend one caller's deadline on the provider. | One bounded attempt outlives its initiating caller and is cancelled with the runtime, not joined. One-hour tokens are fetched about 9% more often, short ones up to a third more. Reopen if detached work must join shutdown or the provider rate limits these requests. |
+| A resource 401 evicts only a token at least thirty seconds old | Evicting on every 401, as Spring Security does, turned a resource that refuses every token (wrong audience, clock skew) into one token request per call; never evicting, as Go's `oauth2` does, keeps a revoked token until it expires. The provider answers a request made seconds after the last with an equivalent token, so nothing is lost by keeping a young one. | A token revoked within thirty seconds of issue is used until that age. Reopen if a provider revokes tokens that young or rate limits one request per thirty seconds. |
+| A provider rejection keeps its registered `error` code as a closed enum; a 429 is `Unavailable` | One `Rejected` reason hid whether the key, the scope, or the grant was refused, and the adapter emitted no log. RFC 6749 section 5.2 and RFC 8693 section 2.2.2 register a finite code set, so mapping it leaks no provider bytes; Go's `oauth2.RetrieveError` exposes the same code. A throttled request may succeed unchanged later, like a 5xx. | An unregistered code is `Other`; `error_description` is still discarded. `Retry-After` is not read, since the adapter does not retry. Reopen if a provider's diagnosis needs `error_description`. |
+| The assertion is dated ten seconds back | Go's `oauth2/jws` does the same for hosts whose clock runs ahead of the provider's. `iat=nbf=now` made a provider one second behind read the assertion as not yet valid. | The assertion is usable for fifty seconds after signing instead of sixty; each is used once, immediately. |
 | One new provider crate, independent of inbound authentication | Extending inbound auth joins separate trust and credential lifetimes; placing OAuth in outbound HTTP makes an optional protocol a dependency of every bare HTTP consumer. | Explicit crate/profile pruning keeps independent adoption; remove speculative traits and unused registry/generator paths. |
 
 Authorization-server evidence: versions checked were Zitadel v4.19.2,
@@ -39,6 +42,8 @@ registration notes for this path.
 | Token exchange client | No maintained Rust crate implements an RFC 8693 client (crates.io/docs.rs survey); Go exposes it only in `google/internal/stsexchange`, while Nimbus, Spring and Duende IdentityModel are precedents for a template-owned request. | Template-owned request on the shared form POST. |
 | Exchanged-token cache | Moka 0.12.16 (2026-08-09, MIT OR Apache-2.0 plus Apache-2.0; already locked and used by the introspection cache with SHA-256 keys, per-entry expiry and coalescing). | Moka `future::Cache` with `Expiry`, 1024 entries. |
 | Assertion `jti` | `uuid` (workspace), aws-lc random. | `uuid` v4. |
+| Absorbed-failure log | `tracing` (workspace; the workspace's event facade). | `tracing`, one `WARN` event. |
+| Real-server proof | Compose service in `env/docker-compose.yml` (needs the `integration` profile, which an OAuth-only service does not retain); `testcontainers` (new dependency, Docker driven from test code); a pinned `docker run` in the proof script. | Pinned `docker run` of Keycloak 26.8.0 by digest; the pin is bumped by hand because Dependabot does not read the script. |
 | Inbound `act` | Extends the existing borrowed-claims parser. | Template-owned claim model, not a mechanism. |
 | DPoP | No maintained Rust client crate. | Deferred; see below. |
 
@@ -116,7 +121,8 @@ no cutoff: as in Go's `oauth2`, the token is reused until a resource 401 evicts
 it. A reused token is always before its cutoff, so dispatch needs no second
 expiry check. There is no fallback to a prior token.
 
-A resource 401 evicts the token that request used, removing it only while it is
+A resource 401 evicts the token that request used when its token request
+started at least thirty seconds ago, removing it only while it is
 still the cached value (`Arc::ptr_eq`), so a concurrently acquired replacement
 survives. The response is returned without replay; the next operation acquires
 anew. This follows Spring Security's authorization-failure handler rather than
@@ -164,7 +170,9 @@ Debug/Display are closed. Record
 `oauth2_token_acquisitions_total{grant, outcome}` once per token request,
 with `grant` in `client_credentials | token_exchange` and finite
 success/timeout/transport/limit/unavailable/rejected/invalid/cancelled/assertion
-outcomes. No scope/audience/URL/integration label or response content
+outcomes, plus the seven registered error codes in place of `rejected`. A
+failed background refresh, which no caller receives, logs
+`oauth2_background_refresh_failed`. No scope/audience/URL/integration label or response content
 is emitted. Existing resource transport error policy remains unchanged.
 
 The production adapter's local token/resource-server proof covers encoding,
@@ -175,7 +183,12 @@ token, and 401/403 without replay. It also verifies the assertion
 header and claims with the matching public key, distinct `jti` values, key and
 algorithm refusal, both request forms, the issued-token-type check, per-subject
 reuse and coalescing, single-subject eviction, uncached exchange failures, one
-exchange for a short-lived token, and gRPC on-behalf dispatch. Reuse existing TLS/transport tests unless that implementation changes.
+exchange for a short-lived token, and gRPC on-behalf dispatch. The Keycloak
+suite (`integration` feature, `make test-integration-oauth`, CI surface
+`oauth_integration`) proves against a real server what the fixture assumes:
+the three algorithms, both grants, and the reported error codes. It lives in
+the crate's unit-test module because only the private `cfg(test)` constructor
+admits a loopback HTTP token endpoint. Reuse existing TLS/transport tests unless that implementation changes.
 Negative proof
 covers Authorization conflict, secret files, safe diagnostics, token redirect,
 limit/timeout, and absence of resource dispatch. Test constructors remain
