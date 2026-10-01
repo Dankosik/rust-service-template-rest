@@ -963,7 +963,8 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
                 SystemTime::now()
             )
             .await,
-        Err(ReceiveError::Rejected(Rejection::new("missing_header")))
+        // The 512-byte legacy identity exceeds the bound that precedes signature work.
+        Err(ReceiveError::Rejected(Rejection::new("invalid_message_id")))
     );
     assert_eq!(receipt_count(&pool).await, 3);
     assert_eq!(job_count(&pool).await, 1);
