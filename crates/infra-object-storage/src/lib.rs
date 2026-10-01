@@ -36,6 +36,7 @@ use aws_sdk_s3::config::{
     BehaviorVersion, Region, RequestChecksumCalculation, ResponseChecksumValidation,
     SharedCredentialsProvider, SharedHttpClient, StalledStreamProtectionConfig,
 };
+use aws_sdk_s3::operation::{RequestId, RequestIdExt};
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::DateTime;
 use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode};
@@ -230,6 +231,10 @@ impl ObjectStorage {
     /// Returns [`ConfigError`] naming the refused key.
     pub fn new(options: ObjectStorageOptions) -> Result<Self, ConfigError> {
         let admitted = provider::admit(&options.provider, &options.bucket)?;
+        // None would refuse every call as `Busy`; more would panic the semaphore.
+        if !(1..=Semaphore::MAX_PERMITS).contains(&options.max_concurrency) {
+            return Err(ConfigError::MaxConcurrency);
+        }
         let http_client = https_client();
         let credentials =
             options
@@ -374,6 +379,9 @@ impl ObjectStorage {
             return Err(guard.fail(ObjectStorageError::Unavailable, "timeout"));
         }
         let result = timeout_at(deadline, request).await;
+        if let Ok(answer) = &result {
+            guard.answered_by(answer.request_id(), answer.extended_request_id());
+        }
         match result {
             Ok(Ok(_)) => {
                 guard.succeed();
@@ -402,7 +410,7 @@ impl ObjectStorage {
     pub async fn get(&self, key: &ObjectKey) -> Result<Download, ObjectStorageError> {
         let mut guard = self.start(Operation::Get);
         let permit = self.admit(&mut guard)?;
-        let output = match self
+        let result = self
             .inner
             .client
             .get_object()
@@ -411,8 +419,9 @@ impl ObjectStorage {
             .checksum_mode(ChecksumMode::Enabled)
             .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
             .send()
-            .await
-        {
+            .await;
+        guard.answered_by(result.request_id(), result.extended_request_id());
+        let output = match result {
             Ok(output) => output,
             Err(failure) => return Err(Self::fail(&mut guard, Call::Read, &failure)),
         };
@@ -429,7 +438,14 @@ impl ObjectStorage {
         if metadata.size > self.inner.max_object_bytes {
             return Err(guard.fail(ObjectStorageError::TooLarge, "too_large"));
         }
-        Ok(Download::open(metadata, output.body, guard, permit))
+        let mut download = Download::open(metadata, output.body, guard, permit);
+        // hyper never polls a response body declared empty, so nothing would
+        // observe an empty object's end: read it here, which records the
+        // outcome and releases the slot.
+        if download.metadata().size == 0 {
+            download.next_chunk().await?;
+        }
+        Ok(download)
     }
 
     /// Read an object's metadata. The size is reported even above
@@ -442,7 +458,7 @@ impl ObjectStorage {
     pub async fn head(&self, key: &ObjectKey) -> Result<ObjectMetadata, ObjectStorageError> {
         let mut guard = self.start(Operation::Head);
         let _permit = self.admit(&mut guard)?;
-        let output = match self
+        let result = self
             .inner
             .client
             .head_object()
@@ -450,8 +466,9 @@ impl ObjectStorage {
             .key(key.as_str())
             .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
             .send()
-            .await
-        {
+            .await;
+        guard.answered_by(result.request_id(), result.extended_request_id());
+        let output = match result {
             Ok(output) => output,
             Err(failure) => return Err(Self::fail(&mut guard, Call::Read, &failure)),
         };
@@ -485,6 +502,7 @@ impl ObjectStorage {
             .config_override(self.one_attempt())
             .send()
             .await;
+        guard.answered_by(result.request_id(), result.extended_request_id());
         match result {
             Ok(_) => {
                 guard.succeed();
@@ -618,14 +636,15 @@ impl health::Probe for BucketProbe {
     async fn check(&self) -> Result<(), health::ProbeError> {
         let inner = &self.storage.inner;
         let mut guard = self.storage.start(Operation::Probe);
-        match inner
+        let result = inner
             .client
             .head_bucket()
             .bucket(&inner.bucket)
             .set_expected_bucket_owner(inner.expected_bucket_owner.clone())
             .send()
-            .await
-        {
+            .await;
+        guard.answered_by(result.request_id(), result.extended_request_id());
+        match result {
             Ok(_) => {
                 guard.succeed();
                 Ok(())

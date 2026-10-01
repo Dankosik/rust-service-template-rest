@@ -16,7 +16,10 @@ use crate::{ObjectMetadata, ObjectStorageError, error};
 /// already ended.
 ///
 /// It is an [`http_body::Body`] of exactly [`ObjectMetadata::size`] bytes,
-/// so it can be returned as a response body. The chunk that completes the
+/// so it can be returned as a response body. The slot is then held for as
+/// long as the reader takes: return it only to a reader that reads promptly,
+/// and give any other reader [`Download::bytes`] or a presigned URL. The
+/// download of an empty object has already ended. The chunk that completes the
 /// object is released only after the provider's body has ended and its
 /// checksum, when one came back, has been validated: a reader that stops at
 /// the declared length never holds a complete object that failed the check.
