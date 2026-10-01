@@ -191,7 +191,7 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
-        uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
         with:
           tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Format
@@ -346,7 +346,7 @@ jobs:
           rustup toolchain install
           rustup show active-toolchain
       - name: Install pinned Cargo tools
-        uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
         with:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Dependency policy
@@ -453,7 +453,7 @@ jobs:
           fi
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.tool_manifest == 'true'
-        uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
         with:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Tool manifest
