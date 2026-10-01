@@ -1,5 +1,6 @@
 //! One duration histogram and one span per operation. Neither carries a key,
-//! bucket, endpoint, URL, or provider message.
+//! bucket, endpoint, URL, or provider message. The span and the failure event
+//! carry the provider's request identifiers, which name none of those.
 
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -130,6 +131,8 @@ pub(crate) struct OperationGuard {
     operation: Operation,
     span: Span,
     histograms: std::sync::Arc<Histograms>,
+    request_id: Option<Box<str>>,
+    extended_request_id: Option<Box<str>>,
     finalized: bool,
 }
 
@@ -152,6 +155,8 @@ impl OperationGuard {
             rpc.service = "S3",
             rpc.method = operation.method(),
             object_storage.outcome = tracing::field::Empty,
+            aws.request_id = tracing::field::Empty,
+            aws.extended_request_id = tracing::field::Empty,
             error.type = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         );
@@ -160,7 +165,29 @@ impl OperationGuard {
             operation,
             span,
             histograms,
+            request_id: None,
+            extended_request_id: None,
             finalized: false,
+        }
+    }
+
+    /// Record what the provider calls the request it answered:
+    /// `x-amz-request-id` and S3's `x-amz-id-2`, which its support asks for.
+    /// A failure after this, such as a download body that fails its
+    /// checksum, reports them too. After a retry they name the last attempt.
+    pub(crate) fn answered_by(
+        &mut self,
+        request_id: Option<&str>,
+        extended_request_id: Option<&str>,
+    ) {
+        self.request_id = request_id.and_then(identifier);
+        self.extended_request_id = extended_request_id.and_then(identifier);
+        if let Some(request_id) = self.request_id.as_deref() {
+            self.span.record("aws.request_id", request_id);
+        }
+        if let Some(extended_request_id) = self.extended_request_id.as_deref() {
+            self.span
+                .record("aws.extended_request_id", extended_request_id);
         }
     }
 
@@ -191,6 +218,8 @@ impl OperationGuard {
                 object_storage.operation = operation,
                 object_storage.outcome = error.label(),
                 error.type = error_type,
+                aws.request_id = self.request_id.as_deref(),
+                aws.extended_request_id = self.extended_request_id.as_deref(),
                 "object_storage_operation_failed"
             ),
             ObjectStorageError::Unavailable
@@ -200,6 +229,8 @@ impl OperationGuard {
                 object_storage.operation = operation,
                 object_storage.outcome = error.label(),
                 error.type = error_type,
+                aws.request_id = self.request_id.as_deref(),
+                aws.extended_request_id = self.extended_request_id.as_deref(),
                 "object_storage_operation_failed"
             ),
         });
@@ -222,6 +253,19 @@ impl Drop for OperationGuard {
             self.finish(Outcome::Cancelled);
         }
     }
+}
+
+/// Longest request identifier kept. S3's `x-amz-id-2` is under 100 bytes.
+const MAX_IDENTIFIER_BYTES: usize = 128;
+
+/// A request identifier is a provider's header value: keep it only when it
+/// is a short visible-ASCII token, so a store cannot put arbitrary text into
+/// a log line.
+fn identifier(value: &str) -> Option<Box<str>> {
+    let bounded = !value.is_empty()
+        && value.len() <= MAX_IDENTIFIER_BYTES
+        && value.bytes().all(|byte| byte.is_ascii_graphic());
+    bounded.then(|| value.into())
 }
 
 /// Describes the histogram to the installed recorder. Repeating it is harmless.

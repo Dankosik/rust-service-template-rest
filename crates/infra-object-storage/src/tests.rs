@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -392,6 +393,21 @@ fn workload_identity_is_built_without_io_and_only_for_amazon() {
         assert_eq!(
             ObjectStorage::new(other).unwrap_err(),
             ConfigError::Credentials
+        );
+    }
+}
+
+#[test]
+fn a_concurrency_limit_outside_the_semaphore_range_is_refused() {
+    for max_concurrency in [0, usize::MAX] {
+        let mut refused = options(Provider::Local {
+            endpoint: "http://127.0.0.1:1".to_owned(),
+            region: String::new(),
+        });
+        refused.max_concurrency = max_concurrency;
+        assert_eq!(
+            ObjectStorage::new(refused).unwrap_err(),
+            ConfigError::MaxConcurrency
         );
     }
 }
@@ -929,6 +945,30 @@ async fn get_without_a_checksum_is_readable() {
 }
 
 #[tokio::test]
+async fn an_empty_object_ends_inside_get() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let stub = Stub::start(|_, _| object(b"", &[])).await;
+    let storage = stub.storage(|options| options.max_concurrency = 1);
+    let download = storage.get(&key()).await.unwrap();
+    // An HTTP server never polls a body that is already at its end, so the
+    // outcome and the slot must not wait for a reader.
+    assert!(http_body::Body::is_end_stream(&download));
+    assert_eq!(http_body::Body::size_hint(&download).exact(), Some(0));
+    let rendered = handle.render();
+    assert!(
+        rendered.contains(
+            r#"object_storage_operation_duration_seconds_count{operation="get",outcome="ok"} 1"#
+        ),
+        "{rendered}"
+    );
+    storage.head(&key()).await.unwrap();
+    assert_eq!(download.bytes().await.unwrap(), Bytes::new());
+    assert!(!handle.render().contains("cancelled"));
+}
+
+#[tokio::test]
 async fn get_refuses_ranges_and_oversized_objects() {
     let stub = Stub::start(|_, _| object(b"partial", &[("content-range", "bytes 0-6/100")])).await;
     let storage = stub.storage(|_| {});
@@ -1166,6 +1206,130 @@ async fn presign_is_bounded_and_redacted() {
         );
     }
     assert!(stub.seen().is_empty(), "presigning sends nothing");
+}
+
+/// Every span and event a test emits, one line each with its recorded fields.
+#[derive(Clone, Default)]
+struct Records(Arc<Mutex<Vec<String>>>);
+
+struct Line(String);
+
+impl tracing::field::Visit for Line {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        let _ = write!(self.0, " {}={value}", field.name());
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        let _ = write!(self.0, " {}={value:?}", field.name());
+    }
+}
+
+impl Records {
+    fn push(&self, line: Line) {
+        self.0.lock().unwrap().push(line.0);
+    }
+
+    fn matching(&self, kind: &str, field: &str) -> Vec<String> {
+        let lines = self.0.lock().unwrap();
+        lines
+            .iter()
+            .filter(|line| line.starts_with(kind) && line.contains(field))
+            .cloned()
+            .collect()
+    }
+}
+
+impl tracing::Subscriber for Records {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        let mut line = Line("span".to_owned());
+        span.record(&mut line);
+        self.push(line);
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+        let mut line = Line("span".to_owned());
+        values.record(&mut line);
+        self.push(line);
+    }
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut line = Line("event".to_owned());
+        event.record(&mut line);
+        self.push(line);
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[tokio::test]
+async fn a_failure_reports_the_request_identifiers_of_its_response() {
+    const REQUEST_ID: &str = "4442587FB7D0A2F9";
+    const EXTENDED_REQUEST_ID: &str =
+        "eftixk72aD6Ap51TnqcoF8eFidJG9Z/2mkiDFu8yU9AS1ed4OpIszj7UDNEHGran";
+    let stub = Stub::start(|_, index| {
+        let mut response = xml_error(StatusCode::FORBIDDEN, "AccessDenied");
+        let headers = response.headers_mut();
+        if index == 0 {
+            headers.insert("x-amz-request-id", REQUEST_ID.parse().unwrap());
+            headers.insert("x-amz-id-2", EXTENDED_REQUEST_ID.parse().unwrap());
+        } else {
+            // Not an identifier: a store may send any header text.
+            headers.insert("x-amz-request-id", "not an identifier".parse().unwrap());
+        }
+        response
+    })
+    .await;
+    let storage = stub.storage(|_| {});
+    let records = Records::default();
+    let _subscriber = tracing::subscriber::set_default(records.clone());
+    // tracing caches each callsite's interest for the whole process. While
+    // one dispatcher exists it asks the registering thread's default, so
+    // another test's thread could cache "never" for the callsites read here.
+    // A second live dispatcher makes tracing consult every dispatcher.
+    let _every_dispatcher = tracing::Dispatch::new(Records::default());
+
+    assert_eq!(
+        storage.head(&key()).await,
+        Err(ObjectStorageError::Rejected)
+    );
+    let failed = records.matching("event", "object_storage_operation_failed");
+    let [event] = failed.as_slice() else {
+        panic!("one failure event: {failed:?}");
+    };
+    assert!(event.contains(" error.type=403"), "{event}");
+    assert!(
+        event.contains(&format!(" aws.request_id={REQUEST_ID}")),
+        "{event}"
+    );
+    assert!(
+        event.contains(&format!(" aws.extended_request_id={EXTENDED_REQUEST_ID}")),
+        "{event}"
+    );
+    assert_eq!(
+        records
+            .matching("span", &format!(" aws.request_id={REQUEST_ID}"))
+            .len(),
+        1,
+        "the span carries the identifier"
+    );
+    assert!(!event.contains("results/op-1.json"), "{event}");
+
+    assert_eq!(
+        storage.head(&key()).await,
+        Err(ObjectStorageError::Rejected)
+    );
+    let failed = records.matching("event", "object_storage_operation_failed");
+    assert_eq!(failed.len(), 2);
+    assert!(!failed[1].contains("request_id"), "{}", failed[1]);
 }
 
 #[tokio::test]
