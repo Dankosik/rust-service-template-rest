@@ -53,17 +53,18 @@ pub(super) fn key_parameter() -> Parameter {
 
 /// Construct the one generated replay response header. It is optional: only a
 /// decoded stored success carries the string value `true` on the wire.
-pub(super) fn replay_header() -> Header {
+pub(super) fn replay_header() -> RefOr<Header> {
     HeaderBuilder::new()
-        .schema(
+        .schema(Some(
             ObjectBuilder::new()
                 .schema_type(Type::String)
                 .enum_values(Some(["true"])),
-        )
+        ))
         .description(Some(
             "present with the string `true` only when this response replays a stored idempotent success",
         ))
         .build()
+        .into()
 }
 
 /// The generated responses that supplement an operation's own success and

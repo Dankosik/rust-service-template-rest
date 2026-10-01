@@ -14,9 +14,7 @@ all-features = false
 [advisories]
 yanked = "deny"
 # Every ignore names the crate, why it is acceptable, and what reopens it.
-ignore = [
-    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but is a proc-macro used only at compile time by utoipa-axum 0.2.0, the latest release; the unreleased utoipa-axum moves to pastey. Reopen: next utoipa-axum release." },
-]
+ignore = []
 
 [licenses]
 # Permissive licenses that the current graph uses; cargo-deny warns on an
