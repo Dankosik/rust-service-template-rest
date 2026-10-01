@@ -29,7 +29,7 @@ mod tls;
 
 use std::{fmt, sync::Arc};
 
-pub use authenticate::AUTHN_VERIFICATIONS_METRIC;
+pub use authenticate::{AUTHN_VERIFICATIONS_METRIC, Transport};
 pub use bearer::{BearerToken, parse_bearer};
 // template:begin oidc-introspection:authn-introspection-prepare-export
 pub use introspection::{IntrospectionCacheOptions, IntrospectionOptions, prepare_introspection};
@@ -37,7 +37,7 @@ pub use introspection::{IntrospectionCacheOptions, IntrospectionOptions, prepare
 // template:begin oidc-jwt:authn-jwt-prepare-export
 pub use jwt::{JwtAlgorithm, JwtOptions, RefreshTask, TokenProfile, prepare_jwt};
 // template:end oidc-jwt:authn-jwt-prepare-export
-pub use provider::{EndpointUrl, IssuerUrl};
+pub use provider::{EndpointUrl, IssuerUrl, ProviderFailure};
 
 /// The fixed authentication outcomes each inbound transport maps to its response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -66,7 +66,7 @@ pub enum PreparationPhase {
 pub enum PreparationReason {
     InvalidUrl,
     Client,
-    Fetch,
+    Fetch(ProviderFailure),
     Parse,
     IssuerMismatch,
     NoUsableKeys,
@@ -133,7 +133,7 @@ pub(crate) enum VerificationReason {
     Refresh,
     // template:end oidc-jwt:authn-jwt-reasons
     // template:begin oidc-introspection:authn-introspection-reasons
-    Provider,
+    Provider(ProviderFailure),
     Inactive,
     Capacity,
     // template:end oidc-introspection:authn-introspection-reasons
@@ -158,7 +158,7 @@ impl VerificationReason {
             Self::Refresh => "refresh",
             // template:end oidc-jwt:authn-jwt-reason-labels
             // template:begin oidc-introspection:authn-introspection-reason-labels
-            Self::Provider => "provider",
+            Self::Provider(failure) => introspection::provider_reason_label(failure),
             Self::Inactive => "inactive",
             Self::Capacity => "capacity",
             // template:end oidc-introspection:authn-introspection-reason-labels
@@ -233,14 +233,15 @@ pub struct Principal {
     expiry_epoch_seconds: u64,
 }
 
-struct Identity {
-    issuer: String,
-    subject: Option<String>,
-    client_id: Option<String>,
-    scopes: Vec<String>,
-    payload: String,
-    access_token: secrecy::SecretString,
-    actor: Option<Actor>,
+/// The verified evidence every engine supplies for one principal.
+pub(crate) struct Identity {
+    pub(crate) issuer: String,
+    pub(crate) subject: Option<String>,
+    pub(crate) client_id: Option<String>,
+    pub(crate) scopes: Vec<String>,
+    pub(crate) payload: String,
+    pub(crate) access_token: secrecy::SecretString,
+    pub(crate) actor: Option<Actor>,
 }
 
 // `secrecy::SecretString` intentionally has no `PartialEq`, so this compares
@@ -261,30 +262,9 @@ impl PartialEq for Identity {
 impl Eq for Identity {}
 
 impl Principal {
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one crate-private constructor for the verified evidence every engine reads"
-    )]
-    pub(crate) fn new(
-        issuer: String,
-        subject: Option<String>,
-        client_id: Option<String>,
-        scopes: Vec<String>,
-        expiry_epoch_seconds: u64,
-        payload: String,
-        access_token: secrecy::SecretString,
-        actor: Option<Actor>,
-    ) -> Self {
+    pub(crate) fn new(identity: Identity, expiry_epoch_seconds: u64) -> Self {
         Self {
-            identity: Arc::new(Identity {
-                issuer,
-                subject,
-                client_id,
-                scopes,
-                payload,
-                access_token,
-                actor,
-            }),
+            identity: Arc::new(identity),
             expiry_epoch_seconds,
         }
     }

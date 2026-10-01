@@ -243,7 +243,10 @@ async fn authenticate(
         .get_all(http::header::AUTHORIZATION)
         .iter()
         .map(http::HeaderValue::as_bytes);
-    let principal = match verifier.authenticate(authorization, "grpc").await {
+    let principal = match verifier
+        .authenticate(authorization, infra_bearerauthn::Transport::Grpc)
+        .await
+    {
         Ok(principal) => principal,
         Err(failure) => return reject(request, authentication_status(failure)).await,
     };
