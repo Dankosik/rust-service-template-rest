@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Generate committed Rust from the owned protobuf module. Buf builds the
-# descriptor set without imports; stock tonic-prost-build emits the code.
+# descriptor set with its imports, which prost needs to resolve an imported
+# message type; stock tonic-prost-build emits the code. The same set is
+# committed beside the Rust for server reflection.
 # Run through `make grpc-generate`, which supplies BUF. The optional argument
 # is the output directory.
 set -euo pipefail
@@ -17,11 +19,11 @@ readonly staging
 trap 'rm -rf -- "${staging}"' EXIT
 
 "${buf[@]}" build "${root_dir}/api/proto" \
-  --exclude-imports \
   --as-file-descriptor-set \
   --output "${staging}/descriptors.binpb"
 cargo run --locked --manifest-path "${root_dir}/tools/grpc-codegen/Cargo.toml" -- \
   "${staging}/descriptors.binpb" "${staging}/rust"
+cp -- "${staging}/descriptors.binpb" "${staging}/rust/file_descriptor_set.binpb"
 
 # Replace the directory whole so a removed package leaves no stale file.
 rm -rf -- "${generated_dir}"

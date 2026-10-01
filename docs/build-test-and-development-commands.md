@@ -71,7 +71,7 @@ compatibility limits.
 | `make check-instructions` | `check-skills` plus the four carrier checks; what CI runs on the `agent_instructions` surface | Python 3 |
 | `make tools-check` | `tools/versions.env` shape and digests; each Cargo tool reports its pin; the Dockerfile `ARG` defaults and `FROM` tags agree with the manifest and `rust-toolchain.toml` | Cargo tools (built once) |
 <!-- template:begin grpc:docs-command-grpc -->
-| `make grpc-generate` | Generate committed protobuf Rust from a temporary Buf descriptor set, built without imports, with stock tonic-prost-build | Go, Rust |
+| `make grpc-generate` | Generate committed protobuf Rust and its descriptor set from Buf's descriptor set, built with imports, with stock tonic-prost-build | Go, Rust |
 | `make grpc-check` | Buf format/lint, generation drift and exact base FILE compatibility; heavy and CI-owned by default | Same tools; `GRPC_BASE_REF` in CI |
 <!-- template:end grpc:docs-command-grpc -->
 
@@ -166,7 +166,7 @@ the versitygw proof when the current Make owner retains that target; it
 requires Docker and does not certify a provider. A local emulator is
 `docker compose -f env/docker-compose.yml up -d versitygw` (root credentials
 `template`/`template-secret`, port `VERSITYGW_PORT`, default 7070).
-`make test-object-storage-conformance PROVIDER=amazon_s3|cloudflare_r2|railway`
+`make test-object-storage-conformance PROVIDER=amazon_s3|cloudflare_r2|railway|s3_compatible`
 runs the ignored live-provider test against the bucket named by the
 service's `APP__OBJECT_STORAGE__*` variables. It writes under a unique prefix,
 refuses unless `OBJECT_STORAGE_CONFORMANCE_WRITES=allow` is set, and needs
