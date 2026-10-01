@@ -13,8 +13,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use health::Probe;
 use infra_object_storage::{
-    ContentType, ObjectKey, ObjectStorage, ObjectStorageError, ObjectStorageOptions, Provider,
-    PutBody, PutOptions,
+    ContentType, CredentialSource, ObjectKey, ObjectStorage, ObjectStorageError,
+    ObjectStorageOptions, Provider, PutBody, PutOptions,
 };
 use secrecy::SecretString;
 
@@ -47,8 +47,10 @@ impl Emulator {
                 region: String::new(),
             },
             bucket: BUCKET.to_owned(),
-            access_key_id: self.access_key_id.clone(),
-            secret_access_key: SecretString::from(secret.to_owned()),
+            credentials: CredentialSource::AccessKey {
+                access_key_id: self.access_key_id.clone(),
+                secret_access_key: SecretString::from(secret.to_owned()),
+            },
             max_object_bytes: 1024 * 1024,
             max_concurrency: 8,
             operation_timeout: Duration::from_secs(10),

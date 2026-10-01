@@ -5,7 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_nats::ConnectErrorKind;
+use async_nats::jetstream::context::{
+    GetStreamByNameErrorKind, GetStreamError, GetStreamErrorKind,
+};
 use health::{Probe, ProbeError};
+use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -56,8 +60,11 @@ impl<const N: usize> std::fmt::Debug for Outcomes<N> {
 /// transport, credential and resident-memory policy.
 #[derive(Clone)]
 pub struct MessagingOptions {
+    /// Shown by the broker's connection reports, so an operator can tell
+    /// this process's connection from its neighbors'.
+    pub connection_name: String,
     pub servers: Vec<String>,
-    pub credentials: Option<String>,
+    pub credentials: Option<SecretString>,
     pub root_ca_path: Option<PathBuf>,
     pub allow_plaintext: bool,
     pub source_stream: String,
@@ -70,11 +77,10 @@ impl std::fmt::Debug for MessagingOptions {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("MessagingOptions")
+            .field("connection_name", &self.connection_name)
+            // A server URL can carry a user and password.
             .field("server_count", &self.servers.len())
-            .field(
-                "credentials",
-                &self.credentials.as_ref().map(|_| "redacted"),
-            )
+            .field("credentials", &self.credentials)
             .field("root_ca_path", &self.root_ca_path)
             .field("allow_plaintext", &self.allow_plaintext)
             .field("source_stream", &self.source_stream)
@@ -157,6 +163,7 @@ impl Messaging {
         }
         let (closed_tx, closed) = watch::channel(false);
         let mut connect = async_nats::ConnectOptions::new()
+            .name(&options.connection_name)
             .connection_timeout(BROKER_OPERATION_BUDGET)
             .request_timeout(Some(BROKER_OPERATION_BUDGET))
             .require_tls(!options.allow_plaintext)
@@ -178,9 +185,9 @@ impl Messaging {
                     .increment(1);
                 std::future::ready(())
             });
-        if let Some(credentials) = options.credentials.as_deref() {
+        if let Some(credentials) = &options.credentials {
             connect = connect
-                .credentials(credentials)
+                .credentials(credentials.expose_secret())
                 .map_err(|_| MessagingError::Authentication)?;
         }
         if let Some(root_ca) = options.root_ca_path.clone() {
@@ -398,7 +405,13 @@ async fn admit_topology(
                 jetstream
                     .stream_by_subject(consumer.dlq_subject.clone())
                     .await
-                    .map_err(|error| classify_topology(&error))
+                    .map_err(|error| {
+                        let broker = match error.kind() {
+                            GetStreamByNameErrorKind::JetStream(broker) => Some(broker),
+                            _ => None,
+                        };
+                        topology_failure("stream_by_subject", &error, broker.as_ref())
+                    })
             })
             .await?
         }
@@ -420,9 +433,41 @@ async fn get_stream(
         jetstream
             .get_stream(name)
             .await
-            .map_err(|error| classify_topology(&error))
+            .map_err(|error| get_stream_failure(&error))
     })
     .await
+}
+
+pub(crate) fn get_stream_failure(error: &GetStreamError) -> MessagingError {
+    let broker = match error.kind() {
+        GetStreamErrorKind::JetStream(broker) => Some(broker),
+        _ => None,
+    };
+    topology_failure("get_stream", error, broker.as_ref())
+}
+
+/// Classifies a failed topology request and logs which request failed.
+///
+/// `broker` is the `JetStream` API error when the broker answered with one.
+/// Its numeric code is a closed vocabulary; its description can quote
+/// configuration and stays out of the log.
+pub(crate) fn topology_failure(
+    operation: &'static str,
+    error: &(dyn std::error::Error + 'static),
+    broker: Option<&async_nats::jetstream::Error>,
+) -> MessagingError {
+    let failure = match broker {
+        Some(broker) if matches!(broker.code(), 401 | 403) => MessagingError::Authentication,
+        Some(_) => MessagingError::Topology,
+        None => classify_topology(error),
+    };
+    tracing::warn!(
+        operation,
+        reason = %failure,
+        jetstream.error_code = broker.map(|broker| broker.error_code().0),
+        "messaging_admission_failed"
+    );
+    failure
 }
 
 fn validate_server(

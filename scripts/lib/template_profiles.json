@@ -104,6 +104,14 @@
         "id": "load-zero-postgres-count"
       },
       {
+        "path": "crates/config/src/load.rs",
+        "id": "load-migration"
+      },
+      {
+        "path": "crates/config/src/load.rs",
+        "id": "load-migration-test"
+      },
+      {
         "path": "crates/config/src/secret_policy.rs",
         "id": "secret-key-vector"
       },
@@ -1087,7 +1095,7 @@
     "markers": [
       {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
-      {"path": "crates/config/src/load.rs", "ids": ["load-messaging-environment", "load-zero-messaging-count", "load-messaging-list-namespace", "load-messaging-list-source"]},
+      {"path": "crates/config/src/load.rs", "ids": ["load-messaging-environment", "load-zero-messaging-count"]},
       {"path": "crates/jobs-worker/Cargo.toml", "ids": ["worker-messaging-dependency"]},
       {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-messaging-imports", "worker-bootstrap-messaging-startup-budget", "worker-bootstrap-messaging-errors", "worker-bootstrap-messaging-startup", "worker-bootstrap-messaging-admit", "worker-bootstrap-messaging-options", "worker-bootstrap-listener-messaging-probe", "worker-bootstrap-registrations-messaging", "worker-bootstrap-register-messaging", "worker-bootstrap-register-messaging-argument", "worker-bootstrap-validate-messaging", "worker-bootstrap-registrations-messaging-value", "worker-bootstrap-wait-messaging-failure", "worker-bootstrap-sanitized-panic-hook", "worker-bootstrap-sanitized-panic-hook-call", "worker-bootstrap-start-admitted-consumer"]},
       {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-messaging-connect"]},
@@ -1562,7 +1570,7 @@
     ],
     "markers": [
       {"path": "Cargo.toml", "ids": ["workspace-cache-crates", "workspace-cache-client"]},
-      {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate", "config-request-budget"]},
+      {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-cache-environment"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-cache-dependency"]},
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["service-bootstrap-cache-imports", "service-bootstrap-cache-startup-budget", "service-bootstrap-cache-errors", "service-bootstrap-cache-startup", "service-bootstrap-cache-functions", "service-bootstrap-cache-histogram"]},

@@ -28,6 +28,8 @@ workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+aws-config = { workspace = true, features = ["rt-tokio"] }
+aws-credential-types = { workspace = true }
 aws-sdk-s3 = { workspace = true, features = ["rt-tokio", "default-https-client"] }
 aws-smithy-checksums = { workspace = true }
 aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
@@ -37,6 +39,7 @@ http-body = { workspace = true }
 http-body-util = { workspace = true }
 metrics = { workspace = true }
 secrecy = { workspace = true }
+sync_wrapper = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time"] }
 tracing = { workspace = true, features = ["std"] }

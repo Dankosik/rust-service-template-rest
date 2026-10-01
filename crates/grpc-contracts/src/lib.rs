@@ -5,9 +5,13 @@
 //! Change schemas in `api/proto`, regenerate with `make grpc-generate`, and
 //! keep schema and generated Rust together. `make grpc-check` verifies drift
 //! and compatibility. Normal service builds use the committed Rust.
-//! Handlers own input validation; `infra-grpc` owns transport policy.
+//! Handlers own input validation; `infra-grpc` owns listener and middleware policy.
 
 pub mod codec;
+
+/// The encoded `FileDescriptorSet` the Rust was generated from, with its
+/// imports, for `infra_grpc::Services::add_reflection`.
+pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/file_descriptor_set.binpb");
 
 // Keep generated-code lint exceptions off the handwritten codec. Re-export
 // packages at the crate root so callers still use their protobuf package paths.
