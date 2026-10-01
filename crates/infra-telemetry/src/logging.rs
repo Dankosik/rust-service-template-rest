@@ -464,8 +464,8 @@ mod tests {
             tracing::Dispatch::new(Registry::default().with(json::JsonLayer::new(buffer.clone())));
         tracing::dispatcher::with_default(&dispatch, || {
             tracing_log::format_trace(
-                &log::Record::builder()
-                    .level(log::Level::Warn)
+                &tracing_log::log::Record::builder()
+                    .level(tracing_log::log::Level::Warn)
                     .target("rustls::client")
                     .module_path(Some("rustls::client::hs"))
                     .file(Some("hs.rs"))
