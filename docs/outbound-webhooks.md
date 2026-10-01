@@ -62,7 +62,8 @@ provider wiring, not a template business event or consumer.
 
 The worker builds one `Endpoint` per configured destination before claims, each
 with its HTTPS URL, fixed-authority client, and decoded key ring, then consumes
-a `Dispatcher` into the existing kind registry:
+a `Dispatcher` into the existing kind registry. `Endpoint::with_client` exists
+only under the crate's `test-support` feature, for a loopback fixture:
 
 ```rust,ignore
 let endpoint = Endpoint::new(&url, keys)?;
@@ -93,8 +94,8 @@ message-id + "." + canonical-decimal-timestamp + "." + raw-body
 ```
 
 The active key and optional predecessor emit one or two space-separated v1
-signatures. Do not emit key, signature, payload, URL, or endpoint ID as a
-diagnostic value or metric label.
+signatures. Do not emit key, signature, payload, or URL as a diagnostic value
+or metric label.
 
 The shared protocol API is `SigningKey::from_encoded`, `KeyRing::new` (or
 `KeyRing::from_encoded`), and `KeyRing::signatures(message_id, timestamp, body)`
@@ -135,6 +136,14 @@ malformed, elapsed, or zero advice uses ordinary backoff. Slow endpoints can
 occupy worker slots until their 30-second deadline. Isolating them needs a
 claim-time concurrency limit in the jobs owner, not a webhook-side refusal.
 Jobs alone owns jitter, leases, delay, exhaustion, and retry.
+
+Each attempt ends with one `webhook_delivery_finished` event carrying the
+configured endpoint ID, the outcome (delivered, retryable, or permanent), and
+for a failure its reason: `response_status` with the HTTP status,
+`endpoint_gone`, `missing_endpoint`, or the transport class `timeout`,
+`transport`, `response_too_large`, or `client`. The same summary
+(`response_status_503`, `timeout`, ...) is the attempt's entry in the job's
+failure history, so one delivery's attempts can be read back from its row.
 
 ## Raw-byte interoperability vector
 

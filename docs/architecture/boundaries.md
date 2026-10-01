@@ -246,8 +246,8 @@ scheduling.
 <!-- template:end webhooks:docs-boundaries-webhooks-outbound -->
 
 <!-- template:begin inbound-webhooks:docs-boundaries-webhooks-inbound -->
-The inbound module owns raw-byte verification, receipt arbitration, and the
-consumer registry/processor. It may use protocol, jobs, PostgreSQL, and SQLx;
+The inbound module owns raw-byte verification behind its per-endpoint
+`Verifier`, receipt arbitration, and the consumer registry/processor. It may use protocol, jobs, PostgreSQL, and SQLx;
 it does not own router middleware, endpoint configuration precedence, or a
 business event schema. `infra-http::webhooks` owns route annotation and problem
 mapping, not receipt SQL or signature implementation.
