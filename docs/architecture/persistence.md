@@ -15,7 +15,7 @@ should weigh before reopening them.
 
 | Owner | Owns | Does not own |
 | --- | --- | --- |
-| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`), the pool with the template's session budgets (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), pool gauges, the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`, `retryable`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
+| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`), the pool with the template's session budgets (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), the pool and transaction signals, the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`, `retryable`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
 | `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), read-only embedded-history verification (`verify_history`), the shared history rule, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
 | `migrations/` | Forward-only SQL files, one transaction each, `<version>_<snake_case>.sql` ([rules](../../migrations/README.md)). | Access code; a repository adapts to the schema, never the reverse. |
 | `service-config` (`postgres` section) | `postgres.enabled`, `postgres.dsn` (secret, environment only), `postgres.max_connections`. | DSN shape (the adapter refuses what the driver would accept). |
@@ -85,33 +85,36 @@ failure class (`no connection available inside the acquire budget`,
 ## Transactions
 
 `in_tx(&pool, async |tx| ...)` opens a transaction and lends the closure an
-opaque `&mut Tx`. The provider adapter obtains a scoped connection through
-`infra_postgres::connection(tx)`; the handle exposes no constructor or
-transaction-control methods. The boundary commits on `Ok` and rolls back on
-`Err`, returning the closure's error at once: dropping the sqlx transaction
-queues the `ROLLBACK`, and the pool's return ping sends it with its own
-round trip instead of the caller waiting for one. A rollback the server
-rejects fails that ping, and the pool closes the connection instead of
-reusing it. A guard discards a connection whose `BEGIN` future was
-cancelled, which sqlx 0.9 would return to the pool inside an open
+opaque `&mut Tx`. The handle is a `sqlx` executor, used the way a
+connection is: `sqlx::query(..).execute(&mut *tx)`. It exposes no
+constructor or transaction-control methods. The boundary commits on `Ok`
+and rolls back on `Err`, returning the closure's error at once: dropping the
+sqlx transaction queues the `ROLLBACK`, and the pool's return ping sends it
+with its own round trip instead of the caller waiting for one. A rollback
+the server rejects fails that ping, and the pool closes the connection
+instead of reusing it. A guard discards a connection whose `BEGIN` future
+was cancelled, which sqlx 0.9 would return to the pool inside an open
 transaction.
 
-Before `COMMIT` of a read-write transaction the boundary runs `SELECT 1`.
 PostgreSQL answers `COMMIT` in an aborted transaction with a silent
 `ROLLBACK` and `sqlx` does not check the command tag, so a closure that
 swallowed a failed statement and returned `Ok` would look committed (pgx
-reports the same case as `ErrTxCommitRollback`). The probe turns it into
-`TxError::CommitFailed` with SQLSTATE `25P02`. Probe and commit travel in
-one simple query, `SELECT 1; COMMIT; BEGIN`, so the probe costs no round
-trip: after an error the server skips the rest of the message, and the
-trailing `BEGIN` keeps the server inside the transaction sqlx still tracks,
-which the dropped sqlx transaction rolls back with the pool's return ping.
-Read-only transactions skip the probe: nothing they did can be lost. So
-does a closure that calls `statement_succeeded(tx)` right after its last
-statement succeeded: that success already proves the transaction is not
-aborted, spares the server three statements, and borrowing
-`connection(tx)` again withdraws the proof. A closure that expects
-a statement to fail runs it under a savepoint (`connection(tx).begin()`).
+reports the same case as `ErrTxCommitRollback`). The handle closes that gap
+by itself: a statement run through it withdraws the proof that the
+transaction is alive when it starts and restores it only when the server
+answered the whole statement without an error, so a failed, dropped, or
+half-read statement leaves it withdrawn. With the proof in hand the boundary
+sends a bare `COMMIT`. Without it the boundary first runs `SELECT 1`, which
+an aborted transaction answers with `25P02`, and reports
+`TxError::CommitFailed` without sending the commit. Read-only transactions
+skip the check: nothing they did can be lost.
+
+`infra_postgres::connection(tx)` lends the connection itself for what the
+executor does not offer, a savepoint (`connection(tx).begin()`) or an API
+that takes a connection. The boundary cannot see what runs there, so the
+borrow withdraws the proof until a later statement through the handle
+succeeds. A closure that expects a statement to fail runs it under a
+savepoint.
 `in_tx_with(&pool, TxOptions { isolation, read_only }, work)` renders the `BEGIN`
 statement for `Connection::begin_with`. `Isolation::ServerDefault` omits the
 isolation clause (server `default_transaction_isolation`);
@@ -120,13 +123,67 @@ isolation clause (server `default_transaction_isolation`);
 Commit-outcome policy: a commit error whose SQLSTATE class is `23`
 (integrity constraint violation, which a deferred constraint raises at
 commit) or `40` (transaction rollback) except `40003` is
-`TxError::CommitFailed`, nothing was written, and the caller may retry.
-Every other commit error, including a broken connection, is
+`TxError::CommitFailed`, nothing was written, and the caller may retry. So
+is any failure of the check ahead of the commit, because the commit was not
+sent. Every other commit error, including a broken connection, is
 `TxError::CommitUnknown`: the server may have committed, and the caller must
 reconcile against the operation's own identity instead of retrying blindly.
 `retryable(&sqlx::Error)` is `40001` or `40P01`; there is deliberately no
 retry loop, because whether a retry is safe depends on what the caller
 already did.
+
+## Signals
+
+Three operator questions, one signal each. Statements are not instrumented:
+the slow-statement warning names the ones that matter, and per-query spans
+stay deferred (see the decisions below).
+
+| Signal | Question | Labels and fields |
+| --- | --- | --- |
+| `db_client_connection_count`, `db_client_connection_max` (gauges) | How full is the pool? | `db.client.connection.pool.name` = `postgres`; `db.client.connection.state` in `idle`/`used` on the count |
+| `db_client_connection_wait_time_seconds` (histogram) | Do transactions wait for a connection? | `db.client.connection.pool.name`; recorded for a wait that ended in a timeout too |
+| `postgres_transaction_duration_seconds` (histogram) | How long does a transaction hold a connection, and how does it end? | `outcome` in `committed`, `rolled_back`, `acquire_failed`, `begin_failed`, `commit_failed`, `commit_unknown`, `cancelled` |
+| `postgres_transaction` (client span) | Where did a request's time in the database go? | `db.system.name`, `db.namespace`, `server.address`, `server.port`, `postgres.transaction.outcome`; on the boundary's own failure `error.type` (the SQLSTATE, or the driver's failure class) and `otel.status_code` |
+
+The gauge names and the wait histogram follow the OpenTelemetry database
+client conventions; the Prometheus exporter spells dots as underscores. The
+wait histogram covers `in_tx` only: a statement a crate runs straight on the
+pool acquires inside the driver, which reports no wait. `rolled_back` is the
+closure's own `Err` and is not marked as a span error, because whether it is
+one is the caller's business rule. The composition root passes each
+histogram's buckets to the recorder, as it does for every other crate.
+
+## Supported Deployments
+
+The proven target is one PostgreSQL server reached directly, or through a
+TCP load balancer that does not speak the protocol; the database suite runs
+against exactly that. What the adapter does on a connection decides what
+else can work:
+
+- **A connection pooler in front (PgBouncer, a managed pooler, RDS Proxy) is
+  not a tested target.** Every connection publishes its session budgets in
+  the startup packet's `options`. PgBouncer refuses a startup parameter it
+  does not track unless `ignore_startup_parameters` lists it, and listing
+  `options` makes it drop the budgets instead of applying them, so the
+  service would run without `statement_timeout` and
+  `idle_in_transaction_session_timeout`. In transaction pooling the driver's
+  named prepared statements additionally need `max_prepared_statements`. A
+  service that must sit behind a pooler sets the budgets on the database role
+  (`ALTER ROLE ... SET`) and proves the path with the database suite before
+  relying on it.
+- **One host.** The DSN admits no host list and no
+  `target_session_attrs`; failover is the endpoint's job (a managed
+  endpoint, a virtual IP, DNS). After a failover a session on a server that
+  became read-only fails its write with `25006`, which `transient` reports.
+- **Password authentication with a static password.** Client certificates
+  (`sslcert`/`sslkey`) and passwordless or short-lived credentials (IAM
+  tokens) are refused by admission or have no path here: the pool is
+  opened once with the admitted connect options and nothing renews them.
+- **A silently dropped network path is bounded by the server, not the
+  client.** `sqlx` 0.9 sets no TCP keepalive and its return-to-pool ping has
+  no timeout, so a connection whose peer vanished without a reset holds its
+  pool slot until the kernel gives up. Callers still fail inside the acquire
+  budget and readiness fails with them; the slot itself comes back late.
 
 ## Migrations
 
@@ -201,10 +258,10 @@ replay is `no_change`, then the lifecycle check with the profile enabled.
 With the HTTP idempotency profile retained, `crates/infra-idempotency-store`
 owns one profile table, `http_idempotency_records`, and every statement
 against it; no other crate names the table. `infra-postgres` owns the opaque
-`Tx`, transaction lifecycle, and provider-only `connection(&mut Tx)` access.
+`Tx` and the transaction lifecycle.
 `infra_http::idempotency` re-exports the same type, so a feature's port can
 name it without a provider dependency, and the feature's provider adapter
-reaches the connection through `infra_postgres::connection`. The store
+runs its statements through it as a `sqlx` executor. The store
 arbitrates and persists within that one explicit READ COMMITTED transaction;
 a storable 2xx effect and record commit together.
 Adapters never issue transaction-control SQL or name the profile table.
@@ -319,6 +376,20 @@ scratch project against `postgres:18.4`):
   their own error type through `E: From<TxError>`. The Go template joined
   the callback error with the rollback error; Rust returns the callback
   error, and a rollback the server rejects closes the connection.
+- **`Tx` implements `sqlx::Executor` and tracks the transaction's state
+  itself.** The earlier seam handed out the connection and let a closure
+  assert `statement_succeeded(tx)` to skip the check ahead of `COMMIT`; a
+  wrong assertion would have reported a rolled-back transaction as
+  committed, and every caller that forgot it paid for the check. Observing
+  each statement's result removes both. The check that remains is a plain
+  `SELECT 1` followed by the driver's own `commit`; the earlier
+  `SELECT 1; COMMIT; BEGIN` in one message saved its round trip by relying
+  on the driver's transaction-depth counter and its return ping, and is no
+  longer worth that coupling now that the check is the rare path.
+  `Executor::describe` exists only when the driver's offline support is on,
+  which `sqlx`'s `macros` feature enables, so `infra-postgres` enables it to
+  see one trait whichever workspace crates are built together; `migrate`
+  already brings the macros into every binary.
 - **Embedded migrations, forward-only**: `sqlx::migrate!` replaces the Go
   template's runtime directory with its symlink and nesting checks; a
   `build.rs` `rerun-if-changed=../../migrations` is required because the

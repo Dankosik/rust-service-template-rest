@@ -10,10 +10,19 @@
 //! retried; a commit whose outcome is unknown must be reconciled against the
 //! operation's own identity instead.
 
-use sqlx::pool::PoolConnection;
-use sqlx::postgres::{PgConnection, PgPool};
-use sqlx::{Connection, Executor, Postgres};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll, ready};
 
+use futures_util::Stream;
+use sqlx::pool::PoolConnection;
+use sqlx::postgres::{
+    PgConnection, PgPool, PgQueryResult, PgRow, PgStatement, PgTypeInfo, Postgres,
+};
+use sqlx::{Connection, Either, Execute, Executor, SqlStr};
+use tracing::Instrument;
+
+use crate::observe::{self, Observed, Outcome};
 use crate::sqlstate;
 
 #[derive(Debug, thiserror::Error)]
@@ -23,8 +32,8 @@ pub enum TxError {
     #[error("postgres transaction: begin: {0}")]
     Begin(#[source] sqlx::Error),
     /// The server rejected the commit, or the transaction was already
-    /// aborted by a failed statement the closure did not propagate; nothing
-    /// was written.
+    /// aborted by a failed statement the closure did not propagate and the
+    /// commit was never sent; nothing was written.
     #[error("postgres transaction: commit rejected: {0}")]
     CommitFailed(#[source] sqlx::Error),
     /// The client did not receive a definitive commit result. The server
@@ -36,30 +45,112 @@ pub enum TxError {
 
 /// An opaque capability for work inside a provider-owned transaction.
 ///
-/// Only [`connection`] exposes the borrowed connection to provider adapters.
-/// The transaction boundary retains commit and rollback ownership.
+/// `&mut Tx` is a `sqlx` executor, used like `&mut PgConnection`:
+/// `sqlx::query(..).execute(&mut *tx)`. The transaction boundary retains
+/// commit and rollback ownership.
 #[derive(Debug)]
 pub struct Tx<'c> {
     conn: &'c mut PgConnection,
-    /// Set by [`statement_succeeded`] and cleared by [`connection`].
-    last_statement_succeeded: bool,
+    /// Whether the last statement run through this handle succeeded, which
+    /// proves the transaction is not aborted. Cleared when a statement
+    /// starts and by [`connection`]; a fresh transaction holds the proof.
+    not_aborted: bool,
 }
 
-/// The connection borrowed by `tx` for a provider adapter's statement.
+/// The connection borrowed by `tx`, for what the executor does not offer: a
+/// savepoint (`connection(tx).begin()`) or an API that takes a connection.
 ///
-/// Do not issue transaction-control SQL through this connection.
+/// The boundary cannot see what runs through it, so the commit that follows
+/// first checks that the transaction is not aborted, unless a later
+/// statement through `tx` succeeds. Do not issue transaction-control SQL
+/// through this connection.
 pub fn connection<'a>(tx: &'a mut Tx<'_>) -> &'a mut PgConnection {
-    tx.last_statement_succeeded = false;
+    tx.not_aborted = false;
     tx.conn
 }
 
-/// Record that the statement just run through [`connection`] succeeded.
-///
-/// That success proves the transaction is not aborted, so a commit that
-/// follows skips its probe statement. Borrowing
-/// [`connection`] again withdraws the proof.
-pub fn statement_succeeded(tx: &mut Tx<'_>) {
-    tx.last_statement_succeeded = true;
+type BoxFuture<'e, T> = Pin<Box<dyn Future<Output = Result<T, sqlx::Error>> + Send + 'e>>;
+type BoxStream<'e, T> = Pin<Box<dyn Stream<Item = Result<T, sqlx::Error>> + Send + 'e>>;
+
+/// Statements run on the borrowed connection; each one withdraws the proof
+/// when it starts and restores it when the server answered it completely
+/// and without an error. A dropped or failed statement leaves it withdrawn.
+impl<'c> Executor<'c> for &'c mut Tx<'_> {
+    type Database = Postgres;
+
+    fn fetch_many<'e, 'q: 'e, E>(self, query: E) -> BoxStream<'e, Either<PgQueryResult, PgRow>>
+    where
+        'c: 'e,
+        E: 'q + Execute<'q, Postgres>,
+    {
+        self.not_aborted = false;
+        Box::pin(Proving {
+            statement: self.conn.fetch_many(query),
+            failed: false,
+            not_aborted: &mut self.not_aborted,
+        })
+    }
+
+    fn fetch_optional<'e, 'q: 'e, E>(self, query: E) -> BoxFuture<'e, Option<PgRow>>
+    where
+        'c: 'e,
+        E: 'q + Execute<'q, Postgres>,
+    {
+        self.not_aborted = false;
+        let statement = self.conn.fetch_optional(query);
+        let not_aborted = &mut self.not_aborted;
+        Box::pin(async move {
+            let row = statement.await?;
+            *not_aborted = true;
+            Ok(row)
+        })
+    }
+
+    // A prepare or describe the driver answers from its statement cache
+    // never reaches the server, so neither one restores the proof.
+    fn prepare_with<'e>(
+        self,
+        sql: SqlStr,
+        parameters: &'e [PgTypeInfo],
+    ) -> BoxFuture<'e, PgStatement>
+    where
+        'c: 'e,
+    {
+        self.not_aborted = false;
+        self.conn.prepare_with(sql, parameters)
+    }
+
+    fn describe<'e>(self, sql: SqlStr) -> BoxFuture<'e, sqlx::Describe<Postgres>>
+    where
+        'c: 'e,
+    {
+        self.not_aborted = false;
+        self.conn.describe(sql)
+    }
+}
+
+/// A statement's result stream that restores the proof once the stream ends
+/// without having yielded an error.
+struct Proving<'e, T> {
+    statement: BoxStream<'e, T>,
+    failed: bool,
+    not_aborted: &'e mut bool,
+}
+
+impl<T> Stream for Proving<'_, T> {
+    type Item = Result<T, sqlx::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let item = ready!(this.statement.as_mut().poll_next(cx));
+        match &item {
+            Some(Ok(_)) => {}
+            Some(Err(_)) => this.failed = true,
+            // The stream also ends after an error it yielded.
+            None => *this.not_aborted = !this.failed,
+        }
+        Poll::Ready(item)
+    }
 }
 
 /// A pooled connection that is closed instead of returned to the pool
@@ -158,44 +249,59 @@ where
     F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
     E: From<TxError>,
 {
-    let mut guard = DiscardOnDrop {
-        connection: pool.acquire().await.map_err(TxError::Acquire)?,
-        discard: true,
-    };
-    let mut tx = match options.begin_statement() {
-        None => guard.connection.begin().await,
-        Some(statement) => guard.connection.begin_with(statement).await,
-    }
-    .map_err(TxError::Begin)?;
-    guard.discard = false;
+    let span = observe::transaction_span(pool);
+    let mut observed = Observed::start(span.clone());
+    async {
+        let acquired = pool.acquire().await;
+        observed.waited();
+        let mut guard = DiscardOnDrop {
+            connection: acquired.map_err(|err| observed.fail(TxError::Acquire(err)))?,
+            discard: true,
+        };
+        let mut tx = match options.begin_statement() {
+            None => guard.connection.begin().await,
+            Some(statement) => guard.connection.begin_with(statement).await,
+        }
+        .map_err(|err| observed.fail(TxError::Begin(err)))?;
+        guard.discard = false;
 
-    let mut handle = Tx {
-        conn: &mut tx,
-        last_statement_succeeded: false,
-    };
-    // On `Err`, dropping `tx` queues the rollback and the pool's return ping
-    // sends it, so the caller does not wait a round trip for it. A rollback
-    // the server rejects fails that ping, and the pool closes the connection
-    // instead of reusing it.
-    let value = f(&mut handle).await?;
-    if options.read_only || handle.last_statement_succeeded {
-        tx.commit().await.map_err(classify_commit)?;
-    } else {
-        // PostgreSQL answers `COMMIT` in an aborted transaction with a silent
-        // `ROLLBACK`, and sqlx does not check the command tag (pgx reports it
-        // as `ErrTxCommitRollback`). The probe statement turns that state into
-        // `25P02` and the server skips the rest of the message: a closure that
-        // swallowed a failed statement must not look committed. One simple
-        // query carries probe and commit in one round trip; its trailing
-        // `BEGIN` keeps the server in the transaction sqlx still tracks, and
-        // dropping `tx` rolls that empty transaction back with the pool's
-        // return ping, without a round trip of its own.
-        (&mut *tx)
-            .execute("SELECT 1; COMMIT; BEGIN")
+        let mut handle = Tx {
+            conn: &mut tx,
+            not_aborted: true,
+        };
+        // On `Err`, dropping `tx` queues the rollback and the pool's return
+        // ping sends it, so the caller does not wait a round trip for it. A
+        // rollback the server rejects fails that ping, and the pool closes
+        // the connection instead of reusing it.
+        let value = match f(&mut handle).await {
+            Ok(value) => value,
+            Err(err) => {
+                observed.end(Outcome::RolledBack);
+                return Err(err);
+            }
+        };
+        if !(options.read_only || handle.not_aborted) {
+            // PostgreSQL answers `COMMIT` in an aborted transaction with a
+            // silent `ROLLBACK`, and sqlx does not check the command tag (pgx
+            // reports it as `ErrTxCommitRollback`). The closure's last
+            // statement did not prove the transaction alive, so this one
+            // does: an aborted transaction answers `25P02`, and a closure
+            // that swallowed a failed statement does not look committed.
+            // The commit is not sent after any failure here, so nothing was
+            // written whatever the failure was.
+            (&mut *tx)
+                .execute("SELECT 1")
+                .await
+                .map_err(|err| observed.fail(TxError::CommitFailed(err)))?;
+        }
+        tx.commit()
             .await
-            .map_err(classify_commit)?;
+            .map_err(|err| observed.fail(classify_commit(err)))?;
+        observed.end(Outcome::Committed);
+        Ok(value)
     }
-    Ok(value)
+    .instrument(span)
+    .await
 }
 
 /// Preserve failures known to have rejected the commit and mark every other
@@ -204,8 +310,9 @@ where
 /// A deferred constraint (class `23`) or a transaction rollback (class `40`)
 /// reported by `COMMIT` means the server rolled back. `40003` (statement
 /// completion unknown) is the exception, as is every transport failure.
-/// `25P02` comes from the probe ahead of `COMMIT`: the transaction was
-/// already aborted and the server skipped the commit.
+/// `25P02` is kept as rejected for a caller that classifies a statement
+/// error of its own; the boundary's check ahead of `COMMIT` reports it
+/// without sending the commit.
 fn classify_commit(err: sqlx::Error) -> TxError {
     let rejected = sqlstate(&err).is_some_and(|code| {
         code.starts_with("23") || (code.starts_with("40") && code != "40003") || code == "25P02"
@@ -219,7 +326,37 @@ fn classify_commit(err: sqlx::Error) -> TxError {
 
 #[cfg(test)]
 mod tests {
+    use futures_util::{StreamExt, stream};
+
     use super::*;
+
+    async fn proof_after(items: Vec<Result<u8, sqlx::Error>>, take: usize) -> bool {
+        let mut not_aborted = false;
+        let mut statement = Proving {
+            statement: Box::pin(stream::iter(items)),
+            failed: false,
+            not_aborted: &mut not_aborted,
+        };
+        for _ in 0..take {
+            let _ = statement.next().await;
+        }
+        drop(statement);
+        not_aborted
+    }
+
+    #[tokio::test]
+    async fn only_a_statement_that_ended_without_an_error_proves_the_transaction() {
+        // Two rows and the end of the stream.
+        assert!(proof_after(vec![Ok(1), Ok(2)], 3).await);
+        // A statement with no rows still has to reach its end.
+        assert!(proof_after(vec![], 1).await);
+        // Dropped before the end: the server's answer was not read.
+        assert!(!proof_after(vec![Ok(1), Ok(2)], 2).await);
+        // The end that follows an error is not a completed statement.
+        let failed = || vec![Ok(1), Err(sqlx::Error::Protocol("failed".into()))];
+        assert!(!proof_after(failed(), 2).await);
+        assert!(!proof_after(failed(), 3).await);
+    }
 
     #[test]
     fn begin_statements_render_isolation_and_read_only() {

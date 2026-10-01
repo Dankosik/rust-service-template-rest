@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use infra_postgres::{TxError, connection, in_tx};
+use infra_postgres::{TxError, in_tx};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -101,12 +101,12 @@ impl Store {
         loop {
             let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupError> {
                 sqlx::query(CLEANUP_STATEMENT_TIMEOUT)
-                    .execute(connection(tx))
+                    .execute(&mut *tx)
                     .await
                     .map_err(|_| CleanupError::Statement)?;
                 let deleted = sqlx::query(CLEANUP_BATCH)
                     .bind(i64::from(CLEANUP_BATCH_ROWS))
-                    .execute(connection(tx))
+                    .execute(&mut *tx)
                     .await
                     .map_err(|_| CleanupError::Statement)?;
                 Ok(deleted.rows_affected())

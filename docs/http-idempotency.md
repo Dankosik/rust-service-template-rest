@@ -394,9 +394,10 @@ The code changes, each first measured alone:
 
 - **One lock-and-read statement.** Replay, mismatch, and in-progress lose a
   round trip (+15–26% ops/s alone); a stored success keeps two reads.
-- **No pre-commit probe after the record write** (`statement_succeeded`): the
-  write's success already proves the transaction is not aborted. A stored
-  success loses a round trip (+8% ops/s, −25% allocations, −8–12% server CPU).
+- **No pre-commit probe after the record write**: the write's success already
+  proves the transaction is not aborted. A stored success loses a round trip
+  (+8% ops/s, −25% allocations, −8–12% server CPU). Measured with an explicit
+  `statement_succeeded` call; the transaction handle now tracks it itself.
 - **Ping only idle connections.** Measured here with a 500 ms window; the same
   change landed separately as #110 with pgx's one-second threshold, which is
   equivalent under this load. Every attempt loses a round trip (+6–7% stored

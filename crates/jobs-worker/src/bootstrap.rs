@@ -492,6 +492,14 @@ fn install_observability(
             HTTP_REQUESTS_DURATION_SECONDS,
             HTTP_REQUESTS_DURATION_BUCKETS,
         ),
+        (
+            infra_postgres::CONNECTION_WAIT_METRIC,
+            infra_postgres::CONNECTION_WAIT_BUCKETS,
+        ),
+        (
+            infra_postgres::TRANSACTION_DURATION_METRIC,
+            infra_postgres::TRANSACTION_DURATION_BUCKETS,
+        ),
         // template:begin jobs:worker-bootstrap-jobs-histograms
         (ATTEMPT_DURATION_METRIC, ATTEMPT_DURATION_BUCKETS),
         (

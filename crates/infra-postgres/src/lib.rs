@@ -11,12 +11,17 @@
 
 mod dsn;
 mod error;
+mod observe;
 mod pool;
 mod probe;
 mod transaction;
 
 pub use dsn::{Dsn, DsnError};
 pub use error::{failure_cause, retryable, sqlstate, transient};
+pub use observe::{
+    CONNECTION_WAIT_BUCKETS, CONNECTION_WAIT_METRIC, TRANSACTION_DURATION_BUCKETS,
+    TRANSACTION_DURATION_METRIC,
+};
 pub use pool::{
     ACQUIRE_TIMEOUT, Closed, ConnectError, IDLE_IN_TRANSACTION_TIMEOUT, PoolOptions,
     STATEMENT_TIMEOUT, SessionOptions, close, connect, connect_session, record_metrics,
@@ -24,6 +29,4 @@ pub use pool::{
 };
 pub use probe::PostgresProbe;
 pub use sqlx::postgres::PgPool;
-pub use transaction::{
-    Isolation, Tx, TxError, TxOptions, connection, in_tx, in_tx_with, statement_succeeded,
-};
+pub use transaction::{Isolation, Tx, TxError, TxOptions, connection, in_tx, in_tx_with};

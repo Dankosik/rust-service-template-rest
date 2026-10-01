@@ -119,7 +119,7 @@
         "path": "crates/config/src/observability.rs",
         "id": "otel-postgres-application-name-doc"
       },
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-imports", "bootstrap-errors", "bootstrap-postgres-startup", "bootstrap-open-postgres", "bootstrap-startup-log-postgres"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-imports", "bootstrap-errors", "bootstrap-postgres-histograms", "bootstrap-postgres-startup", "bootstrap-open-postgres", "bootstrap-startup-log-postgres"]},
       {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["shutdown-imports", "shutdown-dependencies-postgres-field", "shutdown-dependencies-postgres-destructure", "shutdown-dependencies-postgres-close"]},
       {
         "path": ".github/workflows/ci.yml",

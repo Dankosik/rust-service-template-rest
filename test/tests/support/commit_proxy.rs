@@ -6,8 +6,7 @@
 //! the backend's only once it has fired. Armed, it acts once on the first
 //! simple-query commit of any connection, optionally restricted to a
 //! transaction containing matching SQL. `sqlx-postgres` 0.9.0 commits with a
-//! bare `COMMIT`; `infra_postgres::in_tx` sends its probe, `COMMIT`, and a new
-//! `BEGIN` in one simple query:
+//! bare `COMMIT`, which is what `infra_postgres::in_tx` sends:
 //!
 //! - [`Fault::ForwardThenDrop`] forwards it, waits for the server's
 //!   `ReadyForQuery`, and closes both sockets without relaying the answer: a
@@ -34,8 +33,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-/// The texts of the simple-query messages that commit.
-const COMMITS: [&[u8]; 2] = [b"COMMIT", b"SELECT 1; COMMIT; BEGIN"];
+/// The text of the simple-query message that commits.
+const COMMIT: &[u8] = b"COMMIT";
 
 /// Bound on joining the proxy's tasks.
 const JOIN_BUDGET: Duration = Duration::from_secs(5);
@@ -420,8 +419,7 @@ impl Frontend {
             self.matched = false;
             return None;
         }
-        let commit =
-            message.first() == Some(&b'Q') && sql.is_some_and(|sql| COMMITS.contains(&sql));
+        let commit = message.first() == Some(&b'Q') && sql == Some(COMMIT);
         let mut arming = lock(arming);
         let Arming::Armed(armed) = *arming else {
             if commit {

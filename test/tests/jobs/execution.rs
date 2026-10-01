@@ -7,7 +7,7 @@ use infra_jobs::{
     DEFAULT_TIMEOUT, DrainEnd, Engine, EnqueueError, EnqueueOptions, Enqueued, Job, JobError,
     JobKind, Kinds, LEASE_RESERVE, MIN_TIMEOUT, POLL_INTERVAL, Policy, StartupError, enqueue,
 };
-use infra_postgres::{Dsn, PgPool, TxError, connection, in_tx};
+use infra_postgres::{Dsn, PgPool, TxError, in_tx};
 use integration_tests::DATABASE_URL;
 use integration_tests::dsn_for;
 use integration_tests::jobs::{self, Probe, ProbeAction};
@@ -1093,7 +1093,7 @@ fn transactional_gate_registry(gate: Arc<TransactionGateState>) -> infra_jobs::R
                 let completed = in_tx(job.pool(), async |tx| -> Result<(), Step> {
                     sqlx::query("INSERT INTO job_effects (job_id) VALUES ($1::uuid)")
                         .bind(job.id().to_string())
-                        .execute(&mut *connection(tx))
+                        .execute(&mut *tx)
                         .await
                         .map_err(Step::Query)?;
                     gate.business_written.notify_one();
@@ -1377,7 +1377,7 @@ async fn x5_rolled_back_generation_never_returns(pool: PgPool) {
     let slot = Arc::clone(&drawn);
     let rolled = in_tx(&jobs, async move |tx| -> Result<(), Step> {
         let value: i64 = sqlx::query_scalar("SELECT nextval('background_jobs_claim_generation')")
-            .fetch_one(&mut *connection(tx))
+            .fetch_one(&mut *tx)
             .await?;
         *slot.lock().expect("generation") = value;
         Err(Step::Rejected)

@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use infra_postgres::{Tx, connection, statement_succeeded};
+use infra_postgres::Tx;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sqlx::postgres::PgPool;
@@ -142,11 +142,10 @@ impl<K: JobKind> Job<K> {
         let affected = sqlx::query(crate::attempt::COMPLETE)
             .bind(self.attempt.id.to_string())
             .bind(self.attempt.generation)
-            .execute(&mut *connection(tx))
+            .execute(&mut *tx)
             .await?
             .rows_affected();
         if affected == 1 {
-            statement_succeeded(tx);
             Ok(())
         } else {
             Err(CompleteError::StaleClaim)
