@@ -103,15 +103,16 @@ fn prepare_key_parameter(
     operation: &mut Operation,
     operation_id: &str,
 ) -> Result<(), CompositionError> {
-    let generated_key = key_parameter();
+    let generated_key = RefOr::T(key_parameter());
     let mut existing_keys = operation
         .parameters
         .as_deref()
         .into_iter()
         .flatten()
         .filter(|parameter| {
-            parameter.parameter_in == utoipa::openapi::path::ParameterIn::Header
-                && parameter.name.eq_ignore_ascii_case(KEY_HEADER)
+            matches!(parameter, RefOr::T(parameter)
+                if parameter.parameter_in == utoipa::openapi::path::ParameterIn::Header
+                    && parameter.name.eq_ignore_ascii_case(KEY_HEADER))
         });
     match (existing_keys.next(), existing_keys.next()) {
         (None, None) => operation
@@ -173,13 +174,14 @@ fn prepare_success_headers(
         .headers
         .iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case(super::openapi::REPLAYED_HEADER));
+    let generated = RefOr::T(replay_header());
     match (replay_headers.next(), replay_headers.next()) {
         (None, None) => {
             response
                 .headers
-                .insert(super::openapi::REPLAYED_HEADER.to_owned(), replay_header());
+                .insert(super::openapi::REPLAYED_HEADER.to_owned(), generated);
         }
-        (Some((_, header)), None) if header == &replay_header() => {}
+        (Some((_, header)), None) if header == &generated => {}
         _ => return Err(CompositionError::new(operation_id, Rule::ReplayHeader)),
     }
     if response.headers.keys().any(|name| {
@@ -201,9 +203,15 @@ fn one_operation_mut(item: &mut PathItem) -> Option<(&'static str, &mut Operatio
         ("head", item.head.as_mut()),
         ("patch", item.patch.as_mut()),
         ("trace", item.trace.as_mut()),
+        ("query", item.query.as_mut()),
     ]
     .into_iter()
-    .filter_map(|(method, operation)| operation.map(|operation| (method, operation)));
+    .filter_map(|(method, operation)| operation.map(|operation| (method, operation)))
+    .chain(
+        item.additional_operations
+            .values_mut()
+            .map(|operation| ("additional", operation)),
+    );
     let operation = operations.next()?;
     operations.next().is_none().then_some(operation)
 }
@@ -349,7 +357,7 @@ mod tests {
         };
         response.headers.insert(
             super::super::openapi::REPLAYED_HEADER.to_owned(),
-            utoipa::openapi::header::Header::default(),
+            RefOr::T(utoipa::openapi::header::Header::default()),
         );
         assert_eq!(
             prepare(&mut conflicting).unwrap_err().rule(),
@@ -372,7 +380,7 @@ mod tests {
         };
         response.headers.insert(
             "X-Trace".to_owned(),
-            utoipa::openapi::header::Header::default(),
+            RefOr::T(utoipa::openapi::header::Header::default()),
         );
         assert_eq!(
             prepare(&mut unsupported).unwrap_err().rule(),

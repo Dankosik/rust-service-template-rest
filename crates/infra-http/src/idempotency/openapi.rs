@@ -55,11 +55,11 @@ pub(super) fn key_parameter() -> Parameter {
 /// decoded stored success carries the string value `true` on the wire.
 pub(super) fn replay_header() -> Header {
     HeaderBuilder::new()
-        .schema(
+        .schema(Some(
             ObjectBuilder::new()
                 .schema_type(Type::String)
                 .enum_values(Some(["true"])),
-        )
+        ))
         .description(Some(
             "present with the string `true` only when this response replays a stored idempotent success",
         ))

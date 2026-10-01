@@ -200,6 +200,12 @@ the marker.
 startup also requires PostgreSQL, the admitted schema, and a writable session.
 Publish this duration as the retry promise. Expired keys may execute again.
 
+A record keeps the whole success body, up to 1 MiB, as the handler returned
+it, for the full retention and without application-level encryption. An
+operation whose success carries personal or otherwise sensitive data keeps
+that data in `http_idempotency_records` for that long: choose the retention,
+database access, and backup policy with that in mind.
+
 Every request that reaches `execute` holds one pooled connection. Replay,
 mismatch, and in-progress arbitration use three transaction statements
 (`BEGIN`, one lock-and-read, `ROLLBACK`); a stored success uses five plus the
@@ -214,8 +220,16 @@ work inside `execute` short.
 
 While the boundary is active, a background task deletes expired records once
 a minute in batches of 500 rows, each under a 1 s statement timeout, skipping
-rows a live attempt holds. A failed run logs its failure class and retries on
-the next tick; it changes neither readiness nor serving.
+rows a live attempt holds. A failed run retries on the next tick; it changes
+neither readiness nor serving. `http_idempotency_cleanup_runs_total` counts
+every run by `outcome` (`completed`, `failed`), and
+`http_idempotency_cleanup_removed_records_total` counts the records each
+committed batch deleted, so a cleanup that stopped completing or stopped
+deleting shows without reading logs. A failed batch logs
+`http_idempotency_cleanup_failed` with its phase (`failure`), SQLSTATE, and
+bounded cause; a startup check that could not reach a verdict logs
+`http_idempotency_startup_check_failed` with the same fields, or
+`cause = "timeout"` for its 5 s bound. None of them carries driver text.
 
 Each new record retains verified issuer, caller kind/value, non-secret scope
 digest, and expiry, never raw keys, credentials, or request bodies for

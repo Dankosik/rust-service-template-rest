@@ -15,8 +15,7 @@ full-history secret scanning and missing-base handling.
 | Runtime image vulnerabilities | `ALLOW_HEAVY=1 make container-security CONTAINER_IMAGE=<tag>` | Debian packages and the `cargo-auditable` Rust list inside the image; fixable HIGH and CRITICAL fail |
 
 An advisory ignore in `deny.toml` names the crate, why it is acceptable, and
-what reopens it; the current one is `paste` through `utoipa-axum 0.2.0`,
-reopened by the next `utoipa-axum` release. A license the graph does not use
+what reopens it; none is current. A license the graph does not use
 is not listed: cargo-deny warns on an unmatched allowance, and a crate that
 brings a new license adds its line in the same change.
 
