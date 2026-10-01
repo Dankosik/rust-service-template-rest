@@ -126,6 +126,11 @@ const fn http_meta(code: Code) -> HttpCodeMeta {
             title: "request header fields too large",
             type_uri: concat!("https://www.rfc-editor.org/rfc/rfc6585", "#section-5"),
         },
+        Code::UnsupportedMediaType => HttpCodeMeta {
+            status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            title: "unsupported media type",
+            type_uri: concat!("https://www.rfc-editor.org/rfc/rfc9110", "#section-15.5.16"),
+        },
         Code::UnprocessableContent => HttpCodeMeta {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             title: "unprocessable content",

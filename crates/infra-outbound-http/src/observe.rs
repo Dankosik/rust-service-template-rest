@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Instant};
 
-use http::{Method, StatusCode};
+use http::{HeaderMap, Method, StatusCode};
 use metrics::{Label, SharedString, Unit};
 use tracing::Span;
 
@@ -50,6 +50,7 @@ impl Attempt {
         let method = bounded_method(method);
         let span = tracing::info_span!(
             "outbound_http",
+            otel.name = span_name(method),
             otel.kind = "client",
             http.request.method = method,
             server.address = &*server.address,
@@ -71,6 +72,15 @@ impl Attempt {
 
     pub(crate) fn span(&self) -> Span {
         self.span.clone()
+    }
+
+    /// Writes this attempt's context with the process text-map propagator, so
+    /// the provider's server span becomes a child of this client span.
+    pub(crate) fn inject_trace_context(&self, headers: &mut HeaderMap) {
+        tracing_opentelemetry_instrumentation_sdk::http::inject_context(
+            &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(&self.span),
+            headers,
+        );
     }
 
     pub(crate) fn response_headers(&mut self, status: StatusCode) {
@@ -168,6 +178,12 @@ fn bounded_method(method: &Method) -> &'static str {
         "QUERY" => "QUERY",
         _ => "_OTHER",
     }
+}
+
+/// The OpenTelemetry HTTP client span name: the method, or `HTTP` when the
+/// method is not a known one.
+fn span_name(method: &'static str) -> &'static str {
+    if method == "_OTHER" { "HTTP" } else { method }
 }
 
 fn http_error_type(status: StatusCode) -> Option<SharedString> {

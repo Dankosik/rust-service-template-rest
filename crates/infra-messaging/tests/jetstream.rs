@@ -289,6 +289,7 @@ fn options_with_servers(
     max_payload_bytes: usize,
 ) -> MessagingOptions {
     MessagingOptions {
+        connection_name: "infra-messaging-tests".to_owned(),
         servers,
         credentials: None,
         root_ca_path: None,
@@ -645,6 +646,93 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
         .expect("typed handler must observe the broker delivery")
         .expect("handler completion signal must remain connected");
     assert_eq!(observed, "event-consumer");
+    wait_for_source_ack(&fixture).await;
+
+    handle
+        .finish(deadline())
+        .await
+        .expect("bounded consumer drain must join its pull task");
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+/// Installs one process-wide OpenTelemetry layer; a delivery runs in its own task.
+fn install_tracing() {
+    use opentelemetry::trace::TracerProvider as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other test installs a subscriber");
+    });
+}
+
+fn trace_id(span: &tracing::Span) -> opentelemetry::trace::TraceId {
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    span.context().span().span_context().trace_id()
+}
+
+#[tokio::test]
+async fn handler_runs_in_the_trace_of_the_publication() {
+    use tracing::Instrument as _;
+
+    install_tracing();
+    let fixture = Fixture::create(true).await;
+    let cancel = CancellationToken::new();
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer_options(&fixture)), 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect("fixture source stream is admitted");
+    let (observed_tx, observed_rx) = oneshot::channel();
+    let observed_tx = Arc::new(Mutex::new(Some(observed_tx)));
+    let mut registry = registry(&fixture);
+    registry
+        .register::<ExampleEvent, _, _>(move |_, _| {
+            if let Some(sender) = observed_tx
+                .lock()
+                .expect("test completion sender lock must not be poisoned")
+                .take()
+            {
+                let _ = sender.send(trace_id(&tracing::Span::current()));
+            }
+            async { Ok(()) }
+        })
+        .expect("fixture handler is registered");
+    let mut handle = messaging
+        .consumer(registry)
+        .await
+        .expect("operator-provisioned durable consumer is admitted")
+        .start(&cancel);
+    let prepared = messaging
+        .producer()
+        .prepare(fixture.subject.clone(), &event("event-traced"))
+        .expect("fixture event is prepared");
+    let request = tracing::info_span!("request");
+    messaging
+        .producer()
+        .publish(&prepared, deadline(), &cancel)
+        .instrument(request.clone())
+        .await
+        .expect("fixture event publication is acknowledged");
+
+    let observed = timeout(Duration::from_secs(3), observed_rx)
+        .await
+        .expect("typed handler must observe the broker delivery")
+        .expect("handler completion signal must remain connected");
+    assert_ne!(observed, opentelemetry::trace::TraceId::INVALID);
+    assert_eq!(observed, trace_id(&request));
     wait_for_source_ack(&fixture).await;
 
     handle
@@ -1242,6 +1330,145 @@ async fn consumer_reconciles_its_named_durable_without_stream_administration() {
         .finish(deadline())
         .await
         .expect("empty durable consumer drains within the shared deadline");
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn durable_deleted_between_pulls_stops_the_consumer() {
+    let fixture = Fixture::create(false).await;
+    let cancel = CancellationToken::new();
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer_options(&fixture)), 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect("fixture source stream is admitted");
+    let mut registry = registry(&fixture);
+    registry
+        .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
+        .expect("fixture handler is registered");
+    let consumer = messaging
+        .consumer(registry)
+        .await
+        .expect("adapter creates its named durable consumer");
+    // No pull is waiting yet, so the broker has no request to terminate with
+    // `Consumer Deleted`; the next pull meets a subject nobody answers.
+    fixture
+        .jetstream
+        .delete_consumer_from_stream(&fixture.durable, &fixture.stream)
+        .await
+        .expect("test administrator deletes the durable consumer");
+
+    let handle = consumer.start(&cancel);
+    let failure = timeout(Duration::from_secs(10), handle.failed())
+        .await
+        .expect("a durable the broker reports missing must stop the consumer");
+    assert!(matches!(failure, ConsumerError::ConsumerLost));
+
+    drop(handle);
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn drain_returns_a_prefetched_delivery_before_ack_wait() {
+    let fixture = Fixture::create(false).await;
+    let cancel = CancellationToken::new();
+    let consumer_options = ConsumerOptions {
+        concurrency: 2,
+        ..consumer_options(&fixture)
+    };
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer_options), 1024),
+        Instant::now() + Duration::from_secs(30),
+        cancel.clone(),
+    ))
+    .await
+    .expect("fixture source stream is admitted");
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let release = CancellationToken::new();
+    let mut blocking = registry(&fixture);
+    blocking
+        .register::<ExampleEvent, _, _>({
+            let release = release.clone();
+            move |_, _| {
+                let _ = started_tx.send(());
+                let release = release.clone();
+                async move {
+                    release.cancelled().await;
+                    Ok(())
+                }
+            }
+        })
+        .expect("fixture handler is registered");
+    let mut first = messaging
+        .consumer(blocking)
+        .await
+        .expect("adapter creates its named durable consumer")
+        .start(&cancel);
+    for id in ["event-in-flight-1", "event-in-flight-2", "event-prefetched"] {
+        let prepared = messaging
+            .producer()
+            .prepare(fixture.subject.clone(), &event(id))
+            .expect("fixture event is prepared");
+        messaging
+            .producer()
+            .publish(&prepared, deadline(), &cancel)
+            .await
+            .expect("fixture event publication is acknowledged");
+    }
+    // Both slots are busy, so the third delivery waits in the client's buffer.
+    timeout(Duration::from_secs(3), async {
+        started_rx.recv().await;
+        started_rx.recv().await;
+        let mut cadence = tokio::time::interval(Duration::from_millis(10));
+        loop {
+            cadence.tick().await;
+            let durable: consumer::PullConsumer = fixture
+                .jetstream
+                .get_consumer_from_stream(&fixture.durable, &fixture.stream)
+                .await
+                .expect("the durable consumer exists");
+            if durable.cached_info().num_ack_pending == 3 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the broker must deliver the third message to the busy replica");
+
+    first.drain();
+    release.cancel();
+    first
+        .finish(deadline())
+        .await
+        .expect("the in-flight deliveries settle within the shared deadline");
+
+    let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut recording = registry(&fixture);
+    recording
+        .register::<ExampleEvent, _, _>(move |event, _| {
+            let _ = observed_tx.send(event.id);
+            async { Ok(()) }
+        })
+        .expect("fixture handler is registered");
+    let mut second = messaging
+        .consumer(recording)
+        .await
+        .expect("the durable consumer is admitted again")
+        .start(&cancel);
+    let observed = timeout(Duration::from_secs(10), observed_rx.recv())
+        .await
+        .expect("a prefetched delivery must return long before the 41 s ack wait")
+        .expect("handler completion signal must remain connected");
+    assert_eq!(observed, "event-prefetched");
+
+    second
+        .finish(deadline())
+        .await
+        .expect("bounded consumer drain must join its pull task");
     close(messaging).await;
     fixture.cleanup().await;
 }

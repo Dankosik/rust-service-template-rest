@@ -71,7 +71,7 @@ compatibility limits.
 | `make check-instructions` | `check-skills` plus the four carrier checks; what CI runs on the `agent_instructions` surface | Python 3 |
 | `make tools-check` | `tools/versions.env` shape and digests; each Cargo tool reports its pin; the Dockerfile `ARG` defaults and `FROM` tags agree with the manifest and `rust-toolchain.toml` | Cargo tools (built once) |
 <!-- template:begin grpc:docs-command-grpc -->
-| `make grpc-generate` | Generate committed protobuf Rust from a temporary Buf descriptor set, built without imports, with stock tonic-prost-build | Go, Rust |
+| `make grpc-generate` | Generate committed protobuf Rust and its descriptor set from Buf's descriptor set, built with imports, with stock tonic-prost-build | Go, Rust |
 | `make grpc-check` | Buf format/lint, generation drift and exact base FILE compatibility; heavy and CI-owned by default | Same tools; `GRPC_BASE_REF` in CI |
 <!-- template:end grpc:docs-command-grpc -->
 

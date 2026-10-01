@@ -36,7 +36,17 @@ env:
   # target cache about 4 GB. Cache keys carry the level, so a change never
   # restores artifacts built at another one.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  # Dependencies build without debuginfo: the Cargo caches hold dependency
+  # artifacts alone, and workspace frames keep their line tables. Cargo reads
+  # no environment variable for a package override, so each Rust job writes
+  # this level to the runner's Cargo configuration; the name keeps it in the
+  # CARGO_* environment the cache keys hash.
+  CARGO_DEPENDENCY_DEBUG: "false"
   RUST_BACKTRACE: short
+  # zstd reads its default level here when actions/cache archives a cache.
+  # Only a push to main pays the slower save; restores are not slower, and
+  # the smaller archives keep the caches inside the repository's 10 GB.
+  ZSTD_CLEVEL: "12"
 
 jobs:
   changes:
@@ -177,18 +187,26 @@ jobs:
         run: |
           rustup toolchain install
           rustup show active-toolchain
+          printf '[profile.dev.package."*"]\ndebug = %s\n' "${CARGO_DEPENDENCY_DEBUG}" >>"${CARGO_HOME:-${HOME}/.cargo}/config.toml"
       - name: Cargo caches
         # Keyed by the toolchain, every manifest and lockfile, and the CARGO_*
-        # and RUST* environment (the debuginfo level among them). Only a push
+        # and RUST* environment (the debuginfo levels among them). Only a push
         # to main saves, after a successful job, and the saved target holds
         # dependency artifacts alone: workspace crates rebuild on every
         # checkout anyway, and keeping them overran the 10 GB cache budget.
+        # The first save owns a key, so only a run that builds the workspace
+        # saves: a push that ran the OpenAPI or validation steps alone would
+        # leave an empty target under the key until the lockfile changes.
         # zizmor reads lookup-only, not save-if, hence its ignore below.
         if: env.RUST_SELECTED == 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
           cache-bin: "false"
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          save-if: >-
+            ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (
+                needs.changes.outputs.rust_source == 'true' ||
+                needs.changes.outputs.cargo_dependencies == 'true' ||
+                needs.changes.outputs.lint_config == 'true') }}
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
         uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
@@ -304,8 +322,9 @@ jobs:
         if: needs.changes.outputs.agent_instructions == 'true'
         run: bash ./scripts/ci/measure.sh quality-instructions -- make check-instructions
       - name: Validation routing
+        # Four independent self-tests over private fixtures, run side by side.
         if: needs.changes.outputs.validation_system == 'true'
-        run: bash ./scripts/ci/measure.sh quality-validation-system -- make changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
+        run: bash ./scripts/ci/measure.sh quality-validation-system -- make -j4 --output-sync=target changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
 
   security:
     needs: changes
@@ -534,7 +553,9 @@ jobs:
         run: |
           rustup toolchain install
           rustup show active-toolchain
+          printf '[profile.dev.package."*"]\ndebug = %s\n' "${CARGO_DEPENDENCY_DEBUG}" >>"${CARGO_HOME:-${HOME}/.cargo}/config.toml"
       - name: Cargo caches
+        id: cargo-cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
           cache-bin: "false"
@@ -618,6 +639,29 @@ jobs:
           set -euo pipefail
           bash ./scripts/messaging-go-compat.sh verify-rust "${RUNNER_TEMP}/go-wire/records.json" "${RUNNER_TEMP}/go-wire/rust-export.json"
           bash ./scripts/messaging-go-compat.sh check "${RUNNER_TEMP}/go-wire/records.json"
+      - name: Compile every suite for the cache
+        # The first save owns the cache key. A push that selected some of the
+        # suites would keep the others cold until the lockfile changes, so the
+        # run that saves compiles them all; a selected suite is already built.
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+          steps.cargo-cache.outputs.cache-hit != 'true'
+        env:
+          INTEGRATION_COMPOSE_MANAGED: "1"
+          DATABASE_URL: compile-only
+          NATS_URL: compile-only
+          CACHE_URL: compile-only
+          OBJECT_STORAGE_TEST_ENDPOINT: compile-only
+        run: |
+          set -euo pipefail
+          for suite in db messaging cache object-storage; do
+            if [[ -f scripts/ci/test-integration-${suite}.sh ]]; then
+              bash "./scripts/ci/test-integration-${suite}.sh" --no-run
+            fi
+          done
+          if [[ -f scripts/messaging-go-compat.sh ]]; then
+            cargo test --locked -p infra-messaging --test wire_compat --no-run
+          fi
       - name: Upload Go wire provenance
         if: always() && needs.changes.outputs.messaging_integration == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -637,9 +681,9 @@ jobs:
       # Each part reports its own result; `required` reads the aggregate,
       # which is success only when every part passed.
       fail-fast: false
-      # Together the parts are `make template-init-check`: the `source` part
-      # runs the source suites and canonical projections, every other part a
-      # group of runtime graphs. scripts/ci/initializer-matrix.py owns the
+      # With `initializer (projections)` the parts are `make
+      # template-init-check`: the `source` part runs the source suites, every
+      # other part a group of runtime graphs. scripts/ci/initializer-matrix.py owns the
       # grouping and keeps only the graphs the diff can affect; a push without
       # a readable base, a tag, a schedule, or a manual run selects them all.
       matrix: ${{ fromJSON(needs.changes.outputs.initializer_matrix || '{"include":[{"part":"source"}]}') }}
@@ -652,6 +696,7 @@ jobs:
         run: |
           rustup toolchain install
           rustup show active-toolchain
+          printf '[profile.dev.package."*"]\ndebug = %s\n' "${CARGO_DEPENDENCY_DEBUG}" >>"${CARGO_HOME:-${HOME}/.cargo}/config.toml"
       - name: Cargo caches
         # One cache per part: a part's graphs share dependency features, so
         # its pruned target serves the next run of the same part.
@@ -662,14 +707,11 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Fetch locked Cargo packages
         run: cargo fetch --locked
-      - name: Source suites and canonical projections
+      - name: Source suites
         if: matrix.part == 'source'
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: |
-          set -euo pipefail
-          bash ./scripts/ci/measure.sh template-initializer-source -- bash ./scripts/ci/template-init-check.sh --source-checks
-          bash ./scripts/ci/measure.sh template-initializer-projections -- bash ./scripts/ci/template-init-check.sh --projections-only
+        run: bash ./scripts/ci/measure.sh template-initializer-source -- bash ./scripts/ci/template-init-check.sh --source-checks
       - name: Runtime graphs
         if: matrix.part != 'source'
         env:
@@ -682,14 +724,13 @@ jobs:
         run: bash ./scripts/ci/measure.sh "template-initializer-${PART}" -- bash ./scripts/ci/template-init-check.sh --runtime-graphs "${GRAPHS}"
 
   initializer-projections:
-    # Only projected text changed (documentation, instructions, harness
-    # carriers, workflow and image metadata): the canonical projections prove
-    # it without Cargo, and the runtime matrix waits for a change that can
-    # alter an initialized service's build or the initializer itself.
+    # The canonical projections need no Cargo, so they run beside the matrix
+    # instead of inside its `source` part. A change to projected text alone
+    # (documentation, instructions, harness carriers, workflow and image
+    # metadata) runs only this job: the runtime matrix waits for a change that
+    # can alter an initialized service's build or the initializer itself.
     needs: changes
-    if: >-
-      needs.changes.outputs.module_initializer == 'true' &&
-      needs.changes.outputs.initializer_runtime != 'true'
+    if: needs.changes.outputs.module_initializer == 'true'
     name: initializer (projections)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -753,7 +794,6 @@ jobs:
       - name: Require selected initializer projections success
         if: >-
           needs.changes.outputs.module_initializer == 'true' &&
-          needs.changes.outputs.initializer_runtime != 'true' &&
           needs.initializer-projections.result != 'success'
         run: exit 1
       - name: Accept passed and intentionally skipped gates

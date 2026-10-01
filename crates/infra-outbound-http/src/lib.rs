@@ -25,6 +25,9 @@ pub use observe::{REQUEST_DURATION_BUCKETS, REQUEST_DURATION_METRIC};
 pub use url::Url;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The longest TCP connect budget, whatever the operation timeout.
+const CONNECT_TIMEOUT_CAP: Duration = Duration::from_secs(10);
 type Transport = hyper_util::client::legacy::Client<
     hyper_rustls::HttpsConnector<HttpConnector<Resolver>>,
     Full<Bytes>,
@@ -99,6 +102,7 @@ pub struct Client {
     target: policy::Target,
     server: observe::Server,
     limits: Limits,
+    propagate_trace_context: bool,
     transport: Transport,
 }
 
@@ -108,6 +112,7 @@ impl fmt::Debug for Client {
             .debug_struct("Client")
             .field("origin", &self.target)
             .field("limits", &self.limits)
+            .field("propagate_trace_context", &self.propagate_trace_context)
             .finish_non_exhaustive()
     }
 }
@@ -128,8 +133,20 @@ impl Client {
             server: observe::Server::new(&target),
             target,
             limits,
+            propagate_trace_context: false,
             transport: build_transport(&limits, true, tls_config()?.clone(), Resolver::new()),
         })
+    }
+
+    /// Sends the trace context of each attempt to the origin through the
+    /// process text-map propagator (W3C `traceparent` and `tracestate`),
+    /// replacing any caller value of those headers. Off by default: a trace
+    /// identifier is data shared with the provider, so the adapter opts in
+    /// for an origin that belongs to the same trace domain.
+    #[must_use]
+    pub fn with_trace_context(mut self) -> Self {
+        self.propagate_trace_context = true;
+        self
     }
 
     /// Creates the narrow local-HTTP constructor used by downstream mock
@@ -147,6 +164,7 @@ impl Client {
             server: observe::Server::new(&target),
             target,
             limits,
+            propagate_trace_context: false,
             transport: build_transport(&limits, false, tls_config()?.clone(), Resolver::new()),
         })
     }
@@ -172,9 +190,12 @@ impl Client {
         if timeout.is_zero() {
             return Err(Error::Timeout);
         }
-        let request = policy::admit_request(&self.target, request)?;
+        let mut request = policy::admit_request(&self.target, request)?;
 
         let mut attempt = observe::Attempt::start(request.method(), &self.server);
+        if self.propagate_trace_context {
+            attempt.inject_trace_context(request.headers_mut());
+        }
         let result = self.exchange(request, timeout, &mut attempt).await;
         attempt.finish(&result);
         result
@@ -251,6 +272,11 @@ fn build_transport(
     let mut http = HttpConnector::new_with_resolver(resolver);
     http.enforce_http(false);
     http.set_nodelay(true);
+    // Hyper-util divides this among the resolved addresses of one family, so
+    // an address that never answers leaves time for the next one.
+    http.set_connect_timeout(Some(
+        (limits.operation_timeout / 2).min(CONNECT_TIMEOUT_CAP),
+    ));
     http.set_keepalive(Some(Duration::from_secs(15)));
     http.set_keepalive_interval(Some(Duration::from_secs(15)));
     http.set_keepalive_retries(Some(3));

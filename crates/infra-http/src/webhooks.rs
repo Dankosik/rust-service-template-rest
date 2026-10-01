@@ -9,7 +9,7 @@ use std::fmt;
 use std::time::SystemTime;
 
 use axum::Router;
-use axum::extract::{Extension, Path, Request};
+use axum::extract::{Extension, Request};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use health::ReadinessReader;
@@ -20,6 +20,7 @@ use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+use crate::extract::Path;
 use crate::problem::responses::WebhookProblemResponses;
 use crate::problem::{Code, Problem};
 
@@ -203,5 +204,46 @@ mod tests {
             .to_bytes();
         let problem: Value = serde_json::from_slice(&body).expect("problem JSON");
         assert_eq!(problem["code"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn an_undecodable_endpoint_id_is_a_problem() {
+        let readiness = Readiness::new(
+            Vec::new(),
+            RefreshPolicy {
+                interval: std::time::Duration::from_secs(1),
+                probe_budget: std::time::Duration::from_secs(1),
+                failure_threshold: 1,
+            },
+        );
+        let app = crate::finalize_public(router())
+            .expect("the webhook operation is explicitly public")
+            .with_state(readiness.reader())
+            .layer(Extension(WebhookState::inert()));
+        let response = app
+            .oneshot(
+                Request::post("/webhooks/%FF")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/problem+json")
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("complete problem body")
+            .to_bytes();
+        let problem: Value = serde_json::from_slice(&body).expect("problem JSON");
+        assert_eq!(problem["code"], "bad_request");
+        assert_eq!(problem["invalid_params"][0]["name"], "path.endpoint_id");
     }
 }

@@ -40,12 +40,12 @@ NARROWABLE = ("crates/", "migrations/", "test/", "api/proto/")
 # target and cache serve all of them, and balance the measured per-graph
 # minutes (docs/ci-cd-production-ready.md). Every graph belongs to one part.
 PARTS: dict[str, tuple[int, ...]] = {
-    "baseline": (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 47, 50, 51, 52, 54, 57, 58, 59, 60, 62, 64),
+    "baseline": (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 50, 51, 52, 57, 58, 59, 60, 62, 64),
     "idempotency": (13, 14, 15, 16, 23, 24),
-    "jobs": (17, 18, 19, 20, 21, 22, 56),
+    "jobs": (18, 19, 20, 21, 22, 56),
     "jobs-webhooks": (25, 26, 27, 28, 29),
-    "webhooks": (30, 31, 32, 33, 34, 35, 36, 37, 38),
-    "webhooks-messaging": (39, 40, 41, 42, 43, 44, 45, 46, 48, 61, 63, 65),
+    "webhooks": (17, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42),
+    "webhooks-messaging": (43, 44, 45, 46, 47, 48, 54, 61, 63, 65),
     "messaging-oauth": (49, 53, 55),
 }
 

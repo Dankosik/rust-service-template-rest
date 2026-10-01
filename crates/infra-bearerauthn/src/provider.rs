@@ -7,11 +7,44 @@ use reqwest::{header, redirect::Policy};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::{Failure, PreparationError, PreparationPhase, PreparationReason};
+#[cfg(any(test, feature = "test-support"))]
+use crate::Failure;
+use crate::{PreparationError, PreparationPhase, PreparationReason};
 
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
 /// Total budget of one provider exchange; reqwest applies it until the body ends.
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Why a provider exchange produced no usable body. Closed, and free of
+/// provider-supplied text, URLs and credentials.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderFailure {
+    /// The exchange exceeded its time budget.
+    Timeout,
+    /// DNS, TCP or TLS did not establish a connection.
+    Connect,
+    /// The provider answered with this status instead of 200.
+    Status(u16),
+    /// The response is not `application/json` where that is required.
+    MediaType,
+    /// The response exceeds the size ceiling.
+    TooLarge,
+    /// The request or the response body failed in transit.
+    Transfer,
+}
+
+impl ProviderFailure {
+    /// A timed-out connection attempt is both; the budget is the cause.
+    fn from_transport(error: &reqwest::Error) -> Self {
+        if error.is_timeout() {
+            Self::Timeout
+        } else if error.is_connect() {
+            Self::Connect
+        } else {
+            Self::Transfer
+        }
+    }
+}
 
 /// An exact issuer identity: an HTTPS URL without a query or fragment.
 #[derive(Clone, Eq, PartialEq)]
@@ -129,7 +162,7 @@ impl ProviderClient {
     }
 
     // template:begin oidc-jwt:authn-provider-get-json
-    pub(crate) async fn get_json(&self, url: &Url) -> Result<Vec<u8>, Failure> {
+    pub(crate) async fn get_json(&self, url: &Url) -> Result<Vec<u8>, ProviderFailure> {
         self.exchange(self.client.get(url.clone()), false).await
     }
     // template:end oidc-jwt:authn-provider-get-json
@@ -143,7 +176,7 @@ impl ProviderClient {
         client_id: &str,
         client_secret: &str,
         form_body: String,
-    ) -> Result<Vec<u8>, Failure> {
+    ) -> Result<Vec<u8>, ProviderFailure> {
         let request = self
             .client
             .post(url.clone())
@@ -161,20 +194,25 @@ impl ProviderClient {
         &self,
         request: reqwest::RequestBuilder,
         require_json_media_type: bool,
-    ) -> Result<Vec<u8>, Failure> {
-        let mut response = request.send().await.map_err(|_| Failure::Unavailable)?;
-        if response.status() != reqwest::StatusCode::OK
-            || (require_json_media_type && !is_json_response(&response))
-            || response
-                .content_length()
-                .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    ) -> Result<Vec<u8>, ProviderFailure> {
+        let transport = |error| ProviderFailure::from_transport(&error);
+        let mut response = request.send().await.map_err(transport)?;
+        if response.status() != reqwest::StatusCode::OK {
+            return Err(ProviderFailure::Status(response.status().as_u16()));
+        }
+        if require_json_media_type && !is_json_response(&response) {
+            return Err(ProviderFailure::MediaType);
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
         {
-            return Err(Failure::Unavailable);
+            return Err(ProviderFailure::TooLarge);
         }
         let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| Failure::Unavailable)? {
+        while let Some(chunk) = response.chunk().await.map_err(transport)? {
             if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(body.len()) {
-                return Err(Failure::Unavailable);
+                return Err(ProviderFailure::TooLarge);
             }
             body.extend_from_slice(&chunk);
         }
@@ -265,27 +303,48 @@ fn is_json_response(response: &reqwest::Response) -> bool {
         })
 }
 
+/// A TLS acceptor for `host` and the root certificate that trusts it.
+#[cfg(test)]
+pub(crate) fn fixture_acceptor(host: &str) -> (tokio_rustls::TlsAcceptor, Vec<u8>) {
+    use tokio_rustls::rustls::{
+        ServerConfig,
+        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    };
+
+    let material = crate::tls::TlsMaterial::new(host);
+    let config = ServerConfig::builder_with_provider(Arc::new(
+        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![CertificateDer::from(material.cert)],
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key)),
+    )
+    .unwrap();
+    (
+        tokio_rustls::TlsAcceptor::from(Arc::new(config)),
+        material.root,
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::time::Duration;
 
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
         task::JoinHandle,
     };
-    use tokio_rustls::{
-        TlsAcceptor,
-        rustls::{
-            ServerConfig,
-            pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-        },
-    };
     use tokio_util::sync::CancellationToken;
     use url::Url;
 
-    use super::{EndpointUrl, Failure, IssuerUrl, ProviderClient, new_fixture_client};
-    use crate::tls::TlsMaterial;
+    use super::{
+        EndpointUrl, IssuerUrl, ProviderClient, ProviderFailure, fixture_acceptor,
+        new_fixture_client,
+    };
 
     const FIXTURE_HOST: &str = "authn.fixture.test";
 
@@ -329,21 +388,9 @@ mod tests {
         response: Vec<u8>,
         hold_open: bool,
     ) -> (std::net::SocketAddr, Vec<u8>, JoinHandle<Vec<u8>>) {
-        let material = TlsMaterial::new(FIXTURE_HOST);
+        let (acceptor, root) = fixture_acceptor(FIXTURE_HOST);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let config = ServerConfig::builder_with_provider(Arc::new(
-            tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![CertificateDer::from(material.cert)],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key)),
-        )
-        .unwrap();
-        let acceptor = TlsAcceptor::from(Arc::new(config));
         let server = tokio::spawn(async move {
             tokio::time::timeout(Duration::from_secs(5), async move {
                 let (stream, _) = listener.accept().await.unwrap();
@@ -372,7 +419,7 @@ mod tests {
             .await
             .unwrap()
         });
-        (address, material.root, server)
+        (address, root, server)
     }
 
     fn fixture_client(address: std::net::SocketAddr, root: &[u8]) -> ProviderClient {
@@ -428,9 +475,19 @@ mod tests {
             fixture_client(address, &root)
                 .get_json(&fixture_url(address))
                 .await,
-            Err(Failure::Unavailable)
+            Err(ProviderFailure::TooLarge)
         );
         let _ = server.await;
+
+        let response = b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n".to_vec();
+        let (address, root, server) = tls_server(response, false).await;
+        assert_eq!(
+            fixture_client(address, &root)
+                .get_json(&fixture_url(address))
+                .await,
+            Err(ProviderFailure::Status(404))
+        );
+        server.await.unwrap();
 
         let response = b"HTTP/1.1 200 OK\r\ncontent-length: 11\r\n\r\n{".to_vec();
         let (address, root, server) = tls_server(response, true).await;
@@ -438,7 +495,7 @@ mod tests {
             fixture_client(address, &root)
                 .get_json(&fixture_url(address))
                 .await,
-            Err(Failure::Unavailable),
+            Err(ProviderFailure::Timeout),
         );
         server.await.unwrap();
     }
@@ -479,7 +536,7 @@ mod tests {
                         "token=opaque".to_owned(),
                     )
                     .await,
-                Err(Failure::Unavailable),
+                Err(ProviderFailure::MediaType),
             );
             server.await.unwrap();
         }
