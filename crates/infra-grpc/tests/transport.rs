@@ -70,6 +70,9 @@ use tonic_types::StatusExt as _;
 
 // template:begin authn:grpc-transport-test-accepted-token
 const ACCEPTED: &str = "accepted";
+/// A token the provider reports active but without any scope.
+const UNSCOPED: &str = "unscoped";
+const UNARY_PATH: &str = "/example.v1.EchoService/Unary";
 // template:end authn:grpc-transport-test-accepted-token
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -295,6 +298,11 @@ impl Fixture {
         services
             .add(EchoServiceServer::new(echo.clone()))
             .expect("echo registers once");
+        // template:begin authn:grpc-transport-test-scope-requirement
+        services
+            .require_scopes(UNARY_PATH, &["echo.read"])
+            .expect("unary scopes register once");
+        // template:end authn:grpc-transport-test-scope-requirement
         let app = infra_grpc::router(
             services,
             readiness.reader(),
@@ -556,6 +564,94 @@ async fn missing_and_malformed_bearers_are_unauthenticated_and_health_is_public(
     fixture.stop().await;
 }
 // template:end authn:grpc-transport-test-unauthenticated
+
+// template:begin authn:grpc-transport-test-insufficient-scope
+fn unscoped<T>(message: T) -> Request<T> {
+    let mut request = Request::new(message);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {UNSCOPED}").parse().unwrap(),
+    );
+    request
+}
+
+#[tokio::test]
+async fn a_principal_without_a_declared_scope_is_denied_before_the_handler() {
+    let fixture = Fixture::plaintext().await;
+    let mut echo = fixture.echo_client();
+
+    let denied = timeout(
+        WAIT,
+        echo.unary(unscoped(UnaryRequest {
+            message: "denied".to_owned(),
+        })),
+    )
+    .await
+    .expect("unscoped unary")
+    .unwrap_err();
+    assert_eq!(denied.code(), Code::PermissionDenied);
+    assert_eq!(
+        denied.message(),
+        "the verified principal lacks the required scope"
+    );
+    assert!(fixture.echo.calls.lock().expect("observations").is_empty());
+
+    // A method with no declared requirement admits any authenticated caller.
+    let mut undeclared = timeout(
+        WAIT,
+        echo.server_stream(unscoped(ServerStreamRequest {
+            message: "admitted".to_owned(),
+        })),
+    )
+    .await
+    .expect("unscoped server stream")
+    .unwrap()
+    .into_inner();
+    assert_eq!(
+        timeout(WAIT, undeclared.message())
+            .await
+            .expect("server item")
+            .unwrap()
+            .unwrap()
+            .message,
+        "admitted"
+    );
+    drop(echo);
+    fixture.stop().await;
+}
+
+#[test]
+fn a_scope_requirement_needs_a_registered_service_and_is_declared_once() {
+    let mut services = Services::new();
+    assert_eq!(
+        services.require_scopes(UNARY_PATH, &["echo.read"]),
+        Err(Error::UnregisteredMethodPath)
+    );
+    services
+        .add(EchoServiceServer::new(Echo::new()))
+        .expect("registration");
+    for path in [
+        "example.v1.EchoService/Unary",
+        "/example.v1.EchoService",
+        "/example.v1.EchoService/",
+        "/example.v1.EchoService/Unary/extra",
+        "/example.v1.Other/Unary",
+    ] {
+        assert_eq!(
+            services.require_scopes(path, &["echo.read"]),
+            Err(Error::UnregisteredMethodPath),
+            "{path}"
+        );
+    }
+    services
+        .require_scopes(UNARY_PATH, &["echo.read"])
+        .expect("first requirement");
+    assert_eq!(
+        services.require_scopes(UNARY_PATH, &["echo.write"]),
+        Err(Error::DuplicateScopeRequirement)
+    );
+}
+// template:end authn:grpc-transport-test-insufficient-scope
 
 // template:begin authn:grpc-transport-test-rejection-flood
 /// Each rejected call is answered before its request DATA arrives. Without
@@ -1045,15 +1141,30 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
                 let acceptor = acceptor.clone();
                 tokio::spawn(async move {
                     if let Ok(mut stream) = acceptor.accept(stream).await {
+                        // The form body can arrive after the request head.
                         let mut request = [0_u8; 4096];
-                        let _ = stream.read(&mut request).await;
+                        let mut read = 0;
+                        let contains = |seen: &[u8], needle: &[u8]| {
+                            seen.windows(needle.len()).any(|window| window == needle)
+                        };
+                        while !contains(&request[..read], b"token=") {
+                            match stream.read(&mut request[read..]).await {
+                                Ok(more) if more > 0 => read += more,
+                                _ => break,
+                            }
+                        }
+                        let scope = if contains(&request[..read], b"token=unscoped") {
+                            ""
+                        } else {
+                            "echo.read"
+                        };
                         let expiry = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
                             .as_secs()
                             + 60;
                         let body = format!(
-                            r#"{{"active":true,"iss":"https://issuer.example","aud":"api","exp":{expiry},"sub":"subject"}}"#
+                            r#"{{"active":true,"iss":"https://issuer.example","aud":"api","exp":{expiry},"sub":"subject","scope":"{scope}"}}"#
                         );
                         let response = format!(
                             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",

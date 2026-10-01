@@ -128,7 +128,13 @@ Nimbus and go-oidc do. The token header `alg` must be configured and fit the
 key. Mixed key sets retain usable entries while malformed or incompatible
 entries are skipped. Every installed key that matches the token's `kid` (or
 every key, when the token has none) and algorithm is tried in turn; the first
-valid signature wins. An invalid signature or invalid issuer, audience, expiry,
+valid signature wins. A token whose `typ` header names another kind of JWT is
+invalid: the resource-server profile admits only an absent `typ`, `JWT`
+(or `application/jwt`) and `at+jwt` (or `application/at+jwt`), so a logout
+token, a client assertion or a DPoP proof signed by the same issuer is never
+an access token (RFC 8725 section 3.11). An untyped ID token stays
+indistinguishable in this profile except by its missing scopes; `rfc9068`
+requires `at+jwt`. An invalid signature or invalid issuer, audience, expiry,
 not-before or identity evidence is an invalid token. The resource-server
 profile requires a subject or client identity; RFC 9068 also requires
 access-token `typ`, subject, `client_id`, `jti`, and `iat`.
