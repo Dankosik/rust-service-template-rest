@@ -123,7 +123,7 @@ service -> infra-cache for connect, the startup check, shutdown drop, and option
 a feature -> infra-cache for namespace get, set, and delete
 <!-- template:end cache:docs-boundaries-cache-edges -->
 <!-- template:begin object-storage:docs-boundaries-object-storage-edges -->
-  -> infra-object-storage -> aws-sdk-s3, aws-smithy-http-client, health, secrecy, metrics, tracing, tokio
+  -> infra-object-storage -> aws-sdk-s3, aws-config, aws-smithy-http-client, health, secrecy, metrics, tracing, tokio
 service -> infra-object-storage for construction, shutdown drop, and optional probe registration
 a feature -> infra-object-storage for put, get, head, delete, and presigned GET
 <!-- template:end object-storage:docs-boundaries-object-storage-edges -->
