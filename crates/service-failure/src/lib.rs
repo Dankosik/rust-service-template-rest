@@ -1,99 +1,68 @@
-//! Transport-neutral, closed service failure classification.
+//! Closed catalog of the failure identities a client can match on.
 //!
-//! Transports project this catalog into their own wire formats. The catalog
-//! intentionally carries no status code, response schema, or caller-controlled
-//! detail text.
-
-use std::time::Duration;
+//! Each transport projects a [`Code`] into its own wire format: `infra-http`
+//! into an RFC 9457 problem, `infra-grpc` into a status carrying
+//! `google.rpc.ErrorInfo`. The catalog carries no status code, response
+//! schema, or caller-controlled detail text.
 
 use serde::ser::Serializer;
 
-/// Stable machine-readable failure code a client matches on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Code {
-    BadRequest,
-    Unauthorized,
+/// Declares the catalog once, so the variants, the list of them and their
+/// wire spellings cannot drift apart and a profile removes one line per code.
+macro_rules! codes {
+    ($($variant:ident => $wire:literal,)+) => {
+        /// Stable machine-readable failure code a client matches on.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum Code {
+            $($variant,)+
+        }
+
+        impl Code {
+            /// Every published code, for transport coverage tests.
+            pub const ALL: &'static [Code] = &[$(Self::$variant,)+];
+
+            /// The wire spelling: lowercase `snake_case` of at most 63 bytes,
+            /// so its uppercase form is a valid `google.rpc.ErrorInfo` reason.
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $wire,)+
+                }
+            }
+        }
+    };
+}
+
+codes! {
+    BadRequest => "bad_request",
+    Unauthorized => "unauthorized",
     // template:begin authn:http-authentication-codes
-    AuthenticationRequired,
-    AuthenticationMalformed,
-    AuthenticationInvalid,
-    AuthenticationUnavailable,
+    AuthenticationRequired => "authentication_required",
+    AuthenticationMalformed => "authentication_malformed",
+    AuthenticationInvalid => "authentication_invalid",
+    AuthenticationUnavailable => "authentication_unavailable",
     // template:end authn:http-authentication-codes
     // template:begin http-idempotency:http-idempotency-codes
-    IdempotencyRequestInProgress,
-    IdempotencyKeyMismatch,
-    IdempotencyUnavailable,
+    IdempotencyRequestInProgress => "idempotency_request_in_progress",
+    IdempotencyKeyMismatch => "idempotency_key_mismatch",
+    IdempotencyUnavailable => "idempotency_unavailable",
     // template:end http-idempotency:http-idempotency-codes
     // template:begin inbound-webhooks:http-webhook-codes
-    WebhookRejected,
+    WebhookRejected => "webhook_rejected",
     // template:end inbound-webhooks:http-webhook-codes
-    Forbidden,
-    NotFound,
-    MethodNotAllowed,
-    Conflict,
-    AlreadyExists,
-    RequestEntityTooLarge,
-    RequestHeaderFieldsTooLarge,
-    UnsupportedMediaType,
-    UnprocessableContent,
-    TooManyRequests,
-    InternalServerError,
-    ServiceUnavailable,
-    RequestTimeout,
-}
-
-/// Transport-neutral failure meaning.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Meaning {
-    BadRequest,
-    Unauthenticated,
-    PermissionDenied,
-    NotFound,
-    AlreadyExists,
-    Conflict,
-    Unimplemented,
-    ResourceExhausted,
-    Unavailable,
-    DeadlineExceeded,
-    Internal,
-}
-
-/// Closed classified failure data rendered by a transport.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClassifiedFailure {
-    code: Code,
-    retry_after: Option<Duration>,
-}
-
-impl ClassifiedFailure {
-    #[must_use]
-    pub const fn new(code: Code) -> Self {
-        Self {
-            code,
-            retry_after: None,
-        }
-    }
-
-    #[must_use]
-    pub const fn code(&self) -> Code {
-        self.code
-    }
-
-    #[must_use]
-    pub const fn meaning(&self) -> Meaning {
-        self.code.meaning()
-    }
-
-    #[must_use]
-    pub const fn retry_after(&self) -> Option<Duration> {
-        self.retry_after
-    }
-
-    #[must_use]
-    pub fn with_retry_after(mut self, retry_after: Duration) -> Self {
-        self.retry_after = Some(retry_after);
-        self
-    }
+    Forbidden => "forbidden",
+    NotFound => "not_found",
+    MethodNotAllowed => "method_not_allowed",
+    Conflict => "conflict",
+    AlreadyExists => "already_exists",
+    RequestEntityTooLarge => "request_entity_too_large",
+    RequestHeaderFieldsTooLarge => "request_header_fields_too_large",
+    UnsupportedMediaType => "unsupported_media_type",
+    UnprocessableContent => "unprocessable_content",
+    TooManyRequests => "too_many_requests",
+    InternalServerError => "internal_error",
+    ServiceUnavailable => "service_unavailable",
+    RequestTimeout => "request_timeout",
 }
 
 /// Caller-visible text for failures a transport refuses to describe.
@@ -101,122 +70,6 @@ pub const SANITIZED_DETAIL: &str = "request failed";
 
 /// Caller-visible text when admission control sheds a request.
 pub const AT_CAPACITY_DETAIL: &str = "server is at capacity";
-
-impl Code {
-    /// Every published code, for transport projections and coverage tests.
-    pub const ALL: &'static [Code] = &[
-        Self::BadRequest,
-        Self::Unauthorized,
-        // template:begin authn:service-failure-authentication-code-all
-        Self::AuthenticationRequired,
-        Self::AuthenticationMalformed,
-        Self::AuthenticationInvalid,
-        Self::AuthenticationUnavailable,
-        // template:end authn:service-failure-authentication-code-all
-        // template:begin http-idempotency:service-failure-idempotency-code-all
-        Self::IdempotencyRequestInProgress,
-        Self::IdempotencyKeyMismatch,
-        Self::IdempotencyUnavailable,
-        // template:end http-idempotency:service-failure-idempotency-code-all
-        // template:begin inbound-webhooks:service-failure-webhook-code-all
-        Self::WebhookRejected,
-        // template:end inbound-webhooks:service-failure-webhook-code-all
-        Self::Forbidden,
-        Self::NotFound,
-        Self::MethodNotAllowed,
-        Self::Conflict,
-        Self::AlreadyExists,
-        Self::RequestEntityTooLarge,
-        Self::RequestHeaderFieldsTooLarge,
-        Self::UnsupportedMediaType,
-        Self::UnprocessableContent,
-        Self::TooManyRequests,
-        Self::InternalServerError,
-        Self::ServiceUnavailable,
-        Self::RequestTimeout,
-    ];
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::BadRequest => "bad_request",
-            Self::Unauthorized => "unauthorized",
-            // template:begin authn:service-failure-authentication-code-wire
-            Self::AuthenticationRequired => "authentication_required",
-            Self::AuthenticationMalformed => "authentication_malformed",
-            Self::AuthenticationInvalid => "authentication_invalid",
-            Self::AuthenticationUnavailable => "authentication_unavailable",
-            // template:end authn:service-failure-authentication-code-wire
-            // template:begin http-idempotency:service-failure-idempotency-code-wire
-            Self::IdempotencyRequestInProgress => "idempotency_request_in_progress",
-            Self::IdempotencyKeyMismatch => "idempotency_key_mismatch",
-            Self::IdempotencyUnavailable => "idempotency_unavailable",
-            // template:end http-idempotency:service-failure-idempotency-code-wire
-            // template:begin inbound-webhooks:service-failure-webhook-code-wire
-            Self::WebhookRejected => "webhook_rejected",
-            // template:end inbound-webhooks:service-failure-webhook-code-wire
-            Self::Forbidden => "forbidden",
-            Self::NotFound => "not_found",
-            Self::MethodNotAllowed => "method_not_allowed",
-            Self::Conflict => "conflict",
-            Self::AlreadyExists => "already_exists",
-            Self::RequestEntityTooLarge => "request_entity_too_large",
-            Self::RequestHeaderFieldsTooLarge => "request_header_fields_too_large",
-            Self::UnsupportedMediaType => "unsupported_media_type",
-            Self::UnprocessableContent => "unprocessable_content",
-            Self::TooManyRequests => "too_many_requests",
-            Self::InternalServerError => "internal_error",
-            Self::ServiceUnavailable => "service_unavailable",
-            Self::RequestTimeout => "request_timeout",
-        }
-    }
-
-    #[must_use]
-    #[allow(
-        clippy::match_same_arms,
-        reason = "Optional profiles remove complete match arms independently."
-    )]
-    pub const fn meaning(self) -> Meaning {
-        match self {
-            Self::BadRequest | Self::UnsupportedMediaType | Self::UnprocessableContent => {
-                Meaning::BadRequest
-            }
-            // template:begin authn:service-failure-authentication-code-meaning
-            Self::AuthenticationMalformed => Meaning::BadRequest,
-            // template:end authn:service-failure-authentication-code-meaning
-            // template:begin http-idempotency:service-failure-idempotency-code-meaning
-            Self::IdempotencyKeyMismatch => Meaning::BadRequest,
-            // template:end http-idempotency:service-failure-idempotency-code-meaning
-            // template:begin inbound-webhooks:service-failure-webhook-code-meaning
-            Self::WebhookRejected => Meaning::BadRequest,
-            // template:end inbound-webhooks:service-failure-webhook-code-meaning
-            Self::Unauthorized => Meaning::Unauthenticated,
-            // template:begin authn:service-failure-authentication-unauthenticated-meaning
-            Self::AuthenticationRequired | Self::AuthenticationInvalid => Meaning::Unauthenticated,
-            // template:end authn:service-failure-authentication-unauthenticated-meaning
-            Self::Forbidden => Meaning::PermissionDenied,
-            Self::NotFound => Meaning::NotFound,
-            Self::AlreadyExists => Meaning::AlreadyExists,
-            Self::Conflict => Meaning::Conflict,
-            // template:begin http-idempotency:service-failure-idempotency-conflict-meaning
-            Self::IdempotencyRequestInProgress => Meaning::Conflict,
-            // template:end http-idempotency:service-failure-idempotency-conflict-meaning
-            Self::MethodNotAllowed => Meaning::Unimplemented,
-            Self::RequestEntityTooLarge
-            | Self::RequestHeaderFieldsTooLarge
-            | Self::TooManyRequests => Meaning::ResourceExhausted,
-            Self::ServiceUnavailable => Meaning::Unavailable,
-            // template:begin authn:service-failure-authentication-unavailable-meaning
-            Self::AuthenticationUnavailable => Meaning::Unavailable,
-            // template:end authn:service-failure-authentication-unavailable-meaning
-            // template:begin http-idempotency:service-failure-idempotency-unavailable-meaning
-            Self::IdempotencyUnavailable => Meaning::Unavailable,
-            // template:end http-idempotency:service-failure-idempotency-unavailable-meaning
-            Self::RequestTimeout => Meaning::DeadlineExceeded,
-            Self::InternalServerError => Meaning::Internal,
-        }
-    }
-}
 
 impl std::fmt::Display for Code {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -238,12 +91,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_unique_wire_forms_and_exhaustive_meanings() {
+    fn wire_forms_are_unique_lowercase_snake_case_within_the_reason_limit() {
         let mut wires = std::collections::HashSet::new();
         for code in Code::ALL {
-            assert!(wires.insert(code.as_str()));
-            assert_eq!(code.to_string(), code.as_str());
-            let _ = code.meaning();
+            let wire = code.as_str();
+            assert!(wires.insert(wire), "{wire} is published twice");
+            assert_eq!(code.to_string(), wire);
+            assert!((2..=63).contains(&wire.len()), "{wire}");
+            assert!(wire.starts_with(|first: char| first.is_ascii_lowercase()));
+            assert!(!wire.ends_with('_'), "{wire}");
+            assert!(
+                wire.bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'),
+                "{wire}"
+            );
         }
     }
 }

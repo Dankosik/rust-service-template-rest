@@ -182,12 +182,15 @@ components:
           minimum: 0
         title:
           type: string
-          example: bad request
+          description: The HTTP status phrase.
+          example: Bad Request
         type:
           type: string
           format: uri-reference
-          description: Stable URI reference identifying the problem class.
-          example: https://www.rfc-editor.org/rfc/rfc9110#section-15.5.1
+          description: |-
+            Always `about:blank`: the problem has no semantics beyond its HTTP
+            status, and `code` names the specific failure.
+          example: about:blank
       additionalProperties: false
   responses:
     AuthenticationForbidden:
