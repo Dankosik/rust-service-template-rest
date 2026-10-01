@@ -1810,6 +1810,11 @@ mod tests {
         };
         let variables = [
             ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+            (
+                "APP__POSTGRES__PASSWORD_FILE",
+                "/run/secrets/postgres-password",
+            ),
+            ("APP__POSTGRES__SESSION_BUDGETS", "server"),
             ("APP__LOG__FORMAT", "text"),
             ("APP__GRPC__ENABLED", "true"),
         ];
@@ -1819,6 +1824,14 @@ mod tests {
         assert!(cfg.postgres.enabled);
         assert_eq!(cfg.postgres.max_connections.get(), 2);
         assert!(cfg.postgres.has_dsn());
+        assert_eq!(
+            cfg.postgres.password_file.as_deref(),
+            Some(std::path::Path::new("/run/secrets/postgres-password"))
+        );
+        assert_eq!(
+            cfg.postgres.session_budgets,
+            crate::PostgresSessionBudgets::Server
+        );
         assert_eq!(cfg.log.format, LogFormat::Text);
         assert_eq!(cfg.app.version, "1.2.3");
     }
@@ -1832,6 +1845,17 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(unknown, Error::Deserialize(_)), "{unknown}");
+
+        let unknown_source = load_migration_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__POSTGRES__SESSION_BUDGETS", "pooler")]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(unknown_source, Error::Deserialize(_)),
+            "{unknown_source}"
+        );
 
         let missing_dsn = load_migration_from(
             &LoadOptions::default(),

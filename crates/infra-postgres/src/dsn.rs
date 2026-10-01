@@ -8,8 +8,12 @@
 //! self-contained URL: what the operator set is exactly what connects, and a
 //! diagnostic never carries the value. This module checks the URL text before
 //! `sqlx` sees it and then reads the driver's own interpretation back.
+//!
+//! The password is the one component with a second admitted source: a file
+//! the platform rewrites when it rotates the credential. The URL then carries
+//! no password, so there is still exactly one.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
@@ -53,12 +57,19 @@ pub enum DsnError {
     Parameter(String),
     #[error("postgres dsn must be the only connection source; unset {0} in the environment")]
     Ambient(&'static str),
+    #[error("postgres dsn must not carry a password when postgres.password_file is set")]
+    PasswordSources,
+    #[error("postgres password file could not be read ({0})")]
+    PasswordFile(std::io::ErrorKind),
+    #[error("postgres password file is empty")]
+    PasswordFileEmpty,
 }
 
 /// An admitted connection string, ready to become connect options.
 #[derive(Clone)]
 pub struct Dsn {
     options: PgConnectOptions,
+    password_file: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for Dsn {
@@ -81,7 +92,19 @@ impl Dsn {
     ///
     /// The first violated rule, without the offending value.
     pub fn admit(raw: &str) -> Result<Self, DsnError> {
-        Self::admit_with_environment(raw, |name| {
+        Self::admit_with(raw, None)
+    }
+
+    /// [`Dsn::admit`] with the password read from `password_file` when one
+    /// is given (`postgres.password_file`). The URL must then carry no
+    /// password; the file holds the password alone, and one trailing line
+    /// break is not part of it.
+    ///
+    /// # Errors
+    ///
+    /// The first violated rule, without the offending value.
+    pub fn admit_with(raw: &str, password_file: Option<&Path>) -> Result<Self, DsnError> {
+        Self::admit_from(raw, password_file, |name| {
             std::env::var_os(name).is_some_and(|value| !value.is_empty())
         })
     }
@@ -89,7 +112,15 @@ impl Dsn {
     /// [`Dsn::admit`] with an explicit occupancy lookup, so the ambient rule
     /// can be tested without mutating the process environment. `true` means
     /// the named variable is set to a non-empty value.
+    #[cfg(test)]
     pub(crate) fn admit_with_environment<F>(raw: &str, occupied: F) -> Result<Self, DsnError>
+    where
+        F: Fn(&str) -> bool,
+    {
+        Self::admit_from(raw, None, occupied)
+    }
+
+    fn admit_from<F>(raw: &str, password_file: Option<&Path>, occupied: F) -> Result<Self, DsnError>
     where
         F: Fn(&str) -> bool,
     {
@@ -107,7 +138,7 @@ impl Dsn {
         if url.fragment().is_some() {
             return Err(DsnError::Fragment);
         }
-        require_components(&url)?;
+        require_components(&url, password_file.is_some())?;
         check_parameters(&url)?;
 
         // The text holds every component and only known parameters, so what
@@ -120,7 +151,23 @@ impl Dsn {
         if options.get_host().contains(',') {
             return Err(DsnError::MultipleHosts);
         }
-        Ok(Self { options })
+        // Without a password in the URL the driver took one from
+        // `PGPASSWORD` or `.pgpass`; the file's value replaces it, so neither
+        // ever connects.
+        let options = match password_file {
+            Some(path) => options.password(&read_password(path)?),
+            None => options,
+        };
+        Ok(Self {
+            options,
+            password_file: password_file.map(Path::to_path_buf),
+        })
+    }
+
+    /// The file the password came from, when it did not come from the URL.
+    #[must_use]
+    pub fn password_file(&self) -> Option<&Path> {
+        self.password_file.as_deref()
     }
 
     /// Connect options for `sqlx`, before the template's session defaults.
@@ -161,9 +208,32 @@ impl Dsn {
     }
 }
 
+/// The password a platform wrote to `path`.
+fn read_password(path: &Path) -> Result<String, DsnError> {
+    let content =
+        std::fs::read_to_string(path).map_err(|err| DsnError::PasswordFile(err.kind()))?;
+    password_from(content)
+}
+
+/// The password in a password file's content: the whole file, minus one
+/// trailing line break that editors and `echo` add.
+pub(crate) fn password_from(mut password: String) -> Result<String, DsnError> {
+    if password.ends_with('\n') {
+        password.pop();
+        if password.ends_with('\r') {
+            password.pop();
+        }
+    }
+    if password.is_empty() {
+        return Err(DsnError::PasswordFileEmpty);
+    }
+    Ok(password)
+}
+
 /// Every component the driver would otherwise take from the environment,
-/// `.pgpass`, or its own defaults.
-fn require_components(url: &Url) -> Result<(), DsnError> {
+/// `.pgpass`, or its own defaults. With a password file the URL carries no
+/// password instead.
+fn require_components(url: &Url, password_from_file: bool) -> Result<(), DsnError> {
     if url.host_str().is_none_or(str::is_empty) {
         return Err(DsnError::Missing("host"));
     }
@@ -173,8 +243,10 @@ fn require_components(url: &Url) -> Result<(), DsnError> {
     if url.username().is_empty() {
         return Err(DsnError::Missing("user"));
     }
-    if url.password().is_none_or(str::is_empty) {
-        return Err(DsnError::Missing("password"));
+    match (url.password().is_none_or(str::is_empty), password_from_file) {
+        (true, false) => return Err(DsnError::Missing("password")),
+        (false, true) => return Err(DsnError::PasswordSources),
+        _ => {}
     }
     let database = url.path().trim_start_matches('/');
     if database.is_empty() || database.contains('/') {
@@ -429,6 +501,36 @@ mod tests {
             let result = Dsn::admit_with_environment(VALID, |candidate| candidate == name);
             assert!(result.is_ok(), "{name}");
         }
+    }
+
+    #[test]
+    fn a_password_file_is_the_only_password_source_when_set() {
+        let dir = std::env::temp_dir().join(format!("dsn-password-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("password");
+        let without_password = "postgres://app@db.internal:5432/app?sslmode=require";
+        let admit = |raw: &str| Dsn::admit_from(raw, Some(&file), |_| false);
+
+        assert_eq!(
+            admit(without_password).err(),
+            Some(DsnError::PasswordFile(std::io::ErrorKind::NotFound))
+        );
+        std::fs::write(&file, "\n").unwrap();
+        assert_eq!(
+            admit(without_password).err(),
+            Some(DsnError::PasswordFileEmpty)
+        );
+        std::fs::write(&file, "s3cret\n").unwrap();
+        assert_eq!(admit(VALID).err(), Some(DsnError::PasswordSources));
+        let dsn = admit(without_password).unwrap();
+        assert_eq!(dsn.password_file(), Some(file.as_path()));
+        assert_eq!(parse(VALID).unwrap().password_file(), None);
+        assert!(!format!("{dsn:?}").contains("s3cret"));
+
+        // Only one trailing line break is dropped; the rest is the password.
+        std::fs::write(&file, " p w \r\n").unwrap();
+        assert_eq!(read_password(&file).unwrap(), " p w ");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -19,14 +19,17 @@ ALLOW_HEAVY=1 make test-integration-db
 ```
 
 The script brings `env/docker-compose.yml` up under a throwaway project on an
-ephemeral port, clears the libpq variables the DSN policy refuses, exports
-`DATABASE_URL` in the admitted URL form, runs
+ephemeral port, starts the compose PgBouncer (transaction mode) in front of
+the same server, clears the libpq variables the DSN policy refuses, exports
+`DATABASE_URL` and `PGBOUNCER_DATABASE_URL` in the admitted URL form, runs
 `cargo test --locked -p integration-tests --features integration`, and tears
 the project down. Every test gets its own `_sqlx_test_*` database from
 `#[sqlx::test]`; the template's pool, probe, transaction seam, and runner are
 exercised through the admitted `Dsn` exactly as the binaries use them
-(`test/tests/postgres.rs`), including pending-BEGIN cancellation and read-only
-embedded-history admission/refusal. Extra arguments reach `cargo test`:
+(`test/tests/postgres.rs`), including pending-BEGIN cancellation, read-only
+embedded-history admission/refusal, session-budget verification, the pooled
+path, and password rotation. A caller that owns the compose lifecycle itself
+(`INTEGRATION_COMPOSE_MANAGED=1`) provides both URLs. Extra arguments reach `cargo test`:
 `bash scripts/ci/test-integration-db.sh migrations_apply -- --nocapture`.
 Without Docker the target refuses with exit 2; `REQUIRE_DOCKER=1` (what CI
 sets) turns that into a failure, because a skipped required test is not a

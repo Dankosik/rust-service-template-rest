@@ -3,7 +3,7 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 # Proper nouns `doc_markdown` would otherwise ask to backtick; `..` keeps the defaults.
-doc-valid-idents = ["OpenAPI", ".."]
+doc-valid-idents = ["OpenAPI", "PgBouncer", ".."]
 
 # Operations are registered as annotated `utoipa_axum::routes!` tuples through
 # `OpenApiRouter::routes`, so served routes and the OpenAPI document share one
@@ -28,4 +28,11 @@ disallowed-methods = [
     { path = "axum::routing::method_routing::head_service", reason = "HEAD follows GET unless the annotation documents HEAD" },
     { path = "axum::routing::method_routing::any", reason = "register only annotated methods" },
     { path = "axum::routing::method_routing::any_service", reason = "register only annotated methods" },
+    # A transaction opened on the pool itself skips the commit-outcome policy
+    # and the transaction signals `infra_postgres::in_tx` owns. Savepoints
+    # (`Connection::begin` on a borrowed connection) are not affected.
+    { path = "sqlx_core::pool::Pool::begin", reason = "open the transaction with infra_postgres::in_tx" },
+    { path = "sqlx_core::pool::Pool::begin_with", reason = "open the transaction with infra_postgres::in_tx_with" },
+    { path = "sqlx_core::pool::Pool::try_begin", reason = "open the transaction with infra_postgres::in_tx" },
+    { path = "sqlx_core::pool::Pool::try_begin_with", reason = "open the transaction with infra_postgres::in_tx_with" },
 ]

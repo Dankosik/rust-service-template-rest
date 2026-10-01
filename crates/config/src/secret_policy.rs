@@ -7,7 +7,8 @@
 /// Whether a dotted key names a credential.
 ///
 /// Segments are split on `.`, `_`, and `-`, so `otlp_headers`, `api_key`,
-/// and `private-key` all match; `token_url` remains a non-credential URL name.
+/// and `private-key` all match; `token_url` remains a non-credential URL name
+/// and `password_file` a non-credential path.
 #[must_use]
 pub(crate) fn is_secret_like_key(key: &str) -> bool {
     let lowered = key.trim().to_ascii_lowercase();
@@ -24,7 +25,8 @@ pub(crate) fn is_secret_like_key(key: &str) -> bool {
         .iter()
         .enumerate()
         .any(|(i, segment)| match *segment {
-            "password" | "secret" | "secrets" | "credentials" | "authorization" | "dsn" => true,
+            "secret" | "secrets" | "credentials" | "authorization" | "dsn" => true,
+            "password" => !matches!(segments.get(i + 1), Some(&"file")),
             "token" => !matches!(segments.get(i + 1), Some(&"url")),
             "key" => matches!(segments.get(i.wrapping_sub(1)), Some(&"api" | &"private")),
             "headers" => matches!(segments.get(i.wrapping_sub(1)), Some(&"otlp")),
@@ -87,6 +89,7 @@ mod tests {
             "outbound.api_key",
             "signing.private-key",
             "auth.token",
+            "smtp.password",
             "http.authorization",
             "messaging.credentials",
             "object_storage.secret_access_key",
@@ -98,6 +101,7 @@ mod tests {
             "authn.token_profile",
             // template:end oidc-jwt:secret-policy-token-profile-vector
             "authn.token_url",
+            "database.password_file",
             "http.addr",
             "observability.otel.exporter.otlp_endpoint",
             "cache.key_prefix",

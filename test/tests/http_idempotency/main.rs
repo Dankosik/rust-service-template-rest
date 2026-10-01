@@ -104,6 +104,7 @@ async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
             max_connections: NonZeroU32::new(max_connections).expect("a pool size"),
             application_name: APP,
             default_isolation: Isolation::ServerDefault,
+            session_budgets: infra_postgres::SessionBudgets::Startup,
         },
     )
     .await
@@ -705,6 +706,10 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
     seed(&pool, SEED_LIVE, LIVE).await;
     // One expired row stays locked, as an attempt's write holds it until its
     // commit.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test holds a raw transaction open to keep a lock"
+    )]
     let mut holder = pool.begin().await.expect("a row-lock holder");
     sqlx::query(LOCK_SEEDED_ROW)
         .execute(&mut *holder)

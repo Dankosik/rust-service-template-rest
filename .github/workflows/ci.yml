@@ -572,7 +572,7 @@ jobs:
           set -euo pipefail
           OUTBOX_SELECTED=$(python3 scripts/lib/template_state.py profile --repo . --field outbox)
           if [[ "${DATABASE_SELECTED}" == true ]]; then
-            POSTGRES_PORT=5432 docker compose -f env/docker-compose.yml up -d --wait postgres
+            POSTGRES_PORT=5432 PGBOUNCER_PORT=6432 docker compose -f env/docker-compose.yml up -d --wait postgres pgbouncer
           fi
           if [[ "${MESSAGING_SELECTED}" == true || ( "${DATABASE_SELECTED}" == true && "${OUTBOX_SELECTED}" == postgres ) ]]; then
             NATS_PORT=4222 docker compose -f env/docker-compose.yml up -d --wait nats
@@ -599,6 +599,7 @@ jobs:
           bash ./scripts/ci/measure.sh integration-db --
           env INTEGRATION_COMPOSE_MANAGED=1
           DATABASE_URL='postgres://app:app@127.0.0.1:5432/app?sslmode=disable'
+          PGBOUNCER_DATABASE_URL='postgres://app:app@127.0.0.1:6432/app?sslmode=disable'
           NATS_URL=nats://127.0.0.1:4222
           make test-integration-db
       - name: Cache proof

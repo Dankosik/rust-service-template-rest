@@ -75,6 +75,13 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   service files, socket paths, and client key or certificate files are
   refused at startup, and the diagnostic never carries the value
   ([Persistence](architecture/persistence.md#connection-admission)).
+- `postgres.password_file` (unset by default) is the one alternative
+  password source: a path to a file that holds the password alone, for a
+  platform that rotates it. The URL then carries no password, both at once
+  is refused, and the service and the jobs worker follow the file while
+  they run. The key names a path, not a credential, so the file guard lets
+  it appear in TOML: `password` followed by `file` is the one exception to
+  the `password` rule above.
 - The `migrate` binary reads the same files and variables but decodes only
   `app`, `log`, `observability`, and `postgres`. It needs no other section's
   secrets, and it does not check the other sections or an unknown section
@@ -308,6 +315,11 @@ every record inside a request) or `text` (local development).
   dependency-close stage. Enabled service and worker startup also bound the
   read-only embedded migration-history check to `5s`, including pool acquire.
   This is a separate sequential startup step, with no new configuration key.
+  `postgres.session_budgets` (`startup` by default, or `server`) does not
+  change a budget: it says whether the service publishes the two session
+  timeouts in each connection's startup packet or the database role already
+  carries them, for a pooler that refuses startup parameters. Either way the
+  pool refuses to open on a session without them.
 <!-- template:end postgres:docs-config-postgres-budget -->
 <!-- template:begin jobs:docs-config-jobs -->
 - `jobs.max_workers` (environment `APP__JOBS__MAX_WORKERS`, default `1`,

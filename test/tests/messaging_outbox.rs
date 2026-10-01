@@ -358,6 +358,7 @@ async fn template_pool(pool: &PgPool, max_connections: u32) -> PgPool {
             max_connections: NonZeroU32::new(max_connections).expect("pool has capacity"),
             application_name: APP,
             default_isolation: Isolation::ReadCommitted,
+            session_budgets: infra_postgres::SessionBudgets::Startup,
         },
     )
     .await

@@ -15,11 +15,11 @@ should weigh before reopening them.
 
 | Owner | Owns | Does not own |
 | --- | --- | --- |
-| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`), the pool with the template's session budgets (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), the pool and transaction signals, the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`, `retryable`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
+| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`) and of a rotated password file (`refresh_password_periodically`), the pool with the template's session budgets and their verification (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), the pool and transaction signals, the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`, `retryable`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
 | `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), read-only embedded-history verification (`verify_history`), the shared history rule, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
 | `migrations/` | Forward-only SQL files, one transaction each, `<version>_<snake_case>.sql` ([rules](../../migrations/README.md)). | Access code; a repository adapts to the schema, never the reverse. |
-| `service-config` (`postgres` section) | `postgres.enabled`, `postgres.dsn` (secret, environment only), `postgres.max_connections`. | DSN shape (the adapter refuses what the driver would accept). |
-| `service` bootstrap | Opening the pool before readiness admission when the profile is enabled, verifying the embedded migration history, registering the probe and the gauge task, partial-startup cleanup, closing the pool in the dependency-close stage. | Pool mechanics, migration execution. |
+| `service-config` (`postgres` section) | `postgres.enabled`, `postgres.dsn` (secret, environment only), `postgres.password_file`, `postgres.session_budgets`, `postgres.max_connections`. | DSN shape (the adapter refuses what the driver would accept). |
+| `service` bootstrap | Opening the pool before readiness admission when the profile is enabled, verifying the embedded migration history, registering the probe, the gauge task and the password refresh task, partial-startup cleanup, closing the pool in the dependency-close stage. | Pool mechanics, migration execution. |
 | `test/` (`integration-tests`) | Database-backed proof behind the `integration` feature; fixtures under `test/fixtures/migrations/`. | Anything the service binary runs. |
 
 Future feature crates own persistence ports and business invariants; a
@@ -51,6 +51,21 @@ The result is exactly what the operator wrote; `application_name` is added by th
 `pg_stat_activity` attributes sessions. A distinct database session label
 is not a configuration axis.
 
+The password has one alternative source, for a platform that rotates it.
+`postgres.password_file` names a file that holds the password alone (one
+trailing line break is not part of it); the URL then carries no password,
+and one in both places is refused, so there is still exactly one source. The
+file is read at admission by every binary, the migrator included. In the
+service and the jobs worker a task reads it again every five seconds and
+hands a changed password to the pool through `Pool::set_connect_options`,
+the driver's own hook for it; connections already open keep their
+authenticated session and leave at the pool's maximum lifetime. While the
+file is unreadable or empty the pool keeps the last password and logs
+`postgres_password_file_unreadable` once per outage; a change logs
+`postgres_password_reloaded`. A connection opened between a rotation and the
+next read is refused with `28P01`, so a rotation needs either an overlap in
+which both passwords work or five seconds of tolerance for new connections.
+
 ## Budgets
 
 Constants in `infra-postgres`, not configuration keys: a service that needs
@@ -61,6 +76,8 @@ different ones changes them in one reviewed place.
 | Acquire (including opening a connection) | 3 s | `PgPoolOptions::acquire_timeout`; the startup connection draws it too |
 | `statement_timeout` | 8 s | Session default in the startup packet of every pooled connection |
 | `idle_in_transaction_session_timeout` | 8 s | Same duration as `statement_timeout` by policy; a separate constant |
+| Idle connection ping | 1 s | Bounds the ping a connection idle for over a second gets before it is handed out |
+| Password file refresh | 5 s | How often a configured `postgres.password_file` is read again |
 | Slow statement warning | 1 s | `warn` with SQL text and duration; statement logging is otherwise off |
 | Readiness probe | health `probe_budget` | The refresher bounds the acquire plus ping |
 | Pool close at shutdown | 5 s (`DEPENDENCY_CLOSE`) | After background tasks joined, before the telemetry flush |
@@ -72,6 +89,24 @@ different ones changes them in one reviewed place.
 `postgres.max_connections` (1..500, default 4) is the one operator-owned
 value: size it from the database's `max_connections` divided across every
 instance and job that shares it, not from the service's concurrency.
+
+A budget the session does not carry is not a budget. Opening the pool reads
+the effective `statement_timeout`, `idle_in_transaction_session_timeout`,
+and, where the process requires one, `default_transaction_isolation` back
+from the server and refuses to start unless each timeout is a limit no
+looser than the template's (`ConnectError::SessionBudget`,
+`ConnectError::SessionIsolation`). A stricter limit is the operator's to
+choose. `postgres.session_budgets` says where the values come from:
+
+- `startup` (default): the service publishes them in the startup packet of
+  every connection. Nothing has to be configured on the server.
+- `server`: the service publishes nothing, and the database role or the
+  database carries them (`ALTER ROLE app SET statement_timeout = '8s'`, the
+  same for `idle_in_transaction_session_timeout`). For a pooler that refuses
+  startup parameters; see [Supported Deployments](#supported-deployments).
+
+The migrator always publishes its own budgets and takes a session advisory
+lock, so it connects to the server directly whichever value is set.
 
 ## Readiness
 
@@ -160,30 +195,55 @@ TCP load balancer that does not speak the protocol; the database suite runs
 against exactly that. What the adapter does on a connection decides what
 else can work:
 
-- **A connection pooler in front (PgBouncer, a managed pooler, RDS Proxy) is
-  not a tested target.** Every connection publishes its session budgets in
-  the startup packet's `options`. PgBouncer refuses a startup parameter it
-  does not track unless `ignore_startup_parameters` lists it, and listing
-  `options` makes it drop the budgets instead of applying them, so the
-  service would run without `statement_timeout` and
-  `idle_in_transaction_session_timeout`. In transaction pooling the driver's
-  named prepared statements additionally need `max_prepared_statements`. A
-  service that must sit behind a pooler sets the budgets on the database role
-  (`ALTER ROLE ... SET`) and proves the path with the database suite before
-  relying on it.
+- **PostgreSQL 14 or later.** The migrator sets
+  `client_connection_check_interval` and a retained profile's schema may use
+  `lz4` compression, both from 14; the database suite runs against 18.
+- **PgBouncer 1.26 or later in transaction mode, with the session budgets
+  tracked**, is proven by the database suite
+  (`env/pgbouncer/pgbouncer.ini`):
+
+  ```ini
+  pool_mode = transaction
+  track_extra_parameters = statement_timeout, idle_in_transaction_session_timeout, default_transaction_isolation
+  ```
+
+  From 1.26 PgBouncer applies a tracked parameter that PostgreSQL does not
+  report to the server connection whenever the client becomes active, and
+  resets it for clients that did not send it, so every transaction runs
+  under the budgets the service published. 1.24 and 1.25 accept the same
+  configuration and silently drop the values (observed with 1.24.1 and
+  1.25.2: `SHOW statement_timeout` answers `0`), and so does any version
+  that lists the parameters in `ignore_startup_parameters`; the check at
+  pool opening refuses both. The driver's named prepared statements need
+  `max_prepared_statements` above zero, the default since 1.24.
+- **A pooler that refuses startup parameters** (a managed PgBouncer without
+  that setting, RDS Proxy, another vendor's pooler) is reached with
+  `postgres.session_budgets = "server"` and the budgets set on the role or
+  the database. The suite proves this path through the same PgBouncer; a
+  specific vendor's pooler is the deploying service's to prove. A session
+  takes role and database defaults when it starts, so after changing them
+  recycle the pooler's server connections before restarting the service.
+- **What still needs a session of its own connects directly or through a
+  session-mode pooler:** the migrator (advisory lock, its own budgets) and
+  the jobs worker's `LISTEN` connection, which through a transaction-mode
+  pooler receives nothing and leaves pickup to the poll interval.
 - **One host.** The DSN admits no host list and no
   `target_session_attrs`; failover is the endpoint's job (a managed
   endpoint, a virtual IP, DNS). After a failover a session on a server that
   became read-only fails its write with `25006`, which `transient` reports.
-- **Password authentication with a static password.** Client certificates
-  (`sslcert`/`sslkey`) and passwordless or short-lived credentials (IAM
-  tokens) are refused by admission or have no path here: the pool is
-  opened once with the admitted connect options and nothing renews them.
-- **A silently dropped network path is bounded by the server, not the
-  client.** `sqlx` 0.9 sets no TCP keepalive and its return-to-pool ping has
-  no timeout, so a connection whose peer vanished without a reset holds its
-  pool slot until the kernel gives up. Callers still fail inside the acquire
-  budget and readiness fails with them; the slot itself comes back late.
+- **Password authentication.** The password is static in the DSN or
+  rotated through `postgres.password_file`, which covers a secrets manager's
+  agent, a mounted Kubernetes secret, and a sidecar that writes short-lived
+  tokens. Client certificates (`sslcert`/`sslkey`) are refused by admission,
+  and the adapter mints no cloud IAM token itself.
+- **A silently dropped network path is bounded for idle connections only.**
+  `sqlx` 0.9 sets no TCP keepalive. A connection idle for more than a second
+  is pinged before use and discarded when the ping takes more than a second,
+  so a pool whose peers vanished without a reset (a load balancer's idle
+  cut-off, a failed node) recovers inside one acquire budget. A connection
+  that dies while a statement runs is different: the caller's own deadline
+  ends the wait, and the driver's return-to-pool ping, which has no timeout,
+  holds the pool slot until the kernel gives up on the socket.
 
 ## Migrations
 
@@ -244,7 +304,11 @@ classification, source rules, stage mapping. Database-backed proof lives in
 `ALLOW_HEAVY=1 make test-integration-db`: session defaults observed with
 `SHOW`, probe verdicts including pool exhaustion, commit and rollback,
 `CommitFailed` from a deferred constraint and from a swallowed statement
-failure, a serialization failure,
+failure, a serialization failure, the refusal of a session without the
+budgets and the admission of one whose database carries them, the same
+transaction behavior through PgBouncer in transaction mode with published
+and with server-carried budgets, a rotated password file reaching new
+connections, a silent idle connection replaced inside the acquire budget,
 read-only refusal, apply-then-no-change, edited and removed history, lock
 contention, the deadline, source and connect failures. Each test gets its
 own database from `#[sqlx::test]`. `ALLOW_HEAVY=1 make migration-validate`
@@ -392,6 +456,49 @@ scratch project against `postgres:18.4`):
   which `sqlx`'s `macros` feature enables, so `infra-postgres` enables it to
   see one trait whichever workspace crates are built together; `migrate`
   already brings the macros into every binary.
+- **Session budgets are verified, and a pooler is supported two ways**
+  (2026-10-02, PgBouncer 1.24.1, 1.25.2, and 1.26.0 against `postgres:18`).
+  Publishing in the startup packet stays the default because it needs
+  nothing on the server. Per-transaction `SET LOCAL` was rejected: it adds a
+  round trip to every transaction and leaves statements run straight on the
+  pool unbounded. A session-level `SET` after connect was rejected because a
+  transaction pooler hands the next transaction another server connection.
+  That leaves the two sources the key names, and reading the effective
+  values back is what makes either one safe: it is the only way to notice a
+  pooler that accepted the parameters and dropped them. The driver's
+  `extra_float_digits` startup parameter is no longer sent
+  (`PgConnectOptions::extra_float_digits(None)`): PostgreSQL 12 and later
+  already print the shortest exact float by default, and a pooler refuses
+  the parameter unless it is told to ignore it.
+- **`postgres.password_file` over provider-specific credential code**: a
+  file is the interface a secrets manager's agent, a Kubernetes secret
+  volume, and a token sidecar already share, and `Pool::set_connect_options`
+  is the driver's documented way to rotate. Minting IAM tokens in-process
+  would add a cloud SDK to every service for one provider; client
+  certificates would need a TLS fixture in the database suite and have no
+  consumer yet. Reopen either with the first service that needs it. The
+  refresh polls instead of reacting to `28P01` because the driver has no
+  before-connect hook; five seconds bounds the window either way.
+- **The idle ping is bounded; the return ping is the driver's.** The ping
+  before handing out an idle connection is the template's hook, so it
+  carries a one-second timeout. The ping `sqlx` sends when a connection
+  returns to the pool is not reachable from a hook without paying a second
+  round trip on every release.
+- **`Pool::begin` is a lint error outside the adapter** (`clippy.toml`
+  `disallowed-methods`): the pool is a plain `sqlx` pool, so nothing else
+  kept a caller from opening a transaction that skips the commit-outcome
+  policy and the transaction signals. A test that needs a raw lock holder
+  says so with `#[expect]`.
+- **`transaction_timeout` is not set.** It exists from PostgreSQL 17, and
+  publishing an unknown parameter fails the connection on 14 to 16. A
+  request's transaction is already bounded by the request deadline on the
+  client and by the two session budgets on the server; reopen when 17 is
+  the minimum supported server.
+- **Waiting on `sqlx` after 0.9.0** (merged upstream, unreleased on
+  2026-10-02): rollback of a `BEGIN` cancelled in flight (`DiscardOnDrop`
+  can then go), `TCP_NODELAY`, a pool `num_idle` underflow that can spin a
+  core, and invalidation of stale prepared statements. TCP keepalive and a
+  timeout on the return ping are still open there.
 - **Embedded migrations, forward-only**: `sqlx::migrate!` replaces the Go
   template's runtime directory with its symlink and nesting checks; a
   `build.rs` `rerun-if-changed=../../migrations` is required because the

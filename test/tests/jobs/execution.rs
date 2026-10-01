@@ -295,6 +295,10 @@ async fn install_claim_transition_blocker(pool: &PgPool) {
 }
 
 async fn hold_claim_transition(pool: &PgPool) -> Transaction<'_, Postgres> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test holds a raw transaction open to keep a lock"
+    )]
     let mut blocker = pool.begin().await.expect("the claim blocker transaction");
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(CLAIM_BLOCK_KEY)
@@ -580,6 +584,10 @@ async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) 
             "the other-kind job commits",
         );
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test holds a raw transaction open to keep a lock"
+    )]
     let mut hold = locker.begin().await.expect("the candidate lock begins");
     sqlx::query("SELECT 1 FROM background_jobs WHERE id::text = $1 FOR UPDATE")
         .bind(&locked)
@@ -1426,6 +1434,10 @@ async fn w4_known_result_beats_forced_release_while_its_write_waits(pool: PgPool
     let run = start(&jobs, gate_registry(Arc::clone(&gate)), 1);
     super::bounded("the gate handler starts", gate.entered.notified()).await;
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test holds a raw transaction open to keep a lock"
+    )]
     let mut hold = locker
         .begin()
         .await
@@ -2234,6 +2246,10 @@ async fn x12_cancelled_retention_leaves_no_short_timeout_in_the_pool(pool: PgPoo
         probe_registry(2, DEFAULT_TIMEOUT),
         NonZeroU32::new(1).expect("one worker"),
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test holds a raw transaction open to keep a lock"
+    )]
     let mut blocker = pool.begin().await.expect("the table lock transaction");
     sqlx::query("LOCK TABLE background_jobs IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *blocker)
