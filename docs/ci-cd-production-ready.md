@@ -74,8 +74,11 @@ separate acceptance gate.
 
 The source template additionally selects the initializer matrix on
 `initializer_runtime`, the paths that can change an initialized service's
-build and tests or the initializer itself. Eight parallel parts together run
-`make template-init-check`. The source part proves the 368 baseline canonical profile
+build and tests or the initializer itself. Parallel parts together run
+`make template-init-check`, and `scripts/ci/initializer-matrix.py` plans them
+from the same diff: a changed crate, migration, test, or proto path selects
+only the runtime graphs whose profile tuple keeps it (the initializer's own
+removal inventory decides), and any other initializer path selects all. The source part proves the 368 baseline canonical profile
 and harness projections. The 26 existing runtime graphs retain their public
 initializer, build, test and selected database proof; their numbering and
 baseline command scopes are unchanged.
@@ -89,33 +92,34 @@ targets and run the provider suite; inbound selections also run generated
 contract and mounted inert-route process checks. These focused runs do not
 repeat the full database suites.
 
-The existing eight CI parts and warm-cache arrangement remain: source suites;
-`database-none` (1–6); `database-postgres` (7–12); `http-idempotency` (13–16);
-and four jobs parts containing baseline graphs 17–26 plus the new webhook
-graphs. The exact graph IDs per part live in `ci.yml`; the runner records each
-profile tuple, command, result and duration. Initializations within a part
-reuse one absolute Cargo target. The five parts after `database-postgres`
-restore its cache and save none; their retained full database suites require
-Docker.
+The parts are the source suites plus seven runtime groups, balanced on the
+measured per-graph minutes of September 2026 and grouped so a part's graphs
+share dependency features: `baseline` (1–12 and the database-free
+representatives), `idempotency`, `jobs`, `jobs-webhooks`, `webhooks`,
+`webhooks-messaging`, and `messaging-oauth` (the three heaviest full graphs,
+49, 53 and 55). The exact graph IDs per part live in `initializer-matrix.py`,
+which refuses a graph that belongs to no part or to two; the runner records
+each profile tuple, command, result and duration. Initializations within a
+part reuse one absolute Cargo target, and each part keeps its own cache.
 
 <!-- template:begin outbound-auth:docs-ci-outbound-auth-gates -->
 OAuth adds four source projections and runtime graphs 50--53, without another
-CI part or harness cross-product. The database-none part owns 50--52 (OAuth
-alone, with JWT, with introspection); jobs-http-idempotency-2 owns the maximal
-PostgreSQL graph 53. Graph 54 joins the database-none part for the
-messaging/OAuth seam, and graph 55 joins jobs-http-idempotency-2 for the full
+CI part or harness cross-product. The baseline part owns 50--52 (OAuth
+alone, with JWT, with introspection); messaging-oauth owns the maximal
+PostgreSQL graph 53. Graph 54 joins the baseline part for the
+messaging/OAuth seam, and graph 55 joins messaging-oauth for the full
 outbox/OAuth pack. Each runs initialization, locked metadata and compilation
 of retained test targets; the workspace quality gate runs the OAuth behavior
 suite. Database-free graphs do not request the removed integration-test feature.
 <!-- template:end outbound-auth:docs-ci-outbound-auth-gates -->
-Graph 56 joins jobs-1 for PostgreSQL/jobs/messaging without outbox. It uses the
+Graph 56 joins jobs for PostgreSQL/jobs/messaging without outbox. It uses the
 focused locked offline metadata and all-target compile path with
 `integration-tests/integration`, so the fixture callback's optional registry
 argument is compiled. It adds no live PostgreSQL or NATS scenario. Graph 62
-joins database-none for cache alone, and graph 63 joins jobs-http-idempotency-2
-for the maximal profile set plus cache. Graph 64 joins database-none for object
-storage alone, and graph 65 joins jobs-http-idempotency-2 for graph 63 plus
-object storage. None of them adds a database suite. Eight CI parts cover 65
+joins baseline for cache alone, and graph 63 joins webhooks-messaging
+for the maximal profile set plus cache. Graph 64 joins baseline for object
+storage alone, and graph 65 joins webhooks-messaging for graph 63 plus
+object storage. None adds a database suite. Seven runtime parts cover 65
 runtime representatives.
 
 A change to projected text alone selects `module_initializer` without the
@@ -134,6 +138,19 @@ before the `docs` job existed; it adds a link check, not a toolchain).
 Every action is pinned by commit SHA with its version beside it; tool
 versions come from `tools/versions.env` through `GITHUB_ENV` and
 `taiki-e/install-action`.
+
+A draft pull request runs the cheap gates and defers `initializer`, `image`,
+`integration`, and CodeQL for Rust; marking it ready for review
+(`ready_for_review`) runs them, and `required` on a draft accepts the deferral.
+Open a pull request as a draft while it still changes, so parallel work does
+not queue full matrices on the account's shared runner limit.
+
+Cargo caches go through `Swatinem/rust-cache`: keyed by the toolchain, every
+manifest and lockfile, and the `CARGO_*`/`RUST*` environment, and saved only by
+a push to `main` after a successful job. The saved target keeps dependency
+artifacts alone; workspace crates and test binaries rebuild on every checkout
+anyway, and keeping them pushed the repository past its 10 GB cache budget, so
+caches evicted one another and most pull requests started cold.
 
 [codeql.yml](../.github/workflows/codeql.yml) runs CodeQL for Rust
 (`build-mode: none`) when Rust source or manifests change and for Actions
@@ -287,7 +304,11 @@ a plain layer because BuildKit does not export `RUN --mount=type=cache` to
 `type=gha`; a source-only change rebuilds only the workspace crates, which with
 the fat-LTO release profile took 489 s for the service, `/migrate`, and
 `/jobs-worker` on a 4-vCPU host (286 s without LTO); see the profile comment in
-`Cargo.toml`.
+`Cargo.toml`. Each binary builds in its own stage over the cooked layer, so
+BuildKit runs the three single-threaded fat-LTO links in parallel; separate
+cargo invocations keep each binary's feature resolution. CI exports only the
+cooked stage to the Actions cache, since every later layer follows the
+source copy and no later commit reuses it.
 `rust-toolchain.toml` stays out of the context because rustup would download
 `clippy` and `rustfmt` in every stage (*verified*). Two `--no-cache` builds
 produced byte-identical binaries (`CARGO_INCREMENTAL=0`, fixed `/src`,
@@ -310,8 +331,8 @@ same hardened flags.
 <!-- template:end postgres:docs-ci-migrator-image -->
 <!-- template:begin jobs:docs-ci-jobs-worker-image -->
 With the jobs pack retained the image also carries `/jobs-worker`, cooked and
-built in the builder beside the main binary with its own `cargo chef cook` and
-`cargo auditable build` steps, like `/migrate`. `ENTRYPOINT ["/service"]`
+built beside the main binary with its own `cargo chef cook` step and
+`cargo auditable build` stage, like `/migrate`. `ENTRYPOINT ["/service"]`
 stays, and the worker runs as the same image with `--entrypoint /jobs-worker`.
 `runtime-image-check.sh` adds a `/jobs-worker` step whose expectation comes
 from the repository's jobs selection
@@ -372,7 +393,9 @@ The initializer does not create linked Railway inputs or deployment resources.
 4. zizmor is offline without a token; CI passes `GH_TOKEN`.
 5. `actions/cache` with a save in a workflow that also runs on tags is a
    `cache-poisoning` finding; restore everywhere, save only on pushes to
-   `main`.
+   `main`. zizmor reads only `lookup-only` on `Swatinem/rust-cache`, not
+   `save-if`, so its uses carry `zizmor: ignore[cache-poisoning]` beside a
+   `save-if` that admits pushes to `main` alone.
 6. `rust-toolchain.toml` in the image context makes rustup download
    components in every stage; exclude it and pin the `FROM` tag.
 7. `cargo chef cook` must not run inside a cache mount when the layer is
@@ -409,3 +432,14 @@ The initializer does not create linked Railway inputs or deployment resources.
     a target cache only after the step that fills it; otherwise a push to
     `main` that ran only the OpenAPI, migration, or validation steps lets a
     partial target own the key until `Cargo.lock` changes.
+
+### Temporary OpenSSL runtime update
+
+The pinned distroless Debian 13 image still carries `libssl3t64`
+`3.5.7-1~deb13u2`; Trivy rejects CVE-2026-75804 and CVE-2026-84782.
+The image overlays Debian security's exact `3.5.7-1~deb13u3` package and its
+dpkg status record, downloaded through authenticated APT metadata in a separate
+build stage. The runtime remains distroless and contains no package manager.
+The Dockerfile owns this temporary package pin; remove the stage and copy when
+a new pinned distroless image carries that version or later and Trivy passes.
+The image lifecycle and security gates prove the combined image in CI.

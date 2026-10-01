@@ -835,6 +835,7 @@ _PROTECTED_MANIFEST_FILES = frozenset(
         "docs/validation/delivery.md",
         "make/source.mk",
         "scripts/ci/template-init-check.sh",
+        "scripts/ci/initializer-matrix.py",
         "docs/roadmap.md",
     }
 )

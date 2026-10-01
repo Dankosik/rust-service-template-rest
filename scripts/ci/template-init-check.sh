@@ -27,7 +27,7 @@ runtime_graph_selected() {
 
 while (($#)); do
 	case "$1" in
-	--self-test | --source-checks | --projections-only)
+	--self-test | --source-checks | --projections-only | --list-graphs)
 		[[ ${mode} == full ]] || { echo "validation modes cannot be combined" >&2; exit 2; }
 		mode=${1#--}
 		shift
@@ -45,7 +45,7 @@ while (($#)); do
 		shift 2
 		;;
 	*)
-		echo "usage: $0 [--repo ROOT] [--source-checks|--projections-only|--runtime-graphs IDS|--self-test]" >&2
+		echo "usage: $0 [--repo ROOT] [--source-checks|--projections-only|--runtime-graphs IDS|--list-graphs|--self-test]" >&2
 		exit 2
 		;;
 	esac
@@ -310,6 +310,95 @@ run_graph() {
 	fi
 }
 
+# Visit every runtime graph in inventory order with its profile tuple:
+# graph database authn outbound_http outbound_auth http_idempotency jobs
+# messaging outbox webhooks inbound_webhooks [grpc [cache]].
+each_runtime_graph() {
+	local action=$1 graph=0 database authn outbound_http selection http_idempotency
+	for database in none postgres; do
+		for authn in none oidc-jwt oidc-introspection; do
+			for outbound_http in none bounded; do
+				((graph += 1))
+				runtime_graph_selected "${graph}" || continue
+					"${action}" "${graph}" "${database}" "${authn}" "${outbound_http}" none none none none none none none
+			done
+		done
+	done
+	for authn in oidc-jwt oidc-introspection; do
+		for outbound_http in none bounded; do
+			((graph += 1))
+			runtime_graph_selected "${graph}" || continue
+				"${action}" "${graph}" postgres "${authn}" "${outbound_http}" none postgres none none none none none
+		done
+	done
+	for authn in none oidc-jwt oidc-introspection; do
+		for outbound_http in none bounded; do
+			((graph += 1))
+			runtime_graph_selected "${graph}" || continue
+				"${action}" "${graph}" postgres "${authn}" "${outbound_http}" none none postgres none none none none
+		done
+	done
+	for authn in oidc-jwt oidc-introspection; do
+		for outbound_http in none bounded; do
+			((graph += 1))
+			runtime_graph_selected "${graph}" || continue
+				"${action}" "${graph}" postgres "${authn}" "${outbound_http}" none postgres postgres none none none none
+		done
+	done
+	for selection in none:none oidc-jwt:none oidc-introspection:none oidc-jwt:postgres oidc-introspection:postgres; do
+		IFS=: read -r authn http_idempotency <<<"${selection}"
+		for outbound_http in none bounded; do
+			if [[ ${outbound_http} == none ]]; then
+				((graph += 1))
+				runtime_graph_selected "${graph}" || continue
+					"${action}" "${graph}" postgres "${authn}" none none "${http_idempotency}" postgres none none none standard-webhooks
+				continue
+			fi
+			((graph += 1))
+			if runtime_graph_selected "${graph}"; then
+					"${action}" "${graph}" postgres "${authn}" bounded none "${http_idempotency}" postgres none none none standard-webhooks
+			fi
+			((graph += 1))
+			if runtime_graph_selected "${graph}"; then
+					"${action}" "${graph}" postgres "${authn}" bounded none "${http_idempotency}" postgres none none durable none
+			fi
+			((graph += 1))
+			if runtime_graph_selected "${graph}"; then
+					"${action}" "${graph}" postgres "${authn}" bounded none "${http_idempotency}" postgres none none durable standard-webhooks
+			fi
+		done
+	done
+	[[ ${graph} == 46 ]] || { echo "webhook graph inventory ended at ${graph}, expected 46" >&2; return 1; }
+	graph=47; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none none none none none nats-jetstream none none none
+	graph=48; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres none none none none postgres nats-jetstream postgres none none
+	graph=49; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded none postgres postgres nats-jetstream postgres durable standard-webhooks
+	graph=50; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none bounded oauth2-client-credentials none none none none none none
+	graph=51; runtime_graph_selected "${graph}" && "${action}" "${graph}" none oidc-jwt bounded oauth2-client-credentials none none none none none none
+	graph=52; runtime_graph_selected "${graph}" && "${action}" "${graph}" none oidc-introspection bounded oauth2-client-credentials none none none none none none
+	graph=53; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres none none durable standard-webhooks
+	graph=54; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none bounded oauth2-client-credentials none none nats-jetstream none none none
+	graph=55; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks
+	# Compile the integration fixture callback with jobs and messaging, without outbox.
+	graph=56; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres none none none none postgres nats-jetstream none none none
+	graph=57; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none none none none none none none none none enabled
+	graph=58; runtime_graph_selected "${graph}" && "${action}" "${graph}" none oidc-jwt none none none none none none none none enabled
+	graph=59; runtime_graph_selected "${graph}" && "${action}" "${graph}" none oidc-introspection none none none none none none none none enabled
+	graph=60; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none bounded oauth2-client-credentials none none none none none none enabled
+	graph=61; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks enabled
+	# Cache only: no database suite, so this graph does not need Docker.
+	graph=62; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none none none none none none none none none none redis
+	# Graph 61's profile set plus cache. Focused like 61: locked metadata and cargo check, not a database suite.
+	graph=63; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks enabled redis
+	graph=64; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none none none none none none none none none none none s3
+	graph=65; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks enabled redis s3
+	[[ ${graph} == 65 ]] || { echo "profile graph inventory ended at ${graph}, expected 65" >&2; return 1; }
+}
+
+# One line per graph for scripts/ci/initializer-matrix.py.
+print_graph() {
+	printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12:-none}" "${13:-none}" "${14:-none}"
+}
+
 run_validation() {
 	local work source candidate database authn outbound_http outbound_auth graph=0 common receipt_dir receipt log_dir target_cache
 	local started=${SECONDS}
@@ -343,85 +432,7 @@ run_validation() {
 			"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-profile-projections.py" --source "${source}"
 	fi
 	if [[ ${mode} == full || ${mode} == runtime-graphs ]]; then
-		for database in none postgres; do
-			for authn in none oidc-jwt oidc-introspection; do
-				for outbound_http in none bounded; do
-					((graph += 1))
-					runtime_graph_selected "${graph}" || continue
-						run_graph "${graph}" "${database}" "${authn}" "${outbound_http}" none none none none none none none
-				done
-			done
-		done
-		for authn in oidc-jwt oidc-introspection; do
-			for outbound_http in none bounded; do
-				((graph += 1))
-				runtime_graph_selected "${graph}" || continue
-					run_graph "${graph}" postgres "${authn}" "${outbound_http}" none postgres none none none none none
-			done
-		done
-		for authn in none oidc-jwt oidc-introspection; do
-			for outbound_http in none bounded; do
-				((graph += 1))
-				runtime_graph_selected "${graph}" || continue
-					run_graph "${graph}" postgres "${authn}" "${outbound_http}" none none postgres none none none none
-			done
-		done
-		for authn in oidc-jwt oidc-introspection; do
-			for outbound_http in none bounded; do
-				((graph += 1))
-				runtime_graph_selected "${graph}" || continue
-					run_graph "${graph}" postgres "${authn}" "${outbound_http}" none postgres postgres none none none none
-			done
-		done
-		for selection in none:none oidc-jwt:none oidc-introspection:none oidc-jwt:postgres oidc-introspection:postgres; do
-			IFS=: read -r authn http_idempotency <<<"${selection}"
-			for outbound_http in none bounded; do
-				if [[ ${outbound_http} == none ]]; then
-					((graph += 1))
-					runtime_graph_selected "${graph}" || continue
-						run_graph "${graph}" postgres "${authn}" none none "${http_idempotency}" postgres none none none standard-webhooks
-					continue
-				fi
-				((graph += 1))
-				if runtime_graph_selected "${graph}"; then
-						run_graph "${graph}" postgres "${authn}" bounded none "${http_idempotency}" postgres none none none standard-webhooks
-				fi
-				((graph += 1))
-				if runtime_graph_selected "${graph}"; then
-						run_graph "${graph}" postgres "${authn}" bounded none "${http_idempotency}" postgres none none durable none
-				fi
-				((graph += 1))
-				if runtime_graph_selected "${graph}"; then
-						run_graph "${graph}" postgres "${authn}" bounded none "${http_idempotency}" postgres none none durable standard-webhooks
-				fi
-			done
-		done
-		[[ ${graph} == 46 ]] || { echo "webhook graph inventory ended at ${graph}, expected 46" >&2; return 1; }
-		graph=47; runtime_graph_selected "${graph}" && run_graph "${graph}" none none none none none none nats-jetstream none none none
-		graph=48; runtime_graph_selected "${graph}" && run_graph "${graph}" postgres none none none none postgres nats-jetstream postgres none none
-		graph=49; runtime_graph_selected "${graph}" && run_graph "${graph}" postgres oidc-introspection bounded none postgres postgres nats-jetstream postgres durable standard-webhooks
-		graph=50; runtime_graph_selected "${graph}" && run_graph "${graph}" none none bounded oauth2-client-credentials none none none none none none
-		graph=51; runtime_graph_selected "${graph}" && run_graph "${graph}" none oidc-jwt bounded oauth2-client-credentials none none none none none none
-		graph=52; runtime_graph_selected "${graph}" && run_graph "${graph}" none oidc-introspection bounded oauth2-client-credentials none none none none none none
-		graph=53; runtime_graph_selected "${graph}" && run_graph "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres none none durable standard-webhooks
-		graph=54; runtime_graph_selected "${graph}" && run_graph "${graph}" none none bounded oauth2-client-credentials none none nats-jetstream none none none
-		graph=55; runtime_graph_selected "${graph}" && run_graph "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks
-		# Compile the integration fixture callback with jobs and messaging, without outbox.
-	graph=56; runtime_graph_selected "${graph}" && run_graph "${graph}" postgres none none none none postgres nats-jetstream none none none
-	graph=57; runtime_graph_selected "${graph}" && run_graph "${graph}" none none none none none none none none none none enabled
-	graph=58; runtime_graph_selected "${graph}" && run_graph "${graph}" none oidc-jwt none none none none none none none none enabled
-	graph=59; runtime_graph_selected "${graph}" && run_graph "${graph}" none oidc-introspection none none none none none none none none enabled
-	graph=60; runtime_graph_selected "${graph}" && run_graph "${graph}" none none bounded oauth2-client-credentials none none none none none none enabled
-	graph=61; runtime_graph_selected "${graph}" && run_graph "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks enabled
-	# Cache only: no database suite, so this graph does not need Docker.
-	graph=62; runtime_graph_selected "${graph}" && run_graph "${graph}" none none none none none none none none none none none redis
-	# Graph 61's profile set plus cache. Focused like 61: locked metadata and cargo check, not a database suite.
-	graph=63; runtime_graph_selected "${graph}" && run_graph "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks enabled redis
-	# Object storage only: no database suite, so this graph does not need Docker.
-	graph=64; runtime_graph_selected "${graph}" && run_graph "${graph}" none none none none none none none none none none none none s3
-	# Graph 63's profile set plus object storage. Focused like 63.
-	graph=65; runtime_graph_selected "${graph}" && run_graph "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks enabled redis s3
-	[[ ${graph} == 65 ]] || { echo "profile graph inventory ended at ${graph}, expected 65" >&2; return 1; }
+		each_runtime_graph run_graph
 	fi
 	printf 'state=passed\nduration_seconds=%s\n' "$((SECONDS - started))" >>"${receipt}"
 }
@@ -430,6 +441,8 @@ run_validation() {
 # and run sequentially; focused receipts retain their narrower mode.
 if [[ ${mode} == self-test ]]; then
 	recorder_self_test
+elif [[ ${mode} == list-graphs ]]; then
+	each_runtime_graph print_graph
 elif [[ ${VALIDATION_LOCK_HELD:-} == 1 ]]; then
 	run_validation
 else
