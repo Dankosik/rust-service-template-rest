@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import contextlib
 import hashlib
+import io
 import importlib.util
 import json
 import os
@@ -664,6 +667,146 @@ def _check_cache_projections(source: Path, candidate: str, initializer, work: Pa
         raise initializer.Refusal("unknown CACHE was accepted")
 
 
+_WORKER_INITIALIZERS: dict[Path, Any] = {}
+
+
+def _check_selection(context: dict[str, Any], selection: tuple[str, ...]) -> tuple[str, str | None]:
+    """Project one admitted selection in every harness; return its records and any refusal."""
+
+    source = context["source"]
+    initializer = _WORKER_INITIALIZERS.get(source)
+    if initializer is None:
+        initializer = _WORKER_INITIALIZERS[source] = _load_initializer(source)
+    output = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(output):
+            _project_selection(initializer, context, *selection)
+    except initializer.Refusal as error:
+        return output.getvalue(), str(error)
+    return output.getvalue(), None
+
+
+def _project_selection(
+    initializer, context: dict[str, Any], database: str, authn: str, outbound_http: str,
+    http_idempotency: str, jobs: str, webhooks: str, inbound_webhooks: str,
+) -> None:
+    source, candidate, work, exclusions = context["source"], context["candidate"], context["work"], context["exclusions"]
+    idempotency_paths, jobs_paths, webhook_paths = context["idempotency_paths"], context["jobs_paths"], context["webhook_paths"]
+    grpc_paths, combined_grpc_paths = context["grpc_paths"], context["combined_grpc_paths"]
+    reference: dict[str, Node] | None = None
+    reference_lock: bytes | None = None
+    identity = _inputs(
+        initializer, database, authn, outbound_http, http_idempotency, jobs,
+        webhooks, inbound_webhooks, "core",
+    ).identity()
+    all_inputs = _inputs(
+        initializer, database, authn, outbound_http, http_idempotency, jobs,
+        webhooks, inbound_webhooks, "all",
+    )
+    with tempfile.TemporaryDirectory(
+        prefix=(
+            f"{database}-{authn}-{outbound_http}-{http_idempotency}-{jobs}-"
+            f"{webhooks}-{inbound_webhooks}-all-"
+        ),
+        dir=work,
+    ) as selection:
+        all_nodes = _project(
+            source, candidate, initializer, all_inputs, Path(selection) / "tree"
+        )
+    admitted = _admitted_adapter_nodes(source, all_nodes, exclusions, initializer)
+    projected = {"all": all_nodes}
+    for harness in HARNESSES:
+        inputs = _inputs(
+            initializer, database, authn, outbound_http, http_idempotency, jobs,
+            webhooks, inbound_webhooks, harness,
+        )
+        if inputs.identity() != identity:
+            raise initializer.Refusal("harness changed a runtime profile identity")
+        if harness in projected:
+            nodes = projected[harness]
+        else:
+            with tempfile.TemporaryDirectory(
+                prefix=(
+                    f"{database}-{authn}-{outbound_http}-{http_idempotency}-{jobs}-"
+                    f"{webhooks}-{inbound_webhooks}-{harness}-"
+                ),
+                dir=work,
+            ) as selection:
+                nodes = _project(
+                    source, candidate, initializer, inputs, Path(selection) / "tree"
+                )
+        if http_idempotency == "none":
+            _assert_no_http_idempotency_output(initializer, nodes, idempotency_paths)
+        if jobs == "none":
+            _assert_no_jobs_output(initializer, nodes, jobs_paths)
+        if webhooks == "none" and inbound_webhooks == "none":
+            _assert_no_profile_output(
+                initializer, nodes, "webhooks-common", webhook_paths["webhooks-common"]
+            )
+        if webhooks == "none":
+            _assert_no_profile_output(initializer, nodes, "webhooks", webhook_paths["webhooks"])
+        if inbound_webhooks == "none":
+            _assert_no_profile_output(
+                initializer, nodes, "inbound-webhooks", webhook_paths["inbound-webhooks"]
+            )
+        _assert_no_profile_output(initializer, nodes, "grpc", grpc_paths)
+        _assert_no_profile_output(
+            initializer, nodes, "outbound-auth-grpc", combined_grpc_paths
+        )
+        _assert_introspection_cache_output(initializer, nodes, authn)
+        digest = _tree_digest(nodes)
+        lock = initializer._lock_bytes(inputs, candidate, "complete")
+        lock_sha256 = hashlib.sha256(lock).hexdigest()
+        _emit(
+            "selection",
+            database=database,
+            authn=authn,
+            outbound_http=outbound_http,
+            http_idempotency=http_idempotency,
+            jobs=jobs,
+            webhooks=webhooks,
+            inbound_webhooks=inbound_webhooks,
+            harness=harness,
+            identity=inputs.identity(),
+            profiles=inputs.profiles(),
+            tree_sha256=digest,
+            lock_sha256=lock_sha256,
+        )
+        if harness == "core":
+            reference = nodes
+            reference_lock = lock
+            _emit(
+                "equality",
+                database=database,
+                authn=authn,
+                outbound_http=outbound_http,
+                http_idempotency=http_idempotency,
+                jobs=jobs,
+                webhooks=webhooks,
+                inbound_webhooks=inbound_webhooks,
+                harness=harness,
+                reference="core",
+                tree_result="reference",
+                lock_result="reference",
+            )
+            continue
+        assert reference is not None and reference_lock is not None
+        _compare(reference, nodes, exclusions, admitted, initializer)
+        _compare_lock(reference_lock, lock, harness, initializer)
+        _emit(
+            "equality",
+            database=database,
+            authn=authn,
+            outbound_http=outbound_http,
+            http_idempotency=http_idempotency,
+            jobs=jobs,
+            webhooks=webhooks,
+            inbound_webhooks=inbound_webhooks,
+            harness=harness,
+            reference="core",
+            tree_result="equal",
+            lock_result="agent_harness_only",
+        )
 def _check_object_storage_projections(source: Path, candidate: str, initializer, work: Path) -> None:
     """Project object storage alone, with PostgreSQL, and with the maximal profile set."""
 
@@ -775,146 +918,51 @@ def check(source: Path) -> None:
     )
     with tempfile.TemporaryDirectory(prefix="template-profile-projections-") as temporary:
         work = Path(temporary)
-        for database in DATABASES:
-            for authn in AUTHN:
-                for outbound_http in OUTBOUND_HTTP:
-                    for http_idempotency in HTTP_IDEMPOTENCY:
-                        for jobs in JOBS:
-                            for webhooks in WEBHOOKS:
-                                for inbound_webhooks in INBOUND_WEBHOOKS:
-                                    if not _admitted(
-                                        initializer, database, authn, outbound_http, http_idempotency, jobs,
-                                        webhooks, inbound_webhooks,
-                                    ):
-                                        _assert_refused(
-                                            initializer, database, authn, outbound_http, http_idempotency, jobs,
-                                            webhooks, inbound_webhooks,
-                                        )
-                                        _emit(
-                                            "refused",
-                                            database=database,
-                                            authn=authn,
-                                            outbound_http=outbound_http,
-                                            http_idempotency=http_idempotency,
-                                            jobs=jobs,
-                                            webhooks=webhooks,
-                                            inbound_webhooks=inbound_webhooks,
-                                        )
-                                        continue
-                                    reference: dict[str, Node] | None = None
-                                    reference_lock: bytes | None = None
-                                    identity = _inputs(
-                                        initializer, database, authn, outbound_http, http_idempotency, jobs,
-                                        webhooks, inbound_webhooks, "core",
-                                    ).identity()
-                                    all_inputs = _inputs(
-                                        initializer, database, authn, outbound_http, http_idempotency, jobs,
-                                        webhooks, inbound_webhooks, "all",
-                                    )
-                                    with tempfile.TemporaryDirectory(
-                                        prefix=(
-                                            f"{database}-{authn}-{outbound_http}-{http_idempotency}-{jobs}-"
-                                            f"{webhooks}-{inbound_webhooks}-all-"
-                                        ),
-                                        dir=work,
-                                    ) as selection:
-                                        all_nodes = _project(
-                                            source, candidate, initializer, all_inputs, Path(selection) / "tree"
-                                        )
-                                    admitted = _admitted_adapter_nodes(source, all_nodes, exclusions, initializer)
-                                    projected = {"all": all_nodes}
-                                    for harness in HARNESSES:
-                                        inputs = _inputs(
-                                            initializer, database, authn, outbound_http, http_idempotency, jobs,
-                                            webhooks, inbound_webhooks, harness,
-                                        )
-                                        if inputs.identity() != identity:
-                                            raise initializer.Refusal("harness changed a runtime profile identity")
-                                        if harness in projected:
-                                            nodes = projected[harness]
-                                        else:
-                                            with tempfile.TemporaryDirectory(
-                                                prefix=(
-                                                    f"{database}-{authn}-{outbound_http}-{http_idempotency}-{jobs}-"
-                                                    f"{webhooks}-{inbound_webhooks}-{harness}-"
-                                                ),
-                                                dir=work,
-                                            ) as selection:
-                                                nodes = _project(
-                                                    source, candidate, initializer, inputs, Path(selection) / "tree"
-                                                )
-                                        if http_idempotency == "none":
-                                            _assert_no_http_idempotency_output(initializer, nodes, idempotency_paths)
-                                        if jobs == "none":
-                                            _assert_no_jobs_output(initializer, nodes, jobs_paths)
-                                        if webhooks == "none" and inbound_webhooks == "none":
-                                            _assert_no_profile_output(
-                                                initializer, nodes, "webhooks-common", webhook_paths["webhooks-common"]
-                                            )
-                                        if webhooks == "none":
-                                            _assert_no_profile_output(initializer, nodes, "webhooks", webhook_paths["webhooks"])
-                                        if inbound_webhooks == "none":
-                                            _assert_no_profile_output(
-                                                initializer, nodes, "inbound-webhooks", webhook_paths["inbound-webhooks"]
-                                            )
-                                        _assert_no_profile_output(initializer, nodes, "grpc", grpc_paths)
-                                        _assert_no_profile_output(
-                                            initializer, nodes, "outbound-auth-grpc", combined_grpc_paths
-                                        )
-                                        _assert_introspection_cache_output(initializer, nodes, authn)
-                                        digest = _tree_digest(nodes)
-                                        lock = initializer._lock_bytes(inputs, candidate, "complete")
-                                        lock_sha256 = hashlib.sha256(lock).hexdigest()
-                                        _emit(
-                                            "selection",
-                                            database=database,
-                                            authn=authn,
-                                            outbound_http=outbound_http,
-                                            http_idempotency=http_idempotency,
-                                            jobs=jobs,
-                                            webhooks=webhooks,
-                                            inbound_webhooks=inbound_webhooks,
-                                            harness=harness,
-                                            identity=inputs.identity(),
-                                            profiles=inputs.profiles(),
-                                            tree_sha256=digest,
-                                            lock_sha256=lock_sha256,
-                                        )
-                                        if harness == "core":
-                                            reference = nodes
-                                            reference_lock = lock
-                                            _emit(
-                                                "equality",
-                                                database=database,
-                                                authn=authn,
-                                                outbound_http=outbound_http,
-                                                http_idempotency=http_idempotency,
-                                                jobs=jobs,
-                                                webhooks=webhooks,
-                                                inbound_webhooks=inbound_webhooks,
-                                                harness=harness,
-                                                reference="core",
-                                                tree_result="reference",
-                                                lock_result="reference",
-                                            )
-                                            continue
-                                        assert reference is not None and reference_lock is not None
-                                        _compare(reference, nodes, exclusions, admitted, initializer)
-                                        _compare_lock(reference_lock, lock, harness, initializer)
-                                        _emit(
-                                            "equality",
-                                            database=database,
-                                            authn=authn,
-                                            outbound_http=outbound_http,
-                                            http_idempotency=http_idempotency,
-                                            jobs=jobs,
-                                            webhooks=webhooks,
-                                            inbound_webhooks=inbound_webhooks,
-                                            harness=harness,
-                                            reference="core",
-                                            tree_result="equal",
-                                            lock_result="agent_harness_only",
-                                        )
+        context = {
+            "source": source, "candidate": candidate, "work": work, "exclusions": exclusions,
+            "idempotency_paths": idempotency_paths, "jobs_paths": jobs_paths, "webhook_paths": webhook_paths,
+            "grpc_paths": grpc_paths, "combined_grpc_paths": combined_grpc_paths,
+        }
+        selections = [
+            (database, authn, outbound_http, http_idempotency, jobs, webhooks, inbound_webhooks)
+            for database in DATABASES
+            for authn in AUTHN
+            for outbound_http in OUTBOUND_HTTP
+            for http_idempotency in HTTP_IDEMPOTENCY
+            for jobs in JOBS
+            for webhooks in WEBHOOKS
+            for inbound_webhooks in INBOUND_WEBHOOKS
+        ]
+        # Selections are independent and CPU-bound; records still print in
+        # inventory order.
+        with concurrent.futures.ProcessPoolExecutor() as pool:
+            pending = {
+                selection: pool.submit(_check_selection, context, selection)
+                for selection in selections
+                if _admitted(initializer, *selection)
+            }
+            for selection in selections:
+                if selection not in pending:
+                    database, authn, outbound_http, http_idempotency, jobs, webhooks, inbound_webhooks = selection
+                    _assert_refused(
+                        initializer, database, authn, outbound_http, http_idempotency, jobs,
+                        webhooks, inbound_webhooks,
+                    )
+                    _emit(
+                        "refused",
+                        database=database,
+                        authn=authn,
+                        outbound_http=outbound_http,
+                        http_idempotency=http_idempotency,
+                        jobs=jobs,
+                        webhooks=webhooks,
+                        inbound_webhooks=inbound_webhooks,
+                    )
+                    continue
+                records, refusal = pending[selection].result()
+                sys.stdout.write(records)
+                if refusal is not None:
+                    raise initializer.Refusal(refusal)
         _check_oauth_projections(source, candidate, initializer, work)
         _check_grpc_projections(source, candidate, initializer, work)
         _check_cache_projections(source, candidate, initializer, work)

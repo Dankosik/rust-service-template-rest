@@ -17,6 +17,7 @@ SOURCE_ONLY_PREFIXES = (
     "make/source.mk",
     "scripts/tests/template-",
     "scripts/ci/template-init-check.sh",
+    "scripts/ci/initializer-matrix.py",
     "specs/",
     "docs/roadmap.md",
     "evals/",
