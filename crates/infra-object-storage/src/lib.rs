@@ -9,6 +9,10 @@
 //!
 //! Construction performs no I/O and the client is not a readiness
 //! dependency. [`ObjectStorage::probe`] is the opt-in bucket check.
+//!
+//! [`PutBody::stream`] takes any `http_body::Body`, and [`Download`] is one,
+//! so a request body can be stored and an object returned as a response body
+//! without an adapter.
 
 mod body;
 mod error;
@@ -19,21 +23,30 @@ mod provider;
 #[cfg(test)]
 mod tests;
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, ready};
 use std::time::{Duration, SystemTime};
 
+use aws_config::ecs::EcsCredentialsProvider;
+use aws_config::imds::credentials::ImdsCredentialsProvider;
+use aws_config::meta::credentials::CredentialsProviderChain;
+use aws_config::provider_config::ProviderConfig;
+use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
+use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::config::{
     BehaviorVersion, Credentials, Region, RequestChecksumCalculation, ResponseChecksumValidation,
-    StalledStreamProtectionConfig,
+    SharedCredentialsProvider, SharedHttpClient, StalledStreamProtectionConfig,
 };
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::{ByteStream, DateTime};
 use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode};
 use aws_smithy_http_client::tls;
 use bytes::Bytes;
+use http_body::{Frame, SizeHint};
 use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Instant, timeout_at};
@@ -54,8 +67,13 @@ const MAX_ATTEMPTS: u32 = 3;
 /// `operation_timeout`. The SDK default of 20 s would outlast it.
 const MAX_BACKOFF: Duration = Duration::from_secs(1);
 /// TCP and TLS connect bound per attempt; the SDK default of the pinned
-/// behavior version, stated so an SDK bump cannot move it.
+/// behavior version, stated so an SDK bump cannot move it. The attempt bound
+/// caps it when that is shorter.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(3100);
+/// A read attempt gets this share of `operation_timeout`, so one attempt
+/// that hangs before its response headers leaves room for a retry. The SDK
+/// sets no attempt bound itself.
+const READ_ATTEMPT_SHARE: u32 = 2;
 /// A transfer with no progress for this long fails; the pinned behavior
 /// version's default, stated because an explicit config would otherwise
 /// take the builder's 20 s.
@@ -71,10 +89,8 @@ pub struct ObjectStorageOptions {
     pub provider: Provider,
     /// The S3 bucket name (on Railway the hashed `BUCKET`, not the display name).
     pub bucket: String,
-    /// Access key id.
-    pub access_key_id: String,
-    /// Secret access key.
-    pub secret_access_key: SecretString,
+    /// How the client authenticates.
+    pub credentials: CredentialSource,
     /// Largest object a put may send or a get may return.
     pub max_object_bytes: u64,
     /// Operations admitted at once; the excess is refused with
@@ -93,6 +109,32 @@ impl std::fmt::Debug for ObjectStorageOptions {
             .field("max_concurrency", &self.max_concurrency)
             .field("operation_timeout", &self.operation_timeout)
             .finish_non_exhaustive()
+    }
+}
+
+/// How the client authenticates. [`Debug`] prints the variant only.
+pub enum CredentialSource {
+    /// A long-lived access key pair.
+    AccessKey {
+        /// Access key id.
+        access_key_id: String,
+        /// Secret access key.
+        secret_access_key: SecretString,
+    },
+    /// The AWS identity the platform gives the workload, refreshed by the
+    /// SDK before it expires: a web identity token (EKS IAM roles for service
+    /// accounts), the container credentials endpoint (ECS task roles, EKS
+    /// Pod Identity), then the EC2 instance profile. [`Provider::AmazonS3`]
+    /// only.
+    WorkloadIdentity,
+}
+
+impl std::fmt::Debug for CredentialSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::AccessKey { .. } => "AccessKey",
+            Self::WorkloadIdentity => "WorkloadIdentity",
+        })
     }
 }
 
@@ -148,7 +190,7 @@ impl PutBody {
     /// [`ObjectStorageError::Rejected`] instead of storing a truncated object.
     pub fn stream<B, E>(len: u64, body: B) -> Self
     where
-        B: http_body::Body<Data = Bytes, Error = E> + Send + Sync + 'static,
+        B: http_body::Body<Data = Bytes, Error = E> + Send + 'static,
         E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
     {
         let (body, mismatch) = body::ExactLength::new(len, body);
@@ -296,44 +338,64 @@ impl ObjectStorage {
     /// Admit the provider tuple and build the client. This performs no I/O.
     ///
     /// The SDK config is built directly, so no ambient `AWS_*` variable,
-    /// profile file, instance metadata, or proxy variable can change the
-    /// endpoint, region, credentials, retries, or checksum behavior.
+    /// profile file, or proxy variable can change the endpoint, region,
+    /// retries, or checksum behavior. Credentials come from
+    /// [`CredentialSource`] alone: an access key pair, or for
+    /// [`CredentialSource::WorkloadIdentity`] the variables and endpoints the
+    /// platform provides for that identity.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError`] naming the refused key.
     pub fn new(options: ObjectStorageOptions) -> Result<Self, ConfigError> {
+        let admitted = provider::admit(&options.provider, &options.bucket)?;
+        let http_client = https_client();
+        let credentials = match &options.credentials {
+            CredentialSource::AccessKey {
+                access_key_id,
+                secret_access_key,
+            } => {
+                if access_key_id.trim().is_empty() {
+                    return Err(ConfigError::AccessKeyId);
+                }
+                if secret_access_key.expose_secret().trim().is_empty() {
+                    return Err(ConfigError::SecretAccessKey);
+                }
+                SharedCredentialsProvider::new(Credentials::new(
+                    access_key_id,
+                    secret_access_key.expose_secret(),
+                    None,
+                    None,
+                    "object_storage",
+                ))
+            }
+            CredentialSource::WorkloadIdentity => {
+                if !matches!(options.provider, Provider::AmazonS3 { .. }) {
+                    return Err(ConfigError::Credentials);
+                }
+                SharedCredentialsProvider::new(workload_identity(
+                    &admitted.region,
+                    http_client.clone(),
+                ))
+            }
+        };
+        Ok(Self::build(options, admitted, http_client, credentials))
+    }
+
+    fn build(
+        options: ObjectStorageOptions,
+        admitted: provider::Admitted,
+        http_client: SharedHttpClient,
+        credentials: SharedCredentialsProvider,
+    ) -> Self {
         let ObjectStorageOptions {
             provider,
             bucket,
-            access_key_id,
-            secret_access_key,
+            credentials: _,
             max_object_bytes,
             max_concurrency,
             operation_timeout,
         } = options;
-        let admitted = provider::admit(&provider, &bucket)?;
-        if access_key_id.trim().is_empty() {
-            return Err(ConfigError::AccessKeyId);
-        }
-        if secret_access_key.expose_secret().trim().is_empty() {
-            return Err(ConfigError::SecretAccessKey);
-        }
-        let credentials = Credentials::new(
-            access_key_id,
-            secret_access_key.expose_secret(),
-            None,
-            None,
-            "object_storage",
-        );
-        // rustls with aws-lc-rs. An explicit client reads no proxy variable
-        // (the pinned behavior version's default client would), and hyper
-        // follows no redirect, so a signed request reaches only this origin.
-        let http_client = aws_smithy_http_client::Builder::new()
-            .tls_provider(tls::Provider::Rustls(
-                tls::rustls_provider::CryptoMode::AwsLc,
-            ))
-            .build_https();
         let mut config = aws_sdk_s3::Config::builder()
             .behavior_version(BehaviorVersion::v2026_01_12())
             .region(Region::new(admitted.region))
@@ -353,6 +415,7 @@ impl ObjectStorage {
                 TimeoutConfig::builder()
                     .connect_timeout(CONNECT_TIMEOUT)
                     .operation_timeout(operation_timeout)
+                    .operation_attempt_timeout(operation_timeout / READ_ATTEMPT_SHARE)
                     .build(),
             )
             .stalled_stream_protection(
@@ -364,7 +427,7 @@ impl ObjectStorage {
             config = config.endpoint_url(endpoint);
         }
         observe::describe();
-        Ok(Self {
+        Self {
             inner: Arc::new(Inner {
                 client: aws_sdk_s3::Client::from_conf(config.build()),
                 provider: provider.name(),
@@ -376,7 +439,7 @@ impl ObjectStorage {
                 admission: Arc::new(Semaphore::new(max_concurrency)),
                 histograms: Arc::default(),
             }),
-        })
+        }
     }
 
     /// The configured provider name, safe to log.
@@ -419,7 +482,7 @@ impl ObjectStorage {
         // Under the client's `WhenRequired` the SDK sends the named
         // algorithm but computes no checksum value. An upload that carries
         // CRC64NVME therefore switches this one call to `WhenSupported`.
-        let mut once = one_attempt();
+        let mut once = self.one_attempt();
         if checksum.is_some() {
             once = once.request_checksum_calculation(RequestChecksumCalculation::WhenSupported);
         }
@@ -514,6 +577,7 @@ impl ObjectStorage {
             remaining: metadata.size,
             metadata,
             body: output.body,
+            last: None,
             state: DownloadState::Open(End {
                 guard,
                 _permit: permit,
@@ -571,7 +635,7 @@ impl ObjectStorage {
             .key(key.as_str())
             .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
             .customize()
-            .config_override(one_attempt())
+            .config_override(self.one_attempt())
             .send()
             .await;
         match result {
@@ -656,29 +720,82 @@ impl ObjectStorage {
             .map_err(|_| guard.fail(ObjectStorageError::Busy, "busy"))
     }
 
-    fn fail<E: aws_sdk_s3::error::ProvideErrorMetadata>(
+    /// One attempt for a mutation, as a per-call override of the client's
+    /// retry. The single attempt takes the whole `operation_timeout`.
+    fn one_attempt(&self) -> aws_sdk_s3::config::Builder {
+        aws_sdk_s3::Config::builder()
+            .retry_config(RetryConfig::standard().with_max_attempts(1))
+            .timeout_config(
+                TimeoutConfig::builder()
+                    .operation_attempt_timeout(self.inner.operation_timeout)
+                    .build(),
+            )
+    }
+
+    fn fail<E: aws_sdk_s3::error::ProvideErrorMetadata + std::error::Error + 'static>(
         guard: &mut OperationGuard,
         call: Call,
-        failure: &aws_sdk_s3::error::SdkError<E, aws_sdk_s3::config::http::HttpResponse>,
+        failure: &aws_sdk_s3::error::SdkError<E, HttpResponse>,
     ) -> ObjectStorageError {
         let failure = error::from_sdk(call, failure, |response| response.status().as_u16());
         guard.fail(failure.error, &failure.error_type)
     }
 }
 
-/// One attempt for a mutation, as a per-call override of the client's retry.
-fn one_attempt() -> aws_sdk_s3::config::Builder {
-    aws_sdk_s3::Config::builder().retry_config(RetryConfig::standard().with_max_attempts(1))
+/// rustls with aws-lc-rs. An explicit client reads no proxy variable (the
+/// pinned behavior version's default client would), and hyper follows no
+/// redirect, so a signed request reaches only its origin.
+fn https_client() -> SharedHttpClient {
+    aws_smithy_http_client::Builder::new()
+        .tls_provider(tls::Provider::Rustls(
+            tls::rustls_provider::CryptoMode::AwsLc,
+        ))
+        .build_https()
+}
+
+/// The workload's AWS identity, in the SDK default chain's order. Unlike that
+/// chain it has no environment access keys and no profile files: the
+/// providers read only what the platform injects for the identity
+/// (`AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, the
+/// `AWS_CONTAINER_*` variables, the instance metadata endpoint).
+fn workload_identity(region: &str, http_client: SharedHttpClient) -> CredentialsProviderChain {
+    let config = ProviderConfig::without_region()
+        .with_region(Some(Region::new(region.to_owned())))
+        .with_http_client(http_client);
+    CredentialsProviderChain::first_try(
+        "WebIdentityToken",
+        WebIdentityTokenCredentialsProvider::builder()
+            .configure(&config)
+            .build(),
+    )
+    .or_else(
+        "EcsContainer",
+        EcsCredentialsProvider::builder().configure(&config).build(),
+    )
+    .or_else(
+        "Ec2InstanceMetadata",
+        ImdsCredentialsProvider::builder()
+            .configure(&config)
+            .build(),
+    )
 }
 
 /// An open download. Dropping it releases the admission slot and the
 /// connection; the operation is recorded as `cancelled` unless the body
 /// already ended.
+///
+/// It is an [`http_body::Body`] of exactly [`ObjectMetadata::size`] bytes,
+/// so it can be returned as a response body. The chunk that completes the
+/// object is released only after the provider's body has ended and its
+/// checksum, when one came back, has been validated: a reader that stops at
+/// the declared length never holds a complete object that failed the check.
 #[derive(Debug)]
 pub struct Download {
     metadata: ObjectMetadata,
     remaining: u64,
     body: ByteStream,
+    /// The chunk that completed the object, until the body confirms its end.
+    last: Option<Bytes>,
     state: DownloadState,
 }
 
@@ -709,37 +826,54 @@ impl Download {
     ///
     /// # Errors
     ///
-    /// `Integrity` for a checksum mismatch; `Unavailable` for a transport
-    /// failure, a body shorter than its headers, or a stalled body. After an error every call returns the
-    /// same error; after the end, `Ok(None)`.
+    /// `Integrity` for a checksum mismatch or a body that differs from its
+    /// headers; `Unavailable` for a transport failure or a stalled body.
+    /// After an error every call returns the same error; after the end,
+    /// `Ok(None)`.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, ObjectStorageError> {
-        let end = match &mut self.state {
-            DownloadState::Open(end) => end,
-            DownloadState::Succeeded => return Ok(None),
-            DownloadState::Failed(error) => return Err(*error),
-        };
-        let failure = match self.body.next().await {
-            Some(Ok(chunk)) => match self.remaining.checked_sub(chunk.len() as u64) {
-                Some(remaining) => {
-                    self.remaining = remaining;
-                    return Ok(Some(chunk));
+        std::future::poll_fn(|context| self.poll_chunk(context)).await
+    }
+
+    fn poll_chunk(
+        &mut self,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<Option<Bytes>, ObjectStorageError>> {
+        loop {
+            let end = match &mut self.state {
+                DownloadState::Open(end) => end,
+                DownloadState::Succeeded => return Poll::Ready(Ok(self.last.take())),
+                DownloadState::Failed(error) => return Poll::Ready(Err(*error)),
+            };
+            let failure = match ready!(Pin::new(&mut self.body).poll_next(context)) {
+                Some(Ok(chunk)) if chunk.is_empty() => continue,
+                Some(Ok(chunk)) => match self.remaining.checked_sub(chunk.len() as u64) {
+                    Some(0) => {
+                        self.remaining = 0;
+                        self.last = Some(chunk);
+                        continue;
+                    }
+                    Some(remaining) => {
+                        self.remaining = remaining;
+                        return Poll::Ready(Ok(Some(chunk)));
+                    }
+                    None => (ObjectStorageError::Integrity, "content_length"),
+                },
+                Some(Err(error)) if error::is_checksum_mismatch(&error) => {
+                    (ObjectStorageError::Integrity, "checksum")
+                }
+                Some(Err(_)) => (ObjectStorageError::Unavailable, "body"),
+                None if self.remaining == 0 => {
+                    end.guard.succeed();
+                    self.state = DownloadState::Succeeded;
+                    continue;
                 }
                 None => (ObjectStorageError::Integrity, "content_length"),
-            },
-            Some(Err(error)) if error::is_checksum_mismatch(&error) => {
-                (ObjectStorageError::Integrity, "checksum")
-            }
-            Some(Err(_)) => (ObjectStorageError::Unavailable, "body"),
-            None if self.remaining == 0 => {
-                end.guard.succeed();
-                self.state = DownloadState::Succeeded;
-                return Ok(None);
-            }
-            None => (ObjectStorageError::Integrity, "content_length"),
-        };
-        let error = end.guard.fail(failure.0, failure.1);
-        self.state = DownloadState::Failed(error);
-        Err(error)
+            };
+            let error = end.guard.fail(failure.0, failure.1);
+            self.last = None;
+            self.state = DownloadState::Failed(error);
+            return Poll::Ready(Err(error));
+        }
     }
 
     /// Consume the download and collect its remaining body. Chunks already
@@ -755,6 +889,28 @@ impl Download {
             buffer.extend_from_slice(&chunk);
         }
         Ok(Bytes::from(buffer))
+    }
+}
+
+impl http_body::Body for Download {
+    type Data = Bytes;
+    type Error = ObjectStorageError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, ObjectStorageError>>> {
+        self.poll_chunk(context)
+            .map(|chunk| chunk.map(|chunk| chunk.map(Frame::data)).transpose())
+    }
+
+    fn is_end_stream(&self) -> bool {
+        matches!(self.state, DownloadState::Succeeded) && self.last.is_none()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        let last = self.last.as_ref().map_or(0, |chunk| chunk.len() as u64);
+        SizeHint::with_exact(self.remaining + last)
     }
 }
 

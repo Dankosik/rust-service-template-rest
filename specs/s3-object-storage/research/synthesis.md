@@ -260,3 +260,39 @@ limits, rate limits, or expected-owner handling; Tigris (behind it) rejects
 unsigned `x-amz-*` headers since 2026-09-28. R2 documents no trailer support
 and no `x-amz-checksum-mode` on GET. The conformance test records each of
 these per provider; the adapter does not depend on any of them.
+
+## Addendum 2026-10-01: review fixes
+
+A review of the delivered crate changed seven things. The decision record
+(`docs/object-storage-decisions.md`) carries the accepted rows; this section
+keeps the dependency comparison.
+
+| Need | Candidate | Verdict | Evidence |
+| --- | --- | --- | --- |
+| Temporary credentials for `amazon_s3` from the workload's role | `aws-config` 1.12.0 (2026-09-04, Apache-2.0, MSRV 1.94.1, weekly-to-monthly releases), default features off, `rt-tokio` only | Selected | A scratch project outside the repository with the profile's `aws-sdk-s3` 1.150.0 features resolved 189 lock packages without it and 193 with it: `aws-config`, `aws-sdk-sts` 1.118.0, `aws-smithy-query` 0.62.1, `urlencoding`; no smithy crate moved and no new duplicate. `WebIdentityTokenCredentialsProvider`, `EcsCredentialsProvider`, and `ImdsCredentialsProvider` have synchronous builders and take the profile's own HTTP client through `ProviderConfig`, so construction stays free of I/O and of the proxy variables. |
+| The same | `DefaultCredentialsChain` from the same crate | Rejected | Its builder is asynchronous, and the chain also reads `AWS_ACCESS_KEY_ID`, profile files, SSO, and `credential_process`: the ambient sources the profile excludes. |
+| The same | Template-owned STS, container endpoint, and IMDSv2 clients | Rejected | They would re-implement token-file rotation, the container endpoint's address allowlist, IMDSv2 session tokens, and expiry handling. |
+| A non-`Sync` request body in a streamed put | `sync_wrapper` 1.0.2 (Apache-2.0), already in the lock through axum, tower, and reqwest | Selected | `SdkBody::from_body_1_x` requires `Send + Sync`; `axum::body::Body` wraps `UnsyncBoxBody` and is not `Sync`. axum and reqwest wrap bodies the same way. |
+
+What `aws-config` does not do here: it is not asked for a region, an
+endpoint, retries, or checksums, and the S3 client is still built directly.
+Its STS client does honor the SDK's service-endpoint environment variables
+(`AWS_ENDPOINT_URL_STS`), which only moves where credentials are requested.
+
+Verified in the SDK sources (`aws-smithy-runtime` 1.15.0,
+`aws-smithy-runtime-api` 1.18.0, `aws-smithy-types` 1.8.1):
+
+- The pinned behavior version sets a connect timeout only; there is no
+  attempt bound, so one attempt that hangs before its response headers uses
+  the whole `operation_timeout`. A control run of the adapter test without
+  `operation_attempt_timeout` made one request and no retry.
+- A per-call `TimeoutConfig` override merges with the client's, so a
+  mutation can restore the whole budget for its single attempt.
+- A failed identity resolution is `OrchestratorError::other` before transmit
+  and surfaces as `SdkError::DispatchFailure`, with the
+  `CredentialsError` in its source chain.
+- `ByteStream::poll_next` is public, so the download can be a
+  `http_body::Body` without a second buffer.
+
+Unproven: no run against an AWS account exercised a workload identity, and
+no `s3_compatible` store has a conformance run.

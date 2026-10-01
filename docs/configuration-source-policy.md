@@ -96,15 +96,24 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   `none`. `object_storage.secret_access_key` is `SecretString`,
   environment-only (`APP__OBJECT_STORAGE__SECRET_ACCESS_KEY`), and redacted;
   a nonempty file value is refused because `secret` is secret-like.
-  `provider`, `bucket`, `region`, `endpoint`, `expected_bucket_owner`, and
-  `access_key_id` use normal file/environment precedence. Each provider
-  accepts only its own keys: `amazon_s3` takes `region` and
-  `expected_bucket_owner` and no endpoint, `cloudflare_r2` and `railway` take
-  `endpoint`, and a key another provider owns fails startup instead of being
-  ignored. `local` (an emulator, plaintext allowed) is accepted only when
-  `app.env` is `local` or `development`. The client is built from these keys
-  alone: the global `AWS_*` variables, AWS profile files, and instance
-  metadata are never read. On Railway, map the bucket's `${{Bucket.X}}`
+  `provider`, `bucket`, `region`, `endpoint`, `expected_bucket_owner`,
+  `path_style`, `credentials`, and `access_key_id` use normal
+  file/environment precedence. Each provider accepts only its own keys:
+  `amazon_s3` takes `region` and `expected_bucket_owner` and no endpoint,
+  `cloudflare_r2` and `railway` take `endpoint`, `s3_compatible` takes
+  `endpoint` and alone takes `path_style`, and a key another provider owns
+  fails startup instead of being ignored. `local` (an emulator, plaintext
+  allowed) is accepted only when `app.env` is `local` or `development`.
+  `credentials` is `access_key` (default) or, for `amazon_s3` only,
+  `workload_identity`, which refuses a nonempty `access_key_id` or
+  `secret_access_key`. The S3 client is built from these keys alone: the
+  global `AWS_*` variables and AWS profile files never change its endpoint,
+  region, or behavior. Under `workload_identity` the AWS SDK's own providers
+  read what the platform injects for the workload's role
+  (`AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, the
+  `AWS_CONTAINER_*` variables, the instance metadata endpoint), only to
+  obtain credentials; environment access keys and profile files are still
+  not sources. On Railway, map the bucket's `${{Bucket.X}}`
   variables onto `APP__OBJECT_STORAGE__*`. Value shapes (endpoint origin,
   region, bucket name, owner account) are admitted by `infra-object-storage`.
   The [guide](object-storage.md) owns admission.
@@ -313,7 +322,8 @@ every record inside a request) or `text` (local development).
 - `object_storage.operation_timeout` (environment
   `APP__OBJECT_STORAGE__OPERATION_TIMEOUT`, default `5s`, inclusive `1s` to
   `15m`) bounds one call up to its response headers, a read's three attempts
-  included (a put or delete makes one); connect stays a `3.1s` constant and a
+  included (a put or delete makes one); one read attempt gets half of it, so
+  a hung attempt leaves room for a retry; connect stays a `3.1s` constant and a
   download body is bounded by the SDK's stalled-stream protection (5 s without
   progress) instead. On a request path the handler
   budget still applies: a put dropped by `http.request_timeout` has an unknown
