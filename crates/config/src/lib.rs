@@ -4,14 +4,15 @@
 //! files in order → `APP__SECTION__KEY` environment variables. Unknown keys
 //! anywhere fail startup. Secret-like keys may carry a value only through the
 //! environment. Each section owns its type, defaults, and validation in one
-//! file. [`Config::validate`] runs those section validators; intra-HTTP key
-//! relations stay in [`http::HttpConfig::validate`]. Rules that need process
-//! structure, such as the drain-plus-teardown tail against the grace period,
-//! stay in the composition root.
+//! file. [`Config::validate`] runs those section validators; a rule spanning
+//! two sections lives in the one that depends on the other. Rules that need
+//! process structure, such as the drain-plus-teardown tail against the grace
+//! period, stay in the composition root.
 //!
 //! The loader is [`config`](https://docs.rs/config) with `serde`; see
-//! `docs/configuration-source-policy.md` for why, and for what the two
-//! pre-scans in [`load`] add that the crate does not.
+//! `docs/configuration-source-policy.md` for why, and for what the
+//! environment-name and file pre-scans in [`load`] add that the crate does
+//! not.
 
 pub mod app;
 pub mod health;
@@ -100,7 +101,8 @@ pub use authn::{Audiences, AuthnConfig};
 pub use authn::{JwtAlgorithm, TokenProfile};
 // template:end oidc-jwt:config-jwt-input-exports
 // template:begin postgres:config-export
-pub use postgres::PostgresConfig;
+pub use load::load_migration;
+pub use postgres::{MigrationConfig, PostgresConfig};
 // template:end postgres:config-export
 // template:begin http-idempotency:config-http-idempotency-export
 pub use http_idempotency::HttpIdempotencyConfig;
@@ -181,24 +183,9 @@ impl Config {
         self.messaging.validate(&self.app.env)?;
         // template:end messaging:config-validate
         // template:begin cache:config-validate
-        self.cache.validate(&self.app.env)?;
+        self.cache
+            .validate(&self.app.env, self.http.request_timeout)?;
         // template:end cache:config-validate
-        // template:begin cache:config-request-budget
-        if self.cache.is_active() {
-            let doubled = self.cache.command_timeout.checked_mul(2).ok_or_else(|| {
-                ValidationError::new(
-                    "cache.command_timeout",
-                    "must be at most half of http.request_timeout",
-                )
-            })?;
-            if doubled > self.http.request_timeout {
-                return Err(ValidationError::new(
-                    "cache.command_timeout",
-                    "must be at most half of http.request_timeout",
-                ));
-            }
-        }
-        // template:end cache:config-request-budget
         // template:begin object-storage:config-validate
         self.object_storage.validate(&self.app.env)?;
         // template:end object-storage:config-validate

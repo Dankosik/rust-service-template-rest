@@ -13,6 +13,7 @@ use bytesize::ByteSize;
 use secrecy::SecretString;
 use serde::Deserialize;
 
+use crate::app::is_local_development;
 use crate::de::blank_secret_as_none;
 use crate::validate::{ValidationError, duration_range, int_range, non_empty};
 
@@ -152,7 +153,7 @@ impl ObjectStorageConfig {
                 (Field::Required, Field::Optional, Field::Forbidden)
             }
             ObjectStorageProvider::Local => {
-                if !matches!(app_env, "local" | "development") {
+                if !is_local_development(app_env) {
                     return Err(ValidationError::new(
                         "object_storage.provider",
                         "local is local/development-only",
