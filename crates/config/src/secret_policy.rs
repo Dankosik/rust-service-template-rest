@@ -8,7 +8,7 @@
 ///
 /// Segments are split on `.`, `_`, and `-`, so `otlp_headers`, `api_key`,
 /// and `private-key` all match; `token_url` remains a non-credential URL name
-/// and `password_file` a non-credential path.
+/// and a key that ends in `password_file` a non-credential path.
 #[must_use]
 pub(crate) fn is_secret_like_key(key: &str) -> bool {
     let lowered = key.trim().to_ascii_lowercase();
@@ -26,7 +26,7 @@ pub(crate) fn is_secret_like_key(key: &str) -> bool {
         .enumerate()
         .any(|(i, segment)| match *segment {
             "secret" | "secrets" | "credentials" | "authorization" | "dsn" => true,
-            "password" => !matches!(segments.get(i + 1), Some(&"file")),
+            "password" => segments.get(i + 1..) != Some(&["file"][..]),
             "token" => !matches!(segments.get(i + 1), Some(&"url")),
             "key" => matches!(segments.get(i.wrapping_sub(1)), Some(&"api" | &"private")),
             "headers" => matches!(segments.get(i.wrapping_sub(1)), Some(&"otlp")),
@@ -90,6 +90,7 @@ mod tests {
             "signing.private-key",
             "auth.token",
             "smtp.password",
+            "smtp.password_file_contents",
             "http.authorization",
             "messaging.credentials",
             "object_storage.secret_access_key",

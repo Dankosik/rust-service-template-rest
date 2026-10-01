@@ -7,8 +7,9 @@ proof is available only when the local PostgreSQL profile is retained.
 Workspace crate `integration-tests`: database-backed proof for the PostgreSQL
 profile. `make test` compiles it with the `integration` feature off, so
 nothing here runs without Docker; `ALLOW_HEAVY=1 make test-integration-db`
-brings a PostgreSQL up from `env/docker-compose.yml`, exports
-`DATABASE_URL`, and runs `tests/postgres.rs` with the feature on.
+brings a PostgreSQL and a PgBouncer in front of it up from
+`env/docker-compose.yml`, exports `DATABASE_URL` and
+`PGBOUNCER_DATABASE_URL`, and runs `tests/postgres.rs` with the feature on.
 
 - `src/lib.rs`: helpers that turn the `#[sqlx::test]` per-test database into
   an admitted `Dsn`.

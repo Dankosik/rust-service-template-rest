@@ -56,7 +56,8 @@ The password has one alternative source, for a platform that rotates it.
 trailing line break is not part of it); the URL then carries no password,
 and one in both places is refused, so there is still exactly one source. The
 file is read at admission by every binary, the migrator included. In the
-service and the jobs worker a task reads it again every five seconds and
+service, and the jobs worker where that pack is retained, a task reads it
+again every five seconds and
 hands a changed password to the pool through `Pool::set_connect_options`,
 the driver's own hook for it; connections already open keep their
 authenticated session and leave at the pool's maximum lifetime. While the
@@ -224,9 +225,10 @@ else can work:
   takes role and database defaults when it starts, so after changing them
   recycle the pooler's server connections before restarting the service.
 - **What still needs a session of its own connects directly or through a
-  session-mode pooler:** the migrator (advisory lock, its own budgets) and
-  the jobs worker's `LISTEN` connection, which through a transaction-mode
-  pooler receives nothing and leaves pickup to the poll interval.
+  session-mode pooler:** the migrator (advisory lock, its own budgets) and,
+  where the jobs pack is retained, its worker's `LISTEN` connection, which
+  through a transaction-mode pooler receives nothing and leaves pickup to
+  the poll interval.
 - **One host.** The DSN admits no host list and no
   `target_session_attrs`; failover is the endpoint's job (a managed
   endpoint, a virtual IP, DNS). After a failover a session on a server that
@@ -240,7 +242,9 @@ else can work:
   `sqlx` 0.9 sets no TCP keepalive. A connection idle for more than a second
   is pinged before use and discarded when the ping takes more than a second,
   so a pool whose peers vanished without a reset (a load balancer's idle
-  cut-off, a failed node) recovers inside one acquire budget. A connection
+  cut-off, a failed node) sheds one dead connection per second of a
+  caller's acquire budget: with three or more of them the first caller
+  still times out, and the ones after it get fresh connections. A connection
   that dies while a statement runs is different: the caller's own deadline
   ends the wait, and the driver's return-to-pool ping, which has no timeout,
   holds the pool slot until the kernel gives up on the socket.

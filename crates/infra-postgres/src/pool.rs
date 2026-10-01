@@ -56,7 +56,9 @@ const PING_IDLE_AFTER: Duration = Duration::from_secs(1);
 /// balancer's idle cut-off, a failed node) never answers, and an unbounded
 /// ping would spend the caller's whole acquire budget on one dead connection;
 /// past this bound the connection is discarded and the acquire moves on to
-/// the next one or opens a new one.
+/// the next one or opens a new one. Each dead connection still costs its
+/// caller this bound, so a pool with three or more of them fails one acquire
+/// before it is clean again.
 const IDLE_PING_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The effective session budgets and default isolation, in milliseconds as
