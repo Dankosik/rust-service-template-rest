@@ -41,6 +41,8 @@ RUN apt-get update \
  && cd /tmp \
  && apt-get download libssl3t64=3.5.7-1~deb13u3 \
  && dpkg-deb --extract libssl3t64_*.deb /patched \
+ && dpkg-deb --control libssl3t64_*.deb /tmp/openssl-control \
+ && cp /tmp/openssl-control/md5sums /patched/var/lib/dpkg/status.d/libssl3t64.md5sums \
  && dpkg-deb --field libssl3t64_*.deb > /patched/var/lib/dpkg/status.d/libssl3t64 \
  && printf 'Status: install ok installed\n' >> /patched/var/lib/dpkg/status.d/libssl3t64
 
