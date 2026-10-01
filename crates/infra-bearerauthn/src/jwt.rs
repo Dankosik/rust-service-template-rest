@@ -303,9 +303,9 @@ async fn fetch_discovery(
     openid.set_path(&format!("{path}/.well-known/openid-configuration"));
     let bytes = match fetch_within(provider, &openid, deadline).await {
         Err(ProviderFailure::Status(_)) => {
-            let mut oauth = issuer.url().clone();
-            oauth.set_path(&format!("/.well-known/oauth-authorization-server{path}"));
-            fetch_within(provider, &oauth, deadline).await
+            let mut rfc8414 = issuer.url().clone();
+            rfc8414.set_path(&format!("/.well-known/oauth-authorization-server{path}"));
+            fetch_within(provider, &rfc8414, deadline).await
         }
         result => result,
     }
