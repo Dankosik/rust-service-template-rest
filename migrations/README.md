@@ -26,7 +26,10 @@ uses JSONB payloads, C-collated text unique keys, trace state, enqueue-time
 `created_at`, nullable UUID `attempted_by`, and the current partial indexes.
 It sets a table-local autovacuum scale factor of zero and threshold of 5,000;
 it does not change any server setting or role. The existing `migrate` binary
-applies it with the rest of the set. Neither the service nor worker creates or
+applies it with the rest of the set.
+`20261001120000_add_background_job_errors.sql` adds the `errors` JSONB
+failure history and drops the unused random `id` default, since enqueue
+supplies a time-ordered id. Neither the service nor worker creates or
 alters schema at runtime, and only `crates/infra-jobs` names the table.
 <!-- template:end jobs:migrations-readme-jobs -->
 

@@ -30,6 +30,7 @@ migrations/20260924000001_create_background_jobs.sql
 migrations/20260926022945_create_webhook_receipts.sql
 migrations/20260926130000_native_webhook_receipts.sql
 migrations/20260928190000_compress_http_idempotency_bodies_with_lz4.sql
+migrations/20261001120000_add_background_job_errors.sql
 docs/authentication.md
 docs/outbound-http.md
 docs/outbound-http-decisions.md

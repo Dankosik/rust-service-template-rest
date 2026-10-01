@@ -241,16 +241,16 @@ policy this document records. The insert is its only statement: UTF-8 is a
 schema precondition that the canonical migration enforces and the
 worker's startup check verifies. The jobs worker pool selects session-default
 `READ COMMITTED` when it opens each physical connection, including
-replacements, and startup refuses another default. Claim, outcome, retention,
-and sample statements are individual autocommit statements. Enqueue and
+replacements, and startup refuses another default. Claim and outcome
+statements are individual autocommit statements. Enqueue and
 `complete_in_tx` remain caller-owned explicit transactions, preserving their
 isolation and commit-outcome meaning.
 
-Retention and sampling temporarily set their existing server statement limits
-(one and two seconds respectively) on an acquired session, execute one atomic
-statement, then acknowledge reset before returning the connection. Cancellation
-or an unacknowledged SET, statement, or RESET closes that connection rather
-than returning a session with altered settings to the pool.
+Retention and sampling each run one statement in a short `in_tx` transaction
+whose first statement is `SET LOCAL statement_timeout` (one and two seconds
+respectively). PostgreSQL restores the session limit itself on commit,
+rollback, or a dropped connection, so no session returns to the pool with an
+altered setting.
 
 The worker's sessions carry a derived `application_name` of the form
 `{service_name}-jobs-worker`, with the service name cut to at most 51 bytes

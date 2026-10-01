@@ -35,29 +35,15 @@ pub trait JobKind: Serialize + DeserializeOwned + Send + Sync + 'static {
     const NAME: &'static str;
 }
 
-/// A job's stable identifier, as the database generates it.
+/// A job's stable identifier, as enqueue generates it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct JobId(uuid::Uuid);
+pub struct JobId(pub(crate) uuid::Uuid);
 
 impl JobId {
-    pub(crate) fn encode<'a>(&self, buffer: &'a mut [u8; 36]) -> &'a str {
-        self.0.hyphenated().encode_lower(buffer)
-    }
-
     /// A time-ordered id: consecutive enqueues append to the primary key
     /// instead of writing random index pages.
     pub(crate) fn new_v7() -> Self {
         Self(uuid::Uuid::now_v7())
-    }
-
-    /// The id as the database returns it (`id::text`).
-    ///
-    /// `None` when `text` is not a UUID.
-    pub(crate) const fn parse(text: &str) -> Option<Self> {
-        match uuid::Uuid::try_parse(text) {
-            Ok(id) => Some(Self(id)),
-            Err(_) => None,
-        }
     }
 }
 
@@ -140,7 +126,7 @@ impl<K: JobKind> Job<K> {
     /// or [`CompleteError::Database`] when the statement fails.
     pub async fn complete_in_tx(&self, tx: &mut Tx<'_>) -> Result<(), CompleteError> {
         let affected = sqlx::query(crate::attempt::COMPLETE)
-            .bind(self.attempt.id.to_string())
+            .bind(self.attempt.id.0)
             .bind(self.attempt.generation)
             .execute(&mut *connection(tx))
             .await?
@@ -198,7 +184,8 @@ pub struct JobError {
 }
 
 impl JobError {
-    /// A retryable failure. The summary is `error`'s [`Display`] text.
+    /// A retryable failure. The summary is `error`'s [`Display`] text alone;
+    /// `?` on an [`std::error::Error`] also keeps its sources.
     #[must_use]
     pub fn retryable(error: impl fmt::Display) -> Self {
         Self {
@@ -258,13 +245,36 @@ impl fmt::Display for JobError {
     }
 }
 
+/// A retryable failure whose summary is `error`'s text and its sources.
 impl<E> From<E> for JobError
 where
     E: std::error::Error + Send + Sync + 'static,
 {
     fn from(error: E) -> Self {
-        Self::retryable(error)
+        Self {
+            disposition: Disposition::Retry,
+            summary: with_sources(&error),
+        }
     }
+}
+
+/// `error`'s text, then each source whose text the summary does not already
+/// contain: an error that prints its cause (`"complete job: {0}"`) is not
+/// repeated, and one that keeps its cause only in `source()` does not lose it.
+fn with_sources(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut summary = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source
+        && summary.len() < crate::attempt::ERROR_SUMMARY_MAX_BYTES
+    {
+        let text = cause.to_string();
+        if !text.is_empty() && !summary.contains(&text) {
+            summary.push_str(": ");
+            summary.push_str(&text);
+        }
+        source = cause.source();
+    }
+    summary
 }
 
 /// A handler for one job kind.
@@ -565,6 +575,10 @@ mod tests {
         const NAME: &'static str = "Bad";
     }
 
+    fn job_id(text: &str) -> JobId {
+        JobId(uuid::Uuid::try_parse(text).unwrap())
+    }
+
     fn lazy_pool() -> PgPool {
         PgPoolOptions::new()
             .connect_lazy("postgres://localhost/unused")
@@ -686,7 +700,7 @@ mod tests {
     #[test]
     fn job_id_uuid_display_preserves_external_format() {
         let text = "01234567-89ab-cdef-fedc-ba9876543210";
-        let id = JobId::parse(text).unwrap();
+        let id = job_id(text);
         assert_eq!(id.to_string(), text);
         assert_eq!(
             format!("{id:?}"),
@@ -696,7 +710,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_prepare_runs_the_handler_and_rejects_a_bad_payload() {
-        let id = JobId::parse("01234567-89ab-cdef-fedc-ba9876543210").unwrap();
+        let id = job_id("01234567-89ab-cdef-fedc-ba9876543210");
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut kinds = Kinds::new();
         kinds.register(Policy::default(), move |job: Job<Sample>| async move {
@@ -751,7 +765,7 @@ mod tests {
     async fn job_debug_omits_payload() {
         let job = Job {
             attempt: Attempt {
-                id: JobId::parse("01234567-89ab-cdef-fedc-ba9876543210").unwrap(),
+                id: job_id("01234567-89ab-cdef-fedc-ba9876543210"),
                 number: 4,
                 generation: 99,
                 deadline: Instant::now(),
@@ -780,5 +794,28 @@ mod tests {
         let err = JobError::permanent("stop");
         assert!(err.is_permanent());
         assert_eq!(err.to_string(), "stop");
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    enum Layered {
+        #[error("commit outcome unknown")]
+        Hidden(#[source] std::io::Error),
+        #[error("complete job: {0}")]
+        Printed(#[source] std::io::Error),
+    }
+
+    #[test]
+    fn job_error_from_std_keeps_each_source_once() {
+        let hidden = JobError::from(Layered::Hidden(std::io::Error::other("connection reset")));
+        assert_eq!(
+            hidden.to_string(),
+            "commit outcome unknown: connection reset"
+        );
+
+        let printed = JobError::from(Layered::Printed(std::io::Error::other("connection reset")));
+        assert_eq!(printed.to_string(), "complete job: connection reset");
+
+        let explicit = JobError::retryable(Layered::Hidden(std::io::Error::other("reset")));
+        assert_eq!(explicit.to_string(), "commit outcome unknown");
     }
 }

@@ -4,11 +4,12 @@ use std::fmt;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use sqlx::postgres::PgPool;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -29,7 +30,8 @@ pub(crate) const OPERATION_BACKSTOP: Duration = Duration::from_secs(12);
 /// Counter of failed engine statements. Label `operation`.
 pub(crate) const OPERATION_FAILURES_METRIC: &str = "jobs_worker_operation_failures_total";
 
-/// A worker's job engine. Cloning shares the pool, registry, and supervisor tracker.
+/// A worker's job engine: one kind set, its attempt slots, and its claim loop.
+/// Cloning shares the pool, registry, and supervisor tracker.
 #[derive(Clone)]
 pub struct Engine {
     shared: Arc<Shared>,
@@ -121,26 +123,81 @@ impl From<sqlx::Error> for OperationError {
 impl Engine {
     /// Build an engine over a writable UTF8 pool with READ COMMITTED defaults.
     /// Call [`Self::check_startup`] before starting it. Does no I/O.
+    ///
+    /// This engine owns what a worker process needs once: the `LISTEN`
+    /// connection and terminal retention. Engines made with [`Self::beside`]
+    /// share them.
     #[must_use]
     pub fn new(pool: PgPool, registry: Registry, max_workers: NonZeroU32) -> Self {
+        Self::build(
+            pool,
+            registry,
+            max_workers,
+            uuid::Uuid::new_v4(),
+            Arc::default(),
+            true,
+        )
+    }
+
+    /// A second engine of the same worker process on the same pool, with its
+    /// own kinds, slots, and claim loop, so its work is not delayed by this
+    /// engine's occupied slots.
+    ///
+    /// It claims under this engine's worker id, and this engine's listener
+    /// and retention serve it: start both.
+    #[must_use]
+    pub fn beside(&self, registry: Registry, max_workers: NonZeroU32) -> Self {
+        Self::build(
+            self.shared.pool.clone(),
+            registry,
+            max_workers,
+            self.shared.worker_id,
+            Arc::clone(&self.shared.peers),
+            false,
+        )
+    }
+
+    fn build(
+        pool: PgPool,
+        registry: Registry,
+        max_workers: NonZeroU32,
+        worker_id: uuid::Uuid,
+        peers: Arc<Mutex<Vec<Peer>>>,
+        owns_process_duties: bool,
+    ) -> Self {
         let slots = usize::try_from(max_workers.get()).unwrap_or(usize::MAX);
+        let wake = Arc::new(Notify::new());
+        peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Peer {
+                kinds: registry.names().collect(),
+                wake: Arc::clone(&wake),
+            });
         Self {
             shared: Arc::new(Shared {
                 pool,
-                worker_id: *WORKER_ID.get_or_init(uuid::Uuid::new_v4),
+                worker_id,
                 registry,
                 max_workers,
                 slots: Arc::new(Semaphore::new(slots)),
                 permit: Semaphore::new(1),
                 force: CancellationToken::new(),
-                hard_stop: CancellationToken::new(),
+                cleanup_deadline: OnceLock::new(),
                 counters: Counters::default(),
                 attempt_tracker: TaskTracker::new(),
                 failing: Failing::new(),
                 completions: crate::attempt::Completions::default(),
-                wake: tokio::sync::Notify::new(),
+                wake,
+                peers,
+                owns_process_duties,
             }),
         }
+    }
+
+    /// The registered kind names, in registration order.
+    pub fn kinds(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.shared.registry.names()
     }
 
     /// Check UTF8, READ COMMITTED defaults and a writable session, bounded to 5 s.
@@ -164,7 +221,8 @@ impl Engine {
         maintenance::remove_expired(&self.shared).await
     }
 
-    /// Spawn the claim loop, retention, and gauge sampling on `tracker`.
+    /// Spawn the claim loop and gauge sampling on `tracker`, and for an
+    /// engine built with [`Self::new`] also the listener and retention.
     ///
     /// Each task runs under a child of `cancel`. Does no I/O before it returns.
     #[must_use]
@@ -191,15 +249,16 @@ impl Engine {
             failure.clone(),
             claim::run_claim_loop,
         );
-        let retention_cancel = cancel.child_token();
-        tracker.spawn(maintenance::run_retention(
-            Arc::clone(&self.shared),
-            retention_cancel,
-        ));
-        tracker.spawn(claim::run_listener(
-            Arc::clone(&self.shared),
-            cancel.child_token(),
-        ));
+        if self.shared.owns_process_duties {
+            tracker.spawn(maintenance::run_retention(
+                Arc::clone(&self.shared),
+                cancel.child_token(),
+            ));
+            tracker.spawn(claim::run_listener(
+                Arc::clone(&self.shared),
+                cancel.child_token(),
+            ));
+        }
         let sample_cancel = cancel.child_token();
         tracker.spawn(maintenance::run_sampling(
             Arc::clone(&self.shared),
@@ -248,18 +307,17 @@ impl Started {
     #[must_use]
     pub async fn cancel_and_finish(&self, budget: Duration) -> DrainEnd {
         self.stop_claiming();
-        if !self.shared.force.is_cancelled() {
-            self.shared.force.cancel();
-            let hard_stop = self.shared.hard_stop.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(budget).await;
-                hard_stop.cancel();
-            });
-        }
+        // Fixed before `force` fires: a supervisor that sees the cancellation
+        // also sees the deadline.
+        self.shared.cleanup_deadline.get_or_init(|| {
+            let now = Instant::now();
+            now.checked_add(budget).unwrap_or(now + NO_CLEANUP_DEADLINE)
+        });
+        self.shared.force.cancel();
         let timed_out = tokio::select! {
             biased;
             () = self.drained() => false,
-            () = self.shared.hard_stop.cancelled() => true,
+            () = self.shared.cleanup_ended() => true,
         };
         let counters = &self.shared.counters;
         DrainEnd {
@@ -319,7 +377,14 @@ impl Drop for FailUnlessCancelled {
     }
 }
 
-static WORKER_ID: OnceLock<uuid::Uuid> = OnceLock::new();
+/// Stands in for a cleanup budget too long to add to the clock.
+const NO_CLEANUP_DEADLINE: Duration = Duration::from_hours(24 * 365);
+
+/// One engine as the process's listener sees it.
+pub(crate) struct Peer {
+    kinds: Vec<&'static str>,
+    wake: Arc<Notify>,
+}
 
 pub(crate) struct Shared {
     pub(crate) worker_id: uuid::Uuid,
@@ -330,14 +395,50 @@ pub(crate) struct Shared {
     pub(crate) permit: Semaphore,
     /// Cancels running handlers.
     pub(crate) force: CancellationToken,
-    /// Stops supervisors once the cleanup budget is spent.
-    pub(crate) hard_stop: CancellationToken,
+    /// When supervisors stop waiting, set by the first forced cleanup.
+    cleanup_deadline: OnceLock<Instant>,
     pub(crate) counters: Counters,
     pub(crate) attempt_tracker: TaskTracker,
     pub(crate) failing: Failing,
     pub(crate) completions: crate::attempt::Completions,
     /// Set when a due job of a registered kind was committed.
-    pub(crate) wake: tokio::sync::Notify,
+    pub(crate) wake: Arc<Notify>,
+    /// Every engine of this worker process, this one included.
+    peers: Arc<Mutex<Vec<Peer>>>,
+    /// Whether this engine runs the listener and retention.
+    owns_process_duties: bool,
+}
+
+impl Shared {
+    /// Resolves once the budget of a forced cleanup is spent; pending until
+    /// a cleanup is forced.
+    pub(crate) async fn cleanup_ended(&self) {
+        self.force.cancelled().await;
+        match self.cleanup_deadline.get() {
+            Some(deadline) => tokio::time::sleep_until(*deadline).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    pub(crate) fn cleanup_has_ended(&self) -> bool {
+        self.cleanup_deadline
+            .get()
+            .is_some_and(|deadline| Instant::now() >= *deadline)
+    }
+
+    /// Wake every engine of this process that registers `kind`, or all of
+    /// them when `kind` is `None`.
+    pub(crate) fn wake_peers(&self, kind: Option<&str>) {
+        let peers = self
+            .peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for peer in peers.iter() {
+            if kind.is_none_or(|kind| peer.kinds.contains(&kind)) {
+                peer.wake.notify_one();
+            }
+        }
+    }
 }
 
 impl fmt::Debug for Shared {

@@ -231,18 +231,14 @@ async fn prepare(
     ))
     .await?;
     // template:end messaging:worker-bootstrap-messaging-connect
-    // template:begin outbox:worker-bootstrap-outbox-engine
-    let publisher =
-        outbox_publisher(startup_stopped, resources, registrations.jobs.as_ref()).await?;
-    // template:end outbox:worker-bootstrap-outbox-engine
     // template:begin jobs:worker-bootstrap-build-engines
     let mut engines = build_engines(config, &mut registrations, resources, startup_stopped).await?;
     // template:end jobs:worker-bootstrap-build-engines
-    // template:begin outbox:worker-bootstrap-append-publisher
-    if let Some(publisher) = publisher {
+    // template:begin outbox:worker-bootstrap-outbox-engine
+    if let Some(publisher) = outbox_publisher(startup_stopped, resources, engines.first()).await? {
         engines.push(publisher);
     }
-    // template:end outbox:worker-bootstrap-append-publisher
+    // template:end outbox:worker-bootstrap-outbox-engine
     let (readiness, admitted) =
         bind_and_admit(config, &metrics, resources, signals, startup_stopped).await?;
     // template:begin jobs:worker-bootstrap-start-admitted-jobs
@@ -397,7 +393,7 @@ async fn build_engines(
 async fn outbox_publisher(
     startup_stopped: bool,
     resources: &Resources,
-    jobs: Option<&Registry>,
+    ordinary: Option<&Engine>,
 ) -> Result<Option<Engine>, WorkerError> {
     if startup_stopped {
         return Ok(None);
@@ -407,22 +403,26 @@ async fn outbox_publisher(
         .as_ref()
         .ok_or(MessagingError::Connection)?;
     let registry = infra_messaging::outbox::registry(messaging.producer())?;
-    if jobs.is_some_and(|ordinary| {
+    if ordinary.is_some_and(|ordinary| {
         registry
             .names()
-            .any(|reserved| ordinary.names().any(|name| name == reserved))
+            .any(|reserved| ordinary.kinds().any(|name| name == reserved))
     }) {
         return Err(WorkerError::PublisherKindConflict);
     }
-    let publisher = Engine::new(
-        resources
-            .pool
-            .as_ref()
-            .ok_or(WorkerError::PostgresDisabled)?
-            .clone(),
-        registry,
-        std::num::NonZeroU32::MIN,
-    );
+    // One listener and one retention loop serve both engines of this process.
+    let publisher = match ordinary {
+        Some(ordinary) => ordinary.beside(registry, std::num::NonZeroU32::MIN),
+        None => Engine::new(
+            resources
+                .pool
+                .as_ref()
+                .ok_or(WorkerError::PostgresDisabled)?
+                .clone(),
+            registry,
+            std::num::NonZeroU32::MIN,
+        ),
+    };
     publisher.check_startup().await?;
     Ok(Some(publisher))
 }

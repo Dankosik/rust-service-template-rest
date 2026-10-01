@@ -41,25 +41,27 @@ pub const ATTEMPT_DURATION_BUCKETS: &[f64] = &[
 // included. This predicate leaves the primary key as the only access path.
 pub(crate) const COMPLETE: &str = "UPDATE background_jobs \
      SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
-     WHERE id = $1::uuid AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
+     WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
 const RETRY: &str = "UPDATE background_jobs \
      SET state = 'pending', not_before = statement_timestamp() + \
          GREATEST($3::double precision * (0.9 + 0.2 * random()), $4::bigint) * interval '1 microsecond', \
-         claim_expires_at = NULL, error_summary = $5 \
-     WHERE id = $1::uuid AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
+         claim_expires_at = NULL, error_summary = $5, \
+         errors = errors || jsonb_build_object('attempt', attempts, 'at', statement_timestamp(), 'error', $5::text) \
+     WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
 const FAIL: &str = "UPDATE background_jobs \
      SET state = 'failed', failure_reason = $3, finished_at = statement_timestamp(), \
-         claim_expires_at = NULL, error_summary = $4 \
-     WHERE id = $1::uuid AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
+         claim_expires_at = NULL, error_summary = $4, \
+         errors = errors || jsonb_build_object('attempt', attempts, 'at', statement_timestamp(), 'error', $4::text) \
+     WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
 const SNOOZE: &str = "UPDATE background_jobs \
      SET state = 'pending', not_before = statement_timestamp() + $3, claim_expires_at = NULL, \
          attempts = attempts - 1 \
-     WHERE id = $1::uuid AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
+     WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
 /// COMPLETE for every attempt queued while the previous batch was in flight.
 /// Returns the 1-based position of each applied completion.
 const COMPLETE_BATCH: &str = "UPDATE background_jobs AS job \
      SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
-     FROM unnest($1::text[]::uuid[], $2::bigint[]) WITH ORDINALITY AS done (id, generation, position) \
+     FROM unnest($1::uuid[], $2::bigint[]) WITH ORDINALITY AS done (id, generation, position) \
      WHERE job.id = done.id AND job.claim_generation = done.generation \
        AND job.claim_expires_at IS NOT NULL \
      RETURNING done.position";
@@ -67,7 +69,7 @@ const COMPLETE_BATCH: &str = "UPDATE background_jobs AS job \
 /// keeps its place in claim order instead of queueing behind the backlog.
 const RELEASE: &str = "UPDATE background_jobs \
      SET state = 'pending', claim_expires_at = NULL, attempts = attempts - 1 \
-     WHERE id = $1::uuid AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
+     WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
 
 /// The queue transition a known attempt result asks for.
 enum Transition {
@@ -322,13 +324,13 @@ async fn within<T>(shared: &Shared, local: Instant, future: impl Future<Output =
     tokio::select! {
         biased;
         value = future => Some(value),
-        () = shared.hard_stop.cancelled() => None,
+        () = shared.cleanup_ended() => None,
         () = tokio::time::sleep_until(local) => None,
     }
 }
 
 fn expired(shared: &Shared, local: Instant) -> bool {
-    Instant::now() >= local || shared.hard_stop.is_cancelled()
+    Instant::now() >= local || shared.cleanup_has_ended()
 }
 
 /// Poll a ready result before cancellation; it wins as is. After cancellation
@@ -502,7 +504,7 @@ async fn write_batch(shared: &Shared, batch: Vec<QueuedCompletion>) {
     let mut ids = Vec::with_capacity(batch.len());
     let mut generations = Vec::with_capacity(batch.len());
     for queued in &batch {
-        ids.push(queued.id.to_string());
+        ids.push(queued.id.0);
         generations.push(queued.generation);
     }
     let result = backstop(Box::pin(async {
@@ -555,15 +557,9 @@ async fn send_outcome(
             .acquire()
             .await
             .map_err(OperationError::Acquire)?;
-        let mut id = [0; 36];
-        execute(
-            &mut connection,
-            attempt.id.encode(&mut id),
-            attempt.generation,
-            transition,
-        )
-        .await
-        .map_err(OperationError::from)
+        execute(&mut connection, attempt.id, attempt.generation, transition)
+            .await
+            .map_err(OperationError::from)
     }))
     .await
     .map_err(Some)
@@ -571,10 +567,11 @@ async fn send_outcome(
 
 async fn execute(
     connection: &mut PgConnection,
-    id: &str,
+    id: JobId,
     generation: i64,
     transition: &Transition,
 ) -> Result<u64, sqlx::Error> {
+    let id = id.0;
     let query = match transition {
         Transition::Complete => sqlx::query(COMPLETE).bind(id).bind(generation),
         Transition::Retry {

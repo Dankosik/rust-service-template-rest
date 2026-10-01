@@ -1,11 +1,11 @@
 //! The one insert path. It runs on the caller's open transaction and never
 //! opens, commits, or rolls one back.
 
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use std::time::Duration;
 
 use infra_postgres::{Tx, connection, statement_succeeded};
+use tokio::time::Instant;
 
 use crate::kind::{self, JobId, JobKind};
 use crate::trace_context;
@@ -20,7 +20,7 @@ pub const MAX_DELAY: Duration = Duration::from_hours(36_500 * 24);
 /// One insert on the caller's connection. A conflict with a live unique key
 /// returns no row.
 const ENQUEUE: &str = "INSERT INTO background_jobs (id, kind, payload, unique_key, not_before, trace_context, trace_state) \
-     VALUES ($7::uuid, $1, $2::jsonb, $3::text COLLATE \"C\", \
+     VALUES ($7, $1, $2::jsonb, $3::text COLLATE \"C\", \
              statement_timestamp() + ($4 * interval '1 microsecond'), $5, $6) \
      ON CONFLICT (kind, unique_key) WHERE unique_key IS NOT NULL AND state IN ('pending', 'running') \
      DO NOTHING \
@@ -128,7 +128,6 @@ pub async fn enqueue<K: JobKind>(
     let prepared = prepare(payload, options)?;
     let (traceparent, tracestate) = trace_context::capture();
     let id = JobId::new_v7();
-    let mut encoded = [0; 36];
     let row = sqlx::query(ENQUEUE)
         .bind(K::NAME)
         .bind(prepared.payload)
@@ -136,7 +135,7 @@ pub async fn enqueue<K: JobKind>(
         .bind(prepared.delay_micros)
         .bind(traceparent.as_deref())
         .bind(tracestate.as_deref())
-        .bind(id.encode(&mut encoded))
+        .bind(id.0)
         .fetch_optional(&mut *connection(tx))
         .await
         .map_err(EnqueueError::Database)?;
@@ -144,7 +143,7 @@ pub async fn enqueue<K: JobKind>(
         statement_succeeded(tx);
         return Ok(Enqueued::Duplicate);
     };
-    if prepared.delay_micros == 0 && wake_due() {
+    if prepared.delay_micros == 0 && wake_due(K::NAME, Instant::now()) {
         sqlx::query(WAKE)
             .bind(crate::claim::WAKE_CHANNEL)
             .bind(K::NAME)
@@ -194,25 +193,34 @@ pub async fn compare_live_payload<K: JobKind>(
     })
 }
 
-/// At most one wake notification per process in this interval, the claim
-/// cooldown: a job whose notification was skipped becomes due while the
+/// At most one wake notification per kind and process in this interval, the
+/// claim cooldown: a job whose notification was skipped becomes due while the
 /// worker woken by the previous one keeps claiming.
 const WAKE_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Whether this enqueue sends the wake notification. Every notifying commit
 /// takes PostgreSQL's notify queue lock, so notifying each enqueue would
 /// serialize concurrent committers (measured: -50% at 16 connections).
-fn wake_due() -> bool {
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    static LAST_MICROS: AtomicU64 = AtomicU64::new(0);
-    let origin = *ORIGIN.get_or_init(Instant::now);
-    // Offset by the interval so the first enqueue always notifies.
-    let now = u64::try_from((origin.elapsed() + WAKE_INTERVAL).as_micros()).unwrap_or(u64::MAX);
-    let last = LAST_MICROS.load(Ordering::Relaxed);
-    now.saturating_sub(last) >= u64::try_from(WAKE_INTERVAL.as_micros()).unwrap_or(u64::MAX)
-        && LAST_MICROS
-            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
+///
+/// The interval is kept per kind because a worker wakes only for the kinds it
+/// registers: one shared interval would let a notification for one kind
+/// suppress the next kind's, and that kind's worker would wait for its poll.
+fn wake_due(kind: &'static str, now: Instant) -> bool {
+    static LAST: Mutex<Vec<(&'static str, Instant)>> = Mutex::new(Vec::new());
+    let mut last = LAST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match last.iter_mut().find(|(name, _)| *name == kind) {
+        Some((_, at)) if now.saturating_duration_since(*at) < WAKE_INTERVAL => false,
+        Some((_, at)) => {
+            *at = now;
+            true
+        }
+        None => {
+            last.push((kind, now));
+            true
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -293,7 +301,7 @@ mod tests {
 
     use super::{
         EnqueueError, EnqueueOptions, InvalidDelay, MAX_DELAY, MAX_PAYLOAD_BYTES,
-        MAX_UNIQUE_KEY_BYTES, checked_delay_micros, prepare,
+        MAX_UNIQUE_KEY_BYTES, WAKE_INTERVAL, checked_delay_micros, prepare, wake_due,
     };
     use crate::JobKind;
     use serde::ser::Error as _;
@@ -520,6 +528,16 @@ mod tests {
             Err(EnqueueError::PayloadContainsNul)
         ));
         assert!(prepare(&Raw(r"\u0000".to_owned()), EnqueueOptions::default()).is_ok());
+    }
+
+    #[test]
+    fn wake_is_debounced_per_kind() {
+        let now = tokio::time::Instant::now();
+        assert!(wake_due("wake.first", now));
+        assert!(!wake_due("wake.first", now + WAKE_INTERVAL / 2));
+        // Another kind's worker is not woken by the first kind's notification.
+        assert!(wake_due("wake.second", now + WAKE_INTERVAL / 2));
+        assert!(wake_due("wake.first", now + WAKE_INTERVAL));
     }
 
     #[test]

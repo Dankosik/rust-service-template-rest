@@ -100,6 +100,8 @@ struct JobView {
     claim_generation: i64,
     failure_reason: Option<String>,
     error_summary: Option<String>,
+    /// The failure history, each entry as `attempt:error`.
+    errors: Vec<String>,
     claim_cleared: bool,
     finished: bool,
     not_before_us: i64,
@@ -339,7 +341,11 @@ async fn load(pool: &PgPool, id: &str) -> JobView {
          (EXTRACT(EPOCH FROM not_before) * 1000000)::bigint AS not_before_us, \
          (EXTRACT(EPOCH FROM claim_expires_at) * 1000000)::bigint AS claim_expires_us, \
          (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_at_us, \
-         attempted_by::text AS attempted_by \
+         attempted_by::text AS attempted_by, \
+         ARRAY(SELECT (entry ->> 'attempt') || ':' || (entry ->> 'error') \
+               FROM jsonb_array_elements(errors) WITH ORDINALITY AS history (entry, position) \
+               WHERE (entry ->> 'at')::timestamptz <= statement_timestamp() \
+               ORDER BY position) AS errors \
          FROM background_jobs WHERE id::text = $1",
     )
     .bind(id)
@@ -352,6 +358,7 @@ async fn load(pool: &PgPool, id: &str) -> JobView {
         claim_generation: row.try_get("claim_generation").expect("claim_generation"),
         failure_reason: row.try_get("failure_reason").expect("failure_reason"),
         error_summary: row.try_get("error_summary").expect("error_summary"),
+        errors: row.try_get("errors").expect("errors"),
         claim_cleared: row.try_get("claim_cleared").expect("claim_cleared"),
         finished: row.try_get("finished").expect("finished"),
         not_before_us: row.try_get("not_before_us").expect("not_before_us"),
@@ -426,15 +433,15 @@ fn probe_json(action: ProbeAction) -> String {
 async fn stage_running(pool: &PgPool, payload: &str, expired: bool) -> (String, i64) {
     let sql = if expired {
         "INSERT INTO background_jobs \
-         (kind, payload, state, attempts, claim_generation, not_before, claim_expires_at) \
-         VALUES ($1, $2::jsonb, 'running', 1, nextval('background_jobs_claim_generation'), \
+         (id, kind, payload, state, attempts, claim_generation, not_before, claim_expires_at) \
+         VALUES (gen_random_uuid(), $1, $2::jsonb, 'running', 1, nextval('background_jobs_claim_generation'), \
                  statement_timestamp() - interval '1 minute', \
                  statement_timestamp() - interval '1 second') \
          RETURNING id::text AS id, claim_generation"
     } else {
         "INSERT INTO background_jobs \
-         (kind, payload, state, attempts, claim_generation, not_before, claim_expires_at) \
-         VALUES ($1, $2::jsonb, 'running', 1, nextval('background_jobs_claim_generation'), \
+         (id, kind, payload, state, attempts, claim_generation, not_before, claim_expires_at) \
+         VALUES (gen_random_uuid(), $1, $2::jsonb, 'running', 1, nextval('background_jobs_claim_generation'), \
                  statement_timestamp() - interval '1 minute', \
                  statement_timestamp() + interval '30 seconds') \
          RETURNING id::text AS id, claim_generation"
@@ -454,8 +461,8 @@ async fn stage_running(pool: &PgPool, payload: &str, expired: bool) -> (String, 
 async fn stage_expired_gate(pool: &PgPool) -> String {
     let row = sqlx::query(
         "INSERT INTO background_jobs \
-         (kind, payload, state, attempts, claim_generation, not_before, claim_expires_at) \
-         VALUES ($1, $2::jsonb, 'running', 1, nextval('background_jobs_claim_generation'), \
+         (id, kind, payload, state, attempts, claim_generation, not_before, claim_expires_at) \
+         VALUES (gen_random_uuid(), $1, $2::jsonb, 'running', 1, nextval('background_jobs_claim_generation'), \
                  statement_timestamp() - interval '1 minute', \
                  statement_timestamp() - interval '1 second') \
          RETURNING id::text AS id",
@@ -796,8 +803,8 @@ async fn x2_wake_notification_claims_before_the_next_poll(pool: PgPool) {
         tokio::time::sleep(Duration::from_millis(400)).await;
         let id: String = sqlx::query_scalar(
             "WITH job AS ( \
-                 INSERT INTO background_jobs (kind, payload, not_before) \
-                 VALUES ($1, $2::jsonb, statement_timestamp()) RETURNING id \
+                 INSERT INTO background_jobs (id, kind, payload, not_before) \
+                 VALUES (gen_random_uuid(), $1, $2::jsonb, statement_timestamp()) RETURNING id \
              ) \
              SELECT job.id::text FROM job, LATERAL (SELECT pg_notify('background_jobs', $1)) AS wake",
         )
@@ -823,6 +830,96 @@ async fn x2_wake_notification_claims_before_the_next_poll(pool: PgPool) {
         );
     }
     finish(run, &[&jobs]).await;
+}
+
+/// How many sessions of this suite hold the wake `LISTEN`.
+async fn listening_sessions(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity \
+         WHERE datname = current_database() AND application_name = $1 \
+           AND query LIKE 'LISTEN%'",
+    )
+    .bind(super::APP)
+    .fetch_one(pool)
+    .await
+    .expect("the listener observation")
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn x2_an_engine_beside_another_shares_its_listener_and_worker_id(pool: PgPool) {
+    let jobs = open(&pool, 2).await;
+    prepare(&jobs).await;
+    let ordinary = Engine::new(
+        jobs.clone(),
+        probe_registry(2, DEFAULT_TIMEOUT),
+        NonZeroU32::MIN,
+    );
+    let mut kinds = Kinds::new();
+    kinds.register(Policy::default(), |_: Job<Stranded>| async { Ok(()) });
+    let reserved = ordinary.beside(
+        kinds.validate().expect("the reserved kind"),
+        NonZeroU32::MIN,
+    );
+    let tracker = TaskTracker::new();
+    let cancel = CancellationToken::new();
+    let runs = [
+        ordinary.start(&tracker, &cancel),
+        reserved.start(&tracker, &cancel),
+    ];
+    until("the process listens", super::WAIT, async || {
+        (listening_sessions(&jobs).await > 0).then_some(())
+    })
+    .await;
+
+    // Three wakes in a row for the second engine's kind, each well inside
+    // the one-second poll (see the single-engine wake test).
+    let mut reserved_id = String::new();
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        reserved_id = sqlx::query_scalar(
+            "WITH job AS ( \
+                 INSERT INTO background_jobs (id, kind, payload, not_before) \
+                 VALUES (gen_random_uuid(), $1, '{\"token\":1}'::jsonb, statement_timestamp()) \
+                 RETURNING id \
+             ) \
+             SELECT job.id::text FROM job, LATERAL (SELECT pg_notify('background_jobs', $1)) AS wake",
+        )
+        .bind(Stranded::NAME)
+        .fetch_one(&jobs)
+        .await
+        .expect("a due job and its wake commit");
+        let committed = Instant::now();
+        until(
+            "the engine beside claims",
+            Duration::from_secs(3),
+            async || {
+                let view = load(&jobs, &reserved_id).await;
+                (view.attempts > 0).then_some(())
+            },
+        )
+        .await;
+        assert!(
+            committed.elapsed() < Duration::from_millis(250),
+            "pickup took {:?}",
+            committed.elapsed()
+        );
+    }
+    assert_eq!(listening_sessions(&jobs).await, 1);
+
+    let ordinary_id = enqueue_one(&jobs, ProbeAction::Succeed).await;
+    let by_ordinary = completed(&jobs, &ordinary_id).await.attempted_by;
+    let by_reserved = completed(&jobs, &reserved_id).await.attempted_by;
+    assert!(by_ordinary.is_some());
+    assert_eq!(by_ordinary, by_reserved);
+
+    for run in &runs {
+        run.stop_claiming();
+        super::bounded("the engine drains", run.drained()).await;
+    }
+    cancel.cancel();
+    tracker.close();
+    super::bounded("the engine tasks join", tracker.wait()).await;
+    super::close(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1438,8 +1535,8 @@ async fn x6_spent_budget_fails_exhausted_without_running(pool: PgPool) {
 
 async fn stage_spent(pool: &PgPool, payload: &str, summary: Option<&str>) -> String {
     let row = sqlx::query(
-        "INSERT INTO background_jobs (kind, payload, state, attempts, not_before, error_summary) \
-         VALUES ($1, $2::jsonb, 'pending', 2, statement_timestamp() - interval '1 second', $3) \
+        "INSERT INTO background_jobs (id, kind, payload, state, attempts, not_before, error_summary) \
+         VALUES (gen_random_uuid(), $1, $2::jsonb, 'pending', 2, statement_timestamp() - interval '1 second', $3) \
          RETURNING id::text AS id",
     )
     .bind(Probe::NAME)
@@ -1497,6 +1594,7 @@ async fn x7_x8_retryable_failure_waits_about_one_second_then_runs_again(pool: Pg
         failed.not_before_us
     );
     assert!(failed.claim_cleared);
+    assert_eq!(failed.errors, ["1:probe failed retryably"]);
     let second = until("the retry runs", super::WAIT, async || {
         attempt_started_us(&jobs, &id, 2).await
     })
@@ -1594,6 +1692,7 @@ async fn x8_snooze_refunds_once_and_can_run_after_the_attempt_cap(pool: PgPool) 
     assert!(snoozed.not_before_us >= started + 2_000_000);
     assert!(snoozed.failure_reason.is_none());
     assert!(snoozed.error_summary.is_none());
+    assert!(snoozed.errors.is_empty());
     assert!(
         snoozed.not_before_us > db_now_us(&jobs).await,
         "snooze must not be claimable before its requested database time"
@@ -1706,8 +1805,8 @@ async fn x7_undecodable_payload_is_retryable_without_the_handler(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     prepare(&jobs).await;
     let row = sqlx::query(
-        "INSERT INTO background_jobs (kind, payload, state, not_before) \
-         VALUES ($1, '{\"action\":\"no_such_action\"}'::jsonb, 'pending', \
+        "INSERT INTO background_jobs (id, kind, payload, state, not_before) \
+         VALUES (gen_random_uuid(), $1, '{\"action\":\"no_such_action\"}'::jsonb, 'pending', \
                  statement_timestamp()) \
          RETURNING id::text AS id",
     )
@@ -1733,8 +1832,8 @@ async fn x7_undecodable_payload_is_retryable_without_the_handler(pool: PgPool) {
 async fn x11_retention_deletes_only_old_terminal_rows(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     sqlx::query(
-        "INSERT INTO background_jobs (kind, payload, state, finished_at, not_before) \
-         SELECT CASE WHEN g % 2 = 0 THEN 'test.probe' ELSE 'test.stranded' END, \
+        "INSERT INTO background_jobs (id, kind, payload, state, finished_at, not_before) \
+         SELECT gen_random_uuid(), CASE WHEN g % 2 = 0 THEN 'test.probe' ELSE 'test.stranded' END, \
                 '{}'::jsonb, 'completed', \
                 statement_timestamp() - interval '25 hours', \
                 statement_timestamp() - interval '25 hours' \
@@ -1799,8 +1898,8 @@ async fn stage_terminal(
 ) {
     let inserted = sqlx::query(
         "INSERT INTO background_jobs \
-         (kind, payload, state, failure_reason, finished_at, not_before) \
-         VALUES ($1, '{}'::jsonb, $2, $3, \
+         (id, kind, payload, state, failure_reason, finished_at, not_before) \
+         VALUES (gen_random_uuid(), $1, '{}'::jsonb, $2, $3, \
                  statement_timestamp() - ($4 * interval '1 second'), \
                  statement_timestamp() - ($4 * interval '1 second'))",
     )
@@ -1817,14 +1916,14 @@ async fn stage_terminal(
 async fn stage_live(pool: &PgPool, kind: &str, running: bool) {
     let sql = if running {
         "INSERT INTO background_jobs \
-         (kind, payload, state, attempts, claim_generation, not_before, claim_expires_at) \
-         VALUES ($1, '{}'::jsonb, 'running', 1, \
+         (id, kind, payload, state, attempts, claim_generation, not_before, claim_expires_at) \
+         VALUES (gen_random_uuid(), $1, '{}'::jsonb, 'running', 1, \
                  nextval('background_jobs_claim_generation'), \
                  statement_timestamp() - interval '40 days', \
                  statement_timestamp() + interval '30 seconds')"
     } else {
-        "INSERT INTO background_jobs (kind, payload, state, not_before) \
-         VALUES ($1, '{}'::jsonb, 'pending', \
+        "INSERT INTO background_jobs (id, kind, payload, state, not_before) \
+         VALUES (gen_random_uuid(), $1, '{}'::jsonb, 'pending', \
                  statement_timestamp() - interval '40 days')"
     };
     let inserted = sqlx::query(sql)
@@ -2115,9 +2214,12 @@ async fn x3_reclaim_keeps_enqueue_and_claim_identity_with_rescue_evidence(pool: 
         rescued.error_summary.as_deref(),
         Some("lease expired; rescued")
     );
+    // The entry names the attempt whose lease expired, not the rescuing one.
+    assert_eq!(rescued.errors, ["1:lease expired; rescued"]);
 
     gate.open.notify_one();
     let completed = completed(&jobs, &id).await;
+    assert_eq!(completed.errors, ["1:lease expired; rescued"]);
     assert_eq!(completed.attempted_by.as_deref(), Some(worker));
     assert_eq!(completed.created_at_us, before_claim.created_at_us);
     finish(run, &[&jobs]).await;

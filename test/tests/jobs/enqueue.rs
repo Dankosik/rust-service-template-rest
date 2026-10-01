@@ -291,13 +291,13 @@ async fn commit_note(pool: &PgPool, key: &str) -> JobId {
 async fn insert_terminal(pool: &PgPool, key: &str, failed: bool) {
     let sql = if failed {
         "INSERT INTO background_jobs \
-         (kind, payload, unique_key, state, failure_reason, finished_at, not_before) \
-         VALUES ($1, $2::jsonb, $3::text COLLATE \"C\", 'failed', 'exhausted', \
+         (id, kind, payload, unique_key, state, failure_reason, finished_at, not_before) \
+         VALUES (gen_random_uuid(), $1, $2::jsonb, $3::text COLLATE \"C\", 'failed', 'exhausted', \
                  statement_timestamp(), statement_timestamp())"
     } else {
         "INSERT INTO background_jobs \
-         (kind, payload, unique_key, state, finished_at, not_before) \
-         VALUES ($1, $2::jsonb, $3::text COLLATE \"C\", 'completed', \
+         (id, kind, payload, unique_key, state, finished_at, not_before) \
+         VALUES (gen_random_uuid(), $1, $2::jsonb, $3::text COLLATE \"C\", 'completed', \
                  statement_timestamp(), statement_timestamp())"
     };
     let inserted = sqlx::query(sql)
@@ -313,8 +313,8 @@ async fn insert_terminal(pool: &PgPool, key: &str, failed: bool) {
 async fn insert_running(pool: &PgPool, key: &str) {
     let inserted = sqlx::query(
         "INSERT INTO background_jobs \
-         (kind, payload, unique_key, state, attempts, claim_generation, not_before, claim_expires_at) \
-         VALUES ($1, $2::jsonb, $3::text COLLATE \"C\", 'running', 1, \
+         (id, kind, payload, unique_key, state, attempts, claim_generation, not_before, claim_expires_at) \
+         VALUES (gen_random_uuid(), $1, $2::jsonb, $3::text COLLATE \"C\", 'running', 1, \
                  nextval('background_jobs_claim_generation'), \
                  statement_timestamp(), statement_timestamp() + interval '30 seconds')",
     )

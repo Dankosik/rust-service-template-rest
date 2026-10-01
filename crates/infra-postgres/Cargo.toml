@@ -17,7 +17,9 @@ health = { workspace = true }
 # `sqlx::ConnectOptions` takes statement-log levels as `log::LevelFilter`.
 log = { workspace = true }
 metrics = { workspace = true }
-sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs"] }
+# `uuid`: the driver's UUID codec belongs to the PostgreSQL profile, so the
+# resolved sqlx graph is the same whichever optional packs are retained.
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "uuid"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time", "macros"] }
 tokio-util = { workspace = true }
