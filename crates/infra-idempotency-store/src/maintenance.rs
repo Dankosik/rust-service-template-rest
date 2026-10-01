@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use infra_postgres::{TxError, in_tx};
+use infra_postgres::{TxError, failure_cause, in_tx, sqlstate};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -16,6 +16,12 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The most rows one cleanup batch deletes.
 const CLEANUP_BATCH_ROWS: u32 = 500;
+
+/// Runs of the periodic cleanup task, by `outcome` (`completed`, `failed`).
+pub const CLEANUP_RUNS_METRIC: &str = "http_idempotency_cleanup_runs_total";
+
+/// Expired records the cleanup deleted, counted per committed batch.
+pub const CLEANUP_REMOVED_METRIC: &str = "http_idempotency_cleanup_removed_records_total";
 
 /// Whether the current session can write. Migration-history admission owns
 /// schema compatibility; this check keeps only the live writer property.
@@ -62,12 +68,26 @@ pub enum CleanupError {
 
 impl From<TxError> for CleanupError {
     fn from(err: TxError) -> Self {
-        match err {
-            TxError::Acquire(_) => Self::Acquire,
-            TxError::Begin(_) => Self::Begin,
-            TxError::CommitFailed(_) | TxError::CommitUnknown(_) => Self::Commit,
+        match &err {
+            TxError::Acquire(err) => cleanup_failed(err, Self::Acquire),
+            TxError::Begin(err) => cleanup_failed(err, Self::Begin),
+            TxError::CommitFailed(err) | TxError::CommitUnknown(err) => {
+                cleanup_failed(err, Self::Commit)
+            }
         }
     }
+}
+
+/// Log a failed cleanup batch with only bounded fields, never driver text,
+/// and return its class.
+fn cleanup_failed(err: &sqlx::Error, class: CleanupError) -> CleanupError {
+    tracing::warn!(
+        failure = %class,
+        sqlstate = sqlstate(err).as_deref(),
+        cause = failure_cause(err),
+        "http_idempotency_cleanup_failed"
+    );
+    class
 }
 
 impl Store {
@@ -77,13 +97,24 @@ impl Store {
     ///
     /// [`StartupError::NotWritable`] for a read-only or recovering session,
     /// and [`StartupError::Unavailable`] for anything else, including the
-    /// bound.
+    /// bound; that one is logged with a bounded cause.
     pub async fn check_startup(&self) -> Result<(), StartupError> {
         let writable = sqlx::query_scalar::<_, bool>(STARTUP_CHECK).fetch_one(&self.pool);
         match tokio::time::timeout(STARTUP_CHECK_BUDGET, writable).await {
             Ok(Ok(true)) => Ok(()),
             Ok(Ok(false)) => Err(StartupError::NotWritable),
-            Ok(Err(_)) | Err(_) => Err(StartupError::Unavailable),
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    sqlstate = sqlstate(&err).as_deref(),
+                    cause = failure_cause(&err),
+                    "http_idempotency_startup_check_failed"
+                );
+                Err(StartupError::Unavailable)
+            }
+            Err(_) => {
+                tracing::warn!(cause = "timeout", "http_idempotency_startup_check_failed");
+                Err(StartupError::Unavailable)
+            }
         }
     }
 
@@ -94,8 +125,8 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// The failure class of the batch that failed; earlier batches stay
-    /// committed.
+    /// The failure class of the batch that failed, logged with a bounded
+    /// cause; earlier batches stay committed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
         let mut removed = 0;
         loop {
@@ -103,15 +134,16 @@ impl Store {
                 sqlx::query(CLEANUP_STATEMENT_TIMEOUT)
                     .execute(&mut *tx)
                     .await
-                    .map_err(|_| CleanupError::Statement)?;
+                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
                 let deleted = sqlx::query(CLEANUP_BATCH)
                     .bind(i64::from(CLEANUP_BATCH_ROWS))
                     .execute(&mut *tx)
                     .await
-                    .map_err(|_| CleanupError::Statement)?;
+                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
                 Ok(deleted.rows_affected())
             })
             .await?;
+            metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
             removed += batch;
             if batch < u64::from(CLEANUP_BATCH_ROWS) {
                 return Ok(removed);
@@ -120,10 +152,20 @@ impl Store {
     }
 
     /// The periodic cleanup task body: one [`Store::remove_expired`] run
-    /// every 60 s, the first at once. A failed run logs its class and waits
-    /// for the next tick; it changes neither readiness nor serving. Returns
-    /// when `cancel` fires, dropping a run in flight.
+    /// every 60 s, the first at once. Every run counts its outcome; a failed
+    /// run waits for the next tick and changes neither readiness nor serving.
+    /// Returns when `cancel` fires, dropping a run in flight.
     pub async fn run_cleanup(self, cancel: CancellationToken) {
+        metrics::describe_counter!(
+            CLEANUP_RUNS_METRIC,
+            metrics::Unit::Count,
+            "Runs of the expired idempotency record cleanup, by outcome."
+        );
+        metrics::describe_counter!(
+            CLEANUP_REMOVED_METRIC,
+            metrics::Unit::Count,
+            "Expired idempotency records the cleanup deleted."
+        );
         // An already cancelled token never polls the loop.
         let _ = cancel
             .run_until_cancelled(async {
@@ -131,9 +173,11 @@ impl Store {
                 ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
                 loop {
                     ticker.tick().await;
-                    if let Err(failure) = self.remove_expired().await {
-                        tracing::warn!(failure = %failure, "http_idempotency_cleanup_failed");
-                    }
+                    let outcome = match self.remove_expired().await {
+                        Ok(_) => "completed",
+                        Err(_) => "failed",
+                    };
+                    metrics::counter!(CLEANUP_RUNS_METRIC, "outcome" => outcome).increment(1);
                 }
             })
             .await;

@@ -34,6 +34,7 @@ pub enum Code {
     AlreadyExists,
     RequestEntityTooLarge,
     RequestHeaderFieldsTooLarge,
+    UnsupportedMediaType,
     UnprocessableContent,
     TooManyRequests,
     InternalServerError,
@@ -127,6 +128,7 @@ impl Code {
         Self::AlreadyExists,
         Self::RequestEntityTooLarge,
         Self::RequestHeaderFieldsTooLarge,
+        Self::UnsupportedMediaType,
         Self::UnprocessableContent,
         Self::TooManyRequests,
         Self::InternalServerError,
@@ -160,6 +162,7 @@ impl Code {
             Self::AlreadyExists => "already_exists",
             Self::RequestEntityTooLarge => "request_entity_too_large",
             Self::RequestHeaderFieldsTooLarge => "request_header_fields_too_large",
+            Self::UnsupportedMediaType => "unsupported_media_type",
             Self::UnprocessableContent => "unprocessable_content",
             Self::TooManyRequests => "too_many_requests",
             Self::InternalServerError => "internal_error",
@@ -175,7 +178,9 @@ impl Code {
     )]
     pub const fn meaning(self) -> Meaning {
         match self {
-            Self::BadRequest | Self::UnprocessableContent => Meaning::BadRequest,
+            Self::BadRequest | Self::UnsupportedMediaType | Self::UnprocessableContent => {
+                Meaning::BadRequest
+            }
             // template:begin authn:service-failure-authentication-code-meaning
             Self::AuthenticationMalformed => Meaning::BadRequest,
             // template:end authn:service-failure-authentication-code-meaning

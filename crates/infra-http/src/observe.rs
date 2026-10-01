@@ -11,10 +11,11 @@
 //! is set, so all of them are known at creation, and nothing is `Span::record`ed
 //! afterwards, since every record re-serializes the span's fields.
 //!
-//! The metrics keep the names and labels `axum-prometheus` defined: requests
-//! and their response-head duration by method, route template, and status,
-//! and in-flight requests by method and route template, held until the
-//! response body is dropped (including after consumption or cancellation).
+//! The metrics follow the OpenTelemetry HTTP semantic conventions as
+//! Prometheus renders them: the response-head duration by method, route
+//! template, and status, whose `_count` series is the request count, and the
+//! active requests by method, held until the response body is dropped
+//! (including after consumption or cancellation).
 //!
 //! The access-log line is written inside the span, so it carries the trace
 //! and span ids through the subscriber, and outside the shedder and timeout,
@@ -22,6 +23,7 @@
 //! Matched health probe routes are skipped by route template, not raw path,
 //! so an unmatched request that merely looks like a probe is still logged.
 
+use std::borrow::Cow;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -41,9 +43,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
 
-use crate::harden::{
-    HTTP_REQUESTS_DURATION_SECONDS, HTTP_REQUESTS_PENDING, HTTP_REQUESTS_TOTAL, complete_problem,
-};
+use crate::harden::{HTTP_ACTIVE_REQUESTS, HTTP_REQUESTS_DURATION_SECONDS, complete_problem};
 use crate::problem::Problem;
 use crate::router::HEALTH_PROBE_ROUTES;
 
@@ -74,8 +74,7 @@ pub(crate) async fn observe(
     let route = matched
         .as_ref()
         .map_or(UNMATCHED_ROUTE, MatchedPath::as_str);
-    let endpoint = SharedString::from(Arc::<str>::from(route));
-    let pending = Pending::start(method_label(&method), endpoint.clone());
+    let active = Active::start(method_label(&method));
 
     let response = match fallback {
         None => next.run(request).instrument(span.clone()).await,
@@ -90,11 +89,11 @@ pub(crate) async fn observe(
     };
 
     // Complete the Problem before metrics and logging read the response head.
-    // These observations do not wait for a streaming body; only the pending
+    // These observations do not wait for a streaming body; only the active
     // gauge below follows the body's lifetime.
     let response = complete_problem(response, request_id);
     let status = response.status();
-    record(method_label(&method), endpoint, status, started.elapsed());
+    record(method_label(&method), route, status, started.elapsed());
     if !skip_probe(options, &method, route) {
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         // problem_code separates the failures that share a status: a 503 is
@@ -118,7 +117,7 @@ pub(crate) async fn observe(
         });
     }
     update_span_from_response(&span, status);
-    pending.until_body_ends(response)
+    active.until_body_ends(response)
 }
 
 /// The server span. Only what every log record inside the request should
@@ -154,7 +153,7 @@ fn make_span(
     );
     span.set_attribute("url.path", request.uri().path().to_owned());
     if let Some(query) = request.uri().query() {
-        span.set_attribute("url.query", query.to_owned());
+        span.set_attribute("url.query", redact_query(query).into_owned());
     }
     span.set_attribute(
         "url.scheme",
@@ -171,41 +170,66 @@ fn update_span_from_response(span: &tracing::Span, status: StatusCode) {
     }
 }
 
-/// The in-flight gauge of one request, held until its response body is dropped.
-struct Pending(metrics::Gauge);
+/// Query parameters whose values the OpenTelemetry HTTP conventions redact by
+/// default: they carry request signatures and access key ids.
+const REDACTED_QUERY_KEYS: [&str; 4] = ["AWSAccessKeyId", "Signature", "sig", "X-Goog-Signature"];
 
-impl Pending {
-    fn start(method: &'static str, endpoint: SharedString) -> Self {
-        let gauge = metrics::gauge!(
-            HTTP_REQUESTS_PENDING,
-            vec![
-                Label::new("method", method),
-                Label::new("endpoint", endpoint)
-            ]
-        );
+/// The query string for the span's `url.query`, with the values of
+/// [`REDACTED_QUERY_KEYS`] replaced by `REDACTED`.
+fn redact_query(query: &str) -> Cow<'_, str> {
+    let sensitive = |pair: &str| {
+        let key = pair.split_once('=').map_or(pair, |(key, _)| key);
+        REDACTED_QUERY_KEYS.contains(&key)
+    };
+    if !query.split('&').any(sensitive) {
+        return Cow::Borrowed(query);
+    }
+    let mut redacted = String::with_capacity(query.len());
+    for (index, pair) in query.split('&').enumerate() {
+        if index > 0 {
+            redacted.push('&');
+        }
+        match pair.split_once('=') {
+            Some((key, _)) if sensitive(pair) => {
+                redacted.push_str(key);
+                redacted.push_str("=REDACTED");
+            }
+            _ => redacted.push_str(pair),
+        }
+    }
+    Cow::Owned(redacted)
+}
+
+/// The active-requests gauge of one request, held until its response body is
+/// dropped.
+struct Active(metrics::Gauge);
+
+impl Active {
+    fn start(method: &'static str) -> Self {
+        let gauge = metrics::gauge!(HTTP_ACTIVE_REQUESTS, "http_request_method" => method);
         gauge.increment(1);
         Self(gauge)
     }
 
     fn until_body_ends(self, response: Response) -> Response {
         response.map(|body| {
-            Body::new(PendingBody {
+            Body::new(ActiveBody {
                 inner: body,
-                _pending: self,
+                _active: self,
             })
         })
     }
 }
 
-/// A response body that holds its request's [`Pending`] gauge and otherwise
+/// A response body that holds its request's [`Active`] gauge and otherwise
 /// passes everything through, the size hint included, so a known length
 /// still becomes `Content-Length`.
-struct PendingBody {
+struct ActiveBody {
     inner: Body,
-    _pending: Pending,
+    _active: Active,
 }
 
-impl http_body::Body for PendingBody {
+impl http_body::Body for ActiveBody {
     type Data = Bytes;
     type Error = axum::Error;
 
@@ -225,24 +249,26 @@ impl http_body::Body for PendingBody {
     }
 }
 
-impl Drop for Pending {
+impl Drop for Active {
     fn drop(&mut self) {
         self.0.decrement(1);
     }
 }
 
-fn record(method: &'static str, endpoint: SharedString, status: StatusCode, elapsed: Duration) {
+fn record(method: &'static str, route: &str, status: StatusCode, elapsed: Duration) {
     let labels = vec![
-        Label::new("method", method),
-        Label::new("status", Arc::<str>::from(status.as_str())),
-        Label::new("endpoint", endpoint),
+        Label::new("http_request_method", method),
+        Label::new(
+            "http_response_status_code",
+            Arc::<str>::from(status.as_str()),
+        ),
+        Label::new("http_route", SharedString::from(Arc::<str>::from(route))),
     ];
-    metrics::counter!(HTTP_REQUESTS_TOTAL, labels.clone()).increment(1);
     metrics::histogram!(HTTP_REQUESTS_DURATION_SECONDS, labels).record(elapsed.as_secs_f64());
 }
 
-/// The standard method name, or empty for an extension method, so a caller
-/// cannot create label values.
+/// The standard method name, or the conventions' `_OTHER` for an extension
+/// method, so a caller cannot create label values.
 const fn method_label(method: &Method) -> &'static str {
     match *method {
         Method::OPTIONS => "OPTIONS",
@@ -254,7 +280,7 @@ const fn method_label(method: &Method) -> &'static str {
         Method::TRACE => "TRACE",
         Method::CONNECT => "CONNECT",
         Method::PATCH => "PATCH",
-        _ => "",
+        _ => "_OTHER",
     }
 }
 
@@ -279,6 +305,24 @@ mod tests {
             log_health_probes: true,
         };
         assert!(!skip_probe(verbose, &Method::GET, "/health/live"));
+    }
+
+    #[test]
+    fn signature_query_values_are_redacted_and_the_rest_kept() {
+        for (query, expected) in [
+            ("", ""),
+            ("full=1&page=2", "full=1&page=2"),
+            ("sig=abc", "sig=REDACTED"),
+            ("a=1&Signature=abc%3D&b", "a=1&Signature=REDACTED&b"),
+            (
+                "AWSAccessKeyId=AKIA&X-Goog-Signature=ff&x=1",
+                "AWSAccessKeyId=REDACTED&X-Goog-Signature=REDACTED&x=1",
+            ),
+            // Keys are matched exactly, as the conventions list them.
+            ("signature=abc&sig", "signature=abc&sig"),
+        ] {
+            assert_eq!(redact_query(query), expected, "{query}");
+        }
     }
 
     #[tokio::test]

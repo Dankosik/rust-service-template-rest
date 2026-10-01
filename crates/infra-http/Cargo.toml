@@ -14,7 +14,7 @@ workspace = true
 [dependencies]
 service-failure = { workspace = true }
 serde_with = { workspace = true, features = ["std", "macros"] }
-axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json"] }
+axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json", "query"] }
 axum-tracing-opentelemetry = { workspace = true, features = ["tracing_level_info"] }
 health = { workspace = true }
 # template:begin inbound-webhooks:http-webhooks-dependency
@@ -37,10 +37,11 @@ metrics = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
+serde_path_to_error = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
-tower = { workspace = true, features = ["util", "limit", "load-shed", "timeout"] }
+tower = { workspace = true, features = ["util", "timeout"] }
 tower-http = { workspace = true, features = ["request-id", "set-header", "catch-panic", "limit"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["tracing_level_info"] }

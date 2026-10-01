@@ -30,8 +30,8 @@ use std::time::Duration;
 use futures_util::FutureExt as _;
 use futures_util::future::join_all;
 use infra_idempotency_store::{
-    AttemptError, Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey,
-    StartupError, Store,
+    AttemptError, Attempted, CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, CallerIdentity,
+    CallerKind, CleanupError, Digest, HeaderPair, Record, ScopeKey, StartupError, Store,
 };
 use infra_postgres::{Closed, Dsn, Isolation, PgPool, PoolOptions, Tx};
 use integration_tests::dsn_for;
@@ -745,18 +745,27 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p4_the_cleanup_task_runs_at_once_and_returns_promptly_on_cancel(pool: PgPool) {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
     let (store_pool, store) = replica(&dsn_for(&pool).await).await;
     seed(&pool, SEED_EXPIRED, BACKLOG).await;
     let cancel = CancellationToken::new();
     let task = tokio::spawn(store.run_cleanup(cancel.clone()));
 
-    // The first run starts at once and drains the backlog.
+    // The first run starts at once, drains the backlog, and counts itself.
+    let completed = format!("{CLEANUP_RUNS_METRIC}{{outcome=\"completed\"}} 1");
     bounded("the first cleanup run", async {
-        while count(&pool, EXPIRED).await > 0 {
+        while !recorder.handle().render().contains(&completed) {
             tokio::time::sleep(RETRY_PAUSE).await;
         }
     })
     .await;
+    assert_eq!(count(&pool, EXPIRED).await, 0);
+    let rendered = recorder.handle().render();
+    assert!(
+        rendered.contains(&format!("{CLEANUP_REMOVED_METRIC} {BACKLOG}\n")),
+        "{rendered}"
+    );
     assert!(!task.is_finished(), "the task waits for its next tick");
     cancel.cancel();
     tokio::time::timeout(CANCEL_BUDGET, task)
@@ -788,6 +797,8 @@ async fn p5_a_read_only_session_is_unavailable_even_with_a_live_record(pool: PgP
     }
     assert_eq!(work.runs(), 1);
     assert_eq!(count(&pool, EFFECTS).await, 1);
+    // Cleanup on that session fails in its statement and deletes nothing.
+    assert_eq!(reader.remove_expired().await, Err(CleanupError::Statement));
     close(&[&writer_pool, &reader_pool]).await;
 }
 
