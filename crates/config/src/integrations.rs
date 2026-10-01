@@ -89,7 +89,7 @@ pub struct OAuthConfig {
 
 impl OAuthConfig {
     /// One retained token per user active within a token lifetime on one
-    /// replica; a few KiB each.
+    /// replica.
     pub const DEFAULT_EXCHANGE_CACHE_CAPACITY: u32 = 1024;
     const EXCHANGE_CACHE_CAPACITY: std::ops::RangeInclusive<u32> = 1..=65_536;
 }

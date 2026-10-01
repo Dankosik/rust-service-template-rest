@@ -293,7 +293,9 @@ when the provider could not be reached or answered 5xx or 429, and
 or answered unusably, as gRPC clients report credentials that produced no
 call metadata. The message is fixed because a handler may forward the
 status; the closed `AcquisitionError`, with the provider's registered error
-code, is the status source. `credentials.grpc(channel).require_on_behalf_of()`
+code, is the status source. A handler should translate this status rather
+than forward it: `UNAUTHENTICATED` here means the service's own credentials
+were refused, not its caller's. `credentials.grpc(channel).require_on_behalf_of()`
 binds a client that answers `INVALID_ARGUMENT` to a call without `OnBehalfOf`
 instead of sending the service token. One bearer is inserted at
 opening and is not refreshed mid-stream.

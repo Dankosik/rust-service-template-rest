@@ -832,9 +832,17 @@ async fn the_configured_capacity_bounds_how_many_subjects_keep_their_exchanged_t
 #[tokio::test]
 async fn a_client_requiring_a_subject_refuses_a_request_without_one_before_any_io() {
     let fixture = Fixture::new().await;
-    fixture.token_json("200 OK", &exchange_response("exchanged"));
-    let client = fixture
-        .credentials(&[], None)
+    let credentials = fixture.credentials(&[], None);
+    // A reusable service token is cached, so a fallback would have one to send.
+    credentials
+        .http(fixture.resource_client())
+        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    assert_eq!(fixture.token_requests().len(), 1);
+    assert_eq!(fixture.resource_requests().len(), 1);
+
+    let client = credentials
         .http(fixture.resource_client())
         .require_on_behalf_of();
     let error = client
@@ -842,9 +850,10 @@ async fn a_client_requiring_a_subject_refuses_a_request_without_one_before_any_i
         .await
         .unwrap_err();
     assert!(matches!(error, Error::SubjectRequired));
-    assert!(fixture.token_requests().is_empty());
-    assert!(fixture.resource_requests().is_empty());
+    assert_eq!(fixture.token_requests().len(), 1);
+    assert_eq!(fixture.resource_requests().len(), 1);
 
+    fixture.token_json("200 OK", &exchange_response("exchanged"));
     client
         .execute(
             fixture.on_behalf_of_request("alice"),
@@ -853,11 +862,11 @@ async fn a_client_requiring_a_subject_refuses_a_request_without_one_before_any_i
         .await
         .unwrap();
     assert_eq!(
-        form_value(&form_pairs(&fixture.token_requests()[0].body), "grant_type"),
+        form_value(&form_pairs(&fixture.token_requests()[1].body), "grant_type"),
         GRANT_TYPE_TOKEN_EXCHANGE
     );
     assert_eq!(
-        fixture.resource_requests()[0].header("authorization"),
+        fixture.resource_requests()[1].header("authorization"),
         Some("Bearer exchanged")
     );
     fixture.finish().await;

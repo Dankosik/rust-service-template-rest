@@ -166,8 +166,8 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   integration maps and entries without `oauth` are inert; a present tuple
   must contain valid `token_url`, `client_id`, `key_id`, `algorithm` (`RS256`,
   `PS256`, or `ES256`; required, with no default), `assertion_audience`, and
-  an environment-only
-  nonempty `APP__INTEGRATIONS__<NAME>__OAUTH__PRIVATE_KEY`. `client_secret` is
+  an environment-only nonempty
+  `APP__INTEGRATIONS__<NAME>__OAUTH__PRIVATE_KEY`. `client_secret` is
   an unknown key and fails startup. Nonsecret
   `scopes`, optional `audience`, and `exchange_cache_capacity` (a whole
   number, default 1024, inclusive 1–65536) follow normal TOML/environment

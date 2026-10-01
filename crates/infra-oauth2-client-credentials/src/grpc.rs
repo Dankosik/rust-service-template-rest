@@ -135,9 +135,9 @@ fn unauthenticated(response: &Response<Body>) -> bool {
             && !response.headers().contains_key(GRPC_STATUS))
 }
 
-/// A failure that may pass unchanged later is `UNAVAILABLE`; one that needs a
-/// different key, grant or subject is `UNAUTHENTICATED`, as gRPC clients
-/// report credentials that could not produce call metadata. The closed
+/// A failure that may pass unchanged later is `UNAVAILABLE`; any other is
+/// `UNAUTHENTICATED`, as gRPC clients report credentials that could not
+/// produce call metadata. The closed
 /// reason stays reachable as the status source and never crosses the wire.
 fn acquisition_status(error: AcquisitionError) -> Status {
     let mut status = match error {

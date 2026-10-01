@@ -50,8 +50,9 @@ const TOKEN_LIMITS: Limits = Limits {
     response_header_count: 64,
     response_body_bytes: 1024 * 1024,
 };
-/// The admitted number of subjects whose exchanged token is retained. A token
-/// is a few KiB, so the largest cache stays within a few hundred MiB.
+/// The admitted number of subjects whose exchanged token is retained. The
+/// bound counts entries, not bytes: at a few KiB a token, the largest cache
+/// is a few hundred MiB.
 const EXCHANGE_CACHE_CAPACITY: std::ops::RangeInclusive<u32> = 1..=65_536;
 /// RFC 7523 section 2.2 and the OIDF client-assertion notice: one string
 /// audience, a fresh `jti`, and an assertion signed for at most this long.

@@ -650,32 +650,44 @@ async fn on_behalf_of_dispatches_the_exchanged_token_instead_of_the_service_toke
 #[tokio::test]
 async fn a_client_requiring_a_subject_is_invalid_argument_without_one_before_any_io() {
     let tokens = Fixture::new().await;
-    tokens.token_json("200 OK", &super::exchange_response("exchanged-token"));
     let resource = Resource::new().await;
     let credentials = tokens.credentials(&[], None);
+    let message = || UnaryRequest {
+        message: "one".to_owned(),
+    };
+    // A reusable service token is cached, so a fallback would have one to send.
+    resource
+        .client(&credentials)
+        .unary(rpc(message(), Duration::from_secs(10)))
+        .await
+        .unwrap();
+    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(resource.calls(), 1);
+
     let channel = Client::new(
         &format!("http://{}", resource.address),
         ClientSecurity::Plaintext,
     )
     .unwrap();
     let mut client = EchoServiceClient::new(credentials.grpc(channel).require_on_behalf_of());
-    let message = || UnaryRequest {
-        message: "one".to_owned(),
-    };
     let error = client
         .unary(rpc(message(), Duration::from_secs(10)))
         .await
         .unwrap_err();
     assert_eq!(error.code(), Code::InvalidArgument);
-    assert!(tokens.token_requests().is_empty());
-    assert_eq!(resource.calls(), 0);
+    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(resource.calls(), 1);
 
+    tokens.token_json("200 OK", &super::exchange_response("exchanged-token"));
     let mut request = rpc(message(), Duration::from_secs(10));
     request
         .extensions_mut()
         .insert(OnBehalfOf::new(SecretString::from("subject-token")));
     client.unary(request).await.unwrap();
-    assert_eq!(resource.authorizations(), ["Bearer exchanged-token"]);
+    assert_eq!(
+        resource.authorizations(),
+        ["Bearer fixture-token", "Bearer exchanged-token"]
+    );
     resource.finish().await;
     tokens.finish().await;
 }
