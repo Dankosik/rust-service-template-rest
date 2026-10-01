@@ -60,13 +60,20 @@ Handlers have a 30-second limit. Retryable failures, timeouts, and panics use
 delayed NAK at 1s, 5s, 30s, and 2m; the fifth failure transfers to DLQ, and
 deliveries beyond it bypass the handler. A failure of one delivery never stops
 the worker: it is logged, counted, and redelivered by the broker. Shutdown
-cancels unfinished work for redelivery. The worker declares its named durable
+cancels unfinished work for redelivery. A delivery the client prefetched but
+no handler admitted is returned at drain with a one-second redelivery delay
+instead of waiting for ack wait; the broker still counts it as a delivery. The
+worker declares its named durable
 consumer (create or update): explicit ACK, `DeliverAll`, `AckWait=41s`,
 unlimited broker delivery, `ReplayInstant`, and the fixed filter. `MaxAckPending`
 keeps the broker default, which bounds the durable across all replicas; each
 replica bounds its own in-flight work by the configured concurrency. The
 application never creates, deletes, or repairs streams. Only a deleted or
-replaced durable consumer stops the worker unready.
+replaced durable consumer stops the worker unready. The broker reports that on
+a waiting pull; after any other pull-stream error, including two missed
+15-second idle heartbeats, the worker asks the broker for its durable and
+stops when the broker answers that the durable or its stream no longer exists.
+An unanswered lookup is a broker outage, which the worker rides out.
 
 ## DLQ, restore, and bounds
 
@@ -97,7 +104,11 @@ PostgreSQL outbox and never opens a broker connection. Consumer mode needs
 complete source, consumer, and DLQ configuration. Startup requires NATS
 JetStream >= 2.12.3, validates the named streams and the source message limit,
 and fails with sanitized configuration, authentication, connection, topology,
-bounds, or timeout reasons. Readiness uses the existing refresher and reads
+bounds, or timeout reasons. A refused stream or durable request also logs
+`messaging_admission_failed` with the request, that reason, and the broker's
+numeric JetStream error code; the broker's description can quote configuration
+and is not logged. The connection carries the worker's identity as its NATS
+client name. Readiness uses the existing refresher and reads
 only local connection state; a lost connection fails its next evaluation. On shutdown, readiness drains, pulls
 stop, admitted handlers settle under the existing shared deadline, application
 tasks join, and dependency close waits for the NATS closed event. A forced drain

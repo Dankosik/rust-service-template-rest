@@ -4,8 +4,10 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_nats::HeaderMap;
-use async_nats::jetstream::consumer::pull::MessagesErrorKind;
+use async_nats::jetstream::consumer::pull::{self, MessagesErrorKind};
 use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, PullConsumer, ReplayPolicy};
+use async_nats::jetstream::context::ConsumerInfoErrorKind;
+use async_nats::jetstream::stream::ConsumerErrorKind;
 use async_nats::jetstream::{AckKind, Message};
 use futures_util::{FutureExt as _, StreamExt as _, TryStreamExt as _};
 use tokio::sync::watch;
@@ -16,7 +18,9 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument as _;
 
 use crate::error::{HandlerError, MessagingError};
-use crate::messaging::{BROKER_OPERATION_BUDGET, ConsumerOptions, Shared};
+use crate::messaging::{
+    BROKER_OPERATION_BUDGET, ConsumerOptions, Shared, get_stream_failure, topology_failure,
+};
 use crate::producer::publish;
 use crate::registry::Registry;
 use crate::wire::{self, HEADER_LIMIT_BYTES};
@@ -40,6 +44,14 @@ const ACK_WAIT: Duration = HANDLER_TIMEOUT
     .saturating_add(Duration::from_secs(1));
 /// Pause after a recoverable pull-stream error before polling again.
 const STREAM_ERROR_BACKOFF: Duration = Duration::from_secs(1);
+/// Lifetime of one pull request; the client renews it.
+const PULL_EXPIRES: Duration = Duration::from_secs(30);
+/// The broker confirms an idle pull this often; two silent intervals are a
+/// pull-stream error. The broker accepts at most half of `PULL_EXPIRES`.
+const PULL_HEARTBEAT: Duration = Duration::from_secs(15);
+/// Redelivery delay of a delivery returned unhandled at drain. It outlasts
+/// this replica's unsubscription, so the broker redelivers to another pull.
+const RELEASE_DELAY: Duration = Duration::from_secs(1);
 
 /// A bounded pull consumer admitted against an existing source stream.
 #[derive(Debug)]
@@ -132,11 +144,14 @@ impl Consumer {
                 .jetstream
                 .get_stream(&shared.source_stream)
                 .await
-                .map_err(|_| MessagingError::Topology)?;
-            stream
-                .create_consumer(config)
-                .await
-                .map_err(|_| MessagingError::Topology)
+                .map_err(|error| get_stream_failure(&error))?;
+            stream.create_consumer(config).await.map_err(|error| {
+                let broker = match error.kind() {
+                    ConsumerErrorKind::JetStream(broker) => Some(broker),
+                    _ => None,
+                };
+                topology_failure("create_consumer", &error, broker.as_ref())
+            })
         };
         let pull = tokio::select! {
             biased;
@@ -183,8 +198,9 @@ impl Consumer {
         }
     }
 
-    /// Pulls until `stop`, then lets admitted deliveries settle. `force`
-    /// drops the pipeline, which aborts every in-flight delivery task.
+    /// Pulls until `stop`, then returns prefetched deliveries to the broker
+    /// and lets admitted deliveries settle. `force` drops the pipeline, which
+    /// aborts every in-flight delivery task.
     async fn run(
         self,
         stop: CancellationToken,
@@ -196,11 +212,25 @@ impl Consumer {
             .stream()
             .max_messages_per_batch(self.concurrency)
             .max_bytes_per_batch(self.concurrency * envelope_bytes)
+            .expires(PULL_EXPIRES)
+            .heartbeat(PULL_HEARTBEAT)
             .messages()
             .await
             .map_err(|_| ConsumerError::Start)?;
-        let consume = messages
-            .take_until(stop.cancelled_owned())
+        let stop = &stop;
+        let admitted = futures_util::stream::unfold(Some(messages), |messages| async move {
+            let mut messages = messages?;
+            tokio::select! {
+                biased;
+                () = stop.cancelled() => {
+                    release(messages).await;
+                    None
+                }
+                next = messages.next() => next.map(|next| (next, Some(messages))),
+            }
+        });
+        let pull = &self.pull;
+        let consume = admitted
             .map(Ok)
             .try_for_each_concurrent(self.concurrency, |next| {
                 let delivery = Arc::clone(&self.delivery);
@@ -227,6 +257,12 @@ impl Consumer {
                             tracing::warn!(error.kind = %error.kind(), "messaging pull stream error");
                             metrics::counter!("messaging_consumer_stream_errors_total")
                                 .increment(1);
+                            // The broker terminates only a waiting pull with
+                            // `Consumer Deleted`; between pulls a missing
+                            // durable shows as an unanswered request.
+                            if durable_is_gone(pull).await {
+                                return Err(ConsumerError::ConsumerLost);
+                            }
                             tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
                             Ok(())
                         }
@@ -238,6 +274,31 @@ impl Consumer {
             () = force.cancelled() => Err(ConsumerError::DrainTimedOut),
             result = consume => result,
         }
+    }
+}
+
+/// Whether the broker answers that the durable, or its stream, no longer
+/// exists. A failed or unanswered lookup is not that answer.
+async fn durable_is_gone(pull: &PullConsumer) -> bool {
+    pull.get_info().await.is_err_and(|error| {
+        matches!(
+            error.kind(),
+            ConsumerInfoErrorKind::NotFound | ConsumerInfoErrorKind::StreamNotFound
+        )
+    })
+}
+
+/// Returns the deliveries the client buffered but no handler admitted.
+/// Without this the broker holds each one until ack wait.
+async fn release(mut messages: pull::Stream) {
+    let mut prefetched = Vec::new();
+    while let Some(Some(next)) = messages.next().now_or_never() {
+        prefetched.extend(next);
+    }
+    // Ends this replica's pulls before the redelivery requests go out.
+    drop(messages);
+    for message in &prefetched {
+        redeliver_after(message, RELEASE_DELAY).await;
     }
 }
 
