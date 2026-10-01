@@ -3,14 +3,21 @@
 //! One subscriber per process: a filter from the typed level directive
 //! (`EnvFilter` grammar), a JSON or text formatting layer, and, when a tracer provider
 //! exists, the OpenTelemetry layer that gives every span an OpenTelemetry context so
-//! JSON records carry `traceId` and `spanId`. `log` records are bridged by
+//! JSON records carry `trace_id` and `span_id`. `log` records are bridged by
 //! `tracing-subscriber`'s `tracing-log` feature during `try_init`.
+//!
+//! The directive chooses the records. Spans at INFO and above exist under
+//! every directive, so a quieter `log.level` neither stops trace export nor
+//! strips the request fields and trace context from the records that remain.
 
 mod json;
 
 use crate::traces::TracerProviderHandle;
+use tracing::level_filters::LevelFilter;
+use tracing::subscriber::Interest;
+use tracing::{Level, Metadata, Subscriber, span};
 use tracing_subscriber::filter::Targets;
-use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 
@@ -53,12 +60,7 @@ pub enum LoggingError {
 /// Returns an error for an unparsable directive or a second installation in
 /// the same process.
 pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingError> {
-    let filter = EnvFilter::try_new(options.level).map_err(|source| LoggingError::Directive {
-        directive: options.level.to_owned(),
-        source,
-    })?;
-    let targets = static_targets(options.level);
-    let filter = targets.is_none().then_some(filter);
+    let (targets, filter) = level_filter(options.level)?;
     // Source location, thread, and busy/idle timings would be added to every
     // span, sampled or not, at about 2% of a small request's instructions;
     // no dashboard or runbook reads them.
@@ -83,6 +85,79 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
         .with(format)
         .try_init()
         .map_err(|_| LoggingError::AlreadyInstalled)
+}
+
+/// The directive's filter with the spans every directive keeps: `Targets`
+/// when that is exact, `EnvFilter` otherwise.
+type LevelFilters = (
+    Option<WithInfoSpans<Targets>>,
+    Option<WithInfoSpans<EnvFilter>>,
+);
+
+fn level_filter(directive: &str) -> Result<LevelFilters, LoggingError> {
+    let filter = EnvFilter::try_new(directive).map_err(|source| LoggingError::Directive {
+        directive: directive.to_owned(),
+        source,
+    })?;
+    Ok(match static_targets(directive) {
+        Some(targets) => (Some(WithInfoSpans(targets)), None),
+        None => (None, Some(WithInfoSpans(filter))),
+    })
+}
+
+/// A level filter that also enables every span at INFO and above.
+///
+/// The HTTP and gRPC server spans, the job attempt span, and the client
+/// spans are INFO. Under a plain filter `log.level = warn` disables them:
+/// nothing is exported, and the remaining records lose the request id and
+/// trace context those spans carry. A span more verbose than INFO still
+/// follows the directive.
+struct WithInfoSpans<F>(F);
+
+fn info_span(metadata: &Metadata<'_>) -> bool {
+    metadata.is_span() && *metadata.level() <= Level::INFO
+}
+
+impl<S: Subscriber, F: Layer<S>> Layer<S> for WithInfoSpans<F> {
+    fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
+        // `EnvFilter` records its span directives here, so it is asked first.
+        let interest = self.0.register_callsite(metadata);
+        if info_span(metadata) {
+            Interest::always()
+        } else {
+            interest
+        }
+    }
+
+    fn enabled(&self, metadata: &Metadata<'_>, ctx: Context<'_, S>) -> bool {
+        info_span(metadata) || self.0.enabled(metadata, ctx)
+    }
+
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        self.0
+            .max_level_hint()
+            .map(|hint| hint.max(LevelFilter::INFO))
+    }
+
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
+        self.0.on_new_span(attrs, id, ctx);
+    }
+
+    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
+        self.0.on_record(id, values, ctx);
+    }
+
+    fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
+        self.0.on_enter(id, ctx);
+    }
+
+    fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
+        self.0.on_exit(id, ctx);
+    }
+
+    fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
+        self.0.on_close(id, ctx);
+    }
 }
 
 /// The directive as `Targets` when that filters exactly like `EnvFilter`.
@@ -272,9 +347,10 @@ mod tests {
             assert_eq!(sampled, expected_sampled, "{name}");
             assert!(
                 record.contains(&format!(
-                    r#""openTelemetry":{{"spanId":"{span_id}","traceId":"{trace_id}"}}"#
+                    r#""trace_id":"{trace_id}","span_id":"{span_id}","trace_flags":"{flags}""#,
+                    flags = if sampled { "01" } else { "00" }
                 )),
-                "{name} must preserve the nested OpenTelemetry schema: {record}"
+                "{name} must carry the trace context: {record}"
             );
         }
     }
@@ -284,7 +360,7 @@ mod tests {
         for (name, with_span) in [("no span", false), ("no provider", true)] {
             let record = emit_event_without_otel_context(with_span);
             assert!(
-                !record.contains("\"openTelemetry\""),
+                !record.contains("\"trace_id\"") && !record.contains("\"span_id\""),
                 "{name} must not emit empty or invalid trace ids: {record}"
             );
         }
@@ -342,6 +418,113 @@ mod tests {
             .map(|c| if c.is_ascii_digit() { '0' } else { c })
             .collect();
         assert_eq!(shape, "0000-00-00T00:00:00.000000Z", "{timestamp}");
+    }
+
+    #[test]
+    fn json_line_writes_each_key_once() {
+        let buffer = Buffer::default();
+        let dispatch =
+            tracing::Dispatch::new(Registry::default().with(json::JsonLayer::new(buffer.clone())));
+        tracing::dispatcher::with_default(&dispatch, || {
+            let span = tracing::info_span!(
+                "HTTP request",
+                request_id = "from-span",
+                route = "/items",
+                level = "span field named like the line's own key",
+            );
+            span.in_scope(|| {
+                tracing::info!(
+                    request_id = "from-event",
+                    name = "from-event",
+                    timestamp = 1,
+                    trace_id = "not a trace id",
+                    "http_request"
+                );
+            });
+        });
+        let record = buffer.records();
+        let line: serde_json::Value = serde_json::from_str(&record).expect("one JSON object");
+        assert_eq!(line["request_id"], "from-event", "{record}");
+        assert_eq!(line["name"], "from-event", "{record}");
+        assert_eq!(line["route"], "/items", "{record}");
+        assert_eq!(line["level"], "INFO", "{record}");
+        for key in ["level", "timestamp", "trace_id", "request_id", "name"] {
+            assert_eq!(
+                record.matches(&format!("\"{key}\":")).count(),
+                usize::from(key != "trace_id"),
+                "{key}: {record}"
+            );
+        }
+    }
+
+    #[test]
+    fn json_line_names_the_real_target_of_a_log_crate_record() {
+        let buffer = Buffer::default();
+        let dispatch =
+            tracing::Dispatch::new(Registry::default().with(json::JsonLayer::new(buffer.clone())));
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing_log::format_trace(
+                &log::Record::builder()
+                    .level(log::Level::Warn)
+                    .target("rustls::client")
+                    .module_path(Some("rustls::client::hs"))
+                    .file(Some("hs.rs"))
+                    .line(Some(7))
+                    .args(format_args!("bridged"))
+                    .build(),
+            )
+            .expect("the record is dispatched");
+        });
+        let record = buffer.records();
+        assert!(
+            record.starts_with(r#"{"level":"WARN","target":"rustls::client","timestamp":""#),
+            "{record}"
+        );
+        assert!(
+            record.ends_with("Z\",\"message\":\"bridged\"}\n"),
+            "{record}"
+        );
+    }
+
+    #[test]
+    fn info_spans_survive_a_quieter_directive() {
+        // `Targets` for the first two, `EnvFilter` for the span directive.
+        for directive in ["warn", "off", "warn,[never]=trace"] {
+            let buffer = Buffer::default();
+            let (targets, filter) = level_filter(directive).expect("valid directive");
+            let dispatch = tracing::Dispatch::new(
+                Registry::default()
+                    .with(targets)
+                    .with(filter)
+                    .with(json::JsonLayer::new(buffer.clone())),
+            );
+            tracing::dispatcher::with_default(&dispatch, || {
+                let request = tracing::info_span!("request", request_id = "r-1");
+                assert!(!request.is_disabled(), "{directive}");
+                assert!(tracing::debug_span!("detail").is_disabled(), "{directive}");
+                request.in_scope(|| {
+                    tracing::info!("quiet");
+                    tracing::error!("loud");
+                });
+            });
+            let record = buffer.records();
+            assert!(!record.contains("quiet"), "{directive}: {record}");
+            assert_eq!(
+                record.contains(r#""message":"loud","name":"request","request_id":"r-1"}"#),
+                directive != "off",
+                "{directive}: {record}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_verbose_directive_still_enables_verbose_spans() {
+        let (targets, filter) = level_filter("info,app=debug").expect("valid directive");
+        let dispatch = tracing::Dispatch::new(Registry::default().with(targets).with(filter));
+        tracing::dispatcher::with_default(&dispatch, || {
+            assert!(!tracing::debug_span!(target: "app", "detail").is_disabled());
+            assert!(tracing::debug_span!(target: "other", "detail").is_disabled());
+        });
     }
 
     #[test]

@@ -21,7 +21,9 @@ opentelemetry = { workspace = true, features = ["trace"] }
 # `reqwest-rustls` gives the exporter TLS (rustls + aws-lc-rs, system roots
 # through the platform verifier); without it an https:// collector fails at
 # export time with "URL scheme is not allowed".
-opentelemetry-otlp = { workspace = true, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "trace", "internal-logs"] }
+# `gzip-http` lets the standard `OTEL_EXPORTER_OTLP_COMPRESSION=gzip` work;
+# without it that variable fails the exporter build and tracing degrades.
+opentelemetry-otlp = { workspace = true, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "gzip-http", "trace", "internal-logs"] }
 opentelemetry-semantic-conventions = { workspace = true, features = ["semconv_experimental"] }
 opentelemetry_sdk = { workspace = true, features = ["trace"] }
 secrecy = { workspace = true }
@@ -32,9 +34,11 @@ tokio = { workspace = true, features = ["rt", "time", "macros"] }
 tokio-util = { workspace = true }
 tokio-metrics = { workspace = true, features = ["rt", "metrics-rs-integration"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
+tracing-log = { workspace = true, features = ["std"] }
 tracing-opentelemetry = { workspace = true, features = ["tracing-log"] }
 tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter", "registry", "tracing-log", "ansi"] }
 
 [dev-dependencies]
 futures-util = { workspace = true, features = ["std"] }
+log = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

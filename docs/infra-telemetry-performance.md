@@ -81,7 +81,9 @@ record and re-serialized a span's fields on every `record`.
 | + `humantime` timestamp | −45% | −67% | −32% |
 | + `Targets` for a directive without span filters | −45% | −67% | −33%; −4 to −7% more at three threads on span-heavy work |
 
-The line is unchanged: a 64-record corpus (every field type, escapes,
+The line was unchanged by this work (it has since changed where the line
+itself was the defect; see the [logging decision](configuration-source-policy.md#logging)):
+a 64-record corpus (every field type, escapes,
 non-finite floats, raw identifiers, `log` records, nested spans with
 repeated keys, 300 records on one span, explicit and root parents) was
 compared byte for byte against `json-subscriber` under five sampler and

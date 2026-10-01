@@ -255,7 +255,7 @@ or performance gain without a measured comparison.
 
 ## Telemetry compatibility
 
-The telemetry crate's JSON layer reads the nested `openTelemetry.traceId` and
-`openTelemetry.spanId` through `tracing_opentelemetry::get_otel_context` with
+The telemetry crate's JSON layer reads `trace_id`, `span_id`, and
+`trace_flags` through `tracing_opentelemetry::get_otel_context` with
 the active dispatch, so the log line does not depend on a logging crate's
 bridge to a particular `tracing-opentelemetry` minor.
