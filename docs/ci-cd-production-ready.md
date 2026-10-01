@@ -114,6 +114,10 @@ messaging/OAuth seam, and graph 55 joins messaging-oauth for the full
 outbox/OAuth pack. Each runs initialization, locked metadata and compilation
 of retained test targets; the workspace quality gate runs the OAuth behavior
 suite. Database-free graphs do not request the removed integration-test feature.
+The `oauth_integration` surface runs `make test-integration-oauth` in its own
+`oauth-integration` job: the adapter against a digest-pinned throwaway
+Keycloak container the script starts, independent of the Compose-backed
+integration job.
 <!-- template:end outbound-auth:docs-ci-outbound-auth-gates -->
 Graph 56 joins jobs for PostgreSQL/jobs/messaging without outbox. It uses the
 focused locked offline metadata and all-target compile path with
@@ -248,7 +252,7 @@ later change reopens one only with new evidence.
 
 | Gate | Decision | Rejected | Why |
 | --- | --- | --- | --- |
-| Advisories, licenses, bans, sources | `cargo-deny` 0.20.2; `[graph] targets` = the two Linux gnu triples; `allow-wildcard-paths = true`; `multiple-versions = "warn"`; one ignore (`RUSTSEC-2024-0436`, `paste` through `utoipa-axum` 0.2.0, reopened by its next release) | `cargo-audit` (same database, no reachability analysis exists for Rust); `cargo-vet` (a template cannot ship audits) | without `targets`, macOS-only crates enter license decisions about the Linux binary (*verified*); path dependencies count as wildcards otherwise (*verified*); `base64`, `getrandom`, `hashbrown`, `syn`, `tower-http` resolve twice through upstream crates and are warnings |
+| Advisories, licenses, bans, sources | `cargo-deny` 0.20.2; `[graph] targets` = the two Linux gnu triples; `allow-wildcard-paths = true`; `multiple-versions = "warn"`; no advisory ignore (the `paste` one closed with `utoipa-axum` 0.3.0) | `cargo-audit` (same database, no reachability analysis exists for Rust); `cargo-vet` (a template cannot ship audits) | without `targets`, macOS-only crates enter license decisions about the Linux binary (*verified*); path dependencies count as wildcards otherwise (*verified*); `base64`, `getrandom`, `hashbrown`, `syn`, `tower-http` resolve twice through upstream crates and are warnings |
 | Unused dependencies | `cargo-shear` 1.13.4 | `cargo-machete` (two false positives here: `humantime-serde` used through `#[serde(with)]`, `vergen-gitcl` in `build.rs`); `cargo-udeps` (nightly) | *verified*: cargo-shear found the unused `http` and `hyper` in `infra-http` with no false positive |
 | Dependency metadata in the binary | `cargo auditable build` | plain `cargo build` | Trivy reports 178 Rust packages from the image's `/service` (`rustbinary`); without it the scan sees only Debian packages (*verified*) |
 | New vulnerable dependencies | `actions/dependency-review-action` v5, `fail-on-severity: high`, pull requests only | — | needs the repository dependency graph (Dependabot alerts enabled), which was off here and had to be enabled (*verified* by the first failing run) |

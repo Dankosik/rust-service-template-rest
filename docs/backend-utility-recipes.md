@@ -78,8 +78,9 @@ checks remain, with additional pre-cancellation and first-error-order tests.
 `serde_with` also has `OneOrMany` and `StringWithSeparator` for external
 representations that require them. Those are not reasons to make your own
 public API accept ambiguous shapes. HTTP extraction and validation are
-separate steps: the first production DTO still owns its rejection mapper,
-RFC6901 pointer escaping, body limits, safe messages and OpenAPI constraints.
+separate steps: `infra_http::extract` owns the rejection mapping, RFC 6901
+pointer escaping and safe messages; the first production DTO still owns its
+OpenAPI constraints and their enforcement.
 
 ## Async work, buffers, retries and local caching
 
@@ -105,9 +106,11 @@ RFC6901 pointer escaping, body limits, safe messages and OpenAPI constraints.
 | `wiremock` | Loopback request/response contract and expected call count | Tests outbound clients, not replacement for inbound-router, socket or process-lifecycle tests. |
 | `axum-test` | Test-local router requests and response assertions | Existing raw-body/concurrency tests remain where exact low-level behavior is under examination. |
 
-`axum-extra::WithRejection` is available when a conversion alone is sufficient.
-It does not supply request extensions to `From`; it cannot by itself populate
-the service's request ID. Do not install another extractor framework just to
+`infra_http::extract::{Json, Query, Path}` are the service's request
+extractors. `axum-extra::WithRejection` remains for another extractor when a
+conversion alone is sufficient. It does not supply request extensions to
+`From`; problem completion fills the request ID. Do not install another
+extractor framework just to
 wrap it. The existing production HTTP architecture remains authoritative.
 
 ## Text, files and CSV

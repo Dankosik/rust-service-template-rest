@@ -6,7 +6,7 @@ use bytes::Bytes;
 use health::{Readiness, RefreshPolicy};
 use http::{HeaderMap, HeaderValue, StatusCode};
 use infra_jobs::{Engine, JobError, Kinds, Policy};
-use infra_postgres::{Dsn, PgPool, Tx, connection};
+use infra_postgres::{Dsn, PgPool, Tx};
 use infra_webhooks::inbound::{
     Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver, async_trait,
 };
@@ -325,7 +325,7 @@ impl Consumer for EffectConsumer {
         sqlx::query("INSERT INTO webhook_effects (message_id, content_type) VALUES ($1, $2)")
             .bind(incoming.message_id())
             .bind(incoming.content_type())
-            .execute(&mut *connection(tx))
+            .execute(&mut *tx)
             .await
             .map_err(JobError::from)?;
         self.entered.notify_one();

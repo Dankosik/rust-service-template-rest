@@ -24,7 +24,7 @@ use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued};
 use infra_messaging::{
     ConsumerOptions, HandlerError, Messaging, MessagingOptions, Registry, Route,
 };
-use infra_postgres::{Closed, Isolation, PgPool, PoolOptions, TxError, connection, in_tx};
+use infra_postgres::{Closed, Isolation, PgPool, PoolOptions, TxError, in_tx};
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
 use infra_jobs::{JobError, Kinds, Policy};
 use infra_webhooks::inbound::{
@@ -536,7 +536,7 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
     let rolled_back = prepared(&fixture, "event-rollback", "rollback");
     let rollback = in_tx(&business, async |tx| -> Result<(), Step> {
         sqlx::query("INSERT INTO business_effects (id) VALUES ('rollback')")
-            .execute(connection(tx))
+            .execute(&mut *tx)
             .await?;
         assert_eq!(rolled_back.enqueue(tx).await?, OutboxEnqueued::Created);
         Err(Step::Refused)
@@ -555,7 +555,7 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
     let committed = prepared(&fixture, "event-commit", "committed");
     let committed_outcome = in_tx(&business, async |tx| -> Result<_, Step> {
         sqlx::query("INSERT INTO business_effects (id) VALUES ('commit')")
-            .execute(connection(tx))
+            .execute(&mut *tx)
             .await?;
         committed.enqueue(tx).await.map_err(Step::from)
     })
@@ -1046,7 +1046,7 @@ impl WebhookConsumer for HeldWebhookConsumer {
     ) -> Result<(), JobError> {
         sqlx::query("INSERT INTO webhook_effects (message_id) VALUES ($1)")
             .bind(incoming.message_id())
-            .execute(connection(tx))
+            .execute(&mut *tx)
             .await
             .map_err(JobError::from)?;
         self.entered.notify_one();

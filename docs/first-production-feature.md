@@ -125,6 +125,7 @@ generated from it ([HTTP Architecture](architecture/http.md#adding-an-operation)
 
 ```rust
 // crates/greeting/src/http.rs (operation and router; other imports omitted)
+use infra_http::extract::Path;
 use utoipa_axum::router::OpenApiRouter;
 const GREETING_PATH: &str = "/greetings/{name}";
 
@@ -324,10 +325,11 @@ operational question ([Runtime Lifecycle](architecture/runtime-lifecycle.md),
 
 ## What the walkthrough did not exercise
 
-- A request body or a constrained parameter. The first one adds the mapping
-  from extractor rejections to `400`/`415`/`422` problems with
-  `invalid_params` (axum's defaults answer `text/plain`) and constraint
-  enforcement; [HTTP Architecture](architecture/http.md#deferred-with-the-change-that-reopens-each)
+- A request body or a constrained parameter. `infra_http::extract` already
+  maps extractor rejections to `400`/`415`/`422` problems with
+  `invalid_params`; the first one adds the `415`/`422` response components
+  and constraint enforcement;
+  [HTTP Architecture](architecture/http.md#deferred-with-the-change-that-reopens-each)
   records the options.
 - A protected operation: the bearer scheme, `401`/`403`, and the
   authentication profile's bootstrap wiring.

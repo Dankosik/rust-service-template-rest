@@ -1551,7 +1551,7 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
             "tower",
             "0.5.3",
             ["futures-core", "futures-util", "indexmap 2.14.2", "pin-project-lite", "slab", "sync_wrapper", "tokio", "tokio-util", "tower-layer", "tower-service", "tracing"],
-            ["futures-core", "futures-util", "pin-project-lite", "sync_wrapper", "tokio", "tokio-util", "tower-layer", "tower-service", "tracing"],
+            ["futures-core", "futures-util", "pin-project-lite", "sync_wrapper", "tokio", "tower-layer", "tower-service", "tracing"],
         )
         _project_feature_edge(
             records,

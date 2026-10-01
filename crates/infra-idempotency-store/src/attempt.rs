@@ -25,11 +25,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use infra_postgres::{
-    Isolation, Tx, TxError, TxOptions, connection, failure_cause, in_tx_with, sqlstate,
-    statement_succeeded, transient,
+    Isolation, Tx, TxError, TxOptions, failure_cause, in_tx_with, sqlstate, transient,
 };
 use sqlx::Row;
-use sqlx::postgres::{PgConnection, PgRow};
+use sqlx::postgres::PgRow;
 
 use crate::Store;
 
@@ -203,16 +202,14 @@ impl Store {
             &self.pool,
             READ_COMMITTED,
             async |tx: &mut Tx<'_>| -> Result<C, Stop<C, R>> {
-                if let Some(decided) = arbitrate(connection(tx), scope, fingerprint).await? {
+                if let Some(decided) = arbitrate(tx, scope, fingerprint).await? {
                     return Err(Stop(Ok(decided)));
                 }
                 let (record, value) = match work(tx).await {
                     Ok(done) => done,
                     Err(rollback) => return Err(Stop(Ok(Attempted::RolledBack(rollback)))),
                 };
-                write(connection(tx), scope, caller, &record, self.retention).await?;
-                // The write is the last statement, so the commit needs no probe.
-                statement_succeeded(tx);
+                write(tx, scope, caller, &record, self.retention).await?;
                 Ok(value)
             },
         )
@@ -226,7 +223,7 @@ impl Store {
 
 /// Steps 1 and 2: `None` when the work may run.
 async fn arbitrate<C, R>(
-    conn: &mut PgConnection,
+    tx: &mut Tx<'_>,
     scope: &ScopeKey,
     fingerprint: &Digest,
 ) -> Result<Option<Attempted<C, R>>, AttemptError> {
@@ -241,7 +238,7 @@ async fn arbitrate<C, R>(
                 live_record(&row, fingerprint)?,
             ))
         })
-        .fetch_one(&mut *conn)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|err| read_failed(&err, "arbitrate"))?;
     if !writable {
@@ -260,7 +257,7 @@ async fn arbitrate<C, R>(
             .bind(scope.0)
             .bind(fingerprint.as_slice())
             .try_map(|row: PgRow| live_record(&row, fingerprint))
-            .fetch_optional(conn)
+            .fetch_optional(tx)
             .await
             .map_err(|err| read_failed(&err, "read_record"))?
             .flatten(),
@@ -309,7 +306,7 @@ fn read_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
 
 /// Step 3.
 async fn write(
-    conn: &mut PgConnection,
+    tx: &mut Tx<'_>,
     scope: &ScopeKey,
     caller: &CallerIdentity,
     record: &Record,
@@ -325,7 +322,7 @@ async fn write(
         .bind(caller.kind.as_str())
         .bind(&caller.value)
         .bind(retention)
-        .execute(conn)
+        .execute(tx)
         .await
         .map_err(|err| failed(&err, "write_record", classify(&err)))?;
     if written.rows_affected() == 1 {

@@ -51,6 +51,7 @@ make/source.mk
 scripts/ci/template-init-check.sh
 scripts/ci/initializer-matrix.py
 scripts/ci/test-integration-object-storage.sh
+scripts/ci/test-integration-oauth.sh
 scripts/tests/template-candidate-paths.txt
 scripts/tests/fixtures/template-profiles-b206.json
 scripts/tests/template-owned-purity.py

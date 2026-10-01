@@ -353,7 +353,7 @@ async fn complete_holder(pool: &PgPool, key: &str) {
 
 async fn still_usable(tx: &mut Tx<'_>) {
     let one: i32 = sqlx::query_scalar("SELECT 1")
-        .fetch_one(&mut *connection(tx))
+        .fetch_one(&mut *tx)
         .await
         .expect("the transaction stays usable");
     assert_eq!(one, 1);
@@ -397,7 +397,7 @@ async fn expect_serialization(tx: &mut Tx<'_>, key: &str) -> Result<Enqueued, At
     assert_eq!(super::sqlstate(&err).as_deref(), Some("40001"), "{err}");
     assert!(retryable(&err), "{err}");
     let next_err = sqlx::query_scalar::<_, i32>("SELECT 1")
-        .fetch_one(&mut *connection(tx))
+        .fetch_one(&mut *tx)
         .await
         .expect_err("the transaction is aborted");
     assert_eq!(super::sqlstate(&next_err).as_deref(), Some("25P02"));
@@ -459,7 +459,7 @@ fn spawn_snapshot_caller(
             )
             .bind(Note::NAME)
             .bind(&key)
-            .fetch_one(&mut *connection(tx))
+            .fetch_one(&mut *tx)
             .await?;
             assert_eq!(seen, seen_rows, "rows visible to the caller's snapshot");
             snapshot.notify_one();
@@ -484,7 +484,7 @@ async fn e1_e2_e8_a_committed_enqueue_returns_created_and_one_row(pool: PgPool) 
              FROM background_jobs WHERE id::text = $1",
         )
         .bind(id.to_string())
-        .fetch_one(&mut *connection(tx))
+        .fetch_one(&mut *tx)
         .await?;
         assert!(
             on_time,
@@ -561,7 +561,7 @@ async fn e2_a_commit_the_server_rejects_leaves_no_job(pool: PgPool) {
         .await?;
         assert!(matches!(enqueued, Enqueued::Created(_)));
         sqlx::query("INSERT INTO staged (id, other) VALUES (1, 1), (2, 1)")
-            .execute(&mut *connection(tx))
+            .execute(&mut *tx)
             .await?;
         Ok(())
     })
@@ -715,7 +715,7 @@ async fn e4_a_missing_schema_returns_42p01_and_aborts_the_transaction(pool: PgPo
         };
         assert_eq!(super::sqlstate(&err).as_deref(), Some("42P01"), "{err}");
         let next_err = sqlx::query_scalar::<_, i32>("SELECT 1")
-            .fetch_one(&mut *connection(tx))
+            .fetch_one(&mut *tx)
             .await
             .expect_err("the transaction is aborted");
         assert_eq!(super::sqlstate(&next_err).as_deref(), Some("25P02"));
@@ -754,7 +754,7 @@ async fn e4_a_read_only_transaction_returns_25006_and_writes_nothing(pool: PgPoo
             };
             assert_eq!(super::sqlstate(&err).as_deref(), Some("25006"), "{err}");
             let next_err = sqlx::query_scalar::<_, i32>("SELECT 1")
-                .fetch_one(&mut *connection(tx))
+                .fetch_one(&mut *tx)
                 .await
                 .expect_err("the transaction is aborted");
             assert_eq!(super::sqlstate(&next_err).as_deref(), Some("25P02"));
@@ -794,7 +794,7 @@ async fn e5_a_one_hour_delay_is_the_statement_time_plus_one_hour(pool: PgPool) {
              FROM background_jobs WHERE id::text = $1",
         )
         .bind(id.to_string())
-        .fetch_one(&mut *connection(tx))
+        .fetch_one(&mut *tx)
         .await?;
         assert!(
             on_time,
@@ -832,7 +832,7 @@ async fn e5_a_sub_microsecond_delay_is_accepted(pool: PgPool) {
              FROM background_jobs WHERE id::text = $1",
         )
         .bind(id.to_string())
-        .fetch_one(&mut *connection(tx))
+        .fetch_one(&mut *tx)
         .await?;
         assert!(
             on_time,
@@ -976,7 +976,7 @@ async fn e6_read_committed_duplicate_against_a_live_holder_keeps_the_transaction
                 )
                 .bind(Note::NAME)
                 .bind(key)
-                .fetch_one(&mut *connection(tx))
+                .fetch_one(&mut *tx)
                 .await?;
                 assert_eq!(seen, 1, "a live holder is visible");
                 let enqueued = enqueue(
@@ -1098,7 +1098,7 @@ async fn e6_snapshot_isolation_duplicate_when_the_snapshot_sees_the_live_holder(
                 )
                 .bind(Note::NAME)
                 .bind(&key)
-                .fetch_one(&mut *connection(tx))
+                .fetch_one(&mut *tx)
                 .await?;
                 assert_eq!(seen, 1, "the snapshot sees the live holder");
                 let enqueued = enqueue(tx, &Note { text: key.clone() }, keyed(&key)).await?;

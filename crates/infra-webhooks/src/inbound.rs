@@ -16,7 +16,7 @@ use infra_jobs::{
     CompleteError, EnqueueError, EnqueueOptions, Handler, Job, JobError, JobKind, Kinds, Policy,
     enqueue,
 };
-use infra_postgres::{Isolation, Tx, TxError, TxOptions, connection, in_tx, in_tx_with};
+use infra_postgres::{Isolation, Tx, TxError, TxOptions, in_tx, in_tx_with};
 use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
@@ -142,7 +142,7 @@ impl Receiver {
                 let inserted = sqlx::query_scalar::<_, Vec<u8>>(INSERT_RECEIPT)
                     .bind(endpoint_id)
                     .bind(verified.message_id().as_ref())
-                    .fetch_optional(&mut *connection(tx))
+                    .fetch_optional(&mut *tx)
                     .await?;
                 if inserted.is_some() {
                     let incoming = Incoming::new(
@@ -194,11 +194,11 @@ impl Receiver {
         loop {
             let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupFailure> {
                 sqlx::query(CLEANUP_STATEMENT_TIMEOUT)
-                    .execute(connection(tx))
+                    .execute(&mut *tx)
                     .await
                     .map_err(|_| CleanupFailure(CleanupError::Statement))?;
                 let deleted = sqlx::query(CLEANUP_BATCH)
-                    .execute(connection(tx))
+                    .execute(&mut *tx)
                     .await
                     .map_err(|_| CleanupFailure(CleanupError::Statement))?;
                 Ok(deleted.rows_affected())

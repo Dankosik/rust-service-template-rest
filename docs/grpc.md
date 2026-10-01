@@ -291,7 +291,8 @@ opening and is not refreshed mid-stream.
 
 Eviction runs only on the initial response: `grpc-status` `UNAUTHENTICATED`,
 or HTTP 401 with no `grpc-status`. Trailers are not inspected. The response
-is returned unchanged. Conditional eviction of that exact token is an in-memory
+is returned unchanged. Conditional eviction of that exact token, once it is
+thirty seconds old, is an in-memory
 update and starts no background work. A newer cached replacement survives.
 `PERMISSION_DENIED` keeps the credential. The
 [OAuth owner](outbound-machine-authentication.md) keeps the token, cache and

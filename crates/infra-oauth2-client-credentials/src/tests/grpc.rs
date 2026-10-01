@@ -452,6 +452,15 @@ async fn a_reused_token_forwards_the_callers_grpc_timeout_unchanged() {
     tokens.finish().await;
 }
 
+/// Acquires the service token and makes it old enough to be evicted.
+async fn warm_and_age(credentials: &Credentials) {
+    credentials
+        .service_token(Instant::now() + Duration::from_secs(10))
+        .await
+        .unwrap();
+    super::advance(crate::EVICTION_MIN_AGE).await;
+}
+
 #[tokio::test]
 async fn trailers_only_unauthenticated_evicts_without_replay_and_permission_denied_keeps_the_token()
 {
@@ -464,6 +473,8 @@ async fn trailers_only_unauthenticated_evicts_without_replay_and_permission_deni
         let credentials = tokens.credentials(&[], None);
         let mut client = resource.client(&credentials);
         let before_tokens = tokens.token_requests().len();
+        // Old enough for an unauthenticated answer to evict it.
+        warm_and_age(&credentials).await;
         let before_calls = resource.calls();
         let error = client
             .unary(rpc(
@@ -506,6 +517,8 @@ async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
     let resource = Resource::new().await;
     let credentials = tokens.credentials(&[], None);
     let mut client = resource.client(&credentials);
+    // Old enough that only its replacement keeps the late answer from evicting.
+    warm_and_age(&credentials).await;
     let mut delayed = Box::pin(client.unary(rpc(
         UnaryRequest {
             message: "delayed-unauthenticated".to_owned(),
@@ -552,6 +565,8 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
         let credentials = tokens.credentials(&[], None);
         let before_tokens = tokens.token_requests().len();
         let before_calls = resource.calls();
+        // Old enough for an unauthenticated answer to evict it.
+        warm_and_age(&credentials).await;
         let mut request = rpc(UnaryRequest::default(), Duration::from_secs(10));
         request
             .metadata_mut()

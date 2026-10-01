@@ -3,9 +3,11 @@
 //! Owns the one profile table, `http_idempotency_records`: arbitration of a
 //! scoped key at the writer, the one execution transaction that commits the
 //! work together with its success record, the startup check, and the bounded
-//! cleanup of expired records. It knows nothing about HTTP: the inbound seam
-//! in `infra_http::idempotency` derives scopes and fingerprints, captures and
-//! decodes stored successes, and maps [`Attempted`] to responses.
+//! cleanup of expired records. Its records have the shape of an HTTP success
+//! (a 2xx status, header pairs, a body), so it serves no other transport, but
+//! it applies no HTTP policy: the inbound seam in `infra_http::idempotency`
+//! derives scopes and fingerprints, captures and decodes stored successes,
+//! and maps [`Attempted`] to responses.
 //!
 //! No other crate names the table. A feature's persistence adapter reaches
 //! the transaction's connection through the PostgreSQL provider, which the
@@ -21,7 +23,7 @@ use sqlx::postgres::PgPool;
 pub use attempt::{
     AttemptError, Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey,
 };
-pub use maintenance::{CleanupError, StartupError};
+pub use maintenance::{CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, CleanupError, StartupError};
 
 /// Handle on the record store. Cloning shares the pool.
 #[derive(Clone, Debug)]

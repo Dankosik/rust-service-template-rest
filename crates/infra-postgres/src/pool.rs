@@ -15,6 +15,7 @@ use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
 use crate::dsn::Dsn;
+use crate::observe::{CONNECTION_COUNT_METRIC, CONNECTION_MAX_METRIC};
 use crate::transaction::Isolation;
 
 /// Bound on waiting for a pooled connection, including opening a new one.
@@ -45,12 +46,6 @@ const SLOW_STATEMENT_THRESHOLD: Duration = Duration::from_secs(1);
 /// Same threshold as pgx's pool, which the Go template uses. A connection the
 /// server dropped while it was busy fails its next statement either way.
 const PING_IDLE_AFTER: Duration = Duration::from_secs(1);
-
-/// Pool occupancy, named after the OpenTelemetry database client semantic
-/// convention `db.client.connection.count` with its required attributes
-/// `db.client.connection.pool.name` and `db.client.connection.state`
-/// (`idle`, `used`). The Prometheus exporter spells dots as underscores.
-const CONNECTION_COUNT_METRIC: &str = "db_client_connection_count";
 
 /// Why the pool could not be opened.
 #[derive(Debug, thiserror::Error)]
@@ -107,6 +102,7 @@ pub struct SessionOptions<'a> {
 /// [`ACQUIRE_TIMEOUT`]; [`ConnectError::Connect`] when the first attempt is
 /// refused (credentials, TLS, or the server).
 pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, ConnectError> {
+    crate::observe::describe();
     let mut settings = vec![
         ("statement_timeout", to_runtime_param(STATEMENT_TIMEOUT)),
         (
@@ -254,6 +250,8 @@ pub fn record_metrics(pool: &PgPool) {
         "db.client.connection.state" => "used"
     )
     .set((size - idle).max(0.0));
+    metrics::gauge!(CONNECTION_MAX_METRIC, "db.client.connection.pool.name" => "postgres")
+        .set(f64::from(pool.options().get_max_connections()));
 }
 
 /// Publish the gauges every `interval` until `cancel` fires. Same missed-tick

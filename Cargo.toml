@@ -65,8 +65,8 @@ webhook-consumers = { path = "crates/webhook-consumers", default-features = fals
 # template:end inbound-webhooks:workspace-webhook-consumers-crate
 
 # template:begin postgres:workspace-postgres-dependencies
-# Persistence (docs/architecture/persistence.md). `macros` only where
-# `sqlx::migrate!` or `#[sqlx::test]` is used.
+# Persistence (docs/architecture/persistence.md). `macros` where
+# `sqlx::migrate!` or `#[sqlx::test]` is used, and in `infra-postgres`.
 sqlx = { version = "0.9.0", default-features = false }
 log = { version = "0.4", default-features = false }
 # template:end postgres:workspace-postgres-dependencies
@@ -130,14 +130,17 @@ rustls = { version = "0.23.45", default-features = false }
 
 # API contract (docs/architecture/http.md). The document is derived from the
 # handlers and committed as api/openapi/service.yaml.
-utoipa = { version = "5.5.0", default-features = false }
-utoipa-axum = { version = "0.2.0", default-features = false }
+utoipa = { version = "6.0.0", default-features = false }
+utoipa-axum = { version = "0.3.0", default-features = false }
 
 # Configuration (docs/configuration-source-policy.md)
 config = { version = "0.15.25", default-features = false }
 clap = { version = "4.6.7", default-features = false }
 serde = { version = "1", default-features = false }
 serde_json = { version = "1", default-features = false }
+# axum's own extractors report the failing member through it; infra-http reads
+# that path for `invalid_params` (docs/architecture/http.md).
+serde_path_to_error = { version = "0.1.20", default-features = false }
 toml = { version = "1.1.6", default-features = false }
 humantime = "2.4.0"
 humantime-serde = "1.1.1"

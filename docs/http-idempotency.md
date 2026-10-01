@@ -57,6 +57,9 @@ async fn create_widget(
 }
 ```
 
+`Json` is `infra_http::extract::Json`, so a body that does not fit answers a
+Problem before `execute`.
+
 The handler must return the response from `execute`, or preserve its response
 extensions. A private extension marks a successful response as executed or
 replayed; a handler-created 2xx response without that marker becomes the
@@ -200,6 +203,12 @@ the marker.
 startup also requires PostgreSQL, the admitted schema, and a writable session.
 Publish this duration as the retry promise. Expired keys may execute again.
 
+A record keeps the whole success body, up to 1 MiB, as the handler returned
+it, for the full retention and without application-level encryption. An
+operation whose success carries personal or otherwise sensitive data keeps
+that data in `http_idempotency_records` for that long: choose the retention,
+database access, and backup policy with that in mind.
+
 Every request that reaches `execute` holds one pooled connection. Replay,
 mismatch, and in-progress arbitration use three transaction statements
 (`BEGIN`, one lock-and-read, `ROLLBACK`); a stored success uses five plus the
@@ -214,8 +223,16 @@ work inside `execute` short.
 
 While the boundary is active, a background task deletes expired records once
 a minute in batches of 500 rows, each under a 1 s statement timeout, skipping
-rows a live attempt holds. A failed run logs its failure class and retries on
-the next tick; it changes neither readiness nor serving.
+rows a live attempt holds. A failed run retries on the next tick; it changes
+neither readiness nor serving. `http_idempotency_cleanup_runs_total` counts
+every run by `outcome` (`completed`, `failed`), and
+`http_idempotency_cleanup_removed_records_total` counts the records each
+committed batch deleted, so a cleanup that stopped completing or stopped
+deleting shows without reading logs. A failed batch logs
+`http_idempotency_cleanup_failed` with its phase (`failure`), SQLSTATE, and
+bounded cause; a startup check that could not reach a verdict logs
+`http_idempotency_startup_check_failed` with the same fields, or
+`cause = "timeout"` for its 5 s bound. None of them carries driver text.
 
 Each new record retains verified issuer, caller kind/value, non-secret scope
 digest, and expiry, never raw keys, credentials, or request bodies for
@@ -394,9 +411,10 @@ The code changes, each first measured alone:
 
 - **One lock-and-read statement.** Replay, mismatch, and in-progress lose a
   round trip (+15–26% ops/s alone); a stored success keeps two reads.
-- **No pre-commit probe after the record write** (`statement_succeeded`): the
-  write's success already proves the transaction is not aborted. A stored
-  success loses a round trip (+8% ops/s, −25% allocations, −8–12% server CPU).
+- **No pre-commit probe after the record write**: the write's success already
+  proves the transaction is not aborted. A stored success loses a round trip
+  (+8% ops/s, −25% allocations, −8–12% server CPU). Measured with an explicit
+  `statement_succeeded` call; the transaction handle now tracks it itself.
 - **Ping only idle connections.** Measured here with a 500 ms window; the same
   change landed separately as #110 with pgx's one-second threshold, which is
   equivalent under this load. Every attempt loses a round trip (+6–7% stored

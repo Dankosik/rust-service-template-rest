@@ -224,6 +224,16 @@ async fn serve(
             HTTP_REQUESTS_DURATION_SECONDS,
             HTTP_REQUESTS_DURATION_BUCKETS,
         ),
+        // template:begin postgres:bootstrap-postgres-histograms
+        (
+            infra_postgres::CONNECTION_WAIT_METRIC,
+            infra_postgres::CONNECTION_WAIT_BUCKETS,
+        ),
+        (
+            infra_postgres::TRANSACTION_DURATION_METRIC,
+            infra_postgres::TRANSACTION_DURATION_BUCKETS,
+        ),
+        // template:end postgres:bootstrap-postgres-histograms
         // template:begin outbound-http:service-bootstrap-outbound-histogram
         (
             infra_outbound_http::REQUEST_DURATION_METRIC,

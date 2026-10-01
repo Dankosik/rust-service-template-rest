@@ -165,7 +165,8 @@ contract, and the handlers cannot disagree with it.
 
 Delivered:
 
-- Code-first generation with `utoipa` 5.5 and `utoipa-axum` 0.2: the probe
+- Code-first generation with `utoipa` and `utoipa-axum` (6.0 and 0.3 since
+  2026-10-01, with a byte-identical generated document): the probe
   handlers in `crates/infra-http` carry `#[utoipa::path]` with
   `operationId`, `summary`, explicit public `security: []` where a root bearer
   default exists, and every
@@ -226,7 +227,7 @@ this documentation change:
   Cargo tools resolve, the Dockerfile `ARG` defaults agree, every `FROM`
   carries a digest, and the builder tag equals the toolchain channel.
 - Dependency and secret gates: `deny.toml` + `make deny` (Linux gnu targets,
-  the `paste` advisory ignore with its reopen condition, permissive license
+  advisory ignores only with a reopen condition, permissive license
   allow-list, path wildcards allowed, duplicate versions as warnings,
   crates.io only); `make unused-deps` (cargo-shear, which removed the unused
   `http` and `hyper` from `infra-http`); `.gitleaks.toml` + `make secret-scan`
