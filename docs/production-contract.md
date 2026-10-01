@@ -67,8 +67,8 @@ readiness probe; every operation's deadline fits inside
 
 - SLI, SLO, and alert queries: Unresolved. Available signals: the HTTP
   duration histogram by route template and status, `http_server_shed_requests_total`,
-  connection refusals, process and Tokio runtime metrics, and the JSON log
-  records with trace and span ids.
+  connection refusals, `readiness_checks_total` by outcome, process and Tokio
+  runtime metrics, and the JSON log records with trace and span ids.
 - Runbook and manual intervention paths: Unresolved.
 - Rollback authority and mixed-version window: Unresolved. A published
   image is rolled back by digest ([Railway Deployment Profile](railway-deployment-profile.md#rollback)).
