@@ -778,6 +778,7 @@
   "outbound-auth": {
     "remove_when_unselected": [
       "crates/infra-oauth2-client-credentials/",
+      "scripts/ci/test-integration-oauth.sh",
       "docs/outbound-machine-authentication.md",
       "docs/outbound-machine-authentication-decisions.md",
       "docs/service-to-service-authentication.md"
@@ -806,6 +807,13 @@
       {
         "path": "crates/config/src/load.rs",
         "id": "load-integrations-environment"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "ids": [
+          "ci-oauth-integration-job",
+          "ci-required-oauth-integration-need"
+        ]
       },
       {
         "path": "README.md",

@@ -296,9 +296,10 @@ fn claims(token: &super::super::Token) -> Claims {
 fn audiences(claims: &Claims) -> Vec<&str> {
     match &claims.aud {
         serde_json::Value::String(audience) => vec![audience.as_str()],
-        serde_json::Value::Array(audiences) => {
-            audiences.iter().filter_map(|value| value.as_str()).collect()
-        }
+        serde_json::Value::Array(audiences) => audiences
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -319,12 +320,16 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
         credentials.service_token(deadline()).await.unwrap();
 
         let subject = realm.subject_token().await;
-        let subject_claims: Claims =
-            jsonwebtoken::dangerous::insecure_decode(secrecy::ExposeSecret::expose_secret(&subject))
-                .unwrap()
-                .claims;
+        let subject_claims: Claims = jsonwebtoken::dangerous::insecure_decode(
+            secrecy::ExposeSecret::expose_secret(&subject),
+        )
+        .unwrap()
+        .claims;
         let key = subject_key(secrecy::ExposeSecret::expose_secret(&subject).as_bytes());
-        let exchanged = credentials.exchange(key, &subject, deadline()).await.unwrap();
+        let exchanged = credentials
+            .exchange(key, &subject, deadline())
+            .await
+            .unwrap();
         let exchanged = claims(&exchanged);
         // The subject stays the upstream caller; this service is the party
         // the token was issued to, and the integration its audience.

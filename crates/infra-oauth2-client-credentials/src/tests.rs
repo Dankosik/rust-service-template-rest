@@ -1074,6 +1074,94 @@ async fn a_failed_background_refresh_keeps_the_token_and_retries_after_a_pause()
     fixture.finish().await;
 }
 
+/// This crate's events with their fields, in emission order.
+#[derive(Clone, Default)]
+struct Events(Arc<Mutex<Vec<String>>>);
+
+impl tracing::Subscriber for Events {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Fields(Vec<String>);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push(format!("{}={value:?}", field.name()));
+            }
+        }
+        if !event
+            .metadata()
+            .target()
+            .starts_with("infra_oauth2_client_credentials")
+        {
+            return;
+        }
+        let mut fields = Fields(Vec::new());
+        event.record(&mut fields);
+        fields.0.sort();
+        self.0.lock().unwrap().push(fields.0.join(" "));
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[test]
+fn a_failed_background_refresh_is_logged_with_its_error_type() {
+    let events = Events::default();
+    tracing::subscriber::with_default(events.clone(), || {
+        // Keep callsite interest independent of a sibling test's thread-local
+        // subscriber; tracing-core otherwise has a single-dispatcher fast path.
+        let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let fixture = Fixture::new().await;
+                fixture.token_json(
+                    "200 OK",
+                    &serde_json::json!({"access_token": "kept", "token_type": "Bearer", "expires_in": 3600}),
+                );
+                let client = fixture
+                    .credentials(&[], None)
+                    .http(fixture.resource_client());
+                client
+                    .execute(fixture.request(), deadline(Duration::from_secs(10)))
+                    .await
+                    .unwrap();
+                fixture.token_raw(response(
+                    "400 Bad Request",
+                    br#"{"error":"invalid_client","error_description":"provider-secret-body"}"#,
+                ));
+                advance(Duration::from_secs(3291)).await;
+                // The caller keeps its token; the refresh it starts fails alone.
+                client
+                    .execute(fixture.request(), deadline(Duration::from_secs(10)))
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while events.0.lock().unwrap().is_empty() {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                fixture.finish().await;
+            });
+    });
+    assert_eq!(
+        *events.0.lock().unwrap(),
+        [
+            r#"error.type="invalid_client" message=oauth2_background_refresh_failed server.address="127.0.0.1""#
+        ]
+    );
+}
+
 #[tokio::test]
 async fn zero_or_expired_during_acquisition_never_authorizes_dispatch() {
     let fixture = Fixture::new().await;

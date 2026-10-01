@@ -111,6 +111,10 @@ messaging/OAuth seam, and graph 55 joins messaging-oauth for the full
 outbox/OAuth pack. Each runs initialization, locked metadata and compilation
 of retained test targets; the workspace quality gate runs the OAuth behavior
 suite. Database-free graphs do not request the removed integration-test feature.
+The `oauth_integration` surface runs `make test-integration-oauth` in its own
+`oauth-integration` job: the adapter against a digest-pinned throwaway
+Keycloak container the script starts, independent of the Compose-backed
+integration job.
 <!-- template:end outbound-auth:docs-ci-outbound-auth-gates -->
 Graph 56 joins jobs for PostgreSQL/jobs/messaging without outbox. It uses the
 focused locked offline metadata and all-target compile path with

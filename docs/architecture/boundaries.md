@@ -134,7 +134,7 @@ infra-messaging::outbox -> domain-events, infra-jobs, infra-postgres, base64
 infra-outbound-http -> hyper-util, hyper-rustls, rustls, http, bytes, url, tokio, metrics, tracing
 <!-- template:end outbound-http:docs-boundaries-outbound-edges -->
 <!-- template:begin outbound-auth:docs-boundaries-outbound-auth-edges -->
-infra-oauth2-client-credentials -> infra-outbound-http, jsonwebtoken, moka, uuid, http, bytes, tokio, secrecy, serde, serde_json
+infra-oauth2-client-credentials -> infra-outbound-http, jsonwebtoken, moka, uuid, http, bytes, tokio, tracing, secrecy, serde, serde_json
 <!-- template:end outbound-auth:docs-boundaries-outbound-auth-edges -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-edges -->
 main binary -> infra-idempotency-store

@@ -62,6 +62,7 @@ jobs:
       messaging_integration: ${{ steps.surfaces.outputs.messaging_integration }}
       cache_integration: ${{ steps.surfaces.outputs.cache_integration }}
       object_storage_integration: ${{ steps.surfaces.outputs.object_storage_integration }}
+      oauth_integration: ${{ steps.surfaces.outputs.oauth_integration }}
       migrations: ${{ steps.surfaces.outputs.migrations }}
       agent_instructions: ${{ steps.surfaces.outputs.agent_instructions }}
       documentation: ${{ steps.surfaces.outputs.documentation }}
@@ -627,6 +628,30 @@ jobs:
           if-no-files-found: error
   # template:end integration:ci-integration-job
 
+  # template:begin outbound-auth:ci-oauth-integration-job
+  oauth-integration:
+    needs: changes
+    if: needs.changes.outputs.oauth_integration == 'true' && github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - name: Keycloak proof
+        # No Cargo cache: one crate's test build, selected only when the
+        # OAuth surface changes, is not worth a saved target of its own.
+        run: >-
+          bash ./scripts/ci/measure.sh integration-oauth --
+          env REQUIRE_DOCKER=1
+          make test-integration-oauth
+  # template:end outbound-auth:ci-oauth-integration-job
+
   initializer:
     needs: changes
     if: needs.changes.outputs.initializer_runtime == 'true' && github.event.pull_request.draft != true
@@ -729,6 +754,9 @@ jobs:
       # template:begin integration:ci-required-integration-need
       - integration
       # template:end integration:ci-required-integration-need
+      # template:begin outbound-auth:ci-required-oauth-integration-need
+      - oauth-integration
+      # template:end outbound-auth:ci-required-oauth-integration-need
       - initializer
       - initializer-projections
       - docs
