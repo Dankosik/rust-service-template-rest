@@ -1434,7 +1434,6 @@ dependencies = [
 name = "domain-events"
 version = "0.1.0"
 dependencies = [
- "serde",
  "time",
 ]
 
@@ -2482,6 +2481,8 @@ dependencies = [
  "infra-jobs",
  "infra-postgres",
  "metrics",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2490,6 +2491,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]

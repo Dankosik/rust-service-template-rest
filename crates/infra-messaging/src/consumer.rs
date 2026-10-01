@@ -3,16 +3,17 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use async_nats::HeaderMap;
 use async_nats::jetstream::consumer::pull::MessagesErrorKind;
 use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, PullConsumer, ReplayPolicy};
 use async_nats::jetstream::{AckKind, Message};
-use async_nats::{HeaderMap, HeaderName};
 use futures_util::{FutureExt as _, StreamExt as _, TryStreamExt as _};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
+use tracing::Instrument as _;
 
 use crate::error::{HandlerError, MessagingError};
 use crate::messaging::{BROKER_OPERATION_BUDGET, ConsumerOptions, Shared};
@@ -266,6 +267,28 @@ impl Delivery {
             return self.dead_letter(&message, "exhausted", &cancel).await;
         }
 
+        let span = tracing::info_span!(
+            "messaging_process",
+            otel.kind = "consumer",
+            messaging.system = "nats",
+            messaging.operation.type = "process",
+            messaging.destination.name = message.subject.as_str(),
+            outcome = tracing::field::Empty,
+        );
+        crate::trace::set_remote_parent(&span, headers);
+        self.process(&message, envelope, delivered, &cancel)
+            .instrument(span)
+            .await;
+    }
+
+    /// Runs the typed handler inside the delivery span and settles the source.
+    async fn process(
+        &self,
+        message: &Message,
+        envelope: wire::InboundEnvelope,
+        delivered: usize,
+        cancel: &CancellationToken,
+    ) {
         let started = Instant::now();
         let dispatch =
             self.registry
@@ -283,22 +306,38 @@ impl Delivery {
         self.shared
             .handler_metrics
             .record(outcome as usize, started.elapsed());
-        if matches!(outcome, Outcome::Panicked) {
-            tracing::error!("messaging handler panicked");
+        let label = OUTCOME_LABELS[outcome as usize];
+        tracing::Span::current().record("outcome", label);
+        // The cause stays with the handler, which logs it inside this span;
+        // the adapter reports only its closed outcome vocabulary.
+        match outcome {
+            Outcome::Success => {}
+            Outcome::Panicked => tracing::error!(
+                subject = message.subject.as_str(),
+                attempt = delivered,
+                outcome = label,
+                "messaging_delivery_failed"
+            ),
+            _ => tracing::warn!(
+                subject = message.subject.as_str(),
+                attempt = delivered,
+                outcome = label,
+                "messaging_delivery_failed"
+            ),
         }
 
         match outcome {
-            Outcome::Success => acknowledge(&self.shared.client, &message).await,
-            Outcome::Permanent => self.dead_letter(&message, "permanent", &cancel).await,
+            Outcome::Success => acknowledge(&self.shared.client, message).await,
+            Outcome::Permanent => self.dead_letter(message, "permanent", cancel).await,
             _ if delivered >= MAX_DELIVERIES => {
-                self.dead_letter(&message, "exhausted", &cancel).await;
+                self.dead_letter(message, "exhausted", cancel).await;
             }
             _ => {
                 let delay = RETRY_DELAYS
                     .get(delivered.saturating_sub(1))
                     .copied()
                     .unwrap_or(SETTLEMENT_RETRY_DELAY);
-                redeliver_after(&message, delay).await;
+                redeliver_after(message, delay).await;
             }
         }
     }
@@ -332,8 +371,8 @@ impl Delivery {
             wire::name::EVENT_TYPE,
             wire::name::EVENT_SCHEMA,
             wire::name::CREATED_AT,
-            HeaderName::from_static("traceparent"),
-            HeaderName::from_static("tracestate"),
+            crate::trace::TRACEPARENT,
+            crate::trace::TRACESTATE,
         ] {
             let value = wire::header_value(original, name.clone());
             if !value.is_empty() {

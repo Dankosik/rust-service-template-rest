@@ -10,12 +10,14 @@
 //! type and ID must be short printable text and the occurrence time must not
 //! be Go's zero time; see `docs/durable-messaging.md`.
 
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 use time::UtcDateTime;
 
-/// A payload type published and consumed as a domain event.
-pub trait EventPayload: Serialize + DeserializeOwned {
+/// A payload type published or consumed as a domain event.
+///
+/// The messaging adapter asks for `serde::Serialize` where it publishes a
+/// payload and for `serde::de::DeserializeOwned` where it delivers one, so a
+/// type implements only the direction its service uses.
+pub trait EventPayload {
     /// Stable event name, for example `"order.created"`. Never rename it once
     /// published: consumers route by it.
     const EVENT_TYPE: &'static str;

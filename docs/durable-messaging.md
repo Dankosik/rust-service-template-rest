@@ -15,7 +15,9 @@ Features create a typed event once, outside a retryable transaction:
 logical ID, stable type, positive schema version, nonzero UTC occurrence time,
 and JSON payload. Composition maps the registered `(type, version)` to a fixed
 subject and registers typed handlers. Domain code never receives subjects,
-consumer names, broker metadata, retries, or ACKs.
+consumer names, broker metadata, retries, or ACKs. A payload type implements
+`Serialize` to be published and `DeserializeOwned` to be delivered; a service
+needs only the direction it uses.
 
 The adapter uses the Go wire unchanged: `Message-Id`, `Event-Type`,
 `Event-Schema` (`vN`), `Created-At`, and `Nats-Msg-Id`; the original publication
@@ -27,6 +29,18 @@ header (8 KiB), route, schema, and payload limits before a handler allocates or
 runs. Unknown handler/schema, subject mismatch, and invalid typed JSON are
 permanent. Fixture provenance and CI use actual Go encoding and decoding in
 both directions; a hand-written equivalent encoder is not compatibility proof.
+
+A handler is registered for one exact `(type, version)`. A delivery with a
+version no handler knows is permanent and transfers to the DLQ, so deploy the
+consumers of a new schema version before its first producer. A record that
+arrived too early is recovered with the restore helper.
+
+The envelope is the Go template's header set, not CloudEvents. The CloudEvents
+NATS binding (`ce-id`, `ce-type`, `ce-time`, `ce-source`, `ce-specversion`)
+carries the same identity under other names; adopting it is a wire break that
+both templates and every deployed stream would take together, and no consumer
+outside these services reads the events today. Reopen the choice when events
+are offered to a party that does not use this adapter.
 
 ## Delivery and settlement
 
@@ -97,6 +111,18 @@ properties. Adapter telemetry has only closed publication, handler, DLQ, and
 connection result vocabularies, plus counters for pull-stream errors and
 failed settlements. It never labels metrics or logs with payloads,
 credentials, arbitrary errors, or event IDs.
+
+Publication runs in a `messaging_publish` producer span and writes that span's
+W3C `traceparent` and `tracestate` into the message headers, as the Go
+template does; no other propagation field is written. An admitted delivery runs
+its handler and settlement in a `messaging_process` consumer span whose parent
+is the publisher's span, so one trace covers the outbox job, the publication,
+and the handler. A delivery without a valid trace context starts its own
+trace. Both spans carry the subject and the closed outcome. A failed
+publication logs `messaging_publish_failed`, and a handler result other than
+success logs `messaging_delivery_failed` with the subject, the delivery
+attempt, and the outcome. `HandlerError` carries no cause; a handler logs its
+own cause inside the delivery span, where the record shares the trace.
 
 To remove the profile, initialize or migrate a service with `MESSAGING=none` so
 the initializer removes its code, configuration, tests, images, CI, and this
@@ -270,6 +296,8 @@ helper with a 48,000-byte data string took 31.17→0.59 µs and used
 separately removed one payload copy. These component results do not establish
 database or complete-outbox throughput, or a reduction in process RSS.
 
-Stored JSON validation remains `serde_json::Value`: replacing it with
-`IgnoredAny` admitted previously rejected numbers, nesting and Unicode escapes.
+The publisher checks that the stored payload is syntactically valid JSON with
+`serde::de::IgnoredAny`, which builds no value tree. The bytes were written by
+`serde_json` when the event was prepared, so this guards a row edited in
+place; it is not a second validation of the event.
 <!-- template:end outbox:docs-durable-messaging-outbox -->
