@@ -3,7 +3,7 @@
 //! JSON `null` means absent for every consumed claim.
 
 use crate::{
-    Actor, Failure, PreparationError, PreparationPhase, PreparationReason, Principal,
+    Actor, Failure, Identity, PreparationError, PreparationPhase, PreparationReason, Principal,
     VerificationError, VerificationReason,
 };
 use serde::Deserialize;
@@ -122,9 +122,9 @@ pub(crate) struct JwtClaims<'a> {
     iss: Option<Values<'a>>,
     #[serde(borrow)]
     aud: Option<Values<'a>>,
-    exp: Option<u64>,
+    exp: Option<NumericDate>,
     /// A `null` or non-numeric `nbf` is malformed, not absent.
-    #[serde(default, deserialize_with = "numeric_date")]
+    #[serde(default, deserialize_with = "present_numeric_date")]
     nbf: Option<u64>,
     #[serde(borrow)]
     sub: Option<Cow<'a, str>>,
@@ -142,7 +142,7 @@ pub(crate) struct JwtClaims<'a> {
     scp: Option<Values<'a>>,
     #[serde(borrow)]
     jti: Option<Cow<'a, str>>,
-    iat: Option<u64>,
+    iat: Option<NumericDate>,
     #[serde(borrow)]
     act: Option<RawAct<'a>>,
 }
@@ -193,7 +193,9 @@ pub(crate) fn validate_jwt_claims(
         String::from_utf8(payload).map_err(|_| invalid(VerificationReason::MalformedClaims))?;
     let claims: JwtClaims<'_> =
         serde_json::from_str(&payload).map_err(|_| invalid(VerificationReason::MalformedClaims))?;
-    let (Some(issuer), Some(audience), Some(expiry)) = (claims.iss, claims.aud, claims.exp) else {
+    let (Some(issuer), Some(audience), Some(NumericDate(expiry))) =
+        (claims.iss, claims.aud, claims.exp)
+    else {
         return Err(invalid(VerificationReason::MissingClaim));
     };
     check_registered_claims(&issuer, &audience, expiry, claims.nbf, policy, now)?;
@@ -211,7 +213,7 @@ pub(crate) fn validate_jwt_claims(
         return Err(VerificationError::invalid(VerificationReason::MissingClaim));
     }
     if token_profile == TokenProfile::Rfc9068 {
-        let (Some(iat), Some(_), Some(()), Some(_)) = (
+        let (Some(NumericDate(iat)), Some(_), Some(()), Some(_)) = (
             claims.iat,
             &subject,
             has_standard_client_id.then_some(()),
@@ -230,45 +232,56 @@ pub(crate) fn validate_jwt_claims(
         .transpose()
         .map_err(|()| invalid(VerificationReason::MalformedClaims))?;
     Ok(Principal::new(
-        policy.issuer.clone(),
-        subject,
-        client_id,
-        scopes,
+        Identity {
+            issuer: policy.issuer.clone(),
+            subject,
+            client_id,
+            scopes,
+            payload,
+            access_token,
+            actor,
+        },
         expiry,
-        payload,
-        access_token,
-        actor,
     ))
 }
 
-/// A `NumericDate`: an unsigned integer, or a finite non-negative number rounded
-/// to one, as jsonwebtoken reads `nbf`.
-fn numeric_date<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<u64>, D::Error> {
-    struct Visitor;
-    impl serde::de::Visitor<'_> for Visitor {
-        type Value = Option<u64>;
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a NumericDate")
-        }
-        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
-            Ok(Some(value))
-        }
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            clippy::cast_precision_loss
-        )]
-        fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
-            if value.is_finite() && value >= 0.0 && value < u64::MAX as f64 {
-                Ok(Some(value.round() as u64))
-            } else {
-                Err(E::custom("NumericDate out of range"))
+/// An RFC 7519 `NumericDate`: an unsigned integer, or a finite non-negative
+/// number rounded to one, as jsonwebtoken reads `exp` and `nbf`.
+struct NumericDate(u64);
+
+impl<'de> Deserialize<'de> for NumericDate {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = NumericDate;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a NumericDate")
+            }
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(NumericDate(value))
+            }
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                if value.is_finite() && value >= 0.0 && value < u64::MAX as f64 {
+                    Ok(NumericDate(value.round() as u64))
+                } else {
+                    Err(E::custom("NumericDate out of range"))
+                }
             }
         }
+        deserializer.deserialize_any(Visitor)
     }
-    deserializer.deserialize_any(Visitor)
+}
+
+/// Reads a supplied member as a `NumericDate`; `null` is not one.
+fn present_numeric_date<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    NumericDate::deserialize(deserializer).map(|date| Some(date.0))
 }
 
 /// JWT registered-claim order: lifetime first, then issuer and audience.
@@ -337,14 +350,16 @@ pub(crate) fn validate_introspection_claims(
         .transpose()
         .map_err(|()| malformed())?;
     Ok(Principal::new(
-        policy.issuer.clone(),
-        subject,
-        client_id,
-        scopes,
+        Identity {
+            issuer: policy.issuer.clone(),
+            subject,
+            client_id,
+            scopes,
+            payload: payload.to_owned(),
+            access_token,
+            actor,
+        },
         expiry,
-        payload.to_owned(),
-        access_token,
-        actor,
     ))
 }
 // template:end oidc-introspection:authn-claims-introspection-validation
@@ -502,8 +517,17 @@ mod tests {
                 serde_json::json!({"nbf": "1"}),
                 Err(VerificationReason::MalformedClaims),
             ),
+            (serde_json::json!({"exp": 1000.4}), Ok(1000)),
             (
-                serde_json::json!({"exp": 1000.5}),
+                serde_json::json!({"exp": 969.4}),
+                Err(VerificationReason::Expired),
+            ),
+            (
+                serde_json::json!({"exp": -1}),
+                Err(VerificationReason::MalformedClaims),
+            ),
+            (
+                serde_json::json!({"exp": "1000"}),
                 Err(VerificationReason::MalformedClaims),
             ),
             (
@@ -551,6 +575,7 @@ mod tests {
                 "{missing}"
             );
         }
+        assert!(verify(serde_json::json!({"iat": 99.6})).is_ok());
         assert_eq!(
             verify(serde_json::json!({"iat": 131})),
             Err(VerificationReason::Profile)

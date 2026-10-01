@@ -13,7 +13,7 @@ use tracing::warn;
 use crate::{
     EndpointUrl, JwtAlgorithm,
     jwt::{KeySet, KeySetError, parse_key_set},
-    provider::ProviderClient,
+    provider::{ProviderClient, ProviderFailure},
 };
 
 const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
@@ -138,8 +138,12 @@ impl KeyStore {
             .as_ref()
             .map_or_else(|failure| failure.label(), |_| "success");
         let succeeded = replacement.is_ok();
-        if let Err(failure) = &replacement {
-            warn!(reason = failure.label(), "authn_jwks_refresh_failed");
+        match &replacement {
+            Ok(_) => {}
+            Err(RefreshFailure::Fetch(cause)) => {
+                warn!(reason = reason, ?cause, "authn_jwks_refresh_failed");
+            }
+            Err(_) => warn!(reason = reason, "authn_jwks_refresh_failed"),
         }
         self.state.send_modify(|state| {
             if let Ok(keys) = replacement {
@@ -203,7 +207,7 @@ async fn fetch_key_set(
     let bytes = provider
         .get_json(jwks_uri.url())
         .await
-        .map_err(|_| RefreshFailure::Fetch)?;
+        .map_err(RefreshFailure::Fetch)?;
     parse_key_set(&bytes, algorithms)
         .map(Arc::new)
         .map_err(|error| match error {
@@ -214,7 +218,7 @@ async fn fetch_key_set(
 
 #[derive(Clone, Copy)]
 pub(crate) enum RefreshFailure {
-    Fetch,
+    Fetch(ProviderFailure),
     Parse,
     NoUsableKeys,
 }
@@ -222,7 +226,7 @@ pub(crate) enum RefreshFailure {
 impl RefreshFailure {
     fn label(self) -> &'static str {
         match self {
-            Self::Fetch => "fetch",
+            Self::Fetch(_) => "fetch",
             Self::Parse => "parse",
             Self::NoUsableKeys => "no_usable_keys",
         }
@@ -303,7 +307,12 @@ mod tests {
         store.permit_unknown_refresh_for_test();
         let waiter = spawn_refresh(&store);
         tokio::task::yield_now().await;
-        store.finish(1, Err(super::RefreshFailure::Fetch));
+        store.finish(
+            1,
+            Err(super::RefreshFailure::Fetch(
+                crate::ProviderFailure::Timeout,
+            )),
+        );
         assert_eq!(waiter.await.unwrap(), Some(false));
         assert_eq!(spawn_refresh(&store).await.unwrap(), Some(false));
         assert!(store.keys().has_kid("old"));

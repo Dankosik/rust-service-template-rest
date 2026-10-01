@@ -10,13 +10,22 @@ use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::error::{MessagingError, PublishError};
 use crate::messaging::{BROKER_OPERATION_BUDGET, Shared};
 use crate::prepared::{PreparedEvent, PublishAck};
 use crate::wire::encode_prepared;
 
-/// Metric label of each publication result; `Producer::publish` records by index.
+/// How one publication ended. The discriminant indexes [`PUBLISH_RESULTS`].
+#[derive(Clone, Copy)]
+enum PublishResult {
+    Acknowledged = 0,
+    Rejected = 1,
+    Ambiguous = 2,
+}
+
+/// Metric label of each [`PublishResult`], indexed by its discriminant.
 pub(crate) const PUBLISH_RESULTS: [&str; 3] = ["acknowledged", "rejected", "ambiguous"];
 
 /// A clonable producer admitted by one live messaging resource.
@@ -34,7 +43,7 @@ impl Producer {
     /// # Errors
     ///
     /// Returns an error for invalid or oversized intent or a draining dependency.
-    pub fn prepare<T: EventPayload>(
+    pub fn prepare<T: EventPayload + serde::Serialize>(
         &self,
         subject: impl Into<String>,
         event: &Event<T>,
@@ -58,13 +67,23 @@ impl Producer {
         cancel: &CancellationToken,
     ) -> Result<PublishAck, PublishError> {
         let started = Instant::now();
+        let span = tracing::info_span!(
+            "messaging_publish",
+            otel.kind = "producer",
+            messaging.system = "nats",
+            messaging.operation.type = "send",
+            messaging.destination.name = event.subject.as_str(),
+            outcome = tracing::field::Empty,
+        );
         let result = if self.shared.draining.load(Ordering::Acquire)
             || self.shared.failed.load(Ordering::Acquire)
         {
             Err(PublishError::Rejected)
         } else {
             match encode_prepared(event) {
-                Ok(headers) => {
+                Ok(mut headers) => {
+                    // The consumer's delivery span continues this trace.
+                    crate::trace::inject(&span, &mut headers);
                     publish(
                         &self.shared,
                         &event.subject,
@@ -74,16 +93,27 @@ impl Producer {
                         deadline,
                         cancel,
                     )
+                    .instrument(span.clone())
                     .await
                 }
                 Err(_) => Err(PublishError::Rejected),
             }
         };
         let outcome = match &result {
-            Ok(_) => 0,
-            Err(PublishError::Rejected) => 1,
-            Err(PublishError::Ambiguous) => 2,
-        };
+            Ok(_) => PublishResult::Acknowledged,
+            Err(PublishError::Rejected) => PublishResult::Rejected,
+            Err(PublishError::Ambiguous) => PublishResult::Ambiguous,
+        } as usize;
+        span.record("outcome", PUBLISH_RESULTS[outcome]);
+        if result.is_err() {
+            span.in_scope(|| {
+                tracing::warn!(
+                    subject = event.subject.as_str(),
+                    outcome = PUBLISH_RESULTS[outcome],
+                    "messaging_publish_failed"
+                );
+            });
+        }
         self.shared
             .publish_metrics
             .record(outcome, started.elapsed());

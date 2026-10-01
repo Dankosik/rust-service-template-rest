@@ -12,6 +12,7 @@ use std::time::Duration;
 use secrecy::SecretString;
 use serde::Deserialize;
 
+use crate::app::is_local_development;
 use crate::de::blank_secret_as_none;
 use crate::validate::{ValidationError, duration_range};
 
@@ -55,7 +56,13 @@ impl CacheConfig {
         self.dsn.is_some()
     }
 
-    pub(crate) fn validate(&self, app_env: &str) -> Result<(), ValidationError> {
+    /// `request_timeout` is `http.request_timeout`: one degraded call of an
+    /// active cache must leave at least half of it for the source of truth.
+    pub(crate) fn validate(
+        &self,
+        app_env: &str,
+        request_timeout: Duration,
+    ) -> Result<(), ValidationError> {
         let local_development = is_local_development(app_env);
         if self.allow_plaintext && !local_development {
             return Err(ValidationError::new(
@@ -85,12 +92,15 @@ impl CacheConfig {
             Duration::from_millis(1),
             Duration::from_secs(1),
         )?;
+        // The range above keeps the doubling far from overflow.
+        if self.is_active() && self.command_timeout * 2 > request_timeout {
+            return Err(ValidationError::new(
+                "cache.command_timeout",
+                "must be at most half of http.request_timeout",
+            ));
+        }
         Ok(())
     }
-}
-
-fn is_local_development(app_env: &str) -> bool {
-    matches!(app_env, "local" | "development")
 }
 
 #[cfg(test)]
@@ -98,12 +108,14 @@ mod tests {
     use super::*;
     use crate::Config;
 
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+
     #[test]
     fn defaults_are_inert() {
         let config = CacheConfig::default();
         assert!(!config.is_active());
         assert_eq!(config.command_timeout, Duration::from_millis(100));
-        config.validate("production").unwrap();
+        config.validate("production", REQUEST_TIMEOUT).unwrap();
     }
 
     #[test]
@@ -126,7 +138,10 @@ mod tests {
                 ..CacheConfig::default()
             };
             assert_eq!(
-                plaintext.validate(app_env).unwrap_err().key,
+                plaintext
+                    .validate(app_env, REQUEST_TIMEOUT)
+                    .unwrap_err()
+                    .key,
                 "cache.allow_plaintext"
             );
             let unauthenticated = CacheConfig {
@@ -134,7 +149,10 @@ mod tests {
                 ..CacheConfig::default()
             };
             assert_eq!(
-                unauthenticated.validate(app_env).unwrap_err().key,
+                unauthenticated
+                    .validate(app_env, REQUEST_TIMEOUT)
+                    .unwrap_err()
+                    .key,
                 "cache.allow_unauthenticated"
             );
         }
@@ -143,8 +161,8 @@ mod tests {
             allow_unauthenticated: true,
             ..CacheConfig::default()
         };
-        local.validate("local").unwrap();
-        local.validate("development").unwrap();
+        local.validate("local", REQUEST_TIMEOUT).unwrap();
+        local.validate("development", REQUEST_TIMEOUT).unwrap();
     }
 
     #[test]
@@ -155,7 +173,10 @@ mod tests {
                 ..CacheConfig::default()
             };
             assert_eq!(
-                config.validate("production").unwrap_err().key,
+                config
+                    .validate("production", REQUEST_TIMEOUT)
+                    .unwrap_err()
+                    .key,
                 "cache.command_timeout"
             );
         }
@@ -163,7 +184,7 @@ mod tests {
             command_timeout: Duration::from_secs(1),
             ..CacheConfig::default()
         };
-        edges.validate("production").unwrap();
+        edges.validate("production", REQUEST_TIMEOUT).unwrap();
     }
 
     #[test]

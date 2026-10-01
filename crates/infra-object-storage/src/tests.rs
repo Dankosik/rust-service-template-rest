@@ -15,8 +15,8 @@ use secrecy::SecretString;
 use crate::error::{Call, Reply, classify};
 use crate::provider::{UploadChecksum, admit};
 use crate::{
-    ConfigError, ContentType, ObjectKey, ObjectStorage, ObjectStorageError, ObjectStorageOptions,
-    Provider, PutBody, PutOptions,
+    ConfigError, ContentType, CredentialSource, ObjectKey, ObjectStorage, ObjectStorageError,
+    ObjectStorageOptions, Provider, PutBody, PutOptions,
 };
 
 const R2_ENDPOINT: &str = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com";
@@ -25,11 +25,17 @@ fn options(provider: Provider) -> ObjectStorageOptions {
     ObjectStorageOptions {
         provider,
         bucket: "evidence-bucket".to_owned(),
-        access_key_id: "AKIDEXAMPLE".to_owned(),
-        secret_access_key: SecretString::from("hunter2-secret".to_owned()),
+        credentials: access_key("AKIDEXAMPLE", "hunter2-secret"),
         max_object_bytes: 1024,
         max_concurrency: 2,
         operation_timeout: Duration::from_secs(2),
+    }
+}
+
+fn access_key(access_key_id: &str, secret_access_key: &str) -> CredentialSource {
+    CredentialSource::AccessKey {
+        access_key_id: access_key_id.to_owned(),
+        secret_access_key: SecretString::from(secret_access_key.to_owned()),
     }
 }
 
@@ -88,7 +94,7 @@ fn content_types_are_header_values() {
 // ---- provider admission ---------------------------------------------------
 
 #[test]
-fn amazon_requires_a_commercial_region_and_an_owner() {
+fn amazon_requires_a_region_and_an_owner() {
     let admitted = admit(
         &Provider::AmazonS3 {
             region: "eu-central-1".to_owned(),
@@ -105,14 +111,18 @@ fn amazon_requires_a_commercial_region_and_an_owner() {
     assert_eq!(admitted.checksum, UploadChecksum::Always);
     assert!(!admitted.path_style);
 
-    for region in [
-        "us-gov-west-1",
-        "cn-north-1",
-        "auto",
-        "eu-central",
-        "EU-central-1",
-        "",
-    ] {
+    // Every partition is admitted; its credentials decide what it reaches.
+    for region in ["us-gov-west-1", "cn-north-1", "eusc-de-east-1"] {
+        let admitted = admit(
+            &Provider::AmazonS3 {
+                region: region.to_owned(),
+                expected_bucket_owner: "123456789012".to_owned(),
+            },
+            "evidence-bucket",
+        );
+        assert_eq!(admitted.unwrap().region, region);
+    }
+    for region in ["", "EU-central-1", "eu central 1", "eu-central-1/"] {
         let refused = admit(
             &Provider::AmazonS3 {
                 region: region.to_owned(),
@@ -234,6 +244,61 @@ fn local_allows_plaintext_and_path_style() {
 }
 
 #[test]
+fn a_generic_provider_takes_an_https_origin_and_the_common_subset() {
+    let admitted = admit(
+        &Provider::S3Compatible {
+            endpoint: "https://s3.eu-central-003.backblazeb2.com".to_owned(),
+            region: "eu-central-003".to_owned(),
+            path_style: false,
+        },
+        "evidence-bucket",
+    )
+    .unwrap();
+    assert_eq!(
+        admitted.endpoint.as_deref(),
+        Some("https://s3.eu-central-003.backblazeb2.com")
+    );
+    assert_eq!(admitted.region, "eu-central-003");
+    assert!(!admitted.path_style);
+    assert_eq!(admitted.expected_bucket_owner, None);
+    assert_eq!(admitted.checksum, UploadChecksum::Never);
+
+    // A self-hosted store: its own port, path-style, and the default region.
+    let admitted = admit(
+        &Provider::S3Compatible {
+            endpoint: "https://ceph.internal.example:8443".to_owned(),
+            region: String::new(),
+            path_style: true,
+        },
+        "evidence-bucket",
+    )
+    .unwrap();
+    assert_eq!(
+        admitted.endpoint.as_deref(),
+        Some("https://ceph.internal.example:8443")
+    );
+    assert_eq!(admitted.region, "us-east-1");
+    assert!(admitted.path_style);
+
+    for endpoint in [
+        "http://ceph.internal.example",
+        "https://ceph.internal.example/bucket",
+        "https://user@ceph.internal.example",
+        "",
+    ] {
+        let refused = admit(
+            &Provider::S3Compatible {
+                endpoint: endpoint.to_owned(),
+                region: String::new(),
+                path_style: false,
+            },
+            "evidence-bucket",
+        );
+        assert_eq!(refused.unwrap_err(), ConfigError::Endpoint, "{endpoint:?}");
+    }
+}
+
+#[test]
 fn buckets_are_dotless_dns_names() {
     let provider = Provider::Local {
         endpoint: "http://127.0.0.1:7070".to_owned(),
@@ -261,24 +326,6 @@ fn buckets_are_dotless_dns_names() {
             "{bucket:?}"
         );
     }
-    // Amazon's reserved names are refused only where Amazon reserves them.
-    let amazon = Provider::AmazonS3 {
-        region: "us-east-1".to_owned(),
-        expected_bucket_owner: "123456789012".to_owned(),
-    };
-    for bucket in [
-        "xn--punycode",
-        "sthree-bucket",
-        "bucket-s3alias",
-        "bucket--ol-s3",
-    ] {
-        assert_eq!(
-            admit(&amazon, bucket).unwrap_err(),
-            ConfigError::Bucket,
-            "{bucket:?}"
-        );
-        admit(&provider, bucket).unwrap_or_else(|_| panic!("{bucket:?}"));
-    }
 }
 
 #[test]
@@ -287,7 +334,7 @@ fn credentials_are_required_and_redacted() {
         endpoint: "http://127.0.0.1:1".to_owned(),
         region: String::new(),
     });
-    missing_id.access_key_id = " ".to_owned();
+    missing_id.credentials = access_key(" ", "hunter2-secret");
     assert_eq!(
         ObjectStorage::new(missing_id).unwrap_err(),
         ConfigError::AccessKeyId
@@ -297,7 +344,7 @@ fn credentials_are_required_and_redacted() {
         endpoint: "http://127.0.0.1:1".to_owned(),
         region: String::new(),
     });
-    missing_secret.secret_access_key = SecretString::from(String::new());
+    missing_secret.credentials = access_key("AKIDEXAMPLE", "");
     assert_eq!(
         ObjectStorage::new(missing_secret).unwrap_err(),
         ConfigError::SecretAccessKey
@@ -313,6 +360,40 @@ fn credentials_are_required_and_redacted() {
     assert!(!rendered.contains("hunter2"), "{rendered}");
     assert!(!rendered.contains("evidence-bucket"), "{rendered}");
     assert_eq!(storage.provider(), "cloudflare_r2");
+}
+
+#[test]
+fn workload_identity_is_built_without_io_and_only_for_amazon() {
+    let mut amazon = options(Provider::AmazonS3 {
+        region: "eu-central-1".to_owned(),
+        expected_bucket_owner: "123456789012".to_owned(),
+    });
+    amazon.credentials = CredentialSource::WorkloadIdentity;
+    assert_eq!(format!("{:?}", amazon.credentials), "WorkloadIdentity");
+    // No runtime and no network: credentials load on the first call.
+    assert_eq!(ObjectStorage::new(amazon).unwrap().provider(), "amazon_s3");
+
+    for provider in [
+        Provider::CloudflareR2 {
+            endpoint: R2_ENDPOINT.to_owned(),
+        },
+        Provider::S3Compatible {
+            endpoint: "https://ceph.internal.example".to_owned(),
+            region: String::new(),
+            path_style: true,
+        },
+        Provider::Local {
+            endpoint: "http://127.0.0.1:1".to_owned(),
+            region: String::new(),
+        },
+    ] {
+        let mut other = options(provider);
+        other.credentials = CredentialSource::WorkloadIdentity;
+        assert_eq!(
+            ObjectStorage::new(other).unwrap_err(),
+            ConfigError::Credentials
+        );
+    }
 }
 
 // ---- failure classification -----------------------------------------------
@@ -430,18 +511,27 @@ struct Stub {
 
 impl Stub {
     async fn start(respond: impl Fn(&Seen, usize) -> Response + Send + Sync + 'static) -> Self {
-        Self::start_with_delay(Duration::ZERO, respond).await
+        Self::start_delaying(|_| Duration::ZERO, respond).await
+    }
+
+    async fn start_with_delay(
+        response_delay: Duration,
+        respond: impl Fn(&Seen, usize) -> Response + Send + Sync + 'static,
+    ) -> Self {
+        Self::start_delaying(move |_| response_delay, respond).await
     }
 
     #[allow(
         clippy::disallowed_methods,
         reason = "a test-local S3 stand-in, not an application route"
     )]
-    async fn start_with_delay(
-        response_delay: Duration,
+    /// `delay_of` gets a request's zero-based index and holds its response.
+    async fn start_delaying(
+        delay_of: impl Fn(usize) -> Duration + Send + Sync + 'static,
         respond: impl Fn(&Seen, usize) -> Response + Send + Sync + 'static,
     ) -> Self {
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let delay_of = Arc::new(delay_of);
         let respond: Respond = Arc::new(respond);
         let counter = Arc::new(AtomicUsize::new(0));
         let router = axum::Router::new().route(
@@ -452,6 +542,7 @@ impl Stub {
                     let seen = Arc::clone(&seen);
                     let respond = Arc::clone(&respond);
                     let counter = Arc::clone(&counter);
+                    let delay_of = Arc::clone(&delay_of);
                     async move {
                         let (parts, body) = request.into_parts();
                         let _ = body.collect().await;
@@ -463,6 +554,7 @@ impl Stub {
                         let index = counter.fetch_add(1, Ordering::SeqCst);
                         let response = respond(&record, index);
                         seen.lock().unwrap().push(record);
+                        let response_delay = delay_of(index);
                         if !response_delay.is_zero() {
                             tokio::time::sleep(response_delay).await;
                         }
@@ -670,7 +762,8 @@ async fn streamed_put_declares_its_length_and_is_sent_once() {
     let stub =
         Stub::start(|_, _| xml_error(StatusCode::INTERNAL_SERVER_ERROR, "InternalError")).await;
     let storage = stub.storage(|_| {});
-    let body = http_body_util::Full::new(Bytes::from_static(b"streamed"));
+    // A request body: axum's `Body` is `Send` but not `Sync`.
+    let body = Body::from("streamed");
     let result = storage
         .put(&key(), PutBody::stream(8, body), PutOptions::default())
         .await;
@@ -769,6 +862,15 @@ async fn get_reads_the_body_and_validates_a_returned_checksum() {
         Bytes::from_static(b"{\"ok\":true}")
     );
     assert_eq!(stub.seen()[0].headers["x-amz-checksum-mode"], "ENABLED");
+
+    // The download is itself a body of exactly the object's size.
+    let download = storage.get(&key()).await.unwrap();
+    assert_eq!(http_body::Body::size_hint(&download).exact(), Some(11));
+    assert!(!http_body::Body::is_end_stream(&download));
+    assert_eq!(
+        download.collect().await.unwrap().to_bytes(),
+        Bytes::from_static(b"{\"ok\":true}")
+    );
 }
 
 #[tokio::test]
@@ -795,6 +897,20 @@ async fn get_with_a_wrong_checksum_fails_integrity_at_the_end() {
         download.next_chunk().await,
         Err(ObjectStorageError::Integrity)
     );
+
+    // A reader that stops at the declared length, as hyper does for a
+    // response body, never receives the bytes that complete the object.
+    let mut download = storage.get(&key()).await.unwrap();
+    let mut received = 0;
+    let failure = loop {
+        match download.frame().await {
+            Some(Ok(frame)) => received += frame.into_data().unwrap().len(),
+            Some(Err(error)) => break error,
+            None => panic!("a failed check must not read as a clean end"),
+        }
+    };
+    assert_eq!(failure, ObjectStorageError::Integrity);
+    assert!(received < 11, "{received}");
 }
 
 #[tokio::test]
@@ -847,6 +963,88 @@ async fn missing_objects_are_not_found_and_reads_retry() {
         Some(ObjectStorageError::Unavailable)
     );
     assert_eq!(stub.seen().len(), 3);
+}
+
+#[tokio::test]
+async fn a_hung_read_attempt_leaves_room_for_a_retry() {
+    // The first response never arrives inside the 4 s budget. The attempt
+    // bound (half of it) gives up on it, and the retry is answered at once.
+    let stub = Stub::start_delaying(
+        |index| Duration::from_secs(if index == 0 { 30 } else { 0 }),
+        |_, _| object(b"{}", &[]),
+    )
+    .await;
+    let storage = stub.storage(|options| options.operation_timeout = Duration::from_secs(4));
+    assert_eq!(
+        storage.head(&key()).await.map(|metadata| metadata.size),
+        Ok(2)
+    );
+    assert_eq!(stub.seen().len(), 2);
+}
+
+#[tokio::test]
+async fn a_mutation_keeps_the_whole_budget_for_its_one_attempt() {
+    // Slower than a read attempt's share of the 2 s budget, but inside it.
+    let stub = Stub::start_with_delay(Duration::from_millis(1300), |_, _| ok_empty()).await;
+    let storage = stub.storage(|_| {});
+    let result = storage
+        .put(
+            &key(),
+            Bytes::from_static(b"{}").into(),
+            PutOptions::default(),
+        )
+        .await;
+    assert_eq!(result, Ok(()));
+    assert_eq!(storage.delete(&key()).await, Ok(()));
+    assert_eq!(stub.seen().len(), 2);
+}
+
+#[tokio::test]
+async fn a_failed_credential_load_sends_nothing_and_is_retryable() {
+    #[derive(Debug)]
+    struct NoIdentity;
+
+    impl aws_sdk_s3::config::ProvideCredentials for NoIdentity {
+        fn provide_credentials<'a>(
+            &'a self,
+        ) -> aws_credential_types::provider::future::ProvideCredentials<'a>
+        where
+            Self: 'a,
+        {
+            aws_credential_types::provider::future::ProvideCredentials::ready(Err(
+                aws_credential_types::provider::error::CredentialsError::provider_error(
+                    "the identity endpoint is unreachable",
+                ),
+            ))
+        }
+    }
+
+    let stub = Stub::start(|_, _| ok_empty()).await;
+    let options = options(Provider::Local {
+        endpoint: stub.endpoint.clone(),
+        region: String::new(),
+    });
+    let admitted = admit(&options.provider, &options.bucket).unwrap();
+    let storage = ObjectStorage::build(
+        options,
+        admitted,
+        crate::https_client(),
+        aws_sdk_s3::config::SharedCredentialsProvider::new(NoIdentity),
+    );
+    // Nothing was sent, so even a mutation's outcome is known.
+    let put = storage
+        .put(
+            &key(),
+            Bytes::from_static(b"{}").into(),
+            PutOptions::default().create_only(),
+        )
+        .await;
+    assert_eq!(put, Err(ObjectStorageError::Unavailable));
+    assert_eq!(
+        storage.head(&key()).await,
+        Err(ObjectStorageError::Unavailable)
+    );
+    assert!(stub.seen().is_empty());
 }
 
 #[tokio::test]

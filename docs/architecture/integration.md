@@ -114,9 +114,10 @@ inside the command timeout. It does not certify a deployed memory policy.
 
 The bucket and its endpoint are operator-fixed, never caller-selected.
 `infra-object-storage` admits one provider tuple (Amazon S3, Cloudflare R2,
-Railway Buckets, or a local emulator) and builds the SDK client directly, so
-no ambient `AWS_*` variable, profile file, instance metadata, or proxy
-variable can redirect a signed request. The SDK owns signing, retries,
+Railway Buckets, another S3-compatible HTTPS origin, or a local emulator) and
+builds the SDK client directly, so no ambient `AWS_*` variable, profile file,
+or proxy variable can redirect a signed request. Credentials are an access
+key or, on Amazon S3 by explicit choice, the workload's own AWS identity. The SDK owns signing, retries,
 checksums, and presigning; the crate owns size and concurrency bounds, the
 failure mapping, and observation. The feature owns keys, authorization,
 retention, and create-only intent. Bootstrap builds the client without I/O and

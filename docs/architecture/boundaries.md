@@ -12,7 +12,7 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | `service-failure` (`crates/service-failure`) | Closed failure identity, wire code spelling and transport-neutral meaning. | HTTP response metadata, tonic Status, arbitrary detail text, configuration or provider calls. |
 <!-- template:begin grpc:docs-boundaries-grpc-owners -->
 | `infra-grpc` (`crates/infra-grpc`) | Tonic route assembly, auth/deadline/capacity middleware, health projection, server TLS config and lazy clients. | Configuration loading, handler validation, feature behavior, OAuth tokens, process signals or a second lifecycle budget. |
-| `grpc-contracts` (`crates/grpc-contracts`) | Committed prost messages and native tonic traits. | Business behavior, transport policy, or a runtime generator. |
+| `grpc-contracts` (`crates/grpc-contracts`) | Committed prost messages, native tonic traits, the descriptor set they were generated from, and the per-call codec buffer sizes the generated code names. | Business behavior, listener or middleware policy, or a runtime generator. |
 <!-- template:end grpc:docs-boundaries-grpc-owners -->
 | `infra-http` (`crates/infra-http`) | The hardened middleware chain, the bounded accept loop (`Server`), the probe handlers with their `#[utoipa::path]` contract, the RFC 9457 `Problem` type and closed code catalog, request-id admission, the route-template access log. | Business rules, configuration loading, feature routes (they merge in `service::api`). |
 | `infra-telemetry` (`crates/infra-telemetry`) | Subscriber installation (`json`/`text`), the tracer provider with the OTLP endpoint resolution and ambient-credential refusal, the Prometheus recorder with process and Tokio runtime metrics, the diagnostics router. | Feature semantics, startup logging content, request routing, which fields a handler emits. |
@@ -123,7 +123,7 @@ service -> infra-cache for connect, the startup check, shutdown drop, and option
 a feature -> infra-cache for namespace get, set, and delete
 <!-- template:end cache:docs-boundaries-cache-edges -->
 <!-- template:begin object-storage:docs-boundaries-object-storage-edges -->
-  -> infra-object-storage -> aws-sdk-s3, aws-smithy-http-client, health, secrecy, metrics, tracing, tokio
+  -> infra-object-storage -> aws-sdk-s3, aws-config, aws-smithy-http-client, health, secrecy, metrics, tracing, tokio
 service -> infra-object-storage for construction, shutdown drop, and optional probe registration
 a feature -> infra-object-storage for put, get, head, delete, and presigned GET
 <!-- template:end object-storage:docs-boundaries-object-storage-edges -->

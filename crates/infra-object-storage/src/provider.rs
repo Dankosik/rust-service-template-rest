@@ -8,7 +8,7 @@ use url::Url;
 pub enum Provider {
     /// Amazon S3. The SDK resolves the regional endpoint.
     AmazonS3 {
-        /// Commercial region, for example `eu-central-1`.
+        /// Region, for example `eu-central-1`.
         region: String,
         /// The 12-digit account that must own the bucket.
         expected_bucket_owner: String,
@@ -25,6 +25,18 @@ pub enum Provider {
         endpoint: String,
         /// Signing region; `auto` when empty.
         region: String,
+    },
+    /// Any other S3-compatible store at an HTTPS origin, such as Backblaze
+    /// B2, Ceph, or Hetzner Object Storage. It receives only the common S3
+    /// subset: no upload checksum and no expected bucket owner.
+    S3Compatible {
+        /// `https://` origin; a port is allowed.
+        endpoint: String,
+        /// Signing region; `us-east-1` when empty.
+        region: String,
+        /// Path-style addressing (`<endpoint>/<bucket>/<key>`) for a store
+        /// that serves no `<bucket>.<endpoint>` host.
+        path_style: bool,
     },
     /// An S3 emulator for local development and tests. Plaintext is allowed;
     /// the caller must already have applied the local-only policy.
@@ -44,6 +56,7 @@ impl Provider {
             Self::AmazonS3 { .. } => "amazon_s3",
             Self::CloudflareR2 { .. } => "cloudflare_r2",
             Self::Railway { .. } => "railway",
+            Self::S3Compatible { .. } => "s3_compatible",
             Self::Local { .. } => "local",
         }
     }
@@ -52,7 +65,7 @@ impl Provider {
 /// Why the options were refused. Display names the key, never its value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
-    /// Not a dotless DNS bucket name, or an Amazon-reserved one.
+    /// Not a dotless DNS bucket name.
     #[error("object_storage.bucket is not a valid dotless bucket name")]
     Bucket,
     /// Not a region this provider accepts.
@@ -64,6 +77,9 @@ pub enum ConfigError {
     /// Not a 12-digit account id.
     #[error("object_storage.expected_bucket_owner must be a 12-digit account id")]
     ExpectedBucketOwner,
+    /// The provider does not take this credential source.
+    #[error("object_storage.credentials is not accepted by the selected provider")]
+    Credentials,
     /// The access key id is empty.
     #[error("object_storage.access_key_id is required")]
     AccessKeyId,
@@ -94,8 +110,7 @@ pub(crate) struct Admitted {
 }
 
 pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, ConfigError> {
-    let amazon = matches!(provider, Provider::AmazonS3 { .. });
-    if !valid_bucket(bucket) || (amazon && amazon_reserved(bucket)) {
+    if !valid_bucket(bucket) {
         return Err(ConfigError::Bucket);
     }
     match provider {
@@ -103,9 +118,10 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             region,
             expected_bucket_owner,
         } => {
-            if !commercial_region(region) {
+            if region.is_empty() {
                 return Err(ConfigError::Region);
             }
+            let region = signing_region(region, "")?;
             if expected_bucket_owner.len() != 12
                 || !expected_bucket_owner
                     .bytes()
@@ -115,7 +131,7 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             }
             Ok(Admitted {
                 endpoint: None,
-                region: region.clone(),
+                region,
                 path_style: false,
                 expected_bucket_owner: Some(expected_bucket_owner.clone()),
                 checksum: UploadChecksum::Always,
@@ -147,6 +163,17 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
                 checksum: UploadChecksum::Never,
             })
         }
+        Provider::S3Compatible {
+            endpoint,
+            region,
+            path_style,
+        } => Ok(Admitted {
+            endpoint: Some(serialize(&origin(endpoint, false)?)),
+            region: signing_region(region, "us-east-1")?,
+            path_style: *path_style,
+            expected_bucket_owner: None,
+            checksum: UploadChecksum::Never,
+        }),
         Provider::Local { endpoint, region } => Ok(Admitted {
             endpoint: Some(serialize(&origin(endpoint, true)?)),
             region: signing_region(region, "us-east-1")?,
@@ -194,25 +221,6 @@ fn signing_region(region: &str, default: &str) -> Result<String, ConfigError> {
     }
 }
 
-/// `^[a-z]{2}-[a-z]+-[0-9]+$`: commercial partitions only, so `us-gov-*`
-/// and `cn-*` endpoints and their separate credentials are refused.
-fn commercial_region(region: &str) -> bool {
-    let mut parts = region.split('-');
-    let (Some(area), Some(place), Some(number), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return false;
-    };
-    area.len() == 2
-        && area.bytes().all(|byte| byte.is_ascii_lowercase())
-        && area != "cn"
-        && !place.is_empty()
-        && place.bytes().all(|byte| byte.is_ascii_lowercase())
-        && place != "gov"
-        && !number.is_empty()
-        && number.bytes().all(|byte| byte.is_ascii_digit())
-}
-
 /// `<32 hex>[.eu|.fedramp].r2.cloudflarestorage.com`.
 fn r2_host(host: &str) -> bool {
     let Some(rest) = host.strip_suffix(".r2.cloudflarestorage.com") else {
@@ -239,16 +247,4 @@ fn valid_bucket(bucket: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
         && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
         && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
-}
-
-/// Prefixes and suffixes Amazon S3 reserves for its own bucket kinds.
-fn amazon_reserved(bucket: &str) -> bool {
-    const RESERVED_PREFIXES: [&str; 3] = ["xn--", "sthree-", "amzn-s3-demo-"];
-    const RESERVED_SUFFIXES: [&str; 4] = ["-s3alias", "--ol-s3", "--x-s3", "--table-s3"];
-    RESERVED_PREFIXES
-        .iter()
-        .any(|prefix| bucket.starts_with(prefix))
-        || RESERVED_SUFFIXES
-            .iter()
-            .any(|suffix| bucket.ends_with(suffix))
 }

@@ -151,8 +151,9 @@ impl Publisher {
             .payload()
             .prepared()
             .map_err(|_| JobError::permanent("outbox immutable intent is invalid"))?;
-        // Retrying an ambiguous publication is safe: the broker deduplicates
-        // by the unchanged publication ID.
+        // A retry keeps the publication ID. The broker deduplicates it inside
+        // the stream's duplicate window; consumers deduplicate by logical ID
+        // beyond it.
         self.producer
             .publish(&event, job.deadline(), &job.cancellation())
             .await
