@@ -167,7 +167,8 @@ impl IntrospectionVerifier {
             .map_err(|failure| {
                 VerificationError::new(Failure::Unavailable, VerificationReason::Provider(failure))
             })?;
-        // A clock before the Unix epoch expires every token, which fails closed.
+        // A clock before the Unix epoch reads as the far future, so tokens are
+        // expired rather than admitted.
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(u64::MAX, |elapsed| elapsed.as_secs());

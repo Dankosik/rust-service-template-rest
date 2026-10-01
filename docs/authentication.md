@@ -150,7 +150,9 @@ Discovery and initial keys share the six-second startup budget and are not
 retried. JWT mode therefore needs the provider at startup: a replica started
 during a provider outage exits with the preparation error and relies on the
 platform's restart policy, while running replicas keep verifying with their
-installed keys. Refresh runs
+installed keys. The error names the provider failure class, for example
+`Discovery: Fetch(Status(404))`, and a failed refresh logs the same class as
+`cause`. Refresh runs
 every 15 minutes. A token whose `kid` names no installed key, or a kid-less
 token no installed key verifies, requests a refresh with a 30-second cooldown;
 during the cooldown the token is invalid after a successful fetch and
@@ -274,9 +276,7 @@ Preparation errors identify closed phase/reason values and static field labels;
 an issuer mismatch also names the configured and the discovered issuer, echoing
 the discovered value only when it is an issuer URL of at most 256 bytes. A
 failed provider fetch names one closed class: `Timeout`, `Connect` (DNS, TCP or
-TLS), `Status(code)`, `MediaType`, `TooLarge` or `Transfer`, for example
-`Discovery: Fetch(Status(404))`. A failed JWKS refresh logs the same class as
-`cause`.
+TLS), `Status(code)`, `MediaType`, `TooLarge` or `Transfer`.
 Configuration and provider Debug views redact trust inputs, including endpoint
 queries and audiences. Tokens, credentials, raw key material, response
 bodies and unfiltered provider errors are never diagnostic fields.
