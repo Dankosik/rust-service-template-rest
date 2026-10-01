@@ -8,7 +8,8 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use infra_jobs::{Engine, JobError, Kinds, Policy};
 use infra_postgres::{Dsn, PgPool, Tx};
 use infra_webhooks::inbound::{
-    Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver, async_trait,
+    Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver, Rejection,
+    Verifier, async_trait,
 };
 use infra_webhooks::protocol::KeyRing;
 use integration_tests::{DATABASE_URL, dsn_for};
@@ -190,7 +191,7 @@ async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool
         receiver
             .receive(ENDPOINT, &replay_headers, changed, SystemTime::now())
             .await,
-        Err(ReceiveError::Rejected)
+        Err(ReceiveError::Rejected(Rejection::new("invalid_signature")))
     );
     assert_eq!(receipt_count(&pool).await, 1);
     assert_eq!(job_count(&pool).await, 1);
@@ -614,6 +615,88 @@ async fn receipt_identity_preserves_binary_ids_and_endpoint_scope(pool: PgPool) 
     super::close(&[&pool]).await;
 }
 
+/// A provider scheme other than Standard Webhooks: a shared token header and
+/// the provider's own delivery ID header.
+struct TokenVerifier;
+
+impl Verifier for TokenVerifier {
+    fn verify(
+        &self,
+        headers: &HeaderMap,
+        _body: &[u8],
+        _now: SystemTime,
+    ) -> Result<Bytes, Rejection> {
+        if headers.get("x-provider-token").map(HeaderValue::as_bytes) != Some(b"shared") {
+            return Err(Rejection::new("invalid_token"));
+        }
+        let delivery = headers
+            .get("x-provider-delivery")
+            .ok_or(Rejection::new("missing_delivery_id"))?;
+        Ok(Bytes::copy_from_slice(delivery.as_bytes()))
+    }
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn a_provider_verifier_shares_the_receipt_path_beside_standard_webhooks(pool: PgPool) {
+    let keys = KeyRing::from_encoded(KEY, None).expect("key");
+    let receiver = Receiver::new(
+        pool.clone(),
+        [
+            (
+                "standard".to_owned(),
+                Arc::new(keys.clone()) as Arc<dyn Verifier>,
+            ),
+            ("provider".to_owned(), Arc::new(TokenVerifier)),
+        ],
+    );
+    let provider_headers = |token: &'static str, delivery: &str| {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-provider-token", HeaderValue::from_static(token));
+        headers.insert(
+            "x-provider-delivery",
+            HeaderValue::from_str(delivery).expect("delivery id"),
+        );
+        headers
+    };
+    let receive = async |endpoint: &str, headers: HeaderMap| {
+        receiver
+            .receive(endpoint, &headers, b"{}", SystemTime::now())
+            .await
+    };
+
+    assert_eq!(
+        receive("standard", signed_headers(&keys, "msg_1", b"{}")).await,
+        Ok(ReceiptOutcome::Accepted)
+    );
+    assert_eq!(
+        receive("provider", provider_headers("shared", "delivery-1")).await,
+        Ok(ReceiptOutcome::Accepted)
+    );
+    assert_eq!(
+        receive("provider", provider_headers("shared", "delivery-1")).await,
+        Ok(ReceiptOutcome::Duplicate)
+    );
+    // Each endpoint admits only its own scheme, and the verifier's reason survives.
+    assert_eq!(
+        receive("provider", signed_headers(&keys, "msg_2", b"{}")).await,
+        Err(ReceiveError::Rejected(Rejection::new("invalid_token")))
+    );
+    assert_eq!(
+        receive("standard", provider_headers("shared", "delivery-2")).await,
+        Err(ReceiveError::Rejected(Rejection::new("missing_header")))
+    );
+    // The receipt key is indexed, so an identity outside 1 to 255 bytes is refused.
+    for identity in [String::new(), "d".repeat(256)] {
+        assert_eq!(
+            receive("provider", provider_headers("shared", &identity)).await,
+            Err(ReceiveError::Rejected(Rejection::new("invalid_message_id")))
+        );
+    }
+    assert_eq!(receipt_count(&pool).await, 2);
+    assert_eq!(job_count(&pool).await, 2);
+    super::close(&[&pool]).await;
+}
+
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn remove_expired_deletes_only_receipts_older_than_retention(pool: PgPool) {
     sqlx::query(
@@ -645,6 +728,8 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt as _;
 
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
     let app = infra_http::webhooks::with_webhook_state(
         infra_http::finalize_public(infra_http::webhooks::router()).expect("public contract"),
         infra_http::webhooks::WebhookState::active(receiver(pool.clone())),
@@ -748,6 +833,40 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
         assert_eq!(problem["code"], code);
         assert!(!String::from_utf8_lossy(&bytes).contains("private transport failure"));
     }
+    // A configured endpoint labels its outcomes and rejection reasons; the
+    // caller-chosen unknown ID never becomes a label.
+    let scrape = recorder.handle().render();
+    let endpoint = r#"endpoint="partner/a?#""#;
+    for labels in [
+        [endpoint, r#"outcome="accepted""#, ""],
+        [endpoint, r#"outcome="duplicate""#, ""],
+        [
+            endpoint,
+            r#"outcome="rejected""#,
+            r#"reason="invalid_message_id""#,
+        ],
+        [
+            endpoint,
+            r#"outcome="rejected""#,
+            r#"reason="body_too_large""#,
+        ],
+        [
+            endpoint,
+            r#"outcome="rejected""#,
+            r#"reason="body_unreadable""#,
+        ],
+        ["", r#"outcome="unknown_endpoint""#, ""],
+    ] {
+        assert!(
+            scrape.lines().any(|line| {
+                line.starts_with(infra_http::webhooks::WEBHOOK_INGRESS_OUTCOMES_METRIC)
+                    && labels.iter().all(|label| line.contains(label))
+                    && line.ends_with(" 1")
+            }),
+            "{labels:?} in {scrape}"
+        );
+    }
+    assert!(!scrape.contains(r#"endpoint="unknown""#), "{scrape}");
     assert_eq!(receipt_count(&pool).await, 1);
     assert_eq!(job_count(&pool).await, 1);
     super::close(&[&pool]).await;
@@ -844,7 +963,7 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
                 SystemTime::now()
             )
             .await,
-        Err(ReceiveError::Rejected)
+        Err(ReceiveError::Rejected(Rejection::new("missing_header")))
     );
     assert_eq!(receipt_count(&pool).await, 3);
     assert_eq!(job_count(&pool).await, 1);

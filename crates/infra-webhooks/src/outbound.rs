@@ -88,7 +88,7 @@ impl Outbound {
             version: delivery_version(),
             endpoint_id: endpoint_id.to_owned(),
             content_type: content_type.to_owned(),
-            body,
+            body: Bytes::from(body),
         };
         match infra_jobs::enqueue(tx, &delivery, EnqueueOptions::default())
             .await
@@ -125,7 +125,8 @@ impl Endpoint {
         })
     }
 
-    /// Use a caller-built local test client.
+    /// Use a caller-built local test client. Production code must use
+    /// [`Endpoint::new`].
     ///
     /// The caller supplies the absolute destination admitted by its client.
     ///
@@ -133,6 +134,7 @@ impl Endpoint {
     ///
     /// Returns [`OutboundError::InvalidEndpoint`] when the destination cannot
     /// be represented as an HTTP request URI.
+    #[cfg(feature = "test-support")]
     pub fn with_client(
         destination: Url,
         client: Client,
@@ -186,8 +188,10 @@ impl Dispatcher {
 
     async fn dispatch(&self, job: Job<Delivery>) -> Result<(), JobError> {
         let delivery = job.payload();
-        let Some(endpoint) = self.endpoints.get(&delivery.endpoint_id) else {
+        let endpoint_id = delivery.endpoint_id.as_str();
+        let Some(endpoint) = self.endpoints.get(endpoint_id) else {
             tracing::info!(
+                webhook.endpoint = endpoint_id,
                 webhook.outcome = "retryable",
                 webhook.reason = "missing_endpoint",
                 "webhook_delivery_finished"
@@ -210,7 +214,7 @@ impl Dispatcher {
         )
         .map_err(|_| JobError::permanent(DeliveryOutcome::InvalidPayload))?;
         let response = endpoint.client.execute(request, job.deadline()).await;
-        classify_response(response, SystemTime::now())
+        classify_response(endpoint_id, response, SystemTime::now())
     }
 }
 
@@ -230,7 +234,7 @@ struct Delivery {
     endpoint_id: String,
     content_type: String,
     #[serde_as(as = "serde_with::base64::Base64")]
-    body: Vec<u8>,
+    body: Bytes,
 }
 
 const fn delivery_version() -> u8 {
@@ -274,22 +278,35 @@ enum DeliveryOutcome {
     InvalidPayload,
     MissingEndpoint,
     ClockUnavailable,
-    Retryable,
+    Status(StatusCode),
     EndpointGone,
-    TransportUncertain,
+    Transport(&'static str),
 }
 
+/// The summary jobs keeps in a delivery's failure history.
 impl fmt::Display for DeliveryOutcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let outcome = match self {
-            Self::InvalidPayload => "invalid_payload",
-            Self::MissingEndpoint => "missing_endpoint",
-            Self::ClockUnavailable => "clock_unavailable",
-            Self::Retryable => "retryable_response",
-            Self::EndpointGone => "endpoint_gone",
-            Self::TransportUncertain => "transport_uncertain",
-        };
-        formatter.write_str(outcome)
+        match self {
+            Self::InvalidPayload => formatter.write_str("invalid_payload"),
+            Self::MissingEndpoint => formatter.write_str("missing_endpoint"),
+            Self::ClockUnavailable => formatter.write_str("clock_unavailable"),
+            Self::Status(status) => write!(formatter, "response_status_{}", status.as_u16()),
+            Self::EndpointGone => formatter.write_str("endpoint_gone"),
+            Self::Transport(reason) => formatter.write_str(reason),
+        }
+    }
+}
+
+/// Why an exchange produced no response. The outcome is uncertain in every
+/// case: the receiver may have processed the request.
+const fn transport_reason(error: &HttpError) -> &'static str {
+    match error {
+        HttpError::Timeout => "timeout",
+        HttpError::ResponseBodyTooLarge => "response_too_large",
+        HttpError::Transport { .. } => "transport",
+        HttpError::InvalidConfiguration
+        | HttpError::InvalidTarget
+        | HttpError::ClientBuild { .. } => "client",
     }
 }
 
@@ -320,17 +337,19 @@ fn request(
         .header("webhook-id", message_id)
         .header("webhook-timestamp", timestamp.to_string())
         .header("webhook-signature", signature)
-        .body(Bytes::copy_from_slice(&delivery.body))
+        .body(delivery.body.clone())
         .map_err(|_| OutboundError::InvalidEndpoint)
 }
 
 fn classify_response(
+    endpoint_id: &str,
     response: Result<http::Response<Bytes>, HttpError>,
     response_time: SystemTime,
 ) -> Result<(), JobError> {
     match response {
         Ok(response) if response.status().is_success() => {
             tracing::debug!(
+                webhook.endpoint = endpoint_id,
                 webhook.outcome = "delivered",
                 http.status = response.status().as_u16(),
                 "webhook_delivery_finished"
@@ -338,34 +357,40 @@ fn classify_response(
             Ok(())
         }
         Ok(response) if response.status() == StatusCode::GONE => {
+            // The receiver asks for no more deliveries: disable or remove its
+            // static binding and restart workers.
             tracing::warn!(
+                webhook.endpoint = endpoint_id,
                 webhook.outcome = "permanent",
                 webhook.reason = "endpoint_gone",
-                "webhook endpoint returned 410; disable or remove its static binding and restart workers"
+                http.status = response.status().as_u16(),
+                "webhook_delivery_finished"
             );
             Err(JobError::permanent(DeliveryOutcome::EndpointGone))
         }
         Ok(response) => {
             tracing::info!(
+                webhook.endpoint = endpoint_id,
                 webhook.outcome = "retryable",
+                webhook.reason = "response_status",
                 http.status = response.status().as_u16(),
                 "webhook_delivery_finished"
             );
+            let outcome = DeliveryOutcome::Status(response.status());
             if let Some(delay) = retry_after(response.headers(), response_time) {
-                return Err(JobError::retry_after_at_least(
-                    DeliveryOutcome::Retryable,
-                    delay,
-                )?);
+                return Err(JobError::retry_after_at_least(outcome, delay)?);
             }
-            Err(JobError::retryable(DeliveryOutcome::Retryable))
+            Err(JobError::retryable(outcome))
         }
-        Err(_) => {
+        Err(error) => {
+            let reason = transport_reason(&error);
             tracing::info!(
+                webhook.endpoint = endpoint_id,
                 webhook.outcome = "retryable",
-                webhook.reason = "transport_uncertain",
+                webhook.reason = reason,
                 "webhook_delivery_finished"
             );
-            Err(JobError::retryable(DeliveryOutcome::TransportUncertain))
+            Err(JobError::retryable(DeliveryOutcome::Transport(reason)))
         }
     }
 }
@@ -430,7 +455,7 @@ mod tests {
             version: super::delivery_version(),
             endpoint_id: "partner".to_owned(),
             content_type: "application/json".to_owned(),
-            body: b"raw\0bytes".to_vec(),
+            body: bytes::Bytes::from_static(b"raw\0bytes"),
         };
 
         assert_eq!(
@@ -453,7 +478,7 @@ mod tests {
 
         assert_eq!(delivery.endpoint_id, "partner");
         assert_eq!(delivery.content_type, "application/json");
-        assert_eq!(delivery.body, b"raw\0bytes");
+        assert_eq!(delivery.body.as_ref(), b"raw\0bytes");
     }
 
     #[test]
