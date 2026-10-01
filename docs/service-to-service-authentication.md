@@ -8,8 +8,12 @@ audience-bound JWT access token from the shared authorization server. A
 caller obtains its own service token by OAuth 2.0 client credentials with
 `private_key_jwt` client authentication; it carries a verified user's context
 by RFC 8693 token exchange; a receiver verifies the token with
-`AUTHN=oidc-jwt` and enforces the OpenAPI-declared scopes for the operation
-called.
+`AUTHN=oidc-jwt` and enforces the scopes declared for the operation called:
+in OpenAPI for HTTP, at service registration for gRPC.
+
+The mandate covers synchronous HTTP and gRPC calls. Durable messaging is
+outside it: the broker connection authenticates with NATS credentials, and an
+event carries no verified user identity.
 
 Explicitly forbidden, with each reason:
 
@@ -129,6 +133,25 @@ one object are joined by AND. A verified principal that satisfies no
 requirement gets `403 forbidden` with `WWW-Authenticate: Bearer
 error="insufficient_scope"`, before idempotency admission and the handler.
 
+A gRPC receiver declares the same policy per method when it registers the
+service, with every listed scope required; a principal that lacks one gets
+`PERMISSION_DENIED` before the handler:
+
+```rust,ignore
+services.add(BillingServiceServer::new(billing))?;
+services.require_scopes("/billing.v1.BillingService/Charge", &["billing.write"])?;
+```
+
+On either transport an operation with no declared scope admits any caller
+holding a valid token for this audience. Declare at least one scope on every
+service-to-service operation: a scope is also what separates an access token
+from another JWT the same issuer signed for this audience. The verifier
+refuses a token whose `typ` header names another kind of JWT (for example
+`logout+jwt`), but an untyped ID token is indistinguishable from an untyped
+access token except by its missing scopes. Select `token_profile = "rfc9068"`
+wherever the authorization server emits `at+jwt` with the RFC 9068 claims; it
+closes that gap completely.
+
 `VerifiedPrincipal` exposes `client_id()` (the calling service),
 `subject()`, `actor()`, and `scopes()`. Receiver rules:
 
@@ -154,7 +177,7 @@ evidence come from research recorded 2026-09-29:
 
 | Server | Notes |
 | --- | --- |
-| Keycloak 26.7 | JVM container plus PostgreSQL, Apache-2.0. The only self-hostable candidate covering client assertions, client credentials, GA standard token exchange V2, and per-service audience through client scopes with one client per service. No `act` claim (the caller shows as `azp`); a service token's `sub` is the service-account user ID; no `audience` parameter on client credentials; roughly 0.75–1.5 GB memory. |
+| Keycloak 26.7 | JVM container plus PostgreSQL, Apache-2.0. The only self-hostable candidate covering client assertions, client credentials, GA standard token exchange V2, and per-service audience through client scopes with one client per service. No `act` claim in supported features (the caller shows as `azp`): token exchange delegation, which emits `act`, is experimental in 26.7 and preview in 26.8 (checked 2026-10-01); a service token's `sub` is the service-account user ID; no `audience` parameter on client credentials; roughly 0.75–1.5 GB memory. |
 | Spring Authorization Server 7 | Covers the protocol, but it is a Java framework the team would build and operate; `act`, audience mapping, and assertion replay protection are custom code. |
 | Zitadel ≥ 4.19.2 | One Go container plus PostgreSQL, AGPL-3.0, GA token exchange with nested `act`. Does not fit this path without a gap (see below). Pin ≥ 4.19.2 for GHSA-vrh8-c9cm-wh8v and GHSA-w4gv-rcwj-w6r5. |
 
@@ -218,12 +241,20 @@ authenticate a service-to-service call.
 - **Private network is not identity.** Railway's private network encrypts
   traffic but authenticates no service; tokens, not network location, carry
   identity. Reopen if the platform issues workload identity.
-- **DPoP (RFC 9449)** — not adopted: Keycloak supports it, but no maintained
-  Rust client exists, and it adds a signed proof, nonce state and a retry to
+- **DPoP (RFC 9449)** — not adopted: Keycloak supports it since 26.4, but no
+  maintained Rust client exists, and it adds a signed proof, nonce state and a retry to
   every token and resource request.
 - **mTLS-bound tokens (RFC 8705), SPIFFE, WIMSE** — not adopted: no
   per-service certificates or mesh on the target platform, and WIMSE has no
   mainstream implementation.
+- **Platform-issued client assertions (workload identity federation)** — not
+  adopted: the caller still holds a long-lived private key. Keycloak 26.6
+  accepts a Kubernetes service-account or OIDC token as the client assertion,
+  which removes that key, but Railway issues no workload token to a running
+  service. Reopen when the platform does.
+- **Assertion algorithm.** `RS256` stays the default because every
+  shortlisted server accepts it. Prefer `ES256` or `PS256` for a new key: FAPI
+  2.0 admits no PKCS#1 v1.5 signatures.
 - **Transaction Tokens** — not adopted: still a draft, no shortlisted
   authorization server issues them, and a Txn-Token is not itself an access
   token. Reopen when it is published and a chosen server issues it.

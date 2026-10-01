@@ -84,7 +84,22 @@ per-handler middleware stack. Handler `Status` values pass through unchanged.
 
 With authentication retained, a successful verify inserts
 `infra_bearerauthn::Principal` into the request extensions and removes
-`Authorization`.
+`Authorization`. Declare a method's required scopes after adding its service,
+by request path:
+
+```rust,ignore
+services.add(EchoServiceServer::new(Echo))?;
+services.require_scopes("/example.v1.EchoService/Unary", &["echo.read"])?;
+```
+
+Every listed scope is required. A principal that lacks one gets
+`PERMISSION_DENIED` / `the verified principal lacks the required scope`
+before the handler. A method with no declared requirement admits any
+authenticated caller, as an OpenAPI operation without scopes does. A path
+outside a registered service, or a second requirement for one method, fails
+startup. The method name itself is not checked, because generated servers do
+not list their methods: a misspelled method protects nothing, so cover each
+requirement with a test that expects the denial.
 
 ## Middleware
 
@@ -96,7 +111,9 @@ Outermost to innermost:
 3. Business routes only: bearer authentication, when that profile is
    retained. Health is outside it. Missing, malformed and invalid bearers are
    `UNAUTHENTICATED` / `authentication failed`. Provider unavailability is
-   `UNAVAILABLE` / `authentication is unavailable`. Each outcome is counted
+   `UNAVAILABLE` / `authentication is unavailable`. A verified principal
+   without a method's declared scopes is `PERMISSION_DENIED`. Each
+   authentication outcome is counted
    in `authn_verifications_total{transport="grpc"}` by the same
    `Verifier::authenticate` the HTTP boundary uses.
 4. Business routes only: a concurrency limit of 256. A shed call is

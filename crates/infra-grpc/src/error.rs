@@ -18,4 +18,8 @@ pub enum Error {
     InvalidClientTls,
     #[error("gRPC service {0} is registered twice")]
     DuplicateService(&'static str),
+    #[error("gRPC scope requirement must name a method path of a registered service")]
+    UnregisteredMethodPath,
+    #[error("gRPC scope requirement is declared twice for one method")]
+    DuplicateScopeRequirement,
 }
