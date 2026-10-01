@@ -147,6 +147,7 @@ const fn jwt_algorithm(algorithm: JwtAlgorithm) -> infra_bearerauthn::JwtAlgorit
         JwtAlgorithm::EdDsa => infra_bearerauthn::JwtAlgorithm::EdDsa,
     }
 }
+// template:end oidc-jwt:bootstrap-auth-jwt-algorithm-converter
 
 // template:begin oidc-introspection:bootstrap-introspection-cache-tests
 #[cfg(test)]

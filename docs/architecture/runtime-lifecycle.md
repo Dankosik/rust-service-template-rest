@@ -106,7 +106,9 @@ before teardown. A task that ends while the service is serving has therefore
 panicked or hit a defect. Bootstrap observes it beside the stop signal, logs
 `service failed`, runs the full teardown, and exits `1`, so the platform
 replaces the instance instead of keeping one that serves without, for
-example, its JWKS refresh.
+example, its JWKS refresh. The watch covers the serving phase only: a task
+that ends during startup is reported when startup completes, and one that
+ends during teardown is joined like any other.
 
 ## Readiness and liveness
 
