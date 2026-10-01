@@ -5,19 +5,19 @@ use http::{HeaderValue, uri::Scheme};
 use url::Host;
 use url::Url;
 
-use crate::{Bytes, Error, Limits, Request, header};
+use crate::{BuildError, Bytes, Error, Limits, Request, header};
 
 // Hyper sizes a response `HeaderMap` from the parser header count, and
 // http 1.5 `HeaderMap` panics above 32,768 entries.
 const MAX_HEADER_COUNT: usize = 32_768;
 
-pub(crate) fn validate_limits(limits: &Limits) -> Result<(), Error> {
+pub(crate) fn validate_limits(limits: &Limits) -> Result<(), BuildError> {
     if limits.operation_timeout.is_zero()
         || limits.response_header_count == 0
         || limits.response_header_count > MAX_HEADER_COUNT
         || limits.response_body_bytes == 0
     {
-        return Err(Error::InvalidConfiguration);
+        return Err(BuildError::InvalidConfiguration);
     }
     Ok(())
 }
@@ -35,21 +35,21 @@ pub(crate) struct Target {
 }
 
 impl Target {
-    fn new(url: &Url) -> Result<Self, Error> {
+    fn new(url: &Url) -> Result<Self, BuildError> {
         let (scheme, default_port) = match url.scheme() {
             "https" => (Scheme::HTTPS, 443),
             "http" => (Scheme::HTTP, 80),
-            _ => return Err(Error::InvalidConfiguration),
+            _ => return Err(BuildError::InvalidConfiguration),
         };
         let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
-            return Err(Error::InvalidConfiguration);
+            return Err(BuildError::InvalidConfiguration);
         };
         let host_header = if port == default_port {
             HeaderValue::from_str(host)
         } else {
             HeaderValue::from_str(&format!("{host}:{port}"))
         }
-        .map_err(|_| Error::InvalidConfiguration)?;
+        .map_err(|_| BuildError::InvalidConfiguration)?;
         Ok(Self {
             scheme,
             host: host.into(),
@@ -73,22 +73,22 @@ impl fmt::Debug for Target {
     }
 }
 
-pub(crate) fn admit_origin(url: &Url) -> Result<Target, Error> {
+pub(crate) fn admit_origin(url: &Url) -> Result<Target, BuildError> {
     if url.scheme() != "https" || has_userinfo(url) {
-        return Err(Error::InvalidConfiguration);
+        return Err(BuildError::InvalidConfiguration);
     }
     Target::new(url)
 }
 
 #[cfg(feature = "test-support")]
-pub(crate) fn admit_test_http_origin(url: &Url) -> Result<Target, Error> {
+pub(crate) fn admit_test_http_origin(url: &Url) -> Result<Target, BuildError> {
     let loopback = match url.host() {
         Some(Host::Ipv4(address)) => address.is_loopback(),
         Some(Host::Ipv6(address)) => address.is_loopback(),
         _ => false,
     };
     if url.scheme() != "http" || !loopback || has_userinfo(url) {
-        return Err(Error::InvalidConfiguration);
+        return Err(BuildError::InvalidConfiguration);
     }
     Target::new(url)
 }
