@@ -24,7 +24,7 @@ use commit_proxy::CommitProxy;
 use health::Probe;
 use infra_postgres::{
     ACQUIRE_TIMEOUT, Dsn, Isolation, PgPool, PoolOptions, PostgresProbe, TxError, TxOptions,
-    connection, in_tx, in_tx_with, retryable, statement_succeeded,
+    connection, in_tx, in_tx_with, retryable,
 };
 use integration_tests::{DATABASE_URL, dsn_for, fixture_dir};
 use migrate::{HistoryError, MIGRATOR, RunError, RunOptions};
@@ -178,7 +178,7 @@ async fn pool_default_isolation_survives_replacement_and_explicit_transactions_o
         },
         async |tx| {
             Ok(sqlx::query_scalar("SHOW transaction_isolation")
-                .fetch_one(&mut *connection(tx))
+                .fetch_one(&mut *tx)
                 .await?)
         },
     )
@@ -236,7 +236,7 @@ async fn in_tx_commits_on_ok_and_rolls_back_on_err(pool: PgPool) {
         .unwrap();
 
     let inserted: Result<u64, AppError> = in_tx(&pool, async |tx| {
-        Ok(connection(tx)
+        Ok(tx
             .execute("INSERT INTO t VALUES (1)")
             .await?
             .rows_affected())
@@ -245,7 +245,7 @@ async fn in_tx_commits_on_ok_and_rolls_back_on_err(pool: PgPool) {
     assert_eq!(inserted.unwrap(), 1);
 
     let failed: Result<(), AppError> = in_tx(&pool, async |tx| {
-        connection(tx).execute("INSERT INTO t VALUES (2)").await?;
+        tx.execute("INSERT INTO t VALUES (2)").await?;
         Err(AppError::Business)
     })
     .await;
@@ -272,27 +272,27 @@ async fn a_finished_transaction_returns_its_connection_outside_any_transaction(p
     };
 
     let committed: Result<(), AppError> = in_tx(&ours, async |tx| {
-        connection(tx).execute("INSERT INTO t VALUES (1)").await?;
+        tx.execute("INSERT INTO t VALUES (1)").await?;
         Ok(())
     })
     .await;
     assert!(committed.is_ok(), "{committed:?}");
     // An explicit `BEGIN` is refused inside a transaction sqlx still tracks.
     let explicit: Result<(), AppError> = in_tx_with(&ours, serializable, async |tx| {
-        connection(tx).execute("INSERT INTO t VALUES (2)").await?;
+        tx.execute("INSERT INTO t VALUES (2)").await?;
         Ok(())
     })
     .await;
     assert!(explicit.is_ok(), "{explicit:?}");
 
     let failed: Result<(), AppError> = in_tx_with(&ours, serializable, async |tx| {
-        connection(tx).execute("INSERT INTO t VALUES (3)").await?;
+        tx.execute("INSERT INTO t VALUES (3)").await?;
         Err(AppError::Business)
     })
     .await;
     assert!(matches!(failed, Err(AppError::Business)), "{failed:?}");
     // Autocommit on the same connection, visible at once to another one:
-    // neither the probed commit nor the queued rollback left it inside a
+    // neither the commit nor the queued rollback left it inside a
     // transaction.
     ours.execute("INSERT INTO t VALUES (4)").await.unwrap();
     let ids: Vec<i32> = sqlx::query_scalar("SELECT id FROM t ORDER BY id")
@@ -309,12 +309,12 @@ async fn a_savepoint_inside_the_transaction_contains_an_expected_failure(pool: P
         .await
         .unwrap();
     let result: Result<(), AppError> = in_tx(&pool, async |tx| {
-        connection(tx).execute("INSERT INTO t VALUES (1)").await?;
+        tx.execute("INSERT INTO t VALUES (1)").await?;
         let mut savepoint = connection(tx).begin().await?;
         let duplicate = (&mut *savepoint).execute("INSERT INTO t VALUES (1)").await;
         assert!(duplicate.is_err());
         savepoint.rollback().await?;
-        connection(tx).execute("INSERT INTO t VALUES (2)").await?;
+        tx.execute("INSERT INTO t VALUES (2)").await?;
         Ok(())
     })
     .await;
@@ -335,9 +335,7 @@ async fn a_commit_the_server_rejects_is_commit_failed(pool: PgPool) {
     .await
     .unwrap();
     let result: Result<(), AppError> = in_tx(&pool, async |tx| {
-        connection(tx)
-            .execute("INSERT INTO t VALUES (1, 1), (2, 1)")
-            .await?;
+        tx.execute("INSERT INTO t VALUES (1, 1), (2, 1)").await?;
         Ok(())
     })
     .await;
@@ -360,9 +358,9 @@ async fn a_swallowed_statement_failure_is_commit_failed_not_success(pool: PgPool
         .await
         .unwrap();
     let result: Result<(), AppError> = in_tx(&pool, async |tx| {
-        connection(tx).execute("INSERT INTO t VALUES (1)").await?;
+        tx.execute("INSERT INTO t VALUES (1)").await?;
         // The duplicate aborts the transaction; the closure ignores that.
-        let _ = connection(tx).execute("INSERT INTO t VALUES (1)").await;
+        let _ = tx.execute("INSERT INTO t VALUES (1)").await;
         Ok(())
     })
     .await;
@@ -380,14 +378,15 @@ async fn a_swallowed_statement_failure_is_commit_failed_not_success(pool: PgPool
 }
 
 #[sqlx::test(migrations = false)]
-async fn a_later_statement_withdraws_the_proof_that_skips_the_commit_probe(pool: PgPool) {
+async fn a_failure_on_the_borrowed_connection_is_found_before_the_commit(pool: PgPool) {
     pool.execute("CREATE TABLE t (id int PRIMARY KEY)")
         .await
         .unwrap();
+    // The boundary saw a statement succeed, then lent the connection out and
+    // cannot know what happened on it.
     let result: Result<(), AppError> = in_tx(&pool, async |tx| {
-        connection(tx).execute("INSERT INTO t VALUES (1)").await?;
-        statement_succeeded(tx);
-        let _ = connection(tx).execute("INSERT INTO t VALUES (1)").await;
+        tx.execute("INSERT INTO t VALUES (1)").await?;
+        let _ = tx.execute("INSERT INTO t VALUES (1)").await;
         Ok(())
     })
     .await;
@@ -396,18 +395,28 @@ async fn a_later_statement_withdraws_the_proof_that_skips_the_commit_probe(pool:
         "{result:?}"
     );
 
-    let proven: Result<(), AppError> = in_tx(&pool, async |tx| {
-        connection(tx).execute("INSERT INTO t VALUES (2)").await?;
-        statement_succeeded(tx);
+    // The same borrow with nothing failing commits, and so does a statement
+    // through the handle after it.
+    let borrowed: Result<(), AppError> = in_tx(&pool, async |tx| {
+        tx.execute("INSERT INTO t VALUES (2)").await?;
         Ok(())
     })
     .await;
-    assert!(proven.is_ok(), "{proven:?}");
-    let ids: Vec<i32> = sqlx::query_scalar("SELECT id FROM t")
+    assert!(borrowed.is_ok(), "{borrowed:?}");
+    let through_the_handle: Result<(), AppError> = in_tx(&pool, async |tx| {
+        tx.execute("INSERT INTO t VALUES (3)").await?;
+        tx.execute("INSERT INTO t VALUES (4)").await?;
+        Ok(())
+    })
+    .await;
+    assert!(through_the_handle.is_ok(), "{through_the_handle:?}");
+    let empty: Result<(), AppError> = in_tx(&pool, async |_tx| Ok(())).await;
+    assert!(empty.is_ok(), "{empty:?}");
+    let ids: Vec<i32> = sqlx::query_scalar("SELECT id FROM t ORDER BY id")
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert_eq!(ids, [2]);
+    assert_eq!(ids, [2, 3, 4]);
 }
 
 #[sqlx::test(migrations = false)]
@@ -428,7 +437,7 @@ async fn a_serialization_failure_is_retryable(pool: PgPool) {
         },
         async |tx| {
             let seen: i32 = sqlx::query_scalar("SELECT n FROM counters WHERE id = 1")
-                .fetch_one(&mut *connection(tx))
+                .fetch_one(&mut *tx)
                 .await?;
             // A second writer commits between our read and our write.
             let concurrent: Result<(), AppError> = in_tx_with(
@@ -438,8 +447,7 @@ async fn a_serialization_failure_is_retryable(pool: PgPool) {
                     read_only: false,
                 },
                 async |tx| {
-                    connection(tx)
-                        .execute("UPDATE counters SET n = n + 1 WHERE id = 1")
+                    tx.execute("UPDATE counters SET n = n + 1 WHERE id = 1")
                         .await?;
                     Ok(())
                 },
@@ -448,7 +456,7 @@ async fn a_serialization_failure_is_retryable(pool: PgPool) {
             concurrent.expect("the concurrent writer commits first");
             sqlx::query("UPDATE counters SET n = $1 WHERE id = 1")
                 .bind(seen + 1)
-                .execute(&mut *connection(tx))
+                .execute(&mut *tx)
                 .await?;
             Ok(())
         },
@@ -473,7 +481,7 @@ async fn a_read_only_transaction_refuses_writes(pool: PgPool) {
             read_only: true,
         },
         async |tx| {
-            connection(tx).execute("INSERT INTO t VALUES (1)").await?;
+            tx.execute("INSERT INTO t VALUES (1)").await?;
             Ok(())
         },
     )
@@ -536,10 +544,10 @@ async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_opt
         },
         async |tx| {
             let isolation = sqlx::query_scalar("SHOW transaction_isolation")
-                .fetch_one(&mut *connection(tx))
+                .fetch_one(&mut *tx)
                 .await?;
             let read_only = sqlx::query_scalar("SHOW transaction_read_only")
-                .fetch_one(&mut *connection(tx))
+                .fetch_one(&mut *tx)
                 .await?;
             Ok((isolation, read_only))
         },

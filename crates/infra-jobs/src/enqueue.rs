@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use infra_postgres::{Tx, connection, statement_succeeded};
+use infra_postgres::Tx;
 
 use crate::kind::{self, JobId, JobKind};
 use crate::trace_context;
@@ -137,22 +137,20 @@ pub async fn enqueue<K: JobKind>(
         .bind(traceparent.as_deref())
         .bind(tracestate.as_deref())
         .bind(id.encode(&mut encoded))
-        .fetch_optional(&mut *connection(tx))
+        .fetch_optional(&mut *tx)
         .await
         .map_err(EnqueueError::Database)?;
     let Some(_created) = row else {
-        statement_succeeded(tx);
         return Ok(Enqueued::Duplicate);
     };
     if prepared.delay_micros == 0 && wake_due() {
         sqlx::query(WAKE)
             .bind(crate::claim::WAKE_CHANNEL)
             .bind(K::NAME)
-            .execute(&mut *connection(tx))
+            .execute(&mut *tx)
             .await
             .map_err(EnqueueError::Database)?;
     }
-    statement_succeeded(tx);
     Ok(Enqueued::Created(id))
 }
 
@@ -183,10 +181,9 @@ pub async fn compare_live_payload<K: JobKind>(
         .bind(K::NAME)
         .bind(prepared.unique_key)
         .bind(prepared.payload)
-        .fetch_optional(&mut *connection(tx))
+        .fetch_optional(&mut *tx)
         .await
         .map_err(EnqueueError::Database)?;
-    statement_succeeded(tx);
     Ok(match same {
         Some(true) => LivePayloadComparison::Same,
         Some(false) => LivePayloadComparison::Different,

@@ -2654,13 +2654,16 @@ name = "infra-postgres"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "health",
  "log",
  "metrics",
+ "metrics-exporter-prometheus",
  "sqlx",
  "thiserror",
  "tokio",
  "tokio-util",
+ "tracing",
  "url",
 ]
 

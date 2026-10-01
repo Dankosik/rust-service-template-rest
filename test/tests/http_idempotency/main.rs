@@ -33,7 +33,7 @@ use infra_idempotency_store::{
     AttemptError, Attempted, CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, CallerIdentity,
     CallerKind, CleanupError, Digest, HeaderPair, Record, ScopeKey, StartupError, Store,
 };
-use infra_postgres::{Closed, Dsn, Isolation, PgPool, PoolOptions, Tx, connection};
+use infra_postgres::{Closed, Dsn, Isolation, PgPool, PoolOptions, Tx};
 use integration_tests::dsn_for;
 use sqlx::Executor as _;
 use tokio::sync::Notify;
@@ -280,7 +280,7 @@ impl Work {
     async fn run(&self, tx: &mut Tx<'_>) {
         self.runs.fetch_add(1, Ordering::SeqCst);
         sqlx::query("INSERT INTO effects DEFAULT VALUES")
-            .execute(connection(tx))
+            .execute(&mut *tx)
             .await
             .expect("the effect is written");
         self.hold.pass().await;
@@ -599,7 +599,7 @@ async fn p3_a_long_verified_caller_identity_commits_and_replays(pool: PgPool) {
             &INPUT,
             async |tx: &mut Tx<'_>| {
                 sqlx::query("INSERT INTO effects DEFAULT VALUES")
-                    .execute(connection(tx))
+                    .execute(&mut *tx)
                     .await
                     .expect("the committed effect");
                 Ok(returned(record.clone()))
@@ -618,7 +618,7 @@ async fn p3_a_long_verified_caller_identity_commits_and_replays(pool: PgPool) {
             &INPUT,
             async |tx: &mut Tx<'_>| {
                 sqlx::query("INSERT INTO effects DEFAULT VALUES")
-                    .execute(connection(tx))
+                    .execute(&mut *tx)
                     .await
                     .expect("a replay must not run this effect");
                 Ok(returned(record.clone()))
@@ -819,14 +819,11 @@ async fn p6_an_aborted_statement_is_internal_and_the_same_key_can_retry(pool: Pg
             &INPUT,
             async |tx: &mut Tx<'_>| {
                 sqlx::query("INSERT INTO effects DEFAULT VALUES")
-                    .execute(connection(tx))
+                    .execute(&mut *tx)
                     .await
                     .expect("the effect starts inside the transaction");
                 assert!(
-                    sqlx::query("SELECT 1 / 0")
-                        .execute(connection(tx))
-                        .await
-                        .is_err(),
+                    sqlx::query("SELECT 1 / 0").execute(&mut *tx).await.is_err(),
                     "the first statement aborts the transaction"
                 );
                 Ok(returned(record.clone()))

@@ -65,8 +65,8 @@ webhook-consumers = { path = "crates/webhook-consumers", default-features = fals
 # template:end inbound-webhooks:workspace-webhook-consumers-crate
 
 # template:begin postgres:workspace-postgres-dependencies
-# Persistence (docs/architecture/persistence.md). `macros` only where
-# `sqlx::migrate!` or `#[sqlx::test]` is used.
+# Persistence (docs/architecture/persistence.md). `macros` where
+# `sqlx::migrate!` or `#[sqlx::test]` is used, and in `infra-postgres`.
 sqlx = { version = "0.9.0", default-features = false }
 log = { version = "0.4", default-features = false }
 # template:end postgres:workspace-postgres-dependencies

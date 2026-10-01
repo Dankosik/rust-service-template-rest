@@ -61,7 +61,7 @@ days after a failure), and readable by anyone who can read the table.
 
 ```rust,ignore
 infra_postgres::in_tx(pool, async |tx| {
-    let widget_id = insert_widget(infra_postgres::connection(tx)).await?;
+    let widget_id = insert_widget(tx).await?;
     let key = widget_id.to_string();
     match infra_jobs::enqueue(tx, &Welcome { widget_id }, infra_jobs::EnqueueOptions {
         unique_key: Some(&key),
@@ -137,7 +137,7 @@ enum WelcomeError {
 
 async fn welcome(job: infra_jobs::Job<Welcome>) -> Result<(), infra_jobs::JobError> {
     let result = infra_postgres::in_tx(job.pool(), async |tx| {
-        write_effect(infra_postgres::connection(tx), job.payload().widget_id).await?;
+        write_effect(tx, job.payload().widget_id).await?;
         job.complete_in_tx(tx).await?;
         Ok::<_, WelcomeError>(())
     }).await;

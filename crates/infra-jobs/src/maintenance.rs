@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use infra_postgres::{connection, in_tx};
+use infra_postgres::in_tx;
 use sqlx::Row;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -267,14 +267,13 @@ async fn delete_batch(
     };
     backstop(async {
         in_tx(&shared.pool, async |tx| -> Result<u64, OperationError> {
-            let conn = connection(tx);
             sqlx::query(RETENTION_STATEMENT_TIMEOUT)
-                .execute(&mut *conn)
+                .execute(&mut *tx)
                 .await?;
             Ok(sqlx::query(statement)
                 .bind(age)
                 .bind(RETENTION_BATCH_ROWS)
-                .execute(&mut *conn)
+                .execute(&mut *tx)
                 .await?
                 .rows_affected())
         })
@@ -291,14 +290,13 @@ async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
     let kinds: Vec<&str> = shared.registry.names().collect();
     backstop(async {
         in_tx(&shared.pool, async |tx| -> Result<Sample, OperationError> {
-            let conn = connection(tx);
             sqlx::query(SAMPLE_STATEMENT_TIMEOUT)
-                .execute(&mut *conn)
+                .execute(&mut *tx)
                 .await?;
             let rows = sqlx::query_as::<_, SampleRow>(SAMPLE)
                 .bind(kinds)
                 .bind(LIVE_JOBS_SAMPLE_CAP)
-                .fetch_all(&mut *conn)
+                .fetch_all(&mut *tx)
                 .await?;
             decode_sample(rows)
         })

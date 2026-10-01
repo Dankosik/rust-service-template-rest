@@ -13,15 +13,22 @@ workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+# `Stream`, to wrap a statement's result stream.
+futures-util = { workspace = true }
 health = { workspace = true }
 # `sqlx::ConnectOptions` takes statement-log levels as `log::LevelFilter`.
 log = { workspace = true }
 metrics = { workspace = true }
-sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs"] }
+# `macros` turns on the driver's offline support, which adds a method to
+# `sqlx::Executor`. `Tx` implements that trait, so the method set has to be
+# the same whichever workspace crates are built together.
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time", "macros"] }
 tokio-util = { workspace = true }
+tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+metrics-exporter-prometheus = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
