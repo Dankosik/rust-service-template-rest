@@ -332,7 +332,8 @@ From the stage 8 research (versions read 2026-09-18; behavior verified in a
 scratch project against `postgres:18.4`):
 
 - **`sqlx` 0.9** (`postgres`, `runtime-tokio`, `tls-rustls-aws-lc-rs`,
-  `migrate`; `macros` only where `migrate!` or `#[sqlx::test]` is used) over
+  `migrate`; `macros` where `migrate!` or `#[sqlx::test]` is used and in
+  `infra-postgres`, for the reason its `Tx` decision below gives) over
   `tokio-postgres` + `deadpool-postgres` + `refinery` (four crates, no lock in
   `refinery`), `diesel-async` (a schema DSL and a code generation step with no
   query to serve yet), `sea-orm` (an ORM over `sqlx`; a feature may add it

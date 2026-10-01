@@ -47,7 +47,9 @@ pub enum TxError {
 ///
 /// `&mut Tx` is a `sqlx` executor, used like `&mut PgConnection`:
 /// `sqlx::query(..).execute(&mut *tx)`. The transaction boundary retains
-/// commit and rollback ownership.
+/// commit and rollback ownership. It reads a statement's success as proof
+/// that the transaction is alive, which holds for SQL the server executes;
+/// an empty statement proves nothing and has no place here.
 #[derive(Debug)]
 pub struct Tx<'c> {
     conn: &'c mut PgConnection,

@@ -34,7 +34,8 @@ pub const CONNECTION_WAIT_METRIC: &str = "db_client_connection_wait_time_seconds
 pub const CONNECTION_WAIT_BUCKETS: &[f64] = &[0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 3.0];
 
 /// How long a transaction took from asking for a connection to its commit
-/// or rollback answer, by `outcome`.
+/// answer, or to the closure's error (the rollback is not awaited), by
+/// `outcome`.
 pub const TRANSACTION_DURATION_METRIC: &str = "postgres_transaction_duration_seconds";
 
 /// Buckets in seconds for [`TRANSACTION_DURATION_METRIC`], up to the
