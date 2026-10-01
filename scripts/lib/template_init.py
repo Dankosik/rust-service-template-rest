@@ -1498,7 +1498,7 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
         _project_feature_edge(
             records,
             "hyper-rustls",
-            "0.27.9",
+            "0.27.10",
             ["http", "hyper", "hyper-util", "rustls", "rustls-native-certs", "rustls-platform-verifier", "tokio", "tokio-rustls", "tower-service"],
             ["http", "hyper", "hyper-util", "rustls", "rustls-platform-verifier", "tokio", "tokio-rustls", "tower-service"],
         )
@@ -1589,7 +1589,7 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
         _project_feature_edge(
             records,
             "hyper-rustls",
-            "0.27.9",
+            "0.27.10",
             ["http", "hyper", "hyper-util", "rustls", *native_roots, "rustls-platform-verifier", "tokio", "tokio-rustls", "tower-service"],
             ["http", "hyper", "hyper-util", "rustls", *native_roots, "tokio", "tokio-rustls", "tower-service"],
         )
