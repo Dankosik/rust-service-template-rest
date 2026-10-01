@@ -201,6 +201,92 @@ mod tests {
 
     use super::*;
 
+    /// Collects the key of every counter the route registers.
+    #[derive(Default)]
+    struct Keys(std::sync::Mutex<Vec<metrics::Key>>);
+
+    impl metrics::Recorder for Keys {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            self.0.lock().expect("keys").push(key.clone());
+            metrics::Counter::noop()
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    #[test]
+    fn outcomes_label_a_configured_endpoint_and_never_an_unknown_one() {
+        let keys = Keys::default();
+        metrics::with_local_recorder(&keys, || {
+            record_outcome("partner", "accepted");
+            record_rejection("partner", "invalid_signature");
+            let _ = unknown_endpoint();
+        });
+        let labels: Vec<Vec<(String, String)>> = keys
+            .0
+            .lock()
+            .expect("keys")
+            .iter()
+            .map(|key| {
+                assert_eq!(key.name(), WEBHOOK_INGRESS_OUTCOMES_METRIC);
+                key.labels()
+                    .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                    .collect()
+            })
+            .collect();
+        let pair = |key: &str, value: &str| (key.to_owned(), value.to_owned());
+        assert_eq!(
+            labels,
+            [
+                vec![pair("endpoint", "partner"), pair("outcome", "accepted")],
+                vec![
+                    pair("endpoint", "partner"),
+                    pair("outcome", "rejected"),
+                    pair("reason", "invalid_signature"),
+                ],
+                vec![pair("outcome", "unknown_endpoint")],
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn inert_receiver_returns_a_problem_before_reading_or_authenticating_the_body() {
         let readiness = Readiness::new(

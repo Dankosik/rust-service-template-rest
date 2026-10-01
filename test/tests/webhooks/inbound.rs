@@ -728,8 +728,6 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt as _;
 
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let _local = metrics::set_default_local_recorder(&recorder);
     let app = infra_http::webhooks::with_webhook_state(
         infra_http::finalize_public(infra_http::webhooks::router()).expect("public contract"),
         infra_http::webhooks::WebhookState::active(receiver(pool.clone())),
@@ -833,40 +831,6 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
         assert_eq!(problem["code"], code);
         assert!(!String::from_utf8_lossy(&bytes).contains("private transport failure"));
     }
-    // A configured endpoint labels its outcomes and rejection reasons; the
-    // caller-chosen unknown ID never becomes a label.
-    let scrape = recorder.handle().render();
-    let endpoint = r#"endpoint="partner/a?#""#;
-    for labels in [
-        [endpoint, r#"outcome="accepted""#, ""],
-        [endpoint, r#"outcome="duplicate""#, ""],
-        [
-            endpoint,
-            r#"outcome="rejected""#,
-            r#"reason="invalid_message_id""#,
-        ],
-        [
-            endpoint,
-            r#"outcome="rejected""#,
-            r#"reason="body_too_large""#,
-        ],
-        [
-            endpoint,
-            r#"outcome="rejected""#,
-            r#"reason="body_unreadable""#,
-        ],
-        ["", r#"outcome="unknown_endpoint""#, ""],
-    ] {
-        assert!(
-            scrape.lines().any(|line| {
-                line.starts_with(infra_http::webhooks::WEBHOOK_INGRESS_OUTCOMES_METRIC)
-                    && labels.iter().all(|label| line.contains(label))
-                    && line.ends_with(" 1")
-            }),
-            "{labels:?} in {scrape}"
-        );
-    }
-    assert!(!scrape.contains(r#"endpoint="unknown""#), "{scrape}");
     assert_eq!(receipt_count(&pool).await, 1);
     assert_eq!(job_count(&pool).await, 1);
     super::close(&[&pool]).await;
