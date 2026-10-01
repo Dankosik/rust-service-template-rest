@@ -10,6 +10,7 @@
 //! contract decisions are recorded in `docs/architecture/http.md`.
 
 pub mod contract;
+pub mod extract;
 pub mod problem;
 // template:begin inbound-webhooks:http-webhooks-module
 pub mod webhooks;

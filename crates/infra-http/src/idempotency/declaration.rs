@@ -104,11 +104,17 @@ fn prepare_key_parameter(
     operation_id: &str,
 ) -> Result<(), CompositionError> {
     let generated_key = key_parameter();
+    // A `$ref` parameter is not inspected here: a referenced duplicate of
+    // the key is caught by the OpenAPI lint's unique-parameter rule.
     let mut existing_keys = operation
         .parameters
         .as_deref()
         .into_iter()
         .flatten()
+        .filter_map(|parameter| match parameter {
+            RefOr::T(parameter) => Some(parameter),
+            RefOr::Ref(_) => None,
+        })
         .filter(|parameter| {
             parameter.parameter_in == utoipa::openapi::path::ParameterIn::Header
                 && parameter.name.eq_ignore_ascii_case(KEY_HEADER)
@@ -117,7 +123,7 @@ fn prepare_key_parameter(
         (None, None) => operation
             .parameters
             .get_or_insert_default()
-            .push(generated_key),
+            .push(generated_key.into()),
         (Some(existing), None) if existing == &generated_key => {}
         _ => return Err(CompositionError::new(operation_id, Rule::KeyParameter)),
     }
@@ -349,7 +355,7 @@ mod tests {
         };
         response.headers.insert(
             super::super::openapi::REPLAYED_HEADER.to_owned(),
-            utoipa::openapi::header::Header::default(),
+            RefOr::T(utoipa::openapi::header::Header::default()),
         );
         assert_eq!(
             prepare(&mut conflicting).unwrap_err().rule(),
@@ -372,7 +378,7 @@ mod tests {
         };
         response.headers.insert(
             "X-Trace".to_owned(),
-            utoipa::openapi::header::Header::default(),
+            RefOr::T(utoipa::openapi::header::Header::default()),
         );
         assert_eq!(
             prepare(&mut unsupported).unwrap_err().rule(),

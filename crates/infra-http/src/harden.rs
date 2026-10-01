@@ -4,9 +4,9 @@
 //!
 //! request-id sanitize → set → propagate → nosniff → observation (OpenTelemetry
 //! server span, HTTP metrics, problem completion, access log) → traceparent
-//! response header → error mapping → load shed → in-flight limit → request
-//! deadline → request timeout → panic recovery → body limit (tower-http) →
-//! extractor body limit → routes / 404 / 405
+//! response header → in-flight admission (shed, probes exempt) → error mapping
+//! → request deadline → request timeout → panic recovery → body limit
+//! (tower-http) → extractor body limit → routes / 404 / 405
 //!
 //! Every layer is applied with `Router::layer`, so the 404 and 405 fallbacks
 //! travel through the same chain. Cross-origin requests are fail-closed by
@@ -15,19 +15,19 @@
 
 use std::any::Any;
 use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::error_handling::HandleErrorLayer;
-use axum::extract::{DefaultBodyLimit, Request};
+use axum::extract::{DefaultBodyLimit, MatchedPath, Request, State};
 use axum::http::header::X_CONTENT_TYPE_OPTIONS;
 use axum::http::{HeaderValue, StatusCode};
-use axum::middleware;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{BoxError, Router};
 use axum_tracing_opentelemetry::middleware::OtelInResponseLayer;
+use tokio::sync::Semaphore;
 use tower::ServiceBuilder;
-use tower::limit::GlobalConcurrencyLimitLayer;
-use tower::load_shed::error::Overloaded;
 use tower::timeout::error::Elapsed;
 use tower::util::option_layer;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -40,6 +40,7 @@ use crate::observe::{self, AccessLogOptions};
 use crate::problem::SANITIZED_DETAIL;
 use crate::problem::{AT_CAPACITY_DETAIL, Code, Problem, sanitized_internal_error};
 use crate::request_id;
+use crate::router::HEALTH_PROBE_ROUTES;
 
 // template:begin request-budget:http-request-deadline
 /// The conservative deadline shared with request-scoped dependencies.
@@ -69,7 +70,7 @@ const SHED_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 /// HTTP request-duration histogram name. The composition root passes it with
 /// [`HTTP_REQUESTS_DURATION_BUCKETS`] into the Prometheus recorder.
-pub const HTTP_REQUESTS_DURATION_SECONDS: &str = "axum_http_requests_duration_seconds";
+pub const HTTP_REQUESTS_DURATION_SECONDS: &str = "http_server_request_duration_seconds";
 
 /// Buckets in seconds for [`HTTP_REQUESTS_DURATION_SECONDS`], shaped for an
 /// HTTP API.
@@ -77,18 +78,15 @@ pub const HTTP_REQUESTS_DURATION_BUCKETS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
-pub(crate) const HTTP_REQUESTS_TOTAL: &str = "axum_http_requests_total";
-pub(crate) const HTTP_REQUESTS_PENDING: &str = "axum_http_requests_pending";
+pub(crate) const HTTP_ACTIVE_REQUESTS: &str = "http_server_active_requests";
 
-/// HTTP server metrics, under the names `axum-prometheus` introduced:
-/// `axum_http_requests_total`, `axum_http_requests_duration_seconds`, and
-/// `axum_http_requests_pending`, labelled by `method`, `endpoint` (the matched
-/// route template or `<unmatched>`), and `status` (not on the pending gauge).
-pub const HTTP_METRICS_NAMES: &[&str] = &[
-    HTTP_REQUESTS_TOTAL,
-    HTTP_REQUESTS_DURATION_SECONDS,
-    HTTP_REQUESTS_PENDING,
-];
+/// HTTP server metrics, under the OpenTelemetry HTTP semantic-convention
+/// names as Prometheus renders them: `http_server_request_duration_seconds`,
+/// labelled by `http_request_method`, `http_route` (the matched route template
+/// or `<unmatched>`), and `http_response_status_code`; and
+/// `http_server_active_requests`, labelled by `http_request_method`. The
+/// request count is the histogram's `_count` series.
+pub const HTTP_METRICS_NAMES: &[&str] = &[HTTP_REQUESTS_DURATION_SECONDS, HTTP_ACTIVE_REQUESTS];
 
 /// Counter of requests rejected without running a handler because the
 /// in-flight limit was reached.
@@ -106,6 +104,8 @@ pub struct HardenOptions {
     /// `request_timeout`.
     pub request_timeout: Duration,
     /// Concurrent handler executions before 503; `None` disables shedding.
+    /// The health probe routes are admitted without a permit, so a saturated
+    /// service still answers its platform probes.
     pub max_in_flight: Option<NonZeroU32>,
     /// Re-enable access logging for matched health probe routes.
     pub log_health_probes: bool,
@@ -118,31 +118,27 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         metrics::Unit::Count,
         "Requests rejected without running a handler because the in-flight limit was reached."
     );
-    metrics::describe_counter!(
-        HTTP_REQUESTS_TOTAL,
-        metrics::Unit::Count,
-        "The number of times a HTTP request was processed."
-    );
     metrics::describe_gauge!(
-        HTTP_REQUESTS_PENDING,
+        HTTP_ACTIVE_REQUESTS,
         metrics::Unit::Count,
-        "The number of currently in-flight requests."
+        "Number of active HTTP server requests."
     );
     metrics::describe_histogram!(
         HTTP_REQUESTS_DURATION_SECONDS,
         metrics::Unit::Seconds,
-        "The distribution of HTTP response times."
+        "Duration of HTTP server requests."
     );
-    let in_flight = options
-        .max_in_flight
-        .map(|limit| GlobalConcurrencyLimitLayer::new(limit.get() as usize));
+    // One semaphore for the whole router: `Router::layer` applies the chain
+    // to every route, so a per-layer limit would be a per-route limit.
+    let in_flight = options.max_in_flight.map(|limit| {
+        middleware::from_fn_with_state(Arc::new(Semaphore::new(limit.get() as usize)), admit)
+    });
     // template:begin request-budget:http-request-deadline-mapper-state
     let request_timeout = options.request_timeout;
     // template:end request-budget:http-request-deadline-mapper-state
 
-    // `load_shed` plus `GlobalConcurrencyLimitLayer` reject with 503
-    // instead of queueing. They sit inside `ServiceBuilder` on
-    // `Router::layer` so 404 and 405 take the same chain.
+    // The chain sits inside `ServiceBuilder` on `Router::layer` so 404 and
+    // 405 take it too.
     let chain = ServiceBuilder::new()
         .map_request(request_id::strip_invalid)
         .layer(SetRequestIdLayer::new(
@@ -163,9 +159,8 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
             observe::observe,
         ))
         .layer(OtelInResponseLayer)
-        .layer(HandleErrorLayer::new(middleware_error))
-        .load_shed()
         .layer(option_layer(in_flight))
+        .layer(HandleErrorLayer::new(middleware_error))
         // template:begin request-budget:http-request-deadline-mapper
         .map_request(move |mut request: Request| {
             request
@@ -189,15 +184,33 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
     routes.layer(chain)
 }
 
-/// Map the shedder and timeout errors to problem responses.
-async fn middleware_error(err: BoxError) -> Response {
-    if err.is::<Overloaded>() {
+/// Admit a request while an in-flight permit is free, otherwise shed it with
+/// 503 instead of queueing. The permit is held until the response head is
+/// ready. The health probe routes skip the limit: a saturated service is
+/// busy, not dead, and a shed liveness probe would have the platform restart
+/// it under load. They are matched by route template, so only the probe
+/// handlers are exempt.
+async fn admit(
+    State(permits): State<Arc<Semaphore>>,
+    matched: Option<MatchedPath>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if matched.is_some_and(|route| HEALTH_PROBE_ROUTES.contains(&route.as_str())) {
+        return next.run(request).await;
+    }
+    let Ok(_permit) = permits.try_acquire() else {
         metrics::counter!(SHED_REQUESTS_METRIC).increment(1);
         return Problem::new(Code::ServiceUnavailable)
             .detail(AT_CAPACITY_DETAIL)
             .retry_after(SHED_RETRY_AFTER)
             .into_response();
-    }
+    };
+    next.run(request).await
+}
+
+/// Map the timeout error to a problem response.
+async fn middleware_error(err: BoxError) -> Response {
     if err.is::<Elapsed>() {
         return Problem::new(Code::RequestTimeout)
             .detail("request budget expired before a response could be committed")
@@ -574,6 +587,73 @@ mod tests {
         for holder in holders {
             assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
         }
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "transport fixture exercises the middleware independently of contract finalization"
+    )]
+    async fn probes_are_answered_while_every_in_flight_permit_is_held() {
+        let readiness = health::Readiness::new(
+            Vec::new(),
+            health::RefreshPolicy {
+                interval: Duration::from_secs(1),
+                probe_budget: Duration::from_secs(1),
+                failure_threshold: 1,
+            },
+        );
+        readiness.refresh().await;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let routes = crate::finalize_public(crate::router())
+            .expect("the probe contract is public")
+            .with_state(readiness.reader())
+            .route(
+                "/hold",
+                get({
+                    let started = started.clone();
+                    let gate = gate.clone();
+                    move || async move {
+                        started.notify_one();
+                        gate.notified().await;
+                        "released"
+                    }
+                }),
+            );
+        let mut options = options();
+        options.max_in_flight = NonZeroU32::new(1);
+        let app = harden(routes, &options);
+
+        let holder = tokio::spawn({
+            let app = app.clone();
+            async move { app.oneshot(request(Method::GET, "/hold")).await.unwrap() }
+        });
+        started.notified().await;
+
+        let shed = app
+            .clone()
+            .oneshot(request(Method::GET, "/hold"))
+            .await
+            .unwrap();
+        assert_eq!(shed.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body_json(shed).await["code"], "service_unavailable");
+        for probe in ["/health/live", "/health/ready"] {
+            let response = app
+                .clone()
+                .oneshot(request(Method::GET, probe))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{probe}");
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                "ok",
+                "{probe}"
+            );
+        }
+
+        gate.notify_one();
+        assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
     }
 
     #[tokio::test]
