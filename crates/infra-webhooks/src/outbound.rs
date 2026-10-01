@@ -14,7 +14,7 @@ use std::{
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use infra_jobs::{EnqueueOptions, Enqueued, Job, JobError, JobId, JobKind, Kinds, Policy};
-use infra_outbound_http::{Client, Error as HttpError, Limits};
+use infra_outbound_http::{BuildError, Client, Error as HttpError, Limits};
 use infra_postgres::Tx;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -266,7 +266,7 @@ pub enum OutboundError {
     UnexpectedDuplicate,
     /// Existing fixed-authority client construction failed.
     #[error("outbound webhook client configuration is invalid")]
-    Client(#[source] HttpError),
+    Client(#[source] BuildError),
 }
 
 #[derive(Clone, Copy)]
