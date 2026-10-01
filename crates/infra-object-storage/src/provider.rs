@@ -86,6 +86,9 @@ pub enum ConfigError {
     /// The secret access key is empty.
     #[error("object_storage.secret_access_key is required")]
     SecretAccessKey,
+    /// No operation could be admitted, or more than a semaphore can count.
+    #[error("object_storage.max_concurrency is out of range")]
+    MaxConcurrency,
 }
 
 /// Which uploads name a CRC64NVME checksum for the SDK to compute.

@@ -186,7 +186,20 @@ After a failure every later call returns the same error, so a cut body never
 reads as a clean end. The chunk that completes the object is released only
 after the provider's body has ended and a returned checksum has been
 validated: a reader that stops at the declared length, as an HTTP server
-does, never receives a complete object that failed the check.
+does, never receives a complete object that failed the check. An empty
+object's download has already ended when `get` returns.
+
+A streamed download holds its admission slot for as long as its reader takes.
+The stall bound watches the provider, not the reader, and the HTTP server sets
+no deadline on writing a response body. A client that reads slowly therefore
+keeps the slot, and `max_concurrency` such clients make every other call
+`Busy`. Choose by who reads:
+
+| Reader | Return the object as |
+| --- | --- |
+| A client outside the service, object fits in memory | `get(key).await?.bytes().await?`, then the response: the slot is held only while the provider sends |
+| A client outside the service, larger object | a presigned URL: the client downloads from the store |
+| A caller that reads promptly, such as another service or a proxy that buffers responses | `Body::new(download)` |
 
 ## Failures
 
@@ -237,8 +250,9 @@ A `head` response has no body, so a missing bucket on `head` also reads as
   outcome.
 - `object_storage.max_concurrency` (default `8`, `1` to `512`) admits that
   many calls at once and refuses the excess with `Busy`; there is no queue.
-  A download holds its slot until its body ends or it is dropped. Presigning
-  and the probe take no slot.
+  A download holds its slot until its body ends or it is dropped, so a slow
+  reader of a streamed download keeps it (see Use it from a feature).
+  Presigning and the probe take no slot.
 - `object_storage.max_object_bytes` (default `8 MiB`, at most 4.995 GiB, the
   smallest single-upload limit of the supported providers) bounds a put before
   anything is sent and a get before its body is read. `head` reports the real
@@ -321,13 +335,17 @@ Admission pressure:
 sum(rate(object_storage_operation_duration_seconds_count{outcome="busy"}[5m]))
 ```
 
+Pressure together with long `get` durations points at slow readers of
+streamed downloads.
+
 Each call has one `object_storage` span exported as `S3.<Operation>`
 (`S3.PutObject`, `S3.GetObject`, `S3.HeadObject`, `S3.DeleteObject`,
 `S3.HeadBucket` for the probe, and `S3.PresignGetObject`), the OpenTelemetry
 name for an AWS SDK client span. It carries `otel.kind` `client`,
 `rpc.system` `aws-api`, `rpc.service` `S3`, `rpc.method`,
-`object_storage.outcome`, `error.type`, and `otel.status_code`. `error.type`
-is the provider's error code (`AccessDenied`, `SlowDown`,
+`object_storage.outcome`, `error.type`, `otel.status_code`, and, once the
+store has answered, `aws.request_id` and `aws.extended_request_id`.
+`error.type` is the provider's error code (`AccessDenied`, `SlowDown`,
 `PreconditionFailed`), the HTTP status when there is no code, or a transport
 class (`timeout`, `dispatch`, `response`, `body`, `checksum`, `credentials`).
 
@@ -337,6 +355,14 @@ provider detail, so this event is where an operator reads why a call failed.
 It is a WARN for `unavailable`, `rejected`, `outcome_unknown`, and
 `integrity`, and stays at DEBUG for `not_found`, `already_exists`,
 `too_large`, and `busy`, which answer the caller rather than report a fault.
+
+`aws.request_id` and `aws.extended_request_id` are the store's
+`x-amz-request-id` and `x-amz-id-2` response headers, under their
+OpenTelemetry names. A provider's support asks for them first, so quote them
+from the failure event. They are present once a response arrived, also on a
+download that fails later in its body, and after a read retry they name the
+last attempt. A failure with no response, such as a timeout, has none. A
+value that is not a visible-ASCII token of at most 128 bytes is dropped.
 
 No metric, span, or log from this crate carries a key, bucket, endpoint, URL,
 or credential. The SDK itself logs endpoint parameters, which include the key,
@@ -367,8 +393,8 @@ the feature's business, for example a scheduled delete of expired keys.
 `make test` runs the adapter against an in-process HTTP stub. It needs no
 credentials and no Docker, and it covers admission, the failure mapping,
 one attempt per mutation, read retries, checksum validation, range refusal,
-stream length enforcement,
-presign bounds, and redaction.
+stream length enforcement, an empty download, request identifiers in the
+failure event, presign bounds, and redaction.
 
 The emulator proof runs the client against versitygw from
 `env/docker-compose.yml`:

@@ -3,7 +3,8 @@
 <!-- template:begin object-storage:docs-object-storage-decisions -->
 Stage 10.9 library, provider, and failure decisions, recorded 2026-09-29 and
 amended 2026-10-01 (workload identity, the generic provider, the read attempt
-bound, body types, and failure visibility).
+bound, body types, and failure visibility) and 2026-10-02 (request
+identifiers, empty downloads, and who may read a streamed download).
 [Guide](object-storage.md) owns adoption and observable behavior. This record
 retains the accepted choices and their reopen conditions. The comparison
 behind them, including the Go sibling template's findings, is the stage's
@@ -19,7 +20,7 @@ research synthesis in the template repository
 | `sync_wrapper` 1.0.2 around a streamed upload body | The SDK requires a `Sync` body and axum's request `Body` is not one, so a handler could not stream its request into a put. `SyncWrapper` is what axum and reqwest use for the same bound; a body is polled only through `&mut`. | Already in the lock through axum, tower, and reqwest. |
 | Default SDK features stay off | Default `rustls` selects the legacy hyper 0.14, rustls 0.21, and ring stack: 12 duplicate versions. `sigv4a` serves multi-region access points. | The HTTPS client verifies with `rustls-native-certs` (the system store; on Linux the same roots `rustls-platform-verifier` reads) and turns on rustls `prefer-post-quantum`, a rustls default feature, for the whole binary. Reopen if either becomes observable in a deployment. |
 | `BehaviorVersion::v2026_01_12()` in code | The `behavior-version-latest` feature would let an SDK bump change retry, timeout, and proxy defaults silently. | Moving it is a reviewed change with the version bump. |
-| No multipart and no transfer manager | No consumer exceeds 2 MiB. `aws-sdk-s3-transfer-manager` 0.2.0 is a developer preview that needs default SDK features (+79 packages). Hand-rolled Create/UploadPart/Complete/Abort would own provider differences: R2 requires equal non-final parts and conditions at Create, and Railway has no lifecycle rule to clean abandoned uploads. | `max_object_bytes` is capped at R2's single-upload limit, 4.995 GiB. Reopen when a consumer needs larger objects or the transfer manager reaches 1.0 with default features off. |
+| No multipart and no transfer manager | No consumer exceeds 2 MiB. `aws-sdk-s3-transfer-manager` 0.3.0 is a 0.x release that requires the SDK's default features and `behavior-version-latest` (0.2.0 added 79 lock packages). Hand-rolled Create/UploadPart/Complete/Abort would own provider differences: R2 requires equal non-final parts and conditions at Create, and Railway has no lifecycle rule to clean abandoned uploads. | `max_object_bytes` is capped at R2's single-upload limit, 4.995 GiB. Reopen when a consumer needs larger objects or the transfer manager reaches 1.0 with default features off. |
 | One concrete client, no port trait | The template has no second implementation. A feature that needs a test double or a filesystem backend defines its trait at its own boundary. | Reopen when a second backend is a template requirement. |
 | No listing, range reads, copy, tagging, user metadata, or presigned PUT | No production consumer calls them: pricing-service's `ListObjectsV2` and `GetObject` are called only by its tests, and its HEAD read-back can compare the size with the SHA-256 it keeps in PostgreSQL. A presigned PUT cannot enforce the size limit. | A feature adds the operation to `ObjectStorage` so it shares admission, retries, and observation. |
 
@@ -28,8 +29,8 @@ released 2026-09-25, Apache-2.0, MSRV 1.94.1, about weekly releases.
 `aws-config` 1.12.0, 2026-09-04, Apache-2.0, MSRV 1.94.1 (fetched
 2026-10-01; resolves with `aws-sdk-s3` 1.150.0 without moving a smithy crate).
 `object_store` 0.14.2, 2026-09-15, MIT/Apache-2.0. `opendal` 0.59.3,
-2026-09-22, Apache-2.0. `aws-sdk-s3-transfer-manager` 0.2.0, 2026-07-18,
-developer preview. `rust-s3` 0.37.2, 2026-05-04. `minio` 0.4.0, 2026-04-23.
+2026-09-22, Apache-2.0. `aws-sdk-s3-transfer-manager` 0.3.0, 2026-10-01
+(fetched 2026-10-02). `rust-s3` 0.37.2, 2026-05-04. `minio` 0.4.0, 2026-04-23.
 Every MSRV fits workspace Rust 1.98.
 
 ## Failure semantics
@@ -44,6 +45,8 @@ Every MSRV fits workspace Rust 1.98.
 | A streamed body is held to its declared length | hyper cuts a longer body at `Content-Length` without an error, so a provider that receives no checksum would store a truncated object. | Never. |
 | Reject, do not queue, at `max_concurrency` (default 8) | A hidden queue turns overload into latency. The Go sibling's fixed 4 would shed document-processing's per-request reads. The permit moves into a download, so dropping it releases the slot and the "caller must close" rule disappears. | Measured overload shows a queue would help. |
 | A `Download` is an `http_body::Body` of exactly the object's size and holds back the chunk that completes the object until the provider's body has ended | A feature returns it as a response body without an adapter. hyper stops polling a body at `Content-Length`, so the end, where the SDK validates the checksum, would never be observed: the download would record `cancelled` and a failed check would go unseen after the whole object was sent. | Never. |
+| An empty object's download ends inside `get` | hyper never polls a response body whose exact size is 0, so nothing would observe the end: the get would record `cancelled`. | Never. |
+| A streamed download has no transfer deadline; a reader outside the service gets `bytes()` or a presigned URL | The slot follows the reader's pace, so `max_concurrency` slow clients make every call `Busy`. A deadline on the slot would cut a legitimately slow reader off mid-object, and a timer inside the body cannot fire while the server is not polling it: hyper stops polling once its write buffer is full. Buffering first holds the slot only while the provider sends. | A consumer must stream objects too large to buffer to readers it does not trust: add a transfer deadline enforced outside the body, with its own key. |
 | `operation_timeout` bounds a call to its response headers; stalled-stream protection with a 5 s grace (stated in code: an explicit config would otherwise take the builder's 20 s) bounds a body | A single timer cannot cover a download whose length the operator does not bound in time. | A consumer needs a total transfer deadline. |
 | Not a readiness dependency; no startup I/O; `probe()` is opt-in | A bucket probe during a provider outage would evict every replica. document-processing's worker gates on its bucket and can opt in. | Never as a default. |
 
@@ -74,6 +77,7 @@ Every MSRV fits workspace Rust 1.98.
 | --- | --- | --- |
 | One histogram, `object_storage_operation_duration_seconds{operation, outcome}`; a get is observed when its download ends | Per-outcome counts are the `_count` series (the cache profile's precedent), and body failures are counted. | An operator question the histogram cannot answer. |
 | One span exported as `S3.<Operation>` without key, bucket, endpoint, or URL; `error.type` is the provider code, status, or transport class | Keys can carry business identifiers; the bucket and endpoint are configuration. `Service.Operation` is the OpenTelemetry name for AWS SDK client spans. `rpc.system`, `rpc.service`, and `rpc.method` stay: their replacements are not stable yet, and the convention keeps the current names until they are. | The RPC conventions are marked stable. |
+| The span and the failure event carry `aws.request_id` and `aws.extended_request_id` once a response arrived, kept only as a visible-ASCII token of at most 128 bytes | A provider's support asks for `x-amz-request-id` and `x-amz-id-2` first, and they name no key, bucket, or endpoint. The names are OpenTelemetry's. A store controls the header, so other text is dropped. | |
 | The failure event is a WARN for `unavailable`, `rejected`, `outcome_unknown`, and `integrity`; DEBUG for the rest | The caller's error carries no provider detail by design, so at INFO without tracing nothing said why a call failed (`AccessDenied` or `SignatureDoesNotMatch`). `not_found`, `already_exists`, `too_large`, and `busy` answer the caller, and `busy` would flood under load. | |
 | The subscriber keeps `aws_*` targets at INFO or quieter; a target `log.level` names is exempt with the targets under it | The SDK logs endpoint parameters, which include the key, at DEBUG and whole requests at TRACE. | The SDK stops logging keys. |
 
@@ -88,7 +92,8 @@ content policy, retention, create-only intent, and presign recipients.
 Credential-free proof: unit tests for admission, the key grammar,
 classification, and redaction, plus adapter tests over an in-process HTTP
 stub in `make test` (including the read attempt bound, a non-`Sync` request
-body, the download as a body, and a failed credential load); versitygw v1.8.0 (Apache-2.0, 31 MB, pinned by digest)
+body, the download as a body, an empty download, request identifiers in the
+failure event, and a failed credential load); versitygw v1.8.0 (Apache-2.0, 31 MB, pinned by digest)
 through Compose in the integration job. MinIO is archived upstream with no
 official images, Garage has no conditional writes, S3Mock does not validate
 presigned URLs, and LocalStack requires an account token even in CI. Live
