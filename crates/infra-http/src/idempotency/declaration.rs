@@ -207,9 +207,15 @@ fn one_operation_mut(item: &mut PathItem) -> Option<(&'static str, &mut Operatio
         ("head", item.head.as_mut()),
         ("patch", item.patch.as_mut()),
         ("trace", item.trace.as_mut()),
+        ("query", item.query.as_mut()),
     ]
     .into_iter()
-    .filter_map(|(method, operation)| operation.map(|operation| (method, operation)));
+    .filter_map(|(method, operation)| operation.map(|operation| (method, operation)))
+    .chain(
+        item.additional_operations
+            .values_mut()
+            .map(|operation| ("additional", operation)),
+    );
     let operation = operations.next()?;
     operations.next().is_none().then_some(operation)
 }

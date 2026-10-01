@@ -2508,6 +2508,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "infra-postgres",
+ "metrics",
  "sqlx",
  "thiserror",
  "tokio",

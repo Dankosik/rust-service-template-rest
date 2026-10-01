@@ -166,7 +166,7 @@ contract, and the handlers cannot disagree with it.
 Delivered:
 
 - Code-first generation with `utoipa` and `utoipa-axum` (6.0 and 0.3 since
-  2026-10): the probe
+  2026-10-01, with a byte-identical generated document): the probe
   handlers in `crates/infra-http` carry `#[utoipa::path]` with
   `operationId`, `summary`, explicit public `security: []` where a root bearer
   default exists, and every
