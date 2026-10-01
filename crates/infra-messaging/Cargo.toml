@@ -36,6 +36,8 @@ foldhash = { workspace = true, features = ["std"] }
 futures-util = { workspace = true, features = ["std"] }
 health = { workspace = true }
 metrics = { workspace = true }
+secrecy = { workspace = true }
+opentelemetry = { workspace = true, features = ["trace"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 sha2 = { workspace = true }
@@ -44,7 +46,10 @@ time = { workspace = true, features = ["std", "formatting", "parsing"] }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["std"] }
+tracing-opentelemetry = { workspace = true }
 
 [dev-dependencies]
 base64 = { workspace = true, features = ["std"] }
+opentelemetry_sdk = { workspace = true, features = ["trace"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "net", "io-util"] }
+tracing-subscriber = { workspace = true, features = ["std", "registry"] }

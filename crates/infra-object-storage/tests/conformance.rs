@@ -21,8 +21,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use health::Probe;
 use infra_object_storage::{
-    ContentType, ObjectKey, ObjectStorage, ObjectStorageError, ObjectStorageOptions, Provider,
-    PutOptions,
+    ContentType, CredentialSource, ObjectKey, ObjectStorage, ObjectStorageError,
+    ObjectStorageOptions, Provider, PutOptions,
 };
 use secrecy::{ExposeSecret, SecretString};
 
@@ -57,6 +57,11 @@ impl Target {
                 endpoint: var("ENDPOINT"),
                 region: var("REGION"),
             },
+            "s3_compatible" => Provider::S3Compatible {
+                endpoint: var("ENDPOINT"),
+                region: var("REGION"),
+                path_style: var("PATH_STYLE") == "true",
+            },
             other => panic!("APP__OBJECT_STORAGE__PROVIDER {other:?} is not a live provider"),
         };
         assert_eq!(
@@ -76,8 +81,10 @@ impl Target {
         ObjectStorage::new(ObjectStorageOptions {
             provider: self.provider.clone(),
             bucket: self.bucket.clone(),
-            access_key_id: self.access_key_id.clone(),
-            secret_access_key: self.secret_access_key.clone(),
+            credentials: CredentialSource::AccessKey {
+                access_key_id: self.access_key_id.clone(),
+                secret_access_key: self.secret_access_key.clone(),
+            },
             max_object_bytes: 8 * 1024 * 1024,
             max_concurrency: 4,
             operation_timeout: Duration::from_secs(15),
@@ -117,6 +124,18 @@ impl Target {
                 } else {
                     region.clone()
                 }))
+                .endpoint_url(endpoint),
+            Provider::S3Compatible {
+                endpoint,
+                region,
+                path_style,
+            } => config
+                .region(aws_sdk_s3::config::Region::new(if region.is_empty() {
+                    "us-east-1".to_owned()
+                } else {
+                    region.clone()
+                }))
+                .force_path_style(*path_style)
                 .endpoint_url(endpoint),
         };
         aws_sdk_s3::Client::from_conf(config.build())

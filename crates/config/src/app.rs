@@ -27,6 +27,14 @@ impl BuildInfo {
     }
 }
 
+/// Whether `env` (`app.env`) names a developer environment. Only there does
+/// a section accept its plaintext, unauthenticated, or emulator escape hatch;
+/// any other spelling, a production typo included, is refused them.
+#[must_use]
+pub fn is_local_development(env: &str) -> bool {
+    matches!(env, "local" | "development")
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct AppConfig {

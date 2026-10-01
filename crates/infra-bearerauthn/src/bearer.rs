@@ -1,6 +1,6 @@
 //! Strict RFC 6750 bearer-envelope parsing.
 
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 use crate::Failure;
 
@@ -22,11 +22,16 @@ impl<'a> BearerToken<'a> {
         self.bytes
     }
 
-    /// The exact presented token text, for a verified engine to retain on its
-    /// principal. `valid_token` already restricts these bytes to the RFC 6750
-    /// token alphabet, which is ASCII, so this never loses data.
+    /// The exact presented token text. `valid_token` already restricts these
+    /// bytes to the RFC 6750 token alphabet, which is ASCII, so this never
+    /// loses data.
+    pub(crate) fn as_str(&self) -> Cow<'a, str> {
+        String::from_utf8_lossy(self.bytes)
+    }
+
+    /// The presented token text, for a verified engine to retain on its principal.
     pub(crate) fn access_token(&self) -> secrecy::SecretString {
-        String::from_utf8_lossy(self.bytes).into_owned().into()
+        self.as_str().into_owned().into()
     }
 }
 

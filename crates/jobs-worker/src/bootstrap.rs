@@ -712,11 +712,9 @@ fn messaging_options(
         None
     };
     Ok(MessagingOptions {
+        connection_name: worker_identity(&config.observability.otel.service_name),
         servers: messaging.urls.clone(),
-        credentials: messaging
-            .credentials
-            .as_ref()
-            .map(|value| value.expose_secret().to_owned()),
+        credentials: messaging.credentials.clone(),
         root_ca_path: messaging.root_ca_path.clone(),
         allow_plaintext: messaging.allow_plaintext,
         source_stream,

@@ -78,8 +78,10 @@ build and tests or the initializer itself. Parallel parts together run
 `make template-init-check`, and `scripts/ci/initializer-matrix.py` plans them
 from the same diff: a changed crate, migration, test, or proto path selects
 only the runtime graphs whose profile tuple keeps it (the initializer's own
-removal inventory decides), and any other initializer path selects all. The source part proves the 368 baseline canonical profile
-and harness projections. The 26 existing runtime graphs retain their public
+removal inventory decides), and any other initializer path selects all. The
+Cargo-free `initializer (projections)` job proves the 368 baseline canonical
+profile and harness projections beside the matrix, on every `module_initializer`
+change. The 26 existing runtime graphs retain their public
 initializer, build, test and selected database proof; their numbering and
 baseline command scopes are unchanged.
 
@@ -93,11 +95,12 @@ contract and mounted inert-route process checks. These focused runs do not
 repeat the full database suites.
 
 The parts are the source suites plus seven runtime groups, balanced on the
-measured per-graph minutes of September 2026 and grouped so a part's graphs
-share dependency features: `baseline` (1–12 and the database-free
-representatives), `idempotency`, `jobs`, `jobs-webhooks`, `webhooks`,
-`webhooks-messaging`, and `messaging-oauth` (the three heaviest full graphs,
-49, 53 and 55). The exact graph IDs per part live in `initializer-matrix.py`,
+warm per-graph seconds measured on 2026-10-01 and grouped so a part's graphs
+share dependency features where the balance allows: `baseline` (1–12 and the
+database-free representatives without messaging), `idempotency`, `jobs`,
+`jobs-webhooks`, `webhooks` (with jobs graph 17), `webhooks-messaging` (with
+the messaging-only graphs 47 and 54), and `messaging-oauth` (the three
+heaviest full graphs, 49, 53 and 55). The exact graph IDs per part live in `initializer-matrix.py`,
 which refuses a graph that belongs to no part or to two; the runner records
 each profile tuple, command, result and duration. Initializations within a
 part reuse one absolute Cargo target, and each part keeps its own cache.
@@ -106,7 +109,7 @@ part reuse one absolute Cargo target, and each part keeps its own cache.
 OAuth adds four source projections and runtime graphs 50--53, without another
 CI part or harness cross-product. The baseline part owns 50--52 (OAuth
 alone, with JWT, with introspection); messaging-oauth owns the maximal
-PostgreSQL graph 53. Graph 54 joins the baseline part for the
+PostgreSQL graph 53. Graph 54 joins the webhooks-messaging part for the
 messaging/OAuth seam, and graph 55 joins messaging-oauth for the full
 outbox/OAuth pack. Each runs initialization, locked metadata and compilation
 of retained test targets; the workspace quality gate runs the OAuth behavior
@@ -123,7 +126,7 @@ object storage. None adds a database suite. Seven runtime parts cover 65
 runtime representatives.
 
 A change to projected text alone selects `module_initializer` without the
-runtime surface and runs the Cargo-free `initializer (projections)` job.
+runtime surface and runs only the `initializer (projections)` job.
 Other quality, security, image and database jobs keep their own gates. The
 source-only runner and Make include are removed from derived services, so
 initializer proof cannot recur there. [Initialization validation](template-sync.md#validation-boundary)
@@ -150,7 +153,12 @@ manifest and lockfile, and the `CARGO_*`/`RUST*` environment, and saved only by
 a push to `main` after a successful job. The saved target keeps dependency
 artifacts alone; workspace crates and test binaries rebuild on every checkout
 anyway, and keeping them pushed the repository past its 10 GB cache budget, so
-caches evicted one another and most pull requests started cold.
+caches evicted one another and most pull requests started cold. For the same
+budget the dependencies build without debuginfo (workspace crates keep line
+tables) and the archives are written at zstd level 12. The first save owns a
+key until the lockfile changes, so a save must hold everything its job can
+build: `quality` saves only after a workspace build, and `integration`
+compiles every retained suite before it saves.
 
 [codeql.yml](../.github/workflows/codeql.yml) runs CodeQL for Rust
 (`build-mode: none`) when Rust source or manifests change and for Actions
@@ -282,6 +290,10 @@ job, while every other job finished within 8 minutes.
 | CI builds with `CARGO_PROFILE_DEV_DEBUG=line-tables-only`, and every target cache key carries the level | full debuginfo | the `quality` and initializer caches were 4.2 and 4.1 GB, 8.7 of the repository's 10 GB, so the integration, Go-tool and buildx caches were evicted and one restore took 50–126 s; line tables keep file:line in test backtraces |
 | `make verify` leaves heavy steps and the initializer matrix to CI and records a partial receipt | refusing to run without `ALLOW_HEAVY=1` or `ALLOW_FULL=1` | the refusal led agents to run the full matrix on a workstation, 40 minutes and more with several GB of temporary targets, while CI runs the same gates in parallel |
 | No registry-only cache restore in `security` and CodeQL | the restores that were there | a cache version includes its path list, so restoring fewer paths than `quality` saves never hit (the CodeQL run of 2026-09-23 reported "Cache not found"); the crate downloads cost seconds |
+| Dependencies build without debuginfo in CI (`[profile.dev.package."*"] debug = false`, written to the runner's Cargo configuration from `CARGO_DEPENDENCY_DEBUG`), and caches are archived at `ZSTD_CLEVEL=12` | line tables for every crate at the default zstd level; zstd level 16 | after the cache pruning the caches still held 11.2 GB against the 10 GB budget (initializer 9.5 GB), so the BuildKit, CodeQL and `quality` caches kept being evicted; without dependency debuginfo and at level 16 the initializer caches measured 5.5 GB (*verified*, 2026-10-01), and a cold part builds faster, while a failing test still reports file:line for workspace frames. Level 16 cost each saving job 2–6 minutes; level 12 costs 35–85 s for archives about 6% larger, paid only by the push to `main` that first saves a key |
+| A cache is saved only by a run that built everything its job can build: `quality` after a workspace build, `integration` after compiling every retained suite | saving after any successful job | the first save owns the key. The push that merged the cache change ran only the validation steps and left a 104 MB `quality` cache, so every Rust pull request compiled the workspace cold (360 s against 100 s warm); a push that selected three of the four integration suites left the database proof compiling for 158–194 s against 72 s |
+| The canonical projections run in their own Cargo-free job on every `module_initializer` change | a second stage of the `source` part | the projections took 110–150 s after the 150–330 s source suites in one job; side by side the `source` part takes 190 s warm instead of 310 s |
+| The four validation self-tests run under `make -j4` | one after another | independent fixtures; 88 s became 48 s |
 | CodeQL Rust points the extractor's `cargo_target_dir` at a persistent target, cached with the registry under its own key | the default scratch directory per run | loading the workspace (crate downloads, build scripts, proc-macros, all features on) took about 60 s of a 7-minute analysis; codeql-action 4.38.1 offers neither dependency caching nor overlay analysis for Rust, and the queries (about 3 minutes) and database finalization (about 40 s) are fixed cost on a 4-vCPU runner |
 
 ### Runtime image
@@ -432,6 +444,12 @@ The initializer does not create linked Railway inputs or deployment resources.
     a target cache only after the step that fills it; otherwise a push to
     `main` that ran only the OpenAPI, migration, or validation steps lets a
     partial target own the key until `Cargo.lock` changes.
+    `Swatinem/rust-cache` evaluates `save-if` when the job starts, so the
+    condition names the surfaces that select the filling step.
+19. Cargo reads no environment variable for `[profile.dev.package."*"]`, and
+    `Swatinem/rust-cache` does not hash the runner's Cargo configuration. A
+    setting written there needs a `CARGO_*` variable beside it, or the caches
+    keep artifacts built at the old setting.
 
 ### Temporary OpenSSL runtime update
 

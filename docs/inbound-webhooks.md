@@ -30,10 +30,11 @@ to 24--64 bytes. A 32-byte random key is an example. Endpoint/key scope
 prevents verification with another endpoint's key. The processing worker needs
 the non-secret binding only, not the verification keys.
 
-Endpoint IDs are nonempty and NUL-free; no slash, query, fragment, or slug
-restriction is imposed on trusted configuration. The router percent-encodes an
-ID as one path segment (`partner/a?#` becomes `partner%2Fa%3F%23`) and resolves
-the decoded identity for binding and verification.
+Endpoint IDs in a file and key references follow the
+[file-key rule](configuration-source-policy.md#source-of-truth): lowercase
+letters, digits, `_`, and `-`, without `__` or a trailing `_`, so an `APP__`
+variable addresses the same entry. The router percent-encodes an ID as one
+path segment and resolves the decoded identity for binding and verification.
 
 Rotate by adding a new immutable reference, switching active/predecessor
 references, retaining old values while old work needs them, then restarting.
