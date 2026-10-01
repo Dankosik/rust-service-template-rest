@@ -130,8 +130,8 @@ rustls = { version = "0.23.45", default-features = false }
 
 # API contract (docs/architecture/http.md). The document is derived from the
 # handlers and committed as api/openapi/service.yaml.
-utoipa = { version = "5.5.0", default-features = false }
-utoipa-axum = { version = "0.2.0", default-features = false }
+utoipa = { version = "6.0.0", default-features = false }
+utoipa-axum = { version = "0.3.0", default-features = false }
 
 # Configuration (docs/configuration-source-policy.md)
 config = { version = "0.15.25", default-features = false }
