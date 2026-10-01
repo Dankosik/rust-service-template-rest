@@ -304,9 +304,7 @@ const fn transport_reason(error: &HttpError) -> &'static str {
         HttpError::Timeout => "timeout",
         HttpError::ResponseBodyTooLarge => "response_too_large",
         HttpError::Transport { .. } => "transport",
-        HttpError::InvalidConfiguration
-        | HttpError::InvalidTarget
-        | HttpError::ClientBuild { .. } => "client",
+        HttpError::InvalidTarget => "client",
     }
 }
 
