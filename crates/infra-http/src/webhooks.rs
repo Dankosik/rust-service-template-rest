@@ -8,11 +8,9 @@
 use std::fmt;
 use std::time::SystemTime;
 
-use axum::Router;
-use axum::extract::{Extension, Request};
+use axum::extract::{FromRef, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use health::ReadinessReader;
 use http_body_util::{BodyExt, Limited};
 use infra_webhooks::inbound::{ReceiptOutcome, ReceiveError, Receiver};
 use infra_webhooks::protocol::MAX_BODY_BYTES;
@@ -27,7 +25,7 @@ use crate::problem::{Code, Problem};
 /// Bounded result labels for webhook ingress telemetry.
 pub const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
 
-/// Route state supplied by the composition root through an Axum extension.
+/// Route state supplied by the composition root.
 ///
 /// The route is retained when the inbound profile is selected even if no
 /// endpoint is configured.  That inert state deliberately answers unknown
@@ -63,23 +61,18 @@ impl WebhookState {
     }
 }
 
-/// The public webhook route with its annotated contract.  It shares the
-/// service's readiness state; the webhook receiver is a route extension so
-/// existing probe state and the hardened router stay unchanged.
+/// The public webhook route with its annotated contract. The state is any
+/// type that hands out a [`WebhookState`]: the composition root keeps the
+/// receiver in its application state, and a route mounted without one does
+/// not compile.
 #[must_use]
-pub fn router() -> OpenApiRouter<ReadinessReader> {
+pub fn router<S>() -> OpenApiRouter<S>
+where
+    WebhookState: FromRef<S>,
+    S: Clone + Send + Sync + 'static,
+{
     OpenApiRouter::with_openapi(crate::problem::responses::ProblemComponents::openapi())
         .routes(routes!(receive))
-}
-
-/// Attach the composition-root receiver state after contract finalization.
-/// This keeps the existing readiness state as the router's only `State`
-/// value, while avoiding a parallel router or a transport-to-root dependency.
-pub fn with_webhook_state(
-    router: Router<ReadinessReader>,
-    state: WebhookState,
-) -> Router<ReadinessReader> {
-    router.layer(Extension(state))
 }
 
 /// Verify and atomically retain one inbound Standard Webhooks delivery.
@@ -109,7 +102,7 @@ pub fn with_webhook_state(
 )]
 async fn receive(
     Path(endpoint_id): Path<String>,
-    Extension(state): Extension<WebhookState>,
+    State(state): State<WebhookState>,
     request: Request,
 ) -> Response {
     let Some(receiver) = state.receiver.as_ref() else {
@@ -155,10 +148,8 @@ fn record_outcome(outcome: &'static str) {
 #[cfg(test)]
 mod tests {
     use axum::body::Body;
-    use axum::extract::Extension;
     use axum::http::header::CONTENT_TYPE;
     use axum::http::{Request, StatusCode};
-    use health::{Readiness, RefreshPolicy};
     use http_body_util::BodyExt;
     use serde_json::Value;
     use tower::ServiceExt;
@@ -167,19 +158,9 @@ mod tests {
 
     #[tokio::test]
     async fn inert_receiver_returns_a_problem_before_reading_or_authenticating_the_body() {
-        let readiness = Readiness::new(
-            Vec::new(),
-            RefreshPolicy {
-                interval: std::time::Duration::from_secs(1),
-                probe_budget: std::time::Duration::from_secs(1),
-                failure_threshold: 1,
-            },
-        );
-        readiness.refresh().await;
         let app = crate::finalize_public(router())
             .expect("the webhook operation is explicitly public")
-            .with_state(readiness.reader())
-            .layer(Extension(WebhookState::inert()));
+            .with_state(WebhookState::inert());
         let response = app
             .oneshot(
                 Request::post("/webhooks/unknown")
@@ -208,18 +189,9 @@ mod tests {
 
     #[tokio::test]
     async fn an_undecodable_endpoint_id_is_a_problem() {
-        let readiness = Readiness::new(
-            Vec::new(),
-            RefreshPolicy {
-                interval: std::time::Duration::from_secs(1),
-                probe_budget: std::time::Duration::from_secs(1),
-                failure_threshold: 1,
-            },
-        );
         let app = crate::finalize_public(router())
             .expect("the webhook operation is explicitly public")
-            .with_state(readiness.reader())
-            .layer(Extension(WebhookState::inert()));
+            .with_state(WebhookState::inert());
         let response = app
             .oneshot(
                 Request::post("/webhooks/%FF")

@@ -22,9 +22,9 @@ use infra_postgres::{Closed, PgPool};
 // template:end postgres:shutdown-imports
 use infra_telemetry::{ProviderShutdown, TracerProviderHandle};
 use service_config::HttpConfig;
+use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 
 /// Ceilings for the stages after the HTTP drain. They are process
 /// structure, not configuration, so they live here.
@@ -155,7 +155,7 @@ impl Signals {
 #[derive(Default)]
 pub(crate) struct Dependencies {
     // template:begin postgres:shutdown-dependencies-postgres-field
-    /// HTTP connection tasks are not in the tracker; `close` waits for any
+    /// HTTP connection tasks are not in the background set; `close` waits for any
     /// pooled connections they still hold. Work that outlives close is
     /// dropped by `runtime.shutdown_timeout`.
     pub(crate) postgres: Option<PgPool>,
@@ -236,11 +236,11 @@ pub(crate) struct Serving {
 pub(crate) struct Plan<'a> {
     pub(crate) http_config: &'a HttpConfig,
     pub(crate) signals: &'a mut Signals,
-    /// `None` when startup failed or a stop signal ended it before the
-    /// listeners were admitted: teardown then skips the listener stages.
+    /// `None` when startup failed or a stop signal ended it: teardown then
+    /// skips the listener stages.
     pub(crate) serving: Option<Serving>,
     pub(crate) cancel: CancellationToken,
-    pub(crate) tracker: TaskTracker,
+    pub(crate) background: JoinSet<()>,
     pub(crate) dependencies: Dependencies,
     pub(crate) tracer_provider: TracerProviderHandle,
 }
@@ -251,7 +251,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         signals,
         serving,
         cancel,
-        tracker,
+        mut background,
         dependencies,
         tracer_provider,
     } = plan;
@@ -264,13 +264,18 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     };
 
     cancel.cancel();
-    tracker.close();
-    let joined = tokio::time::timeout(budget.remaining(BACKGROUND_JOIN), tracker.wait())
-        .await
-        .is_ok();
+    // A task that panicked is joined like one that returned; the wait for a
+    // stop signal already reported it.
+    let joined = tokio::time::timeout(budget.remaining(BACKGROUND_JOIN), async {
+        while background.join_next().await.is_some() {}
+    })
+    .await
+    .is_ok();
     if joined {
         tracing::info!("background_joined");
     } else {
+        // Dependencies close next: a task still running must not keep them.
+        background.abort_all();
         tracing::warn!("background tasks outlived their join budget");
     }
 
@@ -339,7 +344,7 @@ async fn stop_serving(
             Ok(Drained::TimedOut {
                 remaining_connections: remaining,
             }) => {
-                // Remaining HTTP connection tasks are not in TaskTracker. The
+                // Remaining HTTP connection tasks are not in the background set. The
                 // next wait for pooled connections they still hold is
                 // `pool.close`; `runtime.shutdown_timeout` is the last drop.
                 tracing::warn!(

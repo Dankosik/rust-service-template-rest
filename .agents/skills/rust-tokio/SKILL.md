@@ -7,7 +7,7 @@ description: "Ownership. Use when Rust service tasks, select arms, locks across 
 
 **Ownership.** For the affected work, identify who admits it, observes its failure, requests cancellation, and waits for completion. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
 
-Background work spawns through the task tracker in bootstrap with a child of the root cancellation token, and the shutdown sequence cancels, closes the tracker, and waits under the background-join budget. A bare spawn whose handle is dropped has no owner: its panic is invisible and its completion unprovable. Use a JoinSet when results must be collected and the tracker for fire-and-forget work under a lifecycle. Cancelling a parent token cancels its children, never the reverse.
+Background work spawns in bootstrap with a child of the root cancellation token and runs until that token is cancelled; the shutdown sequence cancels it and joins it under the background-join budget. The service keeps its tasks in one JoinSet so that a task ending early, a panic included, stops the service; the worker keeps a task tracker beside its engine failure channels. A bare spawn whose handle is dropped has no owner: its panic is invisible and its completion unprovable. Cancelling a parent token cancels its children, never the reverse.
 
 A select drops the losing futures, so only cancellation-safe futures may lose without corrupting state: channel receives, sleeps, watch changes, and cancellation waits are safe; a partially completed read or a send on a bounded channel is not. Use biased ordering when arm priority matters.
 

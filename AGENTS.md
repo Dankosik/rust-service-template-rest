@@ -1,7 +1,7 @@
 # AGENTS.md
 
-OpenAPI-first Rust service with safe runtime defaults, optional profiles,
-observability, agent workflows, and CI. Service identity, supported profiles,
+Rust service with a code-first OpenAPI contract, safe runtime defaults,
+optional profiles, observability, agent workflows, and CI. Service identity, supported profiles,
 and delivery policy remain local service decisions.
 
 Own the accepted outcome through the applicable workflow, review, repair, and

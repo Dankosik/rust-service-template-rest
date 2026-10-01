@@ -495,7 +495,7 @@ def _assert_introspection_cache_output(initializer, nodes: dict[str, Node], auth
             rb"\bpub\s+struct\s+IntrospectionCacheOptions\b",
             rb"\bpub\s+cache\s*:\s*Option<IntrospectionCacheOptions>",
         ),
-        "crates/service/src/bootstrap/mod.rs": (rb"\bIntrospectionCacheOptions\b",),
+        "crates/service/src/bootstrap/authn.rs": (rb"\bIntrospectionCacheOptions\b",),
     }
     for relative, patterns in surfaces.items():
         node = nodes.get(relative)

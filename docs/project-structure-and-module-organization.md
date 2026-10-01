@@ -13,6 +13,7 @@ Do not create a crate, module, or directory before its first real artifact.
 | Concrete provider or transport adapters | The selected `crates/infra-<provider>/` owner |
 | Process composition and lifecycle | `crates/service/src/bootstrap/` |
 | The one route tree and the API document identity | `crates/service/src/api.rs` |
+| The state the routes share, one field per feature state | `crates/service/src/state.rs` |
 | A second binary that shares the service's composition | `crates/service/src/bin/<name>.rs` (`openapi` is one) |
 | A binary with its own lifecycle | Its own crate, introduced with that lifecycle |
 | Client-visible REST contract | `#[utoipa::path]` and schema derives in the code; `api/openapi/service.yaml` is the generated, committed form |
@@ -136,7 +137,8 @@ the existing service test owners.
 4. Is it a configuration key? The section file in `crates/config/src/`;
    the reason a value was chosen sits beside the rule that enforces it.
 5. Does it compose or tear down? `bootstrap`: a new background task joins the
-   task tracker with a child cancellation token; a new dependency joins
+   background task set with a child cancellation token and runs until that
+   token is cancelled; a new dependency joins
    admission, the readiness refresher, and the `DEPENDENCY_CLOSE` stage.
 6. Is it a check? A make target in `make/template.mk` (portable) or
    `make/service.mk` (service-owned), backed by a script in `scripts/ci/`

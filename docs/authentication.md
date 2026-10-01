@@ -160,8 +160,8 @@ unavailable after a failed one. One process-owned fetch has its own three-second
 request may be cancelled by the outer HTTP timer without cancelling that work. A
 successful refresh atomically replaces keys, while a failed refresh preserves
 the last usable snapshot. Refresh is not immediate revocation and does not add
-a readiness probe. Bootstrap cancels and joins the refresh task through the
-existing background tracker.
+a readiness probe. Bootstrap cancels and joins the refresh task with its
+other background tasks, and stops the service if the task ends on its own.
 
 Each admitted key is parsed once into an aws-lc `ParsedPublicKey` per
 algorithm it serves, and a token's signature is checked against those keys

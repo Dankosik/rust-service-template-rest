@@ -2,7 +2,7 @@
 //!
 //! A test-only operation is composed exactly as the adopter guide's feature
 //! path. Its handler takes the `Idempotency` extractor, the verified
-//! principal, its `async-trait` port through `Extension`, and the JSON input;
+//! principal, its `async-trait` port through `State`, and the JSON input;
 //! it authorizes every attempt before the seam and runs its work through
 //! `Idempotency::execute`, where the port's adapter writes through
 //! `infra_postgres::connection`. `Composer::route` composes it with
@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Bytes;
-use axum::extract::Path;
+use axum::extract::{FromRef, Path, State};
 use axum::http::header::{
     CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LANGUAGE, ETAG, LAST_MODIFIED, LOCATION,
     RETRY_AFTER, WWW_AUTHENTICATE, X_CONTENT_TYPE_OPTIONS,
@@ -214,7 +214,7 @@ impl CreateWidgets for SqlWidgets {
 async fn create_widget(
     idempotency: Idempotency,
     principal: VerifiedPrincipal,
-    Extension(widgets): Extension<Arc<dyn CreateWidgets>>,
+    State(widgets): State<Arc<dyn CreateWidgets>>,
     Json(input): Json<NewWidget>,
 ) -> Response {
     // The route's declared `widgets:write` scope is checked by the final
@@ -257,7 +257,7 @@ async fn replace_widget(
     Path(_id): Path<i64>,
     idempotency: Idempotency,
     principal: VerifiedPrincipal,
-    Extension(widgets): Extension<Arc<dyn CreateWidgets>>,
+    State(widgets): State<Arc<dyn CreateWidgets>>,
     Json(input): Json<NewWidget>,
 ) -> Response {
     if !may_create(&principal) {
@@ -539,7 +539,27 @@ struct Mounted {
     store_pool: PgPool,
 }
 
-fn widget_contract(composer: &mut Composer) -> OpenApiRouter<health::ReadinessReader> {
+/// The mounted state, shaped like the service's `AppState`: the readiness
+/// reader the probes take and the feature's own port.
+#[derive(Clone)]
+struct WidgetState {
+    readiness: health::ReadinessReader,
+    widgets: Arc<dyn CreateWidgets>,
+}
+
+impl FromRef<WidgetState> for health::ReadinessReader {
+    fn from_ref(state: &WidgetState) -> Self {
+        state.readiness.clone()
+    }
+}
+
+impl FromRef<WidgetState> for Arc<dyn CreateWidgets> {
+    fn from_ref(state: &WidgetState) -> Self {
+        Arc::clone(&state.widgets)
+    }
+}
+
+fn widget_contract(composer: &mut Composer) -> OpenApiRouter<WidgetState> {
     // As `service::api::contract` assembles it: the transport router
     // registers the shared problem responses the family references (the
     // 403 among them must resolve), and the composer adds its own.
@@ -600,9 +620,10 @@ impl Mounted {
             .nest(PRIMARY_PREFIX, routes.clone())
             .nest(SECONDARY_PREFIX, routes);
         let app = harden(
-            mounted
-                .layer(Extension(widgets))
-                .with_state(readiness_reader()),
+            mounted.with_state(WidgetState {
+                readiness: readiness_reader(),
+                widgets,
+            }),
             &HardenOptions {
                 max_body_bytes: MAX_BODY_BYTES,
                 request_timeout: budget,

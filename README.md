@@ -1,6 +1,6 @@
 # rust-service-template-rest
 
-OpenAPI-first Rust HTTP service on Tokio and axum.
+Rust HTTP service on Tokio and axum with a code-first OpenAPI contract.
 
 Repository: https://github.com/Dankosik/rust-service-template-rest
 
