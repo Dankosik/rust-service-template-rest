@@ -4,7 +4,9 @@
 //! shape, serialization, TTL policy, and invalidation. A miss returns `Ok(None)`;
 //! an outage or timeout returns `Err(Unavailable)`. The caller chooses how to
 //! degrade; this crate does not gate readiness.
-//! Standalone TCP only — no Sentinel, Cluster, or Unix socket.
+//! Standalone TCP only — no Sentinel, Cluster, or Unix socket. The connection
+//! always speaks RESP3 (`HELLO 3`), so the server must be Redis-compatible at
+//! 6.0 or later.
 //!
 //! Each namespace stores keys as `{namespace}:{key}` so two features sharing
 //! one server do not collide. The namespace name is also the bounded `cache`
@@ -129,14 +131,18 @@ pub struct Cache {
 
 /// Shared server identity and the replaceable connection manager.
 ///
-/// redis 1.7.1 reconnects a `ConnectionManager` only after an I/O error. Two
-/// failures leave it failing without dialing again: setup that fails without
-/// an I/O error (AUTH refused while a failover is saturating the server, a
-/// parse error), and `READONLY` from a primary demoted by failover. Replacing
-/// it from the retained client is the reconnect the manager does not perform.
-/// go-redis closes such connections for the same reason (go-redis issue
-/// #790). Replacement happens at most once per [`MAX_DELAY`], so a wrong
-/// password costs one reconnect chain per interval rather than one per call.
+/// redis 1.7.1 reconnects a `ConnectionManager` after an I/O error and after
+/// the few kinds it calls unrecoverable. Other failures leave it failing
+/// without dialing again. A refused `HELLO` (`WRONGPASS`, `NOAUTH`, a full
+/// client table while a failover is saturating the server) is a plain server
+/// error, which the manager stores and returns forever. After `READONLY`
+/// from a primary demoted by failover, the manager keeps writing to that
+/// replica. Replacing the manager from the retained client is the reconnect
+/// it does not perform.
+/// go-redis closes a `READONLY` connection for the same reason (go-redis
+/// issue #790). Replacement happens at most once per [`MAX_DELAY`], so a
+/// failing server costs one reconnect chain per interval rather than one per
+/// call.
 struct Link {
     server: ServerIdentity,
     client: redis::Client,
@@ -189,15 +195,15 @@ impl Link {
     }
 }
 
-/// Errors after which redis 1.7.1 keeps answering from the same manager.
+/// Errors after which redis 1.7.1 may keep answering from the same manager.
 ///
-/// An I/O error is the manager's own reconnect path. Any other unrecoverable
-/// error during setup is stored and returned forever. `READONLY` is not
-/// unrecoverable to redis, so standalone mode would keep writing to the
-/// demoted primary.
+/// An I/O error is the manager's own reconnect path. A caller cannot tell a
+/// stored setup failure from a reply to its own command: both arrive as the
+/// same server error. Every other error therefore replaces the manager,
+/// including a per-command reply such as `OOM`. That is accepted because a
+/// replacement only makes the next call dial again, at the bounded rate.
 fn leaves_manager_stuck(error: &redis::RedisError) -> bool {
-    let readonly = error.kind() == redis::ErrorKind::Server(redis::ServerErrorKind::ReadOnly);
-    readonly || (!error.is_io_error() && error.is_unrecoverable_error())
+    !error.is_io_error()
 }
 
 impl Cache {
@@ -228,7 +234,15 @@ impl Cache {
             return Err(CacheError::UnauthenticatedRefused);
         }
         let root_cert = root_ca_path.as_deref().map(read_root_ca).transpose()?;
-        let info = info.set_tcp_settings(tcp_settings());
+        // RESP3 whatever the DSN asks: only then does the manager reconnect
+        // when the socket closes instead of failing the next command first.
+        let settings = info
+            .redis_settings()
+            .clone()
+            .set_protocol(redis::ProtocolVersion::RESP3);
+        let info = info
+            .set_redis_settings(settings)
+            .set_tcp_settings(tcp_settings());
         if server.tls {
             install_tls_provider();
         }

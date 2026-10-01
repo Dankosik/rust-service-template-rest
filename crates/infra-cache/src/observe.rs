@@ -25,8 +25,11 @@ pub(crate) enum Operation {
 }
 
 impl Operation {
-    // Keep in sync with the variants: their dense discriminants index Histograms.
-    const COUNT: usize = 3;
+    /// Variant count. The match is exhaustive, so adding a variant stops the
+    /// build here until the count that sizes `Histograms` is updated.
+    const COUNT: usize = match Self::Get {
+        Self::Get | Self::Set | Self::Delete => 3,
+    };
 
     /// The `operation` metric label.
     fn label(self) -> &'static str {
@@ -37,7 +40,8 @@ impl Operation {
         }
     }
 
-    /// The Redis command, recorded as `db.operation.name`.
+    /// The Redis command, recorded as `db.operation.name` and as the exported
+    /// span name.
     fn command(self) -> &'static str {
         match self {
             Self::Get => "GET",
@@ -59,8 +63,11 @@ pub(crate) enum Outcome {
 }
 
 impl Outcome {
-    // Keep in sync with the variants: their dense discriminants index Histograms.
-    const COUNT: usize = 6;
+    /// Variant count. The match is exhaustive, so adding a variant stops the
+    /// build here until the count that sizes `Histograms` is updated.
+    const COUNT: usize = match Self::Hit {
+        Self::Hit | Self::Miss | Self::Ok | Self::Timeout | Self::Error | Self::Cancelled => 6,
+    };
 
     fn label(self) -> &'static str {
         match self {
@@ -157,6 +164,7 @@ impl<'a> OperationGuard<'a> {
     ) -> Self {
         let span = tracing::info_span!(
             "cache",
+            otel.name = operation.command(),
             otel.kind = "client",
             db.system.name = "redis",
             db.operation.name = operation.command(),
@@ -227,6 +235,10 @@ pub(crate) fn describe() {
 pub(crate) fn error_type(error: &redis::RedisError) -> &'static str {
     if error.is_timeout() {
         return "timeout";
+    }
+    // RESP3 authenticates inside `HELLO`, whose refusal is a plain server error.
+    if matches!(error.code(), Some("WRONGPASS" | "NOAUTH")) {
+        return "auth";
     }
     match error.kind() {
         redis::ErrorKind::Io => "io",
