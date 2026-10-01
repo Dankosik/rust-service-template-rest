@@ -44,6 +44,10 @@ required unless `allow_unauthenticated` is set. TLS uses native roots, or the
 PEM file at `root_ca_path` when that path is set. A CA path on a plaintext
 scheme is refused. The `#insecure` fragment is refused.
 
+The connection always speaks RESP3: the client opens with `HELLO 3` and
+authenticates inside it, whatever `protocol=` the DSN carries. A server or
+proxy without `HELLO` (Redis before 6.0) is not supported.
+
 `allow_plaintext` and `allow_unauthenticated` are accepted only when `app.env`
 is `local` or `development`. `command_timeout` uses a human duration, in a file
 or in `APP__CACHE__COMMAND_TIMEOUT`. Its default is `100ms`. The inclusive
@@ -80,6 +84,11 @@ operation that cannot run without the cache maps `Unavailable` to HTTP 503 in
 that handler. The adapter does not choose the
 status.
 
+The adapter does not coalesce concurrent misses. When a load is expensive and
+many requests can miss one key at once, coalesce it in the feature, for
+example with `moka::future::Cache::try_get_with` around the cache read and
+the load.
+
 ## Failure and budgets
 
 A miss and an outage are degradation, not a failed process. Every `get`,
@@ -104,16 +113,23 @@ TCP nodelay is on. Keepalive is 30 s, then 10 s, with 3 retries where the
 platform supports them. On Linux, `user_timeout` is 10 s so a half-open
 connection is detected and reconnected.
 
+On RESP3 the client notices a closed socket at once and reconnects in the
+background, so an idle connection the server or a load balancer dropped is
+back before the next call instead of failing it.
+
 redis 1.7.1 reconnects only after an I/O error. A connection whose setup
-fails otherwise, for example `AUTH` refused while a failover saturates the
-server, would stay failed until the process restarts. The cache replaces that
-connection from the retained client, at most once per 2 s, so it recovers
-when the server accepts it again. A `READONLY` reply (a demoted primary after
-a failover) replaces the connection the same way, at most once per 2 s. The
-first lazy connection, and a manager the cache replaced, advance only while a
-call is waiting on it; the manager's own reconnect after an I/O error runs in
-the background. With sparse traffic, recovery can take a few calls. A command
-timeout does not by itself reconnect.
+fails otherwise, for example `HELLO` refused with `WRONGPASS` or a full
+client table while a failover saturates the server, would stay failed until
+the process restarts. A `READONLY` reply (a demoted primary after a failover)
+would keep writing to that replica. The cache cannot tell a stored setup
+failure from a reply to one command, so after any error that is not an I/O
+error it replaces the connection from the retained client, at most once per
+2 s. A per-command server error such as `OOM` therefore also costs one new
+connection per 2 s. The first lazy connection, and a manager the cache
+replaced, advance only while a call is waiting on it; the manager's own
+reconnect after an I/O error or a closed socket runs in the background. With
+sparse traffic, recovery from a replaced connection can take a few calls. A
+command timeout does not by itself reconnect.
 
 ## Readiness and shutdown
 
@@ -154,15 +170,17 @@ Hit ratio:
 sum(rate(cache_operation_duration_seconds_count{outcome="hit"}[5m])) / sum(rate(cache_operation_duration_seconds_count{operation="get"}[5m]))
 ```
 
-The client span is `cache`, with `otel.kind` `client`, `db.system.name`
-`redis`, `db.operation.name` `GET`, `SET`, or `DEL`, plus `cache.name`,
+The client span is `cache`, exported under the name `GET`, `SET`, or `DEL`
+(`otel.name`), with `otel.kind` `client`, `db.system.name` `redis`,
+`db.operation.name` with the same command, plus `cache.name`,
 `server.address`, `server.port`, `cache.outcome`, `error.type`, and
 `otel.status_code`. On error or timeout one debug event
 `cache_operation_failed` carries `cache.name`, `cache.operation`, and
 `error.type`; it is not a warning because an outage would log it at the
 request rate. Alert on the `error` and `timeout` outcomes of the histogram
 instead. `error.type` is `timeout`, `io`, `auth`, `response`, `parse`, or
-`other`; a TLS handshake failure surfaces as `io`. Metrics, spans, and logs never carry keys, values, the DSN, or raw server text. `CacheError` Display follows the same
+`other`; a TLS handshake failure surfaces as `io`, and a `HELLO` refused
+with `WRONGPASS` or `NOAUTH` as `auth`. Metrics, spans, and logs never carry keys, values, the DSN, or raw server text. `CacheError` Display follows the same
 rule.
 
 ## Operate the server
@@ -170,8 +188,9 @@ rule.
 The tested server is Valkey 9.1.2
 (`valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11`).
 Redis 7.2 and later is compatible for the command subset the client uses:
-`GET`, `SET` with `PX`, `DEL`, and `PING`, plus `HELLO`, `AUTH`, and `SELECT`
-by the client. Topology is standalone TCP only.
+`GET`, `SET` with `PX`, `DEL`, and `PING`, plus `HELLO 3` (with `AUTH`
+inside it), `CLIENT SETINFO`, and `SELECT` by the client. Topology is
+standalone TCP only.
 
 Set `maxmemory` and an eviction policy, such as `allkeys-lru`. Every entry
 carries a TTL, so `volatile-lru` also works on a server this profile does not
