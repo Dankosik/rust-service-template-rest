@@ -11,7 +11,8 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use url::Url;
 
-use crate::de::{blank_as_none, blank_secret_as_none};
+use crate::app::is_local_development;
+use crate::de::{VALUE_FREE, blank_as_none, blank_secret_as_none};
 use crate::validate::{ValidationError, int_range, non_empty};
 
 const DELIVERY_OVERHEAD_BYTES: u64 = 8 * 1024;
@@ -22,6 +23,7 @@ const MAX_RESIDENT_DELIVERY_BYTES: u64 = 64 * 1024 * 1024;
 #[serde(deny_unknown_fields, default)]
 pub struct MessagingConfig {
     /// NATS server URLs. An empty list keeps messaging inactive in the API.
+    #[serde(deserialize_with = "url_list")]
     pub urls: Vec<String>,
     /// Inline NATS credentials. This environment-only value is redacted.
     #[serde(default, deserialize_with = "blank_secret_as_none")]
@@ -239,8 +241,28 @@ fn required<'a>(
     value.ok_or_else(|| ValidationError::new(key, format!("is required for {requirement}")))
 }
 
-fn is_local_development(app_env: &str) -> bool {
-    matches!(app_env, "local" | "development")
+/// A TOML list, or one comma-separated `APP__MESSAGING__URLS` value. Each
+/// part keeps its exact bytes; validation rejects an empty one.
+fn url_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Input {
+        Text(String),
+        List(Vec<String>),
+    }
+
+    let input = Input::deserialize(deserializer).map_err(|_| {
+        serde::de::Error::custom(format_args!(
+            "{VALUE_FREE}must be a list of strings or a comma-separated string"
+        ))
+    })?;
+    Ok(match input {
+        Input::Text(value) => value.split(',').map(ToOwned::to_owned).collect(),
+        Input::List(urls) => urls,
+    })
 }
 
 #[cfg(test)]
