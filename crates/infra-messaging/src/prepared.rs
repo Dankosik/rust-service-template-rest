@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 use bytes::Bytes;
 use domain_events::{Event, EventPayload};
+use serde::Serialize;
 use time::OffsetDateTime;
 
 /// Serialized, routed event intent. Retrying never reserializes or reroutes it.
@@ -26,7 +27,7 @@ impl PreparedEvent {
     ///
     /// # Errors
     /// Rejects an invalid subject, unserializable payload or exceeded wire bound.
-    pub fn prepare<T: EventPayload>(
+    pub fn prepare<T: EventPayload + Serialize>(
         subject: impl Into<String>,
         event: &Event<T>,
         max_payload_bytes: usize,

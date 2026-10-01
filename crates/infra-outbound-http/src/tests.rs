@@ -20,7 +20,7 @@ use http::{Request, Version, header};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     sync::oneshot,
     task::JoinHandle,
     time::Instant,
@@ -105,10 +105,11 @@ fn recorded_count(scrape: &str, required_labels: &[&str]) -> usize {
         .count()
 }
 
-/// Resolves every name to one fixture listener. Clients built by the public
-/// constructors in tests have none, so they cannot reach the network.
+/// Resolves every name to the fixture addresses, in order. Clients built by
+/// the public constructors in tests have none, so they cannot reach the
+/// network.
 #[derive(Clone, Default)]
-pub(crate) struct FixtureResolver(Option<SocketAddr>);
+pub(crate) struct FixtureResolver(Vec<SocketAddr>);
 
 impl FixtureResolver {
     pub(crate) fn new() -> Self {
@@ -117,7 +118,7 @@ impl FixtureResolver {
 }
 
 impl tower::Service<Name> for FixtureResolver {
-    type Response = std::option::IntoIter<SocketAddr>;
+    type Response = std::vec::IntoIter<SocketAddr>;
     type Error = std::io::Error;
     type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
 
@@ -126,11 +127,11 @@ impl tower::Service<Name> for FixtureResolver {
     }
 
     fn call(&mut self, _: Name) -> Self::Future {
-        std::future::ready(
-            self.0
-                .map(|address| Some(address).into_iter())
-                .ok_or_else(|| std::io::Error::other("no fixture listener")),
-        )
+        std::future::ready(if self.0.is_empty() {
+            Err(std::io::Error::other("no fixture listener"))
+        } else {
+            Ok(self.0.clone().into_iter())
+        })
     }
 }
 
@@ -160,6 +161,15 @@ fn fixture_client_for_host(
     material: &TlsMaterial,
     limits: Limits,
 ) -> Client {
+    fixture_client_resolving(host, vec![address], material, limits)
+}
+
+fn fixture_client_resolving(
+    host: &str,
+    addresses: Vec<SocketAddr>,
+    material: &TlsMaterial,
+    limits: Limits,
+) -> Client {
     let mut roots = tokio_rustls::rustls::RootCertStore::empty();
     roots
         .add(CertificateDer::from(material.root.clone()))
@@ -176,7 +186,8 @@ fn fixture_client_for_host(
         server: observe::Server::new(&target),
         target,
         limits,
-        transport: build_transport(&limits, true, tls, FixtureResolver(Some(address))),
+        propagate_trace_context: false,
+        transport: build_transport(&limits, true, tls, FixtureResolver(addresses)),
     }
 }
 
@@ -459,6 +470,40 @@ async fn parser_header_count_overflow_is_a_transport_error() {
         Err(Error::Transport { .. })
     ));
     server.await.expect("parser header fixture joins");
+}
+
+#[tokio::test]
+async fn response_head_beyond_the_parser_buffer_is_a_transport_error() {
+    // Hyper's default HTTP/1 buffer ceiling is 8192 + 4096 * 100 bytes.
+    const HEAD_BYTES: usize = 512 * 1024;
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("head fixture listener");
+    let address = listener.local_addr().expect("head fixture address");
+    let acceptor = fixture_acceptor(&material);
+    let server = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(3), async move {
+            let (socket, _) = listener.accept().await.expect("head fixture accepts");
+            let mut stream = acceptor.accept(socket).await.expect("head TLS handshake");
+            read_request_headers(&mut stream).await;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Large: {}\r\n\r\n",
+                "a".repeat(HEAD_BYTES)
+            );
+            // The client closes once its buffer is full; the write may fail.
+            let _ = stream.write_all(head.as_bytes()).await;
+        })
+        .await
+        .expect("head fixture completes within its budget");
+    });
+    assert!(matches!(
+        fixture_client(address, &material)
+            .execute(request(), deadline())
+            .await,
+        Err(Error::Transport { .. })
+    ));
+    server.await.expect("head fixture joins");
 }
 
 const REQUEST_SENTINELS: [&str; 6] = [
@@ -792,6 +837,42 @@ async fn expired_deadline_refuses_before_network_work() {
     );
 }
 
+/// A listener that completes no further handshakes: its accept queue is
+/// full, so the kernel drops new SYNs and a connect to it stays pending.
+async fn unresponsive_listener() -> (SocketAddr, tokio::net::TcpListener, Vec<TcpStream>) {
+    let socket = tokio::net::TcpSocket::new_v4().expect("unresponsive socket");
+    socket
+        .bind("127.0.0.1:0".parse().expect("loopback address"))
+        .expect("unresponsive bind");
+    let listener = socket.listen(1).expect("unresponsive listen");
+    let address = listener.local_addr().expect("unresponsive address");
+    let mut queued = Vec::new();
+    for _ in 0..64 {
+        match tokio::time::timeout(Duration::from_millis(200), TcpStream::connect(address)).await {
+            Ok(stream) => queued.push(stream.expect("queued connection")),
+            Err(_) => return (address, listener, queued),
+        }
+    }
+    panic!("the accept queue never filled");
+}
+
+#[tokio::test]
+async fn unresponsive_address_leaves_time_for_the_next_one() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let (unresponsive, _listener, _queued) = unresponsive_listener().await;
+    let (address, server) =
+        tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let mut limits = limits();
+    limits.operation_timeout = Duration::from_secs(2);
+    let response =
+        fixture_client_resolving(FIXTURE_HOST, vec![unresponsive, address], &material, limits)
+            .execute(request(), Instant::now() + Duration::from_secs(2))
+            .await
+            .expect("the second address answers");
+    assert_eq!(response.status(), 200);
+    server.await.expect("fallback fixture server succeeds");
+}
+
 #[tokio::test]
 async fn request_is_not_replayed_after_the_peer_received_it() {
     let material = TlsMaterial::new(FIXTURE_HOST);
@@ -868,6 +949,61 @@ async fn target_and_caller_headers_reach_the_wire_unchanged() {
     assert!(wire.contains("traceparent: 00-abc-def-01"));
     assert!(wire.contains("accept-encoding: gzip"));
     server.await.expect("capture fixture server succeeds");
+}
+
+#[tokio::test]
+async fn opted_in_client_sends_the_context_of_its_named_client_span() {
+    use opentelemetry::trace::{SpanKind, TracerProvider as _};
+    use opentelemetry_sdk::{
+        propagation::TraceContextPropagator,
+        trace::{InMemorySpanExporter, SdkTracerProvider},
+    };
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+    let _guard = tracing::subscriber::set_default(subscriber);
+    // See `observation_records_polled_attempts_once_without_request_data`.
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let (address, captured, server) =
+        tls_server_capture(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let mut request = request();
+    request.headers_mut().insert(
+        "traceparent",
+        "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+            .parse()
+            .expect("header value"),
+    );
+    fixture_client(address, &material)
+        .with_trace_context()
+        .execute(request, deadline())
+        .await
+        .expect("captured request response");
+    let wire = String::from_utf8(captured.await.expect("captured request")).expect("ASCII request");
+    server.await.expect("capture fixture server succeeds");
+
+    let spans = exporter.get_finished_spans().expect("exported spans");
+    let [span] = spans.as_slice() else {
+        panic!("one client span, got {spans:?}");
+    };
+    assert_eq!(span.name, "GET");
+    assert_eq!(span.span_kind, SpanKind::Client);
+    let context = &span.span_context;
+    let expected = format!(
+        "traceparent: 00-{}-{}-01\r\n",
+        context.trace_id(),
+        context.span_id()
+    );
+    let wire = wire.to_ascii_lowercase();
+    assert!(wire.contains(&expected), "{wire} lacks {expected}");
+    assert_eq!(wire.matches("traceparent:").count(), 1);
 }
 
 #[test]

@@ -208,6 +208,7 @@ fn messaging_options(fixture: &Fixture) -> MessagingOptions {
 
 fn messaging_options_with_servers(fixture: &Fixture, servers: Vec<String>) -> MessagingOptions {
     MessagingOptions {
+        connection_name: "integration-tests".to_owned(),
         servers,
         credentials: None,
         root_ca_path: None,

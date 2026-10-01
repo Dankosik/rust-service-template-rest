@@ -1,18 +1,30 @@
 //! The inbound bearer boundary shared by every transport.
 
-use std::sync::Once;
-
 use crate::{Failure, Principal, Verifier, parse_bearer};
 
 /// Bearer-authentication outcomes at an inbound transport boundary.
 pub const AUTHN_VERIFICATIONS_METRIC: &str = "authn_verifications_total";
 
-static DESCRIBE: Once = Once::new();
-
 const SUCCESS_RESULT: &str = "success";
 const NO_FAILURE: &str = "none";
 
-/// Known transports keep prepared handles so success needs no registry lookup.
+/// The inbound transport an authentication outcome is counted under.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Transport {
+    Http,
+    Grpc,
+}
+
+impl Transport {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Grpc => "grpc",
+        }
+    }
+}
+
+/// Prepared success handles, so a success needs no registry lookup.
 pub(crate) struct TransportSuccessCounters {
     http: metrics::Counter,
     grpc: metrics::Counter,
@@ -20,29 +32,29 @@ pub(crate) struct TransportSuccessCounters {
 
 impl TransportSuccessCounters {
     pub(crate) fn new() -> Self {
+        metrics::describe_counter!(
+            AUTHN_VERIFICATIONS_METRIC,
+            metrics::Unit::Count,
+            "Inbound bearer-authentication verification outcomes."
+        );
         Self {
-            http: counter("http", SUCCESS_RESULT, NO_FAILURE),
-            grpc: counter("grpc", SUCCESS_RESULT, NO_FAILURE),
+            http: counter(Transport::Http, SUCCESS_RESULT, NO_FAILURE),
+            grpc: counter(Transport::Grpc, SUCCESS_RESULT, NO_FAILURE),
         }
     }
 
-    fn get(&self, transport: &str) -> Option<&metrics::Counter> {
+    const fn get(&self, transport: Transport) -> &metrics::Counter {
         match transport {
-            "http" => Some(&self.http),
-            "grpc" => Some(&self.grpc),
-            _ => None,
+            Transport::Http => &self.http,
+            Transport::Grpc => &self.grpc,
         }
     }
 }
 
-fn counter(
-    transport: &'static str,
-    result: &'static str,
-    failure: &'static str,
-) -> metrics::Counter {
+fn counter(transport: Transport, result: &'static str, failure: &'static str) -> metrics::Counter {
     metrics::counter!(
         AUTHN_VERIFICATIONS_METRIC,
-        "transport" => transport,
+        "transport" => transport.label(),
         "result" => result,
         "failure" => failure
     )
@@ -60,64 +72,37 @@ impl Verifier {
     pub async fn authenticate<'a>(
         &self,
         authorization: impl IntoIterator<Item = &'a [u8]>,
-        transport: &'static str,
+        transport: Transport,
     ) -> Result<Principal, Failure> {
-        let mut outcome = OutcomeGuard::new(transport);
+        let mut outcome = OutcomeGuard {
+            transport,
+            recorded: false,
+        };
         let result = match parse_bearer(authorization) {
             Ok(token) => self.verify(&token).await,
             Err(failure) => Err(failure),
         };
-        match (&result, self.counters.transport.get(transport)) {
-            (Ok(_), Some(success)) => {
-                // Known transports use a prepared handle, avoiding a registry
-                // lookup. Disarm the guard so drop does not also count cancellation.
-                success.increment(1);
-                outcome.recorded = true;
+        match &result {
+            Ok(_) => self.counters.transport.get(transport).increment(1),
+            Err(failure) => {
+                counter(transport, "failure", failure_class(*failure)).increment(1);
             }
-            _ => outcome.record(result.as_ref().err().copied()),
         }
+        outcome.recorded = true;
         result
     }
 }
 
 /// Records `cancelled` on drop unless an outcome was recorded.
 struct OutcomeGuard {
-    transport: &'static str,
+    transport: Transport,
     recorded: bool,
-}
-
-impl OutcomeGuard {
-    fn new(transport: &'static str) -> Self {
-        DESCRIBE.call_once(|| {
-            metrics::describe_counter!(
-                AUTHN_VERIFICATIONS_METRIC,
-                metrics::Unit::Count,
-                "Inbound bearer-authentication verification outcomes."
-            );
-        });
-        Self {
-            transport,
-            recorded: false,
-        }
-    }
-
-    fn record(&mut self, failure: Option<Failure>) {
-        match failure {
-            None => self.count(SUCCESS_RESULT, NO_FAILURE),
-            Some(failure) => self.count("failure", failure_class(failure)),
-        }
-        self.recorded = true;
-    }
-
-    fn count(&self, result: &'static str, failure: &'static str) {
-        counter(self.transport, result, failure).increment(1);
-    }
 }
 
 impl Drop for OutcomeGuard {
     fn drop(&mut self) {
         if !self.recorded {
-            self.count("cancelled", "cancelled");
+            counter(self.transport, "cancelled", "cancelled").increment(1);
         }
     }
 }

@@ -209,8 +209,9 @@ simple forward-only files (no `.up.sql`/`.down.sql`), no
 refuses a pull request that modifies, deletes, or renames an existing
 migration or adds one older than the newest the base has.
 
-The `migrate` binary loads the same configuration as the service, requires
-`postgres.enabled = true`, and writes `migration_starting` and one terminal
+The `migrate` binary reads the same configuration sources as the service but
+decodes only `app`, `log`, `observability`, and `postgres`, so it needs no
+other section's secrets. It requires `postgres.enabled = true`, and writes `migration_starting` and one terminal
 `migration_run` record (`before`, `target`, `after`, `applied_count`,
 `duration_ms`, `outcome` in `success`/`no_change`/`error`). A version field
 is omitted when there is none or it was not observed. On error the record

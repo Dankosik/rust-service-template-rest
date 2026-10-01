@@ -4,6 +4,15 @@ use std::net::SocketAddr;
 
 use secrecy::SecretString;
 use serde::Deserialize;
+use serde::de::{Error as _, Unexpected};
+
+/// Marks a decode message this crate wrote without the value it rejects, so
+/// the loader shows it as written. An environment variable cannot contain
+/// NUL, so no supplied value can forge the mark.
+pub(crate) const VALUE_FREE: char = '\0';
+
+/// What a listen address must be, for the decode message.
+const LISTEN_ADDR: &str = "an IP address and port, or :port; hostnames are not resolved";
 
 /// Missing, empty, or whitespace-only text is vacant (`None`); a present
 /// value is stored trimmed.
@@ -39,7 +48,8 @@ where
     D: serde::Deserializer<'de>,
 {
     let raw = String::deserialize(deserializer)?;
-    parse_listen_addr(&raw).map_err(serde::de::Error::custom)
+    parse_listen_addr(&raw)
+        .ok_or_else(|| D::Error::invalid_value(Unexpected::Str(&raw), &LISTEN_ADDR))
 }
 
 /// Listen address, or `None` when the value is missing, empty, or whitespace.
@@ -51,7 +61,7 @@ where
     match raw {
         Some(value) if !value.trim().is_empty() => parse_listen_addr(&value)
             .map(Some)
-            .map_err(serde::de::Error::custom),
+            .ok_or_else(|| D::Error::invalid_value(Unexpected::Str(&value), &LISTEN_ADDR)),
         _ => Ok(None),
     }
 }
@@ -59,17 +69,13 @@ where
 /// Parse an IP listen address: `ip:port`, or the Go-style `:port` meaning
 /// IPv4 all-interfaces (`0.0.0.0`). Hostnames are refused; load does not
 /// do DNS. Explicit IPv6 forms such as `[::1]:9000` are unchanged.
-fn parse_listen_addr(value: &str) -> Result<SocketAddr, String> {
+fn parse_listen_addr(value: &str) -> Option<SocketAddr> {
     let trimmed = value.trim();
     let candidate = match trimmed.strip_prefix(':') {
         Some(port) => format!("0.0.0.0:{port}"),
         None => trimmed.to_owned(),
     };
-    candidate.parse().map_err(|_| {
-        format!(
-            "{value:?} is not a socket address (expected an IP address and port, or :port; hostnames are not resolved)"
-        )
-    })
+    candidate.parse().ok()
 }
 
 #[cfg(test)]
@@ -90,8 +96,17 @@ mod tests {
 
     #[test]
     fn socket_addr_rejects_hostnames() {
-        let err = parse_listen_addr("localhost:8080").unwrap_err();
-        assert!(err.contains("not a socket address"), "{err}");
-        assert!(err.contains("localhost:8080"), "{err}");
+        #[derive(Debug, Deserialize)]
+        struct Probe {
+            #[serde(deserialize_with = "listen_addr")]
+            #[allow(dead_code)]
+            addr: SocketAddr,
+        }
+
+        assert_eq!(parse_listen_addr("localhost:8080"), None);
+        let err = toml::from_str::<Probe>("addr = \"localhost:8080\"").unwrap_err();
+        let rendered = err.to_string();
+        assert!(rendered.contains("localhost:8080"), "{rendered}");
+        assert!(rendered.contains(LISTEN_ADDR), "{rendered}");
     }
 }

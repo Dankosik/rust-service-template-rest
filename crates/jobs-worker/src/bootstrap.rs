@@ -492,6 +492,7 @@ fn install_observability(
             HTTP_REQUESTS_DURATION_SECONDS,
             HTTP_REQUESTS_DURATION_BUCKETS,
         ),
+        // template:begin jobs:worker-bootstrap-jobs-histograms
         (
             infra_postgres::CONNECTION_WAIT_METRIC,
             infra_postgres::CONNECTION_WAIT_BUCKETS,
@@ -500,7 +501,6 @@ fn install_observability(
             infra_postgres::TRANSACTION_DURATION_METRIC,
             infra_postgres::TRANSACTION_DURATION_BUCKETS,
         ),
-        // template:begin jobs:worker-bootstrap-jobs-histograms
         (ATTEMPT_DURATION_METRIC, ATTEMPT_DURATION_BUCKETS),
         (
             infra_jobs::CLAIM_DURATION_METRIC,
@@ -720,11 +720,9 @@ fn messaging_options(
         None
     };
     Ok(MessagingOptions {
+        connection_name: worker_identity(&config.observability.otel.service_name),
         servers: messaging.urls.clone(),
-        credentials: messaging
-            .credentials
-            .as_ref()
-            .map(|value| value.expose_secret().to_owned()),
+        credentials: messaging.credentials.clone(),
         root_ca_path: messaging.root_ca_path.clone(),
         allow_plaintext: messaging.allow_plaintext,
         source_stream,

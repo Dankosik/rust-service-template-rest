@@ -13,6 +13,7 @@ pub mod outbox;
 mod prepared;
 mod producer;
 mod registry;
+mod trace;
 pub mod wire;
 
 pub use consumer::{Consumer, ConsumerError, ConsumerHandle};
