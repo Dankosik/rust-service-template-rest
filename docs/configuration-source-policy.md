@@ -164,12 +164,14 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
 - `integrations.<name>.oauth` is an immutable optional OAuth2 client tuple
   authenticated only by a private key, never a shared secret. Empty
   integration maps and entries without `oauth` are inert; a present tuple
-  must contain valid `token_url`, `client_id`, `key_id`, `algorithm` (`RS256`
-  default, `PS256`, or `ES256`), `assertion_audience`, and an environment-only
+  must contain valid `token_url`, `client_id`, `key_id`, `algorithm` (`RS256`,
+  `PS256`, or `ES256`; required, with no default), `assertion_audience`, and
+  an environment-only
   nonempty `APP__INTEGRATIONS__<NAME>__OAUTH__PRIVATE_KEY`. `client_secret` is
   an unknown key and fails startup. Nonsecret
-  `scopes` and optional `audience` follow normal TOML/environment layering;
-  scopes use a TOML list or one space-separated environment value. File secrets
+  `scopes`, optional `audience`, and `exchange_cache_capacity` (a whole
+  number, default 1024, inclusive 1–65536) follow normal TOML/environment
+  layering; scopes use a TOML list or one space-separated environment value. File secrets
   are refused by the recursive secret guard. The [outbound machine-authentication
   guide](outbound-machine-authentication.md) owns endpoint admission and
   provider compatibility.
