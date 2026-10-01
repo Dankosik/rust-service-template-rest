@@ -10,7 +10,7 @@ use infra_postgres::{Dsn, PgPool, Tx};
 use infra_webhooks::inbound::{
     Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver, async_trait,
 };
-use infra_webhooks::protocol::KeyRing;
+use infra_webhooks::protocol::{KeyRing, ProtocolError};
 use integration_tests::{DATABASE_URL, dsn_for};
 use sqlx::Row;
 use tokio::sync::Notify;
@@ -190,7 +190,7 @@ async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool
         receiver
             .receive(ENDPOINT, &replay_headers, changed, SystemTime::now())
             .await,
-        Err(ReceiveError::Rejected)
+        Err(ReceiveError::Rejected(ProtocolError::InvalidSignature))
     );
     assert_eq!(receipt_count(&pool).await, 1);
     assert_eq!(job_count(&pool).await, 1);
@@ -368,7 +368,7 @@ impl RunningProcessor {
 
     fn with_consumer(pool: &PgPool, consumer: Arc<dyn Consumer>) -> Self {
         let mut consumers = Consumers::new();
-        assert!(consumers.insert(ENDPOINT, consumer).is_none());
+        consumers.insert(ENDPOINT, consumer).expect("first binding");
         Self::start(pool, consumers)
     }
 
@@ -844,7 +844,7 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
                 SystemTime::now()
             )
             .await,
-        Err(ReceiveError::Rejected)
+        Err(ReceiveError::Rejected(ProtocolError::InvalidMessageId))
     );
     assert_eq!(receipt_count(&pool).await, 3);
     assert_eq!(job_count(&pool).await, 1);

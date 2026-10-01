@@ -139,8 +139,6 @@ pub(crate) enum BootstrapError {
         #[source]
         source: infra_webhooks::protocol::ProtocolError,
     },
-    #[error("inbound webhook endpoint {endpoint} has no consumer binding")]
-    InboundWebhookConsumerMissing { endpoint: String },
     // template:end inbound-webhooks:bootstrap-webhooks-errors
     #[error(transparent)]
     Server(#[from] infra_http::ServerError),
@@ -512,7 +510,8 @@ async fn serve_until_stopped(
 // template:begin inbound-webhooks:bootstrap-webhooks-constructor
 /// Build a receiver from the immutable startup snapshot. An empty endpoint
 /// map is a retained, inert route; an active endpoint cannot reach listener
-/// admission without PostgreSQL, a bound consumer, and every referenced key.
+/// admission without PostgreSQL and every referenced key. Consumer bindings
+/// are the worker's: an admitted receipt is durable until one processes it.
 fn prepare_inbound_webhooks(
     config: &Config,
     postgres_pool: Option<&PgPool>,
@@ -530,12 +529,6 @@ fn prepare_inbound_webhooks(
             "must be true when inbound webhook endpoints are configured",
         )
     })?;
-    let consumers = webhook_consumers::consumers();
-    consumers
-        .require(webhooks.endpoints.keys().map(String::as_str))
-        .map_err(|missing| BootstrapError::InboundWebhookConsumerMissing {
-            endpoint: missing.endpoint,
-        })?;
     let mut bindings = Vec::with_capacity(webhooks.endpoints.len());
     for (endpoint_id, endpoint) in &webhooks.endpoints {
         let active = signing_key(webhooks, endpoint_id, &endpoint.active_key)?;
@@ -986,31 +979,6 @@ fn log_startup_summary(config: &Config, exporter: &ExporterState) {
 mod tests {
     use super::*;
     use service_config::OtelConfig;
-
-    // template:begin inbound-webhooks:bootstrap-webhooks-tests
-    #[tokio::test]
-    async fn inbound_startup_rejects_an_endpoint_without_an_adopter_consumer() {
-        let mut config = Config::default();
-        config.inbound_webhooks.endpoints.insert(
-            "partner".into(),
-            service_config::InboundWebhookEndpointConfig {
-                active_key: "partner_v1".into(),
-                previous_key: None,
-            },
-        );
-        let pool = PgPool::connect_lazy("postgres://localhost/unused")
-            .expect("lazy pool does not connect");
-        let tracker = TaskTracker::new();
-        let cancel = CancellationToken::new();
-        let result = prepare_inbound_webhooks(&config, Some(&pool), &tracker, &cancel);
-        assert!(matches!(
-            result,
-            Err(BootstrapError::InboundWebhookConsumerMissing { endpoint })
-                if endpoint == "partner"
-        ));
-        pool.close().await;
-    }
-    // template:end inbound-webhooks:bootstrap-webhooks-tests
 
     #[test]
     fn tracing_options_attaches_the_ratio_only_to_ratio_variants() {

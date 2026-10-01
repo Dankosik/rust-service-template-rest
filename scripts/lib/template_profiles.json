@@ -1377,7 +1377,6 @@
   },
   "inbound-webhooks": {
     "remove_when_unselected": [
-      "crates/webhook-consumers/",
       "crates/config/src/inbound_webhooks.rs",
       "crates/infra-http/src/webhooks.rs",
       "crates/infra-webhooks/src/inbound.rs",
@@ -1387,8 +1386,6 @@
       "docs/inbound-webhooks.md"
     ],
     "markers": [
-      {"path": "Cargo.toml", "ids": ["workspace-webhook-consumers-crate"]},
-      {"path": "crates/jobs-worker/Cargo.toml", "ids": ["worker-webhook-consumers-dependency"]},
       {
         "path": "crates/config/src/lib.rs",
         "ids": [
@@ -1419,7 +1416,8 @@
       {
         "path": "crates/infra-http/Cargo.toml",
         "ids": [
-          "http-webhooks-dependency"
+          "http-webhooks-dependency",
+          "http-webhooks-test-dependencies"
         ]
       },
       {
@@ -1450,7 +1448,7 @@
           "service-api-webhooks-tag"
         ]
       },
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-webhooks-imports", "bootstrap-webhooks-errors", "bootstrap-webhooks-prepare", "bootstrap-webhooks-route-state", "bootstrap-webhooks-constructor", "bootstrap-webhooks-tests"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-webhooks-imports", "bootstrap-webhooks-errors", "bootstrap-webhooks-prepare", "bootstrap-webhooks-route-state", "bootstrap-webhooks-constructor"]},
       {
         "path": "crates/service/tests/lifecycle.rs",
         "ids": [

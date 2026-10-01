@@ -15,7 +15,7 @@ use axum::response::{IntoResponse, Response};
 use health::ReadinessReader;
 use http_body_util::{BodyExt, Limited};
 use infra_webhooks::inbound::{ReceiptOutcome, ReceiveError, Receiver};
-use infra_webhooks::protocol::MAX_BODY_BYTES;
+use infra_webhooks::protocol::{MAX_BODY_BYTES, ProtocolError};
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -24,8 +24,14 @@ use crate::extract::Path;
 use crate::problem::responses::WebhookProblemResponses;
 use crate::problem::{Code, Problem};
 
-/// Bounded result labels for webhook ingress telemetry.
+/// Webhook admissions by `outcome` (`accepted`, `duplicate`, `rejected`,
+/// `unavailable`, `unknown_endpoint`), configured `endpoint`, and rejection
+/// `reason`. `endpoint` is empty for an unknown endpoint, so a caller never
+/// chooses a label value; `reason` is empty unless the outcome is `rejected`.
 pub const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
+
+/// The rejection reason for a body the transport could not read.
+const BODY_READ_FAILED: &str = "body_read_failed";
 
 /// Route state supplied by the composition root through an Axum extension.
 ///
@@ -57,6 +63,11 @@ impl WebhookState {
     /// admission in the composition root.
     #[must_use]
     pub fn active(receiver: Receiver) -> Self {
+        metrics::describe_counter!(
+            WEBHOOK_INGRESS_OUTCOMES_METRIC,
+            metrics::Unit::Count,
+            "Inbound webhook admissions by outcome, endpoint, and rejection reason."
+        );
         Self {
             receiver: Some(receiver),
         }
@@ -113,43 +124,66 @@ async fn receive(
     request: Request,
 ) -> Response {
     let Some(receiver) = state.receiver.as_ref() else {
-        return outcome_problem(Code::NotFound, "unknown_endpoint");
+        return unknown_endpoint();
     };
     if !receiver.has_endpoint(&endpoint_id) {
-        return outcome_problem(Code::NotFound, "unknown_endpoint");
+        return unknown_endpoint();
     }
     let (parts, body) = request.into_parts();
     let body = match Limited::new(body, MAX_BODY_BYTES).collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(error) if error.is::<http_body_util::LengthLimitError>() => {
-            return outcome_problem(Code::RequestEntityTooLarge, "rejected");
+            return rejected(
+                Code::RequestEntityTooLarge,
+                &endpoint_id,
+                ProtocolError::BodyTooLarge.as_str(),
+            );
         }
-        Err(_) => return outcome_problem(Code::WebhookRejected, "rejected"),
+        Err(_) => return rejected(Code::WebhookRejected, &endpoint_id, BODY_READ_FAILED),
     };
     match receiver
         .receive(&endpoint_id, &parts.headers, &body, SystemTime::now())
         .await
     {
-        Ok(ReceiptOutcome::Accepted) => outcome_no_content("accepted"),
-        Ok(ReceiptOutcome::Duplicate) => outcome_no_content("duplicate"),
-        Err(ReceiveError::UnknownEndpoint) => outcome_problem(Code::NotFound, "unknown_endpoint"),
-        Err(ReceiveError::Rejected) => outcome_problem(Code::WebhookRejected, "rejected"),
-        Err(ReceiveError::Unavailable) => outcome_problem(Code::ServiceUnavailable, "unavailable"),
+        Ok(ReceiptOutcome::Accepted) => {
+            record_outcome("accepted", &endpoint_id, "");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(ReceiptOutcome::Duplicate) => {
+            record_outcome("duplicate", &endpoint_id, "");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(ReceiveError::UnknownEndpoint) => unknown_endpoint(),
+        Err(ReceiveError::Rejected(reason)) => {
+            rejected(Code::WebhookRejected, &endpoint_id, reason.as_str())
+        }
+        Err(ReceiveError::Unavailable) => {
+            record_outcome("unavailable", &endpoint_id, "");
+            Problem::new(Code::ServiceUnavailable).into_response()
+        }
     }
 }
 
-fn outcome_no_content(outcome: &'static str) -> Response {
-    record_outcome(outcome);
-    StatusCode::NO_CONTENT.into_response()
+/// The path names no configured endpoint, so it never becomes a label value.
+fn unknown_endpoint() -> Response {
+    record_outcome("unknown_endpoint", "", "");
+    Problem::new(Code::NotFound).into_response()
 }
 
-fn outcome_problem(code: Code, outcome: &'static str) -> Response {
-    record_outcome(outcome);
+fn rejected(code: Code, endpoint_id: &str, reason: &'static str) -> Response {
+    record_outcome("rejected", endpoint_id, reason);
     Problem::new(code).into_response()
 }
 
-fn record_outcome(outcome: &'static str) {
-    metrics::counter!(WEBHOOK_INGRESS_OUTCOMES_METRIC, "outcome" => outcome).increment(1);
+/// `endpoint_id` is empty or a configured endpoint ID, a set the operator bounds.
+fn record_outcome(outcome: &'static str, endpoint_id: &str, reason: &'static str) {
+    metrics::counter!(
+        WEBHOOK_INGRESS_OUTCOMES_METRIC,
+        "outcome" => outcome,
+        "endpoint" => endpoint_id.to_owned(),
+        "reason" => reason,
+    )
+    .increment(1);
 }
 
 #[cfg(test)]
@@ -245,5 +279,63 @@ mod tests {
         let problem: Value = serde_json::from_slice(&body).expect("problem JSON");
         assert_eq!(problem["code"], "bad_request");
         assert_eq!(problem["invalid_params"][0]["name"], "path.endpoint_id");
+    }
+
+    #[tokio::test]
+    async fn outcomes_name_the_configured_endpoint_and_reason_but_never_a_caller_path() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        // Both requests end before the receipt transaction, so nothing connects.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .expect("lazy pool does not connect");
+        let keys = infra_webhooks::protocol::KeyRing::from_encoded(
+            "whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=",
+            None,
+        )
+        .expect("key");
+        let readiness = Readiness::new(
+            Vec::new(),
+            RefreshPolicy {
+                interval: std::time::Duration::from_secs(1),
+                probe_budget: std::time::Duration::from_secs(1),
+                failure_threshold: 1,
+            },
+        );
+        let app = crate::finalize_public(router())
+            .expect("the webhook operation is explicitly public")
+            .with_state(readiness.reader())
+            .layer(Extension(WebhookState::active(Receiver::new(
+                pool,
+                [("partner".to_owned(), keys)],
+            ))));
+        for (path, status) in [
+            ("/webhooks/partner", StatusCode::BAD_REQUEST),
+            ("/webhooks/caller-chosen", StatusCode::NOT_FOUND),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::post(path).body(Body::from("{}")).expect("request"))
+                .await
+                .expect("router response");
+            assert_eq!(response.status(), status, "{path}");
+        }
+
+        let rendered = recorder.handle().render();
+        let series = |outcome: &str| {
+            rendered
+                .lines()
+                .find(|line| {
+                    line.starts_with(WEBHOOK_INGRESS_OUTCOMES_METRIC)
+                        && line.contains(&format!("outcome=\"{outcome}\""))
+                })
+                .unwrap_or_else(|| panic!("no {outcome} series in:\n{rendered}"))
+        };
+        let rejected = series("rejected");
+        assert!(rejected.contains("endpoint=\"partner\""), "{rejected}");
+        assert!(rejected.contains("reason=\"missing_header\""), "{rejected}");
+        assert!(rejected.ends_with(" 1"), "{rejected}");
+        assert!(series("unknown_endpoint").ends_with(" 1"));
+        assert!(!rendered.contains("caller-chosen"), "{rendered}");
     }
 }

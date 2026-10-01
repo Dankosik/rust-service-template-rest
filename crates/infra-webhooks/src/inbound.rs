@@ -6,6 +6,7 @@
 //! in that callback's transaction.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -24,7 +25,7 @@ use sqlx::postgres::PgPool;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::KeyRing;
+use crate::protocol::{KeyRing, ProtocolError};
 
 /// Re-exported so a consumer crate implements [`Consumer`] without its own
 /// `async-trait` dependency, as `tonic::async_trait` does for services.
@@ -52,20 +53,18 @@ const RECEIPT_RETENTION: Duration = Duration::from_hours(7 * 24);
 /// Cleanup cadence; the first run starts at once.
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
-/// The most rows one cleanup batch deletes: the `LIMIT` in [`CLEANUP_BATCH`].
-const CLEANUP_BATCH_ROWS: u64 = 500;
+/// The most rows one cleanup batch deletes.
+const CLEANUP_BATCH_ROWS: u32 = 500;
 
 /// Bounds a cleanup batch on the server, so a batch whose client has gone
 /// still ends within 1 s.
 const CLEANUP_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '1000ms'";
 
-/// One batch of expired receipts. The `interval '7 days'` is [`RECEIPT_RETENTION`].
+/// One batch of at most `$2` receipts older than `$1` seconds.
 const CLEANUP_BATCH: &str = "DELETE FROM webhook_receipts WHERE (endpoint_id, message_id) IN \
     (SELECT endpoint_id, message_id FROM webhook_receipts \
-    WHERE received_at < statement_timestamp() - interval '7 days' \
-    ORDER BY received_at LIMIT 500 FOR UPDATE SKIP LOCKED)";
-
-const _: () = assert!(RECEIPT_RETENTION.as_secs() == 7 * 24 * 60 * 60);
+    WHERE received_at < statement_timestamp() - make_interval(secs => $1) \
+    ORDER BY received_at LIMIT $2 FOR UPDATE SKIP LOCKED)";
 
 /// The durable admission result for one verified delivery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,8 +80,9 @@ pub enum ReceiptOutcome {
 pub enum ReceiveError {
     /// No receiving binding owns the requested endpoint.
     UnknownEndpoint,
-    /// Verification did not establish acceptable Standard Webhooks evidence.
-    Rejected,
+    /// Verification did not establish acceptable Standard Webhooks evidence,
+    /// for the closed reason it carries.
+    Rejected(ProtocolError),
     /// Receipt persistence or its commit acknowledgement was unavailable.
     Unavailable,
 }
@@ -131,7 +131,7 @@ impl Receiver {
         };
         let verified = keys
             .verify(headers, body, now)
-            .map_err(|_| ReceiveError::Rejected)?;
+            .map_err(ReceiveError::Rejected)?;
         let content_type = headers
             .get(CONTENT_TYPE)
             .map(|value| value.as_bytes().to_vec());
@@ -198,6 +198,8 @@ impl Receiver {
                     .await
                     .map_err(|_| CleanupFailure(CleanupError::Statement))?;
                 let deleted = sqlx::query(CLEANUP_BATCH)
+                    .bind(RECEIPT_RETENTION.as_secs_f64())
+                    .bind(i64::from(CLEANUP_BATCH_ROWS))
                     .execute(&mut *tx)
                     .await
                     .map_err(|_| CleanupFailure(CleanupError::Statement))?;
@@ -206,7 +208,7 @@ impl Receiver {
             .await
             .map_err(|CleanupFailure(failure)| failure)?;
             removed += batch;
-            if batch < CLEANUP_BATCH_ROWS {
+            if batch < u64::from(CLEANUP_BATCH_ROWS) {
                 return Ok(removed);
             }
         }
@@ -330,7 +332,12 @@ impl JobKind for Incoming {
 
 const _: () = infra_jobs::assert_valid_kind_name(Incoming::NAME);
 
-/// A provider adapter that applies one retained delivery inside its transaction.
+/// An adapter that applies one retained delivery inside its transaction.
+///
+/// `tx` stays open, and holds a pooled connection, until `process` returns
+/// and the job completes in it. Keep `process` to database effects. For an
+/// effect outside PostgreSQL, enqueue a job on `tx` and let that job make the
+/// call, so a slow recipient holds neither a transaction nor a connection.
 ///
 /// Implement it under [`async_trait`](macro@async_trait), the workspace idiom
 /// for object-safe async traits.
@@ -354,12 +361,25 @@ impl Consumers {
     }
 
     /// Bind one configured endpoint to its consumer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DuplicateConsumer`] when the endpoint already has a binding;
+    /// the first binding stays.
     pub fn insert(
         &mut self,
         endpoint_id: impl Into<String>,
         consumer: Arc<dyn Consumer>,
-    ) -> Option<Arc<dyn Consumer>> {
-        self.entries.insert(endpoint_id.into(), consumer)
+    ) -> Result<(), DuplicateConsumer> {
+        match self.entries.entry(endpoint_id.into()) {
+            Entry::Occupied(bound) => Err(DuplicateConsumer {
+                endpoint: bound.key().clone(),
+            }),
+            Entry::Vacant(unbound) => {
+                unbound.insert(consumer);
+                Ok(())
+            }
+        }
     }
 
     /// Fail when a configured endpoint has no consumer binding.
@@ -384,6 +404,14 @@ impl Consumers {
     fn get(&self, endpoint_id: &str) -> Option<Arc<dyn Consumer>> {
         self.entries.get(endpoint_id).cloned()
     }
+}
+
+/// An inbound endpoint bound to a consumer twice.
+#[derive(Debug, thiserror::Error)]
+#[error("inbound webhook endpoint {endpoint} already has a consumer binding")]
+pub struct DuplicateConsumer {
+    /// The endpoint ID bound twice.
+    pub endpoint: String,
 }
 
 /// A configured inbound endpoint with no consumer binding.
@@ -435,9 +463,12 @@ impl Handler<Incoming> for Processor {
         let consumer = self.consumers.get(job.payload().endpoint_id());
         async move {
             let Some(consumer) = consumer else {
+                // The ID was a configured endpoint when its receipt was
+                // admitted, so it is operator data, not caller input.
                 tracing::warn!(
                     event = "webhook_processor_missing_binding",
-                    reason = "missing_binding"
+                    reason = "missing_binding",
+                    endpoint = job.payload().endpoint_id()
                 );
                 return Err(JobError::retryable(
                     "inbound webhook consumer is unavailable",
@@ -504,5 +535,37 @@ impl From<TxError> for CleanupFailure {
             TxError::Begin(_) => CleanupError::Begin,
             TxError::CommitFailed(_) | TxError::CommitUnknown(_) => CleanupError::Commit,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Ignore;
+
+    #[async_trait]
+    impl Consumer for Ignore {
+        async fn process(&self, _tx: &mut Tx<'_>, _incoming: &Incoming) -> Result<(), JobError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_second_binding_for_one_endpoint_is_refused_and_an_unbound_one_is_named() {
+        let mut consumers = Consumers::new();
+        consumers
+            .insert("partner", Arc::new(Ignore))
+            .expect("first binding");
+        let duplicate = consumers
+            .insert("partner", Arc::new(Ignore))
+            .expect_err("second binding");
+        assert_eq!(duplicate.endpoint, "partner");
+
+        assert!(consumers.require(["partner"]).is_ok());
+        let missing = consumers
+            .require(["partner", "other"])
+            .expect_err("unbound endpoint");
+        assert_eq!(missing.endpoint, "other");
     }
 }

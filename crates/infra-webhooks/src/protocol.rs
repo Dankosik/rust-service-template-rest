@@ -208,6 +208,23 @@ pub enum ProtocolError {
     InvalidSignature,
 }
 
+impl ProtocolError {
+    /// The stable lowercase name of this reason, fit for a metric label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidKey => "invalid_key",
+            Self::BodyTooLarge => "body_too_large",
+            Self::MissingHeader => "missing_header",
+            Self::ConflictingHeader => "conflicting_header",
+            Self::InvalidMessageId => "invalid_message_id",
+            Self::InvalidTimestamp => "invalid_timestamp",
+            Self::TimestampOutOfWindow => "timestamp_out_of_window",
+            Self::InvalidSignature => "invalid_signature",
+        }
+    }
+}
+
 fn ensure_body_size(body: &[u8]) -> Result<(), ProtocolError> {
     (body.len() <= MAX_BODY_BYTES)
         .then_some(())
