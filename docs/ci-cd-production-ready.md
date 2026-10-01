@@ -432,3 +432,14 @@ The initializer does not create linked Railway inputs or deployment resources.
     a target cache only after the step that fills it; otherwise a push to
     `main` that ran only the OpenAPI, migration, or validation steps lets a
     partial target own the key until `Cargo.lock` changes.
+
+### Temporary OpenSSL runtime update
+
+The pinned distroless Debian 13 image still carries `libssl3t64`
+`3.5.7-1~deb13u2`; Trivy rejects CVE-2026-75804 and CVE-2026-84782.
+The image overlays Debian security's exact `3.5.7-1~deb13u3` package and its
+dpkg status record, downloaded through authenticated APT metadata in a separate
+build stage. The runtime remains distroless and contains no package manager.
+The Dockerfile owns this temporary package pin; remove the stage and copy when
+a new pinned distroless image carries that version or later and Trivy passes.
+The image lifecycle and security gates prove the combined image in CI.

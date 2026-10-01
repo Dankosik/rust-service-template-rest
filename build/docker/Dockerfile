@@ -33,6 +33,17 @@ ARG CARGO_AUDITABLE_VERSION=0.7.6
 RUN cargo install --locked cargo-chef --version "${CARGO_CHEF_VERSION}" \
  && cargo install --locked cargo-auditable --version "${CARGO_AUDITABLE_VERSION}"
 
+# Temporary security overlay until distroless carries Debian's fixed OpenSSL.
+# Keep the package version and dpkg metadata together so Trivy observes it.
+FROM chef AS runtime-openssl
+RUN apt-get update \
+ && mkdir -p /patched/var/lib/dpkg/status.d \
+ && cd /tmp \
+ && apt-get download libssl3t64=3.5.7-1~deb13u3 \
+ && dpkg-deb --extract libssl3t64_*.deb /patched \
+ && dpkg-deb --field libssl3t64_*.deb > /patched/var/lib/dpkg/status.d/libssl3t64 \
+ && printf 'Status: install ok installed\n' >> /patched/var/lib/dpkg/status.d/libssl3t64
+
 FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
@@ -86,6 +97,7 @@ RUN cargo auditable build --release --locked -p jobs-worker --bin jobs-worker \
 # template:end worker:docker-jobs-worker-output
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97
+COPY --from=runtime-openssl /patched/ /
 # The version is the Cargo package version; scripts/ci/runtime-image-build.sh
 # passes it from the workspace manifest.
 ARG APP_VERSION=unknown
