@@ -158,6 +158,83 @@ mod tests {
     }
 
     #[test]
+    fn catalog_codes_keep_their_status_code_and_message() {
+        for (code, grpc, message) in [
+            (
+                Code::BadRequest,
+                tonic::Code::InvalidArgument,
+                "request is invalid",
+            ),
+            (
+                Code::UnsupportedMediaType,
+                tonic::Code::InvalidArgument,
+                "request is invalid",
+            ),
+            (
+                Code::UnprocessableContent,
+                tonic::Code::InvalidArgument,
+                "request is invalid",
+            ),
+            (
+                Code::Unauthorized,
+                tonic::Code::Unauthenticated,
+                "authentication failed",
+            ),
+            (
+                Code::Forbidden,
+                tonic::Code::PermissionDenied,
+                "permission denied",
+            ),
+            (Code::NotFound, tonic::Code::NotFound, "not found"),
+            (
+                Code::AlreadyExists,
+                tonic::Code::AlreadyExists,
+                "already exists",
+            ),
+            (Code::Conflict, tonic::Code::Aborted, "request conflict"),
+            (
+                Code::MethodNotAllowed,
+                tonic::Code::Unimplemented,
+                "method is not implemented",
+            ),
+            (
+                Code::RequestEntityTooLarge,
+                tonic::Code::ResourceExhausted,
+                "resource limit exceeded",
+            ),
+            (
+                Code::RequestHeaderFieldsTooLarge,
+                tonic::Code::ResourceExhausted,
+                "resource limit exceeded",
+            ),
+            (
+                Code::TooManyRequests,
+                tonic::Code::ResourceExhausted,
+                "resource limit exceeded",
+            ),
+            (
+                Code::ServiceUnavailable,
+                tonic::Code::Unavailable,
+                "service is unavailable",
+            ),
+            (
+                Code::RequestTimeout,
+                tonic::Code::DeadlineExceeded,
+                "request deadline exceeded",
+            ),
+            (
+                Code::InternalServerError,
+                tonic::Code::Internal,
+                "request failed",
+            ),
+        ] {
+            let status = Status::from(Failure::new(code));
+            assert_eq!(status.code(), grpc, "{code}");
+            assert_eq!(status.message(), message, "{code}");
+        }
+    }
+
+    #[test]
     fn retry_delay_and_field_violations_travel_as_standard_details() {
         let status = Status::from(
             Failure::new(Code::BadRequest)

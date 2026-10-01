@@ -97,7 +97,7 @@ mod tests {
             let wire = code.as_str();
             assert!(wires.insert(wire), "{wire} is published twice");
             assert_eq!(code.to_string(), wire);
-            assert!((2..=63).contains(&wire.len()), "{wire}");
+            assert!((3..=63).contains(&wire.len()), "{wire}");
             assert!(wire.starts_with(|first: char| first.is_ascii_lowercase()));
             assert!(!wire.ends_with('_'), "{wire}");
             assert!(
