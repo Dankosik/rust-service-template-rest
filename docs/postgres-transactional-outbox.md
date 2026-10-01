@@ -89,8 +89,11 @@ Each broker operation is bounded by the lesser of the caller's remaining time
 and five seconds. Any failed publication, rejected or ambiguous, is a retryable
 jobs failure: it spends an attempt and waits for the jobs backoff (`attempt^4`
 seconds), so 25 attempts cover roughly 20 days of broker outage. Retrying an
-ambiguous publication is safe because the broker deduplicates the unchanged
-publication ID. After the last attempt the job stays visible in the `failed`
+ambiguous publication keeps the unchanged publication ID, which the broker
+deduplicates only inside the stream's duplicate window (two minutes by
+default); the fourth retry already waits longer. A retry outside the window
+stores the event again, which consumers absorb by deduplicating on the logical
+ID. After the last attempt the job stays visible in the `failed`
 state for an operator to retry. Malformed stored intent is a visible terminal
 job failure, never a completed publication.
 

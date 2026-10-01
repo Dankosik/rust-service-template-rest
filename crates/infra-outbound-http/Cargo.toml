@@ -31,13 +31,18 @@ metrics = { workspace = true }
 rustls = { workspace = true, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-platform-verifier = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
+tracing-opentelemetry-instrumentation-sdk = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 url = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 metrics-exporter-prometheus = { workspace = true }
+opentelemetry = { workspace = true, features = ["trace"] }
+opentelemetry_sdk = { workspace = true, features = ["testing", "trace"] }
 rcgen = { workspace = true, features = ["aws_lc_rs"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
 tower = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["registry"] }

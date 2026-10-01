@@ -3,6 +3,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use domain_events::{Event, EventPayload};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 // Every key is a compile-time constant, so a caller cannot choose colliding
 // keys; SipHash would cost two thirds of each lookup.
 use foldhash::HashMap;
@@ -99,7 +101,7 @@ impl Registry {
     /// Rejects missing routes and a second handler for the same event version.
     pub fn register<T, F, Fut>(&mut self, handler: F) -> Result<(), RegistryError>
     where
-        T: EventPayload + 'static,
+        T: EventPayload + DeserializeOwned + 'static,
         F: Fn(Event<T>, CancellationToken) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), HandlerError>> + Send + 'static,
     {
@@ -138,7 +140,7 @@ impl Registry {
     ///
     /// # Errors
     /// Rejects an unregistered route or an event outside the payload/wire bound.
-    pub fn prepare<T: EventPayload>(
+    pub fn prepare<T: EventPayload + Serialize>(
         &self,
         event: &Event<T>,
         max_payload_bytes: usize,
