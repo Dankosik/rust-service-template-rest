@@ -205,8 +205,8 @@ test-integration-object-storage: ## S3 adapter proof against a throwaway Compose
 
 # Writes to a real bucket under a unique prefix with the service's own
 # APP__OBJECT_STORAGE__* variables; never part of an aggregate or CI.
-test-object-storage-conformance: ## Live-provider conformance; PROVIDER=amazon_s3|cloudflare_r2|railway and OBJECT_STORAGE_CONFORMANCE_WRITES=allow
-	@case "$(PROVIDER)" in amazon_s3|cloudflare_r2|railway) ;; *) printf '%s requires PROVIDER=amazon_s3|cloudflare_r2|railway\n' "$@" >&2; exit 2 ;; esac
+test-object-storage-conformance: ## Live-provider conformance; PROVIDER=amazon_s3|cloudflare_r2|railway|s3_compatible and OBJECT_STORAGE_CONFORMANCE_WRITES=allow
+	@case "$(PROVIDER)" in amazon_s3|cloudflare_r2|railway|s3_compatible) ;; *) printf '%s requires PROVIDER=amazon_s3|cloudflare_r2|railway|s3_compatible\n' "$@" >&2; exit 2 ;; esac
 	@test "$(OBJECT_STORAGE_CONFORMANCE_WRITES)" = allow || { printf 'refusing %s: it writes to a real bucket; set OBJECT_STORAGE_CONFORMANCE_WRITES=allow\n' "$@" >&2; exit 2; }
 	$(VALIDATION_LOCK) env OBJECT_STORAGE_CONFORMANCE_WRITES=allow OBJECT_STORAGE_CONFORMANCE_PROVIDER=$(PROVIDER) \
 		$(CARGO) test -p infra-object-storage --features integration --test conformance $(CARGO_FLAGS) -- --ignored --nocapture

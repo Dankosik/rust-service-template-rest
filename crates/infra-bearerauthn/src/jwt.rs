@@ -122,9 +122,16 @@ impl JwtVerifier {
         let algorithm = JwtAlgorithm::from_jsonwebtoken(header.alg)
             .filter(|algorithm| self.algorithms.contains(algorithm))
             .ok_or_else(|| VerificationError::invalid(VerificationReason::Algorithm))?;
-        if self.token_profile == TokenProfile::Rfc9068
-            && !header.typ.as_deref().is_some_and(is_access_token_type)
-        {
+        let typ = header.typ.as_deref();
+        let admitted_type = match self.token_profile {
+            TokenProfile::Rfc9068 => typ.is_some_and(is_access_token_type),
+            // An untyped or generic JWT may be an access token. One explicitly
+            // typed as another kind of JWT is not (RFC 8725 section 3.11).
+            TokenProfile::ResourceServer => {
+                typ.is_none_or(|typ| is_generic_jwt_type(typ) || is_access_token_type(typ))
+            }
+        };
+        if !admitted_type {
             return Err(VerificationError::invalid(VerificationReason::Profile));
         }
         // Decode into bounded stack storage; admitted keys cap the signature size.
@@ -294,6 +301,10 @@ struct Discovery {
 
 fn is_access_token_type(value: &str) -> bool {
     value.eq_ignore_ascii_case("at+jwt") || value.eq_ignore_ascii_case("application/at+jwt")
+}
+
+fn is_generic_jwt_type(value: &str) -> bool {
+    value.eq_ignore_ascii_case("JWT") || value.eq_ignore_ascii_case("application/jwt")
 }
 
 struct JwtKey {
@@ -885,6 +896,59 @@ mod tests {
                 expected,
                 "{token}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_token_explicitly_typed_as_another_kind_of_jwt_is_not_an_access_token() {
+        let resource_server = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
+        let rfc9068 = JwtVerifier {
+            token_profile: TokenProfile::Rfc9068,
+            ..verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256])
+        };
+        let typed = |typ: Option<&str>| {
+            let mut header = Header::new(Algorithm::RS256);
+            header.kid = Some("fixture".to_owned());
+            header.typ = typ.map(ToOwned::to_owned);
+            let claims = serde_json::json!({
+                "iss": "https://issuer.example", "aud": "api",
+                "exp": jsonwebtoken::get_current_timestamp() + 60,
+                "iat": jsonwebtoken::get_current_timestamp(),
+                "sub": "subject", "client_id": "client", "jti": "id",
+            });
+            encode(&header, &claims, &rsa_signing()).unwrap()
+        };
+        for (typ, generic) in [
+            (None, true),
+            (Some("JWT"), true),
+            (Some("jwt"), true),
+            (Some("application/jwt"), true),
+            (Some("at+jwt"), false),
+            (Some("application/at+jwt"), false),
+        ] {
+            let token = typed(typ);
+            assert!(check(&resource_server, &token).await.is_ok(), "{typ:?}");
+            assert_eq!(
+                check(&rfc9068, &token).await.err(),
+                generic.then_some(VerificationReason::Profile),
+                "{typ:?}"
+            );
+        }
+        for typ in [
+            "client-authentication+jwt",
+            "logout+jwt",
+            "dpop+jwt",
+            "secevent+jwt",
+            "",
+        ] {
+            let token = typed(Some(typ));
+            for verifier in [&resource_server, &rfc9068] {
+                assert_eq!(
+                    check(verifier, &token).await.unwrap_err(),
+                    VerificationReason::Profile,
+                    "{typ}"
+                );
+            }
         }
     }
 

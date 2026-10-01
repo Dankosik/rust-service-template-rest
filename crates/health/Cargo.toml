@@ -13,10 +13,12 @@ workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+metrics = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time", "rt"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
 
 [dev-dependencies]
+metrics-exporter-prometheus = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

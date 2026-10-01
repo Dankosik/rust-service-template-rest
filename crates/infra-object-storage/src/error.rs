@@ -20,8 +20,9 @@ pub enum ObjectStorageError {
     #[error("object storage admission limit reached")]
     Busy,
     /// Transient failure; retrying the same operation is safe. A read failed,
-    /// or the provider refused a mutation before applying it (409, 429, 503,
-    /// or S3's `RequestTimeout`). A mutation makes one attempt, so no earlier
+    /// the workload identity yielded no credentials (nothing was sent), or
+    /// the provider refused a mutation before applying it (409, 429, 503, or
+    /// S3's `RequestTimeout`). A mutation makes one attempt, so no earlier
     /// attempt can have applied it.
     #[error("object storage unavailable")]
     Unavailable,
@@ -78,6 +79,8 @@ pub(crate) enum Call {
 pub(crate) enum Reply<'a> {
     /// The request was never sent: it could not be built or signed.
     NotSent,
+    /// The request was never sent: the credential source yielded none.
+    NoCredentials,
     /// No usable response: a timeout, a dispatch failure, or an unreadable response.
     Lost,
     /// A provider error response.
@@ -93,11 +96,15 @@ pub(crate) struct Failure {
     pub(crate) error_type: String,
 }
 
-pub(crate) fn from_sdk<E: ProvideErrorMetadata, R>(
+pub(crate) fn from_sdk<E, R>(
     call: Call,
     error: &SdkError<E, R>,
     status: impl Fn(&R) -> u16,
-) -> Failure {
+) -> Failure
+where
+    E: ProvideErrorMetadata + std::error::Error + 'static,
+    R: std::fmt::Debug + 'static,
+{
     let (reply, error_type) = match error {
         SdkError::ConstructionFailure(_) => (Reply::NotSent, "construction".to_owned()),
         SdkError::ServiceError(context) => {
@@ -108,6 +115,13 @@ pub(crate) fn from_sdk<E: ProvideErrorMetadata, R>(
                 _ => status.to_string(),
             };
             (Reply::Status { status, code }, error_type)
+        }
+        // The SDK reports a failed credential load as a dispatch failure,
+        // although it happens before the request is signed.
+        SdkError::DispatchFailure(_)
+            if caused_by::<aws_credential_types::provider::error::CredentialsError>(error) =>
+        {
+            (Reply::NoCredentials, "credentials".to_owned())
         }
         SdkError::TimeoutError(_) => (Reply::Lost, "timeout".to_owned()),
         SdkError::DispatchFailure(failure) if failure.is_timeout() => {
@@ -133,6 +147,7 @@ pub(crate) fn classify(call: Call, reply: Reply<'_>) -> ObjectStorageError {
     use ObjectStorageError as E;
     match reply {
         Reply::NotSent => E::Rejected,
+        Reply::NoCredentials => E::Unavailable,
         Reply::Lost => match call {
             Call::Read => E::Unavailable,
             Call::Mutation | Call::CreateOnly => E::OutcomeUnknown,
@@ -162,15 +177,11 @@ pub(crate) fn classify(call: Call, reply: Reply<'_>) -> ObjectStorageError {
 
 /// Whether a download body error is a checksum mismatch rather than transport.
 pub(crate) fn is_checksum_mismatch(error: &(dyn std::error::Error + 'static)) -> bool {
-    let mut current = Some(error);
-    while let Some(error) = current {
-        if error
-            .downcast_ref::<aws_smithy_checksums::body::validate::Error>()
-            .is_some()
-        {
-            return true;
-        }
-        current = error.source();
-    }
-    false
+    caused_by::<aws_smithy_checksums::body::validate::Error>(error)
+}
+
+/// Whether `error` or one of its sources is a `T`.
+fn caused_by<T: std::error::Error + 'static>(error: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(error), |error| error.source())
+        .any(|error| error.downcast_ref::<T>().is_some())
 }

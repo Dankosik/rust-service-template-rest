@@ -425,16 +425,18 @@ fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
         .build_recorder()
 }
 
-/// A RESP2 server that refuses `AUTH` until told otherwise and answers every
-/// `GET` with a miss. It counts `AUTH` attempts so the test can wait for the
-/// client's own reconnect chain to give up. Each accepted connection records
-/// the primary generation; a `SET` on an older generation is `READONLY`.
+/// A server that refuses authentication until told otherwise and answers
+/// every `GET` with a miss. The client authenticates inside `HELLO 3`; the
+/// server counts those attempts so the test can wait for the client's own
+/// reconnect chain to give up. Each accepted connection records the primary
+/// generation; a `SET` on an older generation is `READONLY`.
 struct FakeServer {
     address: std::net::SocketAddr,
     accept_auth: std::sync::Arc<std::sync::atomic::AtomicBool>,
     auth_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     primary: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    sessions: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl FakeServer {
@@ -448,23 +450,26 @@ impl FakeServer {
         let auth_attempts = std::sync::Arc::new(AtomicUsize::new(0));
         let primary = std::sync::Arc::new(AtomicUsize::new(0));
         let connections = std::sync::Arc::new(AtomicUsize::new(0));
-        let (accept, attempts, generation, accepted) = (
+        let sessions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (accept, attempts, generation, accepted, open) = (
             accept_auth.clone(),
             auth_attempts.clone(),
             primary.clone(),
             connections.clone(),
+            sessions.clone(),
         );
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 accepted.fetch_add(1, Ordering::SeqCst);
                 let recorded = generation.load(Ordering::SeqCst);
-                tokio::spawn(serve_resp(
+                let session = tokio::spawn(serve_resp(
                     stream,
                     accept.clone(),
                     attempts.clone(),
                     recorded,
                     generation.clone(),
                 ));
+                open.lock().expect("sessions lock").push(session);
             }
         });
         Self {
@@ -473,6 +478,14 @@ impl FakeServer {
             auth_attempts,
             primary,
             connections,
+            sessions,
+        }
+    }
+
+    /// Close every open connection; the listener keeps accepting.
+    fn hang_up(&self) {
+        for session in self.sessions.lock().expect("sessions lock").drain(..) {
+            session.abort();
         }
     }
 
@@ -530,8 +543,13 @@ async fn serve_resp(
             bulk.truncate(length);
             arguments.push(String::from_utf8_lossy(&bulk).to_ascii_uppercase());
         }
+        let authenticates = match arguments.first().map(String::as_str) {
+            Some("AUTH") => true,
+            Some("HELLO") => arguments.iter().any(|argument| argument == "AUTH"),
+            _ => false,
+        };
         let reply: &[u8] = match arguments.first().map(String::as_str) {
-            Some("AUTH") => {
+            _ if authenticates => {
                 auth_attempts.fetch_add(1, Ordering::SeqCst);
                 if accept_auth.load(Ordering::SeqCst) {
                     b"+OK\r\n"
@@ -639,4 +657,47 @@ async fn a_readonly_reply_reconnects_to_the_new_primary() {
         server.connections() >= 2,
         "READONLY must open a connection to the new primary"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_hello_is_reported_as_auth() {
+    use health::Probe;
+
+    let gate = FakeServer::start().await;
+    let cache = Cache::connect(CacheOptions {
+        dsn: SecretString::from(format!("redis://:secret@{}", gate.address)),
+        root_ca_path: None,
+        allow_plaintext: true,
+        allow_unauthenticated: false,
+        command_timeout: Duration::from_millis(200),
+    })
+    .expect("lazy connect");
+
+    let refused = tokio::time::timeout(Duration::from_secs(20), cache.probe().check())
+        .await
+        .expect("the reconnect chain ends")
+        .expect_err("the server refuses the password");
+    assert_eq!(refused.to_string(), "cache ping failed: auth");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_idle_connection_reconnects_before_the_next_call() {
+    let server = FakeServer::start().await;
+    let cache = admitted(&format!("redis://{}", server.address), true, true);
+    let namespace = cache.namespace("idle");
+    assert_eq!(namespace.get("key").await, Ok(None));
+    assert_eq!(server.connections(), 1);
+
+    server.hang_up();
+    // No cache call from here on: the client must notice the closed socket
+    // and dial again on its own.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while server.connections() < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the client waited for a call before it reconnected"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(namespace.get("key").await, Ok(None));
 }

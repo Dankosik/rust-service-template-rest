@@ -44,15 +44,16 @@ impl Operation {
         }
     }
 
-    /// The exported span name.
+    /// The exported span name: `Service.Operation`, the OpenTelemetry
+    /// convention for AWS SDK client spans.
     fn span_name(self) -> &'static str {
         match self {
-            Self::Put => "object_storage.put",
-            Self::Get => "object_storage.get",
-            Self::Head => "object_storage.head",
-            Self::Delete => "object_storage.delete",
-            Self::PresignGet => "object_storage.presign_get",
-            Self::Probe => "object_storage.probe",
+            Self::Put => "S3.PutObject",
+            Self::Get => "S3.GetObject",
+            Self::Head => "S3.HeadObject",
+            Self::Delete => "S3.DeleteObject",
+            Self::PresignGet => "S3.PresignGetObject",
+            Self::Probe => "S3.HeadBucket",
         }
     }
 
@@ -168,7 +169,11 @@ impl OperationGuard {
     }
 
     /// Record a failure. `error_type` is bounded: a provider error code, an
-    /// HTTP status, or a transport class.
+    /// HTTP status, or a transport class. The caller's error carries no
+    /// provider detail, so the event is the operator's only record of it
+    /// without tracing: a failure of the store, the configuration, or the
+    /// data is a warning; an answer about the object or the admission limit
+    /// stays at DEBUG.
     pub(crate) fn fail(
         &mut self,
         error: ObjectStorageError,
@@ -177,13 +182,26 @@ impl OperationGuard {
         self.span.record("error.type", error_type);
         self.span.record("otel.status_code", "ERROR");
         self.finish(Outcome::Failure(error));
-        self.span.in_scope(|| {
-            tracing::debug!(
-                object_storage.operation = self.operation.label(),
+        let operation = self.operation.label();
+        self.span.in_scope(|| match error {
+            ObjectStorageError::NotFound
+            | ObjectStorageError::AlreadyExists
+            | ObjectStorageError::TooLarge
+            | ObjectStorageError::Busy => tracing::debug!(
+                object_storage.operation = operation,
                 object_storage.outcome = error.label(),
                 error.type = error_type,
                 "object_storage_operation_failed"
-            );
+            ),
+            ObjectStorageError::Unavailable
+            | ObjectStorageError::Rejected
+            | ObjectStorageError::OutcomeUnknown
+            | ObjectStorageError::Integrity => tracing::warn!(
+                object_storage.operation = operation,
+                object_storage.outcome = error.label(),
+                error.type = error_type,
+                "object_storage_operation_failed"
+            ),
         });
         error
     }
