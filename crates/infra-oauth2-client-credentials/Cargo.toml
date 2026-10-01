@@ -16,6 +16,9 @@ workspace = true
 default = ["grpc"]
 grpc = ["dep:infra-grpc", "dep:tonic", "dep:tower"]
 # template:end outbound-auth-grpc:oauth-grpc-feature
+# The Keycloak suite runs only through the explicit integration owner
+# (scripts/ci/test-integration-oauth.sh).
+integration = []
 
 [dependencies]
 # template:begin outbound-auth-grpc:oauth-grpc-dependencies
@@ -35,6 +38,7 @@ serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time"] }
+tracing = { workspace = true, features = ["std"] }
 url = { workspace = true, features = ["std"] }
 uuid = { workspace = true, features = ["v4"] }
 

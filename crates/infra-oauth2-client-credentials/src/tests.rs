@@ -29,14 +29,17 @@ use tokio::{
 use url::Url;
 
 use super::{
-    AcquisitionError, Algorithm, Cached, Credentials, Error, FETCH_TIMEOUT, OnBehalfOf, Options,
-    TOKEN_LIMITS,
+    AcquisitionError, Algorithm, Cached, Credentials, EVICTION_MIN_AGE, Error, FETCH_TIMEOUT,
+    OnBehalfOf, Options, Rejection, TOKEN_LIMITS, subject_key,
 };
 
 // template:begin outbound-auth-grpc:oauth-grpc-tests-module
 #[cfg(feature = "grpc")]
 mod grpc;
 // template:end outbound-auth-grpc:oauth-grpc-tests-module
+
+#[cfg(feature = "integration")]
+mod keycloak;
 
 const TOKEN_PATH: &str = "/token";
 const RESOURCE_PATH: &str = "/resource";
@@ -342,6 +345,13 @@ fn deadline(after: Duration) -> Instant {
     Instant::now() + after
 }
 
+/// Moves the Tokio clock without waiting, leaving it running for socket I/O.
+async fn advance(duration: Duration) {
+    tokio::time::pause();
+    tokio::time::advance(duration).await;
+    tokio::time::resume();
+}
+
 async fn poll_pending<T>(mut future: Pin<&mut impl Future<Output = T>>) {
     assert!(
         poll_fn(|context| Poll::Ready(future.as_mut().poll(context)))
@@ -589,6 +599,12 @@ async fn assertion_header_and_claims_are_verifiable_and_two_requests_differ_in_j
         assert_eq!(claims.aud, ASSERTION_AUDIENCE);
         assert_eq!(claims.exp - claims.iat, 60);
         assert_eq!(claims.iat, claims.nbf);
+        // Dated ten seconds back for a provider whose clock is behind.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!((10..=15).contains(&(now - claims.iat)));
         assert!(!claims.jti.is_empty());
     }
     assert_ne!(decoded[0].1.jti, decoded[1].1.jti);
@@ -799,6 +815,7 @@ async fn a_resource_401_evicts_only_that_subjects_exchanged_token() {
         .await
         .unwrap();
     assert_eq!(fixture.token_requests().len(), 2);
+    advance(EVICTION_MIN_AGE).await;
     fixture.resource_status("401 Unauthorized");
     client
         .execute(
@@ -911,6 +928,11 @@ async fn short_lived_tokens_are_not_reused_but_tokens_without_expiry_are_until_a
     let client = fixture
         .credentials(&[], None)
         .http(fixture.resource_client());
+    client
+        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    advance(EVICTION_MIN_AGE).await;
     fixture.resource_status("401 Unauthorized");
     client
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
@@ -1265,10 +1287,14 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
     for (response, expected) in [
         (
             b"HTTP/1.1 302 Found\r\nlocation: http://redirected.example/token\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec(),
-            AcquisitionError::Rejected,
+            AcquisitionError::Rejected(Rejection::Other),
         ),
         (
             response("503 Service Unavailable", b"provider-secret-body"),
+            AcquisitionError::Unavailable,
+        ),
+        (
+            response("429 Too Many Requests", b"provider-secret-body"),
             AcquisitionError::Unavailable,
         ),
         (
@@ -1280,7 +1306,14 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
                 "400 Bad Request",
                 br#"{"error":"invalid_client","error_description":"provider-secret-body"}"#,
             ),
-            AcquisitionError::Rejected,
+            AcquisitionError::Rejected(Rejection::InvalidClient),
+        ),
+        (
+            response(
+                "400 Bad Request",
+                br#"{"error":"provider-secret-body"}"#,
+            ),
+            AcquisitionError::Rejected(Rejection::Other),
         ),
     ] {
         fixture.token_raw(response);
@@ -1338,12 +1371,18 @@ async fn caller_authorization_conflict_refuses_before_token_or_resource_io() {
 async fn resource_401_and_403_pass_through_and_only_401_evicts_the_token() {
     let fixture = Fixture::new().await;
     for (status, follow_up_fetches) in [("401 Unauthorized", 1), ("403 Forbidden", 0)] {
-        fixture.resource_status(status);
+        fixture.resource_status("200 OK");
         let client = fixture
             .credentials(&[], None)
             .http(fixture.resource_client());
         let before_tokens = fixture.token_requests().len();
         let before_resources = fixture.resource_requests().len();
+        client
+            .execute(fixture.request(), deadline(Duration::from_secs(10)))
+            .await
+            .unwrap();
+        advance(EVICTION_MIN_AGE).await;
+        fixture.resource_status(status);
         assert_eq!(
             client
                 .execute(fixture.request(), deadline(Duration::from_secs(10)))
@@ -1354,7 +1393,7 @@ async fn resource_401_and_403_pass_through_and_only_401_evicts_the_token() {
             status[..3].parse::<u16>().unwrap()
         );
         assert_eq!(fixture.token_requests().len(), before_tokens + 1);
-        assert_eq!(fixture.resource_requests().len(), before_resources + 1);
+        assert_eq!(fixture.resource_requests().len(), before_resources + 2);
         client
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
             .await
@@ -1363,7 +1402,39 @@ async fn resource_401_and_403_pass_through_and_only_401_evicts_the_token() {
             fixture.token_requests().len(),
             before_tokens + 1 + follow_up_fetches
         );
-        assert_eq!(fixture.resource_requests().len(), before_resources + 2);
+        assert_eq!(fixture.resource_requests().len(), before_resources + 3);
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn a_resource_that_refuses_every_token_costs_one_token_request_per_eviction_age() {
+    let fixture = Fixture::new().await;
+    fixture.token_json(
+        "200 OK",
+        &serde_json::json!({"access_token": "refused", "token_type": "Bearer", "expires_in": 3600}),
+    );
+    fixture.resource_status("401 Unauthorized");
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    for token_requests in [1, 2] {
+        // Every call is refused, yet a token younger than the eviction age
+        // is kept instead of being requested again.
+        for _ in 0..3 {
+            let response = client
+                .execute(fixture.request(), deadline(Duration::from_secs(10)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(fixture.token_requests().len(), token_requests);
+        }
+        advance(EVICTION_MIN_AGE).await;
+        // Old enough now: this 401 evicts it for the next round.
+        client
+            .execute(fixture.request(), deadline(Duration::from_secs(10)))
+            .await
+            .unwrap();
     }
     fixture.finish().await;
 }
@@ -1375,9 +1446,15 @@ async fn a_late_401_does_not_evict_a_newer_token() {
         "200 OK",
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 60}),
     );
-    fixture.resource_status("401 Unauthorized");
     let credentials = fixture.credentials(&[], None);
     let client = credentials.http(fixture.resource_client());
+    // Old enough that only its replacement keeps the late 401 from evicting.
+    credentials
+        .service_token(Instant::now() + Duration::from_secs(10))
+        .await
+        .unwrap();
+    advance(EVICTION_MIN_AGE).await;
+    fixture.resource_status("401 Unauthorized");
     let gate = fixture.block_resources();
     let mut stale = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
     tokio::select! { () = fixture.resource_received() => {}, result = &mut stale => panic!("response must be gated: {result:?}"), }
