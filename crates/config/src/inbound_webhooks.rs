@@ -7,10 +7,10 @@
 use std::collections::BTreeMap;
 
 use secrecy::SecretString;
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 use crate::ValidationError;
+use crate::validate::is_env_addressable;
 
 /// Static inbound endpoints and their environment-only verification secrets.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -19,18 +19,7 @@ pub struct InboundWebhooksConfig {
     /// Stable endpoint IDs bound to immutable verification-key references.
     pub endpoints: BTreeMap<String, InboundWebhookEndpointConfig>,
     /// Environment-only Standard Webhooks secrets, keyed by immutable reference.
-    #[serde(deserialize_with = "secret_map")]
     pub secrets: BTreeMap<String, SecretString>,
-}
-
-/// A scalar here is usually a secret whose reference segment was omitted
-/// (`APP__..._SECRETS=value`); the default diagnostic would echo it.
-fn secret_map<'de, D>(deserializer: D) -> Result<BTreeMap<String, SecretString>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    BTreeMap::deserialize(deserializer)
-        .map_err(|_| D::Error::custom("must map key references to secret values"))
 }
 
 /// Verification-key references for one configured inbound endpoint.
@@ -86,11 +75,13 @@ fn validate_endpoint_id(section: &str, endpoint_id: &str) -> Result<(), Validati
     Ok(())
 }
 
+/// A reference names an `APP__INBOUND_WEBHOOKS__SECRETS__<REF>` variable,
+/// which the loader lowercases; any other spelling could never resolve.
 fn validate_key_ref(key: &str, reference: &str) -> Result<(), ValidationError> {
-    if reference.is_empty() || reference.contains('\0') {
+    if !is_env_addressable(reference) {
         return Err(ValidationError::new(
             key,
-            "key references must be nonempty and NUL-free",
+            "key references must be lowercase letters, digits, `_`, or `-`, without `__` or a trailing `_`",
         ));
     }
     Ok(())
@@ -131,6 +122,14 @@ mod tests {
     fn rejects_an_empty_key_reference() {
         let err = with_endpoint("", None).validate(true).unwrap_err();
         assert_eq!(err.key, "inbound_webhooks.endpoints.partner.active_key");
+    }
+
+    #[test]
+    fn rejects_a_reference_no_secret_variable_can_name() {
+        for reference in ["Partner_V2", "partner__v2", "partner_"] {
+            let err = with_endpoint(reference, None).validate(true).unwrap_err();
+            assert_eq!(err.key, "inbound_webhooks.endpoints.partner.active_key");
+        }
     }
 
     #[test]

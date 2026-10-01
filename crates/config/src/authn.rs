@@ -17,6 +17,7 @@ use serde::{Deserialize, Deserializer};
 use crate::de::blank_secret_as_none;
 // template:end oidc-introspection:authn-occupied-secret-import
 use crate::ValidationError;
+use crate::de::VALUE_FREE;
 
 /// Exact audiences accepted by an authentication profile.
 ///
@@ -55,7 +56,8 @@ impl<'de> Deserialize<'de> for Audiences {
             Input::One(value) => vec![value],
             Input::Many(values) => values,
         };
-        Self::new(values).map_err(serde::de::Error::custom)
+        Self::new(values)
+            .map_err(|message| serde::de::Error::custom(format_args!("{VALUE_FREE}{message}")))
     }
 }
 

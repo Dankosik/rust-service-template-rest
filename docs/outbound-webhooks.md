@@ -23,7 +23,9 @@ APP__WEBHOOKS__ENDPOINTS__PARTNER__SECRET=whsec_<base64-key>
 APP__WEBHOOKS__ENDPOINTS__PARTNER__PREVIOUS_SECRET=whsec_<base64-key>
 ```
 
-Endpoint IDs are non-secret, nonempty, NUL-free values. The required secret and
+Endpoint IDs are non-secret values of lowercase letters, digits, `_`, and
+`-`, without `__` or a trailing `_`, so the
+`APP__WEBHOOKS__ENDPOINTS__<ID>__SECRET` variable addresses the same entry. The required secret and
 an explicitly supplied predecessor cannot be blank. `SigningKey::from_encoded`
 admits Standard Webhooks base64, with an optional `whsec_` prefix, only when the
 decoded key is 24--64 bytes. A 32-byte random key is an appropriate example.

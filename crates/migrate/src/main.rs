@@ -1,8 +1,9 @@
 //! `migrate`: apply the embedded migrations to the configured database.
 //!
-//! Loads the same configuration as the service (`--config`, overlays,
-//! `APP__*`), so a migration run is attributable to the same service,
-//! version, and environment as the process it prepares the schema for.
+//! Reads the service's configuration sources (`--config`, overlays,
+//! `APP__*`) and decodes only the sections it uses, so a migration run is
+//! attributable to the same service, version, and environment as the
+//! process it prepares the schema for and needs no secret but the DSN.
 //! Requires the PostgreSQL profile to be enabled; writes one terminal
 //! `migration_run` record; exits 0 on success or no change, 1 otherwise.
 //! A stop signal drops the run, the server ends the session, lock, and
@@ -15,7 +16,7 @@ use infra_postgres::{Dsn, DsnError};
 use infra_telemetry::{LoggingFormat, LoggingOptions, install_subscriber};
 use migrate::{MIGRATOR, Report, RunError, RunOptions};
 use secrecy::ExposeSecret;
-use service_config::{BuildInfo, Config, LoadOptions, ValidationError, process_failure};
+use service_config::{BuildInfo, LoadOptions, MigrationConfig, ValidationError, process_failure};
 
 const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
@@ -50,7 +51,7 @@ impl Failure {
 
 fn main() -> ExitCode {
     let options = LoadOptions::parse_from(std::env::args_os());
-    let config = match service_config::load(&options, BUILD_INFO) {
+    let config = match service_config::load_migration(&options, BUILD_INFO) {
         Ok(config) => config,
         Err(err) => return process_failure(&err.to_string()),
     };
@@ -110,7 +111,7 @@ fn main() -> ExitCode {
     }
 }
 
-async fn apply(config: &Config, target: Option<i64>) -> Result<Report, Failure> {
+async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, Failure> {
     if !config.postgres.enabled {
         return Err(Failure::PostgresDisabled);
     }
