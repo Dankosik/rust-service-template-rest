@@ -28,6 +28,10 @@ type HealthServer = tonic_health::pb::health_server::HealthServer<crate::health:
 pub struct Services {
     routes: tonic::service::RoutesBuilder,
     names: BTreeSet<&'static str>,
+    // template:begin authn:grpc-services-scopes-field
+    /// Scopes a verified principal needs for a method, keyed by request path.
+    scopes: std::collections::HashMap<String, Box<[String]>>,
+    // template:end authn:grpc-services-scopes-field
 }
 
 impl Services {
@@ -59,6 +63,38 @@ impl Services {
         self.routes.add_service(service);
         Ok(())
     }
+
+    // template:begin authn:grpc-services-require-scopes
+    /// Requires every scope in `scopes` for calls to `path`, the method's
+    /// request path such as `/example.v1.EchoService/Unary`. A principal that
+    /// lacks one gets `PERMISSION_DENIED` before the handler. A method with
+    /// no declared requirement admits any authenticated caller, as an OpenAPI
+    /// operation without scopes does. The method name itself is not checked:
+    /// generated servers do not list their methods.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnregisteredMethodPath`] unless `path` is
+    /// `/{service}/{method}` of a service already added, and
+    /// [`Error::DuplicateScopeRequirement`] when `path` already has one.
+    pub fn require_scopes(&mut self, path: &str, scopes: &[&str]) -> Result<(), Error> {
+        let method_of_registered_service = path
+            .strip_prefix('/')
+            .and_then(|rest| rest.split_once('/'))
+            .is_some_and(|(service, method)| {
+                self.names.contains(service) && !method.is_empty() && !method.contains('/')
+            });
+        if !method_of_registered_service {
+            return Err(Error::UnregisteredMethodPath);
+        }
+        if self.scopes.contains_key(path) {
+            return Err(Error::DuplicateScopeRequirement);
+        }
+        let scopes = scopes.iter().map(|&scope| scope.to_owned()).collect();
+        self.scopes.insert(path.to_owned(), scopes);
+        Ok(())
+    }
+    // template:end authn:grpc-services-require-scopes
 }
 
 /// Serves registered services and standard health behind the gRPC middleware
@@ -81,9 +117,11 @@ pub fn router(
                 admit,
             ));
     // template:begin authn:grpc-router-authenticate
+    let scopes = Arc::new(services.scopes);
     let business = business.layer(axum::middleware::from_fn(move |request, next| {
         let verifier = verifier.clone();
-        async move { authenticate(verifier, request, next).await }
+        let scopes = Arc::clone(&scopes);
+        async move { authenticate(verifier, scopes, request, next).await }
     }));
     // template:end authn:grpc-router-authenticate
     with_health(business, readiness, &services.names).layer(axum::middleware::from_fn_with_state(
@@ -192,8 +230,11 @@ async fn reject(request: Request, status: tonic::Status) -> Response {
 }
 
 // template:begin authn:grpc-authenticate
+const INSUFFICIENT_SCOPE_DETAIL: &str = "the verified principal lacks the required scope";
+
 async fn authenticate(
     verifier: infra_bearerauthn::Verifier,
+    scopes: Arc<std::collections::HashMap<String, Box<[String]>>>,
     mut request: Request,
     next: Next,
 ) -> Response {
@@ -206,6 +247,16 @@ async fn authenticate(
         Ok(principal) => principal,
         Err(failure) => return reject(request, authentication_status(failure)).await,
     };
+    // `principal.scopes()` is sorted and deduplicated.
+    let granted = scopes.get(request.uri().path()).is_none_or(|required| {
+        required
+            .iter()
+            .all(|scope| principal.scopes().binary_search(scope).is_ok())
+    });
+    if !granted {
+        let status = tonic::Status::permission_denied(INSUFFICIENT_SCOPE_DETAIL);
+        return reject(request, status).await;
+    }
     request.extensions_mut().insert(principal);
     request.headers_mut().remove(http::header::AUTHORIZATION);
     next.run(request).await
