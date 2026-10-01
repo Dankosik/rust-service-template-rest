@@ -19,7 +19,7 @@ const ENV_SEPARATOR: &str = "__";
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(
-        "environment variable {name} is malformed: empty segment between `{ENV_SEPARATOR}` separators"
+        "environment variable {name} is malformed: each segment between `{ENV_SEPARATOR}` separators must be letters, digits, `_`, or `-`"
     )]
     MalformedEnvName { name: String },
     #[error("config file {}: {error}", path.display())]
@@ -236,8 +236,10 @@ fn is_at_or_under(name: &str, key: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
 }
 
-/// Keep only `APP__*` variables, and refuse names config-rs would otherwise
-/// report as an unknown field with an empty name.
+/// Keep only `APP__*` variables, and refuse a name whose segments are not
+/// plain identifiers. config-rs would report an empty segment as an unknown
+/// field with an empty name, and would read `NAME[0]` or `A.B` as a path of
+/// its own, building a key no rule here expects a variable to set.
 fn collect_namespace<I, K, V>(environment: I) -> Result<config::Map<String, String>, Error>
 where
     I: IntoIterator<Item = (K, V)>,
@@ -252,7 +254,13 @@ where
         let Some(path) = name.strip_prefix(&full_prefix) else {
             continue;
         };
-        if path.is_empty() || path.split(ENV_SEPARATOR).any(str::is_empty) {
+        let is_identifier = |segment: &str| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        };
+        if !path.split(ENV_SEPARATOR).all(is_identifier) {
             return Err(Error::MalformedEnvName {
                 name: name.to_owned(),
             });
@@ -2020,6 +2028,10 @@ mod tests {
             "APP__HTTP____ADDR",
             "APP__HTTP__ADDR__",
             "APP__",
+            "APP__HTTP[0]",
+            "APP__HTTP__ADDR[0]",
+            "APP__HTTP.ADDR",
+            "APP__HTTP__ADDR ",
         ] {
             let err = load_from(&LoadOptions::default(), BUILD, env(&[(name, "x")])).unwrap_err();
             assert!(

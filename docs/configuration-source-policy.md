@@ -28,8 +28,9 @@ Runtime value precedence, last wins:
 An empty `APP__` value is still an explicit final override; it flows into
 validation and fails when the key cannot be empty. Unknown keys from files or
 the environment fail startup (`#[serde(deny_unknown_fields)]` on every
-section), and so does a malformed variable name such as `APP____ADDR` or
-`APP__HTTP__ADDR__`. Because every `APP__*` variable is read, an unrelated
+section), and so does a malformed variable name such as `APP____ADDR`,
+`APP__HTTP__ADDR__`, or `APP__HTTP[0]`: each segment is letters, digits, `_`,
+or `-`. Because every `APP__*` variable is read, an unrelated
 `APP__FOO` in the process environment also fails startup: name the namespace
 for this service only.
 
