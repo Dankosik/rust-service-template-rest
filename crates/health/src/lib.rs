@@ -17,6 +17,13 @@
 //! [`Readiness::refresh_until`] in a tracked background task. Handlers read
 //! the cached result with [`ReadinessReader::verdict`]. Teardown
 //! calls [`Readiness::start_drain`] before cancelling the refresher.
+//!
+//! Operators see the refresher through the `readiness_checks_total` counter
+//! (one increment per completed check, by outcome) and through its log
+//! events: `readiness_lost` and `readiness_recovered` for a published flip,
+//! `readiness_check_failed` for a failure the threshold absorbed, and
+//! `readiness_refresh_late` when a check completes after its predecessor
+//! already went stale.
 
 use std::fmt;
 use std::sync::Arc;
@@ -34,10 +41,10 @@ use tokio_util::sync::CancellationToken;
 /// that cancellation; a check that ignores cancellation holds the whole
 /// refresh past its budget.
 ///
-/// `async_trait` boxes the future so this trait stays object-safe for
-/// `Box<dyn Probe>`. A native `async fn` in a trait is not `dyn`-safe on
-/// this edition, so removing the attribute is a public shape change, not a
-/// cleanup.
+/// `async_trait` boxes the future so this trait stays dyn compatible for
+/// `Box<dyn Probe>`. A trait with a native `async fn` is not dyn compatible
+/// on the pinned toolchain, so removing the attribute is a public shape
+/// change, not a cleanup.
 #[async_trait::async_trait]
 pub trait Probe: Send + Sync + 'static {
     /// Bounded label used in log lines and verdict messages.
@@ -89,6 +96,11 @@ pub enum NotReady {
         error: ProbeError,
     },
 }
+
+/// Completed checks by outcome. A rate that falls to zero while the process
+/// runs is a stopped or hung refresher; the `failed` and `timed_out` rates
+/// show a dependency flapping below the failure threshold.
+const CHECKS_METRIC: &str = "readiness_checks_total";
 
 /// Cadence and thresholds for the refresher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,6 +191,11 @@ impl Readiness {
     /// [`Readiness::refresh`] or [`Readiness::refresh_until`] runs.
     #[must_use]
     pub fn new(probes: Vec<Box<dyn Probe>>, policy: RefreshPolicy) -> Self {
+        metrics::describe_counter!(
+            CHECKS_METRIC,
+            metrics::Unit::Count,
+            "Completed readiness checks by outcome."
+        );
         Self {
             tx: watch::Sender::new(State {
                 draining: false,
@@ -221,23 +238,57 @@ impl Readiness {
     pub async fn refresh(&self) {
         let observed = self.check_probes().await;
         let at = Instant::now();
+        // Literal labels select the metrics facade's static-label fast path.
+        match &observed {
+            Ok(()) => metrics::counter!(CHECKS_METRIC, "outcome" => "ok"),
+            Err(NotReady::TimedOut { .. }) => {
+                metrics::counter!(CHECKS_METRIC, "outcome" => "timed_out")
+            }
+            Err(_) => metrics::counter!(CHECKS_METRIC, "outcome" => "failed"),
+        }
+        .increment(1);
         let failure_threshold = self.policy.failure_threshold;
+        let stale_after = self.policy.stale_after();
         let mut transition_to_log = None;
+        let mut absorbed_failure = None;
+        let mut late_by = None;
         // Publish every completed round, even when readiness stays the same:
         // its timestamp is the refresher's heartbeat for staleness detection.
         self.tx.send_modify(|state| {
-            let next =
-                apply_failure_threshold(state.last_check.as_ref(), observed, failure_threshold, at);
+            let previous = state.last_check.as_ref();
+            let failure = observed.as_ref().err().cloned();
+            let next = apply_failure_threshold(previous, observed, failure_threshold, at);
             // While draining, readers are told "draining" whatever the probes say.
             if !state.draining {
-                transition_to_log = readiness_transition(state.last_check.as_ref(), &next);
+                transition_to_log = readiness_transition(previous, &next);
+                // A failure the threshold absorbed changes nothing readers
+                // see, so this record is its only trace.
+                if next.verdict.is_ok() {
+                    absorbed_failure = failure.map(|reason| (reason, next.consecutive_failures));
+                }
+                // Readers refused the previous verdict as stale before this
+                // round replaced it; nothing else reports that gap.
+                late_by = previous
+                    .map(|previous| at.duration_since(previous.at))
+                    .filter(|age| *age > stale_after);
             }
             state.last_check = Some(next);
         });
         // Logged after the write lock is released so readers never wait on it.
+        if let Some(age) = late_by {
+            tracing::warn!(?age, ?stale_after, "readiness_refresh_late");
+        }
+        if let Some((reason, consecutive_failures)) = absorbed_failure {
+            tracing::warn!(
+                %reason,
+                consecutive_failures,
+                failure_threshold,
+                "readiness_check_failed"
+            );
+        }
         match transition_to_log {
-            Some(Ok(())) => tracing::info!("readiness recovered"),
-            Some(Err(reason)) => tracing::warn!(%reason, "readiness lost"),
+            Some(Ok(())) => tracing::info!("readiness_recovered"),
+            Some(Err(reason)) => tracing::warn!(%reason, "readiness_lost"),
             None => {}
         }
     }
@@ -391,12 +442,12 @@ impl ReadinessReader {
             }
             _ => return self.rx.changed().await.map_err(|_| OwnerDropped),
         };
-        tokio::select! {
-            changed = self.rx.changed() => changed.map_err(|_| OwnerDropped),
-            () = tokio::time::sleep_until(stale_at) => {
+        match tokio::time::timeout_at(stale_at, self.rx.changed()).await {
+            Ok(changed) => changed.map_err(|_| OwnerDropped),
+            Err(_elapsed) => {
                 self.stale_edge_for = checked_at;
                 Ok(())
-            },
+            }
         }
     }
     // template:end grpc:health-changed-verdict
@@ -651,6 +702,121 @@ mod tests {
         ));
         assert_eq!(first_calls.load(Ordering::Relaxed), 1);
         assert_eq!(second_calls.load(Ordering::Relaxed), 0);
+    }
+
+    /// Event names in emission order.
+    #[derive(Clone, Default)]
+    struct Events(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl tracing::Subscriber for Events {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            self.0.lock().unwrap().push(message.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    fn paused_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .expect("test runtime")
+    }
+
+    #[test]
+    fn each_completed_check_is_counted_by_outcome() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let (readiness, flag, _) = flaky(true);
+                readiness.refresh().await;
+                flag.store(false, Ordering::Relaxed);
+                readiness.refresh().await;
+                readiness.refresh().await;
+                Readiness::new(vec![Box::new(Hanging)], policy())
+                    .refresh()
+                    .await;
+            });
+        });
+
+        let scrape = recorder.handle().render();
+        for (outcome, count) in [("ok", 1), ("failed", 2), ("timed_out", 1)] {
+            let sample = format!("readiness_checks_total{{outcome=\"{outcome}\"}} {count}");
+            assert!(scrape.lines().any(|line| line == sample), "{scrape}");
+        }
+    }
+
+    #[test]
+    fn absorbed_failures_flips_and_a_late_refresh_are_logged() {
+        let events = Events::default();
+        tracing::subscriber::with_default(events.clone(), || {
+            // Keep callsite interest independent of a sibling test's thread-local
+            // subscriber; tracing-core otherwise has a single-dispatcher fast path.
+            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+            paused_runtime().block_on(async {
+                let (readiness, flag, _) = flaky(true);
+                readiness.refresh().await;
+                flag.store(false, Ordering::Relaxed);
+                // Two absorbed failures, the flip, then a failure that is
+                // already published.
+                for _ in 0..4 {
+                    readiness.refresh().await;
+                }
+                flag.store(true, Ordering::Relaxed);
+                readiness.refresh().await;
+                tokio::time::advance(policy().stale_after() + Duration::from_millis(1)).await;
+                readiness.refresh().await;
+            });
+        });
+
+        assert_eq!(
+            *events.0.lock().unwrap(),
+            [
+                "readiness_check_failed",
+                "readiness_check_failed",
+                "readiness_lost",
+                "readiness_recovered",
+                "readiness_refresh_late",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_draining_owner_logs_no_check_outcome() {
+        let events = Events::default();
+        tracing::subscriber::with_default(events.clone(), || {
+            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+            paused_runtime().block_on(async {
+                let (readiness, flag, _) = flaky(true);
+                readiness.refresh().await;
+                readiness.start_drain();
+                flag.store(false, Ordering::Relaxed);
+                for _ in 0..3 {
+                    readiness.refresh().await;
+                }
+            });
+        });
+
+        assert!(events.0.lock().unwrap().is_empty(), "{:?}", events.0);
     }
 
     // template:begin grpc:health-changed-verdict-test
