@@ -120,6 +120,24 @@ instance that cannot reach its database cannot serve any route; a service
 whose routes degrade gracefully without a dependency should leave that
 dependency's probe out and watch it through metrics.
 
+The refresher reports itself through `readiness_checks_total{outcome}` (`ok`,
+`failed`, `timed_out`; one increment per completed check) and four log
+events: `readiness_lost` and `readiness_recovered` for a published flip,
+`readiness_check_failed` for a failure the threshold absorbed, and
+`readiness_refresh_late` when a check completes after the previous verdict
+already went stale. A check rate of zero on a running process is a stopped
+refresher.
+
+The failure threshold and the platform's own probe threshold add up. With the
+defaults, a dependency that fails fast withdraws readiness within about `6s`
+(three `2s` rounds) and one that hangs within about `12s` (three rounds at
+the `4s` budget); the platform then counts its own failures on top
+(Kubernetes: `periodSeconds` times `failureThreshold`). Size the platform
+threshold for detection, not for smoothing: the service already absorbs a
+single slow round-trip. The default budget exceeds the PostgreSQL acquire
+budget (`3s`), so a saturated pool is reported by the probe's own error
+rather than as a budget timeout.
+
 ## Shutdown
 
 Every stage draws from one deadline started at the first stop signal
