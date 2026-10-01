@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use infra_outbound_http::{Bytes, Client, Error, Limits, Request, Url};
+use infra_outbound_http::{BuildError, Bytes, Client, Limits, Request, Url};
 use tokio::time::Instant;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -46,7 +46,7 @@ async fn loopback_mock_constructor_uses_the_bounded_client_path() {
 fn production_and_mock_constructors_keep_their_separate_admission_boundaries() {
     assert!(matches!(
         Client::new(&Url::parse("http://127.0.0.1:8080").unwrap(), limits()),
-        Err(Error::InvalidConfiguration)
+        Err(BuildError::InvalidConfiguration)
     ));
     for base in [
         "http://localhost:8080",
@@ -56,7 +56,7 @@ fn production_and_mock_constructors_keep_their_separate_admission_boundaries() {
     ] {
         assert!(matches!(
             Client::new_for_test_http(&Url::parse(base).unwrap(), limits()),
-            Err(Error::InvalidConfiguration)
+            Err(BuildError::InvalidConfiguration)
         ));
     }
 }

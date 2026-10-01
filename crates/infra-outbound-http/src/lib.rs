@@ -47,22 +47,27 @@ pub struct Limits {
     pub response_body_bytes: usize,
 }
 
+/// Client construction failures.
+#[derive(Debug, thiserror::Error)]
+pub enum BuildError {
+    #[error("outbound HTTP configuration is invalid")]
+    InvalidConfiguration,
+    #[error("outbound HTTP TLS configuration failed")]
+    Tls {
+        #[source]
+        source: BoxError,
+    },
+}
+
 /// Outbound exchange failures.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("outbound HTTP configuration is invalid")]
-    InvalidConfiguration,
     #[error("outbound HTTP target is invalid")]
     InvalidTarget,
     #[error("outbound HTTP operation timed out")]
     Timeout,
     #[error("outbound HTTP response body is too large")]
     ResponseBodyTooLarge,
-    #[error("outbound HTTP client construction failed")]
-    ClientBuild {
-        #[source]
-        source: BoxError,
-    },
     #[error("outbound HTTP transport failed")]
     Transport {
         #[source]
@@ -124,9 +129,10 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidConfiguration`] for invalid limits or a
-    /// non-HTTPS URL, a URL without a host, or a URL with userinfo.
-    pub fn new(origin: &Url, limits: Limits) -> Result<Self, Error> {
+    /// Returns [`BuildError::InvalidConfiguration`] for invalid limits or a
+    /// non-HTTPS URL, a URL without a host, or a URL with userinfo, and
+    /// [`BuildError::Tls`] when the platform verifier cannot be built.
+    pub fn new(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         policy::validate_limits(&limits)?;
         let target = policy::admit_origin(origin)?;
         Ok(Self {
@@ -154,10 +160,10 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidConfiguration`] unless `origin` is an `http`
-    /// URL whose host is a literal loopback IP address.
+    /// Returns [`BuildError::InvalidConfiguration`] unless `origin` is an
+    /// `http` URL whose host is a literal loopback IP address.
     #[cfg(feature = "test-support")]
-    pub fn new_for_test_http(origin: &Url, limits: Limits) -> Result<Self, Error> {
+    pub fn new_for_test_http(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         policy::validate_limits(&limits)?;
         let target = policy::admit_test_http_origin(origin)?;
         Ok(Self {
@@ -242,14 +248,14 @@ impl Client {
 /// The process-wide TLS client configuration. Its platform verifier loads the
 /// system root store once, and every client shares its session cache, which
 /// rustls keys by server name.
-fn tls_config() -> Result<&'static rustls::ClientConfig, Error> {
+fn tls_config() -> Result<&'static rustls::ClientConfig, BuildError> {
     use rustls_platform_verifier::BuilderVerifierExt as _;
 
     static CONFIG: OnceLock<rustls::ClientConfig> = OnceLock::new();
     if let Some(config) = CONFIG.get() {
         return Ok(config);
     }
-    let build_error = |source: rustls::Error| Error::ClientBuild {
+    let build_error = |source: rustls::Error| BuildError::Tls {
         source: Box::new(source),
     };
     let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(

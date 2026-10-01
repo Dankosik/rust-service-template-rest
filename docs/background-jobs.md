@@ -175,15 +175,17 @@ fenced transition cannot refund twice.
 Register each handler in the worker's service-local registration function:
 
 ```rust,ignore
-fn register(kinds: &mut infra_jobs::Kinds, _: &jobs_worker::Support<'_>)
+fn register(registration: &mut jobs_worker::Registration<'_>)
     -> Result<(), jobs_worker::BuildError>
 {
-    kinds.register(infra_jobs::Policy::default(), welcome);
+    registration.jobs.register(infra_jobs::Policy::default(), welcome);
     Ok(())
 }
 ```
 
-Pass `register` to `jobs_worker::run` in the worker entrypoint. The
+Pass `register`, or a closure that captures what its handlers need, to
+`jobs_worker::run` in the worker entrypoint. `Registration` also gives the
+loaded configuration, the worker's task tracker, and a shutdown token. The
 unmodified template refuses startup because it ships no business kind.
 Registration rejects an empty set, duplicate/invalid names, and out-of-range
 policies. Defaults are 25 attempts and a 60-second timeout; accepted ranges
@@ -222,8 +224,13 @@ pickup latency matters. `http.grace_period` must cover `http.drain_timeout` plus
 
 Run the image with `--entrypoint /jobs-worker`, using the same PostgreSQL and
 configuration inputs as the service. The worker serves only health and metrics
-listeners, never an application API. It is ready after startup and claiming
-begin, and becomes unready as soon as its first stop signal arrives.
+listeners, never an application API. It reads the service's keys for them:
+`http.addr` is its health listener, and `http.drain_timeout` and
+`http.grace_period` are its shutdown budgets. A worker that shares a host or
+network namespace with the service therefore needs its own `APP__HTTP__ADDR`,
+and its own `APP__OBSERVABILITY__METRICS__ADDR` when metrics are served. It is
+ready after startup and claiming begin, and becomes unready as soon as its
+first stop signal arrives.
 
 ## Claims, deadlines, and shutdown
 
