@@ -1967,6 +1967,8 @@ name = "health"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "metrics",
+ "metrics-exporter-prometheus",
  "thiserror",
  "tokio",
  "tokio-util",
