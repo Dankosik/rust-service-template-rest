@@ -203,7 +203,7 @@ jobs:
         with:
           cache-bin: "false"
           save-if: >-
-            ${{ (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && (
+            ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (
                 needs.changes.outputs.rust_source == 'true' ||
                 needs.changes.outputs.cargo_dependencies == 'true' ||
                 needs.changes.outputs.lint_config == 'true') }}
@@ -559,7 +559,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
           cache-bin: "false"
-          save-if: ${{ (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Start selected integration services
         id: integration-services
         env:
@@ -644,7 +644,7 @@ jobs:
         # suites would keep the others cold until the lockfile changes, so the
         # run that saves compiles them all; a selected suite is already built.
         if: >-
-          (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) &&
+          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
           steps.cargo-cache.outputs.cache-hit != 'true'
         env:
           INTEGRATION_COMPOSE_MANAGED: "1"
@@ -704,7 +704,7 @@ jobs:
         with:
           key: ${{ matrix.part }}
           cache-bin: "false"
-          save-if: ${{ (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Fetch locked Cargo packages
         run: cargo fetch --locked
       - name: Source suites
