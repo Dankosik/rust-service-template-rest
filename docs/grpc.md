@@ -200,7 +200,9 @@ fn accepted(message: String) -> Result<String, Status> {
     if (1..=1024).contains(&message.len()) {
         Ok(message)
     } else {
-        Err(classified_status(ClassifiedFailure::new(Code::BadRequest)))
+        Err(Failure::new(Code::BadRequest)
+            .field_violation("message", "must be 1 to 1024 bytes")
+            .into())
     }
 }
 ```
@@ -211,28 +213,53 @@ cancellation limit. The transport does not cancel work a handler has spawned.
 
 ## Failures
 
-Use `infra_grpc::classified_status` for a shared domain failure.
-`google.rpc.ErrorInfo` carries the stable code in the fixed `service` domain.
-An optional policy-owned retry delay becomes `google.rpc.RetryInfo` and does
-not enable retries. The message is a fixed safe string. HTTP projects the
-same shared identity into its existing status, title, URI and payload.
+Return a failure from the shared catalog with `infra_grpc::Failure`:
+`Err(Failure::new(Code::NotFound).into())`. The catalog code fixes the status
+code and a safe message. `google.rpc.ErrorInfo` carries the code a client
+matches on: `reason` is the catalog code in upper case, such as `NOT_FOUND`
+for the HTTP problem code `not_found`, and `domain` is
+`infra_grpc::ERROR_DOMAIN`, the service name the initializer writes.
+`Failure::field_violation` adds a `google.rpc.BadRequest` violation, as
+`invalid_params` does in an HTTP problem; it names the field and the failed
+constraint, never the submitted value. `Failure::retry_after` adds
+`google.rpc.RetryInfo` and does not enable retries.
 
-| Condition | gRPC code |
+| Catalog code | gRPC code |
 | --- | --- |
-| Classified bad request | `INVALID_ARGUMENT` |
-| Missing, malformed or invalid bearer; classified unauthenticated | `UNAUTHENTICATED` |
-| Classified forbidden | `PERMISSION_DENIED` |
-| Classified not found | `NOT_FOUND` |
-| Classified already exists | `ALREADY_EXISTS` |
-| Classified conflict | `ABORTED` |
-| Classified unimplemented | `UNIMPLEMENTED` |
-| Concurrency shed; classified resource limits | `RESOURCE_EXHAUSTED` |
-| Authentication provider unavailable; classified unavailable | `UNAVAILABLE` |
-| Header deadline elapsed | `DEADLINE_EXCEEDED` |
-| Recovered panic | `INTERNAL` |
+| `bad_request`, `unsupported_media_type`, `unprocessable_content`, `idempotency_key_mismatch`, `webhook_rejected` | `INVALID_ARGUMENT` |
+| `unauthorized`, `authentication_required`, `authentication_malformed`, `authentication_invalid` | `UNAUTHENTICATED` |
+| `forbidden` | `PERMISSION_DENIED` |
+| `not_found` | `NOT_FOUND` |
+| `already_exists` | `ALREADY_EXISTS` |
+| `conflict`, `idempotency_request_in_progress` | `ABORTED` |
+| `method_not_allowed` | `UNIMPLEMENTED` |
+| `request_entity_too_large`, `request_header_fields_too_large`, `too_many_requests` | `RESOURCE_EXHAUSTED` |
+| `service_unavailable`, `authentication_unavailable`, `idempotency_unavailable` | `UNAVAILABLE` |
+| `request_timeout` | `DEADLINE_EXCEEDED` |
+| `internal_error` | `INTERNAL` |
 
-A handler `Status` is not rewritten. Only the rows above are transport-owned
-or catalog-owned. Tonic's own decode-limit status is unchanged.
+The transport answers its own rejections from the same catalog, so each
+carries a reason:
+
+| Condition | gRPC code | Reason |
+| --- | --- | --- |
+| Missing bearer | `UNAUTHENTICATED` | `AUTHENTICATION_REQUIRED` |
+| Malformed bearer | `UNAUTHENTICATED` | `AUTHENTICATION_MALFORMED` |
+| Invalid bearer | `UNAUTHENTICATED` | `AUTHENTICATION_INVALID` |
+| Authentication provider unavailable | `UNAVAILABLE` | `AUTHENTICATION_UNAVAILABLE` |
+| Missing required scope | `PERMISSION_DENIED` | `FORBIDDEN` |
+| Concurrency shed | `RESOURCE_EXHAUSTED` | `SERVICE_UNAVAILABLE` |
+| Header deadline elapsed | `DEADLINE_EXCEEDED` | `REQUEST_TIMEOUT` |
+| Recovered panic | `INTERNAL` | `INTERNAL_ERROR` |
+
+The shed is the one answer whose gRPC code differs from its catalog row: it
+keeps the identity HTTP's shed uses, and `RESOURCE_EXHAUSTED` keeps a client
+that retries `UNAVAILABLE` from adding load. A malformed bearer is HTTP 400
+and gRPC `UNAUTHENTICATED`, because gRPC has no bad-request status for
+credentials.
+
+A handler `Status` is not rewritten, and a status built without `Failure`
+carries no reason. Tonic's own decode-limit status is unchanged.
 
 ## Reuse clients and original deadlines
 
