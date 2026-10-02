@@ -101,7 +101,8 @@ session_budgets = "startup"
 
 # template:begin object-storage:local-config
 # Object storage is inert until a provider is selected. The secret is
-# environment-only. With the emulator from `make compose-up`:
+# environment-only. With the emulator, which creates `template-bucket`:
+#   docker compose -f env/docker-compose.yml up -d --wait versitygw
 #   APP__OBJECT_STORAGE__SECRET_ACCESS_KEY=template-secret make run
 # [object_storage]
 # provider = "local"
