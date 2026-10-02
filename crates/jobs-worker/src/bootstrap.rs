@@ -193,9 +193,7 @@ async fn prepare(
 ) -> Result<Prepared, WorkerError> {
     let identity = worker_identity(&config.observability.otel.service_name);
     let (tracer_provider, metrics) = install_observability(config, &identity)?;
-    // template:begin messaging:worker-bootstrap-sanitized-panic-hook-call
     install_sanitized_panic_hook();
-    // template:end messaging:worker-bootstrap-sanitized-panic-hook-call
     let mut registrations = register_capabilities(config, register, cancel, tracker)?;
     log_startup_record(
         config,
@@ -438,10 +436,10 @@ fn refresh_policy(config: &Config) -> RefreshPolicy {
     }
 }
 
-// template:begin messaging:worker-bootstrap-sanitized-panic-hook
-/// The consumer treats a handler panic as a terminal worker fault. Replace
-/// Rust's default hook so caller-controlled panic text never reaches logs
-/// before that typed failure reaches the lifecycle owner.
+/// A panic in a job or message handler is a recorded outcome of that attempt.
+/// Replace Rust's default hook so panic text, which can quote the payload a
+/// caller supplied, never reaches logs: the record names only where the panic
+/// was raised, inside the attempt's span.
 fn install_sanitized_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let location = info.location();
@@ -453,7 +451,6 @@ fn install_sanitized_panic_hook() {
         );
     }));
 }
-// template:end messaging:worker-bootstrap-sanitized-panic-hook
 
 fn install_observability(
     config: &Config,

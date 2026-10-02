@@ -320,17 +320,60 @@ fn observation_timestamp(body: &str) -> Option<f64> {
     })
 }
 
-fn failed_sample_keeps_timestamp(body: &str, timestamp: f64) -> bool {
-    let failure = body.lines().any(|line| {
+/// Whether the worker counted a failure of `operation`.
+fn operation_failed(body: &str, operation: &str) -> bool {
+    let label = format!("operation=\"{operation}\"");
+    body.lines().any(|line| {
         line.starts_with("jobs_worker_operation_failures_total{")
-            && line.contains("operation=\"sample\"")
+            && line.contains(&label)
             && line
                 .split_ascii_whitespace()
                 .last()
                 .and_then(|value| value.parse::<f64>().ok())
                 .is_some_and(|value| value >= 1.0)
-    });
-    failure
+    })
+}
+
+fn await_failed_operation(url: &str, operation: &str) {
+    let deadline = Instant::now() + METRICS_BOUND;
+    let mut scraped = String::new();
+    while Instant::now() < deadline {
+        if let Ok((status, body)) = get(url) {
+            scraped = body;
+            if status == 200 && operation_failed(&scraped, operation) {
+                return;
+            }
+        }
+        std::thread::sleep(POLL);
+    }
+    panic!("metrics never counted a failed {operation}:\n{scraped}");
+}
+
+/// The worker's wake `LISTEN` session in this test's database, once it listens.
+async fn wake_listener(pool: &PgPool, except: Option<i32>) -> i32 {
+    tokio::time::timeout(JOB_BOUND, async {
+        loop {
+            let pid: Option<i32> = sqlx::query_scalar(
+                "SELECT pid FROM pg_stat_activity \
+                 WHERE datname = current_database() AND query LIKE 'LISTEN%' \
+                   AND pid IS DISTINCT FROM $1",
+            )
+            .bind(except)
+            .fetch_optional(pool)
+            .await
+            .expect("the listener observation");
+            if let Some(pid) = pid {
+                return pid;
+            }
+            tokio::time::sleep(DB_POLL).await;
+        }
+    })
+    .await
+    .expect("the worker listens for wake notifications")
+}
+
+fn failed_sample_keeps_timestamp(body: &str, timestamp: f64) -> bool {
+    operation_failed(body, "sample")
         && capped_scheduled_probe_sample(body)
         && observation_timestamp(body)
             .is_some_and(|current| current.to_bits() == timestamp.to_bits())
@@ -622,6 +665,45 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-4
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-4
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn worker_counts_a_lost_wake_listener_and_listens_again(pool: PgPool) {
+    let database_url = child_database_url(&pool).await;
+    // template:begin outbox:test-jobs-process-nats-fixture-use-6
+    let nats = NatsFixture::create().await;
+    // template:end outbox:test-jobs-process-nats-fixture-use-6
+    let worker = Worker::spawn(
+        &database_url,
+        // template:begin outbox:test-jobs-process-nats-fixture-argument-6
+        &nats,
+        // template:end outbox:test-jobs-process-nats-fixture-argument-6
+        &[],
+    );
+    let diagnostics = listener_addr(&worker, "diagnostics listener bound");
+    worker.await_record("jobs_worker_ready");
+    let metrics = format!("http://{diagnostics}/metrics");
+    let first = wake_listener(&pool, None).await;
+    let (_, before) = get(&metrics).expect("a metrics scrape");
+    assert!(!operation_failed(&before, "listen"), "{before}");
+
+    // The server's closing error is not a notification, so the driver
+    // reports the terminated session only as a lost connection.
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(first)
+        .fetch_one(&pool)
+        .await
+        .expect("the listener's backend is terminated");
+    assert!(terminated);
+    await_failed_operation(&metrics, "listen");
+    wake_listener(&pool, Some(first)).await;
+
+    worker.terminate();
+    let (code, stderr) = worker.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    // template:begin outbox:test-jobs-process-nats-fixture-cleanup-6
+    nats.cleanup().await;
+    // template:end outbox:test-jobs-process-nats-fixture-cleanup-6
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

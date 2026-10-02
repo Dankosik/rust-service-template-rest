@@ -23,7 +23,7 @@ Signals, deadline clamping, and task teardown remain separate service and
 worker lifecycle owners. Extract a shared lifecycle crate only when a shared
 change to signal semantics, deadline arithmetic, or tracked-task teardown
 offsets the public API and profile cost; a third binary alone is insufficient.
-The retained webhook provider and a future messaging/outbox capability reuse this
+The webhook provider and the messaging outbox, where retained, reuse this
 pack's scheduling, attempts, and fenced completion rather than creating
 competing queue machinery.
 
@@ -78,6 +78,11 @@ bytes respectively, rejects controls and malformed nonempty tracestate, and
 links a valid extracted remote span rather than making it the consumer parent.
 It stores no baggage. Parent-only legacy rows remain valid; malformed or
 overbound context leaves the attempt unlinked without failing the job.
+The attempt span keeps its `job.*` fields and takes no `messaging.*`
+attributes: the queue is a table of this service's own database, and the
+outbox attempt already contains the broker's `messaging.*` send span, so a
+second messaging system on the enclosing span would name PostgreSQL as a
+broker in every trace of a published event.
 
 ## Static claims and outcomes
 
@@ -108,7 +113,11 @@ outside its pool: the engine built with `Engine::new` owns that listener and
 terminal retention, and an engine built with `Engine::beside` it shares both
 and its worker id instead of repeating them. Polling remains the recovery
 path, and the only path through a transaction-mode pooler, where `LISTEN`
-succeeds and delivers nothing. On DigitalOcean c-4
+succeeds and delivers nothing. The listener subscribes at most once per poll
+interval and reports each lost connection as a `listen` failure: the driver
+returns a loss as no notification, without an error, so the earlier loop
+neither counted it nor bounded how often it resubscribed and woke every
+engine beyond the time a connection handshake takes. On DigitalOcean c-4
 (PostgreSQL 18, 16 slots) pickup latency at 50 jobs/s went from p50 486 ms /
 p99 981 ms to p50 15 ms / p99 28 ms, and debounced enqueue cost stayed within
 noise.
