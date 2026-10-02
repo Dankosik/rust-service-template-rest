@@ -907,7 +907,7 @@ async fn migrations_apply_once_and_then_report_no_change(pool: PgPool) {
 
     let second = migrate::run(&widgets, &options(&dsn)).await.unwrap();
     assert_eq!(second.before, Some(20_260_918_000_002));
-    assert!(second.applied.is_empty());
+    assert_eq!(second.applied, [] as [i64; 0]);
     assert_eq!(second.after(), Some(20_260_918_000_002));
 }
 
@@ -925,7 +925,7 @@ async fn the_embedded_set_runs_on_an_empty_database(pool: PgPool) {
 
     let repeated = migrate::run(&MIGRATOR, &options(&dsn)).await.unwrap();
     assert_eq!(repeated.before, target);
-    assert!(repeated.applied.is_empty());
+    assert_eq!(repeated.applied, [] as [i64; 0]);
     assert_eq!(migrate::verify_history(&pool).await, Ok(()));
 
     // A later release that already migrated this database keeps an older
@@ -942,7 +942,7 @@ async fn the_embedded_set_runs_on_an_empty_database(pool: PgPool) {
     assert_eq!(migrate::verify_history(&pool).await, Ok(()));
     // A rolled-back release's migrate job also admits the later history.
     let rolled_back = migrate::run(&MIGRATOR, &options(&dsn)).await.unwrap();
-    assert!(rolled_back.applied.is_empty());
+    assert_eq!(rolled_back.applied, [] as [i64; 0]);
     assert_eq!(rolled_back.before, Some(newer));
 }
 
@@ -994,7 +994,7 @@ async fn an_older_release_admits_the_history_of_a_later_one(pool: PgPool) {
     let result = migrate::run(&fixture("widgets_partial").await, &options(&dsn))
         .await
         .unwrap();
-    assert!(result.applied.is_empty());
+    assert_eq!(result.applied, [] as [i64; 0]);
     assert_eq!(result.before, Some(20_260_918_000_002));
     assert_eq!(applied_count(&pool).await, 2);
 }
@@ -1106,7 +1106,7 @@ async fn a_no_transaction_build_is_refused_until_its_invalid_index_is_dropped(po
     .unwrap();
     assert!(valid);
     let replay = migrate::run(&fixture, &options(&dsn)).await.unwrap();
-    assert!(replay.applied.is_empty());
+    assert_eq!(replay.applied, [] as [i64; 0]);
 }
 
 #[sqlx::test(migrations = false)]

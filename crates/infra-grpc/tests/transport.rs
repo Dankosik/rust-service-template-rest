@@ -1595,7 +1595,7 @@ async fn reflection_describes_the_committed_contract_and_health() {
     let MessageResponse::FileDescriptorResponse(files) = next().await else {
         panic!("a known symbol is answered with its file descriptor");
     };
-    assert!(!files.file_descriptor_proto.is_empty());
+    assert_ne!(files.file_descriptor_proto, [] as [Vec<u8>; 0]);
 
     // Older tools ask only for the version `v1` replaced.
     let mut older = v1alpha::server_reflection_client::ServerReflectionClient::new(
