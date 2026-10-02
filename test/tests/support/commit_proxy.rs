@@ -13,6 +13,9 @@
 //!   real commit whose acknowledgement is lost.
 //! - [`Fault::DropBeforeForward`] closes both sockets before forwarding it:
 //!   nothing commits.
+//! - [`Fault::ForwardThenCorruptReady`] forwards it and relays the completed
+//!   commit with an invalid `ReadyForQuery` status: the driver sees a protocol
+//!   error after the real commit.
 //!
 //! It can also hold the backend's `ReadyForQuery` after forwarding one
 //! `BEGIN`. Dropping the client future before release makes the transport
@@ -50,6 +53,9 @@ pub(crate) enum Fault {
     ForwardThenDrop,
     /// Close both sockets before forwarding it: nothing commits.
     DropBeforeForward,
+    /// Forward it, then corrupt the transaction-status byte of `ReadyForQuery`.
+    /// The commit happens, but the driver cannot decode its final response.
+    ForwardThenCorruptReady,
 }
 
 /// A fault with an optional SQL substring selecting its transaction.
@@ -299,14 +305,14 @@ async fn relay(
     let _ = upstream.set_nodelay(true);
     let mut frontend = Frontend::default();
     let mut backend = Vec::new();
-    // Set once the commit boundary is forwarded under `ForwardThenDrop`: from then on the
-    // client is not read, and the server's answer is framed and swallowed.
-    let mut committing = false;
+    // Once the selected commit is forwarded, frame its complete answer before
+    // losing or corrupting it; do not read another client operation meanwhile.
+    let mut committing = None;
     let mut holding_begin = false;
     loop {
         tokio::select! {
             () = cancel.cancelled() => return,
-            read = client.read_buf(&mut frontend.pending), if !committing && !holding_begin => {
+            read = client.read_buf(&mut frontend.pending), if committing.is_none() && !holding_begin => {
                 if !matches!(read, Ok(1..)) {
                     return;
                 }
@@ -317,7 +323,9 @@ async fn relay(
                     let hold_begin = Frontend::claim_begin(&message, &begin_hold);
                     match frontend.operation_fault(&message, &arming) {
                         Some(Fault::DropBeforeForward) => return,
-                        Some(Fault::ForwardThenDrop) => committing = true,
+                        Some(fault @ (Fault::ForwardThenDrop | Fault::ForwardThenCorruptReady)) => {
+                            committing = Some(fault);
+                        }
                         None => {}
                     }
                     if upstream.write_all(&message).await.is_err() {
@@ -327,7 +335,7 @@ async fn relay(
                         holding_begin = true;
                         break;
                     }
-                    if committing {
+                    if committing.is_some() {
                         break;
                     }
                 }
@@ -336,20 +344,27 @@ async fn relay(
                 if !matches!(read, Ok(1..)) {
                     return;
                 }
-                if committing {
-                    // The final acknowledgement is never relayed: close once
-                    // the server is ready again, which it is only after the
-                    // commit.
-                    if !matches!(holds_ready_for_query(&backend), Ok(false)) {
-                        return;
+                if let Some(fault) = committing {
+                    let ready = match ready_for_query(&backend) {
+                        Ok(None) => continue,
+                        Ok(Some(ready)) => ready,
+                        Err(_) => return,
+                    };
+                    if fault == Fault::ForwardThenCorruptReady {
+                        // A complete ReadyForQuery is type + length + status.
+                        // Idle independently establishes that COMMIT ended.
+                        assert_eq!(backend[ready + 5], b'I', "the server completed COMMIT");
+                        backend[ready + 5] = b'?';
+                        let _ = client.write_all(&backend).await;
                     }
+                    return;
                 } else if holding_begin {
                     // TCP may split either frame, or separate CommandComplete
                     // from ReadyForQuery. Keep every held byte until the latter
                     // is complete before publishing the cancellation point.
-                    match holds_ready_for_query(&backend) {
-                        Ok(false) => continue,
-                        Ok(true) => begin_hold.hold(),
+                    match ready_for_query(&backend) {
+                        Ok(None) => continue,
+                        Ok(Some(_)) => begin_hold.hold(),
                         Err(_) => return,
                     }
                     if !begin_hold.wait_for_release(&cancel).await {
@@ -480,17 +495,18 @@ fn frame(bytes: &[u8], typed: bool) -> Option<Result<usize, Malformed>> {
     (bytes.len() >= total).then_some(Ok(total))
 }
 
-/// Whether the backend bytes, read from a message boundary, hold a complete
-/// `ReadyForQuery`.
-fn holds_ready_for_query(mut bytes: &[u8]) -> Result<bool, Malformed> {
-    while let Some(length) = frame(bytes, true) {
+/// The offset of a complete `ReadyForQuery` in backend bytes read from a
+/// message boundary, or `None` while its frame is incomplete.
+fn ready_for_query(bytes: &[u8]) -> Result<Option<usize>, Malformed> {
+    let mut offset = 0;
+    while let Some(length) = frame(&bytes[offset..], true) {
         let length = length?;
-        if bytes[0] == b'Z' {
-            return Ok(true);
+        if bytes[offset] == b'Z' {
+            return Ok(Some(offset));
         }
-        bytes = &bytes[length..];
+        offset += length;
     }
-    Ok(false)
+    Ok(None)
 }
 
 /// The arming state; a relay that panicked cannot leave it inconsistent.

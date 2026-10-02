@@ -17,6 +17,12 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 // template:begin http-idempotency-mounted:http-idempotency-mounted-module
+#[allow(
+    dead_code,
+    reason = "the shared transport also supplies BEGIN and autocommit faults to other integration targets"
+)]
+#[path = "../support/commit_proxy.rs"]
+mod commit_proxy;
 mod mounted;
 // template:end http-idempotency-mounted:http-idempotency-mounted-module
 
