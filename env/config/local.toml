@@ -4,7 +4,8 @@
 # Non-secret defaults only. Secret-like keys (password, secret, credentials,
 # token, dsn, authorization, api_key, private_key, otlp_headers) may appear
 # here only as empty placeholders; a non-empty value fails startup. Set
-# secrets through APP__SECTION__KEY environment variables. Every key not
+# secrets through APP__SECTION__KEY variables: in the environment, or as
+# files of that name in the directory `--secrets-dir` names. Every key not
 # known to the service fails startup too, so a typo cannot be silently
 # ignored.
 

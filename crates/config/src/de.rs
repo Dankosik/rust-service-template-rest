@@ -15,15 +15,16 @@ pub(crate) const VALUE_FREE: char = '\0';
 const LISTEN_ADDR: &str = "an IP address and port, or :port; hostnames are not resolved";
 
 /// Missing, empty, or whitespace-only text is vacant (`None`); a present
-/// value is stored trimmed.
-pub(crate) fn blank_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+/// value is stored trimmed, as text or as the path it names.
+pub(crate) fn blank_as_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
+    T: From<String>,
 {
     let raw = Option::<String>::deserialize(deserializer)?;
     Ok(raw.and_then(|value| {
         let trimmed = value.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        (!trimmed.is_empty()).then(|| T::from(trimmed.to_owned()))
     }))
 }
 

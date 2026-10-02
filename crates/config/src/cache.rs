@@ -13,7 +13,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::app::is_local_development;
-use crate::de::blank_secret_as_none;
+use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::validate::{ValidationError, duration_range};
 
 /// Optional Redis-compatible cache. Absent `dsn` keeps the profile inert.
@@ -25,7 +25,9 @@ pub struct CacheConfig {
     /// is absent (`None`).
     #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub dsn: Option<SecretString>,
-    /// PEM root CA path for a private certificate. Empty when unset.
+    /// PEM root CA path for a private certificate. Missing, empty, or
+    /// whitespace-only is unset (`None`).
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub root_ca_path: Option<PathBuf>,
     /// Permit a plaintext DSN. Local and development only.
     pub allow_plaintext: bool,
@@ -74,16 +76,6 @@ impl CacheConfig {
             return Err(ValidationError::new(
                 "cache.allow_unauthenticated",
                 "is local/development-only",
-            ));
-        }
-        if self
-            .root_ca_path
-            .as_ref()
-            .is_some_and(|path| path.as_os_str().is_empty())
-        {
-            return Err(ValidationError::new(
-                "cache.root_ca_path",
-                "cannot be empty when set",
             ));
         }
         duration_range(

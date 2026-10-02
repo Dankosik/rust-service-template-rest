@@ -29,7 +29,8 @@ make run
 `make run` uses `env/config/local.toml`. The default service needs no external
 services. Check `http://127.0.0.1:8080/health/live` and `/health/ready`;
 Prometheus metrics use the separate listener at `http://127.0.0.1:9090/metrics`.
-`APP__SECTION__KEY` overrides configuration. Unknown keys and secrets in files
+`APP__SECTION__KEY` overrides configuration, from the environment or from a
+file of that name under `--secrets-dir`. Unknown keys and secrets in TOML files
 fail startup. A stop signal drains admitted work, joins background tasks and
 flushes telemetry. [Configuration](docs/configuration-source-policy.md) and
 [Runtime Lifecycle](docs/architecture/runtime-lifecycle.md) own the details.

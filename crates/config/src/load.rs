@@ -1,5 +1,7 @@
-//! Build the snapshot from defaults, files, and the `APP__` environment.
+//! Build the snapshot from defaults, files, and the `APP__` variables: the
+//! secrets directory's files, then the process environment over them.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -10,18 +12,37 @@ use crate::secret_policy::first_secret_like_key;
 use crate::validate::is_env_addressable;
 use crate::{Config, LoadOptions, ValidationError};
 
-/// Environment namespace. `APP__HTTP__ADDR` sets `http.addr`.
+/// Variable namespace. `APP__HTTP__ADDR` sets `http.addr`.
 pub const ENV_PREFIX: &str = "APP";
 const ENV_SEPARATOR: &str = "__";
+
+/// What a variable name must be, for the two errors that refuse one.
+const NAME_FORM: &str = "each segment between `__` separators must be letters, digits, `_`, or `-`";
 
 /// Why a snapshot could not be built. `Display` carries the whole cause, so
 /// no variant also exposes it through `source()`.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error(
-        "environment variable {name} is malformed: each segment between `{ENV_SEPARATOR}` separators must be letters, digits, `_`, or `-`"
-    )]
+    #[error("environment variable {name} is malformed: {NAME_FORM}")]
     MalformedEnvName { name: String },
+    #[error("environment variable {name} holds a value that is not valid Unicode")]
+    NonUnicodeEnvValue { name: String },
+    #[error("secrets directory {}: {error}", path.display())]
+    ReadSecretsDir {
+        path: PathBuf,
+        error: std::io::Error,
+    },
+    #[error("secret file {}: {error}", path.display())]
+    ReadSecret {
+        path: PathBuf,
+        error: std::io::Error,
+    },
+    #[error("secret file {} is malformed: its name is a variable name, and {NAME_FORM}", path.display())]
+    MalformedSecretName { path: PathBuf },
+    #[error(
+        "{name} and {other} set the same key: a variable name is lowercased before it is split"
+    )]
+    AmbiguousName { name: String, other: String },
     #[error("config file {}: {error}", path.display())]
     ReadFile {
         path: PathBuf,
@@ -32,13 +53,13 @@ pub enum Error {
         path: PathBuf,
         error: toml::de::Error,
     },
-    #[error("secret-like key `{key}` carries a value in config file {}; secrets come only from the environment", path.display())]
+    #[error("secret-like key `{key}` carries a value in config file {}; secrets come only from an `{ENV_PREFIX}{ENV_SEPARATOR}` variable", path.display())]
     SecretInFile { key: String, path: PathBuf },
     #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable, whose name is lowercased and split on `{ENV_SEPARATOR}`; use lowercase letters, digits, `_`, and `-`, without `{ENV_SEPARATOR}` or a trailing `_`", path.display())]
     UnaddressableKey { key: String, path: PathBuf },
     #[error("load configuration: {0}")]
     Merge(config::ConfigError),
-    /// The message never carries a value the environment supplied.
+    /// The message never carries a value a variable supplied.
     #[error("configuration is invalid: {0}")]
     Deserialize(String),
     #[error("configuration is invalid: {0}")]
@@ -55,10 +76,11 @@ impl From<ValidationError> for Error {
 ///
 /// # Errors
 ///
-/// Fails on a malformed `APP__` variable name, an unreadable or
-/// unparsable file, a file key the environment cannot address, a non-empty
-/// secret-like value in a file, an unknown key anywhere, or a violated
-/// validation rule.
+/// Fails on a malformed or ambiguous `APP__` variable name, a variable value
+/// that is not Unicode, an unreadable secrets directory, an unreadable or
+/// unparsable file, a file key no variable can address, a non-empty
+/// secret-like value in a config file, an unknown key anywhere, or a
+/// violated validation rule.
 pub fn load(options: &LoadOptions, build: BuildInfo) -> Result<Config, Error> {
     load_from(options, build, std::env::vars_os())
 }
@@ -71,8 +93,8 @@ pub(crate) fn load_from<I, K, V>(
 ) -> Result<Config, Error>
 where
     I: IntoIterator<Item = (K, V)>,
-    K: Into<std::ffi::OsString>,
-    V: Into<std::ffi::OsString>,
+    K: Into<OsString>,
+    V: Into<OsString>,
 {
     let mut snapshot: Config = merge(options, environment)?;
     snapshot.app.apply_build_info(build);
@@ -102,8 +124,8 @@ pub(crate) fn load_migration_from<I, K, V>(
 ) -> Result<crate::MigrationConfig, Error>
 where
     I: IntoIterator<Item = (K, V)>,
-    K: Into<std::ffi::OsString>,
-    V: Into<std::ffi::OsString>,
+    K: Into<OsString>,
+    V: Into<OsString>,
 {
     let mut snapshot: crate::MigrationConfig = merge(options, environment)?;
     snapshot.app.apply_build_info(build);
@@ -112,15 +134,15 @@ where
 }
 // template:end postgres:load-migration
 
-/// Merge the files and the `APP__` namespace, then decode the result.
+/// Merge the files and the `APP__` variables, then decode the result.
 fn merge<T, I, K, V>(options: &LoadOptions, environment: I) -> Result<T, Error>
 where
     T: DeserializeOwned,
     I: IntoIterator<Item = (K, V)>,
-    K: Into<std::ffi::OsString>,
-    V: Into<std::ffi::OsString>,
+    K: Into<OsString>,
+    V: Into<OsString>,
 {
-    let namespace = collect_namespace(environment)?;
+    let namespace = collect_namespace(options.secrets_dir.as_deref(), environment)?;
 
     let mut builder = config::Config::builder();
     for path in options.files() {
@@ -145,35 +167,65 @@ where
         .build()
         .map_err(Error::Merge)?;
 
+    let carrier = if options.secrets_dir.is_some() {
+        "the environment or the secrets directory"
+    } else {
+        "the environment"
+    };
     merged
         .try_deserialize()
-        .map_err(|error| Error::Deserialize(describe_rejection(&error, &namespace)))
+        .map_err(|error| Error::Deserialize(describe_rejection(&error, &namespace, carrier)))
 }
 
-/// Render a decode failure without a value the environment supplied.
+/// Sections whose values stay out of a decode failure whichever source set
+/// them; their `Debug` output redacts the same trust inputs.
+const VALUE_FREE_SECTIONS: &[&str] = &[
+    // template:begin client-integrations:load-value-free-section
+    "integrations",
+    // template:end client-integrations:load-value-free-section
+];
+
+/// Render a decode failure without a value a variable supplied.
 ///
-/// The environment is the only secret source, and config-rs and serde quote
-/// the value they refuse, sometimes lowercased, trimmed, or parsed. So a
-/// failure at a key the environment sets is rebuilt from its key and its
-/// expected form, never from the decoder's text. Only a message that names
-/// keys alone (an unknown or missing field) or carries [`VALUE_FREE`] is
-/// shown as written, as is a failure at a key only a file sets.
+/// Variables are the only secret source, and config-rs and serde quote the
+/// value they refuse, sometimes lowercased, trimmed, or parsed. So a failure
+/// at a key a variable sets is rebuilt from its key and its expected form,
+/// never from the decoder's text, and so is one inside a section of
+/// [`VALUE_FREE_SECTIONS`]. Only a message that names keys alone (an unknown
+/// or missing field) or carries [`VALUE_FREE`] is shown as written, as is a
+/// failure at any other key only a file sets. `carrier` names where the
+/// variables of this load come from.
 fn describe_rejection(
     error: &config::ConfigError,
     namespace: &config::Map<String, String>,
+    carrier: &str,
 ) -> String {
     let (key, rejection) = rejection(error);
-    let supplied = key.is_none_or(|key| {
-        // `urls[0]` is an element of the value at `urls`.
-        let key = key.split('[').next().unwrap_or(key);
-        namespace.keys().any(|name| is_at_or_under(name, key))
+    // `urls[0]` is an element of the value at `urls`.
+    let value_key = key.map(|key| key.split('[').next().unwrap_or(key));
+    let from_variable = value_key.is_none_or(|key| {
+        namespace
+            .keys()
+            .any(|name| is_at_or_under(&variable_path(name), key))
+    });
+    let value_free = value_key.is_some_and(|key| {
+        VALUE_FREE_SECTIONS
+            .iter()
+            .any(|section| is_at_or_under(key, section))
     });
     let place = key.map_or_else(String::new, |key| format!(" for key `{key}`"));
+    let origin = if from_variable {
+        format!(" in {carrier}")
+    } else {
+        String::new()
+    };
     match rejection {
-        Rejection::Expected(expected) if supplied => {
-            format!("invalid value, expected {expected}{place} in the environment")
+        Rejection::Expected(expected) if from_variable || value_free => {
+            format!("invalid value, expected {expected}{place}{origin}")
         }
-        Rejection::Unexplained if supplied => format!("invalid value{place} in the environment"),
+        Rejection::Unexplained if from_variable || value_free => {
+            format!("invalid value{place}{origin}")
+        }
         _ => error.to_string().replace(VALUE_FREE, ""),
     }
 }
@@ -224,58 +276,147 @@ fn rejection(error: &config::ConfigError) -> (Option<&str>, Rejection<'_>) {
     }
 }
 
-/// Whether the variable `name` sets the dotted `key` or a key beneath it.
-fn is_at_or_under(name: &str, key: &str) -> bool {
-    let path = name
-        .strip_prefix(ENV_PREFIX)
-        .and_then(|rest| rest.strip_prefix(ENV_SEPARATOR))
-        .unwrap_or(name)
-        .to_lowercase()
-        .replace(ENV_SEPARATOR, ".");
+/// Whether the dotted `path` is `key` or lies beneath it.
+fn is_at_or_under(path: &str, key: &str) -> bool {
     path.strip_prefix(key)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
 }
 
-/// Keep only `APP__*` variables, and refuse a name whose segments are not
-/// plain identifiers. config-rs would report an empty segment as an unknown
-/// field with an empty name, and would read `NAME[0]` or `A.B` as a path of
-/// its own, building a key no rule here expects a variable to set.
-fn collect_namespace<I, K, V>(environment: I) -> Result<config::Map<String, String>, Error>
-where
-    I: IntoIterator<Item = (K, V)>,
-    K: Into<std::ffi::OsString>,
-    V: Into<std::ffi::OsString>,
-{
-    let full_prefix = format!("{ENV_PREFIX}{ENV_SEPARATOR}");
-    let mut namespace = config::Map::new();
-    for (key, value) in environment {
-        let key = key.into();
-        let Some(name) = key.to_str() else { continue };
-        let Some(path) = name.strip_prefix(&full_prefix) else {
-            continue;
-        };
-        let is_identifier = |segment: &str| {
-            !segment.is_empty()
-                && segment
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        };
-        if !path.split(ENV_SEPARATOR).all(is_identifier) {
-            return Err(Error::MalformedEnvName {
-                name: name.to_owned(),
-            });
-        }
-        let value = value.into();
-        let value = value.to_string_lossy().into_owned();
-        // `Environment::source` keeps keys that still carry the `APP__` prefix;
-        // inserting the stripped path would make every override disappear.
-        namespace.insert(name.to_owned(), value);
-    }
-    Ok(namespace)
+/// The dotted key a lowercased variable name sets.
+fn variable_path(name: &str) -> String {
+    let prefix = namespace_prefix().to_lowercase();
+    name.strip_prefix(&prefix)
+        .unwrap_or(name)
+        .replace(ENV_SEPARATOR, ".")
 }
 
-/// The rules a file must meet before it is merged: every key is one the
-/// environment can also address, and no secret-like key carries a value.
+fn namespace_prefix() -> String {
+    format!("{ENV_PREFIX}{ENV_SEPARATOR}")
+}
+
+/// Whether the part of a variable name after `APP__` is a key path: every
+/// segment a plain identifier. config-rs would report an empty segment as an
+/// unknown field with an empty name, and would read `NAME[0]` or `A.B` as a
+/// path of its own, building a key no rule here expects a variable to set.
+fn is_key_path(path: &str) -> bool {
+    path.split(ENV_SEPARATOR).all(|segment| {
+        !segment.is_empty()
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    })
+}
+
+/// One carrier's variables: the lowercased name config-rs reads, then the
+/// name as spelled and its value.
+type Variables = std::collections::BTreeMap<String, (String, String)>;
+
+/// Record a variable, refusing a second spelling of its name: which of the
+/// two values won would depend on the order the carrier listed them in.
+fn admit(variables: &mut Variables, name: &str, value: String) -> Result<(), Error> {
+    match variables.insert(name.to_lowercase(), (name.to_owned(), value)) {
+        Some((other, _)) => Err(Error::AmbiguousName {
+            name: name.to_owned(),
+            other,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The `APP__` variables of one load under their lowercased names: the
+/// secrets directory's files, then the process environment, whose value wins
+/// for a name both carry.
+fn collect_namespace<I, K, V>(
+    secrets_dir: Option<&Path>,
+    environment: I,
+) -> Result<config::Map<String, String>, Error>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<OsString>,
+    V: Into<OsString>,
+{
+    let mut variables = match secrets_dir {
+        Some(dir) => read_secrets_dir(dir)?,
+        None => Variables::new(),
+    };
+    variables.extend(read_environment(environment)?);
+    // `Environment::source` keeps keys that still carry the `APP__` prefix;
+    // inserting the stripped path would make every override disappear.
+    Ok(variables
+        .into_iter()
+        .map(|(name, (_, value))| (name, value))
+        .collect())
+}
+
+/// The `APP__*` variables of the process environment. A name that is not
+/// Unicode fails the key-path check as well: its replacement character is no
+/// identifier byte.
+fn read_environment<I, K, V>(environment: I) -> Result<Variables, Error>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<OsString>,
+    V: Into<OsString>,
+{
+    let prefix = namespace_prefix();
+    let mut variables = Variables::new();
+    for (key, value) in environment {
+        let key = key.into();
+        let name = key.to_string_lossy();
+        let Some(path) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if !is_key_path(path) {
+            return Err(Error::MalformedEnvName {
+                name: name.into_owned(),
+            });
+        }
+        // A lossy conversion would hand a credential on with its bytes changed.
+        let Ok(value) = value.into().into_string() else {
+            return Err(Error::NonUnicodeEnvValue {
+                name: name.into_owned(),
+            });
+        };
+        admit(&mut variables, &name, value)?;
+    }
+    Ok(variables)
+}
+
+/// The variables a secrets directory holds: each entry named `APP__...` is
+/// one variable and its content the value. Every other entry is skipped,
+/// which leaves out the `..data` links a Kubernetes volume keeps beside its
+/// files. A value ends before its trailing line breaks, since most tools
+/// write one; every other byte is kept.
+fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
+    let unreadable = |error| Error::ReadSecretsDir {
+        path: dir.to_owned(),
+        error,
+    };
+    let prefix = namespace_prefix();
+    let mut variables = Variables::new();
+    for entry in std::fs::read_dir(dir).map_err(unreadable)? {
+        let entry = entry.map_err(unreadable)?;
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        let Some(path) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let file = entry.path();
+        if !is_key_path(path) {
+            return Err(Error::MalformedSecretName { path: file });
+        }
+        let value = std::fs::read_to_string(&file)
+            .map_err(|error| Error::ReadSecret { path: file, error })?;
+        admit(
+            &mut variables,
+            &name,
+            value.trim_end_matches(['\r', '\n']).to_owned(),
+        )?;
+    }
+    Ok(variables)
+}
+
+/// The rules a config file must meet before it is merged: every key is one
+/// a variable can also address, and no secret-like key carries a value.
 fn scan_file(path: &Path) -> Result<(), Error> {
     let text = std::fs::read_to_string(path).map_err(|error| Error::ReadFile {
         path: path.to_owned(),
@@ -405,6 +546,7 @@ mod tests {
             env(&[
                 // template:begin postgres:load-empty-dsn-env
                 ("APP__POSTGRES__DSN", ""),
+                ("APP__POSTGRES__PASSWORD_FILE", "  "),
                 // template:end postgres:load-empty-dsn-env
                 ("APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS", "  "),
                 ("APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_ENDPOINT", "  "),
@@ -413,6 +555,7 @@ mod tests {
         .unwrap();
         // template:begin postgres:load-empty-dsn-assertion
         assert!(!cfg.postgres.has_dsn());
+        assert_eq!(cfg.postgres.password_file, None);
         // template:end postgres:load-empty-dsn-assertion
         assert!(!cfg.observability.otel.exporter.has_headers());
         assert_eq!(cfg.observability.otel.exporter.otlp_endpoint, None);
@@ -726,6 +869,26 @@ mod tests {
     }
 
     #[test]
+    fn messaging_empty_root_ca_path_unsets_the_file_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(
+            &dir,
+            "ca.toml",
+            "[messaging]\nroot_ca_path = \"/etc/nats/root-ca.pem\"\n",
+        );
+        let cfg = load_from(
+            &LoadOptions {
+                config: Some(file),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[("APP__MESSAGING__ROOT_CA_PATH", "")]),
+        )
+        .unwrap();
+        assert_eq!(cfg.messaging.root_ca_path, None);
+    }
+
+    #[test]
     fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
         let dir = tempfile::tempdir().unwrap();
         let list = write(
@@ -866,6 +1029,27 @@ mod tests {
         );
         assert_eq!(cfg.cache.command_timeout, Duration::from_millis(200));
         assert!(!format!("{cfg:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn cache_empty_root_ca_path_unsets_the_file_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(
+            &dir,
+            "ca.toml",
+            "[cache]\nroot_ca_path = \" /etc/cache/root-ca.pem \"\n",
+        );
+        let options = LoadOptions {
+            config: Some(file),
+            ..LoadOptions::default()
+        };
+        let set = load_from(&options, BUILD, env(&[])).unwrap();
+        assert_eq!(
+            set.cache.root_ca_path.as_deref(),
+            Some(Path::new("/etc/cache/root-ca.pem"))
+        );
+        let unset = load_from(&options, BUILD, env(&[("APP__CACHE__ROOT_CA_PATH", " ")])).unwrap();
+        assert_eq!(unset.cache.root_ca_path, None);
     }
 
     #[test]
@@ -1118,7 +1302,7 @@ mod tests {
         assert!(matches!(&err, Error::Deserialize(_)), "{err}");
         assert!(
             err.to_string()
-                .contains("integrations.billing.oauth.algorithm: is required"),
+                .contains("missing configuration field \"integrations.billing.oauth.algorithm\""),
             "{err}"
         );
     }
@@ -1212,7 +1396,7 @@ mod tests {
         let rendered = err.to_string();
         assert!(
             rendered.contains(
-                "integrations.billing.oauth.exchange_cache_capacity: must be a whole number"
+                "invalid value, expected an integer for key `integrations.billing.oauth.exchange_cache_capacity`"
             ),
             "{rendered}"
         );
@@ -1289,8 +1473,9 @@ mod tests {
         assert!(matches!(&err, Error::Deserialize(_)), "{err}");
         let rendered = err.to_string();
         assert!(
-            rendered
-                .contains("integrations.billing.oauth.algorithm: must be RS256, PS256 or ES256"),
+            rendered.contains(
+                "must be RS256, PS256 or ES256 for key `integrations.billing.oauth.algorithm`"
+            ),
             "{rendered}"
         );
         assert!(!rendered.contains("HS256"), "{rendered}");
@@ -1318,11 +1503,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+        let rendered = err.to_string();
         assert!(
-            err.to_string()
-                .contains("integrations.billing.oauth.client_secret: unknown key"),
-            "{err}"
+            rendered.contains("unknown field `client_secret`")
+                && rendered.contains("for key `integrations.billing.oauth`"),
+            "{rendered}"
         );
+        assert!(!rendered.contains("test-client-secret"), "{rendered}");
     }
 
     #[test]
@@ -1399,7 +1586,7 @@ mod tests {
         let wrong_type = write(
             &dir,
             "wrong-type.toml",
-            "[integrations.billing.oauth]\ntoken_url = 42\nclient_id = \"billing-service\"\n",
+            "[integrations.billing.oauth]\ntoken_url = [\"private-sentinel\"]\nclient_id = \"billing-service\"\n",
         );
         let err = load_from(
             &LoadOptions {
@@ -1421,8 +1608,15 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(&err, Error::Deserialize(_)), "{err}");
-        assert!(err.to_string().contains("must be a string"), "{err}");
-        assert!(!err.to_string().contains("42"), "{err}");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains(
+                "invalid value, expected a string for key `integrations.billing.oauth.token_url`"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("private-sentinel"), "{rendered}");
+        assert!(!rendered.contains("in the environment"), "{rendered}");
 
         for (name, contents, expected_key) in [
             (
@@ -2130,6 +2324,7 @@ mod tests {
         let options = LoadOptions {
             config: Some(base),
             config_overlay: vec![overlay],
+            ..LoadOptions::default()
         };
         let cfg = load_from(
             &options,
@@ -2340,6 +2535,193 @@ mod tests {
             assert!(matches!(legacy, Error::Deserialize(_)), "{legacy}");
             assert!(legacy.to_string().contains(key), "{legacy}");
         }
+    }
+
+    fn with_secrets(dir: &tempfile::TempDir) -> LoadOptions {
+        LoadOptions {
+            secrets_dir: Some(dir.path().to_owned()),
+            ..LoadOptions::default()
+        }
+    }
+
+    #[test]
+    fn secrets_directory_supplies_variables_and_the_environment_overrides_it() {
+        use secrecy::ExposeSecret as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir,
+            "APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS",
+            " authorization=Bearer s3cr3t \r\n\n",
+        );
+        write(&dir, "APP__HTTP__ADDR", "127.0.0.1:7\n");
+        write(&dir, "APP__LOG__LEVEL", "debug");
+        // Entries outside the namespace are not variables.
+        write(&dir, "README", "not a variable");
+        write(&dir, ".APP__LOG__FORMAT", "yaml");
+        std::fs::create_dir(dir.path().join("..data")).unwrap();
+
+        let cfg = load_from(
+            &with_secrets(&dir),
+            BUILD,
+            env(&[("APP__HTTP__ADDR", "127.0.0.1:9")]),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.observability
+                .otel
+                .exporter
+                .otlp_headers
+                .as_ref()
+                .unwrap()
+                .expose_secret(),
+            " authorization=Bearer s3cr3t ",
+            "only trailing line breaks are removed"
+        );
+        assert_eq!(cfg.http.addr, "127.0.0.1:9".parse().unwrap(), "env wins");
+        assert_eq!(cfg.log.level, "debug");
+        assert!(!format!("{cfg:?}").contains("s3cr3t"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secrets_directory_follows_the_links_of_a_mounted_volume() {
+        // A Kubernetes volume keeps the files under `..data` and links each
+        // name to it, so an update swaps one link.
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("..data");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("APP__LOG__LEVEL"), "warn\n").unwrap();
+        std::os::unix::fs::symlink("..data/APP__LOG__LEVEL", dir.path().join("APP__LOG__LEVEL"))
+            .unwrap();
+
+        let cfg = load_from(&with_secrets(&dir), BUILD, env(&[])).unwrap();
+        assert_eq!(cfg.log.level, "warn");
+    }
+
+    #[test]
+    fn rejected_secret_file_values_are_not_echoed() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "APP__HTTP__MAX_IN_FLIGHT", "hunter2");
+        let err = load_from(&with_secrets(&dir), BUILD, env(&[])).unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains(
+                "expected an integer for key `http.max_in_flight` in the environment or the secrets directory"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(!format!("{err:?}").contains("hunter2"), "{err:?}");
+    }
+
+    #[test]
+    fn secrets_directory_failures_name_the_path_and_no_content() {
+        let missing = LoadOptions {
+            secrets_dir: Some(PathBuf::from("/definitely/missing-secrets")),
+            ..LoadOptions::default()
+        };
+        assert!(matches!(
+            load_from(&missing, BUILD, env(&[])),
+            Err(Error::ReadSecretsDir { .. })
+        ));
+
+        for name in ["APP__HTTP.ADDR", "APP__HTTP__ADDR__", "APP__"] {
+            let dir = tempfile::tempdir().unwrap();
+            let file = write(&dir, name, "127.0.0.1:7");
+            let err = load_from(&with_secrets(&dir), BUILD, env(&[])).unwrap_err();
+            assert!(
+                matches!(&err, Error::MalformedSecretName { path } if *path == file),
+                "{name}: {err}"
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("APP__HTTP__ADDR")).unwrap();
+        assert!(matches!(
+            load_from(&with_secrets(&dir), BUILD, env(&[])),
+            Err(Error::ReadSecret { .. })
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("APP__LOG__LEVEL");
+        std::fs::write(&file, b"hunter2\xff").unwrap();
+        let err = load_from(&with_secrets(&dir), BUILD, env(&[])).unwrap_err();
+        assert!(
+            matches!(&err, Error::ReadSecret { path, .. } if *path == file),
+            "{err}"
+        );
+        assert!(!err.to_string().contains("hunter2"), "{err}");
+    }
+
+    #[test]
+    fn two_spellings_of_one_variable_are_refused() {
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__HTTP__ADDR", "127.0.0.1:1"),
+                ("APP__http__addr", "127.0.0.1:2"),
+            ]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::AmbiguousName { name, other }
+                if name == "APP__http__addr" && other == "APP__HTTP__ADDR"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_environment_overrides_a_secret_file_spelled_in_another_case() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "APP__log__level", "debug");
+        let cfg = load_from(
+            &with_secrets(&dir),
+            BUILD,
+            env(&[("APP__LOG__LEVEL", "warn")]),
+        )
+        .unwrap();
+        assert_eq!(cfg.log.level, "warn");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn variables_that_are_not_unicode_are_refused() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let not_unicode = |prefix: &str| {
+            let mut bytes = prefix.as_bytes().to_vec();
+            bytes.push(0xff);
+            OsString::from_vec(bytes)
+        };
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            [(OsString::from("APP__LOG__LEVEL"), not_unicode("hunter2"))],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::NonUnicodeEnvValue { name } if name == "APP__LOG__LEVEL"),
+            "{err}"
+        );
+        assert!(!err.to_string().contains("hunter2"), "{err}");
+
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            [(not_unicode("APP__LOG__LEVEL"), OsString::from("info"))],
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::MalformedEnvName { .. }), "{err}");
+
+        // A name outside the namespace is not read at all.
+        load_from(
+            &LoadOptions::default(),
+            BUILD,
+            [(not_unicode("UNRELATED"), not_unicode("value"))],
+        )
+        .unwrap();
     }
 
     #[test]

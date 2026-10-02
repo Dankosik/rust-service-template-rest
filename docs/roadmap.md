@@ -116,7 +116,8 @@ Delivered:
 
 - `crates/config` (`service-config`): typed immutable snapshot over the
   `config` crate; precedence code defaults → `--config` → ordered
-  `--config-overlay` → `APP__SECTION__KEY`; unknown keys and malformed
+  `--config-overlay` → `APP__SECTION__KEY` (from `--secrets-dir` files, then
+  the environment); unknown keys and malformed
   variable names fail; secret-like values in files fail; `SecretString`
   fields; durations and byte sizes in human form; per-section validation with
   operator-readable messages. Policy: [Configuration Source Policy](configuration-source-policy.md).
