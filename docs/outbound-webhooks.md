@@ -145,7 +145,8 @@ the queue and spend no attempt. Set it below `jobs.max_workers` to keep the
 difference for the worker's other job kinds. It is unset by default, and a
 value at or above `jobs.max_workers` reserves nothing. The bound covers the
 kind, not one endpoint: a slow receiver still delays deliveries to the other
-endpoints, by at most the backlog times 30 seconds divided by the bound.
+endpoints. The bound limits concurrent deliveries; it does not reserve
+execution capacity or bound their queueing time.
 
 Each attempt ends with one `webhook_delivery_finished` event carrying the
 configured endpoint ID, the outcome (delivered, retryable, or permanent), and
