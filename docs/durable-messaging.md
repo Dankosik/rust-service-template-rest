@@ -140,6 +140,8 @@ One batch waits at most 30 seconds, independently of the client's fallback
 timer. A missing durable or source stream, changed consumer creation identity,
 or replacement with a push consumer is terminal. An unanswered lookup is a
 broker outage, which the worker rides out with a one-second error backoff.
+New pulls wait until the broker confirms the original creation identity;
+the consuming account therefore needs the consumer-info API permission.
 
 ## DLQ, restore, and bounds
 

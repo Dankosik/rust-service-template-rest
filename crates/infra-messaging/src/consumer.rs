@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_nats::HeaderMap;
 use async_nats::jetstream::consumer::pull;
 use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, PullConsumer, ReplayPolicy};
-use async_nats::jetstream::context::ConsumerInfoErrorKind;
+use async_nats::jetstream::context::{ConsumerInfoError, ConsumerInfoErrorKind};
 use async_nats::jetstream::stream::ConsumerErrorKind;
 use async_nats::jetstream::{AckKind, Message};
 use futures_util::{FutureExt as _, StreamExt as _};
@@ -305,8 +305,16 @@ impl Consumer {
             // Pull requests address a durable by name, not creation identity.
             // A replacement between successful full batches has no waiting
             // request to terminate, so verify identity before every new pull.
-            if durable_is_gone(&self.pull).await {
-                return Err(ConsumerError::ConsumerLost);
+            match durable_is_gone(&self.pull).await {
+                Ok(false) => {}
+                Ok(true) => return Err(ConsumerError::ConsumerLost),
+                Err(_) => {
+                    // Do not admit from a same-name replacement while the
+                    // broker cannot confirm the durable's creation identity.
+                    pull_failed();
+                    tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
+                    continue;
+                }
             }
             // Each unconsumed batch entry already owns a free slot. Completed
             // tasks can only increase capacity while this request is alive.
@@ -332,7 +340,7 @@ impl Consumer {
                         break messages;
                     } else {
                         pull_failed();
-                        if durable_is_gone(&self.pull).await {
+                        if matches!(durable_is_gone(&self.pull).await, Ok(true)) {
                             return Err(ConsumerError::ConsumerLost);
                         }
                         tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
@@ -372,7 +380,7 @@ impl Consumer {
             }
             if remaining > 0 {
                 release(messages).await;
-                if durable_is_gone(&self.pull).await {
+                if matches!(durable_is_gone(&self.pull).await, Ok(true)) {
                     return Err(ConsumerError::ConsumerLost);
                 }
                 if failed {
@@ -391,15 +399,20 @@ impl Consumer {
 /// Whether the broker answers that the durable, or its stream, no longer
 /// exists, or was replaced with another creation or a push consumer.
 /// A failed or unanswered lookup is not that answer.
-async fn durable_is_gone(pull: &PullConsumer) -> bool {
+async fn durable_is_gone(pull: &PullConsumer) -> Result<bool, ConsumerInfoError> {
     match pull.get_info().await {
         Ok(info) => {
-            info.created != pull.cached_info().created || info.config.deliver_subject.is_some()
+            Ok(info.created != pull.cached_info().created || info.config.deliver_subject.is_some())
         }
-        Err(error) => matches!(
-            error.kind(),
-            ConsumerInfoErrorKind::NotFound | ConsumerInfoErrorKind::StreamNotFound
-        ),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ConsumerInfoErrorKind::NotFound | ConsumerInfoErrorKind::StreamNotFound
+            ) =>
+        {
+            Ok(true)
+        }
+        Err(error) => Err(error),
     }
 }
 

@@ -149,6 +149,20 @@ struct AckDroppingRelay {
 
 impl AckDroppingRelay {
     async fn start(stream: &str) -> Self {
+        let stream = stream.to_owned();
+        let mut dropped = false;
+        Self::start_filtering(move |payload| {
+            if !dropped && is_stream_publish_ack(payload, &stream) {
+                dropped = true;
+                true
+            } else {
+                false
+            }
+        })
+        .await
+    }
+
+    async fn start_filtering(drop_reply: impl FnMut(&[u8]) -> bool + Send + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test relay listener must bind an ephemeral loopback port");
@@ -156,7 +170,6 @@ impl AckDroppingRelay {
             .local_addr()
             .expect("test relay listener must report its loopback address");
         let target = relay_target(&nats_url());
-        let stream = stream.to_owned();
         let dropped_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let dropped_for_task = Arc::clone(&dropped_ack);
         let task = tokio::spawn(async move {
@@ -166,7 +179,7 @@ impl AckDroppingRelay {
             let Ok(broker) = TcpStream::connect(target).await else {
                 return;
             };
-            let _ = relay_connection(client, broker, stream, dropped_for_task).await;
+            let _ = relay_connection(client, broker, drop_reply, dropped_for_task).await;
         });
         Self {
             url: format!("nats://{address}"),
@@ -182,7 +195,7 @@ impl AckDroppingRelay {
             .expect("relay task must not panic");
         assert!(
             self.dropped_ack.load(Ordering::SeqCst),
-            "relay must drop a broker publication acknowledgement after dispatch"
+            "relay must drop the configured broker reply after dispatch"
         );
     }
 }
@@ -263,7 +276,7 @@ fn relay_target(url: &str) -> String {
 async fn relay_connection(
     client: TcpStream,
     broker: TcpStream,
-    stream: String,
+    mut drop_reply: impl FnMut(&[u8]) -> bool + Send,
     dropped_ack: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), std::io::Error> {
     let (client_read, mut client_write) = client.into_split();
@@ -272,7 +285,6 @@ async fn relay_connection(
         let _ = tokio::io::copy(&mut BufReader::new(client_read), &mut broker_write).await;
     });
     let mut broker_read = BufReader::new(broker_read);
-    let mut dropped = false;
     loop {
         let mut line = Vec::new();
         if broker_read.read_until(b'\n', &mut line).await? == 0 {
@@ -286,8 +298,7 @@ async fn relay_connection(
         broker_read.read_exact(&mut payload).await?;
         let mut ending = [0; 2];
         broker_read.read_exact(&mut ending).await?;
-        if !dropped && is_stream_publish_ack(&payload, &stream) {
-            dropped = true;
+        if drop_reply(&payload) {
             dropped_ack.store(true, Ordering::SeqCst);
             continue;
         }
@@ -1671,11 +1682,11 @@ async fn durable_deleted_between_pulls_stops_the_consumer() {
 async fn deleting_a_durable_with_a_waiting_batch_stops_the_consumer() {
     let fixture = Fixture::create(false).await;
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    )
+    ))
     .await
     .expect("source stream is admitted");
     let mut registered = registry(&fixture);
@@ -1722,11 +1733,11 @@ async fn deleting_a_durable_with_a_waiting_batch_stops_the_consumer() {
 async fn a_durable_replaced_between_full_batches_stops_before_another_handler() {
     let fixture = Fixture::create(false).await;
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    )
+    ))
     .await
     .unwrap();
     for id in ["before-replacement", "pending-after-replacement"] {
@@ -1795,11 +1806,19 @@ async fn a_durable_replaced_between_full_batches_stops_before_another_handler() 
 }
 
 #[tokio::test]
-async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
+async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer() {
     let fixture = Fixture::create(false).await;
-    let relay = OutageRelay::start().await;
+    let refuse_info = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let drop_info = Arc::clone(&refuse_info);
+    let stream = fixture.stream.clone();
+    let relay = AckDroppingRelay::start_filtering(move |payload| {
+        drop_info.load(Ordering::SeqCst)
+            && serde_json::from_slice::<serde_json::Value>(payload)
+                .is_ok_and(|info| info.get("ack_floor").is_some() && info["stream_name"] == stream)
+    })
+    .await;
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(
+    let messaging = Box::pin(Messaging::connect(
         options_with_servers(
             &fixture,
             vec![relay.url.clone()],
@@ -1808,7 +1827,84 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
         ),
         deadline(),
         cancel.clone(),
-    )
+    ))
+    .await
+    .unwrap();
+    let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut registered = registry(&fixture);
+    registered
+        .register::<ExampleEvent, _, _>(move |event, _| {
+            observed_tx.send(event.id).unwrap();
+            async { Ok(()) }
+        })
+        .unwrap();
+    let consumer = messaging.consumer(registered).await.unwrap();
+    let prepared = registry(&fixture)
+        .prepare(&event("waiting-for-identity"), 1024)
+        .unwrap();
+    messaging
+        .producer()
+        .publish(&prepared, deadline(), &cancel)
+        .await
+        .unwrap();
+    refuse_info.store(true, Ordering::SeqCst);
+    let mut handle = consumer.start(&cancel);
+    timeout(Duration::from_secs(3), async {
+        let mut cadence = tokio::time::interval(Duration::from_millis(20));
+        while !relay.dropped_ack.load(Ordering::SeqCst) {
+            cadence.tick().await;
+        }
+    })
+    .await
+    .expect("the broker answered the identity query but its reply was withheld");
+    assert!(
+        messaging.probe().check().await.is_ok(),
+        "the NATS connection itself is healthy"
+    );
+    // Observe across the five-second request budget and its one-second retry
+    // backoff; a fail-open lookup would admit the retained event here.
+    assert!(
+        timeout(Duration::from_secs(7), observed_rx.recv())
+            .await
+            .is_err()
+    );
+    let durable: consumer::PullConsumer = fixture
+        .jetstream
+        .get_consumer_from_stream(&fixture.durable, &fixture.stream)
+        .await
+        .unwrap();
+    assert_eq!(durable.cached_info().num_ack_pending, 0);
+    assert_eq!(durable.cached_info().num_pending, 1);
+    refuse_info.store(false, Ordering::SeqCst);
+    assert_eq!(
+        timeout(Duration::from_secs(15), observed_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        "waiting-for-identity"
+    );
+    wait_for_source_ack(&fixture).await;
+    handle.finish(deadline()).await.unwrap();
+    close(messaging).await;
+    relay.join().await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
+    let fixture = Fixture::create(false).await;
+    let relay = OutageRelay::start().await;
+    let cancel = CancellationToken::new();
+    let messaging = Box::pin(Messaging::connect(
+        options_with_servers(
+            &fixture,
+            vec![relay.url.clone()],
+            Some(consumer_options(&fixture)),
+            1024,
+        ),
+        deadline(),
+        cancel.clone(),
+    ))
     .await
     .unwrap();
     let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1876,6 +1972,10 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one broker scenario proves admission, one-slot refill and drain together"
+)]
 async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the_broker() {
     let fixture = Fixture::create(false).await;
     let cancel = CancellationToken::new();
@@ -1935,7 +2035,7 @@ async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the
     timeout(Duration::from_secs(3), async {
         let first_id = started_rx.recv().await.expect("first handler starts");
         let second_id = started_rx.recv().await.expect("second handler starts");
-        assert!(first_id != second_id);
+        assert_ne!(first_id, second_id);
         assert!([first_id.as_str(), second_id.as_str()].contains(&"event-in-flight-1"));
         assert!([first_id.as_str(), second_id.as_str()].contains(&"event-in-flight-2"));
         // Observe broker ownership while the slots remain occupied, including
