@@ -485,8 +485,11 @@ async fn start(
         Some(addr) => {
             // Intentionally unhardened: Prometheus text on a private listener.
             // `server_options` is shared HTTP transport policy, not `harden`.
-            let server =
-                Server::bind(addr, diagnostics_router(metrics.clone()), server_options).await?;
+            // Liveness is served here as well: this listener has its own
+            // connection cap, so a full application listener cannot fail it.
+            let diagnostics =
+                diagnostics_router(metrics.clone()).merge(infra_http::liveness_router());
+            let server = Server::bind(addr, diagnostics, server_options).await?;
             tracing::info!(addr = %server.local_addr(), "diagnostics listener bound");
             Some(server)
         }
