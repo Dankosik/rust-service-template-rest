@@ -161,8 +161,10 @@ as `endpoint`, and for a failure the same `reason` without the status code;
 `invalid_payload` and `clock_unavailable` are the two reasons that end an
 attempt before a request is sent. A rising `retryable` rate for one endpoint
 is that receiver refusing or timing out; `jobs_attempts_total` shows the kind
-as a whole. An endpoint ID a queued delivery names but the worker no longer
-configures is counted as `missing_endpoint` without an `endpoint` label.
+as a whole, and is the only counter of an attempt the worker cancels or times
+out before the exchange returns. An endpoint ID a queued delivery names but
+the worker no longer configures is counted as `missing_endpoint` without an
+`endpoint` label.
 
 ## Raw-byte interoperability vector
 
