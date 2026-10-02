@@ -14,6 +14,7 @@ use async_nats::jetstream::{self, consumer, stream};
 use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use futures_util::StreamExt;
+use health::Probe as _;
 use infra_messaging::{
     ConsumerError, ConsumerOptions, HandlerError, Messaging, MessagingOptions, PublishError,
     Registry, Route,
@@ -183,6 +184,64 @@ impl AckDroppingRelay {
             self.dropped_ack.load(Ordering::SeqCst),
             "relay must drop a broker publication acknowledgement after dispatch"
         );
+    }
+}
+
+/// Disconnects one real broker connection and holds replacement connections
+/// until the test explicitly restores the network path.
+struct OutageRelay {
+    url: String,
+    pause: CancellationToken,
+    resume: CancellationToken,
+    stop: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+impl OutageRelay {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("nats://{}", listener.local_addr().unwrap());
+        let target = relay_target(&nats_url());
+        let pause = CancellationToken::new();
+        let resume = CancellationToken::new();
+        let stop = CancellationToken::new();
+        let (paused, restored, stopped) = (pause.clone(), resume.clone(), stop.clone());
+        let task = tokio::spawn(async move {
+            loop {
+                let accepted = tokio::select! {
+                    () = stopped.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let (mut client, _) = accepted.unwrap();
+                if paused.is_cancelled() {
+                    tokio::select! {
+                        () = stopped.cancelled() => break,
+                        () = restored.cancelled() => {},
+                    }
+                }
+                let mut broker = TcpStream::connect(&target).await.unwrap();
+                tokio::select! {
+                    () = stopped.cancelled() => break,
+                    () = paused.cancelled(), if !restored.is_cancelled() => {},
+                    _ = tokio::io::copy_bidirectional(&mut client, &mut broker) => {},
+                }
+            }
+        });
+        Self {
+            url,
+            pause,
+            resume,
+            stop,
+            task,
+        }
+    }
+
+    async fn finish(self) {
+        self.stop.cancel();
+        timeout(Duration::from_secs(3), self.task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }
 
@@ -1609,7 +1668,139 @@ async fn durable_deleted_between_pulls_stops_the_consumer() {
 }
 
 #[tokio::test]
-async fn drain_returns_a_prefetched_delivery_before_ack_wait() {
+async fn deleting_a_durable_with_a_waiting_batch_stops_the_consumer() {
+    let fixture = Fixture::create(false).await;
+    let cancel = CancellationToken::new();
+    let messaging = Messaging::connect(
+        options(&fixture, Some(consumer_options(&fixture)), 1024),
+        deadline(),
+        cancel.clone(),
+    )
+    .await
+    .expect("source stream is admitted");
+    let mut registered = registry(&fixture);
+    registered
+        .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
+        .unwrap();
+    let mut handle = messaging.consumer(registered).await.unwrap().start(&cancel);
+    timeout(Duration::from_secs(3), async {
+        let mut cadence = tokio::time::interval(Duration::from_millis(20));
+        loop {
+            let durable: consumer::PullConsumer = fixture
+                .jetstream
+                .get_consumer_from_stream(&fixture.durable, &fixture.stream)
+                .await
+                .unwrap();
+            if durable.cached_info().num_waiting > 0 {
+                break;
+            }
+            cadence.tick().await;
+        }
+    })
+    .await
+    .expect("the broker observes a waiting batch");
+    fixture
+        .jetstream
+        .delete_consumer_from_stream(&fixture.durable, &fixture.stream)
+        .await
+        .unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(10), handle.failed())
+            .await
+            .unwrap(),
+        ConsumerError::ConsumerLost
+    ));
+    assert!(matches!(
+        handle.finish(deadline()).await,
+        Err(ConsumerError::ConsumerLost)
+    ));
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
+    let fixture = Fixture::create(false).await;
+    let relay = OutageRelay::start().await;
+    let cancel = CancellationToken::new();
+    let messaging = Messaging::connect(
+        options_with_servers(
+            &fixture,
+            vec![relay.url.clone()],
+            Some(consumer_options(&fixture)),
+            1024,
+        ),
+        deadline(),
+        cancel.clone(),
+    )
+    .await
+    .unwrap();
+    let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut registered = registry(&fixture);
+    registered
+        .register::<ExampleEvent, _, _>(move |event, _| {
+            observed_tx.send(event.id).unwrap();
+            async { Ok(()) }
+        })
+        .unwrap();
+    let mut handle = messaging.consumer(registered).await.unwrap().start(&cancel);
+    let before = registry(&fixture)
+        .prepare(&event("before-outage"), 1024)
+        .unwrap();
+    messaging
+        .producer()
+        .publish(&before, deadline(), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(3), observed_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        "before-outage"
+    );
+    wait_for_source_ack(&fixture).await;
+
+    relay.pause.cancel();
+    timeout(Duration::from_secs(3), async {
+        let mut cadence = tokio::time::interval(Duration::from_millis(20));
+        while messaging.probe().check().await.is_ok() {
+            cadence.tick().await;
+        }
+    })
+    .await
+    .expect("the disconnected dependency becomes unready");
+    let after = registry(&fixture)
+        .prepare(&event("after-outage"), 1024)
+        .unwrap();
+    fixture
+        .jetstream
+        .publish_with_headers(
+            fixture.subject.clone(),
+            infra_messaging::wire::encode_prepared(&after).unwrap(),
+            after.payload().clone(),
+        )
+        .await
+        .unwrap()
+        .await
+        .unwrap();
+    relay.resume.cancel();
+    assert_eq!(
+        timeout(Duration::from_secs(45), observed_rx.recv())
+            .await
+            .expect("the next bounded batch recovers the retained message")
+            .unwrap(),
+        "after-outage"
+    );
+    wait_for_source_ack_at_least(&fixture, 2).await;
+    handle.finish(deadline()).await.unwrap();
+    close(messaging).await;
+    relay.finish().await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the_broker() {
     let fixture = Fixture::create(false).await;
     let cancel = CancellationToken::new();
     let consumer_options = ConsumerOptions {
@@ -1624,14 +1815,20 @@ async fn drain_returns_a_prefetched_delivery_before_ack_wait() {
     .await
     .expect("fixture source stream is admitted");
     let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
-    let release = CancellationToken::new();
+    let release_first = CancellationToken::new();
+    let release_other = CancellationToken::new();
     let mut blocking = registry(&fixture);
     blocking
         .register::<ExampleEvent, _, _>({
-            let release = release.clone();
-            move |_, _| {
-                let _ = started_tx.send(());
-                let release = release.clone();
+            let release_first = release_first.clone();
+            let release_other = release_other.clone();
+            move |event, _| {
+                let _ = started_tx.send(event.id.clone());
+                let release = if event.id == "event-in-flight-1" {
+                    release_first.clone()
+                } else {
+                    release_other.clone()
+                };
                 async move {
                     release.cancelled().await;
                     Ok(())
@@ -1639,12 +1836,12 @@ async fn drain_returns_a_prefetched_delivery_before_ack_wait() {
             }
         })
         .expect("fixture handler is registered");
-    let mut first = messaging
-        .consumer(blocking)
-        .await
-        .expect("adapter creates its named durable consumer")
-        .start(&cancel);
-    for id in ["event-in-flight-1", "event-in-flight-2", "event-prefetched"] {
+    for id in [
+        "event-in-flight-1",
+        "event-in-flight-2",
+        "event-next",
+        "event-unadmitted",
+    ] {
         let prepared =
             infra_messaging::PreparedEvent::prepare(fixture.subject.clone(), &event(id), 1024)
                 .expect("fixture event is prepared");
@@ -1654,28 +1851,52 @@ async fn drain_returns_a_prefetched_delivery_before_ack_wait() {
             .await
             .expect("fixture event publication is acknowledged");
     }
-    // Both slots are busy, so the third delivery waits in the client's buffer.
+    let mut first = messaging
+        .consumer(blocking)
+        .await
+        .expect("adapter creates its named durable consumer")
+        .start(&cancel);
     timeout(Duration::from_secs(3), async {
-        started_rx.recv().await;
-        started_rx.recv().await;
-        let mut cadence = tokio::time::interval(Duration::from_millis(10));
-        loop {
+        let first_id = started_rx.recv().await.expect("first handler starts");
+        let second_id = started_rx.recv().await.expect("second handler starts");
+        assert!(first_id != second_id);
+        assert!([first_id.as_str(), second_id.as_str()].contains(&"event-in-flight-1"));
+        assert!([first_id.as_str(), second_id.as_str()].contains(&"event-in-flight-2"));
+        // Observe broker ownership while the slots remain occupied, including
+        // the interval in which the old client stream issued its next batch.
+        let observed_until = Instant::now() + Duration::from_secs(1);
+        let mut cadence = tokio::time::interval(Duration::from_millis(20));
+        while Instant::now() < observed_until {
             cadence.tick().await;
             let durable: consumer::PullConsumer = fixture
                 .jetstream
                 .get_consumer_from_stream(&fixture.durable, &fixture.stream)
                 .await
                 .expect("the durable consumer exists");
-            if durable.cached_info().num_ack_pending == 3 {
-                break;
-            }
+            assert_eq!(durable.cached_info().num_ack_pending, 2);
+            assert_eq!(durable.cached_info().num_pending, 2);
+            assert_eq!(durable.cached_info().num_redelivered, 0);
         }
     })
     .await
-    .expect("the broker must deliver the third message to the busy replica");
+    .expect("two occupied slots must leave both other events at the broker");
+
+    release_first.cancel();
+    let next = timeout(Duration::from_secs(3), started_rx.recv())
+        .await
+        .expect("one freed slot admits the next event")
+        .expect("handler channel remains connected");
+    assert_eq!(next, "event-next");
+    let durable: consumer::PullConsumer = fixture
+        .jetstream
+        .get_consumer_from_stream(&fixture.durable, &fixture.stream)
+        .await
+        .expect("the durable remains observable");
+    assert_eq!(durable.cached_info().num_ack_pending, 2);
+    assert_eq!(durable.cached_info().num_pending, 1);
 
     first.drain();
-    release.cancel();
+    release_other.cancel();
     first
         .finish(deadline())
         .await
@@ -1696,9 +1917,9 @@ async fn drain_returns_a_prefetched_delivery_before_ack_wait() {
         .start(&cancel);
     let observed = timeout(Duration::from_secs(10), observed_rx.recv())
         .await
-        .expect("a prefetched delivery must return long before the 41 s ack wait")
+        .expect("an unadmitted event remains available without waiting for ack wait")
         .expect("handler completion signal must remain connected");
-    assert_eq!(observed, "event-prefetched");
+    assert_eq!(observed, "event-unadmitted");
 
     second
         .finish(deadline())

@@ -4,17 +4,16 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_nats::HeaderMap;
-use async_nats::jetstream::consumer::pull::{self, MessagesErrorKind};
+use async_nats::jetstream::consumer::pull;
 use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, PullConsumer, ReplayPolicy};
 use async_nats::jetstream::context::ConsumerInfoErrorKind;
 use async_nats::jetstream::stream::ConsumerErrorKind;
 use async_nats::jetstream::{AckKind, Message};
-use futures_util::{FutureExt as _, StreamExt as _, TryStreamExt as _};
+use futures_util::{FutureExt as _, StreamExt as _};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument as _;
 
 use crate::error::{HandlerError, MessagingError};
@@ -45,11 +44,8 @@ const ACK_WAIT: Duration = HANDLER_TIMEOUT
     .saturating_add(Duration::from_secs(1));
 /// Pause after a recoverable pull-stream error before polling again.
 const STREAM_ERROR_BACKOFF: Duration = Duration::from_secs(1);
-/// Lifetime of one pull request; the client renews it.
+/// Lifetime of one capacity-reserved pull request.
 const PULL_EXPIRES: Duration = Duration::from_secs(30);
-/// The broker confirms an idle pull this often; two silent intervals are a
-/// pull-stream error. The broker accepts at most half of `PULL_EXPIRES`.
-const PULL_HEARTBEAT: Duration = Duration::from_secs(15);
 /// Redelivery delay of a delivery returned unhandled at drain. It outlasts
 /// this replica's unsubscription, so the broker redelivers to another pull.
 const RELEASE_DELAY: Duration = Duration::from_secs(1);
@@ -270,102 +266,152 @@ impl Consumer {
         }
     }
 
-    /// Pulls until `stop`, then returns prefetched deliveries to the broker
-    /// and lets admitted deliveries settle. `force` drops the pipeline, which
-    /// aborts every in-flight delivery task.
+    /// Reserves free handler/settlement slots before each one-shot pull.
+    /// Drain returns received but unadmitted messages and joins admitted work;
+    /// dropping the join set at forced shutdown aborts every delivery.
     async fn run(
         self,
         stop: CancellationToken,
         force: CancellationToken,
     ) -> Result<(), ConsumerError> {
-        let envelope_bytes = self.delivery.shared.max_payload_bytes + HEADER_LIMIT_BYTES;
-        let messages = self
-            .pull
-            .stream()
-            .max_messages_per_batch(self.concurrency)
-            .max_bytes_per_batch(self.concurrency * envelope_bytes)
-            .expires(PULL_EXPIRES)
-            .heartbeat(PULL_HEARTBEAT)
-            .messages()
-            .await
-            .map_err(|error| {
-                tracing::warn!(error.kind = %error.kind(), "messaging pull stream could not start");
-                ConsumerError::Start
-            })?;
-        let stop = &stop;
-        let admitted = futures_util::stream::unfold(Some(messages), |messages| async move {
-            let mut messages = messages?;
-            tokio::select! {
-                biased;
-                () = stop.cancelled() => {
-                    release(messages).await;
-                    None
-                }
-                next = messages.next() => next.map(|next| (next, Some(messages))),
-            }
-        });
-        let pull = &self.pull;
-        let consume = admitted
-            .map(Ok)
-            .try_for_each_concurrent(self.concurrency, |next| {
-                let delivery = Arc::clone(&self.delivery);
-                let cancel = force.child_token();
-                async move {
-                    match next {
-                        Ok(message) => {
-                            AbortOnDropHandle::new(tokio::spawn(async move {
-                                delivery.handle(message, cancel).await;
-                            }))
-                            .await
-                            .map_err(|_| ConsumerError::Close)
-                        }
-                        Err(error)
-                            if matches!(
-                                error.kind(),
-                                MessagesErrorKind::ConsumerDeleted
-                                    | MessagesErrorKind::PushBasedConsumer
-                            ) =>
-                        {
-                            Err(ConsumerError::ConsumerLost)
-                        }
-                        Err(error) => {
-                            tracing::warn!(error.kind = %error.kind(), "messaging pull stream error");
-                            metrics::counter!("messaging_consumer_stream_errors_total")
-                                .increment(1);
-                            // The broker terminates only a waiting pull with
-                            // `Consumer Deleted`; between pulls a missing
-                            // durable shows as an unanswered request.
-                            if durable_is_gone(pull).await {
-                                return Err(ConsumerError::ConsumerLost);
-                            }
-                            tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
-                            Ok(())
-                        }
-                    }
-                }
-            });
+        let mut deliveries = JoinSet::new();
         tokio::select! {
             biased;
             () = force.cancelled() => Err(ConsumerError::DrainTimedOut),
-            result = consume => result,
+            result = self.consume(&mut deliveries, &stop, &force) => result,
         }
+    }
+
+    async fn consume(
+        &self,
+        deliveries: &mut JoinSet<()>,
+        stop: &CancellationToken,
+        force: &CancellationToken,
+    ) -> Result<(), ConsumerError> {
+        let envelope_bytes = self.delivery.shared.max_payload_bytes + HEADER_LIMIT_BYTES;
+        // A durable deleted before the first pull has no waiting request the
+        // broker could terminate. An unanswered lookup is only an outage.
+        if durable_is_gone(&self.pull).await {
+            return Err(ConsumerError::ConsumerLost);
+        }
+        'pulls: loop {
+            while deliveries.len() == self.concurrency {
+                tokio::select! {
+                    biased;
+                    () = stop.cancelled() => break 'pulls,
+                    joined = deliveries.join_next() => {
+                        joined.transpose().map_err(|_| ConsumerError::Close)?;
+                    }
+                }
+            }
+            if stop.is_cancelled() {
+                break;
+            }
+            // Each unconsumed batch entry already owns a free slot. Completed
+            // tasks can only increase capacity while this request is alive.
+            let slots = self.concurrency - deliveries.len();
+            let request = tokio::time::timeout(
+                BROKER_OPERATION_BUDGET,
+                self.pull
+                    .batch()
+                    .max_messages(slots)
+                    .max_bytes(slots * envelope_bytes)
+                    .expires(PULL_EXPIRES)
+                    .messages(),
+            );
+            tokio::pin!(request);
+            let mut messages = loop {
+                tokio::select! {
+                    biased;
+                    () = stop.cancelled() => break 'pulls,
+                    joined = deliveries.join_next(), if !deliveries.is_empty() => {
+                        joined.transpose().map_err(|_| ConsumerError::Close)?;
+                    }
+                    result = &mut request => match result {
+                        Ok(Ok(messages)) => break messages,
+                        _ => {
+                            pull_failed();
+                            if durable_is_gone(&self.pull).await {
+                                return Err(ConsumerError::ConsumerLost);
+                            }
+                            tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
+                            continue 'pulls;
+                        }
+                    }
+                }
+            };
+            // Batch has no missing-heartbeat watchdog. Bound unanswered pulls
+            // here rather than inheriting the SDK's expires-plus-five timer.
+            let expires = Instant::now() + PULL_EXPIRES;
+            let mut remaining = slots;
+            let mut failed = false;
+            while remaining > 0 {
+                tokio::select! {
+                    biased;
+                    () = stop.cancelled() => {
+                        release(messages).await;
+                        break 'pulls;
+                    }
+                    joined = deliveries.join_next(), if !deliveries.is_empty() => {
+                        joined.transpose().map_err(|_| ConsumerError::Close)?;
+                    }
+                    next = tokio::time::timeout_at(expires, messages.next()) => match next {
+                        Ok(Some(Ok(message))) => {
+                            remaining -= 1;
+                            let delivery = Arc::clone(&self.delivery);
+                            let cancel = force.child_token();
+                            deliveries.spawn(async move { delivery.handle(message, cancel).await; });
+                        }
+                        Ok(None) => break,
+                        Ok(Some(Err(_))) | Err(_) => {
+                            failed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if remaining > 0 {
+                release(messages).await;
+                if durable_is_gone(&self.pull).await {
+                    return Err(ConsumerError::ConsumerLost);
+                }
+                if failed {
+                    pull_failed();
+                    tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
+                }
+            }
+        }
+        while let Some(joined) = deliveries.join_next().await {
+            joined.map_err(|_| ConsumerError::Close)?;
+        }
+        Ok(())
     }
 }
 
 /// Whether the broker answers that the durable, or its stream, no longer
-/// exists. A failed or unanswered lookup is not that answer.
+/// exists, or was replaced with another creation or a push consumer.
+/// A failed or unanswered lookup is not that answer.
 async fn durable_is_gone(pull: &PullConsumer) -> bool {
-    pull.get_info().await.is_err_and(|error| {
-        matches!(
+    match pull.get_info().await {
+        Ok(info) => {
+            info.created != pull.cached_info().created || info.config.deliver_subject.is_some()
+        }
+        Err(error) => matches!(
             error.kind(),
             ConsumerInfoErrorKind::NotFound | ConsumerInfoErrorKind::StreamNotFound
-        )
-    })
+        ),
+    }
+}
+
+fn pull_failed() {
+    // Batch errors may quote broker-controlled descriptions.
+    tracing::warn!("messaging pull batch failed");
+    metrics::counter!("messaging_consumer_stream_errors_total").increment(1);
 }
 
 /// Returns the deliveries the client buffered but no handler admitted.
 /// Without this the broker holds each one until ack wait.
-async fn release(mut messages: pull::Stream) {
+async fn release(mut messages: pull::Batch) {
     let mut prefetched = Vec::new();
     while let Some(Some(next)) = messages.next().now_or_never() {
         prefetched.extend(next);
