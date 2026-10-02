@@ -1077,14 +1077,12 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
         .expect("webhook effect table");
     let held = Arc::new(HeldWebhookConsumer::default());
     let mut consumers = Consumers::new();
-    assert!(
-        consumers
-            .insert(
-                WEBHOOK_ENDPOINT,
-                Arc::clone(&held) as Arc<dyn WebhookConsumer>
-            )
-            .is_none()
-    );
+    consumers
+        .insert(
+            WEBHOOK_ENDPOINT,
+            Arc::clone(&held) as Arc<dyn WebhookConsumer>,
+        )
+        .expect("first binding");
     let mut webhook_kinds = Kinds::new();
     webhook_kinds.register(Policy::default(), Processor::new(consumers));
     let webhook = start(

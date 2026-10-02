@@ -7,6 +7,7 @@
 //! in that callback's transaction.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -441,7 +442,12 @@ impl JobKind for Incoming {
 
 const _: () = infra_jobs::assert_valid_kind_name(Incoming::NAME);
 
-/// A provider adapter that applies one retained delivery inside its transaction.
+/// An adapter that applies one retained delivery inside its transaction.
+///
+/// `tx` stays open, and holds a pooled connection, until `process` returns
+/// and the job completes in it. Keep `process` to database effects. For an
+/// effect outside PostgreSQL, enqueue a job on `tx` and let that job make the
+/// call, so a slow recipient holds neither a transaction nor a connection.
 ///
 /// Implement it under [`async_trait`](macro@async_trait), the workspace idiom
 /// for object-safe async traits.
@@ -465,12 +471,25 @@ impl Consumers {
     }
 
     /// Bind one configured endpoint to its consumer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DuplicateConsumer`] when the endpoint already has a binding;
+    /// the first binding stays.
     pub fn insert(
         &mut self,
         endpoint_id: impl Into<String>,
         consumer: Arc<dyn Consumer>,
-    ) -> Option<Arc<dyn Consumer>> {
-        self.entries.insert(endpoint_id.into(), consumer)
+    ) -> Result<(), DuplicateConsumer> {
+        match self.entries.entry(endpoint_id.into()) {
+            Entry::Occupied(bound) => Err(DuplicateConsumer {
+                endpoint: bound.key().clone(),
+            }),
+            Entry::Vacant(unbound) => {
+                unbound.insert(consumer);
+                Ok(())
+            }
+        }
     }
 
     /// Fail when a configured endpoint has no consumer binding.
@@ -495,6 +514,14 @@ impl Consumers {
     fn get(&self, endpoint_id: &str) -> Option<Arc<dyn Consumer>> {
         self.entries.get(endpoint_id).cloned()
     }
+}
+
+/// An inbound endpoint bound to a consumer twice.
+#[derive(Debug, thiserror::Error)]
+#[error("inbound webhook endpoint {endpoint} already has a consumer binding")]
+pub struct DuplicateConsumer {
+    /// The endpoint ID bound twice.
+    pub endpoint: String,
 }
 
 /// A configured inbound endpoint with no consumer binding.
@@ -615,5 +642,37 @@ impl From<TxError> for CleanupFailure {
             TxError::Begin(_) => CleanupError::Begin,
             TxError::CommitFailed(_) | TxError::CommitUnknown(_) => CleanupError::Commit,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Ignore;
+
+    #[async_trait]
+    impl Consumer for Ignore {
+        async fn process(&self, _tx: &mut Tx<'_>, _incoming: &Incoming) -> Result<(), JobError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_second_binding_for_one_endpoint_is_refused_and_an_unbound_one_is_named() {
+        let mut consumers = Consumers::new();
+        consumers
+            .insert("partner", Arc::new(Ignore))
+            .expect("first binding");
+        let duplicate = consumers
+            .insert("partner", Arc::new(Ignore))
+            .expect_err("second binding");
+        assert_eq!(duplicate.endpoint, "partner");
+
+        assert!(consumers.require(["partner"]).is_ok());
+        let missing = consumers
+            .require(["partner", "other"])
+            .expect_err("unbound endpoint");
+        assert_eq!(missing.endpoint, "other");
     }
 }

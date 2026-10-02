@@ -4,9 +4,14 @@
 The `INBOUND_WEBHOOKS=standard-webhooks` profile exposes durable receipt and
 processing for authenticated Standard Webhooks v1 notifications. It requires
 `DATABASE=postgres` and `JOBS=postgres`; every profile defaults to `none`. An
-empty endpoint map is inert. An active endpoint needs a pool and an explicit
-consumer binding in the shared adopter registry, so partial wiring fails startup rather
-than accepting work into a successful no-op.
+empty endpoint map is inert. An active endpoint needs a pool in the service and
+an explicit consumer binding in the worker, so partial wiring fails startup
+rather than accepting work into a successful no-op.
+
+Verification covers the symmetric `v1` scheme (HMAC-SHA256) only. A sender
+with its own signature scheme, such as Stripe or GitHub, cannot use this
+route, and neither can the asymmetric `v1a` (Ed25519) scheme. Either is a
+separate verification capability, not a consumer binding.
 
 ## Static receiving bindings
 
@@ -98,17 +103,23 @@ errors. `Rejected` carries the verifier's `Rejection`, a static reason label.
 byte-safe content type. A registered `Consumer` implements
 `async fn process(&self, &mut Tx, &Incoming) -> Result<(), JobError>` under the
 re-exported `#[infra_webhooks::inbound::async_trait]`; `Processor` owns the
-binding lookup, transaction, and fenced completion. `Consumers::require` fails
-startup when a configured endpoint has no binding. `Processor::register` installs
+binding lookup, transaction, and fenced completion. `Consumers::insert` refuses
+a second binding for one endpoint, and `Consumers::require` fails startup when
+a configured endpoint has no binding. `Processor::register` installs
 `webhooks.process` with the default jobs policy.
 
-A derived service edits `consumers()` in `crates/webhook-consumers/src/lib.rs`
-to register its `Arc<dyn Consumer>` adapters. Both roots call that one constructor
-and check every configured endpoint before serving or claiming. The worker
-moves that same registry into `Processor::new(...).register(kinds)`; it does not
-construct a second registry.
+A derived service binds its `Arc<dyn Consumer>` adapters in `register` in
+`crates/jobs-worker/src/main.rs`, beside its job kinds and message handlers.
+The worker checks every configured endpoint before claiming and moves the
+registry into `Processor::new(...).register(kinds)`. The service process holds
+no consumer: it admits a verified delivery durably, and the worker that
+refuses to start without the binding is the signal that nothing processes it.
 
 ```rust,ignore
+use std::sync::Arc;
+
+use infra_jobs::JobError;
+use infra_postgres::Tx;
 use infra_webhooks::inbound::{Consumer, Consumers, Incoming, async_trait};
 
 struct Partner;
@@ -121,12 +132,15 @@ impl Consumer for Partner {
     }
 }
 
-pub fn consumers() -> Consumers {
-    let mut consumers = Consumers::new();
-    consumers.insert("partner", Arc::new(Partner));
-    consumers
-}
+// In `register`:
+let mut consumers = Consumers::new();
+consumers.insert("partner", Arc::new(Partner))?;
 ```
+
+The transaction, and its pooled connection, stay open until `process` returns.
+Keep `process` to database effects; for an effect outside PostgreSQL, enqueue a
+job on `tx` and let that job make the call.
+
 
 ### Providers that sign another way
 
@@ -147,6 +161,10 @@ The template deliberately supplies an empty registry because it has no business
 consumer. It is not a successful default: active ingress without the derived
 service's binding fails startup in both processes. A historical queued job whose
 binding is no longer configured retries and spends its normal attempt budget.
+
+Every endpoint shares the one `webhooks.process` kind and the worker's job
+slots, so one endpoint's slow consumer delays the others. Deliveries of one
+endpoint run concurrently and in no guaranteed order.
 
 PostgreSQL arbitrates concurrent deliveries. In one explicit READ COMMITTED
 transaction it inserts a receipt and enqueues `webhooks.process`. The composite

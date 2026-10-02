@@ -40,9 +40,6 @@ infra-webhooks = { workspace = true }
 # template:begin outbound-http:worker-outbound-http-dependency
 infra-outbound-http = { workspace = true }
 # template:end outbound-http:worker-outbound-http-dependency
-# template:begin inbound-webhooks:worker-webhook-consumers-dependency
-webhook-consumers = { workspace = true }
-# template:end inbound-webhooks:worker-webhook-consumers-dependency
 infra-telemetry = { workspace = true }
 secrecy = { workspace = true }
 service-config = { workspace = true }

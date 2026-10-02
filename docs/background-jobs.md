@@ -370,10 +370,9 @@ and operator guidance; all other HTTP responses retry.
 <!-- template:begin inbound-webhooks:docs-background-jobs-webhooks-inbound -->
 `webhooks.process` uses the existing 25-attempt, 60-second policy. A missing
 consumer binding in historical work retries, consumes attempts and eventually
-exhausts. Both process roots use the one `webhook_consumers::consumers()`
-constructor and reject configured inbound endpoints without a consumer before
-serving or claiming. The template registry is empty until an adopter binds its
-real consumer.
+exhausts. The worker's `register` owns the consumer registry and rejects a
+configured inbound endpoint without a consumer before claiming. The registry is
+empty until an adopter binds its real consumer.
 <!-- template:end inbound-webhooks:docs-background-jobs-webhooks-inbound -->
 
 The pack still has no operator pause, cancel, redrive, priority, queue,

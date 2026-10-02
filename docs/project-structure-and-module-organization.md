@@ -113,10 +113,9 @@ and a fixed startup map of endpoint clients and key rings. It is the only webhoo
 
 <!-- template:begin inbound-webhooks:docs-structure-webhooks-inbound -->
 `crates/infra-webhooks/src/inbound.rs` owns receipt/processor SQL and the
-consumer seam. `crates/webhook-consumers/src/lib.rs` is the adopter-owned shared
-composition edit point: its `consumers()` supplies both roots' startup checks
-and the worker processor. This small crate is removed with inbound webhooks;
-real consumer adapters call feature behavior without moving it into the provider.
+consumer seam. `register` in `crates/jobs-worker/src/main.rs` is the adopter's
+registration edit point; real consumer adapters call feature behavior without
+moving it into the provider.
 `crates/infra-http/src/webhooks.rs` owns only route/state/
 annotation. Removable black-box database tests live under
 `test/tests/webhooks/{main,inbound}.rs`; OpenAPI and lifecycle proof stays in
