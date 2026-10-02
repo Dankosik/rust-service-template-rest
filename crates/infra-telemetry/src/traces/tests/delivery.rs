@@ -1,21 +1,18 @@
 //! The exporter against a collector that listens: what arrives there, and
-//! whom the exporter trusts.
+//! what unusable trust material does to the exporter.
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener};
-use std::sync::{Arc, mpsc};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::mpsc;
 
-use futures_util::FutureExt as _;
-use rcgen::{
-    BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-    KeyUsagePurpose,
-};
-use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
-use rustls::server::WebPkiClientVerifier;
-use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 use tracing_subscriber::layer::SubscriberExt as _;
 
 use super::*;
+
+// The TLS fixture crates are in the workspace only with gRPC retained.
+// template:begin grpc:telemetry-tls-delivery-tests
+mod tls;
+// template:end grpc:telemetry-tls-delivery-tests
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -48,7 +45,8 @@ struct Collector {
 }
 
 impl Collector {
-    fn start(tls: Option<Arc<ServerConfig>>) -> Self {
+    /// `accept` turns a connection into the request it carried, if any.
+    fn start(accept: impl Fn(TcpStream) -> Option<Request> + Send + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind the collector");
         let addr = listener.local_addr().expect("collector address");
         let (sender, requests) = mpsc::channel();
@@ -56,14 +54,7 @@ impl Collector {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { return };
                 let _ = stream.set_read_timeout(Some(WAIT));
-                // A refused handshake is a connection without a request.
-                let request = match &tls {
-                    Some(config) => ServerConnection::new(Arc::clone(config))
-                        .ok()
-                        .and_then(|tls| exchange(StreamOwned::new(tls, stream))),
-                    None => exchange(stream),
-                };
-                if let Some(request) = request
+                if let Some(request) = accept(stream)
                     && sender.send(request).is_err()
                 {
                     return;
@@ -121,99 +112,9 @@ fn exchange(mut stream: impl Read + Write) -> Option<Request> {
     })
 }
 
-/// A private certificate authority, the collector certificate it signed for
-/// `127.0.0.1`, and a client certificate, with the PEM files the standard
-/// variables would name.
-struct Pki {
-    issuer: CertifiedIssuer<'static, KeyPair>,
-    files: tempfile::TempDir,
-}
-
-impl Pki {
-    fn new() -> Self {
-        let mut ca = CertificateParams::default();
-        ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        Self {
-            issuer: CertifiedIssuer::self_signed(ca, KeyPair::generate().expect("CA key"))
-                .expect("self-signed CA"),
-            files: tempfile::tempdir().expect("directory for PEM files"),
-        }
-    }
-
-    fn file(&self, variable: &'static str, name: &str, pem: &str) -> TrustFile {
-        let path = self.files.path().join(name);
-        std::fs::write(&path, pem).expect("write a PEM file");
-        TrustFile { variable, path }
-    }
-
-    fn certificate_file(&self) -> TrustFile {
-        self.file(CERTIFICATE_VARS[1], "ca.pem", &self.issuer.pem())
-    }
-
-    fn client_files(&self) -> (TrustFile, TrustFile) {
-        let key = KeyPair::generate().expect("client key");
-        let mut params = CertificateParams::new(vec!["exporter".to_owned()]).expect("client names");
-        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-        let certificate = params.signed_by(&key, &self.issuer).expect("client leaf");
-        (
-            self.file(CLIENT_CERTIFICATE_VARS[1], "client.pem", &certificate.pem()),
-            self.file(CLIENT_KEY_VARS[1], "client.key", &key.serialize_pem()),
-        )
-    }
-
-    fn collector(&self, require_client_certificate: bool) -> Arc<ServerConfig> {
-        let key = KeyPair::generate().expect("collector key");
-        let mut params =
-            CertificateParams::new(vec!["127.0.0.1".to_owned()]).expect("collector names");
-        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        let certificate = params
-            .signed_by(&key, &self.issuer)
-            .expect("collector leaf");
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        let builder = ServerConfig::builder_with_provider(Arc::clone(&provider))
-            .with_safe_default_protocol_versions()
-            .expect("protocol versions");
-        let builder = if require_client_certificate {
-            let mut roots = RootCertStore::empty();
-            roots.add(self.issuer.der().clone()).expect("CA root");
-            builder.with_client_cert_verifier(
-                WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
-                    .build()
-                    .expect("client verifier"),
-            )
-        } else {
-            builder.with_no_client_auth()
-        };
-        Arc::new(
-            builder
-                .with_single_cert(
-                    vec![certificate.der().clone()],
-                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
-                )
-                .expect("collector certificate"),
-        )
-    }
-}
-
-/// One export through the exporter the trust material builds. The batch
-/// processor runs the blocking client on its own thread; here it finishes
-/// in one poll.
-fn export(collector: &Collector, trust: &CollectorTrust) -> OTelSdkResult {
-    span_exporter(
-        Some(&format!("https://{}/v1/traces", collector.addr)),
-        HashMap::new(),
-        trust,
-    )
-    .expect("the exporter builds")
-    .export(Vec::new())
-    .now_or_never()
-    .expect("the blocking client finishes in one poll")
-}
-
 #[test]
 fn a_finished_span_reaches_the_collector_with_the_typed_headers() {
-    let collector = Collector::start(None);
+    let collector = Collector::start(exchange);
     // A collector root: the exporter must post to `/v1/traces` under it.
     let mut options = options(&format!("http://{}", collector.addr));
     options.otlp_headers = Some(SecretString::from("x-tenant=t1"));
@@ -252,93 +153,46 @@ fn a_finished_span_reaches_the_collector_with_the_typed_headers() {
 }
 
 #[test]
-fn a_certificate_file_is_what_makes_a_private_collector_trusted() {
-    let pki = Pki::new();
-    let collector = Collector::start(Some(pki.collector(false)));
-
-    export(&collector, &CollectorTrust::default())
-        .expect_err("the platform trust store does not know the private CA");
-
-    let trust = CollectorTrust {
-        certificate: Some(pki.certificate_file()),
-        ..CollectorTrust::default()
-    };
-    export(&collector, &trust).expect("the certificate file's CA signed the collector");
-    assert_eq!(collector.received().path, "/v1/traces");
-
-    // Only the file's certificates are trusted: another CA's file does not
-    // fall back to anything that would accept this collector.
-    let other = Pki::new();
-    let stranger = CollectorTrust {
-        certificate: Some(other.certificate_file()),
-        ..CollectorTrust::default()
-    };
-    export(&collector, &stranger).expect_err("another CA did not sign the collector");
-}
-
-#[test]
-fn a_client_certificate_is_presented_to_a_collector_that_requires_one() {
-    let pki = Pki::new();
-    let collector = Collector::start(Some(pki.collector(true)));
-    let anonymous = CollectorTrust {
-        certificate: Some(pki.certificate_file()),
-        ..CollectorTrust::default()
-    };
-    export(&collector, &anonymous).expect_err("the collector requires a client certificate");
-
-    let (client_certificate, client_key) = pki.client_files();
-    let identified = CollectorTrust {
-        client_certificate: Some(client_certificate),
-        client_key: Some(client_key),
-        ..anonymous
-    };
-    export(&collector, &identified).expect("the client certificate is accepted");
-    assert_eq!(collector.received().path, "/v1/traces");
-}
-
-#[test]
 fn unusable_trust_material_degrades_the_exporter_and_names_the_variable() {
-    let pki = Pki::new();
-    let (client_certificate, client_key) = pki.client_files();
-    let missing = TrustFile {
-        variable: CERTIFICATE_VARS[0],
-        path: pki.files.path().join("absent.pem"),
+    let files = tempfile::tempdir().expect("directory for trust files");
+    let file = |variable, name: &str| TrustFile {
+        variable,
+        path: files.path().join(name),
     };
-    let not_pem = pki.file(CERTIFICATE_VARS[1], "empty.pem", "not a certificate\n");
+    std::fs::write(files.path().join("text.pem"), "not PEM\n").expect("write a file");
     for (trust, expected) in [
         (
             CollectorTrust {
-                certificate: Some(missing),
+                certificate: Some(file(CERTIFICATE_VARS[0], "absent.pem")),
                 ..CollectorTrust::default()
             },
             "read the file OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE names",
         ),
         (
             CollectorTrust {
-                certificate: Some(not_pem),
+                certificate: Some(file(CERTIFICATE_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
             "the file OTEL_EXPORTER_OTLP_CERTIFICATE names holds no certificate",
         ),
         (
             CollectorTrust {
-                client_certificate: Some(client_certificate.clone()),
+                client_certificate: Some(file(CLIENT_CERTIFICATE_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
             "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE is set without OTEL_EXPORTER_OTLP_CLIENT_KEY",
         ),
         (
             CollectorTrust {
-                client_key: Some(client_key.clone()),
+                client_key: Some(file(CLIENT_KEY_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
             "OTEL_EXPORTER_OTLP_CLIENT_KEY is set without OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
         ),
         (
-            // Two keys and no certificate.
             CollectorTrust {
-                client_certificate: Some(client_key.clone()),
-                client_key: Some(client_key),
+                client_certificate: Some(file(CLIENT_CERTIFICATE_VARS[1], "text.pem")),
+                client_key: Some(file(CLIENT_KEY_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
             "the client certificate and key files are not a usable PEM identity",

@@ -375,7 +375,8 @@ A panic is an ERROR record, `panicked`, with `panic.file`, `panic.line`,
 `panic.column`, `panic.thread`, `panic.message`, and `panic.backtrace` when
 `RUST_BACKTRACE` asks for one. Every binary replaces Rust's panic hook with
 it once the subscriber is installed, so a panic is one parseable line in the
-log stream and not plain text on stderr. The jobs worker with messaging
+log stream and not plain text on stderr; like any ERROR record it follows
+`log.level`. The jobs worker with messaging
 retained leaves `panic.message` out: a handler may format a message's content
 into its panic.
 

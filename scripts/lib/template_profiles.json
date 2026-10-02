@@ -531,6 +531,7 @@
       "crates/config/src/grpc.rs",
       "crates/grpc-contracts/",
       "crates/infra-grpc/",
+      "crates/infra-telemetry/src/traces/tests/delivery/",
       "crates/service/examples/grpc.rs",
       "crates/service/src/grpc.rs",
       "docs/grpc.md",
@@ -614,6 +615,18 @@
         "ids": [
           "http-tls-dependencies",
           "http-tls-test-dependencies"
+        ]
+      },
+      {
+        "path": "crates/infra-telemetry/Cargo.toml",
+        "ids": [
+          "telemetry-tls-test-dependencies"
+        ]
+      },
+      {
+        "path": "crates/infra-telemetry/src/traces/tests/delivery.rs",
+        "ids": [
+          "telemetry-tls-delivery-tests"
         ]
       },
       {

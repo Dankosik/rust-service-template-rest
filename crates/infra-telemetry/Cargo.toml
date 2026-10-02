@@ -43,7 +43,9 @@ tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter",
 
 [dev-dependencies]
 futures-util = { workspace = true, features = ["std"] }
+tempfile = { workspace = true }
+# template:begin grpc:telemetry-tls-test-dependencies
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
-tempfile = { workspace = true }
+# template:end grpc:telemetry-tls-test-dependencies
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
