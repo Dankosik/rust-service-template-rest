@@ -274,7 +274,7 @@ not create a client registry or token owner. See [gRPC](grpc.md).
 The listener's runtime budgets are non-secret and follow normal file and
 environment precedence; they are checked only while `grpc.enabled` is true.
 `grpc.request_timeout` (default `8s`, `100ms` to `10m`) caps a business
-call's time to response headers and must fit inside the effective HTTP drain
+call's time to response headers, authentication included, and must fit inside the effective HTTP drain
 budget, which both listeners share. `grpc.max_in_flight` (default `256`,
 zero disables shedding) bounds business calls running at once.
 `grpc.max_connections` (default `4096`, zero is unbounded) bounds accepted

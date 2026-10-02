@@ -14,6 +14,7 @@ use tracing::Instrument as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 
 use crate::Error;
+use crate::observe::{Observed, Recover};
 
 /// Explicit security selected for one trusted operator destination.
 ///
@@ -45,8 +46,9 @@ pub struct ClientIdentity {
 /// One lazy, shared channel for a configured dependency.
 ///
 /// Construction performs neither DNS nor network I/O. Each call injects the
-/// current trace context and records the client span and metrics from the
-/// response headers.
+/// current trace context and records the client span and metrics when the
+/// call's status arrives: in the response headers of a Trailers-Only answer,
+/// otherwise in the trailers that end the response stream.
 #[derive(Clone, Debug)]
 pub struct Client {
     channel: Channel,
@@ -56,15 +58,26 @@ pub struct Client {
 impl Client {
     /// Parses an explicit trusted destination and constructs a lazy channel.
     ///
+    /// `timeout` is the longest wait for a call's response headers once the
+    /// call is on the channel. A call's shorter
+    /// [`tonic::Request::set_timeout`] wins, and a longer one does not extend
+    /// it. It is this side's bound only: no `grpc-timeout` is sent for it,
+    /// so a response stream that has opened is not cut by it.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidDestination`] for a destination tonic rejects,
     /// [`Error::DestinationSecurityMismatch`] when its scheme disagrees with
     /// `security`, a certificate or key variant for unusable PEM material, and
     /// [`Error::InvalidClientTls`] when tonic cannot build the TLS connector.
-    pub fn new(destination: &str, security: ClientSecurity) -> Result<Self, Error> {
+    pub fn new(
+        destination: &str,
+        security: ClientSecurity,
+        timeout: Duration,
+    ) -> Result<Self, Error> {
         let mut endpoint = Endpoint::from_shared(destination.to_owned())
             .map_err(|_| Error::InvalidDestination)?
+            .timeout(timeout)
             .connect_timeout(Duration::from_secs(5))
             .tcp_keepalive(Some(Duration::from_secs(60)))
             // gRPC's keepalive guide asks clients not to ping much more
@@ -117,11 +130,20 @@ impl tower::Service<Request<Body>> for Client {
             }
             .instrument(call.span().clone())
             .await;
-            call.finish(match &result {
-                Ok(response) => crate::observe::code_from_headers(response.headers()),
-                Err(status) => status.code(),
-            });
-            result
+            match result {
+                Ok(response) => Ok(call.until_status(response, |body, call| {
+                    Body::new(Observed::new(
+                        body,
+                        call,
+                        Recover::Nothing,
+                        tonic::Status::code,
+                    ))
+                })),
+                Err(status) => {
+                    call.finish(status.code());
+                    Err(status)
+                }
+            }
         })
     }
 }
@@ -148,11 +170,11 @@ fn client_tls(material: &ClientTlsMaterial) -> Result<ClientTlsConfig, Error> {
 }
 
 /// The caller sees a fixed status, because a handler may forward it to its
-/// own caller; the cause is logged inside the client span. The call's own
-/// `grpc-timeout` running out, which tonic's channel enforces, is the
-/// caller's deadline and not a transport fault: it is `DEADLINE_EXCEEDED`,
-/// so a caller that retries `UNAVAILABLE` does not repeat a call the server
-/// may still be running.
+/// own caller; the cause is logged inside the client span. The call's
+/// `grpc-timeout` or the client's own timeout running out, which tonic's
+/// channel enforces, is the caller's deadline and not a transport fault: it
+/// is `DEADLINE_EXCEEDED`, so a caller that retries `UNAVAILABLE` does not
+/// repeat a call the server may still be running.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "used as a `map_err` callback, which hands over the owned error"

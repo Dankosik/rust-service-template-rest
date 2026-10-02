@@ -22,6 +22,7 @@ use std::{
 use std::time::{SystemTime, UNIX_EPOCH};
 // template:end authn:grpc-transport-test-auth-time
 
+use futures_util::StreamExt as _;
 use grpc_contracts::example::v1::{
     BidiStreamRequest, BidiStreamResponse, ClientStreamRequest, ClientStreamResponse,
     ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
@@ -71,6 +72,7 @@ use tonic_reflection::pb::v1::{
     ServerReflectionRequest, server_reflection_client::ServerReflectionClient,
     server_reflection_request::MessageRequest, server_reflection_response::MessageResponse,
 };
+use tonic_reflection::pb::v1alpha;
 use tonic_types::StatusExt as _;
 
 // template:begin authn:grpc-transport-test-accepted-token
@@ -79,6 +81,9 @@ const ACCEPTED: &str = "accepted";
 const UNSCOPED: &str = "unscoped";
 const UNARY_PATH: &str = "/example.v1.EchoService/Unary";
 // template:end authn:grpc-transport-test-accepted-token
+
+/// The longest a test client waits for response headers.
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const WAIT: Duration = Duration::from_secs(5);
 const FILL: Duration = Duration::from_secs(30);
@@ -237,9 +242,20 @@ impl EchoService for Echo {
     ) -> Result<Response<Self::ServerStreamStream>, Status> {
         self.observe(&request, Seen::ServerStream);
         let message = request.into_inner().message;
-        Ok(Response::new(Box::pin(tonic::codegen::tokio_stream::iter(
-            [Ok(ServerStreamResponse { message })],
-        ))))
+        let first = futures_util::stream::iter([Ok(ServerStreamResponse {
+            message: message.clone(),
+        })]);
+        Ok(Response::new(match message.as_str() {
+            "fail-after-first" => Box::pin(first.chain(futures_util::stream::iter([Err(
+                Failure::new(FailureCode::Conflict).into(),
+            )]))),
+            "panic-after-first" => Box::pin(first.chain(futures_util::stream::poll_fn(
+                |_| -> std::task::Poll<Option<Result<ServerStreamResponse, Status>>> {
+                    panic!("stream panic detail: do not leak")
+                },
+            ))),
+            _ => Box::pin(first),
+        }))
     }
 
     async fn bidi_stream(
@@ -418,8 +434,12 @@ fn loopback() -> SocketAddr {
 }
 
 fn plaintext_client(address: SocketAddr) -> infra_grpc::Client {
-    infra_grpc::Client::new(&format!("http://{address}"), ClientSecurity::Plaintext)
-        .expect("plaintext client")
+    infra_grpc::Client::new(
+        &format!("http://{address}"),
+        ClientSecurity::Plaintext,
+        CLIENT_TIMEOUT,
+    )
+    .expect("plaintext client")
 }
 
 fn request<T>(message: T) -> Request<T> {
@@ -751,6 +771,22 @@ async fn rejected_calls_do_not_close_the_shared_connection() {
     fixture.stop().await;
 }
 // template:end authn:grpc-transport-test-rejection-flood
+
+// template:begin authn:grpc-transport-test-authentication-deadline
+/// The provider never answers, so the call's 100 ms are spent before any
+/// handler: the deadline is the caller's, whichever step uses it up.
+#[tokio::test]
+async fn the_deadline_bounds_authentication_too() {
+    let fixture = Fixture::plaintext().await;
+    fixture.provider.silent.store(true, Ordering::Release);
+    let status = timeout(WAIT, raw_call(fixture.address, ECHO_SERVICE_UNARY))
+        .await
+        .expect("the deadline answers while the provider is silent");
+    assert_eq!(status, "4");
+    assert!(fixture.echo.calls.lock().expect("observations").is_empty());
+    fixture.stop().await;
+}
+// template:end authn:grpc-transport-test-authentication-deadline
 
 #[tokio::test]
 async fn the_configured_limit_sheds_the_next_call_without_starving_health() {
@@ -1117,11 +1153,16 @@ async fn mtls_refuses_a_client_without_a_trusted_certificate() {
 fn a_destination_scheme_that_disagrees_with_security_is_rejected() {
     let tls = ClientSecurity::Tls(ClientTlsMaterial::default());
     assert_eq!(
-        infra_grpc::Client::new("http://127.0.0.1:1", tls).unwrap_err(),
+        infra_grpc::Client::new("http://127.0.0.1:1", tls, CLIENT_TIMEOUT).unwrap_err(),
         Error::DestinationSecurityMismatch
     );
     assert_eq!(
-        infra_grpc::Client::new("https://127.0.0.1:1", ClientSecurity::Plaintext).unwrap_err(),
+        infra_grpc::Client::new(
+            "https://127.0.0.1:1",
+            ClientSecurity::Plaintext,
+            CLIENT_TIMEOUT
+        )
+        .unwrap_err(),
         Error::DestinationSecurityMismatch
     );
 }
@@ -1160,11 +1201,45 @@ async fn reflection_describes_the_committed_contract_and_health() {
     let names: Vec<&str> = listed.service.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains(&ECHO_SERVICE), "{names:?}");
     assert!(names.contains(&"grpc.health.v1.Health"), "{names:?}");
+    for version in ["v1", "v1alpha"] {
+        let reflection = format!("grpc.reflection.{version}.ServerReflection");
+        assert!(names.contains(&reflection.as_str()), "{names:?}");
+    }
 
     let MessageResponse::FileDescriptorResponse(files) = next().await else {
         panic!("a known symbol is answered with its file descriptor");
     };
     assert!(!files.file_descriptor_proto.is_empty());
+
+    // Older tools ask only for the version `v1` replaced.
+    let mut older = v1alpha::server_reflection_client::ServerReflectionClient::new(
+        plaintext_client(fixture.address),
+    );
+    let asks = tonic::codegen::tokio_stream::iter([v1alpha::ServerReflectionRequest {
+        host: String::new(),
+        message_request: Some(
+            v1alpha::server_reflection_request::MessageRequest::ListServices(String::new()),
+        ),
+    }]);
+    let mut answers = older
+        .server_reflection_info(request(asks))
+        .await
+        .expect("v1alpha reflection opens")
+        .into_inner();
+    let answer = timeout(WAIT, answers.message())
+        .await
+        .expect("v1alpha reflection answers in time")
+        .expect("v1alpha reflection stream stays open")
+        .and_then(|answer| answer.message_response);
+    let Some(v1alpha::server_reflection_response::MessageResponse::ListServicesResponse(listed)) =
+        answer
+    else {
+        panic!("list services is answered with a service list");
+    };
+    assert!(
+        listed.service.iter().any(|s| s.name == ECHO_SERVICE),
+        "{listed:?}"
+    );
     fixture.stop().await;
 }
 
@@ -1274,6 +1349,90 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
     fixture.stop().await;
 }
 
+/// A stream's status arrives in its trailers, after the response headers.
+#[tokio::test]
+async fn a_stream_is_counted_with_the_status_that_ended_it() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let fixture = Fixture::plaintext().await;
+    let mut client = fixture.echo_client();
+
+    for (message, code, detail) in [
+        ("fail-after-first", Code::Aborted, "request conflict"),
+        ("panic-after-first", Code::Internal, "request failed"),
+    ] {
+        let mut stream = timeout(
+            WAIT,
+            client.server_stream(request(ServerStreamRequest {
+                message: message.to_owned(),
+            })),
+        )
+        .await
+        .expect("the stream opens")
+        .unwrap()
+        .into_inner();
+        // tonic encodes the messages that are ready together, so a stream
+        // that panics at once may end before its first message is sent.
+        let ended = loop {
+            match timeout(WAIT, stream.message())
+                .await
+                .expect("the stream ends")
+            {
+                Ok(Some(item)) => assert_eq!(item.message, message),
+                Ok(None) => panic!("{message} ends without its failure"),
+                Err(status) => break status,
+            }
+        };
+        assert_eq!(ended.code(), code, "{message}");
+        assert_eq!(ended.message(), detail, "{message}");
+    }
+
+    // A caller that stops reading abandons the call.
+    let unread = timeout(
+        WAIT,
+        client.server_stream(request(ServerStreamRequest {
+            message: "unread".to_owned(),
+        })),
+    )
+    .await
+    .expect("the unread stream opens")
+    .unwrap();
+    drop(unread);
+
+    // The connection outlives the stream that panicked.
+    let followed = timeout(
+        WAIT,
+        client.unary(request(UnaryRequest {
+            message: "after".to_owned(),
+        })),
+    )
+    .await
+    .expect("call after the streams")
+    .unwrap();
+    assert_eq!(followed.into_inner().message, "after");
+
+    let stream = r#"grpc_service="example.v1.EchoService",grpc_method="ServerStream""#;
+    let expected = [
+        format!("grpc_server_started_total{{{stream}}} 3"),
+        format!(r#"grpc_server_handled_total{{{stream},grpc_code="Aborted"}} 1"#),
+        format!(r#"grpc_server_handled_total{{{stream},grpc_code="Internal"}} 1"#),
+        format!("grpc_client_started_total{{{stream}}} 3"),
+        format!(r#"grpc_client_handled_total{{{stream},grpc_code="Aborted"}} 1"#),
+        format!(r#"grpc_client_handled_total{{{stream},grpc_code="Internal"}} 1"#),
+        format!(r#"grpc_client_handled_total{{{stream},grpc_code="Canceled"}} 1"#),
+    ];
+    timeout(WAIT, async {
+        while !expected.iter().all(|line| handle.render().contains(line)) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("metrics settle: {}", handle.render()));
+    drop(client);
+    fixture.stop().await;
+}
+
 /// A peer that accepts and never answers: the call's own deadline ends it.
 #[tokio::test]
 async fn a_call_whose_deadline_runs_out_is_deadline_exceeded_not_unavailable() {
@@ -1296,6 +1455,24 @@ async fn a_call_whose_deadline_runs_out_is_deadline_exceeded_not_unavailable() {
         .unwrap_err();
     assert_eq!(status.code(), Code::DeadlineExceeded);
     assert_eq!(status.message(), "request deadline exceeded");
+
+    // A call that sets no deadline is still bounded by the client's own.
+    let bounded = infra_grpc::Client::new(
+        &format!("http://{address}"),
+        ClientSecurity::Plaintext,
+        Duration::from_millis(100),
+    )
+    .expect("bounded client");
+    let status = timeout(
+        WAIT,
+        EchoServiceClient::new(bounded).unary(Request::new(UnaryRequest {
+            message: "unanswered".to_owned(),
+        })),
+    )
+    .await
+    .expect("the client timeout ends the call")
+    .unwrap_err();
+    assert_eq!(status.code(), Code::DeadlineExceeded);
     silent.abort();
 }
 
@@ -1307,12 +1484,15 @@ fn tls_client(address: SocketAddr, material: ClientTlsMaterial) -> infra_grpc::C
     infra_grpc::Client::new(
         &format!("https://127.0.0.1:{}", address.port()),
         ClientSecurity::Tls(material),
+        CLIENT_TIMEOUT,
     )
     .expect("tls client")
 }
 
 // template:begin authn:grpc-transport-test-auth-provider
 struct ProviderFixture {
+    /// While set, the provider reads a request and never answers it.
+    silent: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     wake: Arc<Notify>,
     cancel: tokio_util::sync::CancellationToken,
@@ -1338,10 +1518,12 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
     let mut tls = provider_tls_config(&pki);
     tls.alpn_protocols.clear();
     let acceptor = TlsAcceptor::from(Arc::new(tls));
+    let silent = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
     let wake = Arc::new(Notify::new());
     let cancel = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn({
+        let silent = Arc::clone(&silent);
         let stop = Arc::clone(&stop);
         let wake = Arc::clone(&wake);
         async move {
@@ -1359,6 +1541,7 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
                     continue;
                 };
                 let acceptor = acceptor.clone();
+                let silent = Arc::clone(&silent);
                 tokio::spawn(async move {
                     if let Ok(mut stream) = acceptor.accept(stream).await {
                         // The form body can arrive after the request head.
@@ -1373,23 +1556,11 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
                                 _ => break,
                             }
                         }
-                        let scope = if contains(&request[..read], b"token=unscoped") {
-                            ""
-                        } else {
-                            "echo.read"
-                        };
-                        let expiry = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs()
-                            + 60;
-                        let body = format!(
-                            r#"{{"active":true,"iss":"https://issuer.example","aud":"api","exp":{expiry},"sub":"subject","scope":"{scope}"}}"#
-                        );
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                            body.len()
-                        );
+                        if silent.load(Ordering::Acquire) {
+                            std::future::pending::<()>().await;
+                        }
+                        let unscoped = contains(&request[..read], b"token=unscoped");
+                        let response = introspection_response(unscoped);
                         let _ = stream.write_all(response.as_bytes()).await;
                         let _ = stream.shutdown().await;
                     }
@@ -1419,11 +1590,29 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
     (
         verifier,
         ProviderFixture {
+            silent,
             stop,
             wake,
             cancel,
             task,
         },
+    )
+}
+
+/// An active token, with the `echo.read` scope unless `unscoped`.
+fn introspection_response(unscoped: bool) -> String {
+    let scope = if unscoped { "" } else { "echo.read" };
+    let expiry = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 60;
+    let body = format!(
+        r#"{{"active":true,"iss":"https://issuer.example","aud":"api","exp":{expiry},"sub":"subject","scope":"{scope}"}}"#
+    );
+    format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
     )
 }
 

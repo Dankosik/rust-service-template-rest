@@ -20,8 +20,8 @@ use crate::{Error, Failure};
 /// configuration section.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
-    /// Upper bound for a business call's time to response headers. A
-    /// caller's shorter `grpc-timeout` wins.
+    /// Upper bound for a business call's time to response headers,
+    /// authentication included. A caller's shorter `grpc-timeout` wins.
     pub request_timeout: Duration,
     /// Business calls running at once before shedding; `None` never sheds.
     pub max_in_flight: Option<NonZeroU32>,
@@ -124,10 +124,12 @@ impl Services {
         Ok(())
     }
 
-    /// Adds standard server reflection (`grpc.reflection.v1`) over every
-    /// described set, whenever it was described, so `grpcurl` and `buf curl`
-    /// can call the service without its schema files. Health is described
-    /// too. Reflection is a business route: authenticated, limited and
+    /// Adds standard server reflection over every described set, whenever
+    /// it was described, so `grpcurl` and `buf curl` can call the service
+    /// without its schema files. Both protocol versions are served,
+    /// `grpc.reflection.v1` and the `v1alpha` it replaced, as grpc-go serves
+    /// them: older tools ask only for `v1alpha`. Health is described too.
+    /// Reflection is a business route: authenticated, limited and
     /// deadline-bound like every other registered service.
     ///
     /// # Errors
@@ -140,18 +142,32 @@ impl Services {
         Ok(())
     }
 
-    /// Builds the reflection server requested by [`Services::add_reflection`].
+    /// Builds the reflection servers requested by [`Services::add_reflection`].
     fn attach_reflection(&mut self) -> Result<(), Error> {
         self.learn(tonic_reflection::pb::v1::FILE_DESCRIPTOR_SET)?;
-        let mut builder = tonic_reflection::server::Builder::configure()
-            .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET);
-        for set in &self.descriptor_sets {
-            builder = builder.register_encoded_file_descriptor_set(set);
-        }
-        let reflection = builder
+        self.learn(tonic_reflection::pb::v1alpha::FILE_DESCRIPTOR_SET)?;
+        // Each version lists the other, as grpc-go's registration does;
+        // the builder would add only the one it builds.
+        let builder = || {
+            let builder = tonic_reflection::server::Builder::configure()
+                .include_reflection_service(false)
+                .register_encoded_file_descriptor_set(tonic_reflection::pb::v1::FILE_DESCRIPTOR_SET)
+                .register_encoded_file_descriptor_set(
+                    tonic_reflection::pb::v1alpha::FILE_DESCRIPTOR_SET,
+                )
+                .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET);
+            self.descriptor_sets.iter().fold(builder, |builder, set| {
+                builder.register_encoded_file_descriptor_set(set)
+            })
+        };
+        let v1 = builder()
             .build_v1()
             .map_err(|_| Error::InvalidFileDescriptorSet)?;
-        self.add(reflection)
+        let v1alpha = builder()
+            .build_v1alpha()
+            .map_err(|_| Error::InvalidFileDescriptorSet)?;
+        self.add(v1)?;
+        self.add(v1alpha)
     }
 
     /// The request path of every described method of the registered
@@ -206,8 +222,8 @@ impl Services {
 }
 
 /// Serves registered services and standard health behind the gRPC middleware
-/// chain. Health is public; business calls are authenticated, limited, and
-/// bounded by the deadline.
+/// chain. Health is public; business calls are bounded by the deadline,
+/// authenticated inside it, and then limited.
 ///
 /// # Errors
 ///
@@ -226,17 +242,11 @@ pub fn router(
     }
     services.learn(tonic_health::pb::FILE_DESCRIPTOR_SET)?;
     let series = crate::observe::Series::server(services.method_paths());
-    let admission = Admission {
-        permits: limits
-            .max_in_flight
-            .map(|limit| Arc::new(Semaphore::new(limit.get() as usize))),
-        request_timeout: limits.request_timeout,
-    };
-    let business = services
-        .routes
-        .routes()
-        .into_axum_router()
-        .layer(axum::middleware::from_fn_with_state(admission, admit));
+    let mut business = services.routes.routes().into_axum_router();
+    if let Some(limit) = limits.max_in_flight {
+        let permits = Arc::new(Semaphore::new(limit.get() as usize));
+        business = business.layer(axum::middleware::from_fn_with_state(permits, shed));
+    }
     // template:begin authn:grpc-router-authenticate
     let scopes = Arc::new(services.scopes);
     let business = business.layer(axum::middleware::from_fn(move |request, next| {
@@ -245,6 +255,10 @@ pub fn router(
         async move { authenticate(verifier, scopes, request, next).await }
     }));
     // template:end authn:grpc-router-authenticate
+    let business = business.layer(axum::middleware::from_fn_with_state(
+        limits.request_timeout,
+        deadline,
+    ));
     Ok(with_health(business, readiness, &services.names).layer(
         axum::middleware::from_fn_with_state(Arc::new(series), crate::observe::observe),
     ))
@@ -304,33 +318,26 @@ fn with_health(
     router.route_service(&format!("/{}/{{*rest}}", HealthServer::NAME), health)
 }
 
-/// The business limits `admit` applies.
-#[derive(Clone)]
-struct Admission {
-    /// `None` never sheds.
-    permits: Option<Arc<Semaphore>>,
-    request_timeout: Duration,
-}
-
-/// Sheds a business call at the concurrency limit without queueing, and bounds
-/// its time to response headers by the deadline. The permit is held until the
-/// response headers, as `tower::limit` holds it.
-async fn admit(State(admission): State<Admission>, request: Request, next: Next) -> Response {
-    let _permit = match admission.permits.map(Semaphore::try_acquire_owned) {
-        None => None,
-        Some(Ok(permit)) => Some(permit),
-        Some(Err(_)) => {
-            crate::observe::record_shed();
-            return reject(request, at_capacity()).await;
-        }
-    };
-    let budget = grpc_timeout(request.headers())
-        .unwrap_or(admission.request_timeout)
-        .min(admission.request_timeout);
+/// Bounds a business call's time to response headers by the caller's
+/// `grpc-timeout`, capped at the operator's. It is the outermost business
+/// layer, so the time authentication takes is the caller's too.
+async fn deadline(State(cap): State<Duration>, request: Request, next: Next) -> Response {
+    let budget = grpc_timeout(request.headers()).map_or(cap, |asked| asked.min(cap));
     match tokio::time::timeout(budget, next.run(request)).await {
         Ok(response) => response,
         Err(_elapsed) => tonic::Status::from(Failure::new(Code::RequestTimeout)).into_http(),
     }
+}
+
+/// Sheds a business call at the concurrency limit without queueing. The
+/// permit is held until the response headers, as `tower::limit` holds it. It
+/// is the innermost layer, so only an authenticated call can take a permit.
+async fn shed(State(permits): State<Arc<Semaphore>>, request: Request, next: Next) -> Response {
+    let Ok(_permit) = permits.try_acquire_owned() else {
+        crate::observe::record_shed();
+        return reject(request, at_capacity()).await;
+    };
+    next.run(request).await
 }
 
 /// The shed answer. It is `RESOURCE_EXHAUSTED`, so a client that retries
