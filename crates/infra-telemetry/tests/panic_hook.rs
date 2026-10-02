@@ -56,7 +56,7 @@ fn a_panic_is_one_error_record_with_its_place_and_its_message_only_when_recorded
     // add continuation lines, but each panic still emits one ERROR record.
     std::panic::set_hook(original_hook);
     assert_eq!(recorded.matches(" ERROR ").count(), 1, "{recorded}");
-    assert!(recorded.contains("ERROR"), "{recorded}");
+    assert!(recorded.contains("panicked"), "{recorded}");
     assert!(
         recorded.contains(r#"panic.message="refused caller text""#),
         "{recorded}"
