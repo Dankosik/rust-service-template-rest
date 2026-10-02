@@ -1008,6 +1008,7 @@
       "crates/config/src/http_idempotency.rs",
       "migrations/20260923000001_create_http_idempotency_records.sql",
       "migrations/20260928190000_compress_http_idempotency_bodies_with_lz4.sql",
+      "migrations/20261002150000_tune_http_idempotency_records_autovacuum.sql",
       "test/tests/http_idempotency/",
       "docs/http-idempotency.md"
     ],

@@ -1560,7 +1560,10 @@ async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: Pg
         "req-huge",
     );
     assert_eq!(body["detail"], "request failed");
-    assert_eq!(outcomes(&recorder), counts(&[("not_stored", 3)]));
+    assert_eq!(
+        outcomes(&recorder),
+        counts(&[("not_stored", 2), ("unstorable", 1)])
+    );
     assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
 
     // No record stayed behind, so the same key executes another input.
@@ -1592,7 +1595,12 @@ async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: Pg
     }
     assert_eq!(
         outcomes(&recorder),
-        counts(&[("not_stored", 3), ("executed", 1), ("integrity", 2)])
+        counts(&[
+            ("not_stored", 2),
+            ("unstorable", 1),
+            ("executed", 1),
+            ("integrity", 2)
+        ])
     );
     assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
     mounted.finish().await;
