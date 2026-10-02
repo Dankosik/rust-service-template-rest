@@ -1025,6 +1025,7 @@ mod tests {
             &LoadOptions::default(),
             BUILD,
             env(&[
+                ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "RS256"),
                 (
                     "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
                     "https://identity.example/oauth2/token?tenant=blue",
@@ -1089,8 +1090,8 @@ mod tests {
     }
 
     #[test]
-    fn oauth_default_algorithm_is_rs256() {
-        let cfg = load_from(
+    fn oauth_without_an_algorithm_fails_naming_the_key() {
+        let err = load_from(
             &LoadOptions::default(),
             BUILD,
             env(&[
@@ -1113,13 +1114,109 @@ mod tests {
                 ),
             ]),
         )
+        .unwrap_err();
+        assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+        assert!(
+            err.to_string()
+                .contains("integrations.billing.oauth.algorithm: is required"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn oauth_exchange_cache_capacity_has_a_default_an_environment_form_and_a_range() {
+        let load = |capacity: Option<&'static str>| {
+            let mut variables = vec![
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+                    "https://identity.example/token",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
+                    "billing-service",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+                    "test-private-key",
+                ),
+                ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
+                ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "ES256"),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
+                    "https://identity.example",
+                ),
+            ];
+            if let Some(capacity) = capacity {
+                variables.push((
+                    "APP__INTEGRATIONS__BILLING__OAUTH__EXCHANGE_CACHE_CAPACITY",
+                    capacity,
+                ));
+            }
+            load_from(&LoadOptions::default(), BUILD, env(&variables))
+        };
+        let capacity = |cfg: Config| {
+            cfg.integrations["billing"]
+                .oauth
+                .as_ref()
+                .expect("named OAuth tuple")
+                .exchange_cache_capacity
+        };
+        assert_eq!(capacity(load(None).unwrap()), 1024);
+        assert_eq!(capacity(load(Some("4096")).unwrap()), 4096);
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(
+            &dir,
+            "capacity.toml",
+            "[integrations.billing.oauth]\nexchange_cache_capacity = 2048\n",
+        );
+        let from_file = load_from(
+            &LoadOptions {
+                config: Some(file),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+                    "https://identity.example/token",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
+                    "billing-service",
+                ),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+                    "test-private-key",
+                ),
+                ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
+                ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "ES256"),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
+                    "https://identity.example",
+                ),
+            ]),
+        )
         .unwrap();
-        let oauth = cfg
-            .integrations
-            .get("billing")
-            .and_then(|integration| integration.oauth.as_ref())
-            .expect("named OAuth tuple");
-        assert_eq!(oauth.algorithm, crate::OAuthAlgorithm::Rs256);
+        assert_eq!(capacity(from_file), 2048);
+
+        for rejected in ["0", "65537"] {
+            let err = load(Some(rejected)).unwrap_err();
+            assert!(
+                matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.exchange_cache_capacity" && error.message == "must be from 1 to 65536"),
+                "{err}"
+            );
+        }
+        let err = load(Some("many")).unwrap_err();
+        assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains(
+                "integrations.billing.oauth.exchange_cache_capacity: must be a whole number"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("many"), "{rendered}");
     }
 
     #[test]
@@ -1266,6 +1363,7 @@ mod tests {
             },
             BUILD,
             env(&[
+                ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "RS256"),
                 (
                     "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
                     "test-private-key",
@@ -1369,6 +1467,7 @@ mod tests {
             },
             BUILD,
             env(&[
+                ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "RS256"),
                 (
                     "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
                     "test-private-key",
@@ -1390,10 +1489,13 @@ mod tests {
         let err = load_from(
             &LoadOptions::default(),
             BUILD,
-            env(&[(
-                "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
-                "https://identity.example/token",
-            )]),
+            env(&[
+                ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "RS256"),
+                (
+                    "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+                    "https://identity.example/token",
+                ),
+            ]),
         )
         .unwrap_err();
         assert!(
@@ -1408,6 +1510,7 @@ mod tests {
             &LoadOptions::default(),
             BUILD,
             env(&[
+                ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "RS256"),
                 (
                     "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
                     "https://identity.example/token",
@@ -1428,6 +1531,7 @@ mod tests {
             &LoadOptions::default(),
             BUILD,
             env(&[
+                ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "RS256"),
                 (
                     "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
                     "https://identity.example/token",
@@ -1452,6 +1556,7 @@ mod tests {
             &LoadOptions::default(),
             BUILD,
             env(&[
+                ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "RS256"),
                 (
                     "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
                     "https://identity.example/token",
@@ -1480,6 +1585,7 @@ mod tests {
             &LoadOptions::default(),
             BUILD,
             env(&[
+                ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "RS256"),
                 (
                     "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
                     "https://@identity.example/token",

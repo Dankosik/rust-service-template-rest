@@ -31,7 +31,7 @@ use tower::service_fn;
 use secrecy::SecretString;
 
 use super::{Credentials, Fixture};
-use crate::OnBehalfOf;
+use crate::{AcquisitionError, OnBehalfOf, Rejection};
 
 #[derive(Clone)]
 struct Peer {
@@ -290,25 +290,42 @@ async fn token_acquisition_spends_grpc_timeout_without_dispatch() {
 }
 
 #[tokio::test]
-async fn acquisition_failure_is_unavailable_without_dispatch() {
+async fn acquisition_failure_prevents_dispatch_and_reports_whether_it_may_pass_later() {
     let tokens = Fixture::new().await;
-    tokens.token_json(
-        "500 Internal Server Error",
-        &serde_json::json!({"error": "private"}),
-    );
     let resource = Resource::new().await;
-    let error = resource
-        .client(&tokens.credentials(&[], None))
-        .unary(rpc(
-            UnaryRequest {
-                message: "failure".to_owned(),
-            },
-            Duration::from_secs(10),
-        ))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code(), Code::Unavailable);
-    assert_eq!(tokens.token_requests().len(), 1);
+    for (status, body, code, reason) in [
+        (
+            "500 Internal Server Error",
+            serde_json::json!({"error": "private"}),
+            Code::Unavailable,
+            AcquisitionError::Unavailable,
+        ),
+        (
+            "400 Bad Request",
+            serde_json::json!({"error": "invalid_client", "error_description": "private"}),
+            Code::Unauthenticated,
+            AcquisitionError::Rejected(Rejection::InvalidClient),
+        ),
+    ] {
+        tokens.token_json(status, &body);
+        let error = resource
+            .client(&tokens.credentials(&[], None))
+            .unary(rpc(
+                UnaryRequest {
+                    message: "failure".to_owned(),
+                },
+                Duration::from_secs(10),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), code);
+        assert!(!error.message().contains("private"));
+        // The closed reason is the status source; it is never sent to a peer.
+        let source = std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<AcquisitionError>());
+        assert_eq!(source, Some(&reason));
+    }
+    assert_eq!(tokens.token_requests().len(), 2);
     assert_eq!(resource.calls(), 0);
     resource.finish().await;
     tokens.finish().await;
@@ -626,6 +643,51 @@ async fn on_behalf_of_dispatches_the_exchanged_token_instead_of_the_service_toke
     resource.client(&credentials).unary(request).await.unwrap();
     assert_eq!(resource.authorizations(), ["Bearer exchanged-token"]);
     assert_eq!(tokens.token_requests().len(), 1);
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
+async fn a_client_requiring_a_subject_is_invalid_argument_without_one_before_any_io() {
+    let tokens = Fixture::new().await;
+    let resource = Resource::new().await;
+    let credentials = tokens.credentials(&[], None);
+    let message = || UnaryRequest {
+        message: "one".to_owned(),
+    };
+    // A reusable service token is cached, so a fallback would have one to send.
+    resource
+        .client(&credentials)
+        .unary(rpc(message(), Duration::from_secs(10)))
+        .await
+        .unwrap();
+    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(resource.calls(), 1);
+
+    let channel = Client::new(
+        &format!("http://{}", resource.address),
+        ClientSecurity::Plaintext,
+    )
+    .unwrap();
+    let mut client = EchoServiceClient::new(credentials.grpc(channel).require_on_behalf_of());
+    let error = client
+        .unary(rpc(message(), Duration::from_secs(10)))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(resource.calls(), 1);
+
+    tokens.token_json("200 OK", &super::exchange_response("exchanged-token"));
+    let mut request = rpc(message(), Duration::from_secs(10));
+    request
+        .extensions_mut()
+        .insert(OnBehalfOf::new(SecretString::from("subject-token")));
+    client.unary(request).await.unwrap();
+    assert_eq!(
+        resource.authorizations(),
+        ["Bearer fixture-token", "Bearer exchanged-token"]
+    );
     resource.finish().await;
     tokens.finish().await;
 }
