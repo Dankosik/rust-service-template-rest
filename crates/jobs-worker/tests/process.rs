@@ -289,6 +289,6 @@ fn operator_help_is_available_before_configuration() {
         stdout.contains("--kind") && stdout.contains("--version"),
         "{stdout}"
     );
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
 }
 // template:end jobs:worker-operator-process-tests
