@@ -102,7 +102,7 @@ next background refresh, never held across an `.await`, and
 reusable cached token without waiting. Otherwise it waits for `refresh` under
 its own `timeout_at(deadline)`, checks the cache again because the previous
 holder may have just stored a token, and only then requests one within
-`min(caller_deadline, start+5s)`. Token requests therefore never overlap. A
+`min(caller_deadline, start+5s)`. Service-token requests therefore never overlap. A
 success is shared with every later caller while it is reusable. A failure is
 never cached: each queued caller then makes its own request in turn. Dropping
 the holder cancels its request and releases the lock, so the next waiter
@@ -148,8 +148,17 @@ can still be removed; it costs one more exchange. A token the calling request it
 fetched serves that request even inside its margin (Moka's `Entry::is_fresh`),
 so a short-lived token never loops. A token without `expires_in` is stored with
 zero retention: the requests coalesced into its exchange use it, later ones
-exchange again. The shared exchange is bounded by its own start plus five
-seconds; each caller stops waiting at its own deadline.
+exchange again. The shared exchange is the first caller's future, bounded
+by that caller's deadline and its own start plus five seconds. A failure is
+shared with the callers waiting on it; when the first caller is dropped or out
+of budget, Moka hands the exchange to a waiting caller, which starts its own
+request. That is the service token's rule: a cancelled holder's request is
+cancelled and the next waiter proceeds. A detached exchange that outlives its
+first caller would save the repeated request at the price of a second
+unjoined task, and is not added. Exchanges for different subjects are not
+serialized: each belongs to an admitted request, so inbound admission bounds
+them. Reopen with a per-owner limit if concurrent exchanges are measured to
+load the provider.
 
 The caller's resource deadline is forwarded unchanged after acquisition.
 The token client uses constants: five seconds, 64 response headers, 1 MiB encoded body. One MiB matches the existing provider envelope and
@@ -162,7 +171,9 @@ latency, memory, or provider capacity are made by these bounds.
 Typed configuration owns key presence, RFC scope representation, safe diagnostic
 context, and fixed-endpoint syntax; adapter construction independently admits
 direct options by the same rules, including that a whitespace-only value is
-empty and the exchange-cache range. Neither owns the other's dependencies: config uses `url`, while
+empty, the exchange-cache range, and the refusal of an `@` in the endpoint's
+raw authority, which `Url` parses away when the userinfo is empty or follows a
+backslash. Neither owns the other's dependencies: config uses `url`, while
 the adapter receives primitives/SecretString through composition and does not
 depend on service-config. Normal config validation runs in every existing binary;
 there is no eager token call or extra service lifecycle field.
@@ -197,8 +208,11 @@ budget, owner isolation, Bearer injection, 401 eviction that spares a newer
 token, and 401/403 without replay. It also verifies the assertion
 header and claims with the matching public key, distinct `jti` values, key and
 algorithm refusal, both request forms, the issued-token-type check, per-subject
-reuse and coalescing, single-subject eviction, uncached exchange failures, one
-exchange for a short-lived token, and gRPC on-behalf dispatch. The Keycloak
+reuse and coalescing, a waiter restarting the exchange its first caller ran
+out of budget for, single-subject eviction, uncached exchange failures, one
+exchange for a short-lived token, one count per token request under its grant
+and outcome (success, a registered error code, timeout, cancellation) read
+from a local Prometheus recorder, and gRPC on-behalf dispatch. The Keycloak
 suite (`integration` feature, `make test-integration-oauth`, CI surface
 `oauth_integration`) proves against a real server what the fixture assumes:
 the three algorithms, both grants, and the reported error codes. It lives in

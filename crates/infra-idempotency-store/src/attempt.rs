@@ -24,18 +24,9 @@ use std::fmt;
 use std::time::Duration;
 
 use bytes::Bytes;
-use infra_postgres::{
-    Isolation, Tx, TxError, TxOptions, failure_cause, in_tx_with, observed, sqlstate, transient,
-};
+use infra_postgres::{Tx, TxError, failure_cause, in_tx_with, observed, sqlstate, transient};
 
-use crate::Store;
-
-/// Explicit, because the server default may be stricter: see the module
-/// documentation.
-const READ_COMMITTED: TxOptions = TxOptions {
-    isolation: Isolation::ReadCommitted,
-    read_only: false,
-};
+use crate::{READ_COMMITTED, Store};
 
 /// A SHA-256 digest.
 pub type Digest = [u8; 32];
@@ -174,11 +165,11 @@ impl Store {
             READ_COMMITTED,
             async |tx: &mut Tx<'_>| -> Result<C, Stop<C, R>> {
                 if let Some(decided) = arbitrate(tx, scope, fingerprint).await? {
-                    return Err(Stop(Ok(decided)));
+                    return Err(Stop::Decided(decided));
                 }
                 let (record, value) = match work(tx).await {
                     Ok(done) => done,
-                    Err(rollback) => return Err(Stop(Ok(Attempted::RolledBack(rollback)))),
+                    Err(rollback) => return Err(Stop::Decided(Attempted::RolledBack(rollback))),
                 };
                 write(tx, scope, caller, &record, self.retention).await?;
                 Ok(value)
@@ -187,7 +178,8 @@ impl Store {
         .await;
         match committed {
             Ok(value) => Ok(Attempted::Committed(value)),
-            Err(Stop(stopped)) => stopped,
+            Err(Stop::Decided(decided)) => Ok(decided),
+            Err(Stop::Failed(err)) => Err(err),
         }
     }
 }
@@ -363,19 +355,24 @@ async fn write(
     }
 }
 
-/// Ends the transaction without a commit, carrying what the attempt returns:
-/// a decision that ran no work or rolled it back, or a failure.
-struct Stop<C, R>(Result<Attempted<C, R>, AttemptError>);
+/// Why the transaction ends without a commit. The provider commits on `Ok`
+/// and rolls back on `Err`, so both reasons leave the closure as its error.
+enum Stop<C, R> {
+    /// A decision that ran no work, or rolled it back.
+    Decided(Attempted<C, R>),
+    /// The store could not decide.
+    Failed(AttemptError),
+}
 
 impl<C, R> From<AttemptError> for Stop<C, R> {
     fn from(err: AttemptError) -> Self {
-        Self(Err(err))
+        Self::Failed(err)
     }
 }
 
 impl<C, R> From<TxError> for Stop<C, R> {
     fn from(err: TxError) -> Self {
-        Self(Err(classify_tx(&err)))
+        Self::Failed(classify_tx(&err))
     }
 }
 

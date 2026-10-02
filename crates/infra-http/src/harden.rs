@@ -101,7 +101,7 @@ pub struct HardenOptions {
     /// would keep a different ceiling than `http.max_body_bytes`.
     pub max_body_bytes: usize,
     /// Per-request handler budget; expiry answers 504 with code
-    /// `request_timeout`.
+    /// `gateway_timeout`.
     pub request_timeout: Duration,
     /// Concurrent handler executions before 503; `None` disables shedding.
     /// The health probe routes are admitted without a permit, so a saturated
@@ -212,7 +212,7 @@ async fn admit(
 /// Map the timeout error to a problem response.
 async fn middleware_error(err: BoxError) -> Response {
     if err.is::<Elapsed>() {
-        return Problem::new(Code::RequestTimeout)
+        return Problem::new(Code::GatewayTimeout)
             .detail("request budget expired before a response could be committed")
             .into_response();
     }
@@ -447,7 +447,7 @@ mod tests {
         response.assert_status(StatusCode::GATEWAY_TIMEOUT);
         response.assert_header(CONTENT_TYPE, "application/problem+json");
         let json = response.json::<Value>();
-        assert_eq!(json["code"], "request_timeout");
+        assert_eq!(json["code"], "gateway_timeout");
         let id = response.header(REQUEST_ID_HEADER);
         assert_eq!(json["request_id"].as_str(), Some(id.to_str().unwrap()));
     }

@@ -653,10 +653,12 @@ impl Credentials {
     }
 
     /// Returns a live exchanged token for `subject`, exchanging it when the
-    /// cache has none. The shared exchange, coalesced by Moka across
-    /// concurrent misses for the same subject, is bounded by its own start
-    /// plus [`FETCH_TIMEOUT`], not by this caller's deadline; this caller
-    /// still stops waiting for it at `deadline`.
+    /// cache has none. Moka coalesces concurrent misses for one subject into
+    /// the exchange of the first caller, bounded by that caller's `deadline`
+    /// and [`FETCH_TIMEOUT`]. When that caller is dropped or out of budget,
+    /// its exchange is cancelled and a waiting caller starts its own; a
+    /// waiter never fails because of another caller's deadline. Exchanges
+    /// for different subjects run concurrently.
     async fn exchange(
         &self,
         key: [u8; 32],
@@ -1041,9 +1043,21 @@ fn admit_options(options: &Options) -> Result<Url, ConfigurationError> {
         || endpoint.host_str().is_none()
         || !endpoint.username().is_empty()
         || endpoint.password().is_some()
+        || raw_authority_has_userinfo(&options.token_url)
         || endpoint.fragment().is_some()
     {
         return error("token_url", "must be HTTPS without userinfo or fragment");
     }
     Ok(endpoint)
+}
+
+/// `Url` drops an empty userinfo and reads a backslash as a path separator,
+/// so the parsed URL alone admits an `@` that the typed configuration
+/// section refuses.
+fn raw_authority_has_userinfo(token_url: &str) -> bool {
+    let Some((_, authority)) = token_url.split_once("://") else {
+        return false;
+    };
+    let authority_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
+    authority[..authority_end].contains('@')
 }

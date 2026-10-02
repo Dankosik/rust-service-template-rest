@@ -116,6 +116,10 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
     }
 }
 
+/// Set in the fixture worker's environment, makes its registration spawn a
+/// background task named `fixture` that returns at once.
+pub const BACKGROUND_TASK_RETURNS: &str = "JOBS_WORKER_FIXTURE_BACKGROUND_TASK_RETURNS";
+
 /// The fixture worker's registration, the one test-only kind with the default policy.
 ///
 /// # Errors
@@ -124,5 +128,8 @@ pub fn register(
     registration: &mut jobs_worker::Registration<'_>,
 ) -> Result<(), jobs_worker::BuildError> {
     registration.jobs.register(Policy::default(), handle);
+    if std::env::var_os(BACKGROUND_TASK_RETURNS).is_some() {
+        registration.spawn("fixture", |_cancel| async {});
+    }
     Ok(())
 }

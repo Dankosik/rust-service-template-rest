@@ -916,6 +916,47 @@ mod tests {
     }
 
     #[test]
+    fn messaging_credentials_file_is_a_path_a_file_or_the_environment_may_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = write(
+            &dir,
+            "messaging.toml",
+            "[messaging]\ncredentials_file = \"/run/secrets/from-file.creds\"\n",
+        );
+        let options = LoadOptions {
+            config: Some(overlay),
+            ..LoadOptions::default()
+        };
+        let cfg = load_from(&options, BUILD, env(&[])).unwrap();
+        assert_eq!(
+            cfg.messaging.credentials_file.as_deref(),
+            Some(Path::new("/run/secrets/from-file.creds"))
+        );
+
+        let cfg = load_from(
+            &options,
+            BUILD,
+            env(&[(
+                "APP__MESSAGING__CREDENTIALS_FILE",
+                "/run/secrets/nats.creds",
+            )]),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.messaging.credentials_file.as_deref(),
+            Some(Path::new("/run/secrets/nats.creds"))
+        );
+
+        let cfg = load_from(
+            &options,
+            BUILD,
+            env(&[("APP__MESSAGING__CREDENTIALS_FILE", " ")]),
+        )
+        .unwrap();
+        assert_eq!(cfg.messaging.credentials_file, None);
+    }
+
+    #[test]
     fn messaging_empty_root_ca_path_unsets_the_file_value() {
         let dir = tempfile::tempdir().unwrap();
         let file = write(
@@ -1150,6 +1191,42 @@ mod tests {
             cfg.cache.password_file.as_deref(),
             Some(std::path::Path::new("/run/secrets/cache-password"))
         );
+
+        // A blank variable unsets the key, as it does for every optional path.
+        let cfg = load_from(&options, BUILD, env(&[("APP__CACHE__PASSWORD_FILE", " ")])).unwrap();
+        assert_eq!(cfg.cache.password_file, None);
+    }
+
+    #[test]
+    fn cache_client_certificate_paths_are_set_from_the_environment_together() {
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__CACHE__CLIENT_CERT_PATH", "/run/tls/client.crt"),
+                ("APP__CACHE__CLIENT_KEY_PATH", "/run/tls/client.key"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.cache.client_cert_path.as_deref(),
+            Some(std::path::Path::new("/run/tls/client.crt"))
+        );
+        assert_eq!(
+            cfg.cache.client_key_path.as_deref(),
+            Some(std::path::Path::new("/run/tls/client.key"))
+        );
+
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__CACHE__CLIENT_CERT_PATH", "/run/tls/client.crt"),
+                ("APP__CACHE__CLIENT_KEY_PATH", ""),
+            ]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cache.client_key_path"), "{err}");
     }
 
     #[test]

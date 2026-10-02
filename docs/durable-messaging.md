@@ -98,7 +98,11 @@ DLQ, restore, and replay horizon; in-memory state and broker deduplication do
 not establish that property. A successful handler is followed by confirmed ACK;
 a lost ACK can redeliver an effect already completed.
 
-Handlers have a 30-second limit. Retryable failures, timeouts, and panics use
+Handlers have a 30-second limit, and the handler's cancellation token is
+cancelled when its delivery ends: on return, at the limit, after a panic, and
+at a forced shutdown. Work a handler starts with that token stops with the
+delivery; work that must outlive it belongs to the worker's task tracker.
+Retryable failures, timeouts, and panics use
 delayed NAK at 1s, 5s, 30s, and 2m; the fifth failure transfers to DLQ, and
 deliveries beyond it bypass the handler. A failure of one delivery never stops
 the worker: it is logged, counted, and redelivered by the broker. Shutdown
@@ -137,8 +141,23 @@ automation: it validates the original event and derives Go's deterministic
 The worker pulls through the client's pull stream with batches of
 `concurrency` messages and `concurrency * (payload limit + 8192) <= 64 MiB`
 bytes, so in-flight deliveries plus prefetched batches stay a small multiple
-of that bound. Startup requires the source stream's message limit to fit one
-envelope. Network operations consume at most 5 seconds and no more than their
+of that bound. One delivery is the payload limit (`messaging.max_payload_bytes`,
+256 KiB by default) plus the 8 KiB header limit. Startup requires the
+server's `max_payload`, which bounds payload and headers together and is
+1 MiB by default, to carry one delivery, and a consumer's source stream to
+declare a `max_msg_size` no larger than one delivery. A refusal logs
+`messaging_admission_failed` with the delivery size as `required_bytes`, the
+broker's limit as `limit_bytes`, and an `error.type`:
+
+| `error.type` | Meaning | Operator action |
+| --- | --- | --- |
+| `server_max_payload` | The server's `max_payload` is below one delivery | Raise the server's `max_payload` or lower `messaging.max_payload_bytes` |
+| `stream_max_message_size_unset` | The source stream declares no `max_msg_size` | Set it to at most `required_bytes` |
+| `stream_max_message_size` | The source stream admits a message larger than one delivery | Lower the stream's `max_msg_size` or raise `messaging.max_payload_bytes` |
+| `server_version`, `jetstream_disabled`, `headers_unsupported` | The server is older than 2.12.3 or lacks the feature | Upgrade or enable it |
+| `dead_letter_stream_is_source` | The DLQ subject resolves to the source stream | Give the DLQ its own stream |
+
+ Network operations consume at most 5 seconds and no more than their
 caller's remaining deadline. Operators own streams, retention, capacity,
 replicas, discard policy, and broker deduplication windows; the broker enforces
 subjects, stream binding, and message sizes on every publication.
@@ -156,7 +175,23 @@ numeric JetStream error code; the broker's description can quote configuration
 and is not logged. A failed first connection logs the same event with
 `operation="connect"` and an `error.type` that names the stage: `dns`, `tls`,
 `io`, `timeout`, `authentication`, `authorization_violation`, `server_parse`,
-or `max_reconnects`; unparseable credentials log `operation="credentials"`.
+or `max_reconnects`; unusable credentials log `operation="credentials"` with
+`malformed_credentials` or `unreadable_credentials_file`.
+
+Credentials are a NATS credentials file's content (user JWT and key seed).
+`messaging.credentials` holds it inline, from the environment or the secrets
+directory, and is read once at startup. `messaging.credentials_file` names the
+file instead, for a platform that rotates it, as the Go template's key of the
+same name does: the client reads the file for the first connection and for
+every reconnect, so a connection the broker closes for an expired user comes
+back with the file's current content and logs `messaging_credentials_reloaded`.
+Replace the file atomically (a rename, as a Kubernetes secret volume does);
+a reconnect that reads a half-written, unreadable, or malformed file logs
+`messaging_credentials_file_failed` with the same `error.type`, and the client
+tries again. Inline credentials that expire are not replaced while the
+process runs: the client keeps reconnecting with them, `messaging_connection`
+keeps reporting the failed attempts, readiness stays false, and a restart
+reads the new value.
 The connection carries the worker's identity as its NATS client name. After
 startup the client reconnects on its own, and every change logs
 `messaging_connection` with its `result`: `connected`, `disconnected`,
@@ -186,6 +221,13 @@ credentials, arbitrary errors, or event IDs.
 | `messaging_settlement_failures_total` | `operation`: `ack`, `nak` |
 | `messaging_consumer_stream_errors_total` | none |
 | `messaging_connection_events_total` | `result`, as logged by `messaging_connection`, plus `slow_consumer` |
+
+The adapter reports what it did, not what waits in the broker. Backlog and
+redelivery pressure are the durable consumer's `num_pending`,
+`num_ack_pending`, and `num_redelivered`, which the broker serves through its
+monitoring endpoint (`/jsz?consumers=true`) and the NATS Prometheus exporter
+or Surveyor; alert on those beside the handler metrics rather than deriving
+lag from the worker.
 
 `event_type` is the event type of a registered handler, so the worker's
 handlers bound its values; schema versions of one type share it. A delivery

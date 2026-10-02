@@ -10,14 +10,26 @@
 //! one collector's credential is never sent to another.
 //! `OTEL_EXPORTER_OTLP_COMPRESSION` and its traces variant select `gzip`;
 //! the default is uncompressed, as the specification has it.
+//! The collector is verified with the platform trust store unless
+//! `OTEL_EXPORTER_OTLP_CERTIFICATE` names a PEM file of trusted
+//! certificates, which then are the only ones trusted;
+//! `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` with
+//! `OTEL_EXPORTER_OTLP_CLIENT_KEY` presents a client certificate. Each has
+//! a traces variant that wins. The SDK's OTLP/HTTP exporter reads none of
+//! them, so this module builds the exporter's HTTP client when one is set.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::http::{HeaderName, HeaderValue, Uri};
 use opentelemetry::trace::TracerProvider;
 use opentelemetry::{KeyValue, global};
-use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
+use opentelemetry_otlp::{
+    OTEL_EXPORTER_OTLP_TIMEOUT, OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT,
+    OTEL_EXPORTER_OTLP_TRACES_TIMEOUT, WithExportConfig, WithHttpConfig,
+};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
@@ -82,8 +94,11 @@ pub enum ExporterState {
     /// An OTLP exporter is attached to the provider.
     Initialized {
         endpoint_source: EndpointSource,
-        /// Occupied standard trust variables this exporter does not read.
-        ignored_variables: Vec<&'static str>,
+        /// The collector is verified against the certificate file of a
+        /// standard variable, not the platform trust store.
+        certificate_file: bool,
+        /// A client certificate from the standard variables is presented.
+        client_certificate: bool,
     },
     /// No endpoint resolved; spans get ids but are not exported.
     Disabled,
@@ -107,20 +122,14 @@ impl ExporterState {
         match self {
             ExporterState::Initialized {
                 endpoint_source,
-                ignored_variables,
-            } => {
-                tracing::info!(
-                    endpoint_source = endpoint_source.as_str(),
-                    "trace exporter initialized"
-                );
-                if !ignored_variables.is_empty() {
-                    tracing::warn!(
-                        variables = ?ignored_variables,
-                        "OTLP trust variables are not supported; the exporter \
-                         verifies the collector with the platform trust store"
-                    );
-                }
-            }
+                certificate_file,
+                client_certificate,
+            } => tracing::info!(
+                endpoint_source = endpoint_source.as_str(),
+                certificate_file,
+                client_certificate,
+                "trace exporter initialized"
+            ),
             ExporterState::Disabled => {}
             ExporterState::Degraded { reason } => tracing::warn!(
                 reason = %reason,
@@ -158,14 +167,19 @@ const AMBIENT_HEADER_VARS: &[&str] = &[
     "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
 ];
 
-/// Standard trust variables the OTLP/HTTP exporter does not read.
-const UNSUPPORTED_TRUST_VARS: &[&str] = &[
-    "OTEL_EXPORTER_OTLP_CERTIFICATE",
+/// Standard trust variables, each a path to a PEM file; the traces variant
+/// wins.
+const CERTIFICATE_VARS: [&str; 2] = [
     "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
-    "OTEL_EXPORTER_OTLP_CLIENT_KEY",
-    "OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY",
-    "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+    "OTEL_EXPORTER_OTLP_CERTIFICATE",
+];
+const CLIENT_CERTIFICATE_VARS: [&str; 2] = [
     "OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE",
+    "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+];
+const CLIENT_KEY_VARS: [&str; 2] = [
+    "OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY",
+    "OTEL_EXPORTER_OTLP_CLIENT_KEY",
 ];
 
 const AMBIENT_ENDPOINT_VARS: &[&str] = &[
@@ -196,7 +210,20 @@ const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
 pub fn install_tracer_provider(
     options: &TracingOptions,
 ) -> Result<TracerProviderHandle, TracingError> {
-    let endpoint_source = resolve_endpoint_source(options, occupied_env)?;
+    let trust = CollectorTrust::from_env(|name| std::env::var_os(name));
+    let handle = tracer_provider(options, occupied_env, &trust)?;
+    global::set_text_map_propagator(TraceContextPropagator::new());
+    global::set_tracer_provider(handle.provider.clone());
+    Ok(handle)
+}
+
+/// The provider and its startup state, before anything global is set.
+fn tracer_provider(
+    options: &TracingOptions,
+    occupied: impl Fn(&str) -> bool,
+    trust: &CollectorTrust,
+) -> Result<TracerProviderHandle, TracingError> {
+    let endpoint_source = resolve_endpoint_source(options, occupied)?;
     let headers = match options.otlp_headers.as_ref() {
         Some(raw) => parse_headers(raw.expose_secret())?,
         None => HashMap::new(),
@@ -208,16 +235,13 @@ pub fn install_tracer_provider(
 
     let exporter_state = match endpoint_source {
         None => ExporterState::Disabled,
-        Some(source) => match span_exporter(options.otlp_endpoint.as_deref(), headers) {
+        Some(source) => match span_exporter(options.otlp_endpoint.as_deref(), headers, trust) {
             Ok(span_exporter) => {
                 builder = builder.with_batch_exporter(Counted(span_exporter));
                 ExporterState::Initialized {
                     endpoint_source: source,
-                    ignored_variables: UNSUPPORTED_TRUST_VARS
-                        .iter()
-                        .copied()
-                        .filter(|name| occupied_env(name))
-                        .collect(),
+                    certificate_file: trust.certificate.is_some(),
+                    client_certificate: trust.client_certificate.is_some(),
                 }
             }
             Err(err) => ExporterState::Degraded {
@@ -226,11 +250,8 @@ pub fn install_tracer_provider(
         },
     };
 
-    let provider = builder.build();
-    global::set_text_map_propagator(TraceContextPropagator::new());
-    global::set_tracer_provider(provider.clone());
     Ok(TracerProviderHandle {
-        provider,
+        provider: builder.build(),
         exporter_state,
     })
 }
@@ -306,10 +327,96 @@ fn resolve_endpoint_source(
         .then_some(EndpointSource::Environment))
 }
 
+/// A PEM file named by a standard trust variable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrustFile {
+    variable: &'static str,
+    path: PathBuf,
+}
+
+impl TrustFile {
+    fn read(&self) -> Result<Vec<u8>, ExporterError> {
+        std::fs::read(&self.path).map_err(|source| ExporterError::Read {
+            variable: self.variable,
+            source,
+        })
+    }
+
+    fn unusable(&self, source: reqwest::Error) -> ExporterError {
+        ExporterError::Pem {
+            variable: self.variable,
+            source,
+        }
+    }
+}
+
+/// The collector's trust material from the standard variables. All vacant
+/// is the platform trust store and no client certificate.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CollectorTrust {
+    certificate: Option<TrustFile>,
+    client_certificate: Option<TrustFile>,
+    client_key: Option<TrustFile>,
+}
+
+impl CollectorTrust {
+    /// A blank value is vacant, like a blank endpoint.
+    fn from_env(var: impl Fn(&str) -> Option<OsString>) -> Self {
+        let file = |variables: [&'static str; 2]| {
+            variables.into_iter().find_map(|variable| {
+                let path = var(variable)?;
+                (!path.to_string_lossy().trim().is_empty()).then(|| TrustFile {
+                    variable,
+                    path: path.into(),
+                })
+            })
+        };
+        Self {
+            certificate: file(CERTIFICATE_VARS),
+            client_certificate: file(CLIENT_CERTIFICATE_VARS),
+            client_key: file(CLIENT_KEY_VARS),
+        }
+    }
+}
+
+/// Why an exporter could not be built; the bounded text becomes
+/// [`ExporterState::Degraded`]. Names the variable, never file content.
+#[derive(Debug, thiserror::Error)]
+enum ExporterError {
+    #[error(transparent)]
+    Build(#[from] opentelemetry_otlp::ExporterBuildError),
+    #[error("read the file {variable} names: {source}")]
+    Read {
+        variable: &'static str,
+        source: std::io::Error,
+    },
+    #[error("the file {variable} names is not usable PEM: {source}")]
+    Pem {
+        variable: &'static str,
+        source: reqwest::Error,
+    },
+    #[error("the file {variable} names holds no certificate")]
+    NoCertificate { variable: &'static str },
+    #[error("the client certificate and key files are not a usable PEM identity: {0}")]
+    Identity(#[source] reqwest::Error),
+    #[error("{present} is set without {missing}; a client certificate needs both")]
+    IncompleteIdentity {
+        present: &'static str,
+        missing: &'static str,
+    },
+    #[error("build the collector HTTP client: {0}")]
+    Client(#[source] reqwest::Error),
+    #[error("start the thread that builds the collector HTTP client: {0}")]
+    ClientThread(#[source] std::io::Error),
+    #[error("the thread that builds the collector HTTP client panicked")]
+    ClientThreadPanicked,
+}
+
 fn span_exporter(
     endpoint: Option<&str>,
     headers: HashMap<String, String>,
-) -> Result<opentelemetry_otlp::SpanExporter, opentelemetry_otlp::ExporterBuildError> {
+    trust: &CollectorTrust,
+) -> Result<opentelemetry_otlp::SpanExporter, ExporterError> {
     // Always OTLP/HTTP protobuf. An environment endpoint still lets the SDK
     // pick the URL; it does not select gRPC or another protocol.
     let mut builder = opentelemetry_otlp::SpanExporter::builder()
@@ -321,7 +428,82 @@ fn span_exporter(
     if !headers.is_empty() {
         builder = builder.with_headers(headers);
     }
-    builder.build()
+    if let Some(client) = collector_client(trust)? {
+        builder = builder.with_http_client(client);
+    }
+    Ok(builder.build()?)
+}
+
+/// The exporter's HTTP client when a trust variable is set; `None` leaves
+/// the SDK's own client, which verifies with the platform trust store.
+fn collector_client(
+    trust: &CollectorTrust,
+) -> Result<Option<reqwest::blocking::Client>, ExporterError> {
+    if *trust == CollectorTrust::default() {
+        return Ok(None);
+    }
+    // The blocking client starts its own runtime thread and waits for it,
+    // which an async worker must not do; the SDK builds its client the same
+    // way.
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .spawn_scoped(scope, || trusting_client(trust))
+            .map_err(ExporterError::ClientThread)?
+            .join()
+            .map_err(|_| ExporterError::ClientThreadPanicked)?
+    })
+    .map(Some)
+}
+
+fn trusting_client(trust: &CollectorTrust) -> Result<reqwest::blocking::Client, ExporterError> {
+    // The SDK sets its timeout on the client it builds, so a supplied
+    // client carries the same one.
+    let mut builder = reqwest::blocking::Client::builder().timeout(export_timeout());
+    if let Some(file) = &trust.certificate {
+        let certificates = reqwest::Certificate::from_pem_bundle(&file.read()?)
+            .map_err(|source| file.unusable(source))?;
+        if certificates.is_empty() {
+            return Err(ExporterError::NoCertificate {
+                variable: file.variable,
+            });
+        }
+        builder = builder.tls_certs_only(certificates);
+    }
+    match (&trust.client_certificate, &trust.client_key) {
+        (Some(certificate), Some(key)) => {
+            let mut pem = key.read()?;
+            pem.push(b'\n');
+            pem.extend(certificate.read()?);
+            let identity = reqwest::Identity::from_pem(&pem).map_err(ExporterError::Identity)?;
+            builder = builder.identity(identity);
+        }
+        (Some(present), None) => {
+            return Err(ExporterError::IncompleteIdentity {
+                present: present.variable,
+                missing: CLIENT_KEY_VARS[1],
+            });
+        }
+        (None, Some(present)) => {
+            return Err(ExporterError::IncompleteIdentity {
+                present: present.variable,
+                missing: CLIENT_CERTIFICATE_VARS[1],
+            });
+        }
+        (None, None) => {}
+    }
+    builder.build().map_err(ExporterError::Client)
+}
+
+/// The export timeout as the SDK resolves it: the traces variable, then the
+/// general one, in milliseconds, then ten seconds.
+fn export_timeout() -> Duration {
+    [
+        OTEL_EXPORTER_OTLP_TRACES_TIMEOUT,
+        OTEL_EXPORTER_OTLP_TIMEOUT,
+    ]
+    .into_iter()
+    .find_map(|name| std::env::var(name).ok()?.parse().ok())
+    .map_or(OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT, Duration::from_millis)
 }
 
 /// Counts the spans of every finished export under
@@ -448,6 +630,8 @@ fn truncate(message: &str) -> String {
 mod tests {
     use super::*;
 
+    mod delivery;
+
     fn options(endpoint: &str) -> TracingOptions {
         TracingOptions {
             service_name: "svc".into(),
@@ -510,6 +694,36 @@ mod tests {
     }
 
     #[test]
+    fn trust_files_come_from_the_standard_variables_traces_variant_first() {
+        let trust = CollectorTrust::from_env(|name| match name {
+            "OTEL_EXPORTER_OTLP_CERTIFICATE" => Some("/general/ca.pem".into()),
+            "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE" => Some("/traces/ca.pem".into()),
+            "OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE" => Some("  ".into()),
+            "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE" => Some("/general/client.pem".into()),
+            _ => None,
+        });
+        assert_eq!(
+            trust,
+            CollectorTrust {
+                certificate: Some(TrustFile {
+                    variable: "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
+                    path: "/traces/ca.pem".into(),
+                }),
+                // A blank traces variant is vacant, so the general one holds.
+                client_certificate: Some(TrustFile {
+                    variable: "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+                    path: "/general/client.pem".into(),
+                }),
+                client_key: None,
+            }
+        );
+        assert_eq!(
+            CollectorTrust::from_env(|_| None),
+            CollectorTrust::default()
+        );
+    }
+
+    #[test]
     fn header_pairs_parse_and_blank_entries_are_skipped() {
         let headers = parse_headers("authorization=Basic%20x, x-tenant = t1 ,").unwrap();
         assert_eq!(
@@ -562,8 +776,12 @@ mod tests {
         // blocking client off the async workers; a `#[tokio::test]` runtime
         // cannot drop reqwest's inner runtime. Nothing listens on :1, so
         // the accepted failure is a transport error, not collector delivery.
-        let exporter = span_exporter(Some("https://127.0.0.1:1/v1/traces"), HashMap::new())
-            .expect("https endpoint must build");
+        let exporter = span_exporter(
+            Some("https://127.0.0.1:1/v1/traces"),
+            HashMap::new(),
+            &CollectorTrust::default(),
+        )
+        .expect("https endpoint must build");
         let result = {
             use opentelemetry_sdk::trace::SpanExporter as _;
             exporter

@@ -185,7 +185,10 @@ fn register(registration: &mut jobs_worker::Registration<'_>)
 
 Pass `register`, or a closure that captures what its handlers need, to
 `jobs_worker::run` in the worker entrypoint. `Registration` also gives the
-loaded configuration, the worker's task tracker, and a shutdown token. The
+loaded configuration, a shutdown token, and `spawn(name, |cancel| task)` for a
+background task the worker owns: the task runs until `cancel` fires, the
+background-join stage joins it, and one that returns or panics earlier stops
+the worker with exit code 1 under that name. The
 unmodified template refuses startup because it ships no business kind.
 Registration rejects an empty set, duplicate/invalid names, and out-of-range
 policies. Defaults are 25 attempts and a 60-second timeout; accepted ranges
@@ -230,9 +233,23 @@ listeners, never an application API. It reads the service's keys for them:
 `http.addr` is its health listener, and `http.drain_timeout` and
 `http.grace_period` are its shutdown budgets. A worker that shares a host or
 network namespace with the service therefore needs its own `APP__HTTP__ADDR`,
-and its own `APP__OBSERVABILITY__METRICS__ADDR` when metrics are served. It is
+and its own `APP__OBSERVABILITY__METRICS__ADDR` when metrics are served. The
+metrics listener also serves `GET /health/live`, as the service's does, so the
+platform's liveness probe targets the same port in both processes;
+`/health/ready` stays on `http.addr`. It is
 ready after startup and claiming begin, and becomes unready as soon as its
 first stop signal arrives.
+
+The worker stops itself, with exit code 1 after the staged shutdown, when
+something it needs ends without a stop signal: an engine's claim loop,
+retention, listener, or sampling task (`jobs_engine_task_stopped` names it),
+the messaging consumer, or one of its own background tasks
+(`background_task_stopped` names it: metrics upkeep, runtime metrics, pool
+metrics, password refresh, the readiness refresher, or a task a registration
+spawned). Each record carries `panicked`. A panic anywhere in the process is
+logged once as `panicked` with its file, line, and column and never its
+message, which can carry the payload a handler was processing; a handler's
+panic is still only a retried attempt.
 
 ## Claims, deadlines, and shutdown
 

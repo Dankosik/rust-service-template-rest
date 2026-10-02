@@ -169,8 +169,9 @@ With `OBJECT_STORAGE=s3`, `infra-object-storage` is a package name for
 `make test-package`. `ALLOW_HEAVY=1 make test-integration-object-storage` is
 the versitygw proof when the current Make owner retains that target; it
 requires Docker and does not certify a provider. A local emulator is
-`docker compose -f env/docker-compose.yml up -d versitygw` (root credentials
-`template`/`template-secret`, port `VERSITYGW_PORT`, default 7070).
+`docker compose -f env/docker-compose.yml up -d --wait versitygw` (root
+credentials `template`/`template-secret`, port `VERSITYGW_PORT`, default 7070,
+bucket `template-bucket` already created).
 `make test-object-storage-conformance PROVIDER=amazon_s3|cloudflare_r2|railway|s3_compatible`
 runs the ignored live-provider test against the bucket named by the
 service's `APP__OBJECT_STORAGE__*` variables. It writes under a unique prefix,

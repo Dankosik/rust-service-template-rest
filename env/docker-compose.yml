@@ -77,12 +77,18 @@ services:
       retries: 20
   # template:end cache:compose-valkey-service
   # template:begin object-storage:compose-versitygw-service
-  # S3 emulator for `make test-integration-object-storage`. The posix backend
-  # keeps objects and their metadata (extended attributes) under /data, an
-  # anonymous volume that `down -v` removes.
+  # S3 emulator for `make test-integration-object-storage` and a local run:
+  #   docker compose -f env/docker-compose.yml up -d --wait versitygw
+  # The posix backend keeps objects and their metadata (extended attributes)
+  # under /data, an anonymous volume that `down -v` removes. A directory there
+  # is a bucket of the root account, so `template-bucket` exists before the
+  # gateway listens: the client never creates a bucket.
   versitygw:
     image: versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
-    command: ["--port", ":7070", "--health", "/health", "posix", "/data"]
+    entrypoint:
+      - /bin/sh
+      - -c
+      - mkdir -p /data/template-bucket && exec versitygw --port :7070 --health /health posix /data
     environment:
       ROOT_ACCESS_KEY: template
       ROOT_SECRET_KEY: template-secret

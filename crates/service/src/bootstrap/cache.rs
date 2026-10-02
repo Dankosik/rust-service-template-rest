@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use health::Probe;
-use infra_cache::{Cache, CacheOptions};
+use infra_cache::{Cache, CacheOptions, ClientCertificate};
 use service_config::Config;
 
 use super::BootstrapError;
@@ -17,10 +17,21 @@ pub(super) async fn open(config: &Config) -> Result<Option<Cache>, BootstrapErro
     let Some(dsn) = &config.cache.dsn else {
         return Ok(None);
     };
+    // Configuration validation has already refused one path without the other.
+    let client_certificate = config
+        .cache
+        .client_cert_path
+        .clone()
+        .zip(config.cache.client_key_path.clone())
+        .map(|(cert_path, key_path)| ClientCertificate {
+            cert_path,
+            key_path,
+        });
     let cache = Cache::connect_lazy(CacheOptions {
         dsn: dsn.clone(),
         password_file: config.cache.password_file.clone(),
         root_ca_path: config.cache.root_ca_path.clone(),
+        client_certificate,
         allow_plaintext: config.cache.allow_plaintext,
         allow_unauthenticated: config.cache.allow_unauthenticated,
         command_timeout: config.cache.command_timeout,

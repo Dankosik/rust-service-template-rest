@@ -2575,12 +2575,14 @@ dependencies = [
  "infra-postgres",
  "metrics",
  "metrics-exporter-prometheus",
+ "nkeys",
  "opentelemetry",
  "opentelemetry_sdk",
  "secrecy",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tempfile",
  "thiserror",
  "time",
  "tokio",
@@ -2605,6 +2607,7 @@ dependencies = [
  "infra-outbound-http",
  "jsonwebtoken",
  "metrics",
+ "metrics-exporter-prometheus",
  "moka",
  "rcgen",
  "secrecy",
@@ -2706,9 +2709,13 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
+ "rcgen",
+ "reqwest",
+ "rustls",
  "secrecy",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-metrics",
@@ -2732,6 +2739,7 @@ dependencies = [
  "infra-jobs",
  "infra-outbound-http",
  "infra-postgres",
+ "metrics",
  "serde",
  "serde_json",
  "serde_with",
@@ -5232,7 +5240,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -5377,9 +5385,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
-version = "0.26.5"
+version = "0.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
  "tokio",

@@ -13,7 +13,9 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use infra_postgres::{Dsn, DsnError};
-use infra_telemetry::{LoggingFormat, LoggingOptions, install_subscriber};
+use infra_telemetry::{
+    LoggingFormat, LoggingOptions, PanicMessage, install_panic_hook, install_subscriber,
+};
 use migrate::{MIGRATOR, Report, RunError, RunOptions};
 use secrecy::ExposeSecret;
 use service_config::{BuildInfo, LoadOptions, MigrationConfig, ValidationError, process_failure};
@@ -65,6 +67,7 @@ fn main() -> ExitCode {
     }) {
         return process_failure(&err.to_string());
     }
+    install_panic_hook(PanicMessage::Recorded);
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

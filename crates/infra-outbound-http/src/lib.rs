@@ -21,7 +21,7 @@ use tracing::Instrument as _;
 
 pub use bytes::Bytes;
 pub use http::{HeaderMap, Method, Request, Response, StatusCode, Version, header};
-pub use observe::{REQUEST_DURATION_BUCKETS, REQUEST_DURATION_METRIC};
+pub use observe::{REQUEST_DURATION_BUCKETS, REQUEST_DURATION_METRIC, UrlTemplate};
 pub use url::Url;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -180,7 +180,8 @@ impl Client {
     /// The exchange ends at the earlier of `deadline` and its start plus
     /// [`Limits::operation_timeout`]; that timeout covers DNS through the last
     /// body byte. Dropping this future ends the exchange; it does not undo a
-    /// provider-side effect.
+    /// provider-side effect. A [`UrlTemplate`] request extension names the
+    /// operation in the attempt's span and metric.
     ///
     /// # Errors
     ///
@@ -198,7 +199,8 @@ impl Client {
         }
         let mut request = policy::admit_request(&self.target, request)?;
 
-        let mut attempt = observe::Attempt::start(request.method(), &self.server);
+        let template = request.extensions_mut().remove::<UrlTemplate>();
+        let mut attempt = observe::Attempt::start(request.method(), template, &self.server);
         if self.propagate_trace_context {
             attempt.inject_trace_context(request.headers_mut());
         }

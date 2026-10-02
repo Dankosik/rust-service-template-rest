@@ -47,6 +47,13 @@ confidence-threshold = 0.8
 # syn, and tower-http currently resolve twice through upstream crates that
 # have not converged; docs/ci-cd-production-ready.md lists them as deferred.
 multiple-versions = "warn"
+# The exception is OpenTelemetry: a second version brings its own `global`
+# tracer provider and propagator, which nothing installs, so the crates built
+# against it export and propagate nothing without an error.
+deny = [
+    { crate = "opentelemetry", deny-multiple-versions = true },
+    { crate = "opentelemetry_sdk", deny-multiple-versions = true },
+]
 wildcards = "deny"
 # Workspace crates depend on each other by path without a version; cargo-deny
 # treats a bare path dependency as a wildcard unless this is set.
