@@ -43,6 +43,9 @@ tokio-util = { workspace = true, features = ["rt"] }
 url = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+# template:begin oidc-jwt:authn-jwt-dev-dependency
+proptest = { workspace = true, features = ["std"] }
+# template:end oidc-jwt:authn-jwt-dev-dependency
 rcgen = { workspace = true, features = ["aws_lc_rs"] }
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }

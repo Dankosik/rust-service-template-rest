@@ -49,7 +49,7 @@ pub struct Services {
     reflection: bool,
     // template:begin authn:grpc-services-scopes-field
     /// Scopes a verified principal needs for a method, keyed by request path.
-    scopes: std::collections::HashMap<String, Box<[String]>>,
+    scopes: HashMap<String, Box<[String]>>,
     // template:end authn:grpc-services-scopes-field
 }
 
@@ -231,20 +231,16 @@ pub fn router(
             .max_in_flight
             .map(|limit| Arc::new(Semaphore::new(limit.get() as usize))),
         request_timeout: limits.request_timeout,
+        // template:begin authn:grpc-router-authenticate
+        verifier,
+        scopes: Arc::new(services.scopes),
+        // template:end authn:grpc-router-authenticate
     };
     let business = services
         .routes
         .routes()
         .into_axum_router()
         .layer(axum::middleware::from_fn_with_state(admission, admit));
-    // template:begin authn:grpc-router-authenticate
-    let scopes = Arc::new(services.scopes);
-    let business = business.layer(axum::middleware::from_fn(move |request, next| {
-        let verifier = verifier.clone();
-        let scopes = Arc::clone(&scopes);
-        async move { authenticate(verifier, scopes, request, next).await }
-    }));
-    // template:end authn:grpc-router-authenticate
     Ok(with_health(business, readiness, &services.names).layer(
         axum::middleware::from_fn_with_state(Arc::new(series), crate::observe::observe),
     ))
@@ -304,18 +300,45 @@ fn with_health(
     router.route_service(&format!("/{}/{{*rest}}", HealthServer::NAME), health)
 }
 
-/// The business limits `admit` applies.
+/// What `admit` applies to a business call.
 #[derive(Clone)]
 struct Admission {
     /// `None` never sheds.
     permits: Option<Arc<Semaphore>>,
     request_timeout: Duration,
+    // template:begin authn:grpc-admission-authentication
+    verifier: infra_bearerauthn::Verifier,
+    /// Scopes a verified principal needs for a method, keyed by request path.
+    scopes: Arc<HashMap<String, Box<[String]>>>,
+    // template:end authn:grpc-admission-authentication
 }
 
-/// Sheds a business call at the concurrency limit without queueing, and bounds
-/// its time to response headers by the deadline. The permit is held until the
-/// response headers, as `tower::limit` holds it.
+/// Bounds a business call's time to response headers by the deadline. The
+/// deadline starts when the call arrives, so it also bounds authentication.
 async fn admit(State(admission): State<Admission>, request: Request, next: Next) -> Response {
+    let budget = grpc_timeout(request.headers())
+        .unwrap_or(admission.request_timeout)
+        .min(admission.request_timeout);
+    match tokio::time::timeout(budget, admitted(admission, request, next)).await {
+        Ok(response) => response,
+        Err(_elapsed) => tonic::Status::from(Failure::new(Code::RequestTimeout)).into_http(),
+    }
+}
+
+/// Sheds a business call at the concurrency limit without queueing. The
+/// permit is held until the response headers, as `tower::limit` holds it.
+/// Authentication, when that profile is retained, comes first, so a call
+/// that is not authenticated never holds a permit.
+#[allow(
+    unused_mut,
+    reason = "only an authentication profile changes the request"
+)]
+async fn admitted(admission: Admission, mut request: Request, next: Next) -> Response {
+    // template:begin authn:grpc-admitted-authenticate
+    if let Err(status) = authenticate(&admission.verifier, &admission.scopes, &mut request).await {
+        return reject(request, status).await;
+    }
+    // template:end authn:grpc-admitted-authenticate
     let _permit = match admission.permits.map(Semaphore::try_acquire_owned) {
         None => None,
         Some(Ok(permit)) => Some(permit),
@@ -324,13 +347,7 @@ async fn admit(State(admission): State<Admission>, request: Request, next: Next)
             return reject(request, at_capacity()).await;
         }
     };
-    let budget = grpc_timeout(request.headers())
-        .unwrap_or(admission.request_timeout)
-        .min(admission.request_timeout);
-    match tokio::time::timeout(budget, next.run(request)).await {
-        Ok(response) => response,
-        Err(_elapsed) => tonic::Status::from(Failure::new(Code::RequestTimeout)).into_http(),
-    }
+    next.run(request).await
 }
 
 /// The shed answer. It is `RESOURCE_EXHAUSTED`, so a client that retries
@@ -368,24 +385,22 @@ async fn reject(request: Request, status: tonic::Status) -> Response {
 // template:begin authn:grpc-authenticate
 const INSUFFICIENT_SCOPE_DETAIL: &str = "the verified principal lacks the required scope";
 
+/// Verifies the bearer and the method's declared scopes. On success the
+/// principal replaces the `authorization` header.
 async fn authenticate(
-    verifier: infra_bearerauthn::Verifier,
-    scopes: Arc<std::collections::HashMap<String, Box<[String]>>>,
-    mut request: Request,
-    next: Next,
-) -> Response {
+    verifier: &infra_bearerauthn::Verifier,
+    scopes: &HashMap<String, Box<[String]>>,
+    request: &mut Request,
+) -> Result<(), tonic::Status> {
     let authorization = request
         .headers()
         .get_all(http::header::AUTHORIZATION)
         .iter()
         .map(http::HeaderValue::as_bytes);
-    let principal = match verifier
+    let principal = verifier
         .authenticate(authorization, infra_bearerauthn::Transport::Grpc)
         .await
-    {
-        Ok(principal) => principal,
-        Err(failure) => return reject(request, authentication_status(failure)).await,
-    };
+        .map_err(authentication_status)?;
     // `principal.scopes()` is sorted and deduplicated.
     let granted = scopes.get(request.uri().path()).is_none_or(|required| {
         required
@@ -393,13 +408,12 @@ async fn authenticate(
             .all(|scope| principal.scopes().binary_search(scope).is_ok())
     });
     if !granted {
-        let status = Failure::new(Code::Forbidden)
-            .into_status_as(tonic::Code::PermissionDenied, INSUFFICIENT_SCOPE_DETAIL);
-        return reject(request, status).await;
+        return Err(Failure::new(Code::Forbidden)
+            .into_status_as(tonic::Code::PermissionDenied, INSUFFICIENT_SCOPE_DETAIL));
     }
     request.extensions_mut().insert(principal);
     request.headers_mut().remove(http::header::AUTHORIZATION);
-    next.run(request).await
+    Ok(())
 }
 
 fn authentication_status(failure: infra_bearerauthn::Failure) -> tonic::Status {
