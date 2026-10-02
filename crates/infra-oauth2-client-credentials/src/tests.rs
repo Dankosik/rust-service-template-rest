@@ -430,6 +430,10 @@ fn valid_options() -> Options {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one admission table retains the independent options contract"
+)]
 fn direct_construction_repeats_sensitive_option_admission() {
     for (options, key) in [
         (
