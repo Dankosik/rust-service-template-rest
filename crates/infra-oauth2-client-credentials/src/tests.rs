@@ -121,8 +121,8 @@ impl Fixture {
         }
     }
 
-    fn credentials(&self, scopes: &[&str], audience: Option<&str>) -> Credentials {
-        let options = Options {
+    fn options(&self, scopes: &[&str], audience: Option<&str>) -> Options {
+        Options {
             token_url: self.endpoint.to_string(),
             client_id: "client:id".to_owned(),
             private_key: SecretString::from(self.key.serialize_pem()),
@@ -131,7 +131,17 @@ impl Fixture {
             assertion_audience: ASSERTION_AUDIENCE.to_owned(),
             scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
             audience: audience.map(str::to_owned),
-        };
+            exchange_cache_capacity: 1024,
+        }
+    }
+
+    fn credentials(&self, scopes: &[&str], audience: Option<&str>) -> Credentials {
+        self.prepare(self.options(scopes, audience))
+    }
+
+    /// Admits the fixture's loopback HTTP token endpoint, which
+    /// [`Credentials::new`] refuses.
+    fn prepare(&self, options: Options) -> Credentials {
         Credentials::prepare(
             options,
             &self.endpoint,
@@ -409,10 +419,11 @@ fn valid_options() -> Options {
         client_id: "client".to_owned(),
         private_key: SecretString::from("placeholder"),
         key_id: "key-1".to_owned(),
-        algorithm: Algorithm::default(),
+        algorithm: Algorithm::Rs256,
         assertion_audience: "https://issuer.example".to_owned(),
         scopes: Vec::new(),
         audience: None,
+        exchange_cache_capacity: 1024,
     }
 }
 
@@ -467,6 +478,49 @@ fn direct_construction_repeats_sensitive_option_admission() {
                 ..valid_options()
             },
             "audience",
+        ),
+        // Whitespace alone is empty, as the typed configuration section rules.
+        (
+            Options {
+                client_id: " ".to_owned(),
+                ..valid_options()
+            },
+            "client_id",
+        ),
+        (
+            Options {
+                key_id: "\t".to_owned(),
+                ..valid_options()
+            },
+            "key_id",
+        ),
+        (
+            Options {
+                assertion_audience: " ".to_owned(),
+                ..valid_options()
+            },
+            "assertion_audience",
+        ),
+        (
+            Options {
+                private_key: SecretString::from(" \n"),
+                ..valid_options()
+            },
+            "private_key",
+        ),
+        (
+            Options {
+                exchange_cache_capacity: 0,
+                ..valid_options()
+            },
+            "exchange_cache_capacity",
+        ),
+        (
+            Options {
+                exchange_cache_capacity: 65_537,
+                ..valid_options()
+            },
+            "exchange_cache_capacity",
         ),
     ] {
         let mut options = options;
@@ -735,6 +789,85 @@ async fn an_exchanged_token_is_reused_per_subject_but_not_across_subjects() {
     assert_eq!(
         authorizations,
         ["Bearer first", "Bearer first", "Bearer second"]
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn the_configured_capacity_bounds_how_many_subjects_keep_their_exchanged_token() {
+    let fixture = Fixture::new().await;
+    fixture.token_json("200 OK", &exchange_response("exchanged"));
+    let credentials = fixture.prepare(Options {
+        exchange_cache_capacity: 1,
+        ..fixture.options(&[], None)
+    });
+    let client = credentials.http(fixture.resource_client());
+    for subject in ["alice", "bob"] {
+        client
+            .execute(
+                fixture.on_behalf_of_request(subject),
+                deadline(Duration::from_secs(10)),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(fixture.token_requests().len(), 2);
+    // Moka applies its bound when it runs its pending maintenance.
+    credentials.0.exchanged.run_pending_tasks().await;
+    for subject in ["alice", "bob"] {
+        client
+            .execute(
+                fixture.on_behalf_of_request(subject),
+                deadline(Duration::from_secs(10)),
+            )
+            .await
+            .unwrap();
+        credentials.0.exchanged.run_pending_tasks().await;
+    }
+    // One subject at most kept its token, so the other exchanged again.
+    assert!(fixture.token_requests().len() > 2);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn a_client_requiring_a_subject_refuses_a_request_without_one_before_any_io() {
+    let fixture = Fixture::new().await;
+    let credentials = fixture.credentials(&[], None);
+    // A reusable service token is cached, so a fallback would have one to send.
+    credentials
+        .http(fixture.resource_client())
+        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    assert_eq!(fixture.token_requests().len(), 1);
+    assert_eq!(fixture.resource_requests().len(), 1);
+
+    let client = credentials
+        .http(fixture.resource_client())
+        .require_on_behalf_of();
+    let error = client
+        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::SubjectRequired));
+    assert_eq!(fixture.token_requests().len(), 1);
+    assert_eq!(fixture.resource_requests().len(), 1);
+
+    fixture.token_json("200 OK", &exchange_response("exchanged"));
+    client
+        .execute(
+            fixture.on_behalf_of_request("alice"),
+            deadline(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        form_value(&form_pairs(&fixture.token_requests()[1].body), "grant_type"),
+        GRANT_TYPE_TOKEN_EXCHANGE
+    );
+    assert_eq!(
+        fixture.resource_requests()[1].header("authorization"),
+        Some("Bearer exchanged")
     );
     fixture.finish().await;
 }
