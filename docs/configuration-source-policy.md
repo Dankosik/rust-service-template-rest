@@ -196,7 +196,7 @@ Quote text in TOML.
   an environment-only nonempty
   `APP__INTEGRATIONS__<NAME>__OAUTH__PRIVATE_KEY`. `client_secret` is
   an unknown key and fails startup. Nonsecret
-  `scopes`, optional `audience`, and `exchange_cache_capacity` (a whole
+  `scopes`, optional `audience` (not blank when set), and `exchange_cache_capacity` (a whole
   number, default 1024, inclusive 1–65536) follow normal TOML/environment
   layering; scopes use a TOML list or one space-separated environment value. File secrets
   are refused by the recursive secret guard. The [outbound machine-authentication
