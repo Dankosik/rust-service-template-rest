@@ -466,7 +466,10 @@ async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: P
     // Roles are cluster-wide; the tail of the per-test database name keeps this
     // one apart and the role inside PostgreSQL's 63-byte identifier limit.
     let database = dsn.database();
-    let role = format!("rotating_{}", &database[database.len().saturating_sub(24)..]);
+    let role = format!(
+        "rotating_{}",
+        &database[database.len().saturating_sub(24)..]
+    );
     sqlx::query(AssertSqlSafe(format!(
         "CREATE ROLE {role:?} LOGIN PASSWORD 'first'"
     )))
