@@ -27,18 +27,21 @@ workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+futures-util = { workspace = true }
 health = { workspace = true }
 metrics = { workspace = true }
 redis = { workspace = true, features = [
     "tokio-comp",
     "connection-manager",
     "tokio-rustls-comp",
+    # The credentials provider that follows `cache.password_file`.
+    "token-based-authentication",
 ] }
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 secrecy = { workspace = true }
 socket2 = { workspace = true, features = ["all"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["fs", "rt", "time"] }
 tracing = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
@@ -46,5 +49,5 @@ base64 = { workspace = true, features = ["std"] }
 metrics-exporter-prometheus = { workspace = true }
 rcgen = { workspace = true, features = ["aws_lc_rs"] }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }

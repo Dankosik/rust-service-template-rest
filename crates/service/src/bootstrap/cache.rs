@@ -17,8 +17,9 @@ pub(super) async fn open(config: &Config) -> Result<Option<Cache>, BootstrapErro
     let Some(dsn) = &config.cache.dsn else {
         return Ok(None);
     };
-    let cache = Cache::connect(CacheOptions {
+    let cache = Cache::connect_lazy(CacheOptions {
         dsn: dsn.clone(),
+        password_file: config.cache.password_file.clone(),
         root_ca_path: config.cache.root_ca_path.clone(),
         allow_plaintext: config.cache.allow_plaintext,
         allow_unauthenticated: config.cache.allow_unauthenticated,

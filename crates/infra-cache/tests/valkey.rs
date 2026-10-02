@@ -66,6 +66,7 @@ fn options(
 ) -> CacheOptions {
     CacheOptions {
         dsn: SecretString::from(dsn.into()),
+        password_file: None,
         root_ca_path: root_ca,
         allow_plaintext: true,
         allow_unauthenticated: true,
@@ -74,7 +75,7 @@ fn options(
 }
 
 fn connect_url(url: &str, command_timeout: Duration) -> Cache {
-    Cache::connect(options(url, command_timeout, None)).expect("admit cache DSN")
+    Cache::connect_lazy(options(url, command_timeout, None)).expect("admit cache DSN")
 }
 
 struct Proxy {
@@ -376,7 +377,7 @@ async fn a_trusted_ca_roundtrips_through_a_terminating_proxy() {
     let ca = write_pem(&material.root);
     let upstream = upstream_addr(&cache_url());
     let proxy = Proxy::tls(upstream, tls_acceptor(&material)).await;
-    let cache = Cache::connect(options(
+    let cache = Cache::connect_lazy(options(
         format!("rediss://localhost:{}", proxy.port),
         Duration::from_secs(1),
         Some(ca.path().to_path_buf()),
@@ -400,7 +401,7 @@ async fn an_untrusted_ca_is_unavailable() {
     let ca = write_pem(&material.untrusted_root);
     let upstream = upstream_addr(&cache_url());
     let proxy = Proxy::tls(upstream, tls_acceptor(&material)).await;
-    let cache = Cache::connect(options(
+    let cache = Cache::connect_lazy(options(
         format!("rediss://localhost:{}", proxy.port),
         COMMAND_TIMEOUT,
         Some(ca.path().to_path_buf()),

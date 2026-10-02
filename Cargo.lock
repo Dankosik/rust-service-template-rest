@@ -2423,6 +2423,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
+ "futures-util",
  "health",
  "metrics",
  "metrics-exporter-prometheus",
@@ -4108,6 +4109,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "itoa",
+ "log",
  "percent-encoding",
  "pin-project-lite",
  "rustls",

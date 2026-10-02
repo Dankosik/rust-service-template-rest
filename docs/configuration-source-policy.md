@@ -107,7 +107,12 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
 - `cache` is an optional typed section. It is active when `dsn` is set.
   `cache.dsn` is `SecretString`, environment-only (`APP__CACHE__DSN`), and
   redacted. A missing, empty, or whitespace-only value is absent. A nonempty
-  file value is refused because `dsn` is secret-like. `root_ca_path` and
+  file value is refused because `dsn` is secret-like. `cache.password_file`
+  (unset by default) is the one alternative password source: a path to a
+  file that holds the password alone, for a platform that rotates it. The
+  DSN then carries no password, both at once is refused, and the client
+  follows the file while it runs. The key names a path, not a credential,
+  so it may appear in TOML. `password_file`, `root_ca_path`, and
   `command_timeout` use normal file/environment precedence. `allow_plaintext`
   and `allow_unauthenticated` are accepted only when `app.env` is `local` or
   `development`. Admitted schemes are `redis`, `rediss`, `valkey`, and

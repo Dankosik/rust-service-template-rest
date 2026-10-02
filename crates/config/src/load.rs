@@ -892,6 +892,36 @@ mod tests {
     }
 
     #[test]
+    fn cache_password_file_is_a_path_a_file_or_the_environment_may_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = write(
+            &dir,
+            "cache.toml",
+            "[cache]\npassword_file = \"/run/secrets/from-file\"\n",
+        );
+        let options = LoadOptions {
+            config: Some(overlay),
+            ..LoadOptions::default()
+        };
+        let cfg = load_from(&options, BUILD, env(&[])).unwrap();
+        assert_eq!(
+            cfg.cache.password_file.as_deref(),
+            Some(std::path::Path::new("/run/secrets/from-file"))
+        );
+
+        let cfg = load_from(
+            &options,
+            BUILD,
+            env(&[("APP__CACHE__PASSWORD_FILE", "/run/secrets/cache-password")]),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.cache.password_file.as_deref(),
+            Some(std::path::Path::new("/run/secrets/cache-password"))
+        );
+    }
+
+    #[test]
     fn cache_unknown_environment_key_fails_loading() {
         assert!(matches!(
             load_from(

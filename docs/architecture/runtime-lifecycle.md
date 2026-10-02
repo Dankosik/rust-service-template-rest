@@ -324,7 +324,7 @@ drain yields the established degraded exit code rather than clean shutdown.
 <!-- template:begin cache:docs-lifecycle-cache -->
 ## Cache lifecycle
 
-`Cache::connect` admits configuration and builds a lazy `ConnectionManager`.
+`Cache::connect_lazy` admits configuration and builds a lazy `ConnectionManager`.
 It does no network I/O. Startup then runs one probe check inside a 1 s bound.
 Success logs `cache_connected`. Failure logs `cache_unavailable_at_startup`
 and startup continues. The cache is not a readiness probe unless composition
