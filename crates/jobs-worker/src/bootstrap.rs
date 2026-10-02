@@ -699,6 +699,7 @@ fn messaging_options(
         connection_name: worker_identity(&config.observability.otel.service_name),
         servers: messaging.urls.clone(),
         credentials: messaging.credentials.clone(),
+        credentials_file: messaging.credentials_file.clone(),
         root_ca_path: messaging.root_ca_path.clone(),
         allow_plaintext: messaging.allow_plaintext,
         source_stream,

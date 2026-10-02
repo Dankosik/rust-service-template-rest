@@ -6,6 +6,7 @@
 
 mod consumer;
 mod contract;
+mod credentials;
 mod error;
 mod messaging;
 // template:begin outbox:messaging-outbox-module

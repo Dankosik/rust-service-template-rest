@@ -211,6 +211,7 @@ fn messaging_options_with_servers(fixture: &Fixture, servers: Vec<String>) -> Me
         connection_name: "integration-tests".to_owned(),
         servers,
         credentials: None,
+        credentials_file: None,
         root_ca_path: None,
         allow_plaintext: true,
         source_stream: fixture.stream.clone(),
