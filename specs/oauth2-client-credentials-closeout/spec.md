@@ -1,0 +1,57 @@
+# Outbound OAuth closeout behavior
+
+Status: ready
+
+Authority: [Intent](intent.md). Baseline: commit `67be869acea112af271ec8ba621cbc50ae9d36b7`; [existing contract](../../docs/outbound-machine-authentication.md), [decisions](../../docs/outbound-machine-authentication-decisions.md), and [research](research/baseline-and-libraries.md). This spec owns only the deltas below; unchanged behavior remains with the existing contract.
+
+## 1. Service-token acquisition failures
+
+For one credential owner, concurrent requests without a reusable service token must not turn a completed failed acquisition into one provider request per waiting caller. A completed acquisition failure is shared for one second from completion. During that interval, callers without a reusable token receive the same closed acquisition error without token-endpoint traffic. At or after the interval's end, the next caller may start one new acquisition and overlapping callers share its outcome. No automatic retry or background retry timer is introduced.
+
+The one-second interval is an accepted operational target for this closeout: it bounds immediate rejection/outage amplification to at most one completed attempt per second per owner while limiting recovery delay to one second. It is not a provider SLA or a new configuration key. It applies to provider refusal, transport, response limit, unavailable/invalid response, signing failure, and the adapter's full five-second fetch timeout. Cancellation or a shorter caller deadline must not install a shared failure: a still-live waiter remains eligible to acquire under its own budget. A caller whose deadline has elapsed receives Timeout without dispatch regardless of the shared outcome.
+
+Reusable tokens take precedence over a stored acquisition failure. A failed proactive refresh keeps the old token only until its existing reuse cutoff. If that cutoff or an eligible 401 eviction occurs during the failure interval, callers receive the shared error; expiry or eviction must not erase failure suppression. A successful acquisition clears the prior failure. Owners are isolated, and the token-exchange failure policy remains unchanged (coalesced concurrent failure, no persisted negative cache). Metrics count actual acquisitions once, not callers receiving a shared result. Existing HTTP error and gRPC status mapping remains canonical.
+
+Nearest falsifier: a burst against an immediately refusing provider must produce one acquisition within the interval, every waiting caller terminates within its own budget, and the first post-interval call can recover.
+
+## 2. Lifetime is explicit
+
+Both grant responses retain RFC-compatible omission of `expires_in`. A valid response with no lifetime may serve only the acquisition's requesting call; it must not become a reusable service or exchanged token, and must not schedule proactive refresh. Waiting or later calls needing their own token may acquire once under their own deadline; no internal refetch loop is allowed just because a newly acquired token is non-reusable.
+
+A present zero lifetime, an expiry already reached before response admission, or a positive value that cannot be represented as a monotonic expiry is InvalidResponse and must cause no resource dispatch or cache insertion. Overflow must never be interpreted as omitted lifetime. Positive representable lifetimes retain acquisition-start accounting, the existing ten-second reuse margin, non-sliding hits, and one-call use for a still-live token inside its margin. JWT claims remain uninterpreted; no invented provider lifetime is substituted.
+
+Compatibility: providers omitting lifetime continue to work, at the cost of acquiring per call. Providers returning overflowed lifetimes are refused rather than producing indefinitely reusable credentials. These changes must be stated in the operator guide.
+
+Nearest falsifier: repeated service calls with omitted expiry each acquire without looping; overflow returns the closed invalid error and the resource sees no request.
+
+## 3. Exchange-cache resource target
+
+Keep `exchange_cache_capacity` as the configured entry-count target, default 1024 and inclusive range 1–65536. Additionally, retained exchanged-token payload has a best-effort target of 16 MiB per credential owner, measured as the sum of cached Bearer header byte lengths. Neither target changes the validity of an otherwise valid token for the requesting call; pressure reduces retention and causes later reacquisition. No new user-facing configuration key is required.
+
+The 16 MiB value is an accepted local operating target, not measured usage or an RFC bound: it allows 1024 retained headers averaging 16 KiB while preventing the configured maximum of 65536 near-1-MiB responses from defining steady-state retention. The existing one-MiB token response ceiling stays. Subject-token plaintext must not become a cache key or retained diagnostic. Token-owner and subject isolation, expiry, coalescing, and selective 401 eviction remain intact.
+
+Both targets are explicitly best-effort retention targets, not a strict process-memory ceiling: eviction may lag concurrent insertions, active calls hold token references, and keys/metadata/allocator overhead are additional. Under settled cache maintenance, both retained entry count and payload must converge within their targets. Do not claim instantaneous memory admission control or total RSS bounds. Documentation must describe this distinction, and pressure must never bypass expiry checks or trigger replay.
+
+Nearest falsifier: sufficiently many distinct large valid tokens cause payload retention to converge below the byte target even when the entry target alone would admit them; small-token retention still respects the entry target.
+
+## 4. Proactive refresh ownership
+
+Keep non-blocking refresh-ahead and its existing refresh window and thirty-second retry spacing. A refresh may outlive the request that triggered it while the credential owner remains in use; it must not keep the last externally owned Credentials/client alive indefinitely or continue independent work after all external owners disappear. Dropping the last external owner requests cancellation of its active refresh. There is no new public shutdown method or service-global task registry requirement.
+
+At most one service-token acquisition is active per owner, including foreground and background work. A background attempt's five-second budget includes waiting for acquisition ownership and the network operation, starting when that background attempt is scheduled. Losing the owner, reaching that budget, or runtime teardown cancels remaining work and releases held resources without unbounded waiting. Completion racing cancellation may finish already-started I/O but must not create another attempt. Failure reporting stays sanitized and acquisition metrics remain once per actual attempt; a task waiting for ownership is not itself a token request.
+
+Nearest falsifier: a blocked refresh does not survive the final external-owner drop; a refresh delayed by foreground work cannot spend an additional fresh five-second budget after waiting; one surviving clone still allows refresh to finish.
+
+## 5. Accurate guidance and bounded dependency decision
+
+Correct the service-to-service guide to describe the actual assertion clock policy: iat and nbf are signing time minus ten seconds, and exp is fifty seconds after signing (sixty seconds after the backdated iat), with a fresh jti per request. Do not change these wire semantics merely to match stale prose.
+
+Replace the absolute claims that no maintained Rust token-exchange or DPoP client exists with the dated evidence for Huskarl and the eventual Technical Design decision. That owner must compare retained template code, oauth2 5.0.0 and Huskarl 0.11.4/core 0.10.5, including supported custom signer/HTTP integration rather than treating optional native crypto as unavoidable. It must account for actual removed code, new adapters, supported semantics, maturity, dependencies and proof. No library migration is preselected by this spec. DPoP adoption remains outside this repair; library availability reopens its rationale, not its user-visible rollout.
+
+## Deliberately unchanged and proof boundary
+
+Private-key-only configuration, algorithms, assertion audience, fixed HTTPS egress/no redirects, form parameters, scope/audience omission, RFC 8693 issued-token-type checking, sensitive Bearer headers, required OnBehalfOf behavior, thirty-second 401 eviction age, replacement-safe eviction, no 403 eviction, no automatic resource replay, gRPC remaining-deadline propagation, lazy profile wiring and closed error labels remain unchanged. No eager startup dependency, readiness change or database behavior is introduced.
+
+Implementers choose the smallest meaningful regression coverage and commands under repository validation routing. Existing tests remain reusable evidence for unchanged behavior; changed failure/reuse/retention/lifetime behavior needs observable regression proof. Final delivery review covers interactions, HTTP/gRPC compatibility and truthful documentation. Existing CI-owned OAuth integration/profile gates remain required when selected; local mocks do not establish Keycloak or deployment proof.
+
+Composition scenario: an owner has a reusable service token nearing cutoff, starts a bounded refresh, and the provider refuses. Calls continue on the old token until cutoff; during the shared failure interval subsequent calls fail without provider amplification or resource dispatch. After the interval, a successful acquisition can recover. Its omitted expiry permits one resource dispatch and no indefinite cache reuse. Each path preserves independent caller deadlines and the no-replay rule.
