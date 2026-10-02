@@ -281,15 +281,18 @@ failed provider fetch names one closed class: `Timeout`, `Connect` (DNS, TCP or
 TLS), `Status(code)`, `MediaType`, `TooLarge` or `Transfer`.
 `authn_provider_request_duration_seconds` records how long each provider
 exchange took, with an `operation` label of `discovery`, `jwks` or
-`introspection` and an `outcome` label of `success`, `cancelled` or the closed
-`provider_*` class above; it uses the default histogram buckets. Each exchange
-also runs in an `authn_provider` client span, exported under its method name,
-that carries the same operation and outcome with the provider host and port,
-never a path, query or credential. An introspection span is a child of the
+`introspection` and an `outcome` label of `success`, `cancelled` or one closed
+failure class: `provider_timeout`, `provider_connect`, `provider_status_4xx`,
+`provider_status_5xx`, `provider_status_other`, `provider_media_type`,
+`provider_too_large` or `provider_transfer`. It uses the default histogram
+buckets. Each exchange also runs in an `authn_provider` client span, exported
+under its method name, that carries the operation, the provider host and port,
+the response status and, when the exchange failed, the same class as
+`error.type`; never a path, query or credential. An introspection span is a child of the
 request's span; a key refresh has no request and starts its own trace. A
 caller that stops waiting, including the startup budget, is `cancelled`.
-A system clock before the Unix epoch reads as the far future, so every token
-is expired rather than admitted.
+A system clock before the Unix epoch reads as the far future, so a token is
+refused as expired rather than admitted.
 Configuration and provider Debug views redact trust inputs, including endpoint
 queries and audiences. Tokens, credentials, raw key material, response
 bodies and unfiltered provider errors are never diagnostic fields.

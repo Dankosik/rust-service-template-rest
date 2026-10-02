@@ -72,8 +72,8 @@ impl KeyStore {
     }
 
     /// Joins the fetch in flight, or starts one outside the cooldown. `checked`
-    /// is the set the token was checked against; when a newer one is already
-    /// installed, that set is the answer and no fetch is needed.
+    /// is the set the token was checked against; when the fetch that started
+    /// the cooldown has since installed another, that set is the answer.
     pub(crate) async fn refresh_for_unknown_key(&self, checked: &Arc<KeySet>) -> UnknownKeyRefresh {
         let mut ticket = None;
         let mut answer = UnknownKeyRefresh::Unavailable;
@@ -87,13 +87,14 @@ impl KeyStore {
                 ticket = Some(state.requested);
                 return false;
             }
-            if !Arc::ptr_eq(&state.keys, checked) {
-                answer = UnknownKeyRefresh::Refreshed(state.keys.clone());
-                return false;
-            }
             if state.last_started.elapsed() < REFRESH_COOLDOWN {
                 if state.last_succeeded {
-                    answer = UnknownKeyRefresh::StillUnknown;
+                    // That fetch may have finished after the token was checked.
+                    answer = if Arc::ptr_eq(&state.keys, checked) {
+                        UnknownKeyRefresh::StillUnknown
+                    } else {
+                        UnknownKeyRefresh::Refreshed(state.keys.clone())
+                    };
                 }
                 return false;
             }

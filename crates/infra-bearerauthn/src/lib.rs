@@ -182,7 +182,7 @@ impl VerificationError {
 }
 
 /// Unix time in seconds. A clock before the epoch reads as the far future, so
-/// tokens are expired rather than admitted.
+/// a token is refused as expired rather than admitted.
 pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
