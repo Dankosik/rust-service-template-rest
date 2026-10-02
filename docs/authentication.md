@@ -156,7 +156,9 @@ installed keys. The error names the provider failure class, for example
 every 15 minutes. A token whose `kid` names no installed key, or a kid-less
 token no installed key verifies, requests a refresh with a 30-second cooldown;
 during the cooldown the token is invalid after a successful fetch and
-unavailable after a failed one. One process-owned fetch has its own three-second cap; each waiting
+unavailable after a failed one. A token that missed while a fetch was
+installing new keys is checked once against those keys instead of being
+refused by the cooldown. One process-owned fetch has its own three-second cap; each waiting
 request may be cancelled by the outer HTTP timer without cancelling that work. A
 successful refresh atomically replaces keys, while a failed refresh preserves
 the last usable snapshot. Refresh is not immediate revocation and does not add
@@ -277,6 +279,20 @@ an issuer mismatch also names the configured and the discovered issuer, echoing
 the discovered value only when it is an issuer URL of at most 256 bytes. A
 failed provider fetch names one closed class: `Timeout`, `Connect` (DNS, TCP or
 TLS), `Status(code)`, `MediaType`, `TooLarge` or `Transfer`.
+`authn_provider_request_duration_seconds` records how long each provider
+exchange took, with an `operation` label of `discovery`, `jwks` or
+`introspection` and an `outcome` label of `success`, `cancelled` or one closed
+failure class: `provider_timeout`, `provider_connect`, `provider_status_4xx`,
+`provider_status_5xx`, `provider_status_other`, `provider_media_type`,
+`provider_too_large` or `provider_transfer`. It uses the default histogram
+buckets. Each exchange also runs in an `authn_provider` client span, exported
+under its method name, that carries the operation, the provider host and port,
+the status of a successful or status-refused response and, when the exchange
+failed, the same class as `error.type`; never a path, query or credential. An introspection span is a child of the
+request's span; a key refresh has no request and starts its own trace. A
+caller that stops waiting, including the startup budget, is `cancelled`.
+A system clock before the Unix epoch reads as the far future, so a token is
+refused as expired rather than admitted.
 Configuration and provider Debug views redact trust inputs, including endpoint
 queries and audiences. Tokens, credentials, raw key material, response
 bodies and unfiltered provider errors are never diagnostic fields.

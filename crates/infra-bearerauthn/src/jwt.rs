@@ -16,7 +16,7 @@ use crate::{
     BearerToken, EndpointUrl, Failure, IssuerUrl, PreparationError, PreparationPhase,
     PreparationReason, Principal, ProviderFailure, VerificationError, VerificationReason, Verifier,
     claims::{ClaimPolicy, validate_jwt_claims},
-    provider::ProviderClient,
+    provider::{Document, ProviderClient},
     refresh::{KeyStore, UnknownKeyRefresh, run_refresh_worker},
 };
 
@@ -145,11 +145,14 @@ impl JwtVerifier {
             .map(|length| &signature_bytes[..length])
             .map_err(|_| VerificationError::invalid(VerificationReason::Signature))?;
         let kid = header.kid.as_deref();
-        match self.keys.keys().verify(message, signature, kid, algorithm) {
+        let keys = self.keys.keys();
+        match keys.verify(message, signature, kid, algorithm) {
             Ok(()) => {}
             Err(miss) if miss.may_need_new_keys(kid) => {
-                self.verify_signature_after_refresh(message, signature, kid, algorithm, miss)
-                    .await?;
+                self.verify_signature_after_refresh(
+                    &keys, message, signature, kid, algorithm, miss,
+                )
+                .await?;
             }
             Err(error) => return Err(error.into()),
         }
@@ -160,21 +163,23 @@ impl JwtVerifier {
             payload,
             &self.claim_policy,
             self.token_profile,
-            jsonwebtoken::get_current_timestamp(),
+            crate::unix_now(),
             token.access_token(),
         )
     }
 
-    /// Retries only the signature check; the caller validates the payload once.
+    /// Retries only the signature check, against a set newer than `checked`;
+    /// the caller validates the payload once.
     async fn verify_signature_after_refresh(
         &self,
+        checked: &Arc<KeySet>,
         message: &[u8],
         signature: &[u8],
         kid: Option<&str>,
         algorithm: JwtAlgorithm,
         miss: SignatureVerificationError,
     ) -> Result<(), VerificationError> {
-        match self.keys.refresh_for_unknown_key().await {
+        match self.keys.refresh_for_unknown_key(checked).await {
             UnknownKeyRefresh::Refreshed(keys) => {
                 Ok(keys.verify(message, signature, kid, algorithm)?)
             }
@@ -233,7 +238,7 @@ async fn prepare_with_provider(
         None => discover_jwks_uri(&provider, &options.issuer, startup_deadline).await?,
     };
     let jwks_error = |reason| PreparationError::new(PreparationPhase::Jwks, reason);
-    let bytes = fetch_within(&provider, jwks_uri.url(), startup_deadline)
+    let bytes = fetch_within(&provider, jwks_uri.url(), Document::Jwks, startup_deadline)
         .await
         .map_err(|failure| jwks_error(PreparationReason::Fetch(failure)))?;
     let keys = parse_key_set(&bytes, &options.algorithms).map_err(|error| {
@@ -301,11 +306,11 @@ async fn fetch_discovery(
     let path = path.strip_suffix('/').unwrap_or(path);
     let mut openid = issuer.url().clone();
     openid.set_path(&format!("{path}/.well-known/openid-configuration"));
-    let bytes = match fetch_within(provider, &openid, deadline).await {
+    let bytes = match fetch_within(provider, &openid, Document::Discovery, deadline).await {
         Err(ProviderFailure::Status(_)) => {
             let mut rfc8414 = issuer.url().clone();
             rfc8414.set_path(&format!("/.well-known/oauth-authorization-server{path}"));
-            fetch_within(provider, &rfc8414, deadline).await
+            fetch_within(provider, &rfc8414, Document::Discovery, deadline).await
         }
         result => result,
     }
@@ -317,9 +322,10 @@ async fn fetch_discovery(
 async fn fetch_within(
     provider: &ProviderClient,
     url: &url::Url,
+    document: Document,
     deadline: Instant,
 ) -> Result<Vec<u8>, ProviderFailure> {
-    tokio::time::timeout_at(deadline, provider.get_json(url))
+    tokio::time::timeout_at(deadline, provider.get_json(url, document))
         .await
         .unwrap_or(Err(ProviderFailure::Timeout))
 }
@@ -637,7 +643,9 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
 
-    use super::{ClaimPolicy, JwtAlgorithm, JwtVerifier, KeyStore, TokenProfile, parse_key_set};
+    use super::{
+        ClaimPolicy, Document, JwtAlgorithm, JwtVerifier, KeyStore, TokenProfile, parse_key_set,
+    };
     use crate::{Failure, Transport, VerificationReason, parse_bearer, refresh::UnknownKeyRefresh};
 
     const JWT_SIGNING_DER: &[u8] = include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
@@ -819,7 +827,10 @@ mod tests {
             VerificationReason::Signature
         );
         assert!(matches!(
-            verifier.keys.refresh_for_unknown_key().await,
+            verifier
+                .keys
+                .refresh_for_unknown_key(&verifier.keys.keys())
+                .await,
             UnknownKeyRefresh::StillUnknown
         ));
     }
@@ -1502,7 +1513,32 @@ mod tests {
     #[derive(Clone, Default)]
     struct Diagnostics {
         counters: Arc<std::sync::Mutex<Vec<(metrics::Key, u64)>>>,
+        histograms: Arc<std::sync::Mutex<Vec<metrics::Key>>>,
         events: Arc<std::sync::Mutex<Vec<String>>>,
+        /// Each span's fields, the ones recorded later appended to its entry.
+        spans: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    /// Renders fields as `name=value;` with values in their debug form.
+    #[derive(Default)]
+    struct Fields(String);
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write;
+            write!(self.0, "{}={value:?};", field.name()).unwrap();
+        }
+    }
+    struct RecordedHistogram {
+        key: metrics::Key,
+        diagnostics: Diagnostics,
+    }
+    impl metrics::HistogramFn for RecordedHistogram {
+        fn record(&self, _: f64) {
+            self.diagnostics
+                .histograms
+                .lock()
+                .unwrap()
+                .push(self.key.clone());
+        }
     }
     struct RecordedCounter {
         key: metrics::Key,
@@ -1557,34 +1593,35 @@ mod tests {
         }
         fn register_histogram(
             &self,
-            _: &metrics::Key,
+            key: &metrics::Key,
             _: &metrics::Metadata<'_>,
         ) -> metrics::Histogram {
-            metrics::Histogram::noop()
+            metrics::Histogram::from_arc(Arc::new(RecordedHistogram {
+                key: key.clone(),
+                diagnostics: self.clone(),
+            }))
         }
     }
     impl tracing::Subscriber for Diagnostics {
         fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
             true
         }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
+        fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            let mut fields = Fields(format!("span={};", attributes.metadata().name()));
+            attributes.record(&mut fields);
+            let mut spans = self.spans.lock().unwrap();
+            spans.push(fields.0);
+            tracing::span::Id::from_u64(spans.len() as u64)
         }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record(&self, id: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+            let mut fields = Fields::default();
+            values.record(&mut fields);
+            let index = usize::try_from(id.into_u64()).unwrap() - 1;
+            self.spans.lock().unwrap()[index].push_str(&fields.0);
+        }
         fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
         fn event(&self, event: &tracing::Event<'_>) {
-            struct Fields(String);
-            impl tracing::field::Visit for Fields {
-                fn record_debug(
-                    &mut self,
-                    field: &tracing::field::Field,
-                    value: &dyn std::fmt::Debug,
-                ) {
-                    use std::fmt::Write;
-                    write!(self.0, "{}={value:?};", field.name()).unwrap();
-                }
-            }
-            let mut fields = Fields(String::new());
+            let mut fields = Fields::default();
             event.record(&mut fields);
             self.events.lock().unwrap().push(fields.0);
         }
@@ -1674,6 +1711,126 @@ mod tests {
                 .all(|event| !event.contains("private-claim-value")
                     && !event.contains("private-key-id")),
             "recorded events: {events:?}"
+        );
+    }
+
+    #[test]
+    fn each_provider_exchange_records_one_duration_sample_and_a_bounded_client_span() {
+        ensure_crypto_provider();
+        let diagnostics = Diagnostics::default();
+        let _registration_anchor =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let dispatch = tracing::Dispatch::new(diagnostics.clone());
+        let key = jwk(&rsa_signing(), Algorithm::RS256, Some("fixture"), true);
+        let metadata = format!(
+            r#"{{"issuer":"https://{FIXTURE_HOST}:PORT/tenant","jwks_uri":"https://{FIXTURE_HOST}:PORT/keys?tenant=private"}}"#
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let port = metrics::with_local_recorder(&diagnostics, || {
+            tracing::dispatcher::with_default(&dispatch, || {
+                runtime.block_on(async {
+                    let (address, root, _) = metadata_server(vec![
+                        ("/.well-known/oauth-authorization-server/tenant", metadata),
+                        (
+                            "/keys?tenant=private",
+                            serde_json::json!({ "keys": [key] }).to_string(),
+                        ),
+                    ])
+                    .await;
+                    let _prepared = prepare(address, &root, None).await.unwrap();
+                    address.port()
+                })
+            })
+        });
+        let samples = diagnostics.histograms.lock().unwrap();
+        let labels = samples
+            .iter()
+            .map(|key| {
+                assert_eq!(key.name(), "authn_provider_request_duration_seconds");
+                key.labels()
+                    .map(|label| format!("{}={}", label.key(), label.value()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "operation=discovery,outcome=provider_status_4xx",
+                "operation=discovery,outcome=success",
+                "operation=jwks,outcome=success",
+            ]
+        );
+        let spans = diagnostics.spans.lock().unwrap();
+        let server = format!("server.address=\"{FIXTURE_HOST}\";server.port={port};");
+        let client = format!(
+            "span=authn_provider;otel.name=\"GET\";otel.kind=\"client\";http.request.method=\"GET\";{server}"
+        );
+        assert_eq!(
+            *spans,
+            [
+                format!(
+                    "{client}authn.operation=\"discovery\";http.response.status_code=404;\
+                     error.type=\"provider_status_4xx\";otel.status_code=\"ERROR\";"
+                ),
+                format!("{client}authn.operation=\"discovery\";http.response.status_code=200;"),
+                format!("{client}authn.operation=\"jwks\";http.response.status_code=200;"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dropped_provider_exchange_is_recorded_as_cancelled() {
+        use std::{future::Future, task::Poll};
+
+        let diagnostics = Diagnostics::default();
+        let _registration_anchor =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let dispatch = tracing::Dispatch::new(diagnostics.clone());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        metrics::with_local_recorder(&diagnostics, || {
+            tracing::dispatcher::with_default(&dispatch, || {
+                runtime.block_on(async {
+                    // The listener never answers the TLS handshake.
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let address = listener.local_addr().unwrap();
+                    let (_, root) = crate::provider::fixture_acceptor(FIXTURE_HOST);
+                    let provider = crate::provider::new_fixture_client(
+                        FIXTURE_HOST,
+                        address,
+                        &root,
+                        tokio_util::sync::CancellationToken::new(),
+                    )
+                    .unwrap();
+                    let url = format!("https://{FIXTURE_HOST}:{}/keys", address.port());
+                    let url = url::Url::parse(&url).unwrap();
+                    let mut pending = Box::pin(provider.get_json(&url, Document::Jwks));
+                    std::future::poll_fn(|cx| {
+                        assert!(pending.as_mut().poll(cx).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                    drop(pending);
+                });
+            });
+        });
+        let samples = diagnostics.histograms.lock().unwrap();
+        assert_eq!(samples.len(), 1);
+        assert!(
+            samples[0]
+                .labels()
+                .any(|label| label.key() == "outcome" && label.value() == "cancelled")
+        );
+        let spans = diagnostics.spans.lock().unwrap();
+        assert!(
+            spans[0].ends_with("error.type=\"cancelled\";otel.status_code=\"ERROR\";"),
+            "{spans:?}"
         );
     }
 

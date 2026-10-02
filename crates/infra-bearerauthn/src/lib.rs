@@ -158,7 +158,7 @@ impl VerificationReason {
             Self::Refresh => "refresh",
             // template:end oidc-jwt:authn-jwt-reason-labels
             // template:begin oidc-introspection:authn-introspection-reason-labels
-            Self::Provider(failure) => introspection::provider_reason_label(failure),
+            Self::Provider(failure) => failure.label(),
             Self::Inactive => "inactive",
             Self::Capacity => "capacity",
             // template:end oidc-introspection:authn-introspection-reason-labels
@@ -179,6 +179,14 @@ impl VerificationError {
     pub(crate) const fn invalid(reason: VerificationReason) -> Self {
         Self::new(Failure::Invalid, reason)
     }
+}
+
+/// Unix time in seconds. A clock before the epoch reads as the far future, so
+/// a token is refused as expired rather than admitted.
+pub(crate) fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(u64::MAX, |elapsed| elapsed.as_secs())
 }
 
 pub(crate) fn describe_verification() {
