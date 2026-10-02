@@ -4,7 +4,8 @@
 Stage 10.9 library, provider, and failure decisions, recorded 2026-09-29 and
 amended 2026-10-01 (workload identity, the generic provider, the read attempt
 bound, body types, and failure visibility) and 2026-10-02 (request
-identifiers, empty downloads, and who may read a streamed download).
+identifiers, empty downloads, who may read a streamed download, and the
+span's region).
 [Guide](object-storage.md) owns adoption and observable behavior. This record
 retains the accepted choices and their reopen conditions. The comparison
 behind them, including the Go sibling template's findings, is the stage's
@@ -78,6 +79,7 @@ Every MSRV fits workspace Rust 1.98.
 | One histogram, `object_storage_operation_duration_seconds{operation, outcome}`; a get is observed when its download ends | Per-outcome counts are the `_count` series (the cache profile's precedent), and body failures are counted. | An operator question the histogram cannot answer. |
 | One span exported as `S3.<Operation>` without key, bucket, endpoint, or URL; `error.type` is the provider code, status, or transport class | Keys can carry business identifiers; the bucket and endpoint are configuration. `Service.Operation` is the OpenTelemetry name for AWS SDK client spans. `rpc.system`, `rpc.service`, and `rpc.method` stay: their replacements are not stable yet, and the convention keeps the current names until they are. | The RPC conventions are marked stable. |
 | The span and the failure event carry `aws.request_id` and `aws.extended_request_id` once a response arrived, kept only as a visible-ASCII token of at most 128 bytes | A provider's support asks for `x-amz-request-id` and `x-amz-id-2` first, and they name no key, bucket, or endpoint. The names are OpenTelemetry's. A store controls the header, so other text is dropped. | |
+| The span carries `cloud.region` on `amazon_s3` only | The OpenTelemetry convention for AWS SDK spans recommends it, and there the configured region is the one that answers. R2 signs with `auto`, and Railway and `s3_compatible` may: a placeholder is not a region. | A named provider's region is shown to be a real one in every deployment. |
 | The failure event is a WARN for `unavailable`, `rejected`, `outcome_unknown`, and `integrity`; DEBUG for the rest | The caller's error carries no provider detail by design, so at INFO without tracing nothing said why a call failed (`AccessDenied` or `SignatureDoesNotMatch`). `not_found`, `already_exists`, `too_large`, and `busy` answer the caller, and `busy` would flood under load. | |
 | The subscriber keeps `aws_*` targets at INFO or quieter; a target `log.level` names is exempt with the targets under it | The SDK logs endpoint parameters, which include the key, at DEBUG and whole requests at TRACE. | The SDK stops logging keys. |
 
