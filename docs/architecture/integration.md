@@ -10,7 +10,7 @@ cross-service evidence path changes.
 Record a neighbour when this service calls it, is called by it, or shares
 durable state with it. Point to the real contract and the concrete runtime
 evidence path joined by the request id or W3C trace context (every log
-record inside a request carries `openTelemetry.traceId` and `spanId`). Store
+record inside a request carries `trace_id` and `span_id`). Store
 the access shape, never credentials, tokens, or customer data.
 
 ## Adding a dependency

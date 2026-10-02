@@ -1422,8 +1422,7 @@
       {
         "path": "crates/infra-http/Cargo.toml",
         "ids": [
-          "http-webhooks-dependency",
-          "http-webhooks-test-dependencies"
+          "http-webhooks-dependency"
         ]
       },
       {

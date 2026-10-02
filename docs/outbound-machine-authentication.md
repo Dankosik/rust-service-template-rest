@@ -30,10 +30,11 @@ entries. No separate integration-name slug grammar is imposed.
 token_url = "https://identity.example/oauth2/token"
 client_id = "billing-service"
 key_id = "billing-service-2026"
-algorithm = "RS256"
+algorithm = "ES256"
 assertion_audience = "https://identity.example/"
 scopes = ["billing.read"]
 # audience = "https://billing-api.example"
+# exchange_cache_capacity = 1024
 ```
 
 Supply the private key only through
@@ -41,14 +42,18 @@ Supply the private key only through
 rejected by the recursive secret guard. `client_secret` is an unknown key and
 fails startup: this profile authenticates only with a private key, never a
 shared secret ([mandate](service-to-service-authentication.md#mandate)).
-`key_id` and `assertion_audience` are required; `algorithm` is `RS256`
-(default), `PS256`, or `ES256` — one algorithm per key. Other keys use normal
-file/environment layering. Environment scopes use one space-separated string,
+`key_id`, `assertion_audience`, and `algorithm` are required; `algorithm` is
+`RS256`, `PS256`, or `ES256` — one algorithm per key, with no default, so a
+tuple that omits it fails startup naming the key. Prefer `ES256` or `PS256`
+for a new key and keep `RS256` for a server that accepts nothing else. Other
+keys use normal file/environment layering. Environment scopes use one space-separated string,
 for example `APP__INTEGRATIONS__BILLING__OAUTH__SCOPES=billing.read
 billing.write`; TOML uses a list. Omitted or empty scopes send no scope
 parameter. Each list member is an RFC 6749 scope token; a configured audience
-must be nonempty. Credentials and configuration are immutable; rotate by
-restart. Client IDs are nonempty without additional length or character
+must be nonempty. `exchange_cache_capacity` (default 1024, inclusive 1–65536)
+bounds how many subjects keep a token exchanged on their behalf; see [Token
+exchange](#token-exchange-for-user-context). Credentials and configuration
+are immutable; rotate by restart. Client IDs are nonempty without additional length or character
 restrictions; the private key must be a PKCS#8 or PKCS#1 PEM matching
 `algorithm`, or construction fails with a sanitized configuration error
 naming `private_key` before any I/O happens.
@@ -104,6 +109,13 @@ present, `execute`/`call` exchange the carried token for one addressed to
 this integration (see [Token exchange](#token-exchange-for-user-context))
 instead of sending the service's own token; without it, the existing
 service-token path below runs unchanged.
+
+A request that should have carried `OnBehalfOf` and did not is therefore sent
+with the service's own authority. Bind an integration that only ever acts for
+a user with `credentials.http(resource_client).require_on_behalf_of()` (the
+gRPC binding has the same method): such a client refuses a request without
+`OnBehalfOf` before any token or resource I/O, as `Error::SubjectRequired`
+or gRPC `INVALID_ARGUMENT`, and never sends the service token.
 
 An existing Authorization header is refused before token or resource I/O,
 whether or not `OnBehalfOf` is attached. Otherwise acquisition supplies
@@ -187,8 +199,12 @@ the access-token type URI; anything else is an invalid-response failure and
 no token is used.
 
 Exchanged tokens are cached per credential owner, keyed by the SHA-256 digest
-of the subject token, bounded to 1024 entries, each until its own reuse
-cutoff (the same ten-second margin as above). Concurrent requests for one
+of the subject token, bounded to `exchange_cache_capacity` entries (default
+1024), each until its own reuse cutoff (the same ten-second margin as above).
+Past that bound a subject without a retained token is exchanged on every
+call, which `oauth2_token_acquisitions_total{grant="token_exchange"}` shows
+as a rate tracking the request rate; size the bound to the users active on
+one replica within a token lifetime. Concurrent requests for one
 subject share a single in-flight exchange. A resource 401 evicts only that
 subject's cache entry, not the whole cache. An exchanged token with no
 `expires_in` serves only the request that fetched it and is never stored;
@@ -197,7 +213,9 @@ failed exchanges are never cached.
 ## Failure and observation
 
 Configuration errors identify the integration/key with a bounded static reason,
-never its value. A key that is not PEM, or that does not match `algorithm`,
+never its value. A request refused before any I/O is a caller `Authorization`
+conflict or, on a client bound with `require_on_behalf_of()`, a missing
+subject. A key that is not PEM, or that does not match `algorithm`,
 fails construction with a sanitized configuration error naming
 `private_key`; no I/O happens. Runtime token failures use closed reasons for
 deadline, transport, response limit, provider unavailability (5xx or 429),
@@ -262,9 +280,14 @@ With `GRPC=enabled`, `Credentials::grpc` binds the same private acquisition owne
 to an `infra_grpc::Client`. Each call spends `grpc-timeout` when that header is
 present, otherwise the owner's fetch timeout. `OnBehalfOf` set on the call's
 extensions through `tonic::Request::extensions_mut` selects the same token
-exchange as the HTTP binding; without it, the service token is sent. Token
+exchange as the HTTP binding; without it, the service token is sent, unless
+the client was bound with `require_on_behalf_of()`, which answers
+`INVALID_ARGUMENT`. Token
 failure prevents resource
-dispatch. Eviction inspects only the initial response and never replays the
+dispatch: `DEADLINE_EXCEEDED` when the budget ran out, `UNAVAILABLE` when the
+provider could not be reached or answered 5xx or 429, and `UNAUTHENTICATED`
+when it refused the request or answered unusably. The closed
+`AcquisitionError` is the status source. Eviction inspects only the initial response and never replays the
 call. When acquisition waited at least a millisecond, `grpc-timeout` is
 rewritten to the remaining budget; a reused token forwards it unchanged.
 Streaming acquires once at opening. The [gRPC

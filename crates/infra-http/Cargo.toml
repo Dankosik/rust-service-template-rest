@@ -60,10 +60,6 @@ http = { workspace = true }
 hyper = { workspace = true, features = ["client", "http2"] }
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
 # template:end grpc:http-tls-test-dependencies
-# template:begin inbound-webhooks:http-webhooks-test-dependencies
-metrics-exporter-prometheus = { workspace = true }
-sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs"] }
-# template:end inbound-webhooks:http-webhooks-test-dependencies
 itertools = { workspace = true, features = ["use_std"] }
 uuid = { workspace = true, features = ["std"] }
 axum-test = { workspace = true }

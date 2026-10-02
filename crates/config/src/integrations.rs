@@ -74,7 +74,8 @@ pub struct OAuthConfig {
     pub private_key: SecretString,
     /// Key identifier carried in the client-assertion header as `kid`.
     pub key_id: String,
-    /// Client-assertion signing algorithm; defaults to RS256 when omitted.
+    /// Client-assertion signing algorithm; required, because it must match
+    /// the key.
     pub algorithm: OAuthAlgorithm,
     /// Audience claim asserted in the signed client assertion.
     pub assertion_audience: String,
@@ -82,6 +83,15 @@ pub struct OAuthConfig {
     pub scopes: Scopes,
     /// Optional OAuth audience parameter.
     pub audience: Option<String>,
+    /// How many subjects keep a token exchanged on their behalf.
+    pub exchange_cache_capacity: u32,
+}
+
+impl OAuthConfig {
+    /// One retained token per user active within a token lifetime on one
+    /// replica.
+    pub const DEFAULT_EXCHANGE_CACHE_CAPACITY: u32 = 1024;
+    const EXCHANGE_CACHE_CAPACITY: std::ops::RangeInclusive<u32> = 1..=65_536;
 }
 
 impl fmt::Debug for OAuthConfig {
@@ -91,10 +101,9 @@ impl fmt::Debug for OAuthConfig {
 }
 
 /// Client-assertion signing algorithm, decoded from its RFC 7518 identifier.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OAuthAlgorithm {
     /// RSASSA-PKCS1-v1_5 using SHA-256.
-    #[default]
     Rs256,
     /// RSASSA-PSS using SHA-256.
     Ps256,
@@ -218,8 +227,7 @@ fn decode_oauth(value: config::Value, prefix: &str) -> Result<OAuthConfig, Strin
     let key_id = take_text(&mut fields, "key_id", prefix)?.unwrap_or_default();
     let algorithm = take_text(&mut fields, "algorithm", prefix)?
         .map(|value| parse_oauth_algorithm(&value, prefix))
-        .transpose()?
-        .unwrap_or_default();
+        .transpose()?;
     let assertion_audience =
         take_text(&mut fields, "assertion_audience", prefix)?.unwrap_or_default();
     let audience = take_text(&mut fields, "audience", prefix)?;
@@ -232,7 +240,12 @@ fn decode_oauth(value: config::Value, prefix: &str) -> Result<OAuthConfig, Strin
         })
         .transpose()?
         .unwrap_or_default();
+    let exchange_cache_capacity = take_count(&mut fields, "exchange_cache_capacity", prefix)?
+        .unwrap_or(OAuthConfig::DEFAULT_EXCHANGE_CACHE_CAPACITY);
     refuse_unknown(fields, prefix)?;
+    // After the unknown-key check, so a misspelt or unsupported key is named
+    // first.
+    let algorithm = algorithm.ok_or_else(|| format!("{prefix}.algorithm: is required"))?;
     Ok(OAuthConfig {
         token_url,
         client_id,
@@ -242,7 +255,28 @@ fn decode_oauth(value: config::Value, prefix: &str) -> Result<OAuthConfig, Strin
         assertion_audience,
         scopes,
         audience,
+        exchange_cache_capacity,
     })
+}
+
+/// A whole number from a file, or its decimal text from the environment.
+fn take_count(
+    fields: &mut config::Map<String, config::Value>,
+    field: &str,
+    prefix: &str,
+) -> Result<Option<u32>, String> {
+    fields
+        .remove(field)
+        .map(|value| {
+            match value.kind {
+                config::ValueKind::I64(count) => u32::try_from(count).ok(),
+                config::ValueKind::U64(count) => u32::try_from(count).ok(),
+                config::ValueKind::String(count) => count.parse().ok(),
+                _ => None,
+            }
+            .ok_or_else(|| format!("{prefix}.{field}: must be a whole number"))
+        })
+        .transpose()
 }
 
 fn parse_oauth_algorithm(value: &str, prefix: &str) -> Result<OAuthAlgorithm, String> {
@@ -446,6 +480,12 @@ impl OAuthConfig {
                 "must contain RFC 6749 scope tokens",
             ));
         }
+        if !Self::EXCHANGE_CACHE_CAPACITY.contains(&self.exchange_cache_capacity) {
+            return Err(ValidationError::new(
+                &format!("{prefix}.exchange_cache_capacity"),
+                "must be from 1 to 65536",
+            ));
+        }
         Ok(())
     }
 }
@@ -509,10 +549,11 @@ mod tests {
             client_id: "billing-service".to_owned(),
             private_key: SecretString::from("   "),
             key_id: "key-1".to_owned(),
-            algorithm: OAuthAlgorithm::default(),
+            algorithm: OAuthAlgorithm::Es256,
             assertion_audience: "https://identity.example".to_owned(),
             scopes: Scopes::default(),
             audience: None,
+            exchange_cache_capacity: OAuthConfig::DEFAULT_EXCHANGE_CACHE_CAPACITY,
         };
         let err = config.validate("integrations.billing.oauth").unwrap_err();
         assert_eq!(err.key, "integrations.billing.oauth.private_key");
