@@ -712,7 +712,7 @@ async fn x1_unregistered_kind_stays_pending(pool: PgPool) {
     assert_eq!(after.claim_generation, before.claim_generation);
     assert!(after.failure_reason.is_none());
     assert!(after.error_summary.is_none());
-    assert!(attempts_of(&jobs, &stranded).await.is_empty());
+    assert_eq!(attempts_of(&jobs, &stranded).await, [] as [i32; 0]);
     finish(run, &[&jobs]).await;
 }
 
@@ -1227,7 +1227,7 @@ async fn x4_expired_claim_is_recovered_and_a_live_claim_is_not(pool: PgPool) {
     assert_eq!(live_after.not_before_us, live_before.not_before_us);
     assert!(live_after.failure_reason.is_none());
     assert!(!live_after.finished);
-    assert!(attempts_of(&jobs, &live).await.is_empty());
+    assert_eq!(attempts_of(&jobs, &live).await, [] as [i32; 0]);
     finish(run, &[&jobs]).await;
 }
 
@@ -1713,8 +1713,8 @@ async fn x6_spent_budget_fails_exhausted_without_running(pool: PgPool) {
     assert_eq!(kept_view.failure_reason.as_deref(), Some("exhausted"));
     assert_eq!(kept_view.attempts, 2);
     assert_eq!(kept_view.error_summary.as_deref(), Some("kept earlier"));
-    assert!(attempts_of(&jobs, &fresh).await.is_empty());
-    assert!(attempts_of(&jobs, &kept).await.is_empty());
+    assert_eq!(attempts_of(&jobs, &fresh).await, [] as [i32; 0]);
+    assert_eq!(attempts_of(&jobs, &kept).await, [] as [i32; 0]);
     finish(run, &[&jobs]).await;
 }
 
@@ -1877,7 +1877,7 @@ async fn x8_snooze_refunds_once_and_can_run_after_the_attempt_cap(pool: PgPool) 
     assert!(snoozed.not_before_us >= started + 2_000_000);
     assert!(snoozed.failure_reason.is_none());
     assert!(snoozed.error_summary.is_none());
-    assert!(snoozed.errors.is_empty());
+    assert_eq!(snoozed.errors, [] as [String; 0]);
     assert!(
         snoozed.not_before_us > db_now_us(&jobs).await,
         "snooze must not be claimable before its requested database time"
@@ -2009,7 +2009,7 @@ async fn x7_undecodable_payload_is_retryable_without_the_handler(pool: PgPool) {
         summary.starts_with("payload does not decode as test.probe: data error at line 1 column"),
         "{summary}"
     );
-    assert!(attempts_of(&jobs, &id).await.is_empty());
+    assert_eq!(attempts_of(&jobs, &id).await, [] as [i32; 0]);
     finish(run, &[&jobs]).await;
 }
 
@@ -2498,7 +2498,7 @@ async fn w4_drain_waits_for_the_in_flight_attempt_and_claims_nothing_new(pool: P
         assert_eq!(view.state, "pending");
         assert_eq!(view.attempts, 0);
         assert_eq!(view.claim_generation, 0);
-        assert!(attempts_of(&jobs, &later).await.is_empty());
+        assert_eq!(attempts_of(&jobs, &later).await, [] as [i32; 0]);
     })
     .await;
     join(run, &[&jobs]).await;
