@@ -28,13 +28,18 @@ pub struct MessagingConfig {
     /// Inline NATS credentials. This environment-only value is redacted.
     #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub credentials: Option<SecretString>,
+    /// Path to a NATS credentials file, the alternative to `credentials` for
+    /// a platform that rotates it: the client reads the file again for every
+    /// connection. Missing, empty, or whitespace-only is unset (`None`).
+    #[serde(default, deserialize_with = "blank_as_none")]
+    pub credentials_file: Option<PathBuf>,
     /// Optional PEM root CA path for the operator-selected broker. Missing,
     /// empty, or whitespace-only is unset (`None`).
     #[serde(default, deserialize_with = "blank_as_none")]
     pub root_ca_path: Option<PathBuf>,
     /// Permit `nats://` only for a local or development process.
     pub allow_plaintext: bool,
-    /// Permit a connection without inline credentials only for a local or
+    /// Permit a connection without credentials only for a local or
     /// development process.
     pub allow_unauthenticated: bool,
     /// Operator-owned source stream for publication and consumption.
@@ -60,11 +65,15 @@ impl Default for MessagingConfig {
         Self {
             urls: Vec::new(),
             credentials: None,
+            credentials_file: None,
             root_ca_path: None,
             allow_plaintext: false,
             allow_unauthenticated: false,
             source_stream: None,
-            max_payload_bytes: ByteSize::mib(1),
+            // A broker's default `max_payload` is 1 MiB for payload and
+            // headers together, so the default must leave room below it; the
+            // Go template defaults to the same value.
+            max_payload_bytes: ByteSize::kib(256),
             consumer_durable: None,
             consumer_filter_subject: None,
             dlq_subject: None,
@@ -150,6 +159,12 @@ impl MessagingConfig {
                 "is local/development-only",
             ));
         }
+        if self.credentials.is_some() && self.credentials_file.is_some() {
+            return Err(ValidationError::new(
+                "messaging.credentials_file",
+                "cannot be set together with messaging.credentials",
+            ));
+        }
         let mut plaintext = false;
         for raw in &self.urls {
             non_empty("messaging.urls", raw)?;
@@ -208,10 +223,13 @@ impl MessagingConfig {
     }
 
     fn required_credentials(&self, app_env: &str) -> Result<(), ValidationError> {
-        if self.credentials.is_none() && !self.allow_unauthenticated {
+        if self.credentials.is_none()
+            && self.credentials_file.is_none()
+            && !self.allow_unauthenticated
+        {
             return Err(ValidationError::new(
                 "messaging.credentials",
-                "is required unless messaging.allow_unauthenticated = true",
+                "or messaging.credentials_file is required unless messaging.allow_unauthenticated = true",
             ));
         }
         if self.allow_unauthenticated && !is_local_development(app_env) {
@@ -270,9 +288,38 @@ mod tests {
     fn defaults_are_inactive_and_within_the_delivery_budget() {
         let config = MessagingConfig::default();
         assert!(!config.is_active());
-        assert_eq!(config.max_payload_bytes, ByteSize::mib(1));
+        assert_eq!(config.max_payload_bytes, ByteSize::kib(256));
         assert_eq!(config.consumer_concurrency, NonZeroU32::MIN);
         config.validate("production").unwrap();
+    }
+
+    #[test]
+    fn default_delivery_fits_a_broker_with_the_default_payload_limit() {
+        // nats-server's default `max_payload`, which bounds payload and
+        // headers together.
+        const BROKER_DEFAULT_MAX_PAYLOAD: u64 = 1024 * 1024;
+        let config = MessagingConfig::default();
+        assert!(
+            config.max_payload_bytes.as_u64() + DELIVERY_OVERHEAD_BYTES
+                <= BROKER_DEFAULT_MAX_PAYLOAD
+        );
+    }
+
+    #[test]
+    fn a_credentials_file_is_the_alternative_to_inline_credentials() {
+        let mut config = MessagingConfig {
+            urls: vec!["tls://nats.example:4222".to_owned()],
+            credentials_file: Some(PathBuf::from("/run/secrets/nats.creds")),
+            source_stream: Some("events".to_owned()),
+            ..MessagingConfig::default()
+        };
+        config.validate_producer("production").unwrap();
+
+        config.credentials = Some(SecretString::from("fixture-credentials".to_owned()));
+        assert_eq!(
+            config.validate_producer("production").unwrap_err().key,
+            "messaging.credentials_file"
+        );
     }
 
     #[test]

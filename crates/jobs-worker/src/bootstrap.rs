@@ -439,9 +439,9 @@ fn refresh_policy(config: &Config) -> RefreshPolicy {
 }
 
 // template:begin messaging:worker-bootstrap-sanitized-panic-hook
-/// The consumer treats a handler panic as a terminal worker fault. Replace
-/// Rust's default hook so caller-controlled panic text never reaches logs
-/// before that typed failure reaches the lifecycle owner.
+/// The consumer catches a handler panic and retries the delivery. Replace
+/// Rust's default hook so caller-controlled panic text never reaches logs;
+/// the consumer reports the delivery's closed `panic` outcome.
 fn install_sanitized_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let location = info.location();
@@ -717,6 +717,7 @@ fn messaging_options(
         connection_name: worker_identity(&config.observability.otel.service_name),
         servers: messaging.urls.clone(),
         credentials: messaging.credentials.clone(),
+        credentials_file: messaging.credentials_file.clone(),
         root_ca_path: messaging.root_ca_path.clone(),
         allow_plaintext: messaging.allow_plaintext,
         source_stream,

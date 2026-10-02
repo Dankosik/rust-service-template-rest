@@ -916,6 +916,47 @@ mod tests {
     }
 
     #[test]
+    fn messaging_credentials_file_is_a_path_a_file_or_the_environment_may_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = write(
+            &dir,
+            "messaging.toml",
+            "[messaging]\ncredentials_file = \"/run/secrets/from-file.creds\"\n",
+        );
+        let options = LoadOptions {
+            config: Some(overlay),
+            ..LoadOptions::default()
+        };
+        let cfg = load_from(&options, BUILD, env(&[])).unwrap();
+        assert_eq!(
+            cfg.messaging.credentials_file.as_deref(),
+            Some(Path::new("/run/secrets/from-file.creds"))
+        );
+
+        let cfg = load_from(
+            &options,
+            BUILD,
+            env(&[(
+                "APP__MESSAGING__CREDENTIALS_FILE",
+                "/run/secrets/nats.creds",
+            )]),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.messaging.credentials_file.as_deref(),
+            Some(Path::new("/run/secrets/nats.creds"))
+        );
+
+        let cfg = load_from(
+            &options,
+            BUILD,
+            env(&[("APP__MESSAGING__CREDENTIALS_FILE", " ")]),
+        )
+        .unwrap();
+        assert_eq!(cfg.messaging.credentials_file, None);
+    }
+
+    #[test]
     fn messaging_empty_root_ca_path_unsets_the_file_value() {
         let dir = tempfile::tempdir().unwrap();
         let file = write(

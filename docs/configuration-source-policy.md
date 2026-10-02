@@ -110,11 +110,20 @@ Quote text in TOML.
 - `messaging` is an optional typed section. Its non-secret endpoint, stream,
   consumer, DLQ, TLS, timeout, concurrency, and delivery-size inputs use normal
   file/environment precedence, and a blank `root_ca_path` is unset; credentials are `SecretString`, environment-only,
-  and redacted. Active consumption requires complete named topology and distinct
+  and redacted. `messaging.credentials_file` (unset by default; a blank
+  value is unset) is the one alternative credential source: a path to a
+  NATS credentials file, for a platform that rotates it. The client reads
+  the file again for every connection, which a secrets-directory value,
+  read once at startup, cannot do. Both at once is refused. The key names a
+  path, not a credential, so it may appear in TOML. Active consumption requires complete named topology and distinct
   source/DLQ subjects. Local plaintext or unauthenticated use is an explicit
   development/test escape hatch, never a production default. Configuration
   validates shape and resource bounds before any provider I/O; the adapter maps
   the admitted snapshot to its client options.
+  `messaging.max_payload_bytes` defaults to `256 KiB`, the Go template's
+  default. A broker bounds payload and headers together, by default at
+  1 MiB, so the payload limit plus the 8 KiB header limit must fit the
+  broker's `max_payload`; startup refuses a larger one.
   `messaging.urls` uses a list or one comma-separated string, such as an
   `APP__MESSAGING__URLS` value, for example
   `tls://nats-a.example:4222,tls://nats-b.example:4222`. A single URL is written
