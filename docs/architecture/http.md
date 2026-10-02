@@ -23,7 +23,7 @@ alternatives they beat, are recorded at the end of this document.
    problem completion that fills `request_id` into every Problem, and the
    access log), the `traceparent` response header, in-flight admission
    (`503` shedding with `Retry-After`, which the probe routes bypass), error
-   mapping (`504` timeout with code `request_timeout`), the request timeout,
+   mapping (`504` timeout with code `gateway_timeout`), the request timeout,
    panic recovery (`500`), the tower-http body limit, and the extractor body
    limit (`413`). Every layer is applied with `Router::layer`, so the `404`
    and `405` fallbacks travel through the same chain. There is no CORS
@@ -150,7 +150,7 @@ The hardened chain stamps `infra_http::RequestDeadline` immediately before
 the existing request timer. Its `at()` accessor exposes the same absolute
 instant without allowing a reset. Idempotency uses it for its request-owned work. Authentication has independent
 provider bounds and accepts no deadline stamp or response reserve; the outer
-timer alone owns `504 request_timeout`.
+timer alone owns `504 gateway_timeout`.
 <!-- template:end request-budget:docs-http-request-budget -->
 <!-- template:begin http-idempotency:docs-http-idempotent-composition -->
 With a retained idempotency profile, compose an idempotent operation through

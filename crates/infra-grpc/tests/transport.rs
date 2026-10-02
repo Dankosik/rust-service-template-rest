@@ -1224,6 +1224,18 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
     .expect("answered call")
     .unwrap();
 
+    // A handler's own catalog failure.
+    let classified = timeout(
+        WAIT,
+        client.unary(request(UnaryRequest {
+            message: "classified".to_owned(),
+        })),
+    )
+    .await
+    .expect("classified call")
+    .unwrap_err();
+    assert_eq!(classified.code(), Code::InvalidArgument);
+
     // The caller stops waiting while the handler runs.
     let abandoned = tokio::spawn({
         let mut client = client.clone();
@@ -1248,13 +1260,16 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
 
     let unary = r#"grpc_service="example.v1.EchoService",grpc_method="Unary""#;
     let expected = [
-        format!("grpc_server_started_total{{{unary}}} 3"),
+        format!("grpc_server_started_total{{{unary}}} 4"),
         format!(r#"grpc_server_handled_total{{{unary},grpc_code="OK"}} 1"#),
+        format!(r#"grpc_server_handled_total{{{unary},grpc_code="InvalidArgument"}} 1"#),
+        format!(r#"grpc_server_failures_total{{{unary},failure_code="bad_request"}} 1"#),
+        format!(r#"grpc_server_failures_total{{{unary},failure_code="gateway_timeout"}} 1"#),
         format!(r#"grpc_server_handled_total{{{unary},grpc_code="Canceled"}} 1"#),
         format!(r#"grpc_server_handled_total{{{unary},grpc_code="DeadlineExceeded"}} 1"#),
         r#"grpc_server_started_total{grpc_service="unknown",grpc_method="unknown"} 1"#.to_owned(),
         r#"grpc_server_handled_total{grpc_service="unknown",grpc_method="unknown",grpc_code="Unimplemented"} 1"#.to_owned(),
-        format!("grpc_client_started_total{{{unary}}} 2"),
+        format!("grpc_client_started_total{{{unary}}} 3"),
         format!(r#"grpc_client_handled_total{{{unary},grpc_code="OK"}} 1"#),
         format!(r#"grpc_client_handled_total{{{unary},grpc_code="Canceled"}} 1"#),
     ];
@@ -1271,6 +1286,13 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
     .await
     .unwrap_or_else(|_| panic!("metrics settle: {}", handle.render()));
     assert!(!rendered.contains("Invented"), "{rendered}");
+    // Only a catalog failure is counted as one: tonic's own `Unimplemented`
+    // carries no reason, and the abandoned call got no answer.
+    assert_eq!(
+        rendered.matches("grpc_server_failures_total{").count(),
+        2,
+        "{rendered}"
+    );
     fixture.stop().await;
 }
 

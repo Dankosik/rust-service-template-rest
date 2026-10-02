@@ -52,14 +52,13 @@ pub(crate) const fn http_status(code: Code) -> StatusCode {
         Code::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
         Code::Conflict | Code::AlreadyExists => StatusCode::CONFLICT,
         Code::RequestEntityTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-        Code::RequestHeaderFieldsTooLarge => StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
         Code::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
         Code::UnprocessableContent => StatusCode::UNPROCESSABLE_ENTITY,
         Code::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
         Code::InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
         Code::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         // The server's own budget expired, so the caller was not slow (408).
-        Code::RequestTimeout => StatusCode::GATEWAY_TIMEOUT,
+        Code::GatewayTimeout => StatusCode::GATEWAY_TIMEOUT,
     }
 }
 
@@ -68,9 +67,15 @@ pub(crate) const fn http_status(code: Code) -> StatusCode {
 /// its `title`; the `code` extension member names the specific failure.
 const ABOUT_BLANK: &str = "about:blank";
 
-/// The HTTP status phrase, as RFC 9457 asks of an `about:blank` problem.
+/// The HTTP status phrase, as RFC 9457 asks of an `about:blank` problem. The
+/// `http` crate still spells 413 and 422 as RFC 9110 renamed them from, so
+/// those two are the registered phrases here.
 fn http_title(code: Code) -> &'static str {
-    http_status(code).canonical_reason().unwrap_or_default()
+    match http_status(code) {
+        StatusCode::PAYLOAD_TOO_LARGE => "Content Too Large",
+        StatusCode::UNPROCESSABLE_ENTITY => "Unprocessable Content",
+        status => status.canonical_reason().unwrap_or_default(),
+    }
 }
 
 /// Which part of a request failed validation, following the RFC 9457
@@ -318,7 +323,7 @@ pub mod responses {
     /// the enclosing request budget expired before a response committed
     #[derive(Debug, ToResponse)]
     #[response(content_type = "application/problem+json")]
-    pub struct RequestTimeout(pub Problem);
+    pub struct GatewayTimeout(pub Problem);
 
     /// Responses every protected operation declares in addition to its own
     /// success shape. Authentication never returns 403 itself; that status is
@@ -334,7 +339,7 @@ pub mod responses {
         #[response(status = 503)]
         Unavailable(#[ref_response] AuthenticationUnavailable),
         #[response(status = 504)]
-        Timeout(#[ref_response] RequestTimeout),
+        Timeout(#[ref_response] GatewayTimeout),
     }
     // template:end authn:http-authentication-problem-responses
 
@@ -370,7 +375,7 @@ pub mod responses {
             // template:end inbound-webhooks:http-webhook-problem-components
             // template:begin authn:http-authentication-problem-components
             , AuthenticationMalformed, AuthenticationUnauthorized, AuthenticationForbidden,
-            AuthenticationUnavailable, RequestTimeout
+            AuthenticationUnavailable, GatewayTimeout
             // template:end authn:http-authentication-problem-components
         )
     ))]
@@ -397,9 +402,14 @@ mod tests {
             assert!(!http_title(*code).is_empty());
         }
         assert_eq!(http_status(Code::AlreadyExists), StatusCode::CONFLICT);
-        assert_eq!(Code::RequestTimeout.as_str(), "request_timeout");
+        assert_eq!(http_title(Code::RequestEntityTooLarge), "Content Too Large");
         assert_eq!(
-            http_status(Code::RequestTimeout),
+            http_title(Code::UnprocessableContent),
+            "Unprocessable Content"
+        );
+        assert_eq!(Code::GatewayTimeout.as_str(), "gateway_timeout");
+        assert_eq!(
+            http_status(Code::GatewayTimeout),
             StatusCode::GATEWAY_TIMEOUT
         );
     }
