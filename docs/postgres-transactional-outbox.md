@@ -88,14 +88,20 @@ The reserved publisher has 25 maximum attempts and a 30-second handler budget.
 Each broker operation is bounded by the lesser of the caller's remaining time
 and five seconds. Any failed publication, rejected or ambiguous, is a retryable
 jobs failure: it spends an attempt and waits for the jobs backoff (`attempt^4`
-seconds), so 25 attempts cover roughly 20 days of broker outage. Retrying an
-ambiguous publication keeps the unchanged publication ID, which the broker
+seconds with independent +/-10% jitter). With immediate failures and no extra
+floor, queueing, downtime, or handler cost, the nominal delays before attempt 25
+sum to `1,763,020 seconds` (about 20.4 days), with a +/-10% jitter-only range.
+This is not a delivery bound: handler time, retry floors, outage, backpressure,
+and scheduling can lengthen the horizon. Retrying an ambiguous publication keeps the unchanged publication ID, which the broker
 deduplicates only inside the stream's duplicate window (two minutes by
 default); the fourth retry already waits longer. A retry outside the window
 stores the event again, which consumers absorb by deduplicating on the logical
 ID. After the last attempt the job stays visible in the `failed`
 state until explicit recovery or discard. Malformed stored intent is a visible terminal
-job failure, never a completed publication.
+job failure, never a completed publication. Keep handlers compatible with
+outstanding kind and stored payload versions throughout rolling deployment and
+restore. A kind rename is not migration, and redrive does not repair poison
+intent; restore compatible code or use a separately reviewed data conversion.
 
 Operators retain the pending job when recovering or rolling back an application
 change. Do not disable the outbox while unpublished intent is live, and do not
@@ -114,7 +120,16 @@ intent and removes its history.
 Broker deduplication still ends at the configured duplicate window. Consumer
 logical-ID deduplication must cover the full retained-failure, redrive, restore,
 stream-retention and DLQ horizon; the default two-minute broker window is not
-that guarantee. The jobs history/index migrations and the
+that guarantee. Failed custody and permitted manual replay have no automatic
+expiry, so no finite consumer deduplication TTL covers every permitted replay.
+Retain durable logical-ID effect identity for the full permitted replay lifetime,
+or reconcile effects and explicitly constrain replay before expiring that
+identity. No exactly-once effect is promised.
+
+After backup restore, invalidate saved pre-restore recovery tokens, commands,
+and receipts. Restore queue/history/sequence consistently and handlers compatible
+with outstanding intent, reconcile possible prior effects, and re-inspect the
+restored identities before recovery. The jobs history/index migrations and the
 [all-old-retention-owners-stopped gate](background-jobs.md#upgrade-and-custody)
 apply to publisher jobs too. Old-binary rollback can delete retained failures.
 

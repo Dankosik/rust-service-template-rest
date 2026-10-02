@@ -483,10 +483,10 @@ struct QueuedCompletion {
 }
 
 impl QueuedCompletion {
-    fn finish(self, result: Result<bool, ()>) {
+    fn retire(self) -> tokio::sync::oneshot::Sender<Result<bool, ()>> {
         let Self { slots, reply, .. } = self;
         drop(slots);
-        let _ = reply.send(result);
+        reply
     }
 }
 
@@ -544,15 +544,51 @@ impl Completions {
     }
 }
 
-/// Remove batch membership before dropping each entry's custody and reply,
-/// including when the SQL future is cancelled by its owning supervisor.
-struct CompletionBatch(Vec<QueuedCompletion>);
+/// Retire the entire batch before a reply or sender closure can wake a waiter.
+struct CompletionBatch {
+    queued: Vec<QueuedCompletion>,
+    ids: Vec<uuid::Uuid>,
+    generations: Vec<i64>,
+    pruned_replies: Vec<tokio::sync::oneshot::Sender<Result<bool, ()>>>,
+}
+
+impl CompletionBatch {
+    fn new(queued: Vec<QueuedCompletion>) -> Self {
+        Self {
+            queued,
+            ids: Vec::new(),
+            generations: Vec::new(),
+            pruned_replies: Vec::new(),
+        }
+    }
+
+    fn prune(&mut self, index: usize) {
+        self.pruned_replies
+            .push(self.queued.swap_remove(index).retire());
+    }
+
+    fn retire(&mut self) -> Vec<tokio::sync::oneshot::Sender<Result<bool, ()>>> {
+        drop(std::mem::take(&mut self.ids));
+        drop(std::mem::take(&mut self.generations));
+        std::mem::take(&mut self.queued)
+            .into_iter()
+            .map(QueuedCompletion::retire)
+            .collect()
+    }
+
+    fn finish(mut self, results: Vec<Result<bool, ()>>) {
+        let replies: Vec<_> = self.retire().into_iter().zip(results).collect();
+        // Also close pruned replies only after every entry and SQL buffer is gone.
+        drop(self);
+        for (reply, result) in replies {
+            let _ = reply.send(result);
+        }
+    }
+}
 
 impl Drop for CompletionBatch {
     fn drop(&mut self) {
-        while let Some(entry) = self.0.pop() {
-            drop(entry);
-        }
+        drop(self.retire());
     }
 }
 
@@ -565,7 +601,7 @@ async fn complete_batched(
 ) -> Result<u64, Option<OperationError>> {
     let (_registration, response) = shared.completions.register(attempt, deadline, slots);
     let writer = shared.completions.writer.lock().await;
-    let batch = CompletionBatch(std::mem::take(&mut *shared.completions.lock_queue()));
+    let batch = CompletionBatch::new(std::mem::take(&mut *shared.completions.lock_queue()));
     write_batch(shared, batch).await;
     drop(writer);
     match response.await {
@@ -576,21 +612,21 @@ async fn complete_batched(
 
 async fn write_batch(shared: &Shared, mut batch: CompletionBatch) {
     let mut index = 0;
-    while index < batch.0.len() {
-        if batch.0[index].reply.is_closed() || expired(shared, batch.0[index].deadline) {
-            drop(batch.0.swap_remove(index));
+    while index < batch.queued.len() {
+        if batch.queued[index].reply.is_closed() || expired(shared, batch.queued[index].deadline) {
+            batch.prune(index);
         } else {
             index += 1;
         }
     }
-    let Some(deadline) = batch.0.iter().map(|entry| entry.deadline).min() else {
+    let Some(deadline) = batch.queued.iter().map(|entry| entry.deadline).min() else {
         return;
     };
-    let mut ids = Vec::with_capacity(batch.0.len());
-    let mut generations = Vec::with_capacity(batch.0.len());
-    for queued in &batch.0 {
-        ids.push(queued.id.0);
-        generations.push(queued.generation);
+    batch.ids.reserve(batch.queued.len());
+    batch.generations.reserve(batch.queued.len());
+    for queued in &batch.queued {
+        batch.ids.push(queued.id.0);
+        batch.generations.push(queued.generation);
     }
     let result = within(shared, deadline, backstop(Box::pin(async {
         let mut connection = shared
@@ -612,8 +648,8 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch) {
                  WHERE job.id = done.id AND job.claim_generation = done.generation \
                    AND job.claim_expires_at IS NOT NULL \
                  RETURNING done.position AS \"position!\"",
-                &ids,
-                &generations,
+                &batch.ids,
+                &batch.generations,
             )
             .fetch_all(&mut *connection),
         )
@@ -623,24 +659,22 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch) {
     .await;
     match result {
         Some(Ok(positions)) => {
-            let mut applied = vec![false; batch.0.len()];
+            let mut applied = vec![Ok(false); batch.queued.len()];
             for position in positions {
                 if let Some(flag) = usize::try_from(position - 1)
                     .ok()
                     .and_then(|index| applied.get_mut(index))
                 {
-                    *flag = true;
+                    *flag = Ok(true);
                 }
             }
-            while let Some(queued) = batch.0.pop() {
-                queued.finish(Ok(applied[batch.0.len()]));
-            }
+            batch.finish(applied);
         }
         Some(Err(error)) => {
             observe_failure(shared, Operation::Record, &error);
-            while let Some(queued) = batch.0.pop() {
-                queued.finish(Err(()));
-            }
+            drop(error);
+            let results = vec![Err(()); batch.queued.len()];
+            batch.finish(results);
         }
         None => {}
     }
@@ -920,48 +954,73 @@ mod tests {
     }
 
     #[test]
-    fn in_flight_custody_retires_before_success_failure_or_cancellation_wakes_a_retry() {
-        for result in [Some(Ok(true)), Some(Err(())), None] {
-            let completions = Completions::default();
-            let capacity = Arc::new(tokio::sync::Semaphore::new(1));
-            let slots = admitted(&capacity);
-            let (registration, mut response) = completions.register(
-                &attempt_id(1),
-                Instant::now() + Duration::from_secs(10),
-                &slots,
-            );
-            let mut batch = CompletionBatch(std::mem::take(&mut *completions.lock_queue()));
-            drop(registration);
-            drop(slots);
-            assert_eq!(
-                capacity.available_permits(),
-                0,
-                "the batch retains admission"
-            );
+    fn entire_batch_retires_before_success_failure_cancellation_or_pruning_wakes_a_waiter() {
+        for result in [Some(Ok(true)), Some(Ok(false)), Some(Err(())), None] {
+            for prune in [false, true] {
+                let completions = Completions::default();
+                let capacity = Arc::new(tokio::sync::Semaphore::new(3));
+                let mut registrations = Vec::new();
+                let mut responses = Vec::new();
+                let mut observers = Vec::new();
+                for generation in 1..=3 {
+                    let slots = admitted(&capacity);
+                    let (registration, mut response) = completions.register(
+                        &attempt_id(generation),
+                        Instant::now() + Duration::from_secs(10),
+                        &slots,
+                    );
+                    let wake = Arc::new(ReplyWake {
+                        capacity: Arc::clone(&capacity),
+                        available_at_wake: std::sync::atomic::AtomicUsize::new(usize::MAX),
+                    });
+                    let waker = std::task::Waker::from(Arc::clone(&wake));
+                    let mut context = std::task::Context::from_waker(&waker);
+                    assert!(
+                        std::pin::Pin::new(&mut response)
+                            .poll(&mut context)
+                            .is_pending()
+                    );
+                    registrations.push(registration);
+                    responses.push(response);
+                    observers.push(wake);
+                }
+                let mut batch =
+                    CompletionBatch::new(std::mem::take(&mut *completions.lock_queue()));
+                drop(registrations);
+                assert_eq!(capacity.available_permits(), 0, "batch retains admission");
 
-            let wake = Arc::new(ReplyWake {
-                capacity: Arc::clone(&capacity),
-                available_at_wake: std::sync::atomic::AtomicUsize::new(usize::MAX),
-            });
-            let waker = std::task::Waker::from(Arc::clone(&wake));
-            let mut context = std::task::Context::from_waker(&waker);
-            assert!(
-                std::pin::Pin::new(&mut response)
-                    .poll(&mut context)
-                    .is_pending()
-            );
-            match result {
-                Some(result) => batch.0.pop().unwrap().finish(result),
-                None => drop(batch),
-            }
-            assert_eq!(wake.available_at_wake.load(Ordering::SeqCst), 1);
-            assert_eq!(capacity.available_permits(), 1);
-            match result {
-                Some(result) => assert_eq!(response.try_recv().unwrap(), result),
-                None => assert!(matches!(
-                    response.try_recv(),
-                    Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-                )),
+                if prune {
+                    batch.prune(0);
+                    assert!(matches!(
+                        responses[0].try_recv(),
+                        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                    ));
+                    assert_eq!(
+                        observers[0].available_at_wake.load(Ordering::SeqCst),
+                        usize::MAX,
+                        "a pruned sender stays open until the remaining batch retires"
+                    );
+                }
+                match result {
+                    Some(result) => {
+                        let results = vec![result; batch.queued.len()];
+                        batch.finish(results);
+                    }
+                    None => drop(batch),
+                }
+                assert_eq!(capacity.available_permits(), 3);
+                for (index, (wake, mut response)) in
+                    observers.into_iter().zip(responses).enumerate()
+                {
+                    assert_eq!(wake.available_at_wake.load(Ordering::SeqCst), 3);
+                    match result.filter(|_| !prune || index != 0) {
+                        Some(result) => assert_eq!(response.try_recv().unwrap(), result),
+                        None => assert!(matches!(
+                            response.try_recv(),
+                            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                        )),
+                    }
+                }
             }
         }
     }

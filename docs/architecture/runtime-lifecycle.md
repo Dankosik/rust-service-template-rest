@@ -334,9 +334,11 @@ discard commands before ordinary configuration and startup; `operator.rs`
 loads only `JobsOperatorConfig`, installs signal streams and admits a one-slot
 PostgreSQL pool with fixed `application_name=jobs-worker-operator`. It starts
 no registry, engine, broker, listener, exporter, password refresher or maintenance.
-The same history verifier and shared jobs session check run before one operation.
-Inspection uses read-only transactions and a two-second statement limit;
-mutation uses the caller-owned transaction and existing session budgets.
+The same history verifier and shared jobs UTF-8/writable/READ COMMITTED session
+check admit every mode against the canonical writable queue before one operation.
+Inspection then uses a read-only transaction; mutation uses the caller-owned
+transaction. Both set a two-second local statement timeout, before the mutation's
+initial row lock, without changing ordinary pooled session budgets.
 
 After argument/configuration/file admission, connect/history/session/operation/
 pool-close/runtime ceilings are 5/5/5/12/5/1 seconds. Signals cancel the current

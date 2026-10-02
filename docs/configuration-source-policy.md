@@ -504,8 +504,13 @@ into its panic.
   scan. No new runtime key is added. It requires `postgres.enabled`, reads a
   password file once, and uses a one-connection pool with fixed
   `application_name=jobs-worker-operator`. It requires no ordinary jobs
-  capacity, HTTP, telemetry, auth, webhook or messaging configuration. Operator
-  timeouts are existing code-owned ceilings; see the
+  capacity, HTTP, telemetry, auth, webhook or messaging configuration. Every
+  mode requires canonical writable UTF-8/READ COMMITTED session admission;
+  inspection then uses a read-only transaction. Both reads and mutations set a
+  two-second transaction-local statement timeout, before the mutation's initial
+  lock, within the existing 12-second operation backstop including acquire,
+  begin, and commit. Ordinary pooled session budgets remain unchanged. Operator
+  timeouts are code-owned ceilings; see the
   [command contract](background-jobs.md#inspect-and-recover-retained-jobs).
 <!-- template:end jobs:docs-config-jobs -->
 <!-- template:begin authn:docs-config-authn-budgets -->

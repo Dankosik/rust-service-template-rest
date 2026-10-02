@@ -155,6 +155,19 @@ impl Inspection {
         Self::page(after, limit, Filter::Unhandled(kinds))
     }
 
+    /// The admitted sorted, deduplicated fleet kinds for an unhandled inspection.
+    /// Other inspection modes carry no declared handled set.
+    #[must_use]
+    pub const fn handled_kinds(&self) -> Option<&BTreeSet<String>> {
+        match &self.0 {
+            Request::Page {
+                filter: Filter::Unhandled(kinds),
+                ..
+            } => Some(kinds),
+            _ => None,
+        }
+    }
+
     fn page(after: Option<&str>, limit: u16, filter: Filter) -> Result<Self, InputError> {
         if !(1..=MAX_PAGE).contains(&limit) {
             return Err(InputError::Limit);
@@ -343,12 +356,12 @@ impl From<TxError> for OperatorError {
     }
 }
 
-/// Share the worker's UTF8/isolation checks without creating an engine.
+/// Share the worker's UTF8/writable/isolation checks without creating an engine.
 ///
 /// # Errors
-/// Refuses an unavailable or incompatible session; writable admission is optional.
-pub async fn check_startup(pool: &PgPool, require_writable: bool) -> Result<(), StartupError> {
-    crate::maintenance::check_startup(pool, require_writable).await
+/// Refuses an unavailable, read-only, or incompatible session.
+pub async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
+    crate::maintenance::check_startup(pool).await
 }
 
 struct SnapshotRow {
@@ -485,6 +498,11 @@ r#"SELECT id, kind, state, claim_generation::text AS "version!", attempts, failu
 }
 
 async fn lock_failed(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(), OperatorError> {
+    observed(
+        "set statement timeout",
+        sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
+    )
+    .await?;
     let row = observed(
         "lock failed job",
         sqlx::query!(
