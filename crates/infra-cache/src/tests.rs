@@ -759,6 +759,32 @@ impl FakeServer {
     }
 }
 
+async fn read_resp_arguments(
+    read: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+    line: &mut String,
+) -> Option<Vec<String>> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+    line.clear();
+    if read.read_line(line).await.unwrap_or(0) == 0 {
+        return None;
+    }
+    let count = line.trim_end().strip_prefix('*')?.parse::<usize>().ok()?;
+    let mut arguments = Vec::with_capacity(count);
+    for _ in 0..count {
+        line.clear();
+        if read.read_line(line).await.unwrap_or(0) == 0 {
+            return None;
+        }
+        let length = line.trim_end().strip_prefix('$')?.parse::<usize>().ok()?;
+        let mut bulk = vec![0; length + 2];
+        read.read_exact(&mut bulk).await.ok()?;
+        bulk.truncate(length);
+        arguments.push(String::from_utf8_lossy(&bulk).into_owned());
+    }
+    Some(arguments)
+}
+
 async fn serve_resp(
     stream: tokio::net::TcpStream,
     accept_auth: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -769,43 +795,12 @@ async fn serve_resp(
     socket: ObservedSocket,
 ) {
     use std::sync::atomic::Ordering;
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
 
     let (read, mut write) = stream.into_split();
     let mut read = BufReader::new(read);
     let mut line = String::new();
-    loop {
-        line.clear();
-        if read.read_line(&mut line).await.unwrap_or(0) == 0 {
-            return;
-        }
-        let Some(count) = line
-            .trim_end()
-            .strip_prefix('*')
-            .and_then(|n| n.parse::<usize>().ok())
-        else {
-            return;
-        };
-        let mut arguments = Vec::with_capacity(count);
-        for _ in 0..count {
-            line.clear();
-            if read.read_line(&mut line).await.unwrap_or(0) == 0 {
-                return;
-            }
-            let Some(length) = line
-                .trim_end()
-                .strip_prefix('$')
-                .and_then(|n| n.parse::<usize>().ok())
-            else {
-                return;
-            };
-            let mut bulk = vec![0; length + 2];
-            if read.read_exact(&mut bulk).await.is_err() {
-                return;
-            }
-            bulk.truncate(length);
-            arguments.push(String::from_utf8_lossy(&bulk).into_owned());
-        }
+    while let Some(arguments) = read_resp_arguments(&mut read, &mut line).await {
         socket
             .observed
             .commands
@@ -1453,7 +1448,6 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         .await;
     let connections = server.connections();
     server.require_password("pending-password");
-    let usable_since = tokio::time::Instant::now();
     // Acceptance changes while the rejected reply is still delayed. Every
     // exchange fits its 1 s budget, but completion-relative refresh scheduling
     // lets the PINGs at 6, 8.4 and 10.8 s push recovery past the 7 s bound.
@@ -1464,10 +1458,6 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
             logs.contains("cache_password_reloaded")
         })
         .await;
-    eprintln!(
-        "retained credential recovery completed in {:?}",
-        usable_since.elapsed()
-    );
     assert_eq!(
         server.connections(),
         connections,
@@ -1576,7 +1566,7 @@ impl std::io::Write for CapturedLogs {
 fn reliability_auth_errors_are_sanitized_through_the_dependency_log_bridge() {
     static BRIDGE: std::sync::Once = std::sync::Once::new();
     BRIDGE.call_once(|| {
-        tracing_log::LogTracer::init().expect("install actual dependency log bridge")
+        tracing_log::LogTracer::init().expect("install actual dependency log bridge");
     });
     let captured = CapturedLogs::default();
     let writer = captured.clone();

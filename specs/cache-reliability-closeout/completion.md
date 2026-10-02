@@ -1,6 +1,6 @@
 # Cache reliability completion
 
-Status: Accepted locally; separate PR publication and CI remain pending.
+Status: Accepted locally; PR #226 is open, refreshed exact-head CI remains pending.
 Baseline: `67be869acea112af271ec8ba621cbc50ae9d36b7`.
 Unit: [implementation](implementation.md), accepted behavior [R1–R5](spec.md).
 
@@ -8,7 +8,7 @@ The implementation checkpoint `4ee53a6` was merged with current main
 `546a381` at `ed9920510ff25c8d5081652e7721de38afdba501`, retaining its Rust
 1.99 upgrade and two mechanical cache test/documentation edits. No merge
 conflicts occurred. Final reviewed source tree:
-`b91a87cff3a75738c852c869ce050610fc9fcacb`. Subsequent changes to this
+`3e52bd2cffccbfa06981462ca9e49abe13630f01`. Subsequent changes to this
 completion receipt do not change the reviewed implementation or tests.
 
 ## Implementation
@@ -142,8 +142,34 @@ independent verdict.
 
 ## Delivery boundary
 
-Remote push, one separate PR and exact-head CI readback remain with the root
-continuation owner. No merge or deployment is authorized or claimed.
+The root continuation owner published PR #226 at `d8fe74e`. Its first CI run
+`37028483140` reported three test-only Clippy failures in the quality job:
+`serve_resp` exceeded the line limit, the timing diagnostic used `eprintln!`,
+and the log-bridge initialization closure lacked a semicolon. The repair
+extracts the fixture's existing RESP argument parser without changing decoding
+or EOF behavior, removes the temporary print and elapsed-time variable, and
+adds the semicolon. Production, test assertions, delays and recovery bounds
+remain unchanged; no lint allowance or policy relaxation was introduced.
+
+On reviewed tree `3e52bd2`, the serial scoped rerun passed:
+`make fmt-check` (0.84 s), `make lint-changed PKGS=infra-cache` (6.01 s,
+all targets with integration enabled), and `make test-package PKG=infra-cache`
+(25.48 s overall; 44 unit tests and one doctest). The retained reviewer returned
+**PASS** for this mechanical delta with no finding, retaining its prior R1–R5
+reasoning and F1 closure. Original production build/workspace evidence remains
+valid; the changed fixture received fresh package proof. Raw logs are
+`ci-repair-*.log` alongside the earlier Git-common receipts.
+
+First-head CI Valkey evidence at `d8fe74e` passed all ten tests in 2.01 s,
+including round trip, TTL expiry, outage/recovery, silent/unreachable-server
+degradation, trusted/untrusted TLS and required client certificates. This is
+preserved in `ci-integration-first.log`; it does not establish CI success on
+the subsequent lint-repair commit. The initial quality failure is retained in
+`ci-quality-first.log`.
+
+Pushing the accepted repair to the existing PR and reading refreshed exact-head
+CI remain with the root continuation owner. No merge or deployment is authorized
+or claimed.
 Valkey, initializer/profile, image and all other selected external gates remain
 CI-owned. Local acceptance does not establish those results or deployed runtime
 behavior. The worktree and accepted decision packet remain available for this
