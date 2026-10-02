@@ -10,6 +10,7 @@
 // `health` crate.
 use crate::probes;
 use crate::problem::responses::ProblemComponents;
+use axum::extract::FromRef;
 use health::ReadinessReader;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
@@ -19,11 +20,17 @@ use utoipa_axum::routes;
 pub(crate) const HEALTH_PROBE_ROUTES: &[&str] = &[probes::LIVE_PATH, probes::READY_PATH];
 
 /// The probe routes with their contract and the problem components, as one
-/// [`OpenApiRouter`] whose [`ReadinessReader`] state is still unapplied: the
-/// service crate's `api::contract` merges this value, finalizes policy, then
-/// calls `with_state` before [`crate::harden`]. One `routes!` call per path:
-/// the macro groups the methods of a single path.
-pub fn router() -> OpenApiRouter<ReadinessReader> {
+/// [`OpenApiRouter`] whose state is still unapplied: the service crate's
+/// `api::contract` merges this value, finalizes policy, then calls
+/// `with_state` before [`crate::harden`]. The state is any type that hands
+/// out a [`ReadinessReader`], so a composition root with more state than
+/// readiness serves the same probes. One `routes!` call per path: the macro
+/// groups the methods of a single path.
+pub fn router<S>() -> OpenApiRouter<S>
+where
+    ReadinessReader: FromRef<S>,
+    S: Clone + Send + Sync + 'static,
+{
     OpenApiRouter::with_openapi(ProblemComponents::openapi())
         .routes(routes!(probes::live))
         .routes(routes!(probes::ready))
@@ -113,7 +120,7 @@ mod tests {
 
     #[test]
     fn document_paths_are_the_access_log_probe_routes() {
-        let document = router().into_openapi();
+        let document = router::<ReadinessReader>().into_openapi();
         assert_eq!(
             document
                 .paths

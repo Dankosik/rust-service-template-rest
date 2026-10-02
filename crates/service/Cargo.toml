@@ -26,6 +26,8 @@ path = "src/bin/openapi.rs"
 workspace = true
 
 [dependencies]
+# `FromRef` for the application state; the transport stays in infra-http.
+axum = { workspace = true }
 gethostname = { workspace = true }
 health = { workspace = true }
 infra-http = { workspace = true }
@@ -82,9 +84,6 @@ tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 # template:begin grpc-jwt:service-grpc-jwt-test-dependencies
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 # template:end grpc-jwt:service-grpc-jwt-test-dependencies
-# template:begin authn:service-authn-test-dependencies
-axum = { workspace = true }
-# template:end authn:service-authn-test-dependencies
 rstest = { workspace = true }
 nix = { workspace = true, features = ["signal"] }
 tokio = { workspace = true, features = ["test-util", "io-util"] }

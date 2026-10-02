@@ -1,8 +1,9 @@
 # Runtime Lifecycle
 
 Load for startup, readiness, drain, shutdown, exit codes, or
-process-resource ownership. `crates/service/src/bootstrap` (`mod.rs` and
-`shutdown.rs`) is the code; the process tests in `crates/service/tests` prove
+process-resource ownership. `crates/service/src/bootstrap` is the code:
+`mod.rs` is the startup order, each retained profile keeps its step in a
+module beside it, and `shutdown.rs` is the teardown; the process tests in `crates/service/tests` prove
 it against the built binary.
 
 ## Startup
@@ -14,14 +15,16 @@ it against the built binary.
    and exits `1`.
 2. Inside the Tokio runtime, the signal streams are installed first, so a
    `SIGTERM` that arrives during startup is handled rather than killing the
-   process.
+   process. Startup then runs raced against those streams: a stop signal
+   drops the unfinished startup at its next await, no listener is bound, and
+   the teardown below runs without the listener stages.
 3. The tracer provider is installed, then the subscriber (so SDK warnings are
    caught), then the Prometheus recorder; the startup record
    (`service_starting`) carries the non-secret facts an operator needs:
    `app.env`, `app.version`, `app.commit`, the listeners, the budgets, the
    log level, and the exporter state (`initialized`, `disabled`, `degraded`).
 4. Background tasks (metrics upkeep, Tokio runtime metrics, the readiness
-   refresher) join a `TaskTracker` with child `CancellationToken`s.
+   refresher) join one `JoinSet` with child `CancellationToken`s.
 5. Admit the dependencies retained by the local profile before accepting
    traffic; bootstrap owns their readiness registration and cleanup.
 6. The API contract comes from `service::api::contract()`: the route tree
@@ -30,8 +33,8 @@ it against the built binary.
 7. Readiness admission: the refresher evaluates every registered probe once
    under `health.probe_budget`; a failure is a startup failure (exit
    `1`). Without a selected profile the set is empty and admission proves
-   the mechanism. The route tree is then given the readiness reader as
-   state, wrapped by `infra_http::harden`, and bound by the bounded
+   the mechanism. The route tree is then given the application state
+   (`service::AppState`), wrapped by `infra_http::harden`, and bound by the bounded
    `Server`; the diagnostics listener binds second when
    `observability.metrics.addr` is set. `service_ready` is logged only after
    both binds; the platform's first `/health/ready` poll answers from the
@@ -44,17 +47,16 @@ uses public finalization without a verifier; protected policy refuses startup.
 Bootstrap validates introspection cache options even when caching is disabled,
 before any listener or provider I/O. Introspection construction does no provider I/O; JWT startup discovers metadata
 and installs a usable JWKS inside its bounded startup budget. A JWT refresh
-future joins the existing `TaskTracker` with a child cancellation token.
+future joins the existing background `JoinSet` with a child cancellation token.
 Authentication neither adds a readiness probe nor changes public health behavior.
 <!-- template:end authn:docs-lifecycle-authn -->
 <!-- template:begin outbound-http:docs-lifecycle-outbound -->
 A retained [outbound client](../outbound-http.md) is inert until a concrete
 provider is wired. Operations are caller-owned futures; dropping one ends its
 exchange. Resolver, connection-pool, and HTTP library tasks are
-library-owned; bootstrap neither gives them a tracker/token nor joins them in a
+library-owned; bootstrap neither gives them a task set or token nor joins them in a
 shutdown stage. The client adds no readiness probe or teardown stage. JWT refresh
-remains the separate process-owned task that the existing tracker cancels and
-joins.
+remains the separate process-owned task that bootstrap cancels and joins.
 <!-- template:end outbound-http:docs-lifecycle-outbound -->
 <!-- template:begin outbound-auth:docs-lifecycle-outbound-auth -->
 The retained OAuth2 profile is inert until a concrete integration constructs an
@@ -73,7 +75,7 @@ the DSN and opens the first connection inside the acquire budget
 five seconds including acquire, that every embedded migration is applied with
 its checksum: pending or divergent history is a sanitized startup failure,
 while versions from a later release are admitted so a rollback still starts.
-The probe joins readiness, the pool gauge task joins the tracker, and an
+The probe joins readiness, the pool gauge task joins the background set, and an
 unreachable database is a startup failure
 ([Persistence](persistence.md)).
 <!-- template:end postgres:docs-lifecycle-postgres-startup -->
@@ -84,7 +86,7 @@ After all routes compose, `finish` activates their count without inspecting
 the assembled document. An `Active` result requires `postgres.enabled`, a set
 retention, admitted migration history, and a writable session, then starts the boundary before
 admission continues; an `Inactive` result does nothing further. While
-active, a background cleanup task joins the existing `TaskTracker` with a
+active, a background cleanup task joins the existing background `JoinSet` with a
 child cancellation token and is cancelled and joined in the existing
 background-join shutdown stage, beside the other background tasks. It never
 adds a readiness probe or a shutdown stage of its own.
@@ -96,7 +98,17 @@ cleanup of a partial startup. Startup records every opened dependency in one
 `Dependencies` value, and a failed or stopped startup runs the same staged
 teardown as a stop signal without the listener stages: background tasks
 join, opened dependencies close under the dependency-close budget, and
-telemetry flushes. A failed startup then exits `1`.
+telemetry flushes. A failed startup then exits `1`; a startup stopped by a
+signal exits by the teardown outcome, `0` when every stage fit its budget.
+
+Every background task runs until its token is cancelled, and nothing cancels
+before teardown. A task that ends while the service is serving has therefore
+panicked or hit a defect. Bootstrap observes it beside the stop signal, logs
+`service failed`, runs the full teardown, and exits `1`, so the platform
+replaces the instance instead of keeping one that serves without, for
+example, its JWKS refresh. The watch covers the serving phase only: a task
+that ends during startup is reported when startup completes, and one that
+ends during teardown is joined like any other.
 
 ## Readiness and liveness
 
@@ -153,7 +165,7 @@ instead of pushing the process into `SIGKILL`.
 | Propagation delay: keep serving while load balancers notice | `http.readiness_propagation_delay` (`15s`); a second signal skips it | `readiness_propagation_wait` |
 | HTTP drain: stop accepting, finish in-flight requests | `http.drain_timeout` minus the delay (`10s`) | `drain_started`, then `drain_completed`, or `shutdown_forced` with `remaining` connections |
 | Diagnostics listener close | `2s` | `diagnostics_stopped` or `diagnostics_forced` |
-| Cancel and join background tasks | `5s` | `background_joined` |
+| Cancel and join background tasks; tasks that outlive the budget are aborted | `5s` | `background_joined` |
 | Close selected dependencies | `5s` | An overrun votes `degraded`; unused capacity retains the same grace-budget arithmetic |
 | Flush telemetry | `5s` | `telemetry_flushed`, then `shutdown_completed` |
 
@@ -187,7 +199,7 @@ tasks that outlived the drain.
 | --- | --- |
 | `0` | Every stage completed inside its budget |
 | `3` | The process shut down on its own but a stage overran (degraded shutdown); the platform and the process test can tell it from a crash |
-| `1` | Startup failure: invalid configuration, unknown key, malformed `APP__` name, secret in a file, bind failure, admission failure |
+| `1` | Startup failure: invalid configuration, unknown key, malformed `APP__` name, secret in a file, bind failure, admission failure. Also a background task that ended while serving; the teardown still runs first |
 
 `--help` exits `0`. `--version` is not a loader flag: identity is
 `BuildInfo` / `app.version`. `process::exit` is never called, so
@@ -366,9 +378,11 @@ not add a second budget or change NATS/provider shutdown ownership. See
   `available_parallelism`, which honours cgroup quotas; no `GOMAXPROCS` or
   `memory_limit_ratio` equivalent exists because there is no garbage
   collector.
-- **`CancellationToken` and `TaskTracker`** (`tokio-util`) for background
-  work: `child_token()` is one-directional, and `TaskTracker::wait()` needs
-  `close()` first.
+- **`CancellationToken` (`tokio-util`) and a Tokio `JoinSet`** for the
+  service's background work: `child_token()` is one-directional, and the set
+  reports a task that ends early, panics included, which a `TaskTracker`
+  does not. The worker keeps its tracker beside its own engine failure
+  channels.
 - **Signal streams are created before anything can send a signal and kept
   alive**; a dropped `tokio::signal::unix::signal` stream swallows later
   signals.

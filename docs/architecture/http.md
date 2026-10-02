@@ -7,8 +7,11 @@ alternatives they beat, are recorded at the end of this document.
 ## Request path
 
 1. `bootstrap` in `crates/service` builds configuration, telemetry, and
-   readiness, takes the route tree from `service::api::contract()`, wraps it
-   in `infra_http::harden`, and binds it with `infra_http::Server`.
+   readiness, takes the route tree from `service::api::contract()`, applies
+   the one `service::AppState`, wraps it in `infra_http::harden`, and binds
+   it with `infra_http::Server`. A router names the part of the state it
+   reads (`ReadinessReader: FromRef<S>`), so a route whose state bootstrap
+   does not supply fails to compile.
 2. The bounded server (`crates/infra-http/src/server.rs`) owns
    connection-level policy: the connection cap, the header timeout that
    doubles as the keep-alive idle bound, the header-size bound (`431` as
