@@ -242,28 +242,24 @@ impl Engine {
         tracing::info!(worker.id = %self.shared.worker_id, "jobs_engine_starting");
         let stop = cancel.child_token();
         let failure = CancellationToken::new();
-        spawn_guarded(
-            tracker,
-            Arc::clone(&self.shared),
-            stop.clone(),
-            failure.clone(),
-            claim::run_claim_loop,
-        );
+        let spawn = |task, token, run| {
+            spawn_guarded(
+                tracker,
+                Arc::clone(&self.shared),
+                Guard {
+                    task,
+                    token,
+                    failure: failure.clone(),
+                },
+                run,
+            );
+        };
+        spawn("claim", stop.clone(), Run::Claim);
         if self.shared.owns_process_duties {
-            tracker.spawn(maintenance::run_retention(
-                Arc::clone(&self.shared),
-                cancel.child_token(),
-            ));
-            tracker.spawn(claim::run_listener(
-                Arc::clone(&self.shared),
-                cancel.child_token(),
-            ));
+            spawn("retention", cancel.child_token(), Run::Retention);
+            spawn("listener", cancel.child_token(), Run::Listener);
         }
-        let sample_cancel = cancel.child_token();
-        tracker.spawn(maintenance::run_sampling(
-            Arc::clone(&self.shared),
-            sample_cancel,
-        ));
+        spawn("sampling", cancel.child_token(), Run::Sampling);
         Started {
             shared: Arc::clone(&self.shared),
             stop,
@@ -329,7 +325,9 @@ impl Started {
         }
     }
 
-    /// Resolves if the claim loop ends on its own.
+    /// Resolves if the claim loop, or the retention, listener, or sampling
+    /// task this engine started, ends before its token is cancelled: a panic
+    /// or a defect. The engine logs which one as `jobs_engine_task_stopped`.
     pub async fn failed(&self) {
         self.failure.cancelled().await;
     }
@@ -344,34 +342,44 @@ impl fmt::Debug for Started {
     }
 }
 
-fn spawn_guarded<F, Fut>(
-    tracker: &TaskTracker,
-    shared: Arc<Shared>,
-    token: CancellationToken,
-    failure: CancellationToken,
-    run: F,
-) where
-    F: FnOnce(Arc<Shared>, CancellationToken) -> Fut + Send + 'static,
-    Fut: Future<Output = ()> + Send + 'static,
-{
-    let guard_token = token.clone();
+/// The engine's own tasks. Each runs until its token is cancelled.
+#[derive(Clone, Copy)]
+enum Run {
+    Claim,
+    Retention,
+    Listener,
+    Sampling,
+}
+
+fn spawn_guarded(tracker: &TaskTracker, shared: Arc<Shared>, guard: Guard, run: Run) {
+    let token = guard.token.clone();
     tracker.spawn(async move {
-        let _guard = FailUnlessCancelled {
-            token: guard_token,
-            failure,
-        };
-        run(shared, token).await;
+        let _guard = guard;
+        match run {
+            Run::Claim => claim::run_claim_loop(shared, token).await,
+            Run::Retention => maintenance::run_retention(shared, token).await,
+            Run::Listener => claim::run_listener(shared, token).await,
+            Run::Sampling => maintenance::run_sampling(shared, token).await,
+        }
     });
 }
 
-struct FailUnlessCancelled {
+/// Dropped when its task ends, a panic included: an end before the token
+/// was cancelled fails the engine.
+struct Guard {
+    task: &'static str,
     token: CancellationToken,
     failure: CancellationToken,
 }
 
-impl Drop for FailUnlessCancelled {
+impl Drop for Guard {
     fn drop(&mut self) {
         if !self.token.is_cancelled() {
+            tracing::error!(
+                task = self.task,
+                panicked = std::thread::panicking(),
+                "jobs_engine_task_stopped"
+            );
             self.failure.cancel();
         }
     }

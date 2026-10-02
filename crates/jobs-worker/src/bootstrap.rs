@@ -30,10 +30,8 @@ use infra_telemetry::{
 };
 use secrecy::ExposeSecret;
 use service_config::{AppConfig, Config, LogFormat, TracesSampler};
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 
-use crate::shutdown::{self, Resources, Signals};
+use crate::shutdown::{self, Background, Resources, Signals};
 use crate::{BuildError, Register, Registration};
 
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
@@ -41,7 +39,8 @@ const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
 const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 // template:end messaging:worker-bootstrap-messaging-startup-budget
 
-/// Every startup refusal, plus an engine or consumer stopping without a stop signal.
+/// Every startup refusal, plus an engine, a consumer, or a background task
+/// stopping without a stop signal.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WorkerError {
     #[error(
@@ -70,6 +69,8 @@ pub(crate) enum WorkerError {
     Metrics(#[from] infra_telemetry::MetricsError),
     #[error("job kind registration failed: {0}")]
     Registration(#[source] BuildError),
+    #[error("background task {0} stopped without a stop signal")]
+    BackgroundStopped(&'static str),
     // template:begin jobs:worker-bootstrap-job-errors
     #[error("job kinds are invalid: {0}")]
     Kinds(#[from] infra_jobs::KindError),
@@ -133,38 +134,36 @@ struct Prepared {
 }
 
 /// Install stop signals, admit dependencies, then wait until a stop signal or
-/// a terminal engine or consumer failure. A failed signal install returns
+/// a terminal engine, consumer, or background-task failure. A failed signal install returns
 /// before anything is open. Every later refusal goes through
-/// `shutdown::abort_startup` exactly once. A stop signal or an engine failure
-/// runs the staged shutdown plan.
+/// `shutdown::abort_startup` exactly once. A stop signal or any of those
+/// failures runs the staged shutdown plan.
 pub(crate) async fn serve(
     config: Config,
     register: Register<'_>,
 ) -> Result<shutdown::Outcome, WorkerError> {
     let mut signals = Signals::install().map_err(WorkerError::Signals)?;
-    let cancel = CancellationToken::new();
-    let tracker = TaskTracker::new();
+    let background = Background::new();
     let mut resources = Resources::default();
     let prepared = match Box::pin(prepare(
         &config,
         register,
         &mut signals,
-        &cancel,
-        &tracker,
+        &background,
         &mut resources,
     ))
     .await
     {
         Ok(prepared) => prepared,
         Err(err) => {
-            shutdown::abort_startup(resources, &cancel, &tracker).await;
+            shutdown::abort_startup(resources, &background).await;
             return Err(err);
         }
     };
     let ended = if prepared.admitted {
-        spawn_refresher(&prepared.readiness, &cancel, &tracker);
+        spawn_refresher(&prepared.readiness, &background);
         tracing::info!("jobs_worker_ready");
-        wait_for_stop(&resources, &mut signals).await
+        wait_for_stop(&resources, &background, &mut signals).await
     } else {
         Ended::Signal
     };
@@ -172,8 +171,7 @@ pub(crate) async fn serve(
         http: &config.http,
         readiness: &prepared.readiness,
         resources,
-        cancel,
-        tracker,
+        background,
         tracer_provider: prepared.tracer_provider,
         signals: &mut signals,
     })
@@ -188,21 +186,15 @@ async fn prepare(
     config: &Config,
     register: Register<'_>,
     signals: &mut Signals,
-    cancel: &CancellationToken,
-    tracker: &TaskTracker,
+    background: &Background,
     resources: &mut Resources,
 ) -> Result<Prepared, WorkerError> {
     let identity = worker_identity(&config.observability.otel.service_name);
     let (tracer_provider, metrics) = install_observability(config, &identity)?;
-    install_panic_hook(PanicMessage::Recorded);
-    // template:begin messaging:worker-bootstrap-sanitized-panic-hook-call
-    // The consumer treats a handler panic as a terminal worker fault, and a
-    // handler may format a message's content into its panic. Withhold the
-    // text so it never reaches logs before that typed failure reaches the
-    // lifecycle owner.
+    // A handler may include its payload in a panic; every worker profile
+    // records the location without exposing that text.
     install_panic_hook(PanicMessage::Withheld);
-    // template:end messaging:worker-bootstrap-sanitized-panic-hook-call
-    let mut registrations = register_capabilities(config, register, cancel, tracker)?;
+    let mut registrations = register_capabilities(config, register, background)?;
     log_startup_record(
         config,
         &identity,
@@ -211,8 +203,8 @@ async fn prepare(
         // template:end jobs:worker-bootstrap-log-jobs-argument
         &tracer_provider.exporter_state,
     );
-    spawn_metrics_tasks(&metrics, cancel, tracker);
-    admit_pool(config, &registrations, cancel, tracker, resources).await?;
+    spawn_metrics_tasks(&metrics, background);
+    admit_pool(config, &registrations, background, resources).await?;
     // template:begin messaging:worker-bootstrap-messaging-startup
     #[allow(
         unused_variables,
@@ -228,7 +220,7 @@ async fn prepare(
         config,
         &mut registrations.messages,
         signals,
-        cancel,
+        &background.cancel,
         resources,
         needs_messaging,
     ))
@@ -256,14 +248,14 @@ async fn prepare(
     if admitted {
         resources.started = engines
             .iter()
-            .map(|engine| engine.start(tracker, cancel))
+            .map(|engine| engine.start(&background.tracker, &background.cancel))
             .collect();
         tracing::info!(engines = resources.started.len(), "jobs_claiming_started");
     }
     // template:end jobs:worker-bootstrap-start-admitted-jobs
     // template:begin messaging:worker-bootstrap-start-admitted-consumer
     if admitted && let Some(consumer) = consumer {
-        resources.consumer = Some(consumer.start(cancel));
+        resources.consumer = Some(consumer.start(&background.cancel));
         tracing::info!("messaging_consuming_started");
     }
     // template:end messaging:worker-bootstrap-start-admitted-consumer
@@ -281,8 +273,7 @@ async fn prepare(
 async fn admit_pool(
     config: &Config,
     registrations: &Registrations,
-    cancel: &CancellationToken,
-    tracker: &TaskTracker,
+    background: &Background,
     resources: &mut Resources,
 ) -> Result<(), WorkerError> {
     // template:begin jobs:worker-bootstrap-jobs-startup
@@ -320,7 +311,7 @@ async fn admit_pool(
         config.messaging.validate_producer(&config.app.env)?;
         // template:end outbox:worker-bootstrap-outbox-config
         // template:begin jobs:worker-bootstrap-pool-open
-        let pool = open_pool(config, cancel, tracker, resources).await?;
+        let pool = open_pool(config, background, resources).await?;
         migrate::verify_history(&pool).await?;
     }
     // template:end jobs:worker-bootstrap-pool-open
@@ -332,7 +323,7 @@ async fn connect_messaging(
     config: &Config,
     messages: &mut Option<MessagingRegistry>,
     signals: &mut Signals,
-    cancel: &CancellationToken,
+    cancel: &tokio_util::sync::CancellationToken,
     resources: &mut Resources,
     needs_messaging: bool,
 ) -> Result<std::ops::ControlFlow<(), Option<Consumer>>, WorkerError> {
@@ -515,8 +506,7 @@ struct Registrations {
 fn register_capabilities(
     config: &Config,
     register: Register<'_>,
-    cancel: &CancellationToken,
-    tracker: &TaskTracker,
+    background: &Background,
 ) -> Result<Registrations, WorkerError> {
     let mut registration = Registration {
         // template:begin jobs:worker-bootstrap-register-jobs
@@ -526,8 +516,7 @@ fn register_capabilities(
         messages: MessagingRegistry::new([])?,
         // template:end messaging:worker-bootstrap-register-messaging
         config,
-        tracker,
-        cancel,
+        background,
     };
     register(&mut registration).map_err(WorkerError::Registration)?;
     #[allow(
@@ -578,19 +567,17 @@ fn register_capabilities(
     })
 }
 
-fn spawn_metrics_tasks(metrics: &Metrics, cancel: &CancellationToken, tracker: &TaskTracker) {
-    tracker.spawn(metrics.clone().upkeep(cancel.child_token()));
-    tracker.spawn(runtime_metrics(
-        METRICS_MAINTENANCE_INTERVAL,
-        cancel.child_token(),
-    ));
+fn spawn_metrics_tasks(metrics: &Metrics, background: &Background) {
+    background.spawn("metrics_upkeep", |cancel| metrics.clone().upkeep(cancel));
+    background.spawn("runtime_metrics", |cancel| {
+        runtime_metrics(METRICS_MAINTENANCE_INTERVAL, cancel)
+    });
 }
 
 // template:begin jobs:worker-bootstrap-open-pool
 async fn open_pool(
     config: &Config,
-    cancel: &CancellationToken,
-    tracker: &TaskTracker,
+    background: &Background,
     resources: &mut Resources,
 ) -> Result<PgPool, WorkerError> {
     let dsn = Dsn::admit_with(
@@ -620,17 +607,20 @@ async fn open_pool(
         postgres.max_connections = config.postgres.max_connections.get(),
         "postgres_pool_opened"
     );
-    tracker.spawn(infra_postgres::record_metrics_periodically(
-        pool.clone(),
-        METRICS_MAINTENANCE_INTERVAL,
-        cancel.child_token(),
-    ));
-    // Ends at once unless `postgres.password_file` is set.
-    tracker.spawn(infra_postgres::refresh_password_periodically(
-        pool.clone(),
-        dsn,
-        cancel.child_token(),
-    ));
+    background.spawn("postgres_pool_metrics", |cancel| {
+        infra_postgres::record_metrics_periodically(
+            pool.clone(),
+            METRICS_MAINTENANCE_INTERVAL,
+            cancel,
+        )
+    });
+    // The rotation task ends at once without a password file, and an ended
+    // background task is a worker failure.
+    if dsn.password_file().is_some() {
+        background.spawn("postgres_password_refresh", |cancel| {
+            infra_postgres::refresh_password_periodically(pool.clone(), dsn, cancel)
+        });
+    }
     Ok(pool)
 }
 // template:end jobs:worker-bootstrap-open-pool
@@ -659,7 +649,10 @@ async fn bind_listeners(
     tracing::info!(addr = %health.local_addr(), "http listener bound");
     resources.listeners.health = Some(health);
     if let Some(addr) = config.observability.metrics.addr {
-        let diagnostics = Server::bind(addr, diagnostics_router(metrics.clone()), options).await?;
+        // Liveness is served here as well, as in the service, so one probe
+        // target fits both processes.
+        let routes = diagnostics_router(metrics.clone()).merge(infra_http::liveness_router());
+        let diagnostics = Server::bind(addr, routes, options).await?;
         tracing::info!(addr = %diagnostics.local_addr(), "diagnostics listener bound");
         resources.listeners.diagnostics = Some(diagnostics);
     }
@@ -730,19 +723,25 @@ async fn admit(signals: &mut Signals, readiness: &Readiness) -> Result<bool, Wor
     }
 }
 
-fn spawn_refresher(readiness: &Readiness, cancel: &CancellationToken, tracker: &TaskTracker) {
+fn spawn_refresher(readiness: &Readiness, background: &Background) {
     let readiness = readiness.clone();
-    let cancel = cancel.child_token();
-    tracker.spawn(async move { readiness.refresh_until(cancel).await });
+    background.spawn("readiness_refresher", |cancel| async move {
+        readiness.refresh_until(cancel).await;
+    });
 }
 
-/// `Ended::Signal` when a stop signal ended the wait. A terminal jobs or
-/// messaging failure names its owner and takes the error exit after ordered
-/// cleanup.
-async fn wait_for_stop(resources: &Resources, signals: &mut Signals) -> Ended {
+/// `Ended::Signal` when a stop signal ended the wait. A terminal jobs,
+/// messaging, or background-task failure names its owner and takes the error
+/// exit after ordered cleanup.
+async fn wait_for_stop(
+    resources: &Resources,
+    background: &Background,
+    signals: &mut Signals,
+) -> Ended {
     tokio::select! {
         biased;
         () = signals.wait() => Ended::Signal,
+        task = background.stopped() => Ended::Failure(WorkerError::BackgroundStopped(task)),
         // template:begin jobs:worker-bootstrap-wait-jobs-failure
         () = async {
             if resources.started.is_empty() {
