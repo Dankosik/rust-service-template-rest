@@ -369,7 +369,8 @@ It builds the tonic router and any TLS config before serving. Health reads
 cached readiness and is `NOT_SERVING` until admission succeeds. At first stop,
 readiness drain publishes `NOT_SERVING` before the propagation delay. HTTP and
 gRPC then drain concurrently under the remaining effective drain budget.
-Health watchers end after `NOT_SERVING` and do not hold that drain. It does
+Health watchers end after `NOT_SERVING` and do not hold that drain.
+Configuration refuses a `grpc.request_timeout` longer than that budget. It does
 not add a second budget or change NATS/provider shutdown ownership. See
 [gRPC](../grpc.md#health-shutdown-and-observation).
 <!-- template:end grpc:docs-runtime-grpc -->

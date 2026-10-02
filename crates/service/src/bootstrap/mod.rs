@@ -384,6 +384,15 @@ async fn start(
         },
     );
 
+    // Built before any route or registration reads it, so both transports
+    // hand their handlers the same dependencies.
+    let state = crate::AppState {
+        readiness: readiness.reader(),
+        // template:begin inbound-webhooks:bootstrap-webhooks-route-state
+        webhooks: webhook_state,
+        // template:end inbound-webhooks:bootstrap-webhooks-route-state
+    };
+
     // template:begin grpc:bootstrap-grpc-prepare-start
     let grpc_prepared = if config.grpc.enabled {
         // template:end grpc:bootstrap-grpc-prepare-start
@@ -400,27 +409,20 @@ async fn start(
         };
         // template:end grpc-authn:bootstrap-grpc-verifier
         // template:begin grpc:bootstrap-grpc-prepare-call
-        if config.http.effective_drain_budget() < infra_grpc::CALL_DEADLINE_CAP {
-            return Err(service_config::ValidationError::new(
-                "http.drain_timeout",
-                format!(
-                    "minus http.readiness_propagation_delay must cover the {:?} gRPC unary deadline",
-                    infra_grpc::CALL_DEADLINE_CAP
-                ),
-            )
-            .into());
-        }
+        let limits = crate::grpc::limits(config);
         Some((
             infra_grpc::router(
-                crate::grpc::services(grpc_registration)?,
+                crate::grpc::services(grpc_registration, &state)?,
                 readiness.reader(),
                 // template:end grpc:bootstrap-grpc-prepare-call
                 // template:begin grpc-authn:bootstrap-grpc-verifier-argument
                 verifier,
                 // template:end grpc-authn:bootstrap-grpc-verifier-argument
                 // template:begin grpc:bootstrap-grpc-prepare-finish
-            ),
+                limits,
+            )?,
             crate::grpc::tls(config)?,
+            infra_grpc::server_options(limits),
         ))
     } else {
         None
@@ -460,12 +462,7 @@ async fn start(
         max_header_bytes: usize::try_from(config.http.max_header_bytes.as_u64())
             .unwrap_or(usize::MAX),
         max_connections: config.http.connection_cap(),
-    };
-    let state = crate::AppState {
-        readiness: readiness.reader(),
-        // template:begin inbound-webhooks:bootstrap-webhooks-route-state
-        webhooks: webhook_state,
-        // template:end inbound-webhooks:bootstrap-webhooks-route-state
+        max_connection_age: config.http.connection_age(),
     };
     let app = infra_http::harden(
         routes.with_state(state),
@@ -494,13 +491,11 @@ async fn start(
 
     // template:begin grpc:bootstrap-grpc-bind
     let grpc_listener = match grpc_prepared {
-        Some((grpc_router, tls)) => {
+        Some((grpc_router, tls, grpc_options)) => {
             let addr = config.grpc.listen_addr()?;
             let bound = match tls {
-                Some(tls) => {
-                    Server::bind_tls(addr, grpc_router, infra_grpc::server_options(), tls).await?
-                }
-                None => Server::bind(addr, grpc_router, infra_grpc::server_options()).await?,
+                Some(tls) => Server::bind_tls(addr, grpc_router, grpc_options, tls).await?,
+                None => Server::bind(addr, grpc_router, grpc_options).await?,
             };
             tracing::info!(addr = %bound.local_addr(), "grpc listener bound");
             Some(bound)

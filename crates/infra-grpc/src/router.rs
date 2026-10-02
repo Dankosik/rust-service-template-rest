@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -9,26 +9,44 @@ use axum::middleware::Next;
 use axum::response::Response;
 use bytes::Bytes;
 use http_body_util::BodyExt as _;
+use prost::Message as _;
 use service_failure::{AT_CAPACITY_DETAIL, Code};
 use tokio::sync::Semaphore;
 use tonic::server::NamedService as _;
 
 use crate::{Error, Failure};
 
-/// Upper bound for the time to response headers of any business call, and the
-/// floor for the process drain budget.
-pub const CALL_DEADLINE_CAP: Duration = Duration::from_secs(8);
-
-const BUSINESS_CONCURRENCY: usize = 256;
+/// Operator limits of the listener and its business calls, from the `grpc`
+/// configuration section.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// Upper bound for a business call's time to response headers. A
+    /// caller's shorter `grpc-timeout` wins.
+    pub request_timeout: Duration,
+    /// Business calls running at once before shedding; `None` never sheds.
+    pub max_in_flight: Option<NonZeroU32>,
+    /// Accepted connections at once; `None` accepts without a bound.
+    pub max_connections: Option<NonZeroU32>,
+    /// Age after which a connection gets GOAWAY; `None` sets no age.
+    pub max_connection_age: Option<Duration>,
+}
 
 type HealthServer = tonic_health::pb::health_server::HealthServer<crate::health::Adapter>;
 
-/// Registered generated services. Health is attached later, outside the
-/// business concurrency limit and authentication.
+const REFLECTION_SERVICE: &str = tonic_reflection::pb::v1::server_reflection_server::SERVICE_NAME;
+
+/// Registered generated services and the contracts that describe them.
+/// Health is attached later, outside the business concurrency limit and
+/// authentication.
 #[derive(Debug, Default)]
 pub struct Services {
     routes: tonic::service::RoutesBuilder,
     names: BTreeSet<&'static str>,
+    /// Method names of every described service, by full service name.
+    described: HashMap<String, Vec<String>>,
+    /// The sets given to [`Services::describe`], which reflection serves.
+    descriptor_sets: Vec<&'static [u8]>,
+    reflection: bool,
     // template:begin authn:grpc-services-scopes-field
     /// Scopes a verified principal needs for a method, keyed by request path.
     scopes: std::collections::HashMap<String, Box<[String]>>,
@@ -42,11 +60,49 @@ impl Services {
         Self::default()
     }
 
+    /// Reads the services and methods of an encoded `FileDescriptorSet`,
+    /// such as `grpc_contracts::FILE_DESCRIPTOR_SET`. A generated server does
+    /// not list its methods; the set is what lets a scope requirement name a
+    /// real method and a metric carry a method label no caller can invent.
+    /// Describe a contract before adding its servers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidFileDescriptorSet`] when the bytes do not
+    /// decode.
+    pub fn describe(&mut self, encoded_file_descriptor_set: &'static [u8]) -> Result<(), Error> {
+        self.learn(encoded_file_descriptor_set)?;
+        self.descriptor_sets.push(encoded_file_descriptor_set);
+        Ok(())
+    }
+
+    fn learn(&mut self, encoded_file_descriptor_set: &[u8]) -> Result<(), Error> {
+        let set = prost_types::FileDescriptorSet::decode(encoded_file_descriptor_set)
+            .map_err(|_| Error::InvalidFileDescriptorSet)?;
+        for file in &set.file {
+            for service in &file.service {
+                let name = match file.package() {
+                    "" => service.name().to_owned(),
+                    package => format!("{package}.{}", service.name()),
+                };
+                let methods = service
+                    .method
+                    .iter()
+                    .map(|method| method.name().to_owned())
+                    .collect();
+                self.described.insert(name, methods);
+            }
+        }
+        Ok(())
+    }
+
     /// Records `S::NAME` and adds the generated server.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::DuplicateService`] when that name is already registered.
+    /// Returns [`Error::UndescribedService`] when no described set holds
+    /// that name, and [`Error::DuplicateService`] when it is already
+    /// registered.
     pub fn add<S>(&mut self, service: S) -> Result<(), Error>
     where
         S: tower::Service<http::Request<tonic::body::Body>, Error = Infallible>
@@ -58,6 +114,9 @@ impl Services {
         S::Response: axum::response::IntoResponse,
         S::Future: Send + 'static,
     {
+        if !self.described.contains_key(S::NAME) {
+            return Err(Error::UndescribedService(S::NAME));
+        }
         if !self.names.insert(S::NAME) {
             return Err(Error::DuplicateService(S::NAME));
         }
@@ -65,24 +124,48 @@ impl Services {
         Ok(())
     }
 
-    /// Adds standard server reflection (`grpc.reflection.v1`) over an encoded
-    /// `FileDescriptorSet`, such as `grpc_contracts::FILE_DESCRIPTOR_SET`, so
-    /// `grpcurl` and `buf curl` can call the service without its schema files.
-    /// Health is described too. Reflection is a business route: authenticated,
-    /// limited and deadline-bound like every other registered service.
+    /// Adds standard server reflection (`grpc.reflection.v1`) over every
+    /// described set, whenever it was described, so `grpcurl` and `buf curl`
+    /// can call the service without its schema files. Health is described
+    /// too. Reflection is a business route: authenticated, limited and
+    /// deadline-bound like every other registered service.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidFileDescriptorSet`] when the bytes are not a
-    /// usable descriptor set, and [`Error::DuplicateService`] when reflection
-    /// is already registered.
-    pub fn add_reflection(&mut self, encoded_file_descriptor_set: &[u8]) -> Result<(), Error> {
-        let reflection = tonic_reflection::server::Builder::configure()
-            .register_encoded_file_descriptor_set(encoded_file_descriptor_set)
-            .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
+    /// Returns [`Error::DuplicateService`] when reflection is already added.
+    pub fn add_reflection(&mut self) -> Result<(), Error> {
+        if std::mem::replace(&mut self.reflection, true) {
+            return Err(Error::DuplicateService(REFLECTION_SERVICE));
+        }
+        Ok(())
+    }
+
+    /// Builds the reflection server requested by [`Services::add_reflection`].
+    fn attach_reflection(&mut self) -> Result<(), Error> {
+        self.learn(tonic_reflection::pb::v1::FILE_DESCRIPTOR_SET)?;
+        let mut builder = tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET);
+        for set in &self.descriptor_sets {
+            builder = builder.register_encoded_file_descriptor_set(set);
+        }
+        let reflection = builder
             .build_v1()
             .map_err(|_| Error::InvalidFileDescriptorSet)?;
         self.add(reflection)
+    }
+
+    /// The request path of every described method of the registered
+    /// services and of health: the only paths that become metric labels.
+    fn method_paths(&self) -> HashSet<Box<str>> {
+        self.names
+            .iter()
+            .copied()
+            .chain([HealthServer::NAME])
+            .flat_map(|service| {
+                let methods = self.described.get(service).into_iter().flatten();
+                methods.map(move |method| format!("/{service}/{method}").into_boxed_str())
+            })
+            .collect()
     }
 
     // template:begin authn:grpc-services-require-scopes
@@ -90,20 +173,24 @@ impl Services {
     /// request path such as `/example.v1.EchoService/Unary`. A principal that
     /// lacks one gets `PERMISSION_DENIED` before the handler. A method with
     /// no declared requirement admits any authenticated caller, as an OpenAPI
-    /// operation without scopes does. The method name itself is not checked:
-    /// generated servers do not list their methods.
+    /// operation without scopes does.
     ///
     /// # Errors
     ///
     /// Returns [`Error::UnregisteredMethodPath`] unless `path` is
-    /// `/{service}/{method}` of a service already added, and
-    /// [`Error::DuplicateScopeRequirement`] when `path` already has one.
+    /// `/{service}/{method}` of a described method of a service already
+    /// added, and [`Error::DuplicateScopeRequirement`] when `path` already
+    /// has one.
     pub fn require_scopes(&mut self, path: &str, scopes: &[&str]) -> Result<(), Error> {
         let method_of_registered_service = path
             .strip_prefix('/')
             .and_then(|rest| rest.split_once('/'))
             .is_some_and(|(service, method)| {
-                self.names.contains(service) && !method.is_empty() && !method.contains('/')
+                self.names.contains(service)
+                    && self
+                        .described
+                        .get(service)
+                        .is_some_and(|methods| methods.iter().any(|known| known == method))
             });
         if !method_of_registered_service {
             return Err(Error::UnregisteredMethodPath);
@@ -121,22 +208,35 @@ impl Services {
 /// Serves registered services and standard health behind the gRPC middleware
 /// chain. Health is public; business calls are authenticated, limited, and
 /// bounded by the deadline.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidFileDescriptorSet`] when reflection was added and
+/// cannot serve the described sets.
 pub fn router(
-    services: Services,
+    mut services: Services,
     readiness: ::health::ReadinessReader,
     // template:begin authn:grpc-router-verifier
     verifier: infra_bearerauthn::Verifier,
     // template:end authn:grpc-router-verifier
-) -> axum::Router {
-    let business =
-        services
-            .routes
-            .routes()
-            .into_axum_router()
-            .layer(axum::middleware::from_fn_with_state(
-                Arc::new(Semaphore::new(BUSINESS_CONCURRENCY)),
-                admit,
-            ));
+    limits: Limits,
+) -> Result<axum::Router, Error> {
+    if services.reflection {
+        services.attach_reflection()?;
+    }
+    services.learn(tonic_health::pb::FILE_DESCRIPTOR_SET)?;
+    let series = crate::observe::Series::server(services.method_paths());
+    let admission = Admission {
+        permits: limits
+            .max_in_flight
+            .map(|limit| Arc::new(Semaphore::new(limit.get() as usize))),
+        request_timeout: limits.request_timeout,
+    };
+    let business = services
+        .routes
+        .routes()
+        .into_axum_router()
+        .layer(axum::middleware::from_fn_with_state(admission, admit));
     // template:begin authn:grpc-router-authenticate
     let scopes = Arc::new(services.scopes);
     let business = business.layer(axum::middleware::from_fn(move |request, next| {
@@ -145,19 +245,20 @@ pub fn router(
         async move { authenticate(verifier, scopes, request, next).await }
     }));
     // template:end authn:grpc-router-authenticate
-    with_health(business, readiness, &services.names).layer(axum::middleware::from_fn_with_state(
-        Arc::new(crate::observe::Series::server()),
-        crate::observe::observe,
+    Ok(with_health(business, readiness, &services.names).layer(
+        axum::middleware::from_fn_with_state(Arc::new(series), crate::observe::observe),
     ))
 }
 
-/// Fixed listener options for the gRPC port.
+/// Listener options for the gRPC port: the operator's connection bounds and
+/// the fixed head limits.
 #[must_use]
-pub fn server_options() -> infra_http::ServerOptions {
+pub fn server_options(limits: Limits) -> infra_http::ServerOptions {
     infra_http::ServerOptions {
         header_read_timeout: Duration::from_secs(5),
         max_header_bytes: 16 * 1024,
-        max_connections: NonZeroU32::new(4096),
+        max_connections: limits.max_connections,
+        max_connection_age: limits.max_connection_age,
     }
 }
 
@@ -199,27 +300,35 @@ fn with_health(
     readiness: ::health::ReadinessReader,
     names: &BTreeSet<&'static str>,
 ) -> axum::Router {
-    let health = tower::ServiceBuilder::new()
-        .map_response(crate::observe::mark_dispatched)
-        .service(HealthServer::new(crate::health::Adapter::new(
-            readiness, names,
-        )));
+    let health = HealthServer::new(crate::health::Adapter::new(readiness, names));
     router.route_service(&format!("/{}/{{*rest}}", HealthServer::NAME), health)
+}
+
+/// The business limits `admit` applies.
+#[derive(Clone)]
+struct Admission {
+    /// `None` never sheds.
+    permits: Option<Arc<Semaphore>>,
+    request_timeout: Duration,
 }
 
 /// Sheds a business call at the concurrency limit without queueing, and bounds
 /// its time to response headers by the deadline. The permit is held until the
 /// response headers, as `tower::limit` holds it.
-async fn admit(State(limit): State<Arc<Semaphore>>, request: Request, next: Next) -> Response {
-    let Ok(_permit) = limit.try_acquire_owned() else {
-        crate::observe::record_shed();
-        return reject(request, at_capacity()).await;
+async fn admit(State(admission): State<Admission>, request: Request, next: Next) -> Response {
+    let _permit = match admission.permits.map(Semaphore::try_acquire_owned) {
+        None => None,
+        Some(Ok(permit)) => Some(permit),
+        Some(Err(_)) => {
+            crate::observe::record_shed();
+            return reject(request, at_capacity()).await;
+        }
     };
     let budget = grpc_timeout(request.headers())
-        .unwrap_or(CALL_DEADLINE_CAP)
-        .min(CALL_DEADLINE_CAP);
+        .unwrap_or(admission.request_timeout)
+        .min(admission.request_timeout);
     match tokio::time::timeout(budget, next.run(request)).await {
-        Ok(response) => crate::observe::mark_dispatched(response),
+        Ok(response) => response,
         Err(_elapsed) => tonic::Status::from(Failure::new(Code::RequestTimeout)).into_http(),
     }
 }

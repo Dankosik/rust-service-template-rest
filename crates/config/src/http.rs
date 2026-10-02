@@ -67,6 +67,12 @@ pub struct HttpConfig {
     /// socket with no HTTP response. Zero accepts without a bound. The
     /// composition root maps zero to `None` on the adapter policy type.
     pub max_connections: u32,
+    /// Age after which a connection is told to finish and close, so its
+    /// client reconnects and is balanced again. Each connection's age is
+    /// spread by up to 10% either way. Zero keeps a connection for as long
+    /// as its peer does.
+    #[serde(with = "humantime_serde")]
+    pub max_connection_age: Duration,
     /// Re-enable access logging for `/health/live` and `/health/ready`.
     pub access_log_health_probes: bool,
 }
@@ -91,6 +97,10 @@ impl Default for HttpConfig {
             // the connection cap closes the socket with no HTTP response. The
             // headroom keeps the informative rejection common.
             max_connections: 4096,
+            // Off: an HTTP/1 proxy that reuses an idle connection just as
+            // the server closes it sees a failed request. HTTP/2 GOAWAY has
+            // no such race, which is why the gRPC listener sets an age.
+            max_connection_age: Duration::ZERO,
             access_log_health_probes: false,
         }
     }
@@ -107,6 +117,12 @@ impl HttpConfig {
     #[must_use]
     pub fn in_flight_cap(&self) -> Option<NonZeroU32> {
         NonZeroU32::new(self.max_in_flight)
+    }
+
+    /// Adapter form of `http.max_connection_age`: `None` means no age.
+    #[must_use]
+    pub fn connection_age(&self) -> Option<Duration> {
+        (!self.max_connection_age.is_zero()).then_some(self.max_connection_age)
     }
 
     /// Drain budget left after the readiness propagation delay.
@@ -196,13 +212,40 @@ impl HttpConfig {
                 format!("must be >= http.max_in_flight ({})", self.max_in_flight),
             ));
         }
-        Ok(())
+        connection_age_range("http.max_connection_age", self.max_connection_age)
     }
+}
+
+/// A connection age is off at zero, or between one second and one day.
+pub(crate) fn connection_age_range(key: &str, value: Duration) -> Result<(), ValidationError> {
+    if value.is_zero() {
+        return Ok(());
+    }
+    duration_range(key, value, Duration::from_secs(1), Duration::from_hours(24))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connection_age_is_off_at_zero_or_at_least_a_second() {
+        assert_eq!(HttpConfig::default().connection_age(), None);
+        let aged = HttpConfig {
+            max_connection_age: Duration::from_mins(30),
+            ..HttpConfig::default()
+        };
+        aged.validate().unwrap();
+        assert_eq!(aged.connection_age(), Some(Duration::from_mins(30)));
+        let too_short = HttpConfig {
+            max_connection_age: Duration::from_millis(500),
+            ..HttpConfig::default()
+        };
+        assert_eq!(
+            too_short.validate().unwrap_err().key,
+            "http.max_connection_age"
+        );
+    }
 
     #[test]
     fn defaults_validate() {
