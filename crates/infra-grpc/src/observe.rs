@@ -603,17 +603,9 @@ mod tests {
                 );
             } else if method != "Cancelled" {
                 let mut body = response.into_body();
-                let status = tokio::time::timeout(WAIT, async {
-                    while let Some(frame) = body.frame().await {
-                        let frame = frame.unwrap();
-                        if let Some(trailers) = frame.trailers_ref() {
-                            return tonic::Status::from_header_map(trailers).unwrap().code();
-                        }
-                    }
-                    Code::Unknown
-                })
-                .await
-                .unwrap();
+                let status = tokio::time::timeout(WAIT, trailer_status(&mut body))
+                    .await
+                    .unwrap();
                 assert_eq!(status, expected);
                 assert!(body.frame().await.is_none());
             }
@@ -782,6 +774,16 @@ mod tests {
             .await
             .expect("expired call answers without channel progress");
         assert_eq!(result.unwrap_err().code(), Code::DeadlineExceeded);
+    }
+
+    async fn trailer_status(body: &mut tonic::body::Body) -> Code {
+        while let Some(frame) = body.frame().await {
+            let frame = frame.unwrap();
+            if let Some(trailers) = frame.trailers_ref() {
+                return tonic::Status::from_header_map(trailers).unwrap().code();
+            }
+        }
+        Code::Unknown
     }
 
     fn client_request(

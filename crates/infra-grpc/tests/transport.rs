@@ -1834,6 +1834,29 @@ async fn a_stream_is_counted_with_the_status_that_ended_it() {
     fixture.stop().await;
 }
 
+fn stalled_unary_response(
+    send_data: bool,
+    peer_polled: Arc<Notify>,
+    dropped: NotifyOnDrop,
+) -> http::Response<axum::body::Body> {
+    let first = send_data.then(|| {
+        Ok::<_, std::convert::Infallible>(http_body::Frame::data(bytes::Bytes::from(grpc_frame(
+            "reply",
+        ))))
+    });
+    let frames = futures_util::stream::iter(first).chain(futures_util::stream::once(async move {
+        let _dropped = dropped;
+        peer_polled.notify_one();
+        std::future::pending().await
+    }));
+    http::Response::builder()
+        .header("content-type", "application/grpc")
+        .body(axum::body::Body::new(http_body_util::StreamBody::new(
+            frames,
+        )))
+        .unwrap()
+}
+
 /// A peer that accepts and never answers: the call's own deadline ends it.
 #[tokio::test]
 #[allow(
@@ -1852,26 +1875,7 @@ async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
                 move || {
                     let peer_polled = Arc::clone(&peer_polled);
                     let dropped = NotifyOnDrop(Arc::clone(&body_dropped));
-                    async move {
-                        let first = send_data.then(|| {
-                            Ok::<_, std::convert::Infallible>(http_body::Frame::data(
-                                bytes::Bytes::from(grpc_frame("reply")),
-                            ))
-                        });
-                        let frames = futures_util::stream::iter(first).chain(
-                            futures_util::stream::once(async move {
-                                let _dropped = dropped;
-                                peer_polled.notify_one();
-                                std::future::pending().await
-                            }),
-                        );
-                        http::Response::builder()
-                            .header("content-type", "application/grpc")
-                            .body(axum::body::Body::new(http_body_util::StreamBody::new(
-                                frames,
-                            )))
-                            .unwrap()
-                    }
+                    async move { stalled_unary_response(send_data, peer_polled, dropped) }
                 }
             }),
         );
