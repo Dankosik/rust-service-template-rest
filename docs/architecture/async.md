@@ -266,18 +266,20 @@ uses the retained 20-attempt, 30-second policy. Receiver `Retry-After` advice is
 only a capped floor; jobs combines it with normal backoff. A completed 2xx
 succeeds, 410 terminates with operator guidance to disable the configured
 endpoint, and every other HTTP response retries. Missing endpoints consume
-attempts. Only endpoint capacity uses a one-second snooze with an attempt
-refund: each worker process permits one active exchange per endpoint, keeping
-another slot available when the worker has at least two slots. This is neither
-cross-process suppression nor queue fairness.
+attempts. The optional `webhooks.max_concurrent_deliveries` sets the kind's
+`Policy::max_running`: the claim leaves excess deliveries pending without
+spending attempts or holding worker slots. It is unset by default; a bound
+below `jobs.max_workers` leaves capacity for other kinds. The bound is per
+engine and kind, not per endpoint or across processes.
 <!-- template:end webhooks:docs-async-webhooks-outbound -->
 
 <!-- template:begin inbound-webhooks:docs-async-webhooks-inbound -->
 An inbound receipt inserts `webhooks.process` in its receiver transaction; the
-worker uses the existing 25-attempt, 60-second policy. Both process roots
-construct the shared adopter registry once and reject unbound configured
-endpoints at startup; a historical job whose binding disappeared retries and
-exhausts normally. Consumer work and fenced completion remain one transaction.
+worker uses the existing 25-attempt, 60-second policy. The worker root
+constructs the adopter registry and rejects unbound configured endpoints
+before claiming. The service admits receipts without a consumer registry;
+a historical job whose binding disappeared retries and exhausts normally.
+Consumer work and fenced completion remain one transaction.
 <!-- template:end inbound-webhooks:docs-async-webhooks-inbound -->
 
 The durable decisions are the static lease, supervisor-owned outcome,
