@@ -137,7 +137,7 @@ async fn receive(
         tracing::error!(failure = "deadline_missing", "webhook_wiring_failed");
         return sanitized_internal_error();
     };
-    let received = if let Some(attempt_end) = postgres_attempt_end(deadline.at()) {
+    let result = if let Some(attempt_end) = postgres_attempt_end(deadline.at()) {
         tokio::time::timeout_at(
             attempt_end,
             receiver.receive(&endpoint_id, &parts.headers, &body, SystemTime::now()),
@@ -147,7 +147,7 @@ async fn receive(
     } else {
         Err(ReceiveError::Unavailable)
     };
-    match received {
+    match result {
         Ok(outcome) => {
             let outcome = match outcome {
                 ReceiptOutcome::Accepted => "accepted",
