@@ -11,7 +11,6 @@
 
 use std::error::Error;
 
-use health::ReadinessReader;
 use utoipa_axum::router::OpenApiRouter;
 // template:begin http-idempotency:service-api-http-idempotency-import
 use infra_http::idempotency::Composer;
@@ -22,6 +21,8 @@ use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 // template:end authn:service-api-authn-imports
 use utoipa::OpenApi;
 use utoipa::openapi::OpenApi as Document;
+
+use crate::AppState;
 
 /// First line of the committed document, so a reader knows where to edit.
 const GENERATED_HEADER: &str =
@@ -65,10 +66,23 @@ impl Modify for BearerAuth {
 }
 // template:end authn:service-api-authn-security-scheme
 
+/// Why the contract could not be assembled or rendered.
+#[derive(Debug, thiserror::Error)]
+pub enum ContractError {
+    // template:begin http-idempotency:service-api-contract-error-idempotency
+    /// A participating route cannot carry the idempotency contract.
+    #[error(transparent)]
+    Idempotency(#[from] infra_http::idempotency::CompositionError),
+    // template:end http-idempotency:service-api-contract-error-idempotency
+    /// The document did not serialize as YAML.
+    #[error("render the OpenAPI document as YAML: {0}")]
+    Yaml(#[source] Box<dyn Error + Send + Sync>),
+}
+
 /// Every operation the service serves, with its contract, as one
-/// [`OpenApiRouter`] whose [`ReadinessReader`] state is still unapplied.
-/// Bootstrap finalizes it, supplies the state, and hardens the routes;
-/// [`document`] consumes the document-only path.
+/// [`OpenApiRouter`] whose [`AppState`] is still unapplied. Bootstrap
+/// finalizes it, supplies the state, and hardens the routes; [`document`]
+/// consumes the document-only path.
 ///
 /// The template composes nothing fallible yet. The `Result` is the seam for
 /// the first idempotent operation, added here as
@@ -77,13 +91,13 @@ impl Modify for BearerAuth {
 ///
 /// # Errors
 ///
-/// Returns a local idempotency composition error when a participating route
-/// cannot carry the required served contract.
+/// Returns [`ContractError`] when a participating route cannot carry the
+/// required served contract.
 pub fn contract(
     // template:begin http-idempotency:service-api-contract-composer
     idempotency: &mut Composer,
     // template:end http-idempotency:service-api-contract-composer
-) -> Result<OpenApiRouter<ReadinessReader>, Box<dyn Error + Send + Sync>> {
+) -> Result<OpenApiRouter<AppState>, ContractError> {
     let contract = assemble();
     // template:begin http-idempotency:service-api-idempotency-components
     let contract = contract.merge(OpenApiRouter::with_openapi(idempotency.components()));
@@ -91,7 +105,7 @@ pub fn contract(
     Ok(contract)
 }
 
-fn assemble() -> OpenApiRouter<ReadinessReader> {
+fn assemble() -> OpenApiRouter<AppState> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(infra_http::router())
         // template:begin inbound-webhooks:service-api-webhooks-router
@@ -103,9 +117,9 @@ fn assemble() -> OpenApiRouter<ReadinessReader> {
 ///
 /// # Errors
 ///
-/// Returns a local idempotency composition error when a participating route
-/// cannot carry the required served contract.
-pub fn document() -> Result<Document, Box<dyn Error + Send + Sync>> {
+/// Returns [`ContractError`] when a participating route cannot carry the
+/// required served contract.
+pub fn document() -> Result<Document, ContractError> {
     contract(
         // template:begin http-idempotency:service-api-document-composer
         &mut Composer::inert(),
@@ -119,9 +133,12 @@ pub fn document() -> Result<Document, Box<dyn Error + Send + Sync>> {
 ///
 /// # Errors
 ///
-/// Returns a local idempotency composition error or YAML serialization error.
-pub fn render() -> Result<String, Box<dyn Error + Send + Sync>> {
-    let yaml = document()?.to_yaml()?;
+/// Returns [`ContractError`] when the contract does not assemble or the
+/// document does not serialize.
+pub fn render() -> Result<String, ContractError> {
+    let yaml = document()?
+        .to_yaml()
+        .map_err(|err| ContractError::Yaml(Box::new(err)))?;
     Ok(format!("{GENERATED_HEADER}\n{}\n", yaml.trim_end()))
 }
 
@@ -164,7 +181,7 @@ mod tests {
         }
     }
 
-    fn protected_test_contract() -> OpenApiRouter<ReadinessReader> {
+    fn protected_test_contract() -> OpenApiRouter<AppState> {
         assemble().routes(utoipa_axum::routes!(protected))
     }
 
@@ -219,16 +236,13 @@ mod idempotency_tests {
     /// same composer.
     fn with_test_route(
         idempotency: &mut Composer,
-    ) -> Result<OpenApiRouter<ReadinessReader>, Box<dyn Error + Send + Sync>> {
+    ) -> Result<OpenApiRouter<AppState>, ContractError> {
         Ok(contract(idempotency)?.routes(idempotency.route(utoipa_axum::routes!(idempotent))?))
     }
 
     /// Activation counts only routes that composed successfully.
     fn finished(
-        compose: impl FnOnce(
-            &mut Composer,
-        )
-            -> Result<OpenApiRouter<ReadinessReader>, Box<dyn Error + Send + Sync>>,
+        compose: impl FnOnce(&mut Composer) -> Result<OpenApiRouter<AppState>, ContractError>,
     ) -> Activation {
         let mut composer = Composer::inert();
         let _contract = compose(&mut composer).expect("the route composes");

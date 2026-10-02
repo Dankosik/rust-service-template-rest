@@ -3,7 +3,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum_test::TestServer;
 use bytes::Bytes;
-use health::{Readiness, RefreshPolicy};
 use http::{HeaderMap, HeaderValue, StatusCode};
 use infra_jobs::{Engine, JobError, Kinds, Policy};
 use infra_postgres::{Dsn, PgPool, Tx};
@@ -551,13 +550,11 @@ async fn missing_consumer_spends_attempts_and_exhausts_the_normal_budget(pool: P
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn mounted_percent_decoded_endpoint_reaches_signature_rejection(pool: PgPool) {
-    let router = infra_http::finalize_public(infra_http::webhooks::router())
-        .expect("webhook operation is public");
-    let app = infra_http::webhooks::with_webhook_state(
-        router,
-        infra_http::webhooks::WebhookState::active(receiver(pool.clone())),
-    )
-    .with_state(readiness_reader());
+    let app = infra_http::finalize_public(infra_http::webhooks::router())
+        .expect("webhook operation is public")
+        .with_state(infra_http::webhooks::WebhookState::active(receiver(
+            pool.clone(),
+        )));
     let response = TestServer::new(app)
         .post("/webhooks/partner%2Fa%3F%23")
         .add_header("webhook-id", "message-decoded")
@@ -728,11 +725,11 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt as _;
 
-    let app = infra_http::webhooks::with_webhook_state(
-        infra_http::finalize_public(infra_http::webhooks::router()).expect("public contract"),
-        infra_http::webhooks::WebhookState::active(receiver(pool.clone())),
-    )
-    .with_state(readiness_reader());
+    let app = infra_http::finalize_public(infra_http::webhooks::router())
+        .expect("public contract")
+        .with_state(infra_http::webhooks::WebhookState::active(receiver(
+            pool.clone(),
+        )));
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
     for (id, body, content_type, status) in [
         (
@@ -1001,17 +998,4 @@ async fn receipt_migration_uses_actual_index_admission_and_rolls_back_oversized_
         .fetch_one(&pool).await.expect("incompressible historical identity");
     historical_receipt(&pool, 1, ENDPOINT, &wide).await;
     assert_receipt_migration_rollback(&pool, "54000").await;
-}
-
-/// Router state only: these tests never read the readiness verdict.
-fn readiness_reader() -> health::ReadinessReader {
-    Readiness::new(
-        Vec::new(),
-        RefreshPolicy {
-            interval: Duration::from_secs(1),
-            probe_budget: Duration::from_secs(1),
-            failure_threshold: 1,
-        },
-    )
-    .reader()
 }

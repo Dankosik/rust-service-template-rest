@@ -20,6 +20,7 @@
       "crates/migrate/",
       "migrations/",
       "crates/config/src/postgres.rs",
+      "crates/service/src/bootstrap/postgres.rs",
       "test/tests/postgres.rs",
       "test/tests/support/commit_proxy.rs",
       "test/fixtures/migrations/",
@@ -128,7 +129,7 @@
         "path": "crates/config/src/observability.rs",
         "id": "otel-postgres-application-name-doc"
       },
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-imports", "bootstrap-errors", "bootstrap-postgres-histograms", "bootstrap-postgres-startup", "bootstrap-open-postgres", "bootstrap-startup-log-postgres"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-errors", "bootstrap-postgres-histograms", "bootstrap-postgres-startup", "bootstrap-startup-log-postgres", "bootstrap-postgres-module"]},
       {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["shutdown-imports", "shutdown-dependencies-postgres-field", "shutdown-dependencies-postgres-destructure", "shutdown-dependencies-postgres-close"]},
       {
         "path": ".github/workflows/ci.yml",
@@ -257,6 +258,7 @@
       "crates/infra-bearerauthn/",
       "crates/config/src/authn.rs",
       "crates/infra-http/src/authn.rs",
+      "crates/service/src/bootstrap/authn.rs",
       "docs/authentication.md"
     ],
     "markers": [
@@ -268,12 +270,12 @@
       {"path": "crates/infra-http/src/problem.rs", "ids": ["http-authentication-code-meta", "http-authentication-problem-responses", "http-authentication-problem-components"]},
       {"path": "crates/service-failure/src/lib.rs", "ids": ["http-authentication-codes"]},
       {"path": "crates/infra-grpc/src/status.rs", "ids": ["grpc-authentication-status"]},
-      {"path": "crates/service/Cargo.toml", "ids": ["service-authn-dependency", "service-authn-test-dependencies"]},
+      {"path": "crates/service/Cargo.toml", "ids": ["service-authn-dependency"]},
       {"path": "crates/infra-grpc/Cargo.toml", "ids": ["grpc-bearer-dependency", "grpc-bearer-test-dependency"]},
       {"path": "crates/infra-grpc/src/router.rs", "ids": ["grpc-services-scopes-field", "grpc-services-require-scopes", "grpc-router-verifier", "grpc-router-authenticate", "grpc-authenticate"]},
       {"path": "crates/infra-grpc/tests/transport.rs", "ids": ["grpc-transport-test-auth-time", "grpc-transport-test-auth-imports", "grpc-transport-test-auth-secret", "grpc-transport-test-auth-listener", "grpc-transport-test-auth-io", "grpc-transport-test-auth-tls-acceptor", "grpc-transport-test-accepted-token", "grpc-transport-test-seen-identity-field", "grpc-transport-test-seen-principal", "grpc-transport-test-auth-provider-field", "grpc-transport-test-auth-fixture", "grpc-transport-test-scope-requirement", "grpc-transport-test-router-verifier", "grpc-transport-test-auth-provider-init", "grpc-transport-test-auth-provider-stop", "grpc-transport-test-bearer", "grpc-transport-test-watch-bearer", "grpc-transport-test-seen-identity-assert", "grpc-transport-test-unauthenticated", "grpc-transport-test-insufficient-scope", "grpc-transport-test-rejection-flood", "grpc-transport-test-deadline-bearer", "grpc-transport-test-auth-provider", "grpc-transport-test-auth-ca-der", "grpc-transport-test-auth-ca-der-init"]},
       {"path": "crates/service/src/api.rs", "ids": ["service-api-authn-imports", "service-api-authn-document-security", "service-api-authn-security-scheme", "service-api-protected-test-route"]},
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-authn-imports", "bootstrap-authn-config-import", "bootstrap-authn-errors", "bootstrap-authn-prepare", "bootstrap-authn-finalize-enabled", "bootstrap-prepare-auth-prefix", "bootstrap-prepare-auth-suffix", "bootstrap-auth-provider-url", "bootstrap-prepared-auth-enabled"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-authn-errors", "bootstrap-authn-prepare", "bootstrap-authn-finalize-enabled", "bootstrap-prepared-auth-enabled", "bootstrap-authn-module"]},
       {"path": "crates/service/tests/lifecycle.rs", "ids": ["service-lifecycle-disabled-authn"]},
       {"path": "crates/service/tests/openapi.rs", "ids": ["service-openapi-authn-contract"]},
       {"path": "env/config/local.toml", "ids": ["local-config-section"]},
@@ -302,7 +304,7 @@
       {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-jwt-dependency"]},
       {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-get-json", "authn-provider-tls-bounds-test", "authn-provider-issuer-url"]},
       {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-jwt-module", "authn-refresh-module", "authn-jwt-prepare-export", "authn-jwt-reasons", "authn-jwt-reason-labels", "authn-jwt-engine", "authn-jwt-verifier", "authn-jwt-verify"]},
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-prepare-auth-jwt", "bootstrap-auth-jwt-algorithm-import", "bootstrap-auth-jwt-algorithm-converter"]},
+      {"path": "crates/service/src/bootstrap/authn.rs", "ids": ["bootstrap-prepare-auth-jwt", "bootstrap-auth-jwt-algorithm-import", "bootstrap-auth-jwt-algorithm-converter"]},
       {"path": "docs/authentication.md", "ids": ["authentication-jwt"]},
       {"path": "docs/architecture/integration.md", "ids": ["docs-integration-jwt"]},
       {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-jwt-refresh"]},
@@ -321,7 +323,7 @@
       {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-secret-dependency"]},
       {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-post-form-json", "authn-provider-post-form-tls-test"]},
       {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-introspection-module", "authn-introspection-prepare-export", "authn-test-support-introspection-prepare", "authn-introspection-reasons", "authn-introspection-reason-labels", "authn-retained-payload", "authn-introspection-engine", "authn-introspection-verifier", "authn-introspection-verify"]},
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-prepare-auth-introspection", "bootstrap-introspection-cache-tests"]},
+      {"path": "crates/service/src/bootstrap/authn.rs", "ids": ["bootstrap-prepare-auth-introspection", "bootstrap-introspection-cache-tests"]},
       {"path": "env/config/local.toml", "ids": ["local-config-introspection-inputs"]},
       {"path": "docs/authentication.md", "ids": ["authentication-introspection"]},
       {"path": "docs/architecture/integration.md", "ids": ["docs-integration-introspection"]},
@@ -429,7 +431,7 @@
     },
     {
       "path": "README.md",
-      "old": "OpenAPI-first Rust HTTP service on Tokio and axum.",
+      "old": "Rust HTTP service on Tokio and axum with a code-first OpenAPI contract.",
       "template": "{description}",
       "count": 1,
       "encoding": "markdown"
@@ -1001,6 +1003,7 @@
     "remove_when_unselected": [
       "crates/infra-idempotency-store/",
       "crates/infra-http/src/idempotency/",
+      "crates/service/src/bootstrap/idempotency.rs",
       "crates/config/src/http_idempotency.rs",
       "migrations/20260923000001_create_http_idempotency_records.sql",
       "migrations/20260928190000_compress_http_idempotency_bodies_with_lz4.sql",
@@ -1017,8 +1020,8 @@
       {"path": "crates/config/src/lib.rs", "ids": ["config-http-idempotency-module", "config-http-idempotency-export", "config-http-idempotency-field", "config-http-idempotency-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-http-idempotency-environment"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-http-idempotency-dependency"]},
-      {"path": "crates/service/src/api.rs", "ids": ["service-api-http-idempotency-import", "service-api-contract-composer", "service-api-idempotency-components", "service-api-document-composer", "service-api-idempotent-test-route"]},
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-http-idempotency-imports", "bootstrap-http-idempotency-errors", "bootstrap-http-idempotency-composer", "bootstrap-http-idempotency-contract-composer", "bootstrap-http-idempotency-activation", "bootstrap-http-idempotency-functions", "bootstrap-http-idempotency-tests"]},
+      {"path": "crates/service/src/api.rs", "ids": ["service-api-http-idempotency-import", "service-api-contract-composer", "service-api-idempotency-components", "service-api-document-composer", "service-api-idempotent-test-route", "service-api-contract-error-idempotency"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-http-idempotency-errors", "bootstrap-http-idempotency-composer", "bootstrap-http-idempotency-contract-composer", "bootstrap-http-idempotency-activation", "bootstrap-http-idempotency-module"]},
       {"path": "crates/service/tests/openapi.rs", "ids": ["service-openapi-http-idempotency-contract"]},
       {"path": "test/Cargo.toml", "ids": ["test-http-idempotency-dependencies"]},
       {"path": "test/README.md", "ids": ["test-readme-http-idempotency"]},
@@ -1159,8 +1162,7 @@
     "markers": [
       {"path": "env/docker-compose.yml", "ids": ["compose-file"]},
       {"path": ".github/dependabot.yml", "ids": ["dependabot-compose"]},
-      {"path": ".github/workflows/ci.yml", "ids": ["ci-integration-job", "ci-required-integration-need"]},
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-postgres-secret-import"]}
+      {"path": ".github/workflows/ci.yml", "ids": ["ci-integration-job", "ci-required-integration-need"]}
     ]
   },
   "jobs-messaging": {
@@ -1386,6 +1388,7 @@
     "remove_when_unselected": [
       "crates/config/src/inbound_webhooks.rs",
       "crates/infra-http/src/webhooks.rs",
+      "crates/service/src/bootstrap/webhooks.rs",
       "crates/infra-webhooks/src/inbound.rs",
       "migrations/20260926022945_create_webhook_receipts.sql",
       "migrations/20260926130000_native_webhook_receipts.sql",
@@ -1455,7 +1458,8 @@
           "service-api-webhooks-tag"
         ]
       },
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-webhooks-imports", "bootstrap-webhooks-errors", "bootstrap-webhooks-prepare", "bootstrap-webhooks-route-state", "bootstrap-webhooks-constructor"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-webhooks-errors", "bootstrap-webhooks-prepare", "bootstrap-webhooks-route-state", "bootstrap-webhooks-module"]},
+      {"path": "crates/service/src/state.rs", "ids": ["service-state-webhooks-import", "service-state-webhooks-field", "service-state-webhooks-from-ref"]},
       {
         "path": "crates/service/tests/lifecycle.rs",
         "ids": [
@@ -1577,6 +1581,7 @@
     "remove_when_unselected": [
       "crates/infra-cache/",
       "crates/config/src/cache.rs",
+      "crates/service/src/bootstrap/cache.rs",
       "scripts/ci/test-integration-cache.sh",
       "docs/cache.md",
       "docs/cache-decisions.md"
@@ -1586,7 +1591,7 @@
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-cache-environment"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-cache-dependency"]},
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["service-bootstrap-cache-imports", "service-bootstrap-cache-startup-budget", "service-bootstrap-cache-errors", "service-bootstrap-cache-startup", "service-bootstrap-cache-functions", "service-bootstrap-cache-histogram"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["service-bootstrap-cache-errors", "service-bootstrap-cache-startup", "service-bootstrap-cache-histogram", "service-bootstrap-cache-module"]},
       {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["service-shutdown-cache-imports", "service-shutdown-dependencies-cache-field", "service-shutdown-dependencies-cache-destructure", "service-shutdown-dependencies-cache-close"]},
       {"path": "crates/service/tests/lifecycle.rs", "ids": ["service-cache-lifecycle-admission"]},
       {"path": "env/config/local.toml", "ids": ["local-config"]},
@@ -1619,6 +1624,7 @@
     "remove_when_unselected": [
       "crates/infra-object-storage/",
       "crates/config/src/object_storage.rs",
+      "crates/service/src/bootstrap/object_storage.rs",
       "scripts/ci/test-integration-object-storage.sh",
       "docs/object-storage.md",
       "docs/object-storage-decisions.md"
@@ -1628,7 +1634,7 @@
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-object-storage-environment"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-object-storage-dependency"]},
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["service-bootstrap-object-storage-imports", "service-bootstrap-object-storage-errors", "service-bootstrap-object-storage-histogram", "service-bootstrap-object-storage-startup", "service-bootstrap-object-storage-functions"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["service-bootstrap-object-storage-errors", "service-bootstrap-object-storage-histogram", "service-bootstrap-object-storage-startup", "service-bootstrap-object-storage-module"]},
       {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["service-shutdown-object-storage-imports", "service-shutdown-dependencies-object-storage-field", "service-shutdown-dependencies-object-storage-destructure", "service-shutdown-dependencies-object-storage-close"]},
       {"path": "crates/service/tests/lifecycle.rs", "ids": ["service-object-storage-lifecycle-admission"]},
       {"path": "crates/infra-telemetry/src/logging.rs", "ids": ["telemetry-sdk-log-cap", "telemetry-sdk-log-cap-apply", "telemetry-sdk-log-cap-test"]},

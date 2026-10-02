@@ -228,6 +228,44 @@ fn production_plaintext_cache_dsn_exits_before_the_listener() {
         "startup must refuse plaintext before the listener: {stderr}"
     );
 }
+
+#[test]
+fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
+    // Accepts the connection and never answers, so the cache startup check
+    // holds startup for its whole bound.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("silent listener");
+    let port = silent.local_addr().expect("silent listener").port();
+    let dsn = format!("redis://127.0.0.1:{port}");
+    let service = Service::spawn(&[
+        ("APP__APP__ENV", "local"),
+        ("APP__CACHE__DSN", &dsn),
+        ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
+        ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
+        ("APP__CACHE__COMMAND_TIMEOUT", "1s"),
+    ]);
+    service.await_record("service_starting");
+    service.terminate();
+    let mut messages = Vec::new();
+    while let Ok(line) = service.lines.recv_timeout(Duration::from_secs(20)) {
+        let record: serde_json::Value = serde_json::from_str(&line).expect("JSON log record");
+        messages.push(record["message"].as_str().unwrap_or_default().to_owned());
+    }
+    let (code, stderr) = service.wait();
+    drop(silent);
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "shutdown_completed"),
+        "{messages:?}"
+    );
+    for skipped in ["http listener bound", "service_ready", "readiness_disabled"] {
+        assert!(
+            !messages.iter().any(|message| message == skipped),
+            "a stopped startup must not reach {skipped:?}: {messages:?}"
+        );
+    }
+}
 // template:end cache:service-cache-lifecycle-admission
 
 // template:begin object-storage:service-object-storage-lifecycle-admission

@@ -27,7 +27,7 @@ keep its endpoint, credentials, response reserve, parsing and business errors
 there. Read the inbound deadline and pass it to `Client::execute` rather
 than starting a fresh request budget. The adapter builds a standard
 `http::Request<bytes::Bytes>` and awaits the exchange; bootstrap supplies no
-tracker or cancellation token to this library-owned resolver/pool work.
+task set or cancellation token to this library-owned resolver/pool work.
 <!-- template:end outbound-http:docs-first-feature-outbound -->
 <!-- template:begin http-idempotency:docs-first-feature-http-idempotency -->
 For an operation that must commit its business effect at most once per
@@ -245,21 +245,71 @@ the document, and one `.merge`:
 )]
 struct ApiDoc;
 
-pub fn contract() -> OpenApiRouter<ReadinessReader> {
+pub fn contract() -> Result<OpenApiRouter<AppState>, ContractError> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(infra_http::router())
         .merge(greeting::http::router())
 }
 ```
 
+(The body is abridged: the retained `contract` ends in `Ok(..)`.)
+
+### A feature that needs a dependency
+
+The greeting needs nothing from the process, so its router accepts any state.
+A feature that reads a pool, a cache, or an outbound client names its own
+state type and asks the router's state to hand it out:
+
+```rust
+// crates/orders/src/http.rs
+#[derive(Clone)]
+pub struct Orders { /* the feature's repository or port */ }
+
+pub fn router<S>() -> OpenApiRouter<S>
+where
+    Orders: FromRef<S>,
+    S: Clone + Send + Sync + 'static,
+{
+    OpenApiRouter::with_openapi(utoipa::openapi::OpenApi::default())
+        .routes(utoipa_axum::routes!(create_order))
+}
+
+async fn create_order(State(orders): State<Orders>, /* … */) -> OrderResponse { /* … */ }
+```
+
+`crates/service/src/state.rs` gains one field and its `FromRef` impl, and
+bootstrap builds the value in `start`, where the opened dependencies are in
+scope:
+
+```rust
+// crates/service/src/state.rs
+pub struct AppState {
+    pub readiness: ReadinessReader,
+    pub orders: orders::http::Orders,
+}
+
+impl FromRef<AppState> for orders::http::Orders {
+    fn from_ref(state: &AppState) -> Self {
+        state.orders.clone()
+    }
+}
+```
+
+A dependency the feature cannot serve without is a startup refusal that names
+its configuration key, not an `Option` the handler unwraps. The retained
+probe and webhook routers take their state the same way. Use `State`, not
+`Extension`: a route merged without its field does not compile, where a
+missing extension answers `500` at the first request. The document-only path
+(`make openapi-generate`) never builds the state, so it needs no dependency.
+
 <!-- template:begin http-idempotency:docs-first-feature-http-idempotency-contract -->
 With the idempotency pack retained, `contract` also takes the idempotency
-composer: `pub fn contract(idempotency: &mut infra_http::idempotency::Composer) -> Result<OpenApiRouter<ReadinessReader>, Box<dyn Error + Send + Sync>>`,
+composer: `pub fn contract(idempotency: &mut infra_http::idempotency::Composer) -> Result<OpenApiRouter<AppState>, ContractError>`,
 merging components with
 `.merge(OpenApiRouter::with_openapi(idempotency.components()))` and composing an
 idempotent operation with
 `.routes(idempotency.route(utoipa_axum::routes!(handler))?)` instead of a plain
-`.merge`. Propagate `CompositionError` through the existing assembly error path and call
+`.merge`. `?` converts `CompositionError` into `ContractError`; call
 `finish` once after every route is composed.
 <!-- template:end http-idempotency:docs-first-feature-http-idempotency-contract -->
 

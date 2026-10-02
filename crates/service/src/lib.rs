@@ -6,6 +6,8 @@
 pub mod api;
 
 mod bootstrap;
+mod state;
+pub use state::AppState;
 // template:begin grpc:service-registration-module
 mod grpc;
 pub use grpc::GrpcRegistration;

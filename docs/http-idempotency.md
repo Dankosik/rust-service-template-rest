@@ -47,7 +47,7 @@ may be refused by the current authorization policy just as a first attempt may.
 async fn create_widget(
     idempotency: Idempotency,
     principal: VerifiedPrincipal,
-    Extension(widgets): Extension<Arc<dyn CreateWidgets>>,
+    State(widgets): State<Arc<dyn CreateWidgets>>,
     Json(input): Json<NewWidget>,
 ) -> Response {
     if !may_create(&principal) { return forbidden(); }
