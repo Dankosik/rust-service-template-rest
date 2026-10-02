@@ -656,22 +656,48 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
     fixture.cleanup().await;
 }
 
-/// Installs one process-wide OpenTelemetry layer; a delivery runs in its own task.
-fn install_tracing() {
+/// Installs one process-wide OpenTelemetry layer; a delivery runs in its own
+/// task. Returns the exporter that keeps every finished span of the process.
+fn install_tracing() -> &'static opentelemetry_sdk::trace::InMemorySpanExporter {
     use opentelemetry::trace::TracerProvider as _;
     use tracing_subscriber::layer::SubscriberExt as _;
 
-    static INSTALLED: std::sync::Once = std::sync::Once::new();
-    INSTALLED.call_once(|| {
+    static EXPORTER: std::sync::OnceLock<opentelemetry_sdk::trace::InMemorySpanExporter> =
+        std::sync::OnceLock::new();
+    EXPORTER.get_or_init(|| {
         opentelemetry::global::set_text_map_propagator(
             opentelemetry_sdk::propagation::TraceContextPropagator::new(),
         );
-        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
         let subscriber = tracing_subscriber::registry()
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
         tracing::subscriber::set_global_default(subscriber)
             .expect("no other test installs a subscriber");
-    });
+        exporter
+    })
+}
+
+/// The exported spans named `name`; a fixture's subject makes the name unique.
+fn exported_spans(
+    exporter: &opentelemetry_sdk::trace::InMemorySpanExporter,
+    name: &str,
+) -> Vec<opentelemetry_sdk::trace::SpanData> {
+    exporter
+        .get_finished_spans()
+        .expect("in-memory exporter is readable")
+        .into_iter()
+        .filter(|span| span.name == name)
+        .collect()
+}
+
+fn attribute(span: &opentelemetry_sdk::trace::SpanData, key: &str) -> Option<String> {
+    span.attributes
+        .iter()
+        .find(|attribute| attribute.key.as_str() == key)
+        .map(|attribute| attribute.value.as_str().into_owned())
 }
 
 fn trace_id(span: &tracing::Span) -> opentelemetry::trace::TraceId {
@@ -685,7 +711,7 @@ fn trace_id(span: &tracing::Span) -> opentelemetry::trace::TraceId {
 async fn handler_runs_in_the_trace_of_the_publication() {
     use tracing::Instrument as _;
 
-    install_tracing();
+    let exporter = install_tracing();
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
@@ -739,12 +765,44 @@ async fn handler_runs_in_the_trace_of_the_publication() {
         .finish(deadline())
         .await
         .expect("bounded consumer drain must join its pull task");
+    // The exported names are low-cardinality: the subject of a publication
+    // and the durable's filter for a delivery.
+    for (name, kind, operation) in [
+        (
+            format!("publish {}", fixture.subject),
+            opentelemetry::trace::SpanKind::Producer,
+            "publish",
+        ),
+        (
+            format!("process {}", fixture.subject),
+            opentelemetry::trace::SpanKind::Consumer,
+            "process",
+        ),
+    ] {
+        let spans = exported_spans(exporter, &name);
+        assert_eq!(spans.len(), 1, "{name}");
+        let span = &spans[0];
+        assert_eq!(span.span_context.trace_id(), observed, "{name}");
+        assert_eq!(span.span_kind, kind, "{name}");
+        assert_eq!(
+            attribute(span, "messaging.operation.name").as_deref(),
+            Some(operation)
+        );
+        assert_eq!(attribute(span, "error.type"), None, "{name}");
+        assert_eq!(span.status, opentelemetry::trace::Status::Unset, "{name}");
+    }
+    let process = &exported_spans(exporter, &format!("process {}", fixture.subject))[0];
+    assert_eq!(
+        attribute(process, "messaging.destination.template").as_deref(),
+        Some(fixture.subject.as_str())
+    );
     close(messaging).await;
     fixture.cleanup().await;
 }
 
 #[tokio::test]
 async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked() {
+    let exporter = install_tracing();
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
@@ -805,6 +863,29 @@ async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked(
         .finish(deadline())
         .await
         .expect("bounded consumer drain must join its pull task");
+    // The failed attempt's span is an error named by its closed outcome.
+    let deliveries = exported_spans(exporter, &format!("process {}", fixture.subject));
+    let outcomes: Vec<_> = deliveries
+        .iter()
+        .map(|span| {
+            (
+                attribute(span, "outcome"),
+                attribute(span, "error.type"),
+                matches!(span.status, opentelemetry::trace::Status::Error { .. }),
+            )
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            (
+                Some("retryable".to_owned()),
+                Some("retryable".to_owned()),
+                true
+            ),
+            (Some("success".to_owned()), None, false),
+        ]
+    );
     close(messaging).await;
     fixture.cleanup().await;
 }
@@ -1330,6 +1411,61 @@ async fn consumer_reconciles_its_named_durable_without_stream_administration() {
         .finish(deadline())
         .await
         .expect("empty durable consumer drains within the shared deadline");
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct PublishedElsewhere;
+
+impl EventPayload for PublishedElsewhere {
+    const EVENT_TYPE: &'static str = "test.example.published_elsewhere";
+    const SCHEMA_VERSION: u16 = 1;
+}
+
+#[tokio::test]
+async fn consumer_admission_checks_the_filter_for_handled_subjects_only() {
+    let fixture = Fixture::create(true).await;
+    let cancel = CancellationToken::new();
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer_options(&fixture)), 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect("fixture source stream is admitted");
+    let routes = || {
+        Registry::new([
+            Route::new::<ExampleEvent>(fixture.subject.clone()),
+            Route::new::<PublishedElsewhere>("elsewhere.published"),
+        ])
+        .expect("fixture routes are valid")
+    };
+
+    // The process only publishes `PublishedElsewhere`; its durable need not
+    // select that subject.
+    let mut publishes_elsewhere = routes();
+    publishes_elsewhere
+        .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
+        .expect("fixture handler is registered");
+    messaging
+        .consumer(publishes_elsewhere)
+        .await
+        .expect("a publish-only route outside the filter does not refuse the consumer");
+
+    let mut handles_elsewhere = routes();
+    handles_elsewhere
+        .register::<PublishedElsewhere, _, _>(|_, _| async { Ok(()) })
+        .expect("fixture handler is registered");
+    let refused = messaging
+        .consumer(handles_elsewhere)
+        .await
+        .expect_err("a handler the filter can never reach refuses the consumer");
+    assert!(
+        matches!(refused, infra_messaging::MessagingError::Configuration(_)),
+        "{refused:?}"
+    );
+
     close(messaging).await;
     fixture.cleanup().await;
 }

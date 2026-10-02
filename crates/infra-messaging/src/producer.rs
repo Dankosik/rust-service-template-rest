@@ -69,11 +69,15 @@ impl Producer {
         let started = Instant::now();
         let span = tracing::info_span!(
             "messaging_publish",
+            otel.name = format!("publish {}", event.subject),
             otel.kind = "producer",
             messaging.system = "nats",
             messaging.operation.type = "send",
+            messaging.operation.name = "publish",
             messaging.destination.name = event.subject.as_str(),
             outcome = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
         );
         let result = if self.shared.draining.load(Ordering::Acquire)
             || self.shared.failed.load(Ordering::Acquire)
@@ -106,6 +110,8 @@ impl Producer {
         } as usize;
         span.record("outcome", PUBLISH_RESULTS[outcome]);
         if result.is_err() {
+            span.record("error.type", PUBLISH_RESULTS[outcome]);
+            span.record("otel.status_code", "ERROR");
             span.in_scope(|| {
                 tracing::warn!(
                     subject = event.subject.as_str(),

@@ -2569,6 +2569,7 @@ dependencies = [
  "infra-jobs",
  "infra-postgres",
  "metrics",
+ "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry_sdk",
  "secrecy",

@@ -19,7 +19,8 @@ use tracing::Instrument as _;
 
 use crate::error::{HandlerError, MessagingError};
 use crate::messaging::{
-    BROKER_OPERATION_BUDGET, ConsumerOptions, Shared, get_stream_failure, topology_failure,
+    BROKER_OPERATION_BUDGET, ConsumerOptions, Outcomes, Shared, get_stream_failure,
+    topology_failure,
 };
 use crate::producer::publish;
 use crate::registry::Registry;
@@ -89,8 +90,63 @@ pub struct ConsumerHandle {
 struct Delivery {
     shared: Arc<Shared>,
     registry: Registry,
+    metrics: HandlerMetrics,
+    /// The durable's filter: the low-cardinality name of what it processes.
+    filter_subject: String,
+    /// `process <filter>`, the exported name of every delivery span.
+    span_name: String,
     dlq_subject: String,
     dlq_stream: String,
+}
+
+/// `event_type` label of a delivery whose type has no registered handler,
+/// including a malformed envelope. Its own header text is publisher-chosen
+/// and never becomes a label.
+const UNREGISTERED: &str = "unregistered";
+
+/// Handler outcome metrics of one event type.
+#[derive(Debug)]
+struct EventMetrics {
+    event_type: &'static str,
+    outcomes: Outcomes<5>,
+}
+
+/// Handler outcome metrics per handled event type, so an operator can tell
+/// which one fails or runs slowly. The label values are the payload types'
+/// constants, a set closed at admission; schema versions of one type share
+/// its label.
+#[derive(Debug)]
+struct HandlerMetrics {
+    registered: foldhash::HashMap<&'static str, EventMetrics>,
+    unregistered: EventMetrics,
+}
+
+impl HandlerMetrics {
+    fn register(registry: &Registry) -> Self {
+        let event = |event_type| EventMetrics {
+            event_type,
+            outcomes: Outcomes::register(
+                "messaging_handler_total",
+                "messaging_handler_duration_seconds",
+                "outcome",
+                OUTCOME_LABELS,
+                Some(event_type),
+            ),
+        };
+        Self {
+            registered: registry
+                .handled()
+                .map(|((event_type, _), _)| (event_type, event(event_type)))
+                .collect(),
+            unregistered: event(UNREGISTERED),
+        }
+    }
+
+    fn get(&self, event_type: &str) -> &EventMetrics {
+        self.registered
+            .get(event_type)
+            .unwrap_or(&self.unregistered)
+    }
 }
 
 /// How one handler invocation ended. The discriminant indexes [`OUTCOME_LABELS`].
@@ -113,12 +169,13 @@ impl Consumer {
         options: ConsumerOptions,
         registry: Registry,
     ) -> Result<Self, MessagingError> {
+        // A route without a handler is publish-only and need not be consumed.
         if registry
-            .subjects()
-            .any(|subject| !wire::subject_matches(&options.filter_subject, subject))
+            .handled()
+            .any(|(_, subject)| !wire::subject_matches(&options.filter_subject, subject))
         {
             return Err(MessagingError::Configuration(
-                "registered subject is outside the consumer filter",
+                "handled subject is outside the consumer filter",
             ));
         }
         let dlq_stream = shared.dlq_stream.clone().ok_or(MessagingError::Topology)?;
@@ -164,7 +221,10 @@ impl Consumer {
             concurrency: options.concurrency,
             delivery: Arc::new(Delivery {
                 shared,
+                metrics: HandlerMetrics::register(&registry),
                 registry,
+                span_name: format!("process {}", options.filter_subject),
+                filter_subject: options.filter_subject,
                 dlq_subject: options.dlq_subject,
                 dlq_stream,
             }),
@@ -216,7 +276,10 @@ impl Consumer {
             .heartbeat(PULL_HEARTBEAT)
             .messages()
             .await
-            .map_err(|_| ConsumerError::Start)?;
+            .map_err(|error| {
+                tracing::warn!(error.kind = %error.kind(), "messaging pull stream could not start");
+                ConsumerError::Start
+            })?;
         let stop = &stop;
         let admitted = futures_util::stream::unfold(Some(messages), |messages| async move {
             let mut messages = messages?;
@@ -322,22 +385,32 @@ impl Delivery {
             wire::decode_envelope(message.subject.as_ref(), headers, message.payload.clone())
         };
         let Ok(envelope) = envelope else {
-            return self.dead_letter(&message, "malformed", &cancel).await;
+            return self
+                .dead_letter(&message, "malformed", UNREGISTERED, &cancel)
+                .await;
         };
+        let metrics = self.metrics.get(envelope.event_type());
         if delivered > MAX_DELIVERIES {
-            return self.dead_letter(&message, "exhausted", &cancel).await;
+            return self
+                .dead_letter(&message, "exhausted", metrics.event_type, &cancel)
+                .await;
         }
 
         let span = tracing::info_span!(
             "messaging_process",
+            otel.name = self.span_name.as_str(),
             otel.kind = "consumer",
             messaging.system = "nats",
             messaging.operation.type = "process",
+            messaging.operation.name = "process",
             messaging.destination.name = message.subject.as_str(),
+            messaging.destination.template = self.filter_subject.as_str(),
             outcome = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
         );
         crate::trace::set_remote_parent(&span, headers);
-        self.process(&message, envelope, delivered, &cancel)
+        self.process(&message, envelope, metrics, delivered, &cancel)
             .instrument(span)
             .await;
     }
@@ -347,6 +420,7 @@ impl Delivery {
         &self,
         message: &Message,
         envelope: wire::InboundEnvelope,
+        metrics: &EventMetrics,
         delivered: usize,
         cancel: &CancellationToken,
     ) {
@@ -364,23 +438,29 @@ impl Delivery {
                 Ok(Err(_)) => Outcome::Panicked,
                 Err(_) => Outcome::TimedOut,
             };
-        self.shared
-            .handler_metrics
-            .record(outcome as usize, started.elapsed());
+        metrics.outcomes.record(outcome as usize, started.elapsed());
+        let event_type = metrics.event_type;
         let label = OUTCOME_LABELS[outcome as usize];
-        tracing::Span::current().record("outcome", label);
+        let span = tracing::Span::current();
+        span.record("outcome", label);
+        if !matches!(outcome, Outcome::Success) {
+            span.record("error.type", label);
+            span.record("otel.status_code", "ERROR");
+        }
         // The cause stays with the handler, which logs it inside this span;
         // the adapter reports only its closed outcome vocabulary.
         match outcome {
             Outcome::Success => {}
             Outcome::Panicked => tracing::error!(
                 subject = message.subject.as_str(),
+                event_type,
                 attempt = delivered,
                 outcome = label,
                 "messaging_delivery_failed"
             ),
             _ => tracing::warn!(
                 subject = message.subject.as_str(),
+                event_type,
                 attempt = delivered,
                 outcome = label,
                 "messaging_delivery_failed"
@@ -389,9 +469,13 @@ impl Delivery {
 
         match outcome {
             Outcome::Success => acknowledge(&self.shared.client, message).await,
-            Outcome::Permanent => self.dead_letter(message, "permanent", cancel).await,
+            Outcome::Permanent => {
+                self.dead_letter(message, "permanent", event_type, cancel)
+                    .await;
+            }
             _ if delivered >= MAX_DELIVERIES => {
-                self.dead_letter(message, "exhausted", cancel).await;
+                self.dead_letter(message, "exhausted", event_type, cancel)
+                    .await;
             }
             _ => {
                 let delay = RETRY_DELAYS
@@ -409,6 +493,7 @@ impl Delivery {
         &self,
         source: &Message,
         reason: &'static str,
+        event_type: &'static str,
         cancel: &CancellationToken,
     ) {
         let empty = HeaderMap::new();
@@ -462,12 +547,22 @@ impl Delivery {
             Err(crate::PublishError::Ambiguous) => "ambiguous",
             Err(crate::PublishError::Rejected) => "rejected",
         };
-        metrics::counter!("messaging_dead_letter_total", "reason" => reason, "outcome" => outcome)
-            .increment(1);
+        metrics::counter!(
+            "messaging_dead_letter_total",
+            "event_type" => event_type,
+            "reason" => reason,
+            "outcome" => outcome
+        )
+        .increment(1);
         if result.is_ok() {
             acknowledge(&self.shared.client, source).await;
         } else {
-            tracing::error!(reason, outcome, "messaging dead-letter transfer failed");
+            tracing::error!(
+                event_type,
+                reason,
+                outcome,
+                "messaging dead-letter transfer failed"
+            );
             redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
         }
     }
@@ -571,7 +666,64 @@ impl Drop for ConsumerHandle {
     reason = "test controls the task and all completion signals"
 )]
 mod tests {
+    use domain_events::EventPayload;
+
     use super::*;
+    use crate::registry::Route;
+
+    #[derive(serde::Deserialize)]
+    struct Created;
+
+    impl EventPayload for Created {
+        const EVENT_TYPE: &'static str = "order.created";
+        const SCHEMA_VERSION: u16 = 1;
+    }
+
+    struct Shipped;
+
+    impl EventPayload for Shipped {
+        const EVENT_TYPE: &'static str = "order.shipped";
+        const SCHEMA_VERSION: u16 = 1;
+    }
+
+    #[test]
+    fn handler_metrics_carry_handled_event_types_and_no_publisher_chosen_text() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        metrics::with_local_recorder(&recorder, || {
+            let mut registry = Registry::new([
+                Route::new::<Created>("orders.created"),
+                Route::new::<Shipped>("orders.shipped"),
+            ])
+            .unwrap();
+            registry
+                .register::<Created, _, _>(|_, _| async { Ok(()) })
+                .unwrap();
+            let metrics = HandlerMetrics::register(&registry);
+
+            let handled = metrics.get("order.created");
+            assert_eq!(handled.event_type, "order.created");
+            handled
+                .outcomes
+                .record(Outcome::Retryable as usize, Duration::from_millis(5));
+            // A routed type without a handler and a type no route knows.
+            for unhandled in ["order.shipped", "sentinel.publisher.chosen"] {
+                let metrics = metrics.get(unhandled);
+                assert_eq!(metrics.event_type, UNREGISTERED);
+                metrics
+                    .outcomes
+                    .record(Outcome::Permanent as usize, Duration::from_millis(5));
+            }
+        });
+
+        let scrape = recorder.handle().render();
+        for line in [
+            r#"messaging_handler_total{outcome="retryable",event_type="order.created"} 1"#,
+            r#"messaging_handler_total{outcome="permanent",event_type="unregistered"} 2"#,
+        ] {
+            assert!(scrape.contains(line), "{line} is missing from:\n{scrape}");
+        }
+        assert!(!scrape.contains("order.shipped") && !scrape.contains("sentinel"));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn expired_finish_retains_the_task_without_spending_cleanup_time() {
