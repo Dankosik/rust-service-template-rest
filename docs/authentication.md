@@ -173,7 +173,12 @@ are a string or an array that must name a configured value, `exp` is required,
 a numeric `exp`, `nbf` or `iat` may be fractional (RFC 7519 `NumericDate`) and
 is rounded, and lifetime is checked before issuer and audience. A test signs a
 corpus of claim shapes, payloads and compact forms and compares each decision
-with `jsonwebtoken::decode`; a header the library refuses never passes here. The payload is decoded and read once. `jsonwebtoken::decode` was
+with `jsonwebtoken::decode`; a header the library refuses never passes here.
+Two `proptest` properties extend that comparison to generated combinations of
+registered-claim shapes, in plain and `\u`-escaped spelling, and to payloads
+damaged at random positions. They found one difference, kept on purpose: a
+payload that is not valid UTF-8 is refused here (RFC 7519 section 7.2), while
+the library accepts one whose invalid bytes sit in a member it skips. The payload is decoded and read once. `jsonwebtoken::decode` was
 replaced because it rebuilds the aws-lc key on every call and parses the header
 three times and the payload three times; the direct path cut full RS256
 verification by about 40% (see

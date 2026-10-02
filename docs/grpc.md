@@ -56,7 +56,7 @@ counterpart has:
 
 ```toml
 [grpc]
-request_timeout = "8s"      # cap on a call's time to response headers
+request_timeout = "8s"      # cap on a call's time to response headers, authentication included
 max_in_flight = 256         # business calls at once; 0 never sheds
 max_connections = 4096      # accepted connections; 0 is unbounded
 max_connection_age = "30m"  # GOAWAY after this age; "0s" sets no age
@@ -145,7 +145,9 @@ services.add_reflection()?;
 `grpcurl`, `grpcui`, Postman and `buf curl` can then list and call the
 registered services, and health, without the schema files. It serves every
 described set, whether described before or after this call. It is
-`grpc.reflection.v1` from `tonic-reflection`, served as a business route: it
+`grpc.reflection.v1` and the `grpc.reflection.v1alpha` it replaced, both from
+`tonic-reflection`, as grpc-go registers both: older tools ask only for
+`v1alpha`. Both are served as business routes: reflection
 needs the same bearer as any application method and is limited and
 deadline-bound with them. It publishes the whole schema, comments included,
 to every authenticated caller, so add it only in the environments where
@@ -156,11 +158,21 @@ from a checkout.
 
 Outermost to innermost:
 
-1. Observation.
+1. Observation. It follows a call until its status is known; see
+   [Health, shutdown and observation](#health-shutdown-and-observation).
 2. Panic recovery, inside the observation layer. The response is `INTERNAL` / `request failed`. The payload
    goes to the process panic hook, which records it as an ERROR log record,
    as on HTTP.
-3. Business routes only: bearer authentication, when that profile is
+   A response stream that panics after its headers ends with the same
+   status in its trailers, instead of a reset stream.
+3. Business routes only: deadline `min(grpc-timeout, grpc.request_timeout)`,
+   measured until the handler returns response headers. Expiry is
+   `DEADLINE_EXCEEDED` / `request deadline exceeded`. A malformed
+   `grpc-timeout`, including more than eight digits, counts as absent and
+   `grpc.request_timeout` applies. The deadline is outside authentication,
+   so the time a verification takes is spent from the caller's budget, as
+   the HTTP request timer covers its authentication.
+4. Business routes only: bearer authentication, when that profile is
    retained. Health is outside it. Missing, malformed and invalid bearers are
    `UNAUTHENTICATED` / `authentication failed`. Provider unavailability is
    `UNAVAILABLE` / `authentication is unavailable`. A verified principal
@@ -168,18 +180,14 @@ Outermost to innermost:
    authentication outcome is counted
    in `authn_verifications_total{transport="grpc"}` by the same
    `Verifier::authenticate` the HTTP boundary uses.
-4. Business routes only: the `grpc.max_in_flight` concurrency limit, 256
+5. Business routes only: the `grpc.max_in_flight` concurrency limit, 256
    unless configured, and none at zero. A shed call is
    `RESOURCE_EXHAUSTED` / `server is at capacity` and increments
-   `grpc_server_shed_requests_total`. Health is outside this limit. A permit
+   `grpc_server_shed_requests_total`. Health is outside this limit. It is
+   innermost, so a call that failed authentication never holds a permit. A permit
    is held until response headers, so it bounds unary and client-streaming
    calls; server-streaming and bidi streams that are already open are bounded
    by the connection cap and the HTTP/2 stream limit instead.
-5. Business routes only: deadline `min(grpc-timeout, grpc.request_timeout)`,
-   measured until the handler returns response headers. Expiry is
-   `DEADLINE_EXCEEDED` / `request deadline exceeded`. A malformed
-   `grpc-timeout`, including more than eight digits, counts as absent and
-   `grpc.request_timeout` applies.
 
 An authentication failure or a shed call is answered after reading the rest
 of its request body, for at most 100 ms and 64 KiB. A caller sends request
@@ -191,7 +199,7 @@ with every other call on it.
 
 `grpc.request_timeout`, eight seconds unless configured, is tonic
 `Server::timeout` placement with a `DEADLINE_EXCEEDED` status. It is not a
-body-lifetime timer.
+body-lifetime timer. It starts before authentication.
 
 - Unary: the whole call, because the handler returns the response.
 - Client-streaming: the upload must finish and the handler must return within
@@ -316,7 +324,7 @@ connection. TLS uses tonic `ClientTlsConfig`: normal certificate and hostname
 verification, native roots unless a CA is supplied, and an optional
 `ClientIdentity` whose key is a `SecretString`. Unusable PEM input fails
 construction with the variant that names it. The server remains TLS 1.3-only; the client does not. Construction
-sets a 5 second connect timeout, a 60 second TCP keepalive, HTTP/2
+takes the client's timeout and sets a 5 second connect timeout, a 60 second TCP keepalive, HTTP/2
 keepalive at 60 seconds with a 20 second timeout, and adaptive receive
 windows. The keepalive PING is sent only while a call is open, and no more
 often than gRPC's keepalive guide asks of clients. A grpc-go, grpc-java or
@@ -325,15 +333,25 @@ answer a stream that stays silent for minutes with `GOAWAY too_many_pings`;
 such a server sets its `PermitWithoutStream`/`MinTime` policy for long quiet
 streams. Clones share the lazy channel and its metric handles.
 
-Set the call budget with tonic `Request::set_timeout`. That writes
-`grpc-timeout`, and tonic's channel ends the call when it runs out. The
-caller then gets `DEADLINE_EXCEEDED` / `request deadline exceeded`, never
-`UNAVAILABLE`: the server may still be running the call, so a caller that
-retries `UNAVAILABLE` must not repeat it. The server still applies
-`min(grpc-timeout, grpc.request_timeout)`.
+`Client::new(destination, security, timeout)` takes the longest wait for a
+call's response headers once the call is on the channel, so a call that sets
+no deadline of its own still ends. It is adapter policy, like the limits of the outbound HTTP client: pick
+it for the dependency. It bounds this side only and sends no `grpc-timeout`,
+so a response stream that has opened is not cut by it; a unary or
+client-streaming call is bounded whole, because its headers arrive with its
+answer.
+
+Set a call's own budget with tonic `Request::set_timeout`. That writes
+`grpc-timeout`, which the server enforces too, and tonic's channel ends the
+call at the shorter of the two; a longer `grpc-timeout` does not extend the
+client's timeout. Either way the caller gets `DEADLINE_EXCEEDED` /
+`request deadline exceeded`, never `UNAVAILABLE`: the server may still be
+running the call, so a caller that retries `UNAVAILABLE` must not repeat it.
+The server still applies `min(grpc-timeout, grpc.request_timeout)`.
 
 ```rust,ignore
-let channel = infra_grpc::Client::new(destination, security)?;
+let timeout = std::time::Duration::from_secs(10);
+let channel = infra_grpc::Client::new(destination, security, timeout)?;
 let mut client = EchoServiceClient::new(channel);
 let mut request = tonic::Request::new(UnaryRequest { message: "hello".into() });
 request.set_timeout(std::time::Duration::from_secs(2));
@@ -341,18 +359,25 @@ let response = client.unary(request).await?;
 ```
 
 The client injects the current trace context and records its span and metrics
-from response headers. Any other transport failure is `UNAVAILABLE` /
+when the call's status arrives. Any other transport failure is `UNAVAILABLE` /
 `transport unavailable` to the caller, because a handler may forward that
 status; the cause is logged as `grpc_client_transport_failed` inside the
 client span. There is no application retry, replay, hedging,
-discovery or client health polling.
+discovery or client health polling. A `Client` is one HTTP/2 connection to
+whatever address its destination resolved to when it connected: it does not
+watch DNS or balance across addresses. Behind a connection-level balancer the
+server's `grpc.max_connection_age` is what moves it to another replica; a
+caller that needs more than one connection's streams, 200 against this
+template's listener, creates more clients. gRPC messages are not compressed
+in either direction: tonic's compression features are off, so a peer that
+sends a compressed message gets `UNIMPLEMENTED`.
 
 <!-- template:begin outbound-auth-grpc:docs-grpc-oauth -->
 When OAuth is also selected, bind the channel inside the private credential
 owner before giving it to the generated client:
 
 ```rust,ignore
-let channel = infra_grpc::Client::new(destination, security)?;
+let channel = infra_grpc::Client::new(destination, security, timeout)?;
 let authenticated = credentials.grpc(channel);
 let client = EchoServiceClient::new(authenticated);
 ```
@@ -436,24 +461,39 @@ from the shared catalog, under the catalog code as HTTP's access log spells
 it in `problem_code`, so the failures that share one `grpc_code`
 (`authentication_unavailable` and `service_unavailable` are both
 `Unavailable`) stay apart. A status a handler builds without
-`infra_grpc::Failure` is not counted there.
-Started minus handled is the number of calls waiting for response headers.
-`grpc_code` is the grpc-go code name, one of all 17: `OK`, `Canceled`,
-`InvalidArgument`, `FailedPrecondition` and so on. The histograms measure time
-to response headers, with the Prometheus default buckets that
+`infra_grpc::Failure` is not counted there. Catalog failures in response
+trailers and recovered stream panics are counted too.
+Started minus handled is the number of calls in progress, open streams
+included. `grpc_code` is the grpc-go code name, one of all 17: `OK`, `Canceled`,
+`InvalidArgument`, `FailedPrecondition` and so on. The histograms measure the
+whole call, to its status, with the Prometheus default buckets that
 `go-grpc-middleware` uses (`HANDLING_SECONDS_BUCKETS`, registered by the
-bootstrap). Metric handles are kept per method after the first call.
+bootstrap); a stream that stays open longer than ten seconds, a health
+`Watch` above all, lands in the `+Inf` bucket when it ends. Metric handles
+are kept per method after the first call.
+
+A call is handled when its status is known, on both sides. A rejection, a
+deadline and a unary failure carry `grpc-status` in the response headers and
+are handled there. Every other answer is followed through its response body
+to the trailers, so a stream that fails after its first message is counted
+with that failure, not as `OK`, and the span ends with the call and carries
+its real status. Following the body costs no task and holds nothing back:
+frames pass through as they are produced. The span is current while the
+handler runs and not while the response stream is polled, so a stream that
+logs or calls out as it produces messages instruments itself, for example
+with `tracing::Instrument::in_current_span`.
 
 On the server, `grpc_service` and `grpc_method` come from the request path
 only when it is a described method of a registered service or of health.
 Every outcome of such a call carries its method: an answer, an
 authentication failure, a shed, a deadline, a recovered panic. Any other
 path is `"unknown"` in the labels and in the span name, so a caller-chosen
-path cannot create a series. A call its caller abandons before the response
-headers, by resetting the stream or closing the connection, is handled as
+path cannot create a series. A call its caller abandons before its status,
+by resetting the stream or closing the connection, is handled as
 `Canceled`, as grpc-go counts it; so is a client call whose caller stops
-waiting. Spans and metrics use the response-header status. A missing `grpc-status` header is recorded as ok, so
-a streaming error sent only in trailers is not reflected. Payloads, metadata
+waiting or drops a response stream it has not read to the end. An answer
+that ends with no `grpc-status` at all is `Unknown`, as tonic's client reports
+it. Payloads, metadata
 values, bearer tokens and raw errors are not transport attributes.
 
 ## Generate and verify

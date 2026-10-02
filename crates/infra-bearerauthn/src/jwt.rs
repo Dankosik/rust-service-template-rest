@@ -1449,39 +1449,58 @@ mod tests {
         exact
     }
 
+    /// This crate and `jsonwebtoken::decode`, deciding the same token under
+    /// the same issuer, audience, leeway and key.
+    struct Deciders {
+        verifier: JwtVerifier,
+        key: jsonwebtoken::DecodingKey,
+        validation: jsonwebtoken::Validation,
+    }
+
+    impl Deciders {
+        fn new() -> Self {
+            let key = serde_json::from_value::<Jwk>(jwk(
+                &rsa_signing(),
+                Algorithm::RS256,
+                Some("fixture"),
+                true,
+            ))
+            .unwrap();
+            let mut validation = jsonwebtoken::Validation::new(Algorithm::RS256);
+            validation.leeway = 30;
+            validation.validate_nbf = true;
+            validation.set_issuer(&[CORPUS_ISSUER]);
+            validation.set_audience(&["api"]);
+            validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+            Self {
+                verifier: verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]),
+                key: jsonwebtoken::DecodingKey::from_jwk(&key).unwrap(),
+                validation,
+            }
+        }
+
+        /// `IgnoredAny` keeps the library's own claim rules and adds none.
+        fn library(&self, token: &str) -> bool {
+            jsonwebtoken::decode::<serde::de::IgnoredAny>(token, &self.key, &self.validation)
+                .is_ok()
+        }
+
+        /// A token outside the bearer grammar never reaches the verifier.
+        async fn here(&self, token: &str) -> bool {
+            let header = format!("Bearer {token}");
+            match parse_bearer([header.as_bytes()]) {
+                Ok(token) => self.verifier.verify(&token).await.is_ok(),
+                Err(_) => false,
+            }
+        }
+    }
+
     /// This crate verifies the signature and reads the registered claims
     /// itself. Its decisions on them must stay those of `jsonwebtoken::decode`,
     /// and no header that the library refuses may pass here.
     #[tokio::test]
     async fn registered_claim_decisions_match_jsonwebtoken_decode() {
-        let verifier = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
-        let key = serde_json::from_value::<Jwk>(jwk(
-            &rsa_signing(),
-            Algorithm::RS256,
-            Some("fixture"),
-            true,
-        ))
-        .unwrap();
-        let key = jsonwebtoken::DecodingKey::from_jwk(&key).unwrap();
-        let mut validation = jsonwebtoken::Validation::new(Algorithm::RS256);
-        validation.leeway = 30;
-        validation.validate_nbf = true;
-        validation.set_issuer(&[CORPUS_ISSUER]);
-        validation.set_audience(&["api"]);
-        validation.set_required_spec_claims(&["exp", "iss", "aud"]);
-        // `IgnoredAny` keeps the library's own claim rules and adds none.
-        let library = |token: &str| {
-            jsonwebtoken::decode::<serde::de::IgnoredAny>(token, &key, &validation).is_ok()
-        };
-        // A token outside the bearer grammar never reaches the verifier.
-        let accepts = async |token: &str| {
-            let header = format!("Bearer {token}");
-            match parse_bearer([header.as_bytes()]) {
-                Ok(token) => verifier.verify(&token).await.is_ok(),
-                Err(_) => false,
-            }
-        };
-
+        let deciders = Deciders::new();
         let now = jsonwebtoken::get_current_timestamp();
         let base = serde_json::json!({
             "iss": CORPUS_ISSUER, "aud": "api", "exp": now + 600, "sub": "subject",
@@ -1491,7 +1510,7 @@ mod tests {
         exact.extend(payload_and_compact_cases(&body));
         let mut differences = Vec::new();
         for (name, token) in &exact {
-            let (here, there) = (accepts(token).await, library(token));
+            let (here, there) = (deciders.here(token).await, deciders.library(token));
             if here != there {
                 differences.push(format!("{name}: {here} here, {there} in jsonwebtoken"));
             }
@@ -1500,14 +1519,249 @@ mod tests {
         // refuse more headers than the library, never fewer.
         for header in CORPUS_HEADERS {
             let token = sign_raw(header, body.as_bytes());
-            if accepts(&token).await && !library(&token) {
+            if deciders.here(&token).await && !deciders.library(&token) {
                 differences.push(format!("{header}: accepted here, refused by jsonwebtoken"));
             }
         }
         assert!(differences.is_empty(), "{differences:#?}");
         // The corpus exercises both decisions, not one constant answer.
-        let accepted = exact.iter().filter(|(_, token)| library(token)).count();
+        let accepted = exact
+            .iter()
+            .filter(|(_, token)| deciders.library(token))
+            .count();
         assert!(accepted > 0 && accepted < exact.len());
+    }
+
+    /// The one deliberate difference in reading a payload. RFC 7519 section
+    /// 7.2 requires a UTF-8 payload and this crate keeps it as text; the
+    /// library does not validate the text of a member it skips.
+    #[tokio::test]
+    async fn a_payload_that_is_not_utf8_is_refused_where_jsonwebtoken_skips_it() {
+        let deciders = Deciders::new();
+        let exp = jsonwebtoken::get_current_timestamp() + 600;
+        let mut payload =
+            format!(r#"{{"sub":"subject","iss":"{CORPUS_ISSUER}","aud":"api","exp":{exp},"t":""#)
+                .into_bytes();
+        payload.extend_from_slice(b"\xff\"}");
+        let token = sign_raw(CORPUS_HEADER, &payload);
+        assert!(deciders.library(&token));
+        assert_eq!(
+            check(&deciders.verifier, &token).await.unwrap_err(),
+            VerificationReason::MalformedClaims
+        );
+    }
+
+    /// One registered claim of a generated payload.
+    #[derive(Clone, Debug)]
+    enum Member {
+        Absent,
+        Json(serde_json::Value),
+        /// Seconds from the moment the case runs, outside the leeway's edges
+        /// so that the two deciders' clock readings cannot disagree.
+        Time {
+            offset: i64,
+            fractional: bool,
+        },
+    }
+
+    impl Member {
+        fn put(&self, claims: &mut serde_json::Value, name: &str, now: u64) {
+            #[allow(clippy::cast_precision_loss, reason = "epoch seconds fit an f64")]
+            let value = match self {
+                Self::Absent => return,
+                Self::Json(value) => value.clone(),
+                Self::Time { offset, fractional } => {
+                    let seconds = now.saturating_add_signed(*offset);
+                    if *fractional {
+                        serde_json::json!(seconds as f64 + 0.4)
+                    } else {
+                        seconds.into()
+                    }
+                }
+            };
+            claims[name] = value;
+        }
+    }
+
+    fn any_json() -> impl proptest::strategy::Strategy<Value = serde_json::Value> {
+        use proptest::prelude::*;
+        use serde_json::Value;
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::from),
+            any::<i64>().prop_map(Value::from),
+            any::<u64>().prop_map(Value::from),
+            any::<f64>().prop_map(Value::from),
+            prop_oneof![
+                Just("api".to_owned()),
+                Just(CORPUS_ISSUER.to_owned()),
+                any::<String>()
+            ]
+            .prop_map(Value::from),
+        ];
+        leaf.prop_recursive(2, 8, 3, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..3).prop_map(Value::from),
+                inner.prop_map(|value| serde_json::json!({ "a": value })),
+            ]
+        })
+    }
+
+    /// The accepted value half of the time, so both decisions are exercised.
+    fn member(accepted: Member) -> impl proptest::strategy::Strategy<Value = Member> {
+        use proptest::prelude::*;
+        let time = (
+            prop_oneof![-1000_i64..=-40, -20_i64..=20, 40_i64..=1000],
+            any::<bool>(),
+        )
+            .prop_map(|(offset, fractional)| Member::Time { offset, fractional });
+        prop_oneof![
+            4 => Just(accepted),
+            1 => Just(Member::Absent),
+            2 => time,
+            2 => any_json().prop_map(Member::Json),
+        ]
+    }
+
+    /// Rewrites every ASCII letter inside a JSON string, member names
+    /// included, as a `\u` escape, which a deserializer cannot borrow from
+    /// the payload.
+    fn escape_letters(json: &str) -> String {
+        use std::fmt::Write as _;
+        let mut escaped = String::with_capacity(json.len());
+        // Characters of an escape sequence still to copy unchanged.
+        let (mut in_string, mut copy) = (false, 0_usize);
+        let mut characters = json.chars().peekable();
+        while let Some(character) = characters.next() {
+            if copy > 0 {
+                copy -= 1;
+            } else if in_string && character == '\\' {
+                copy = if characters.peek() == Some(&'u') {
+                    5
+                } else {
+                    1
+                };
+            } else if character == '"' {
+                in_string = !in_string;
+            } else if in_string && character.is_ascii_alphabetic() {
+                write!(escaped, "\\u{:04x}", u32::from(character)).unwrap();
+                continue;
+            }
+            escaped.push(character);
+        }
+        escaped
+    }
+
+    /// One edit of a payload's bytes.
+    #[derive(Clone, Debug)]
+    enum Edit {
+        Replace(u8),
+        Insert(u8),
+        Delete,
+    }
+
+    /// Edits at positions given as a fraction of the payload's length.
+    fn edits() -> impl proptest::strategy::Strategy<Value = Vec<(f64, Edit)>> {
+        use proptest::prelude::*;
+        // Mostly the bytes JSON gives a meaning to.
+        let byte = prop_oneof![
+            3 => proptest::sample::select(br#"{}[]",:\ 0123456789eE+-.truefalsn"#.to_vec()),
+            1 => any::<u8>(),
+        ];
+        let edit = prop_oneof![
+            byte.clone().prop_map(Edit::Replace),
+            byte.prop_map(Edit::Insert),
+            Just(Edit::Delete),
+        ];
+        proptest::collection::vec((0.0..1.0_f64, edit), 1..4)
+    }
+
+    proptest::proptest! {
+        // A failing case is printed; no seed file is left beside the source.
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 256,
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        /// Any combination of registered claim shapes, with either spelling
+        /// of its strings, is decided as `jsonwebtoken::decode` decides it.
+        #[test]
+        fn generated_registered_claims_are_decided_as_jsonwebtoken_decides_them(
+            iss in member(Member::Json(CORPUS_ISSUER.into())),
+            aud in member(Member::Json("api".into())),
+            exp in member(Member::Time { offset: 600, fractional: false }),
+            nbf in member(Member::Absent),
+            custom in any_json(),
+            escaped in proptest::prelude::any::<bool>(),
+        ) {
+            let deciders = Deciders::new();
+            let now = jsonwebtoken::get_current_timestamp();
+            let mut claims = serde_json::json!({"sub": "subject", "x": custom});
+            for (name, member) in [("iss", &iss), ("aud", &aud), ("exp", &exp), ("nbf", &nbf)] {
+                member.put(&mut claims, name, now);
+            }
+            let payload = if escaped {
+                escape_letters(&claims.to_string())
+            } else {
+                claims.to_string()
+            };
+            let token = sign_raw(CORPUS_HEADER, payload.as_bytes());
+            let here = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(deciders.here(&token));
+            proptest::prop_assert_eq!(here, deciders.library(&token), "payload {}", payload);
+        }
+
+        /// A payload damaged anywhere after its subject is decided as
+        /// `jsonwebtoken::decode` decides it, unless the damage leaves it
+        /// outside UTF-8. The subject stays intact because only this crate
+        /// requires an identity.
+        #[test]
+        fn damaged_payloads_are_decided_as_jsonwebtoken_decides_them(edits in edits()) {
+            const KEPT: &str = r#"{"sub":"subject","#;
+            let deciders = Deciders::new();
+            let now = jsonwebtoken::get_current_timestamp();
+            let mut rest = format!(
+                r#""iss":"{CORPUS_ISSUER}","aud":["api"],"exp":{},"nbf":{},"t":[1.5,{{"a":"b\n"}}]}}"#,
+                now + 600,
+                now - 600,
+            )
+            .into_bytes();
+            for (position, edit) in edits {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    clippy::cast_precision_loss,
+                    reason = "a fraction of a short length"
+                )]
+                let index = (position * rest.len() as f64) as usize;
+                match edit {
+                    Edit::Replace(byte) if index < rest.len() => rest[index] = byte,
+                    Edit::Delete if index < rest.len() => drop(rest.remove(index)),
+                    Edit::Insert(byte) => rest.insert(index, byte),
+                    Edit::Replace(_) | Edit::Delete => {}
+                }
+            }
+            let payload = [KEPT.as_bytes(), &rest].concat();
+            let token = sign_raw(CORPUS_HEADER, &payload);
+            let here = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(deciders.here(&token));
+            if std::str::from_utf8(&payload).is_ok() {
+                proptest::prop_assert_eq!(
+                    here,
+                    deciders.library(&token),
+                    "payload {}",
+                    String::from_utf8_lossy(&payload)
+                );
+            } else {
+                // See `a_payload_that_is_not_utf8_is_refused_where_jsonwebtoken_skips_it`.
+                proptest::prop_assert!(!here, "payload {}", String::from_utf8_lossy(&payload));
+            }
+        }
     }
 
     #[derive(Clone, Default)]

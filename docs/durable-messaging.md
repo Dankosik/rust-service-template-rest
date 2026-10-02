@@ -27,12 +27,15 @@ It parses and emits RFC3339 timestamps with offsets and fractions, the text
 Go's `time.RFC3339Nano` produces; spellings only Go's lenient parser accepts
 are malformed. Boundary admission enforces the Go identity,
 header (8 KiB), route, schema, and payload limits before a handler allocates or
-runs. Unknown handler/schema, subject mismatch, and invalid typed JSON are
-permanent. Fixture provenance and CI use actual Go encoding and decoding in
+runs. A delivery no handler claims (unknown type or schema version, a subject
+other than the route's, a route without a handler) and a payload that is not
+the handler type's JSON never reach a handler and transfer to the DLQ with the
+reason `permanent`, as a handler's own permanent rejection does. Telemetry
+[tells the three apart](#configure-operate-and-remove). Fixture provenance and CI use actual Go encoding and decoding in
 both directions; a hand-written equivalent encoder is not compatibility proof.
 
 A handler is registered for one exact `(type, version)`. A delivery with a
-version no handler knows is permanent and transfers to the DLQ, so deploy the
+version no handler knows transfers to the DLQ as `unhandled`, so deploy the
 consumers of a new schema version before its first producer. A record that
 arrived too early is recovered with the restore helper.
 
@@ -216,7 +219,7 @@ credentials, arbitrary errors, or event IDs.
 | Metric | Labels |
 | --- | --- |
 | `messaging_publish_total`, `messaging_publish_duration_seconds` | `result`: `acknowledged`, `rejected`, `ambiguous` |
-| `messaging_handler_total`, `messaging_handler_duration_seconds` | `event_type`; `outcome`: `success`, `permanent`, `retryable`, `timeout`, `panic` |
+| `messaging_handler_total`, `messaging_handler_duration_seconds` | `event_type`; `outcome`: `success`, `permanent`, `retryable`, `timeout`, `panic`, `unhandled`, `undecodable` |
 | `messaging_dead_letter_total` | `event_type`; `reason`: `malformed`, `permanent`, `exhausted`; `outcome`: `accepted`, `rejected`, `ambiguous` |
 | `messaging_settlement_failures_total` | `operation`: `ack`, `nak` |
 | `messaging_consumer_stream_errors_total` | none |
@@ -233,7 +236,20 @@ lag from the worker.
 handlers bound its values; schema versions of one type share it. A delivery
 whose type has no handler, including a malformed envelope, is counted as
 `unregistered`: the type a publisher wrote into a header never becomes a
-label. Publication metrics carry no event type. A publication outcome is the
+label.
+
+Three outcomes share the dead-letter reason `permanent`, which is the Go wire
+vocabulary, and differ in the handler metric, the delivery span, and the log.
+`permanent` is the handler's own rejection. `undecodable` is a payload that is
+not the JSON the handler's type reads: with a registered `event_type` it means
+a producer changed the payload without a new schema version. `unhandled` is a
+delivery no handler claims: with a registered `event_type` it is a schema
+version published before its consumer was deployed or a subject other than
+the route's, and with `unregistered` it is a type this worker does not handle
+under its filter. Neither ran a handler, so their duration is the lookup or
+the decode.
+
+Publication metrics carry no event type. A publication outcome is the
 broker's answer rather than a property of the event, the outbox publisher
 restores the type from a stored row instead of a compiled constant, and
 `messaging_publish_failed` already names the subject.

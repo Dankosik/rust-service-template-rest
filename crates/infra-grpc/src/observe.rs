@@ -6,14 +6,24 @@
 //! serializes every span field and repeats it on each record inside the call;
 //! the RPC attributes go to the OpenTelemetry span alone, and nothing is
 //! `Span::record`ed afterwards, since every record re-serializes the fields.
+//!
+//! A call is observed until its status is known. An answer that carries
+//! `grpc-status` in its headers ends there; any other answer is followed
+//! through its body to the trailers, so a stream that fails after its first
+//! message is counted with that failure and its handling time is the whole
+//! call, as grpc-go's interceptors count it.
 
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
+use std::pin::Pin;
 use std::sync::{Arc, Once, OnceLock, PoisonError, RwLock};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use futures_util::FutureExt as _;
 use http::HeaderMap;
+use http_body::{Body, Frame, SizeHint};
 use opentelemetry::context::FutureExt as _;
 use opentelemetry::trace::SpanKind;
 use tonic::Code;
@@ -24,13 +34,13 @@ use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_f
 
 const SERVER_STARTED: &str = "grpc_server_started_total";
 const SERVER_HANDLED: &str = "grpc_server_handled_total";
-/// Server time to response headers, a histogram by service and method.
+/// Server time to the call's status, a histogram by service and method.
 pub const SERVER_HANDLING_SECONDS: &str = "grpc_server_handling_seconds";
 const SERVER_SHED: &str = "grpc_server_shed_requests_total";
 const SERVER_FAILURES: &str = "grpc_server_failures_total";
 const CLIENT_STARTED: &str = "grpc_client_started_total";
 const CLIENT_HANDLED: &str = "grpc_client_handled_total";
-/// Client time to response headers, a histogram by service and method.
+/// Client time to the call's status, a histogram by service and method.
 pub const CLIENT_HANDLING_SECONDS: &str = "grpc_client_handling_seconds";
 /// Buckets for both handling-time histograms: the Prometheus client default
 /// that `go-grpc-middleware` uses, so its dashboards' `_bucket` queries apply.
@@ -41,8 +51,9 @@ pub const HANDLING_SECONDS_BUCKETS: &[f64] = &[
 
 static DESCRIBE: Once = Once::new();
 
-/// Server span and metrics. A panicking handler becomes a sanitized
-/// `Internal` answer, observed like any other call.
+/// Server span and metrics. A panicking handler, or a response stream that
+/// panics, becomes a sanitized `Internal` answer, observed like any other
+/// call.
 pub(crate) async fn observe(
     axum::extract::State(series): axum::extract::State<Arc<Series>>,
     request: axum::extract::Request,
@@ -60,12 +71,7 @@ pub(crate) async fn observe(
         // so it still reaches outbound calls.
         Some(context) => answer.with_context(context).await,
     }
-    .unwrap_or_else(|_panic| {
-        tonic::Status::from(crate::Failure::new(
-            service_failure::Code::InternalServerError,
-        ))
-        .into_http()
-    });
+    .unwrap_or_else(|_panic| internal().into_http());
     // tonic keeps the status of a Trailers-Only answer in the extensions.
     if let Some(failure) = response
         .extensions()
@@ -74,14 +80,21 @@ pub(crate) async fn observe(
     {
         call.failed(failure);
     }
-    call.finish(code_from_headers(response.headers()));
-    response
+    call.until_status(response, |body, call| {
+        let unknown = |_error: &axum::Error| Code::Unknown;
+        axum::body::Body::new(Observed::new(body, call, Recover::Panics, unknown))
+    })
+}
+
+/// The sanitized answer to a panic.
+fn internal() -> tonic::Status {
+    crate::Failure::new(service_failure::Code::InternalServerError).into()
 }
 
 /// One observed call: counted as started when created and as handled, with
 /// its status code, when finished. A call dropped before that was abandoned
-/// by its caller, which stopped waiting or reset the stream, and is recorded
-/// as `Cancelled`, as grpc-go records it.
+/// by its caller, which stopped waiting, reset the stream or stopped reading
+/// it, and is recorded as `Cancelled`, as grpc-go records it.
 pub(crate) struct Call {
     series: Arc<Series>,
     /// Shares the request's bytes. `None` when the path is not a label.
@@ -127,6 +140,24 @@ impl Call {
     pub(crate) fn finish(mut self, code: Code) {
         self.record(code);
         self.finished = true;
+    }
+
+    /// Finishes the call when its status is known: now, when the response
+    /// headers carry it (a Trailers-Only answer), and otherwise when the
+    /// body yields its trailers. Only that second answer is handed to
+    /// `follow`, which wraps its body in an [`Observed`].
+    pub(crate) fn until_status<B: Body>(
+        self,
+        response: http::Response<B>,
+        follow: impl FnOnce(B, Self) -> B,
+    ) -> http::Response<B> {
+        match status(response.headers()) {
+            Some(code) => self.finish(code),
+            // No status and no body left to carry one.
+            None if response.body().is_end_stream() => self.finish(Code::Unknown),
+            None => return response.map(|body| follow(body, self)),
+        }
+        response
     }
 
     fn record(&self, code: Code) {
@@ -191,10 +222,126 @@ pub(crate) fn record_shed() {
 /// Path whose labels are `unknown`.
 const UNKNOWN_PATH: &str = "";
 
-pub(crate) fn code_from_headers(headers: &HeaderMap) -> Code {
+/// Whether a response body that panics is answered or left to unwind.
+#[derive(Clone, Copy)]
+pub(crate) enum Recover {
+    /// The server: the caller gets `Internal` trailers.
+    Panics,
+    /// The client: tonic's own channel body does not run handler code.
+    Nothing,
+}
+
+/// A response body that finishes its [`Call`] with the status in the
+/// trailers. A body dropped before them leaves the call to its drop guard.
+pub(crate) struct Observed<B: Body> {
+    /// `None` once the body ended or panicked; it is not polled again.
+    inner: Option<B>,
+    /// `None` once the call is finished.
+    call: Option<Call>,
+    recover: Recover,
+    error_code: fn(&B::Error) -> Code,
+}
+
+impl<B: Body> Observed<B> {
+    /// `error_code` is the status of a body that fails instead of ending.
+    pub(crate) fn new(
+        inner: B,
+        call: Call,
+        recover: Recover,
+        error_code: fn(&B::Error) -> Code,
+    ) -> Self {
+        Self {
+            inner: Some(inner),
+            call: Some(call),
+            recover,
+            error_code,
+        }
+    }
+
+    fn finish(&mut self, code: Code) {
+        if let Some(call) = self.call.take() {
+            call.finish(code);
+        }
+    }
+}
+
+impl<B> Body for Observed<B>
+where
+    B: Body<Data = Bytes> + Unpin,
+{
+    type Data = Bytes;
+    type Error = B::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, B::Error>>> {
+        let this = self.get_mut();
+        let Some(inner) = this.inner.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let polled = match this.recover {
+            Recover::Nothing => Pin::new(inner).poll_frame(context),
+            Recover::Panics => {
+                let poll = AssertUnwindSafe(|| Pin::new(inner).poll_frame(context));
+                match std::panic::catch_unwind(poll) {
+                    Ok(polled) => polled,
+                    Err(_panic) => {
+                        this.inner = None;
+                        if let Some(call) = &this.call {
+                            call.failed(service_failure::Code::InternalServerError);
+                        }
+                        this.finish(Code::Internal);
+                        let mut trailers = HeaderMap::new();
+                        // A fixed catalog status always encodes.
+                        let _ = internal().add_header(&mut trailers);
+                        return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
+                    }
+                }
+            }
+        };
+        match &polled {
+            Poll::Pending => {}
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(trailers) = frame.trailers_ref() {
+                    if matches!(this.recover, Recover::Panics)
+                        && let Some(failure) = tonic::Status::from_header_map(trailers)
+                            .as_ref()
+                            .and_then(crate::status::catalog_code)
+                        && let Some(call) = &this.call
+                    {
+                        call.failed(failure);
+                    }
+                    this.finish(status(trailers).unwrap_or(Code::Unknown));
+                }
+            }
+            Poll::Ready(Some(Err(error))) => this.finish((this.error_code)(error)),
+            // A gRPC answer always carries a status; one that ended without
+            // it is what tonic's client reports as `Unknown`.
+            Poll::Ready(None) => {
+                this.inner = None;
+                this.finish(Code::Unknown);
+            }
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.as_ref().is_none_or(Body::is_end_stream)
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner
+            .as_ref()
+            .map_or_else(|| SizeHint::with_exact(0), Body::size_hint)
+    }
+}
+
+/// The `grpc-status` of response headers or trailers.
+fn status(headers: &HeaderMap) -> Option<Code> {
     headers
         .get("grpc-status")
-        .map_or(Code::Ok, |value| Code::from_bytes(value.as_bytes()))
+        .map(|value| Code::from_bytes(value.as_bytes()))
 }
 
 /// Metric handles by call path, registered on first use so a call does not
@@ -369,7 +516,7 @@ fn describe() {
         metrics::describe_histogram!(
             SERVER_HANDLING_SECONDS,
             metrics::Unit::Seconds,
-            "Server gRPC time to response headers by service and method"
+            "Server gRPC time to the call's status by service and method"
         );
         metrics::describe_counter!(
             SERVER_SHED,
@@ -389,7 +536,7 @@ fn describe() {
         metrics::describe_histogram!(
             CLIENT_HANDLING_SECONDS,
             metrics::Unit::Seconds,
-            "Client gRPC time to response headers by service and method"
+            "Client gRPC time to the call's status by service and method"
         );
     });
 }

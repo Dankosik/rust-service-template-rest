@@ -169,9 +169,13 @@ fn follow_connect_options(engine_pool: &PgPool, listener_pool: &PgPool) {
 }
 
 async fn listen(shared: &Shared, pool: &PgPool) {
-    'subscribe: loop {
+    loop {
+        // At most one subscription per poll interval: a connection that
+        // served longer is replaced at once, and one the server keeps closing
+        // costs no more connections or wake-ups than polling does.
+        let next = Instant::now() + POLL_INTERVAL;
         follow_connect_options(&shared.pool, pool);
-        match subscribe(pool).await {
+        let ended = match subscribe(pool).await {
             Ok(mut listener) => {
                 observe_recovery(shared, Operation::Listen);
                 // Anything committed while no listener was attached is due now.
@@ -181,19 +185,23 @@ async fn listen(shared: &Shared, pool: &PgPool) {
                         Ok(Some(notification)) => {
                             shared.wake_peers(Some(notification.payload()));
                         }
-                        // The connection was lost: subscribe again at once.
-                        Ok(None) => continue 'subscribe,
-                        Err(error) => {
-                            observe_failure(shared, Operation::Listen, &error.into());
-                            break;
-                        }
+                        Ok(None) => break connection_lost(),
+                        Err(error) => break error,
                     }
                 }
             }
-            Err(error) => observe_failure(shared, Operation::Listen, &error.into()),
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
+            Err(error) => error,
+        };
+        observe_failure(shared, Operation::Listen, &ended.into());
+        tokio::time::sleep_until(next).await;
     }
+}
+
+/// The driver reports a closed listener connection as no notification and
+/// keeps the I/O error to itself; this stands in for it so that the loss is
+/// counted and logged like any other listener failure.
+fn connection_lost() -> sqlx::Error {
+    sqlx::Error::Io(std::io::ErrorKind::ConnectionAborted.into())
 }
 
 /// The listener leaves reconnecting to [`listen`], which first takes the
