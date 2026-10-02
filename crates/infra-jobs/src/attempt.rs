@@ -239,7 +239,7 @@ pub(crate) async fn supervise(
         trace_state,
         slot,
     } = claimed;
-    let span = tracing::info_span!("job_attempt", job.id = %id, job.kind = kind, job.attempt = u64::from(attempt), otel.kind = "consumer");
+    let span = attempt_span(id, kind, attempt);
     crate::trace_context::link(&span, parent.as_deref(), trace_state.as_deref());
     drop(parent);
     drop(trace_state);
@@ -257,6 +257,33 @@ pub(crate) async fn supervise(
     )
     .instrument(span)
     .await;
+}
+
+/// One span per attempt, named `process <kind>` in an exported trace. The
+/// kind set is the registered one, so the name stays low-cardinality.
+fn attempt_span(id: JobId, kind: &'static str, attempt: u16) -> tracing::Span {
+    tracing::info_span!(
+        "job_attempt",
+        otel.name = %format_args!("process {kind}"),
+        otel.kind = "consumer",
+        otel.status_code = tracing::field::Empty,
+        job.id = %id,
+        job.kind = kind,
+        job.attempt = u64::from(attempt),
+        outcome = tracing::field::Empty,
+    )
+}
+
+/// The attempt's `outcome`, the `jobs_attempts_total` label. An attempt that
+/// spent its unit on a failure is an error; a snooze or a release is not.
+fn record_on_span(span: &tracing::Span, transition: &Transition) {
+    span.record("outcome", transition.label());
+    if matches!(
+        transition,
+        Transition::Retry { .. } | Transition::Fail { .. }
+    ) {
+        span.record("otel.status_code", "ERROR");
+    }
 }
 
 async fn run_attempt(
@@ -315,6 +342,7 @@ async fn run_attempt(
             .known_results
             .fetch_add(1, Ordering::Relaxed);
     }
+    record_on_span(&tracing::Span::current(), &transition);
     record(registered.metrics.get(), &attempt, &transition, ran);
     persist(shared, &attempt, &transition, deadline).await;
 }
@@ -768,6 +796,91 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Collects the fields of every span, from creation and later records.
+    #[derive(Clone, Default)]
+    struct SpanFields(Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>);
+
+    struct Collect<'a>(&'a mut std::collections::BTreeMap<String, String>);
+
+    impl tracing::field::Visit for Collect<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_owned(), value.to_owned());
+        }
+    }
+
+    impl tracing::Subscriber for SpanFields {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            let mut spans = self.0.lock().unwrap();
+            let mut fields = std::collections::BTreeMap::new();
+            attributes.record(&mut Collect(&mut fields));
+            spans.push(fields);
+            tracing::span::Id::from_u64(spans.len() as u64)
+        }
+
+        fn record(&self, span: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+            let index = usize::try_from(span.into_u64()).unwrap() - 1;
+            values.record(&mut Collect(&mut self.0.lock().unwrap()[index]));
+        }
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, _: &tracing::Event<'_>) {}
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn the_attempt_span_is_named_for_its_kind_and_carries_the_outcome() {
+        let id = JobId(uuid::Uuid::try_parse("01234567-89ab-cdef-fedc-ba9876543210").unwrap());
+        let spans = SpanFields::default();
+        tracing::subscriber::with_default(spans.clone(), || {
+            for ended in [
+                Ended::Success,
+                Ended::Error(JobError::retryable("fail")),
+                Ended::Error(JobError::permanent("stop")),
+                Ended::Cancelled,
+            ] {
+                let span = attempt_span(id, "sample", 3);
+                record_on_span(&span, &outcome(ended, 3));
+            }
+        });
+        let spans = spans.0.lock().unwrap();
+        let seen: Vec<_> = spans
+            .iter()
+            .map(|fields| {
+                (
+                    fields["outcome"].as_str(),
+                    fields.get("otel.status_code").map(String::as_str),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("completed", None),
+                ("retry", Some("ERROR")),
+                ("permanent", Some("ERROR")),
+                ("cancelled", None),
+            ]
+        );
+        let first = &spans[0];
+        assert_eq!(first["otel.name"], "process sample");
+        assert_eq!(first["otel.kind"], "consumer");
+        assert_eq!(first["job.kind"], "sample");
+        assert_eq!(first["job.id"], "01234567-89ab-cdef-fedc-ba9876543210");
+        assert_eq!(first["job.attempt"], "3");
     }
 
     #[test]

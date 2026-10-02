@@ -8,11 +8,10 @@ use infra_jobs::{
     JobKind, Kinds, LEASE_RESERVE, MIN_TIMEOUT, POLL_INTERVAL, Policy, StartupError, enqueue,
 };
 use infra_postgres::{Dsn, PgPool, TxError, in_tx};
-use integration_tests::DATABASE_URL;
-use integration_tests::dsn_for;
 use integration_tests::jobs::{self, Probe, ProbeAction};
+use integration_tests::{DATABASE_URL, dsn_for, url_for};
 use serde::{Deserialize, Serialize};
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{AssertSqlSafe, Postgres, Row, Transaction};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -851,6 +850,83 @@ async fn listening_sessions(pool: &PgPool) -> i64 {
     .fetch_one(pool)
     .await
     .expect("the listener observation")
+}
+
+/// The backend that holds the wake `LISTEN`, once there is one.
+async fn listening_pid(pool: &PgPool) -> Option<i32> {
+    sqlx::query_scalar(
+        "SELECT pid FROM pg_stat_activity \
+         WHERE datname = current_database() AND application_name = $1 \
+           AND query LIKE 'LISTEN%'",
+    )
+    .bind(super::APP)
+    .fetch_optional(pool)
+    .await
+    .expect("the listener observation")
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgPool) {
+    // Roles are cluster-wide; the tail of the per-test database name keeps
+    // this one apart and inside PostgreSQL's 63-byte identifier limit.
+    let mut url = url_for(&pool, DATABASE_URL).await;
+    let database = url.path().trim_start_matches('/').to_owned();
+    let role = format!(
+        "listening_{}",
+        &database[database.len().saturating_sub(24)..]
+    );
+    for statement in [
+        // A failed earlier run leaves the role behind, without its database.
+        format!("DROP ROLE IF EXISTS {role:?}"),
+        format!("CREATE ROLE {role:?} LOGIN PASSWORD 'first'"),
+        format!("GRANT ALL ON ALL TABLES IN SCHEMA public TO {role:?}"),
+        format!("GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO {role:?}"),
+    ] {
+        sqlx::query(AssertSqlSafe(statement))
+            .execute(&pool)
+            .await
+            .expect("the rotating role");
+    }
+    url.set_username(&role).expect("a user name");
+    url.set_password(Some("first")).expect("a password");
+    let dsn = Dsn::admit(url.as_str()).expect("the role's DSN is admitted");
+    let jobs = super::template_pool(&dsn, 3).await;
+    let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
+    // The role cannot read another role's `query`; the suite's own pool can.
+    let first = until("the engine listens", super::WAIT, async || {
+        listening_pid(&pool).await
+    })
+    .await;
+
+    // What `refresh_password_periodically` does after the platform rotates.
+    sqlx::query(AssertSqlSafe(format!(
+        "ALTER ROLE {role:?} PASSWORD 'second'"
+    )))
+    .execute(&pool)
+    .await
+    .expect("the rotation");
+    jobs.set_connect_options(jobs.connect_options().as_ref().clone().password("second"));
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(first)
+        .fetch_one(&pool)
+        .await
+        .expect("the listener's backend is terminated");
+    assert!(terminated);
+
+    // The password the listener started with is refused now (`28P01` where
+    // the server asks for one), so only the pool's current one reconnects.
+    until("the engine listens again", super::WAIT, async || {
+        listening_pid(&pool).await.filter(|pid| *pid != first)
+    })
+    .await;
+
+    finish(run, &[&jobs]).await;
+    for statement in [
+        format!("DROP OWNED BY {role:?}"),
+        format!("DROP ROLE {role:?}"),
+    ] {
+        let _ = sqlx::query(AssertSqlSafe(statement)).execute(&pool).await;
+    }
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
