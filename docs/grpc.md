@@ -159,36 +159,32 @@ Outermost to innermost:
 1. Observation.
 2. Panic recovery, inside the observation layer. The response is `INTERNAL` / `request failed`. The payload
    goes to the normal panic hook, as on HTTP. There is no suppressing hook.
-3. Business routes only: deadline `min(grpc-timeout, grpc.request_timeout)`,
-   measured from the call's arrival until the handler returns response
-   headers, so it also bounds authentication and its provider exchange.
-   Expiry is `DEADLINE_EXCEEDED` / `request deadline exceeded`. A malformed
-   `grpc-timeout`, including more than eight digits, counts as absent and
-   `grpc.request_timeout` applies.
-4. Business routes only: bearer authentication, when that profile is
+3. Business routes only: bearer authentication, when that profile is
    retained. Health is outside it. Missing, malformed and invalid bearers are
    `UNAUTHENTICATED` / `authentication failed`. Provider unavailability is
    `UNAVAILABLE` / `authentication is unavailable`. A verified principal
    without a method's declared scopes is `PERMISSION_DENIED`. Each
    authentication outcome is counted
    in `authn_verifications_total{transport="grpc"}` by the same
-   `Verifier::authenticate` the HTTP boundary uses; a call whose deadline
-   ran out during authentication is counted as `cancelled`.
-5. Business routes only: the `grpc.max_in_flight` concurrency limit, 256
+   `Verifier::authenticate` the HTTP boundary uses.
+4. Business routes only: the `grpc.max_in_flight` concurrency limit, 256
    unless configured, and none at zero. A shed call is
    `RESOURCE_EXHAUSTED` / `server is at capacity` and increments
-   `grpc_server_shed_requests_total`. Health is outside this limit. A call
-   that is not authenticated never holds a permit. A permit
+   `grpc_server_shed_requests_total`. Health is outside this limit. A permit
    is held until response headers, so it bounds unary and client-streaming
    calls; server-streaming and bidi streams that are already open are bounded
    by the connection cap and the HTTP/2 stream limit instead.
+5. Business routes only: deadline `min(grpc-timeout, grpc.request_timeout)`,
+   measured until the handler returns response headers. Expiry is
+   `DEADLINE_EXCEEDED` / `request deadline exceeded`. A malformed
+   `grpc-timeout`, including more than eight digits, counts as absent and
+   `grpc.request_timeout` applies.
 
 An authentication failure or a shed call is answered after reading the rest
 of its request body, for at most 100 ms and 64 KiB. A caller sends request
 DATA after the headers; answering first would make h2 reset each stream when
 that DATA arrives, and after 1024 such resets hyper closes the connection
-with every other call on it. That read is inside the deadline: a call whose
-deadline is shorter than the read is answered `DEADLINE_EXCEEDED`.
+with every other call on it.
 
 ## Deadlines
 

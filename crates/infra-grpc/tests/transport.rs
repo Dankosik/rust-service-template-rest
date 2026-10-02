@@ -77,8 +77,6 @@ use tonic_types::StatusExt as _;
 const ACCEPTED: &str = "accepted";
 /// A token the provider reports active but without any scope.
 const UNSCOPED: &str = "unscoped";
-/// A token whose introspection the provider never answers.
-const UNANSWERED: &str = "unanswered";
 const UNARY_PATH: &str = "/example.v1.EchoService/Unary";
 // template:end authn:grpc-transport-test-accepted-token
 
@@ -847,37 +845,6 @@ async fn unary_deadline_is_deadline_exceeded_on_the_raw_http2_response() {
 /// The `grpc-status` response header of a unary `deadline` request with a
 /// 100 ms `grpc-timeout`, sent to `path` without a client-side timer.
 async fn raw_call(address: SocketAddr, path: &str) -> String {
-    #[allow(unused_mut, reason = "only an authentication profile adds a header")]
-    let mut builder = deadline_request(address, path);
-    // template:begin authn:grpc-transport-test-deadline-bearer
-    builder = builder.header("authorization", format!("Bearer {ACCEPTED}"));
-    // template:end authn:grpc-transport-test-deadline-bearer
-    raw_status(address, builder).await
-}
-
-/// The head of a unary request with a 100 ms `grpc-timeout`.
-fn deadline_request(address: SocketAddr, path: &str) -> http::request::Builder {
-    let mut timeout_request = Request::new(());
-    timeout_request.set_timeout(Duration::from_millis(100));
-    let grpc_timeout = timeout_request
-        .metadata()
-        .get("grpc-timeout")
-        .expect("set_timeout header")
-        .to_str()
-        .unwrap()
-        .to_owned();
-    http::Request::builder()
-        .method("POST")
-        .uri(format!("http://{address}{path}"))
-        .header("host", address.to_string())
-        .header("content-type", "application/grpc")
-        .header("te", "trailers")
-        .header("grpc-timeout", grpc_timeout)
-}
-
-/// Sends the `deadline` message under `head` and returns the `grpc-status`
-/// response header.
-async fn raw_status(address: SocketAddr, head: http::request::Builder) -> String {
     let stream = TcpStream::connect(address).await.expect("connect");
     let (mut sender, connection) = hyper::client::conn::http2::handshake(
         hyper_util::rt::TokioExecutor::new(),
@@ -888,7 +855,26 @@ async fn raw_status(address: SocketAddr, head: http::request::Builder) -> String
     let driver = tokio::spawn(async move {
         let _ = connection.await;
     });
-    let request = head
+    let mut timeout_request = Request::new(());
+    timeout_request.set_timeout(Duration::from_millis(100));
+    let grpc_timeout = timeout_request
+        .metadata()
+        .get("grpc-timeout")
+        .expect("set_timeout header")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let mut builder = http::Request::builder()
+        .method("POST")
+        .uri(format!("http://{address}{path}"))
+        .header("host", address.to_string())
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .header("grpc-timeout", grpc_timeout);
+    // template:begin authn:grpc-transport-test-deadline-bearer
+    builder = builder.header("authorization", format!("Bearer {ACCEPTED}"));
+    // template:end authn:grpc-transport-test-deadline-bearer
+    let request = builder
         .body(axum::body::Body::from(grpc_frame("deadline")))
         .unwrap();
     let pending = tokio::spawn(async move { sender.send_request(request).await });
@@ -905,22 +891,6 @@ async fn raw_status(address: SocketAddr, head: http::request::Builder) -> String
 }
 
 const ECHO_SERVICE_UNARY: &str = "/example.v1.EchoService/Unary";
-
-// template:begin authn:grpc-transport-test-auth-deadline
-/// A provider that does not answer holds authentication, not the handler.
-#[tokio::test]
-async fn the_deadline_also_bounds_authentication() {
-    let fixture = Fixture::plaintext().await;
-    let head = deadline_request(fixture.address, ECHO_SERVICE_UNARY)
-        .header("authorization", format!("Bearer {UNANSWERED}"));
-    let status = timeout(WAIT, raw_status(fixture.address, head))
-        .await
-        .expect("the 100 ms deadline answers before the provider budget");
-    assert_eq!(status, "4");
-    assert!(fixture.echo.calls.lock().expect("observations").is_empty());
-    fixture.stop().await;
-}
-// template:end authn:grpc-transport-test-auth-deadline
 
 fn grpc_frame(message: &str) -> Vec<u8> {
     let text = message.as_bytes();
@@ -1402,11 +1372,6 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
                                 Ok(more) if more > 0 => read += more,
                                 _ => break,
                             }
-                        }
-                        if contains(&request[..read], b"token=unanswered") {
-                            // Held until the verifier gives up and closes.
-                            let _ = stream.read(&mut [0_u8; 1]).await;
-                            return;
                         }
                         let scope = if contains(&request[..read], b"token=unscoped") {
                             ""

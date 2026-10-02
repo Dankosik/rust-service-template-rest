@@ -308,9 +308,7 @@ HTTPS IdPs are supported. Caller input never selects a destination. Redirects,
 ambient proxies, and retries are disabled. Responses have a 1 MiB ceiling, and
 each provider attempt has `reqwest`'s three-second total timeout, which covers
 body completion.
-Authentication accepts no request deadline and has no response reserve; each
-transport runs it under its own timer, `http.request_timeout` on HTTP and
-`min(grpc-timeout, grpc.request_timeout)` on gRPC. Dropping
+Authentication accepts no request deadline and has no response reserve. Dropping
 a request cancels its introspection exchange; process-owned JWKS refresh remains
 independent and is cancelled and joined at shutdown.
 
