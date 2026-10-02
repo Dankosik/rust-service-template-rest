@@ -1,26 +1,32 @@
 # Definition review
 
-Reviewer: fresh read-only `reviewer-agent`, native model `gpt-6-astra`, effort `high`, task `/root/oauth_definition/definition_review`, 2026-10-02.
+Current verdict: PASS. No surviving findings.
 
-candidate: Definition on baseline `67be869acea112af271ec8ba621cbc50ae9d36b7`. Independently checked SHA-256:
+## Bounded lifecycle amendment review
 
-- intent.md: `f4f9172507d3fc38639c4f4281d2a3dbcd4b81906aeecaf379e6166796d4cd78`
-- spec.md (reviewed draft): `2713a6134c71c8654e09c062048893832a678cd705b1ffa0d6f71ee665c0311d`
-- research/baseline-and-libraries.md: `197889b2d65b011e672105524276411bd159a9001105235136cee65bbaff9bfc`
+Fresh read-only reviewer `/root/oauth_definition/definition_closed_lifecycle_review`, native model `gpt-6-astra`, effort `high`, 2026-10-02. Method: shared Review and Specification Review.
+
+candidate: compatibility/lifecycle amendment over Definition commit `e9e57b3a11b2fcab75b8533472ecee4d453c84e6`, independently verified:
+
+- intent.md reviewed draft SHA-256: `28bace7a8dce50bf1d4176e56d3e2991a212ba2462792704e1ce7fe1e65588e7`
+- spec.md reviewed draft SHA-256: `ded12f873e15b05ba0e0a616a8fff65234f8baf874b69ea105387b0af859d40c`
 
 verdict: PASS
 
-findings: None surviving.
+findings: none
 
-## Evidence boundary and attempted falsifiers
+Evidence boundary and attempted falsifiers:
 
-- Failure-policy falsifier: immediate refusal, requesting-caller cancellation, waiter deadlines, and eviction during suppression. The spec distinguishes completed failures from caller cancellation, preserves reusable-token precedence, and retains suppression across cutoff/eviction.
-- Lifetime falsifier: omission, overflow, zero lifetime and waiting callers. The spec distinguishes one-call use from invalid response, forbids indefinite reuse and internal refetch loops; omission is compatible with RFC 6749 section 5.1.
-- Retention falsifier: a byte target rejecting valid tokens or claiming an RSS ceiling. The spec limits retention only, preserves the requesting call, requires settled convergence and explicitly qualifies best-effort capacity.
-- Lifecycle falsifier: cancellation mistaken for observed completion. Inherited authority closes the candidate; no specification repair is needed. [CONTRIBUTING](../../CONTRIBUTING.md) requires joining every spawned task; [rust-tokio](../../.agents/skills/rust-tokio/SKILL.md) requires an owner that observes failure, cancellation and completion. Section 4 does not waive these obligations. Technical Design must identify a compliant completion mechanism. An abandoned handle or cancellation-only proof is insufficient, and preserving the public API never overrides completion ownership.
-- Baseline acquisition, refresh, admission, exchange retention and eviction inspected through the worktree CodeGraph; existing HTTP/gRPC contract and assertion documentation compared with the deltas.
-- Huskarl 0.11.4 metadata and published archive paths for both grants and core HTTP/signer modules independently confirmed. Library suitability, resolved dependencies and lifecycle mechanisms remain Technical Design-owned.
+- Closure bypass through cached success or failure: the spec orders elapsed deadline, lifecycle closure, then reusable tokens/shared failure. Closed integrations cannot start new token or resource requests.
+- Undefined surviving-clone or recovery behavior: owner drop/completion produces terminal closure, preserves independent owners and requires newly constructed integration ownership for recovery.
+- Closure retroactively changing admitted work: admitted calls may finish within existing deadlines; completed effects are preserved and replay remains forbidden. Background cancellation races stay bounded.
+- Cancellation mistaken for completion: the spec requires a driven production completion owner, termination after final credential release, bounded teardown and joining spawned tasks. Immediate closure of surviving credentials is distinct from declaring teardown complete. This satisfies Definition-level [CONTRIBUTING](../../CONTRIBUTING.md) and [rust-tokio](../../.agents/skills/rust-tokio/SKILL.md) requirements.
+- Accidental mechanism selection or expanded authority: bounded construction/composition changes are permitted while API shape and mechanism remain Technical Design-owned. No merge, deployment, provider/platform migration or additional capability is authorized.
 
-Read-only review; no builds, tests, provider integration, CI or implementation acceptance. The phase owner subsequently changed only spec status from draft to ready, a mechanical lifecycle update with unchanged semantic scope.
+Read-only review. No builds, tests, edits, mechanism exploration, implementation-feasibility certification, acceptance or transition. The phase owner subsequently changed only the two draft statuses to ready, with unchanged semantic scope.
 
-reopen_owner: none currently. Technical Design reopens Definition if inherited completion ownership cannot be satisfied within the accepted compatibility boundary.
+reopen_owner: none
+
+## Retained review scope
+
+The initial Definition review in commit `e9e57b3a11b2fcab75b8533472ecee4d453c84e6` remains PASS for unchanged service-token failure suppression, token lifetimes, cache retention targets, documentation/library research and other preserved behavior. Its former implicit lifecycle-compatibility interpretation is superseded by the explicit amendment above. The intermediate compatibility-only review is not relied upon for the added closed-lifecycle behavior; the fresh review above covers the complete amendment.

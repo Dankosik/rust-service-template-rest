@@ -22,7 +22,9 @@ Cover the OAuth adapter, its existing HTTP/gRPC bindings, relevant configuration
 
 Preserve private_key_jwt, the two supported grants, tenant/subject isolation, fixed egress, sensitive-data redaction, caller deadlines and absence of automatic resource replay. Preserve unrelated work. Code/docs/tests repair, non-destructive validation, branch push and one separate PR are authorized; merge and deployment are not.
 
-Assumption: existing supported providers and the public composition API remain the compatibility baseline. Reopen if completing a necessary fix would require a provider/platform migration or a new user-visible capability.
+Existing supported providers and HTTP/gRPC request behavior remain the compatibility baseline. A bounded source-level change to credential construction and integration composition is accepted when necessary to give proactive refresh an observable completion owner. Derived-service composition may need to retain and drive that owner under its existing lifecycle and await its completion during teardown. Preserve request binding behavior while the integration lifecycle is active. Releasing or completing its required lifecycle owner closes surviving credentials: new calls must fail locally without outbound dispatch. Document and update affected construction examples and integration consumers in the same PR. This is a necessary lifecycle repair within the authorized OAuth closeout, not a new authentication capability.
+
+No public shutdown method, service-global task registry, provider/platform migration or new readiness dependency is required by this change. Technical Design owns the narrow mechanism and API shape. Reopen if it would require a provider/platform migration, materially changed request semantics beyond this explicit lifecycle-closure behavior, or another user-visible capability.
 
 ## Success signal
 

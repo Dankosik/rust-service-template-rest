@@ -4,20 +4,24 @@ status: ready
 
 owner: Definition
 
-result: [Intent](intent.md), [behavior spec](spec.md), [supporting research](research/baseline-and-libraries.md). Ready spec SHA-256: `052fcdfd88df8b6c7d730cbc9442c61175ae49dd99d9ecd4a519b3be94e5f85b`.
+result: [Intent](intent.md), [behavior spec](spec.md), and unchanged [supporting research](research/baseline-and-libraries.md). Ready intent SHA-256: `f9ba40ce215cd16c1c5b2baf26957093bade7831fce8803f281a8c6d3f8d2602`. Ready spec SHA-256: `bc78c10a723502a01bc40d91db174910e6fed6a9e18f1cc39e9bd1b862af3236`.
 
-review: [Fresh Specification review](definition-review.md), PASS with no surviving findings. Changing draft to ready after review changed no semantic scope.
+review: [Fresh bounded lifecycle/compatibility review](definition-review.md), PASS with no surviving findings. Unchanged behavior retains the initial reviewed scope from `e9e57b3a11b2fcab75b8533472ecee4d453c84e6`. Draft-to-ready status changes after review are mechanical only.
 
-movement_evidence: Requester meaning, failure suppression, expiry, cache targets, refresh ownership and documentation deltas are closed. Existing library-absence claims have current counter-evidence. No runtime code was changed. `make docs-check` passed with zero errors on the three reviewed artifacts and repository docs; `git diff --check` passed. No runtime, Keycloak or CI result is claimed.
+movement_evidence: Definition now explicitly permits the necessary bounded source-level credential construction/composition change to provide a driven production completion owner. Last external-owner release cancels refresh and permits observed completion. Dropping/completing the lifecycle owner closes surviving credentials: new calls return Timeout if their deadline already elapsed, otherwise existing Unavailable without token/resource dispatch, regardless of cache contents. Admitted calls may finish within their budgets and completed effects are not retroactively cancelled. These deltas have fresh independent PASS; other accepted behavior and authority remain unchanged. No runtime code changed or runtime/provider/CI proof is claimed.
 
-reopen_owner: Definition for changed observable behavior/compatibility; supporting Research for version or dependency evidence drift.
+reopen_owner: Definition if a new behavior or compatibility delta becomes necessary; Research for dependency-evidence drift.
 
-next_owner: Technical Design, to select the library mechanism and close runtime ownership, bounded lifecycle completion, cache accounting and file responsibility before Planning.
+next_owner: Technical Design, continuing its bounded lifecycle mechanism/API, ownership and library decisions before Planning.
 
 ## Required design input
 
-Join/observed completion is inherited from CONTRIBUTING and rust-tokio and was explicitly reviewed. Cancellation-only proof, an abandoned task handle or API preservation cannot waive it. Identify the narrow compliant completion mechanism; reopen Definition if it cannot fit the accepted compatibility boundary. The spec's absence of a mandated new public shutdown method does not prohibit necessary owned completion.
+Technical Design may change credential construction and integration composition to expose the necessary completion ownership. It owns the exact API, mechanism and placement; Definition does not mandate a particular driver or task arrangement. Preserve supported active-integration HTTP/gRPC semantics and update all affected examples/consumers in this PR. A public shutdown method, global registry, new readiness dependency or provider/platform migration is not required.
 
-Fairly compare retained code, oauth2 and Huskarl using the research, including Huskarl's supported optional crypto/HTTP seams. Do not treat library presence as a migration mandate or optional native crypto as unavoidable. DPoP deployment, provider/platform migration, merge and deployment remain outside scope.
+Cancellation-only proof, synchronous final Drop, an abandoned task handle or private detached reaper cannot satisfy observed completion. The supported production composition must drive the lifetime operation while credentials remain active and await completion within its existing teardown budget. Newly invoked calls on a closed owner fail locally as specified; unmanaged fallback is forbidden.
 
-The root remains continuation and PR owner. Authorized next action is a fresh Technical Design actor; do not seek technical approval already delegated to the agent. This actor stops at reviewed Definition completion.
+Retain the original fair library comparison, including optional signer/HTTP seams. DPoP deployment, merge and deployment remain outside scope. The root owns continuation and PR publication; no user technical approval remains necessary for the accepted bounded change.
+
+## Static verification
+
+Final `make docs-check` passed with 866 total links and zero errors; the amendment passed `git diff --check`. No runtime build, provider integration or CI was run by this Definition actor.
