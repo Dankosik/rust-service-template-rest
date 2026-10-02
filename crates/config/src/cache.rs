@@ -1,7 +1,7 @@
 //! Optional cache profile: DSN, TLS escape hatches, and the command budget.
 //!
 //! The section is inert until `dsn` is set. The DSN is secret-like, so it
-//! arrives through the environment only. URL shape, TLS, and password
+//! arrives only as its `APP__` variable. URL shape, TLS, and password
 //! admission stay in `infra-cache`, which is the crate that parses what the
 //! driver would connect to. `command_timeout` is the one budget an operator
 //! sets; connect and keepalive ceilings are template constants there.
@@ -13,7 +13,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::app::is_local_development;
-use crate::de::blank_secret_as_none;
+use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::validate::{ValidationError, duration_range};
 
 /// Optional Redis-compatible cache. Absent `dsn` keeps the profile inert.
@@ -30,7 +30,9 @@ pub struct CacheConfig {
     /// by rewriting the file. The DSN then carries no password, and the
     /// running service follows the file. Unset by default.
     pub password_file: Option<PathBuf>,
-    /// PEM root CA path for a private certificate. Empty when unset.
+    /// PEM root CA path for a private certificate. Missing, empty, or
+    /// whitespace-only is unset (`None`).
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub root_ca_path: Option<PathBuf>,
     /// Permit a plaintext DSN. Local and development only.
     pub allow_plaintext: bool,
@@ -89,16 +91,6 @@ impl CacheConfig {
         {
             return Err(ValidationError::new(
                 "cache.password_file",
-                "cannot be empty when set",
-            ));
-        }
-        if self
-            .root_ca_path
-            .as_ref()
-            .is_some_and(|path| path.as_os_str().is_empty())
-        {
-            return Err(ValidationError::new(
-                "cache.root_ca_path",
                 "cannot be empty when set",
             ));
         }

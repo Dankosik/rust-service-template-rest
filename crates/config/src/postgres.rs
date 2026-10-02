@@ -1,8 +1,8 @@
 //! PostgreSQL profile switch, connection source, and pool capacity.
 //!
 //! The profile is inert until `enabled` is set. The DSN is the only
-//! connection source and, being secret-like, arrives through the environment
-//! only; its admission rules (URL form, explicit `sslmode`, no libpq side
+//! connection source and, being secret-like, arrives only as its `APP__`
+//! variable; its admission rules (URL form, explicit `sslmode`, no libpq side
 //! channels) live in `infra-postgres`, which is the crate that knows what
 //! the driver would otherwise read. Timeouts are template constants there
 //! as well; the pool size is the one capacity value without a universal
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::de::blank_secret_as_none;
+use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::validate::{ValidationError, int_range};
 use crate::{AppConfig, LogConfig, ObservabilityConfig};
 
@@ -50,7 +50,9 @@ pub struct PostgresConfig {
     pub dsn: Option<SecretString>,
     /// A file that holds the password alone, for a platform that rotates it
     /// by rewriting the file. The DSN then carries no password, and the
-    /// running service follows the file. Unset by default.
+    /// running service follows the file. Missing, empty, or whitespace-only
+    /// is unset (`None`), the default.
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub password_file: Option<PathBuf>,
     pub session_budgets: PostgresSessionBudgets,
     /// Upper bound on pooled connections. Size it from the database's
@@ -93,16 +95,6 @@ impl PostgresConfig {
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
         if self.enabled {
             self.required_dsn()?;
-        }
-        if self
-            .password_file
-            .as_ref()
-            .is_some_and(|path| path.as_os_str().is_empty())
-        {
-            return Err(ValidationError::new(
-                "postgres.password_file",
-                "cannot be empty when set",
-            ));
         }
         int_range(
             "postgres.max_connections",
@@ -174,16 +166,6 @@ mod tests {
             ..PostgresConfig::default()
         };
         config.validate().unwrap();
-    }
-
-    #[test]
-    fn an_empty_password_file_path_is_refused() {
-        let config = PostgresConfig {
-            password_file: Some(PathBuf::new()),
-            ..PostgresConfig::default()
-        };
-        let err = config.validate().unwrap_err();
-        assert_eq!(err.key, "postgres.password_file");
     }
 
     #[test]

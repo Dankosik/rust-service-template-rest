@@ -567,10 +567,6 @@
           "config-integration-grpc-field",
           "config-integration-grpc-type",
           "config-integration-grpc-import",
-          "config-integration-grpc-decode",
-          "config-integration-grpc-value",
-          "config-integration-grpc-parser",
-          "config-integration-grpc-material-parser",
           "config-integration-grpc-validate",
           "config-integration-grpc-validation"
         ]
@@ -785,7 +781,8 @@
           "config-validate",
           "config-integration-export"
         ]
-      }
+      },
+      {"path": "crates/config/src/load.rs", "id": "load-value-free-section"}
     ]
   },
   "config-url": {
@@ -816,9 +813,6 @@
           "config-integration-oauth-url-import",
           "config-integration-oauth-field",
           "config-integration-oauth-types",
-          "config-integration-oauth-decode",
-          "config-integration-oauth-value",
-          "config-integration-oauth-parser",
           "config-integration-oauth-validate",
           "config-integration-oauth-validation"
         ]

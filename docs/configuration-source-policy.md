@@ -9,13 +9,16 @@ is what the template adds on top. The `service-config` crate owns it.
 - TOML files (`env/config/*.toml`) hold baseline non-secret defaults. TOML is
   the Rust ecosystem convention; a service that must consume YAML enables
   config-rs's `yaml` feature rather than adding a YAML crate.
-- Environment variables (`APP__SECTION__KEY`) hold per-environment overrides
-  and every application-owned secret. `APP__HTTP__ADDR` sets `http.addr`;
+- `APP__SECTION__KEY` variables hold per-environment overrides and every
+  application-owned secret. `APP__HTTP__ADDR` sets `http.addr`;
   `APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS` sets the collector
-  credential. Profile-specific inputs are defined only when their section
-  exists in the local typed snapshot.
-- CLI flags are loader controls: `--config PATH` selects the base file and
-  `--config-overlay PATH` (repeatable, ordered) adds overlays. They never set
+  credential. A variable has two carriers: the process environment, and a
+  file of the same name in the [secrets directory](#secrets-directory).
+  Profile-specific inputs are defined only when their section exists in the
+  local typed snapshot.
+- CLI flags are loader controls: `--config PATH` selects the base file,
+  `--config-overlay PATH` (repeatable, ordered) adds overlays, and
+  `--secrets-dir PATH` names the secrets directory. They never set
   individual keys, and a positional argument is refused.
 
 Runtime value precedence, last wins:
@@ -23,16 +26,22 @@ Runtime value precedence, last wins:
 1. code defaults (`impl Default` beside each section type)
 2. `--config` base file
 3. `--config-overlay` files in order
-4. `APP__` environment variables
+4. `APP__` variables in the secrets directory
+5. `APP__` variables in the process environment
 
 An empty `APP__` value is still an explicit final override; it flows into
-validation and fails when the key cannot be empty. Unknown keys from files or
-the environment fail startup (`#[serde(deny_unknown_fields)]` on every
+validation and fails when the key cannot be empty. An optional text, path, or
+secret key reads an empty or whitespace-only value as unset, so an empty
+variable also unsets what a file set; the exceptions are the trust inputs
+whose section says a blank value is refused, which fail validation instead. Unknown keys from files or
+variables fail startup (`#[serde(deny_unknown_fields)]` on every
 section), and so does a malformed variable name such as `APP____ADDR`,
 `APP__HTTP__ADDR__`, or `APP__HTTP[0]`: each segment is letters, digits, `_`,
 or `-`. Because every `APP__*` variable is read, an unrelated
 `APP__FOO` in the process environment also fails startup: name the namespace
-for this service only.
+for this service only. Two spellings of one name in one carrier, such as
+`APP__HTTP__ADDR` beside `APP__http__addr`, fail startup, and so does a
+variable whose value is not valid Unicode; neither is resolved by guessing.
 
 A variable name is lowercased and split on `__`, and each segment must be a
 path identifier, so every key in a file must be one a variable can address:
@@ -45,6 +54,10 @@ The same rule applies to a value that refers to an environment-supplied entry.
 Values keep their human forms in both files and the environment: durations
 as `"8s"`, `"250ms"`, `"1m 30s"`; byte sizes as `"1 MiB"`, `"16 KiB"`, or a
 plain integer; booleans as `true`/`false`; enums by their documented spelling.
+Because a variable is always text, config-rs converts between scalar forms on
+demand in every section: numeric text sets a number, and an unquoted TOML
+number or boolean given to a text key is read as its text (`1.50` as `1.5`).
+Quote text in TOML.
 
 ## Secret Rules
 
@@ -54,14 +67,19 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   with a non-empty value in any file fails startup. Empty placeholders are
   allowed so a file can document the key. The guard reads key names, not
   types: a new secret field needs a name it recognizes.
+- "Environment-only" in these documents and in the section doc comments
+  means: set through an `APP__` variable, from either carrier, and never in a
+  TOML file.
 - Secret fields are `secrecy::SecretString`: `Debug` output and the startup
   summary print `[REDACTED]`, and the value is zeroed on drop.
-- A value from the environment that fails to decode is never echoed. The
-  message is rebuilt from the key and the expected form (`invalid value,
-  expected a boolean for key ...`); config-rs's own diagnostic would quote the
-  value, which is a secret when a variable omits its last name segment. An
-  unknown or missing key is reported as written, and a rejected file value is
-  still shown.
+- A value from a variable that fails to decode is never echoed, whichever
+  carrier held it. The message is rebuilt from the key and the expected form
+  (`invalid value, expected a boolean for key ...`); config-rs's own
+  diagnostic would quote the value, which is a secret when a variable omits
+  its last name segment. An unknown or missing key is reported as written,
+  and a rejected file value is still shown, except in a section the loader
+  lists as value-free (`VALUE_FREE_SECTIONS` in `load.rs`), whose trust
+  inputs stay out of diagnostics as they stay out of `Debug`.
 - Files are read as the process user; relative paths and symlinks are
   accepted because Kubernetes projected volumes depend on symlinks for atomic
   updates.
@@ -75,11 +93,12 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   service files, socket paths, and client key or certificate files are
   refused at startup, and the diagnostic never carries the value
   ([Persistence](architecture/persistence.md#connection-admission)).
-- `postgres.password_file` (unset by default) is the one alternative
-  password source: a path to a file that holds the password alone, for a
-  platform that rotates it. The URL then carries no password, both at once
-  is refused, and the service and the jobs worker follow the file while
-  they run. The key names a path, not a credential, so the file guard lets
+- `postgres.password_file` (unset by default; a blank value is unset) is
+  the one alternative password source: a path to a file that holds the
+  password alone, for a platform that rotates it. The URL then carries no
+  password, both at once is refused, and the service and the jobs worker
+  follow the file while they run, which a secrets-directory value, read
+  once at startup, does not. The key names a path, not a credential, so the file guard lets
   it appear in TOML: `password` followed by `file` is the one exception to
   the `password` rule above.
 - The `migrate` binary reads the same files and variables but decodes only
@@ -90,7 +109,7 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
 <!-- template:begin messaging:docs-config-messaging-source -->
 - `messaging` is an optional typed section. Its non-secret endpoint, stream,
   consumer, DLQ, TLS, timeout, concurrency, and delivery-size inputs use normal
-  file/environment precedence; credentials are `SecretString`, environment-only,
+  file/environment precedence, and a blank `root_ca_path` is unset; credentials are `SecretString`, environment-only,
   and redacted. Active consumption requires complete named topology and distinct
   source/DLQ subjects. Local plaintext or unauthenticated use is an explicit
   development/test escape hatch, never a production default. Configuration
@@ -113,7 +132,8 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   DSN then carries no password, both at once is refused, and the client
   follows the file while it runs. The key names a path, not a credential,
   so it may appear in TOML. `password_file`, `root_ca_path`, and
-  `command_timeout` use normal file/environment precedence. `allow_plaintext`
+  `command_timeout` use normal file/environment precedence; a blank
+  `root_ca_path` is unset. `allow_plaintext`
   and `allow_unauthenticated` are accepted only when `app.env` is `local` or
   `development`. Admitted schemes are `redis`, `rediss`, `valkey`, and
   `valkeys`. `#insecure` and a unix socket are refused; Sentinel and Cluster
@@ -181,13 +201,59 @@ plain integer; booleans as `true`/`false`; enums by their documented spelling.
   an environment-only nonempty
   `APP__INTEGRATIONS__<NAME>__OAUTH__PRIVATE_KEY`. `client_secret` is
   an unknown key and fails startup. Nonsecret
-  `scopes`, optional `audience`, and `exchange_cache_capacity` (a whole
+  `scopes`, optional `audience` (not blank when set), and `exchange_cache_capacity` (a whole
   number, default 1024, inclusive 1–65536) follow normal TOML/environment
   layering; scopes use a TOML list or one space-separated environment value. File secrets
   are refused by the recursive secret guard. The [outbound machine-authentication
   guide](outbound-machine-authentication.md) owns endpoint admission and
   provider compatibility.
 <!-- template:end outbound-auth:docs-config-outbound-auth -->
+
+## Secrets Directory
+
+`--secrets-dir PATH` reads `APP__` variables from files, for a platform that
+mounts secrets instead of exporting them: a Kubernetes Secret volume, Docker
+or Compose secrets, systemd credentials (`--secrets-dir
+"$CREDENTIALS_DIRECTORY"`). It is a second carrier of the same variables, not
+a second set of keys.
+
+- Each directory entry whose name starts with `APP__` is one variable, and
+  the file's content is its value. A file named
+  `APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS` sets the collector
+  credential, exactly as the environment variable of that name does. Every other entry is
+  skipped, which leaves out the `..data` links a Kubernetes volume keeps
+  beside its files; subdirectories are not searched.
+- A value ends before its trailing line breaks, because most tools write
+  one. Every other byte is kept, so a multi-line PEM key is stored whole.
+- The process environment wins over a file of the same name.
+- The directory is read once, at startup, and symbolic links are followed. A
+  rotated file takes effect at the next restart, like every other key of the
+  immutable snapshot.
+- A directory that cannot be listed, an entry that cannot be read, is not
+  valid Unicode, or holds a NUL byte, and a malformed name fail startup. The message names the
+  path and never the content.
+- Any key may be supplied this way; the rule that keeps secrets out of TOML
+  files is unchanged.
+
+On Kubernetes, name the Secret's keys as the variables, or map a provider's
+key names with `items`, and mount the volume read-only:
+
+```yaml
+containers:
+  - name: service
+    args: ["--config", "/etc/service/config.toml", "--secrets-dir", "/run/secrets/app"]
+    volumeMounts:
+      - { name: app-secrets, mountPath: /run/secrets/app, readOnly: true }
+volumes:
+  - name: app-secrets
+    projected:
+      sources:
+        - secret: { name: service }
+        - secret:
+            name: collector-token
+            items:
+              - { key: headers, path: APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS }
+```
 
 ## OpenTelemetry Environment Policy
 
@@ -196,7 +262,10 @@ The optional `grpc` section defaults disabled. Enabling it requires an address
 and explicit plaintext or TLS security; bearer verification remains valid with
 either mode. PEM certificate/CA values are ordinary configuration, while
 `grpc.private_key` and `integrations.<name>.grpc.private_key` are environment-only
-secrets. The transport builds the listener config at startup. A disabled
+secrets. In a [secrets directory](#secrets-directory), a certificate
+manager's `tls.crt` and `tls.key` map onto `APP__GRPC__CERTIFICATE` and
+`APP__GRPC__PRIVATE_KEY` with the volume's `items`. The transport builds the
+listener config at startup. A disabled
 listener performs no TLS or network work. Config Debug omits all trust and
 identity material. Client integration inputs select a trusted destination,
 explicit security, optional CA and optional paired certificate/key; they do
@@ -403,7 +472,12 @@ fields.
 1. Add the typed field, its default in the section's `impl Default`, and its
    validation, all in the section's own file under `crates/config/src/`. One
    section is one file: the reason a value was chosen sits beside the rule
-   that enforces it.
+   that enforces it. An optional text or path key decodes a blank value as
+   unset with `de::blank_as_none`, and an optional secret with
+   `de::blank_secret_as_none`. A new multi-word enum value is spelled
+   `snake_case`, like the keys; `authn.mode` and `authn.token_profile` keep
+   the hyphenated spellings they shipped with, and identifiers a standard
+   defines (`RS256`, `parentbased_traceidratio`) keep the standard's.
 2. Add a loader test in `crates/config/src/load.rs` that sets the key through
    the environment and asserts the decoded value, and a validation test for a
    rejected value. For a secret, also add its dotted key to the vectors in
@@ -426,7 +500,7 @@ registry to maintain.
 Webhook configuration follows normal typed TOML/environment layering and is an
 immutable startup snapshot: configuration or secret rotation takes effect only
 after restart. Secret values are `SecretString` values, supplied only through
-the corresponding `APP__...` environment paths and never a file. The recursive
+the corresponding `APP__...` variables and never a TOML file. The recursive
 secret-file guard covers endpoint fields and dynamic maps. There is no
 environment-variable indirection, JSON-in-environment manifest, or remote secret
 provider.
@@ -465,8 +539,9 @@ only with new evidence.
 | Decision | Alternative rejected | Why |
 | --- | --- | --- |
 | The `config` crate (`toml` feature only) with `serde`, layered builder, `#[serde(deny_unknown_fields, default)]` per section | `figment` | no release since 2024 and it silently drops a malformed environment name; config-rs reports the unknown field, and the template's pre-scan names the variable |
+| `--secrets-dir`: one directory whose files are named as `APP__` variables, merged under the process environment | a `*_FILE` twin per variable; a path key beside every secret key; the environment as the only carrier | platforms mount secrets as files (Kubernetes Secret volumes, Docker secrets, systemd credentials), the CIS Kubernetes Benchmark (5.4.1) prefers that to environment variables, and a multi-line PEM key is awkward in a variable. A directory reuses the one variable namespace: no key gains a twin, validation and the decode-failure redaction cover both carriers, and a secret still cannot sit in TOML. `*_FILE` would collide with a real key whose name ends in `_file` and need a registry of declared keys to tell them apart; a path key per secret doubles every secret key. The shape is pydantic-settings' `secrets_dir`; config-rs has no such source and no crate on crates.io adds one (searched 2026-10-02), so the loader lists the directory itself, about thirty lines. Reopen for a key that must follow rotation without a restart: that is a decision for that key, with its own reader |
 | TOML baseline files | YAML | the Rust convention with a maintained crate; `serde_yaml` is archived, `serde_yml` carries RUSTSEC-2025-0068; config-rs's `yaml` feature stays available for a service that must consume YAML |
-| Secrets as `secrecy::SecretString`; environment is the only secret source; each file is pre-scanned for non-empty secret-like keys (`password`, `secret`, `credentials`, `token`, `dsn`, `authorization`, `api_key`, `private_key`, `otlp_headers`) | trusting file contents | a committed baseline cannot leak a credential; `Debug` prints `[REDACTED]` |
+| Secrets as `secrecy::SecretString`; `APP__` variables are the only secret source; each TOML file is pre-scanned for non-empty secret-like keys (`password`, `secret`, `credentials`, `token`, `dsn`, `authorization`, `api_key`, `private_key`, `otlp_headers`) | trusting file contents | a committed baseline cannot leak a credential; `Debug` prints `[REDACTED]` |
 | `tracing` + `tracing-subscriber` (`EnvFilter` parses `log.level`; a directive without span filters runs as the equivalent `Targets`); the telemetry crate's JSON layer for `log.format = json`, `fmt::layer()` for `text`; `log` records bridged | `json-subscriber` 0.3 (chosen in stage 2) | it wrote the same line but built a JSON value map for the event and another for the span list on every record, and re-serialized all of a span's fields on every `record`: 61% of a small request's instructions. The crate's layer wrote the identical line (a differential corpus of 64 records matched byte for byte) with two thirds fewer instructions per record ([Telemetry performance](infra-telemetry-performance.md)). It has since left that line in three places where the line was the defect: a key an event shared with a span was written twice, which a strict JSON consumer rejects; a `log` crate record had the target `log`; and the trace context was nested as `openTelemetry.traceId` and `spanId`, where OpenTelemetry names it `trace_id`, `span_id`, and `trace_flags` for a non-OTLP log format. `EnvFilter` takes a shared lock on every span enter, exit, and close even without span directives. Reopen if an upstream layer flattens span fields without per-record maps |
 | Tracer provider always installed; the OTLP HTTP/protobuf batch exporter added only when a typed endpoint or a standard `OTEL_EXPORTER_OTLP_*ENDPOINT` resolves one; `TraceContextPropagator` installed explicitly | exporter `disabled` when no endpoint, provider absent | trace ids in every log line cost nothing without an exporter and avoid connection-refused noise against the SDK's `localhost:4318` default |
 | Ambient `OTEL_EXPORTER_OTLP_*HEADERS` fail validation when the typed endpoint selects the destination; unread trust variables are named in a startup warning | letting the SDK merge them | one collector's credential is never sent to another; the mechanism stays the SDK's, the safety property is a validation rule |

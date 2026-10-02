@@ -167,13 +167,17 @@ the adapter receives primitives/SecretString through composition and does not
 depend on service-config. Normal config validation runs in every existing binary;
 there is no eager token call or extra service lifecycle field.
 
-The section decodes through `config::Value` instead of derived serde like the
-webhook sections. Derived decoding surfaces serde's `invalid type: string "..."`
-as a config-rs `Message` error, which echoes the rejected value; config-rs keeps
-its `Unexpected` type private, so a global redaction in `load` would have to
-parse error text. The explicit decoder keeps full key paths and unknown-key
-names without values. Reopen when config-rs exposes value-free type errors or
-the service adopts one loader-wide diagnostic policy for every section.
+The section decodes with derived serde like every other section. Its values
+stay out of decode failures through the loader's one redaction rule: `load`
+rebuilds a failure at a key a variable sets from the key and the expected
+form, and `integrations` is listed in `VALUE_FREE_SECTIONS` there, so a file
+value of this section is not shown either. The section first shipped with an
+explicit decoder over `config::Value` for that purpose; once the loader had
+the rule for every variable, a second decoder was a parallel path and was
+removed. With it went its refusal of a number where text is expected:
+config-rs converts scalars here as in every section, and validation still
+checks the result. `algorithm` is decoded by hand only to answer a refused
+value with the accepted ones.
 
 Runtime errors separate caller Authorization conflict, a missing required
 subject, acquisition failure, and existing resource transport failure. Acquisition reasons and all public

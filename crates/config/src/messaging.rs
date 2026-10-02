@@ -28,7 +28,9 @@ pub struct MessagingConfig {
     /// Inline NATS credentials. This environment-only value is redacted.
     #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub credentials: Option<SecretString>,
-    /// Optional PEM root CA path for the operator-selected broker.
+    /// Optional PEM root CA path for the operator-selected broker. Missing,
+    /// empty, or whitespace-only is unset (`None`).
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub root_ca_path: Option<PathBuf>,
     /// Permit `nats://` only for a local or development process.
     pub allow_plaintext: bool,
@@ -148,17 +150,6 @@ impl MessagingConfig {
                 "is local/development-only",
             ));
         }
-        if self
-            .root_ca_path
-            .as_ref()
-            .is_some_and(|path| path.as_os_str().is_empty())
-        {
-            return Err(ValidationError::new(
-                "messaging.root_ca_path",
-                "cannot be empty when set",
-            ));
-        }
-
         let mut plaintext = false;
         for raw in &self.urls {
             non_empty("messaging.urls", raw)?;
@@ -359,18 +350,6 @@ mod tests {
         assert_eq!(
             config.validate("production").unwrap_err().key,
             "messaging.consumer_concurrency"
-        );
-    }
-
-    #[test]
-    fn rejects_an_empty_root_ca_path() {
-        let config = MessagingConfig {
-            root_ca_path: Some(PathBuf::new()),
-            ..MessagingConfig::default()
-        };
-        assert_eq!(
-            config.validate("production").unwrap_err().key,
-            "messaging.root_ca_path"
         );
     }
 }

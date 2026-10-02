@@ -10,20 +10,22 @@ use secrecy::SecretString;
 // template:begin outbound-auth:config-integration-oauth-imports
 use secrecy::ExposeSecret as _;
 // template:end outbound-auth:config-integration-oauth-imports
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 // template:begin outbound-auth:config-integration-oauth-url-import
 use url::Url;
 // template:end outbound-auth:config-integration-oauth-url-import
 
 use crate::ValidationError;
-use crate::de::VALUE_FREE;
 // template:begin grpc:config-integration-grpc-import
 use crate::GrpcSecurity;
 // template:end grpc:config-integration-grpc-import
 
 /// One named integration's optional client input.
-#[derive(Clone, Debug, Default)]
+///
+/// The loader keeps this section's values out of a decode failure whichever
+/// source set them, as `Debug` does below.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
 pub struct IntegrationConfig {
     // template:begin outbound-auth:config-integration-oauth-field
     /// OAuth client-credentials input. Absent entries do not create clients.
@@ -37,17 +39,22 @@ pub struct IntegrationConfig {
 
 // template:begin grpc:config-integration-grpc-type
 /// Immutable native gRPC client input for one named integration.
-#[derive(Clone)]
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrpcClientConfig {
     /// Tonic endpoint input, admitted by the transport before a channel exists.
+    #[serde(default)]
     pub destination: String,
-    /// Explicit client security mode.
+    /// Explicit client security mode; required.
     pub security: GrpcSecurity,
-    /// Optional PEM trust anchor for TLS.
+    /// Optional PEM trust anchor for TLS. Blank is absent.
+    #[serde(default, deserialize_with = "crate::de::blank_as_none")]
     pub ca_certificate: Option<String>,
-    /// Optional PEM client certificate for mTLS.
+    /// Optional PEM client certificate for mTLS. Blank is absent.
+    #[serde(default, deserialize_with = "crate::de::blank_as_none")]
     pub certificate: Option<String>,
-    /// Environment-only PEM client key for mTLS.
+    /// PEM client key for mTLS, never in a config file. Blank is absent.
+    #[serde(default, deserialize_with = "crate::de::blank_secret_as_none")]
     pub private_key: Option<SecretString>,
 }
 
@@ -63,27 +70,39 @@ impl fmt::Debug for GrpcClientConfig {
 
 // template:begin outbound-auth:config-integration-oauth-types
 /// One immutable OAuth client-credentials tuple.
-#[derive(Clone)]
+///
+/// A missing text key decodes empty and is refused by validation, which
+/// names the key; `algorithm` has no empty form and is refused when decoded.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OAuthConfig {
     /// Fixed token endpoint, admitted before any adapter construction.
+    #[serde(default)]
     pub token_url: String,
     /// Client identifier posted as a form field and asserted as the client
     /// assertion's `iss` and `sub`.
+    #[serde(default)]
     pub client_id: String,
-    /// Environment-only PEM private key used to sign the client assertion.
+    /// PEM private key used to sign the client assertion, never in a config
+    /// file.
+    #[serde(default = "empty_secret")]
     pub private_key: SecretString,
     /// Key identifier carried in the client-assertion header as `kid`.
+    #[serde(default)]
     pub key_id: String,
     /// Client-assertion signing algorithm; required, because it must match
     /// the key.
     pub algorithm: OAuthAlgorithm,
     /// Audience claim asserted in the signed client assertion.
+    #[serde(default)]
     pub assertion_audience: String,
     /// Optional RFC 6749 scopes, retained in their configured order.
+    #[serde(default)]
     pub scopes: Scopes,
     /// Optional OAuth audience parameter.
     pub audience: Option<String>,
     /// How many subjects keep a token exchanged on their behalf.
+    #[serde(default = "default_exchange_cache_capacity")]
     pub exchange_cache_capacity: u32,
 }
 
@@ -92,6 +111,14 @@ impl OAuthConfig {
     /// replica.
     pub const DEFAULT_EXCHANGE_CACHE_CAPACITY: u32 = 1024;
     const EXCHANGE_CACHE_CAPACITY: std::ops::RangeInclusive<u32> = 1..=65_536;
+}
+
+fn empty_secret() -> SecretString {
+    SecretString::from(String::new())
+}
+
+const fn default_exchange_cache_capacity() -> u32 {
+    OAuthConfig::DEFAULT_EXCHANGE_CACHE_CAPACITY
 }
 
 impl fmt::Debug for OAuthConfig {
@@ -109,6 +136,26 @@ pub enum OAuthAlgorithm {
     Ps256,
     /// ECDSA using the P-256 curve and SHA-256.
     Es256,
+}
+
+/// Decoded by hand so a refused value is answered with the accepted ones:
+/// config-rs reports a derived enum's mismatch without naming them, and this
+/// key has no default to fall back on.
+impl<'de> Deserialize<'de> for OAuthAlgorithm {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "RS256" => Ok(Self::Rs256),
+            "PS256" => Ok(Self::Ps256),
+            "ES256" => Ok(Self::Es256),
+            _ => Err(serde::de::Error::custom(format_args!(
+                "{}must be RS256, PS256 or ES256",
+                crate::de::VALUE_FREE
+            ))),
+        }
+    }
 }
 
 /// RFC 6749 scope tokens supplied as a list or an environment string.
@@ -138,7 +185,7 @@ impl fmt::Debug for Scopes {
 impl<'de> Deserialize<'de> for Scopes {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: Deserializer<'de>,
+        D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
         #[serde(untagged)]
@@ -148,7 +195,10 @@ impl<'de> Deserialize<'de> for Scopes {
         }
 
         let input = Input::deserialize(deserializer).map_err(|_| {
-            D::Error::custom("must be a list of strings or a space-separated string")
+            serde::de::Error::custom(format_args!(
+                "{}must be a list of strings or a space-separated string",
+                crate::de::VALUE_FREE
+            ))
         })?;
         let scopes = match input {
             Input::Text(value) => value
@@ -163,208 +213,6 @@ impl<'de> Deserialize<'de> for Scopes {
 }
 
 // template:end outbound-auth:config-integration-oauth-types
-
-/// Decode through config-rs's value representation so its rejected-value
-/// diagnostics never escape this sensitive section. Every message written
-/// here names a key and no value, from a file or the environment alike.
-pub(crate) fn deserialize_integrations<'de, D>(
-    deserializer: D,
-) -> Result<BTreeMap<String, IntegrationConfig>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = config::Value::deserialize(deserializer)
-        .map_err(|_| value_free("integrations: invalid configuration value"))?;
-    decode_integrations(value).map_err(value_free)
-}
-
-fn value_free<E: serde::de::Error>(message: impl fmt::Display) -> E {
-    E::custom(format_args!("{VALUE_FREE}{message}"))
-}
-
-fn decode_integrations(
-    value: config::Value,
-) -> Result<BTreeMap<String, IntegrationConfig>, String> {
-    let mut integrations = BTreeMap::new();
-    for (name, value) in into_table(value, "integrations")? {
-        let prefix = format!("integrations.{name}");
-        let mut fields = into_table(value, &prefix)?;
-        // template:begin outbound-auth:config-integration-oauth-decode
-        let oauth = fields
-            .remove("oauth")
-            .map(|value| decode_oauth(value, &format!("{prefix}.oauth")))
-            .transpose()?;
-        // template:end outbound-auth:config-integration-oauth-decode
-        // template:begin grpc:config-integration-grpc-decode
-        let grpc = fields
-            .remove("grpc")
-            .map(|value| decode_grpc(value, &format!("{prefix}.grpc")))
-            .transpose()?;
-        // template:end grpc:config-integration-grpc-decode
-        refuse_unknown(fields, &prefix)?;
-        integrations.insert(
-            name,
-            IntegrationConfig {
-                // template:begin outbound-auth:config-integration-oauth-value
-                oauth,
-                // template:end outbound-auth:config-integration-oauth-value
-                // template:begin grpc:config-integration-grpc-value
-                grpc,
-                // template:end grpc:config-integration-grpc-value
-            },
-        );
-    }
-    Ok(integrations)
-}
-
-// template:begin outbound-auth:config-integration-oauth-parser
-fn decode_oauth(value: config::Value, prefix: &str) -> Result<OAuthConfig, String> {
-    let mut fields = into_table(value, prefix)?;
-    let token_url = take_text(&mut fields, "token_url", prefix)?.unwrap_or_default();
-    let client_id = take_text(&mut fields, "client_id", prefix)?.unwrap_or_default();
-    let private_key =
-        SecretString::from(take_text(&mut fields, "private_key", prefix)?.unwrap_or_default());
-    let key_id = take_text(&mut fields, "key_id", prefix)?.unwrap_or_default();
-    let algorithm = take_text(&mut fields, "algorithm", prefix)?
-        .map(|value| parse_oauth_algorithm(&value, prefix))
-        .transpose()?;
-    let assertion_audience =
-        take_text(&mut fields, "assertion_audience", prefix)?.unwrap_or_default();
-    let audience = take_text(&mut fields, "audience", prefix)?;
-    let scopes = fields
-        .remove("scopes")
-        .map(|value| {
-            value.try_deserialize::<Scopes>().map_err(|_| {
-                format!("{prefix}.scopes: must be a list of strings or a space-separated string")
-            })
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let exchange_cache_capacity = take_count(&mut fields, "exchange_cache_capacity", prefix)?
-        .unwrap_or(OAuthConfig::DEFAULT_EXCHANGE_CACHE_CAPACITY);
-    refuse_unknown(fields, prefix)?;
-    // After the unknown-key check, so a misspelt or unsupported key is named
-    // first.
-    let algorithm = algorithm.ok_or_else(|| format!("{prefix}.algorithm: is required"))?;
-    Ok(OAuthConfig {
-        token_url,
-        client_id,
-        private_key,
-        key_id,
-        algorithm,
-        assertion_audience,
-        scopes,
-        audience,
-        exchange_cache_capacity,
-    })
-}
-
-/// A whole number from a file, or its decimal text from the environment.
-fn take_count(
-    fields: &mut config::Map<String, config::Value>,
-    field: &str,
-    prefix: &str,
-) -> Result<Option<u32>, String> {
-    fields
-        .remove(field)
-        .map(|value| {
-            match value.kind {
-                config::ValueKind::I64(count) => u32::try_from(count).ok(),
-                config::ValueKind::U64(count) => u32::try_from(count).ok(),
-                config::ValueKind::String(count) => count.parse().ok(),
-                _ => None,
-            }
-            .ok_or_else(|| format!("{prefix}.{field}: must be a whole number"))
-        })
-        .transpose()
-}
-
-fn parse_oauth_algorithm(value: &str, prefix: &str) -> Result<OAuthAlgorithm, String> {
-    match value {
-        "RS256" => Ok(OAuthAlgorithm::Rs256),
-        "PS256" => Ok(OAuthAlgorithm::Ps256),
-        "ES256" => Ok(OAuthAlgorithm::Es256),
-        _ => Err(format!("{prefix}.algorithm: must be RS256, PS256 or ES256")),
-    }
-}
-// template:end outbound-auth:config-integration-oauth-parser
-
-// template:begin grpc:config-integration-grpc-parser
-fn decode_grpc(value: config::Value, prefix: &str) -> Result<GrpcClientConfig, String> {
-    let mut fields = into_table(value, prefix)?;
-    let destination = take_text(&mut fields, "destination", prefix)?.unwrap_or_default();
-    let security = take_text(&mut fields, "security", prefix)?
-        .ok_or_else(|| format!("{prefix}.security: is required"))
-        .and_then(|value| parse_grpc_security(&value, prefix))?;
-    let ca_certificate = take_nonblank_text(&mut fields, "ca_certificate", prefix)?;
-    let certificate = take_nonblank_text(&mut fields, "certificate", prefix)?;
-    let private_key = take_nonblank_secret(&mut fields, "private_key", prefix)?;
-    refuse_unknown(fields, prefix)?;
-    Ok(GrpcClientConfig {
-        destination,
-        security,
-        ca_certificate,
-        certificate,
-        private_key,
-    })
-}
-
-fn parse_grpc_security(value: &str, prefix: &str) -> Result<GrpcSecurity, String> {
-    match value {
-        "plaintext" => Ok(GrpcSecurity::Plaintext),
-        "tls" => Ok(GrpcSecurity::Tls),
-        _ => Err(format!("{prefix}.security: must be plaintext or tls")),
-    }
-}
-// template:end grpc:config-integration-grpc-parser
-
-fn into_table(
-    value: config::Value,
-    key: &str,
-) -> Result<config::Map<String, config::Value>, String> {
-    value
-        .into_table()
-        .map_err(|_| format!("{key}: must be an object"))
-}
-
-fn take_text(
-    fields: &mut config::Map<String, config::Value>,
-    field: &str,
-    prefix: &str,
-) -> Result<Option<String>, String> {
-    fields
-        .remove(field)
-        .map(|value| match value.kind {
-            config::ValueKind::String(value) => Ok(value),
-            _ => Err(format!("{prefix}.{field}: must be a string")),
-        })
-        .transpose()
-}
-
-// template:begin grpc:config-integration-grpc-material-parser
-fn take_nonblank_text(
-    fields: &mut config::Map<String, config::Value>,
-    field: &str,
-    prefix: &str,
-) -> Result<Option<String>, String> {
-    Ok(take_text(fields, field, prefix)?.filter(|value| !value.trim().is_empty()))
-}
-
-fn take_nonblank_secret(
-    fields: &mut config::Map<String, config::Value>,
-    field: &str,
-    prefix: &str,
-) -> Result<Option<SecretString>, String> {
-    Ok(take_nonblank_text(fields, field, prefix)?.map(SecretString::from))
-}
-// template:end grpc:config-integration-grpc-material-parser
-
-fn refuse_unknown(fields: config::Map<String, config::Value>, prefix: &str) -> Result<(), String> {
-    if let Some(field) = fields.into_keys().next() {
-        return Err(format!("{prefix}.{field}: unknown key"));
-    }
-    Ok(())
-}
 
 pub(crate) fn validate_integrations(
     integrations: &BTreeMap<String, IntegrationConfig>,
