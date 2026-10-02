@@ -100,7 +100,7 @@ enum ReadyHoldState {
     Released,
 }
 
-/// Which request will have its ReadyForQuery reply withheld once.
+/// Which request will have its `ReadyForQuery` reply withheld once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReadyBoundary {
     Begin,
@@ -236,7 +236,7 @@ impl CommitProxy {
         self.ready_hold.arm(boundary);
     }
 
-    /// Wait until PostgreSQL has answered but ReadyForQuery is still withheld.
+    /// Wait until PostgreSQL has answered but `ReadyForQuery` is still withheld.
     pub(crate) async fn ready_held(&self) {
         self.ready_hold.held().await;
     }
