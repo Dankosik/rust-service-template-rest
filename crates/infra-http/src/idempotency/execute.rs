@@ -34,7 +34,9 @@ pub(super) enum Outcome {
     KeyMismatch,
     Replayed,
     Integrity,
+    Internal,
     Executed,
+    Unstorable,
     NotStored,
     Abandoned,
 }
@@ -48,7 +50,9 @@ impl Outcome {
             Self::KeyMismatch => "key_mismatch",
             Self::Replayed => "replayed",
             Self::Integrity => "integrity",
+            Self::Internal => "internal",
             Self::Executed => "executed",
+            Self::Unstorable => "unstorable",
             Self::NotStored => "not_stored",
             Self::Abandoned => "abandoned",
         }
@@ -225,8 +229,11 @@ fn map_attempted(
         Err(AttemptError::Unavailable) => {
             Answer::boundary_problem(unavailable(), Outcome::Unavailable)
         }
-        Err(AttemptError::Internal) | Ok(Attempted::RolledBack(Rollback::Unstorable)) => {
-            Answer::boundary_problem(sanitized_internal_error(), Outcome::NotStored)
+        Err(AttemptError::Internal) => {
+            Answer::boundary_problem(sanitized_internal_error(), Outcome::Internal)
+        }
+        Ok(Attempted::RolledBack(Rollback::Unstorable)) => {
+            Answer::boundary_problem(sanitized_internal_error(), Outcome::Unstorable)
         }
         Err(AttemptError::Integrity) => integrity_failure(),
         Ok(Attempted::Mismatch) => Answer::boundary_problem(key_mismatch(), Outcome::KeyMismatch),
@@ -384,7 +391,18 @@ mod tests {
         .await;
         assert_problem(
             map_attempted(Err(AttemptError::Internal), &scope(), "test"),
-            Outcome::NotStored,
+            Outcome::Internal,
+            Code::InternalServerError,
+            false,
+        )
+        .await;
+        assert_problem(
+            map_attempted(
+                Ok(Attempted::RolledBack(Rollback::Unstorable)),
+                &scope(),
+                "test",
+            ),
+            Outcome::Unstorable,
             Code::InternalServerError,
             false,
         )
