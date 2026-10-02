@@ -564,12 +564,11 @@ fn register_capabilities(
     let has_jobs = jobs.is_some();
     // template:end jobs:worker-bootstrap-validate-jobs
     // template:begin messaging:worker-bootstrap-validate-messaging
-    let messages = if registration.messages.is_empty() {
-        None
-    } else {
+    let messages = if registration.messages.has_handlers() {
         config.messaging.validate_consumer(&config.app.env)?;
-        registration.messages.validate_consumer()?;
         Some(registration.messages)
+    } else {
+        None
     };
     let has_messages = messages.is_some();
     // template:end messaging:worker-bootstrap-validate-messaging

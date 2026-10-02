@@ -631,10 +631,12 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
-    let prepared = messaging
-        .producer()
-        .prepare(fixture.subject.clone(), &event("event-consumer"))
-        .expect("fixture event is prepared");
+    let prepared = infra_messaging::PreparedEvent::prepare(
+        fixture.subject.clone(),
+        &event("event-consumer"),
+        1024,
+    )
+    .expect("fixture event is prepared");
     messaging
         .producer()
         .publish(&prepared, deadline(), &cancel)
@@ -741,10 +743,12 @@ async fn handler_runs_in_the_trace_of_the_publication() {
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
-    let prepared = messaging
-        .producer()
-        .prepare(fixture.subject.clone(), &event("event-traced"))
-        .expect("fixture event is prepared");
+    let prepared = infra_messaging::PreparedEvent::prepare(
+        fixture.subject.clone(),
+        &event("event-traced"),
+        1024,
+    )
+    .expect("fixture event is prepared");
     let request = tracing::info_span!("request");
     messaging
         .producer()
@@ -842,10 +846,12 @@ async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked(
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
-    let prepared = messaging
-        .producer()
-        .prepare(fixture.subject.clone(), &event("event-retry"))
-        .expect("fixture event is prepared");
+    let prepared = infra_messaging::PreparedEvent::prepare(
+        fixture.subject.clone(),
+        &event("event-retry"),
+        1024,
+    )
+    .expect("fixture event is prepared");
     messaging
         .producer()
         .publish(&prepared, deadline(), &cancel)
@@ -921,10 +927,12 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
-    let prepared = messaging
-        .producer()
-        .prepare(fixture.subject.clone(), &event("event-permanent"))
-        .expect("fixture event is prepared");
+    let prepared = infra_messaging::PreparedEvent::prepare(
+        fixture.subject.clone(),
+        &event("event-permanent"),
+        1024,
+    )
+    .expect("fixture event is prepared");
     messaging
         .producer()
         .publish(&prepared, deadline(), &cancel)
@@ -1070,6 +1078,89 @@ async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_t
 }
 
 #[tokio::test]
+async fn unhandled_and_undecodable_deliveries_share_a_dead_letter_reason_and_differ_in_the_span() {
+    let exporter = install_tracing();
+    let fixture = Fixture::create(true).await;
+    let cancel = CancellationToken::new();
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer_options(&fixture)), 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect("fixture source stream is admitted");
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_handler = Arc::clone(&handler_calls);
+    let mut handlers = registry(&fixture);
+    handlers
+        .register::<ExampleEvent, _, _>(move |_, _| {
+            calls_for_handler.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        })
+        .expect("fixture handler is registered");
+    let mut handle = messaging
+        .consumer(handlers)
+        .await
+        .expect("operator-provisioned durable consumer is admitted")
+        .start(&cancel);
+
+    // A schema version published before its consumer was deployed, then the
+    // handled version with a payload that is not the handler's type.
+    let newer = registry(&fixture)
+        .prepare(&event("event-newer-schema"), 1024)
+        .expect("newer-schema fixture starts from a valid production envelope");
+    let mut newer_headers = infra_messaging::wire::encode_prepared(&newer)
+        .expect("newer-schema fixture has valid identity headers");
+    newer_headers.insert("Event-Schema", "v2");
+    let undecodable = registry(&fixture)
+        .prepare(&event("event-undecodable"), 1024)
+        .expect("undecodable fixture starts from a valid production envelope");
+    let undecodable_headers = infra_messaging::wire::encode_prepared(&undecodable)
+        .expect("undecodable fixture has valid identity headers");
+    let undecodable_payload = Bytes::from_static(br#"{"value":7}"#);
+
+    let mut transferred = 0;
+    for (headers, payload) in [
+        (newer_headers, newer.payload().clone()),
+        (undecodable_headers, undecodable_payload),
+    ] {
+        fixture
+            .jetstream
+            .publish_with_headers(fixture.subject.clone(), headers, payload.clone())
+            .await
+            .expect("fixture message is accepted by the source stream")
+            .await
+            .expect("fixture message receives a source publication acknowledgment");
+        let dead_letter = wait_for_dead_letter_after(&fixture, transferred).await;
+        assert_dead_letter(&dead_letter, &fixture, "permanent", payload.as_ref());
+        transferred = dead_letter.sequence;
+    }
+    assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
+    wait_for_source_ack_at_least(&fixture, 2).await;
+
+    handle
+        .finish(deadline())
+        .await
+        .expect("bounded consumer drain must join its pull task");
+    let causes: Vec<_> = exported_spans(exporter, &format!("process {}", fixture.subject))
+        .iter()
+        .map(|span| (attribute(span, "outcome"), attribute(span, "error.type")))
+        .collect();
+    assert_eq!(
+        causes,
+        [
+            (Some("unhandled".to_owned()), Some("unhandled".to_owned())),
+            (
+                Some("undecodable".to_owned()),
+                Some("undecodable".to_owned())
+            ),
+        ]
+    );
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn definite_dlq_refusal_keeps_the_source_for_redelivery_and_the_consumer_running() {
     let fixture = Fixture::create_with_limits(true, 10, 1).await;
     fixture
@@ -1099,10 +1190,12 @@ async fn definite_dlq_refusal_keeps_the_source_for_redelivery_and_the_consumer_r
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
-    let prepared = messaging
-        .producer()
-        .prepare(fixture.subject.clone(), &event("event-dlq-refused"))
-        .expect("fixture event is prepared");
+    let prepared = infra_messaging::PreparedEvent::prepare(
+        fixture.subject.clone(),
+        &event("event-dlq-refused"),
+        1024,
+    )
+    .expect("fixture event is prepared");
     messaging
         .producer()
         .publish(&prepared, deadline(), &cancel)
@@ -1148,10 +1241,12 @@ async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
     ))
     .await
     .expect("fixture source stream is admitted");
-    let prepared = messaging
-        .producer()
-        .prepare(fixture.subject.clone(), &event("event-exhausted"))
-        .expect("fixture event is prepared");
+    let prepared = infra_messaging::PreparedEvent::prepare(
+        fixture.subject.clone(),
+        &event("event-exhausted"),
+        1024,
+    )
+    .expect("fixture event is prepared");
     messaging
         .producer()
         .publish(&prepared, deadline(), &cancel)
@@ -1220,10 +1315,12 @@ async fn handler_panic_is_retried_like_a_retryable_failure() {
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
-    let prepared = messaging
-        .producer()
-        .prepare(fixture.subject.clone(), &event("event-panic"))
-        .expect("fixture event is prepared");
+    let prepared = infra_messaging::PreparedEvent::prepare(
+        fixture.subject.clone(),
+        &event("event-panic"),
+        1024,
+    )
+    .expect("fixture event is prepared");
     messaging
         .producer()
         .publish(&prepared, deadline(), &cancel)
@@ -1344,10 +1441,12 @@ async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
-    let prepared = messaging
-        .producer()
-        .prepare(fixture.subject.clone(), &event("event-drain"))
-        .expect("fixture event is prepared");
+    let prepared = infra_messaging::PreparedEvent::prepare(
+        fixture.subject.clone(),
+        &event("event-drain"),
+        1024,
+    )
+    .expect("fixture event is prepared");
     messaging
         .producer()
         .publish(&prepared, deadline(), &cancel)
@@ -1545,10 +1644,9 @@ async fn drain_returns_a_prefetched_delivery_before_ack_wait() {
         .expect("adapter creates its named durable consumer")
         .start(&cancel);
     for id in ["event-in-flight-1", "event-in-flight-2", "event-prefetched"] {
-        let prepared = messaging
-            .producer()
-            .prepare(fixture.subject.clone(), &event(id))
-            .expect("fixture event is prepared");
+        let prepared =
+            infra_messaging::PreparedEvent::prepare(fixture.subject.clone(), &event(id), 1024)
+                .expect("fixture event is prepared");
         messaging
             .producer()
             .publish(&prepared, deadline(), &cancel)

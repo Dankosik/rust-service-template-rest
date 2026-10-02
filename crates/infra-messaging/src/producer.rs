@@ -7,12 +7,11 @@ use async_nats::jetstream::ErrorCode;
 use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::message::PublishMessage;
 use bytes::Bytes;
-use domain_events::{Event, EventPayload};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
-use crate::error::{MessagingError, PublishError};
+use crate::error::PublishError;
 use crate::messaging::{BROKER_OPERATION_BUDGET, Shared};
 use crate::prepared::{PreparedEvent, PublishAck};
 use crate::wire::encode_prepared;
@@ -35,25 +34,6 @@ pub struct Producer {
 }
 
 impl Producer {
-    /// Serializes an explicitly routed typed event once into immutable intent.
-    ///
-    /// Prefer [`Registry::prepare`](crate::Registry::prepare) for normal
-    /// composition-owned routing; this form is retained for stored redrive.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for invalid or oversized intent or a draining dependency.
-    pub fn prepare<T: EventPayload + serde::Serialize>(
-        &self,
-        subject: impl Into<String>,
-        event: &Event<T>,
-    ) -> Result<PreparedEvent, MessagingError> {
-        if self.shared.draining.load(Ordering::Acquire) {
-            return Err(MessagingError::Draining);
-        }
-        PreparedEvent::prepare(subject, event, self.shared.max_payload_bytes)
-    }
-
     /// Dispatches and awaits one confirmed `JetStream` acknowledgment under one deadline.
     ///
     /// # Errors

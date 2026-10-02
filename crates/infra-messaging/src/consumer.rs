@@ -23,7 +23,7 @@ use crate::messaging::{
     topology_failure,
 };
 use crate::producer::publish;
-use crate::registry::Registry;
+use crate::registry::{DispatchError, Registry};
 use crate::wire::{self, HEADER_LIMIT_BYTES};
 
 const HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -108,7 +108,7 @@ const UNREGISTERED: &str = "unregistered";
 #[derive(Debug)]
 struct EventMetrics {
     event_type: &'static str,
-    outcomes: Outcomes<5>,
+    outcomes: Outcomes<7>,
 }
 
 /// Handler outcome metrics per handled event type, so an operator can tell
@@ -149,19 +149,31 @@ impl HandlerMetrics {
     }
 }
 
-/// How one handler invocation ended. The discriminant indexes [`OUTCOME_LABELS`].
+/// How one admitted delivery ended. The discriminant indexes [`OUTCOME_LABELS`].
 #[derive(Clone, Copy)]
 enum Outcome {
     Success = 0,
+    /// The handler rejected the event.
     Permanent = 1,
     Retryable = 2,
     TimedOut = 3,
     Panicked = 4,
+    /// No handler claims this event type, schema version and subject.
+    Unhandled = 5,
+    /// The payload is not what the handler's type reads.
+    Undecodable = 6,
 }
 
 /// Metric label of each [`Outcome`], indexed by its discriminant.
-pub(crate) const OUTCOME_LABELS: [&str; 5] =
-    ["success", "permanent", "retryable", "timeout", "panic"];
+pub(crate) const OUTCOME_LABELS: [&str; 7] = [
+    "success",
+    "permanent",
+    "retryable",
+    "timeout",
+    "panic",
+    "unhandled",
+    "undecodable",
+];
 
 impl Consumer {
     pub(crate) async fn admit(
@@ -433,8 +445,10 @@ impl Delivery {
                 .await
             {
                 Ok(Ok(Ok(()))) => Outcome::Success,
-                Ok(Ok(Err(HandlerError::Permanent))) => Outcome::Permanent,
-                Ok(Ok(Err(HandlerError::Retryable))) => Outcome::Retryable,
+                Ok(Ok(Err(DispatchError::Handler(HandlerError::Permanent)))) => Outcome::Permanent,
+                Ok(Ok(Err(DispatchError::Handler(HandlerError::Retryable)))) => Outcome::Retryable,
+                Ok(Ok(Err(DispatchError::Unhandled))) => Outcome::Unhandled,
+                Ok(Ok(Err(DispatchError::Undecodable))) => Outcome::Undecodable,
                 Ok(Err(_)) => Outcome::Panicked,
                 Err(_) => Outcome::TimedOut,
             };
@@ -447,8 +461,8 @@ impl Delivery {
             span.record("error.type", label);
             span.record("otel.status_code", "ERROR");
         }
-        // The cause stays with the handler, which logs it inside this span;
-        // the adapter reports only its closed outcome vocabulary.
+        // A handler's cause stays with the handler, which logs it inside this
+        // span; the adapter reports only its closed outcome vocabulary.
         match outcome {
             Outcome::Success => {}
             Outcome::Panicked => tracing::error!(
@@ -469,7 +483,9 @@ impl Delivery {
 
         match outcome {
             Outcome::Success => acknowledge(&self.shared.client, message).await,
-            Outcome::Permanent => {
+            // The dead-letter reason is the Go wire vocabulary, which has one
+            // word for every delivery that a retry cannot help.
+            Outcome::Permanent | Outcome::Unhandled | Outcome::Undecodable => {
                 self.dead_letter(message, "permanent", event_type, cancel)
                     .await;
             }

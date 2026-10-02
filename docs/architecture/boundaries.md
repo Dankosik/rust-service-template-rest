@@ -115,7 +115,8 @@ infra-http -> infra-bearerauthn
   -> domain-events
   -> infra-messaging -> domain-events, async-nats, health, tokio, bytes, utoipa
 jobs-worker -> infra-messaging only when the messaging profile is retained
-service -> infra-messaging only for optional producer/probe composition
+service -> infra-messaging only when a feature prepares and enqueues an event
+  through the outbox; it opens no broker connection
 <!-- template:end messaging:docs-boundaries-messaging-edges -->
 <!-- template:begin cache:docs-boundaries-cache-edges -->
   -> infra-cache -> redis, rustls, health, secrecy, metrics, tracing, tokio
