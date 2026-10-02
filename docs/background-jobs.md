@@ -47,8 +47,9 @@ maximum of 36,500 days, and drops sub-microseconds. `unique_key` is an optional
 Before sending SQL, enqueue validates kind, key, delay, JSON size (256 KiB),
 and decoded NUL. It serializes once with `serde_json` and rejects a `\u0000`
 escape (a NUL character), which JSONB cannot store. Valid payload and key
-bind as text with explicit JSONB/text casts, and the insert is the only
-statement enqueue sends. UTF-8 is a schema precondition rather than a
+bind as text with explicit JSONB/text casts. Enqueue sends the insert and,
+for a job due at once, at most one [wake notification](#claims-deadlines-and-shutdown)
+per kind every 25 ms. UTF-8 is a schema precondition rather than a
 per-call check: the canonical migration requires a UTF-8 database,
 and the worker's startup check verifies it. The typed validation failures
 include `InvalidKind`, `InvalidUniqueKey`, `InvalidDelay`,
@@ -275,7 +276,10 @@ notification or poll. A lost notification or listener connection delays a
 job only until the next poll. So does a skipped one: an enqueue inside the
 25 ms window relies on the worker the earlier notification woke, and waits
 for the poll when it commits after that worker has gone idle again, or when
-the notifying transaction rolled back.
+the notifying transaction rolled back. The listener subscribes at most once
+per poll interval, so a connection that served longer than that is replaced
+at once and one the server keeps closing costs one connection a second. Each
+lost connection counts as a `listen` failure.
 
 One supervisor owns each admitted claim, slot, handler, deadline, and
 intended queue transition through cleanup. The handler runs on the
@@ -340,7 +344,7 @@ listener:
 | `jobs_attempt_duration_seconds` | `kind` | Handler run time. |
 | `jobs_claim_duration_seconds` | none | Claim request duration through acknowledgement or failure. |
 | `jobs_queue_wait_seconds` | `kind` | Claimed-row database time minus its current `not_before`, floored at zero. |
-| `jobs_worker_operation_failures_total` | `operation` | Failed `claim`, `record`, `release`, `retention`, or `sample` statements, and failed `listen` connections. |
+| `jobs_worker_operation_failures_total` | `operation` | Failed `claim`, `record`, `release`, `retention`, or `sample` statements, and failed or lost `listen` connections. |
 
 Records never carry the payload: `job_failed` (`warn`), `job_attempt_failed`
 (`info`), `job_attempt_finished` (`info`, snooze and cancellation),
@@ -350,7 +354,11 @@ when unknown), and
 and the first recovery of each operation. `jobs_operation_failed` carries
 `sqlstate` or `cause`. A startup check that could not read the session logs
 `jobs_startup_check_failed` (`warn`) with `sqlstate` and `cause`, `timeout`
-for the five-second bound, before startup fails.
+for the five-second bound, before startup fails. A handler panic logs
+`background task panicked` (`error`) with `panic.file`, `panic.line`, and
+`panic.column` inside the attempt's span; the worker replaces Rust's default
+panic hook in every profile, so the panic text, which can quote the payload,
+is never printed.
 
 Every worker samples only registered kinds every ten seconds. For each kind and
 `available`, `scheduled`, or `running` state, it counts at most 1000 indexed
@@ -405,7 +413,7 @@ empty until an adopter binds its real consumer.
 <!-- template:end inbound-webhooks:docs-background-jobs-webhooks-inbound -->
 
 The pack still has no operator pause, cancel, redrive, priority, queue,
-workflow, or generic business-closure replay API. The retained webhook provider
-and a future messaging/outbox capability reuse its scheduling, attempt, and
+workflow, or generic business-closure replay API. The webhook provider and
+the messaging outbox, where retained, reuse its scheduling, attempt, and
 completion mechanics. A lifecycle-crate extraction remains deliberately deferred under the condition in
 [Async Architecture](architecture/async.md#ownership-and-retained-decisions).
