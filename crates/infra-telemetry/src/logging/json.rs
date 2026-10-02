@@ -1,15 +1,23 @@
 //! The JSON log line.
 //!
-//! One object per line: `level`, `target`, `timestamp`, the OpenTelemetry ids
-//! of the event's span, the event's fields sorted by key, then the fields of
-//! every span in the event's scope sorted by key, where a key repeated by a
-//! nested span keeps the value nearest the event and each span's name is its
-//! `name` field. This is the line `json-subscriber` 0.3 wrote with
-//! `flatten_event` and `flatten_span_list_on_top_level`, byte for byte. That
-//! crate built a JSON value map for the event and another for the span list
-//! on every line and re-serialized all of a span's fields on every record;
-//! here a span keeps its values serialized once, and a line is written into
-//! a reused buffer.
+//! One object per line: `level`, `target`, `timestamp`, the trace context of
+//! the event's span, the event's fields sorted by key, then the fields of
+//! every span in the event's scope sorted by key, where each span's name is
+//! its `name` field. A key appears once: the value nearest the event wins
+//! (the event over its spans, a nested span over its parents), and a field
+//! named like one of the [`RESERVED`] keys is dropped. The trace context is
+//! `trace_id`, `span_id`, and `trace_flags`, the names OpenTelemetry gives
+//! trace context in a non-OTLP log format.
+//!
+//! The layout is the one `json-subscriber` 0.3 wrote with `flatten_event`
+//! and `flatten_span_list_on_top_level`. That crate built a JSON value map
+//! for the event and another for the span list on every line and
+//! re-serialized all of a span's fields on every record; here a span keeps
+//! its values serialized once, and a line is written into a reused buffer.
+//! It also repeated a key the event shared with a span, nested the trace
+//! context as `openTelemetry.traceId` and `spanId`, and wrote a record
+//! bridged from the `log` crate with the target `log` and its real target
+//! in a `log.target` field; this layer does none of the three.
 
 use std::cell::RefCell;
 use std::fmt::{self, Write as _};
@@ -22,12 +30,24 @@ use tracing::dispatcher::WeakDispatch;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Dispatch, Event, Subscriber};
+use tracing_log::NormalizeEvent as _;
 use tracing_subscriber::Layer;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::time::{FormatTime, SystemTime};
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
+
+/// The keys this layer writes itself; an event or span field with one of
+/// these names would repeat the key, so it is left out of the line.
+const RESERVED: [&str; 6] = [
+    "level",
+    "target",
+    "timestamp",
+    "trace_id",
+    "span_id",
+    "trace_flags",
+];
 
 pub(crate) struct JsonLayer<W = fn() -> io::Stdout> {
     make_writer: W,
@@ -123,10 +143,16 @@ impl Visit for SpanVisitor<'_> {
 struct EventVisitor<'a> {
     values: &'a mut Vec<u8>,
     fields: &'a mut Vec<(&'static str, Range<usize>)>,
+    /// The record came through the `log` bridge, whose `log.*` fields carry
+    /// the metadata the line already has.
+    bridged: bool,
 }
 
 impl EventVisitor<'_> {
     fn push(&mut self, field: &Field, value: &(impl serde::Serialize + ?Sized)) {
+        if self.bridged && field.name().starts_with("log.") {
+            return;
+        }
         let start = self.values.len();
         write_json(self.values, value);
         self.fields.push((field.name(), start..self.values.len()));
@@ -185,7 +211,9 @@ impl<W> JsonLayer<W> {
         line.clear();
         values.clear();
         fields.clear();
-        let metadata = event.metadata();
+        // A record bridged from the `log` crate carries its own target.
+        let normalized = event.normalized_metadata();
+        let metadata = normalized.as_ref().unwrap_or_else(|| event.metadata());
         line.extend_from_slice(b"{\"level\":\"");
         line.extend_from_slice(metadata.level().as_str().as_bytes());
         line.extend_from_slice(b"\",\"target\":");
@@ -199,8 +227,13 @@ impl<W> JsonLayer<W> {
             self.write_trace_ids(&span.id(), line);
         }
 
-        event.record(&mut EventVisitor { values, fields });
-        write_sorted(line, values, fields);
+        event.record(&mut EventVisitor {
+            values,
+            fields,
+            bridged: normalized.is_some(),
+        });
+        write_sorted(line, values, fields, 0);
+        let event_fields = fields.len();
 
         if let Some(span) = span {
             for span in span.scope().from_root() {
@@ -214,7 +247,7 @@ impl<W> JsonLayer<W> {
                     fields.push((*key, start..values.len()));
                 }
             }
-            write_sorted(line, values, fields);
+            write_sorted(line, values, fields, event_fields);
         }
         line.extend_from_slice(b"}\n");
     }
@@ -228,11 +261,16 @@ impl<W> JsonLayer<W> {
         };
         let span = context.span();
         let ids = span.span_context();
-        line.extend_from_slice(b",\"openTelemetry\":{\"spanId\":\"");
-        write_hex(line, &ids.span_id().to_bytes());
-        line.extend_from_slice(b"\",\"traceId\":\"");
+        if !ids.is_valid() {
+            return;
+        }
+        line.extend_from_slice(b",\"trace_id\":\"");
         write_hex(line, &ids.trace_id().to_bytes());
-        line.extend_from_slice(b"\"}");
+        line.extend_from_slice(b"\",\"span_id\":\"");
+        write_hex(line, &ids.span_id().to_bytes());
+        line.extend_from_slice(b"\",\"trace_flags\":\"");
+        write_hex(line, &[ids.trace_flags().to_u8()]);
+        line.push(b'"');
     }
 }
 
@@ -285,15 +323,22 @@ where
     }
 }
 
-/// Sort by key and keep the last value of a repeated key, as a map would.
+/// Write `fields[from..]` sorted by key, keeping the last value of a
+/// repeated key as a map would. `fields[..from]` is the group already
+/// written, still sorted; a key it holds is not written again.
 fn write_sorted(
     line: &mut Vec<u8>,
-    values: &mut Vec<u8>,
-    fields: &mut Vec<(&'static str, Range<usize>)>,
+    values: &[u8],
+    fields: &mut [(&'static str, Range<usize>)],
+    from: usize,
 ) {
+    let (written, fields) = fields.split_at_mut(from);
     fields.sort_by_key(|(key, _)| *key);
     for (index, (key, range)) in fields.iter().enumerate() {
-        if fields.get(index + 1).is_some_and(|(next, _)| next == key) {
+        if fields.get(index + 1).is_some_and(|(next, _)| next == key)
+            || RESERVED.contains(key)
+            || written.binary_search_by_key(key, |(name, _)| *name).is_ok()
+        {
             continue;
         }
         line.push(b',');
@@ -301,8 +346,6 @@ fn write_sorted(
         line.push(b':');
         line.extend_from_slice(&values[range.clone()]);
     }
-    fields.clear();
-    values.clear();
 }
 
 /// The instant as `tracing-subscriber`'s `SystemTime` timer prints it,

@@ -4,7 +4,8 @@
 //! process metrics from `metrics-process`, runtime metrics from
 //! `tokio-metrics`; this module owns the recorder, the periodic upkeep, and
 //! the scrape route. Each crate that emits a histogram
-//! owns its name and buckets.
+//! owns its name and buckets; a histogram nobody registered gets
+//! [`DEFAULT_BUCKETS`].
 
 use std::time::Duration;
 
@@ -19,6 +20,20 @@ use tokio_util::sync::CancellationToken;
 /// Gauge: 1 when the OTLP trace exporter was configured and initialized at
 /// startup, 0 otherwise. A startup-configuration signal, not delivery health.
 pub const TRACE_EXPORTER_ACTIVE_METRIC: &str = "service_startup_trace_exporter_active";
+
+/// Counter: spans the OTLP exporter finished exporting, by the
+/// OpenTelemetry SDK's name for it. A failed batch carries `error_type`
+/// (`timeout`, `already_shutdown`, or `internal_failure`); a delivered one
+/// has no such label. Spans the batch queue dropped before export are not
+/// counted here; the SDK logs those.
+pub const TRACE_SPANS_EXPORTED_METRIC: &str = "otel_sdk_exporter_span_exported_total";
+
+/// Buckets in seconds for a histogram no emitter registered, the Prometheus
+/// client default. Without buckets the exporter renders a summary, whose
+/// quantiles cannot be aggregated across replicas.
+pub const DEFAULT_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
 
 /// The recorder keeps every histogram sample, 24 bytes with its timestamp,
 /// until upkeep folds it into the buckets. Each second bounds that to one
@@ -43,14 +58,16 @@ impl Metrics {
     /// Install the process-global recorder with explicit buckets for each
     /// `(metric, buckets)` histogram and describe the process metrics. The
     /// crate that emits a histogram owns its name and buckets; without an
-    /// entry here the exporter renders that histogram as a summary.
+    /// entry here that histogram gets [`DEFAULT_BUCKETS`].
     ///
     /// # Errors
     ///
     /// Returns [`MetricsError::Install`] when a recorder is already
     /// installed or the buckets are invalid.
     pub fn install(histograms: &[(&str, &[f64])]) -> Result<Self, MetricsError> {
-        let mut builder = PrometheusBuilder::new();
+        let mut builder = PrometheusBuilder::new()
+            .set_buckets(DEFAULT_BUCKETS)
+            .map_err(MetricsError::Install)?;
         for &(name, buckets) in histograms {
             builder = builder
                 .set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)
@@ -62,6 +79,10 @@ impl Metrics {
         metrics::describe_gauge!(
             TRACE_EXPORTER_ACTIVE_METRIC,
             "1 when the OTLP trace exporter is configured and initialized, 0 otherwise."
+        );
+        metrics::describe_counter!(
+            TRACE_SPANS_EXPORTED_METRIC,
+            "Spans the OTLP exporter finished exporting; error_type marks a failed batch."
         );
         Ok(Self { handle, process })
     }
