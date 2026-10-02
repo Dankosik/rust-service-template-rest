@@ -37,7 +37,7 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | `infra-messaging` (`crates/infra-messaging`) | Go-compatible wire admission, prepared publication, typed registry and its AsyncAPI contract document, bounded JetStream consumer, deterministic DLQ/restore, and connection/probe mapping ([guide](../durable-messaging.md)). | Business events, feature policy, queue SQL or commits, stream administration, configuration loading, signals, or a generic bus. |
 <!-- template:end messaging:docs-boundaries-messaging-owner -->
 <!-- template:begin cache:docs-boundaries-cache-owner -->
-| `infra-cache` (`crates/infra-cache`) | Bytes-only RESP admission, a lazy `ConnectionManager`, namespace `get`/`set`/`delete`, the `cache` probe, and sanitized observation ([guide](../cache.md)). | Keys, serialization, TTL policy, invalidation, a generic `Cache<K, V>`, get-or-load, locks, rate limits, configuration loading, or readiness policy. |
+| `infra-cache` (`crates/infra-cache`) | Bytes-only RESP admission, an owned multiplexed-connection supervisor, namespace `get`/`set`/`delete`, the `cache` probe, and sanitized observation ([guide](../cache.md)). | Keys, serialization, TTL policy, invalidation, a generic `Cache<K, V>`, get-or-load, locks, rate limits, configuration loading, or readiness policy. |
 <!-- template:end cache:docs-boundaries-cache-owner -->
 <!-- template:begin object-storage:docs-boundaries-object-storage-owner -->
 | `infra-object-storage` (`crates/infra-object-storage`) | Provider admission, one `aws-sdk-s3` client per bucket, put/get/head/delete/presigned GET, the closed failure set, admission, the `object_storage` probe, and sanitized observation ([guide](../object-storage.md)). | Keys, authorization, content policy, retention, create-only intent, presign recipients, listing, multipart, configuration loading, or readiness policy. |
@@ -125,9 +125,10 @@ service -> infra-messaging only when a feature prepares and enqueues an event
   through the outbox; it opens no broker connection
 <!-- template:end messaging:docs-boundaries-messaging-edges -->
 <!-- template:begin cache:docs-boundaries-cache-edges -->
-  -> infra-cache -> redis, rustls, health, secrecy, metrics, tracing, tokio
+  -> infra-cache -> redis, backon, rustls, health, secrecy, metrics, tracing, tokio, tokio-util
 service -> infra-cache for connect, the startup check, shutdown drop, and optional probe registration
-a feature -> infra-cache for namespace get, set, and delete
+composition/service adapters -> infra-cache for namespace get, set, and delete
+features own keys, serialization, TTL, invalidation, and fallback; no feature -> infra-cache edge
 <!-- template:end cache:docs-boundaries-cache-edges -->
 <!-- template:begin object-storage:docs-boundaries-object-storage-edges -->
   -> infra-object-storage -> aws-sdk-s3, aws-config, aws-smithy-http-client, health, secrecy, metrics, tracing, tokio

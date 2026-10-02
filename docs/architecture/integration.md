@@ -99,9 +99,12 @@ and the durable logical-ID effect owner, rather than NATS, absorbs replay.
 Valkey, or a Redis OSS server with the same command subset, is an
 operator-fixed neighbour, not a caller-selected destination. `infra-cache`
 accepts only an admitted DSN and owns bytes-only `get`, `set`, and `delete`,
-the command timeout, and sanitized observation. The feature owns keys,
-serialization, TTL, and invalidation. Bootstrap owns admission, the bounded
-startup check, and the shutdown drop. The cache does not gate readiness. A
+the command timeout, owned connection recovery, and sanitized observation.
+Features own keys, serialization, TTL, invalidation, and fallback without
+depending on the provider crate. Composition or service adapters call
+`infra-cache` and translate feature-defined requests/results. Multiple replicas
+may instead use independent Moka copies when their consistency needs allow it.
+Bootstrap owns admission, the bounded startup check, and the shutdown drop. The cache does not gate readiness. A
 service that cannot degrade pushes `cache.probe()` itself. See the
 [guide](../cache.md).
 

@@ -381,18 +381,29 @@ drain yields the established degraded exit code rather than clean shutdown.
 <!-- template:begin cache:docs-lifecycle-cache -->
 ## Cache lifecycle
 
-`Cache::connect_lazy` admits configuration and builds a lazy `ConnectionManager`.
-It waits for no network I/O; the connection is dialed in the background from
-then on. Startup then runs one probe check inside a 1 s bound.
-Success logs `cache_connected`. Failure logs `cache_unavailable_at_startup`
-and startup continues. The cache is not a readiness probe unless composition
-pushes `cache.probe()` into the probe list. It is never a liveness check. A
-gate would turn an outage into total unavailability.
+`Cache::connect_lazy` admits configuration and starts one owned supervisor over
+canonical multiplexed connections, without waiting for network I/O. Setup and
+recovery advance without traffic. Each setup attempt is bounded at 1 s, with
+capped backoff and repeated retry chains. Generation identity fences retirement
+so late failures cannot remove a successor. A periodic PING every 2 s has a
+`min(command_timeout, 1 s)` response budget. Password refresh every 5 s shares
+a 1 s read/direct-AUTH budget; rejected unchanged credentials remain retryable.
+
+Startup runs one probe check inside its existing 1 s bound. Success logs
+`cache_connected`; failure logs `cache_unavailable_at_startup` and startup
+continues. The cache is not a readiness probe unless composition pushes
+`cache.probe()` into the probe list. Probe acquisition uses its caller's
+budget; a connected PING has a 1 s ceiling and ends on generation retirement.
+It is never a liveness check.
 
 Shutdown drops `Option<Cache>` inside `Dependencies::close`, in the dependency
-stage after HTTP drain. The connection closes when its last clone drops, and
-the drop does not add to `DEPENDENCY_CLOSE`. The same drop runs on the
-startup-failure and stopped-startup paths. The [guide](../cache.md) shows the
+stage after HTTP drain. Cache, namespace and probe handles retain one shared
+application owner. Its final drop withdraws the connection and cancels/aborts
+the supervisor, which holds no owner cycle. Runtime scheduling completes
+destruction and last-clone drop aborts the canonical connection driver. A
+retained namespace or probe legitimately keeps the cache alive. The synchronous
+drop adds no wait to `DEPENDENCY_CLOSE`; the same path covers failed and
+interrupted startup. See the [guide](../cache.md) for recovery bounds and
 readiness opt-in.
 <!-- template:end cache:docs-lifecycle-cache -->
 <!-- template:begin object-storage:docs-lifecycle-object-storage -->
