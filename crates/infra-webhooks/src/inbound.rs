@@ -714,6 +714,7 @@ fn cleanup_failed(err: &sqlx::Error, class: CleanupError) -> CleanupError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_metrics::CounterKeys;
 
     struct Ignore;
 
@@ -742,60 +743,9 @@ mod tests {
         assert_eq!(missing.endpoint, "other");
     }
 
-    /// Collects the key of every counter the cleanup registers.
-    #[derive(Default)]
-    struct Keys(std::sync::Mutex<Vec<metrics::Key>>);
-
-    impl metrics::Recorder for Keys {
-        fn describe_counter(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn describe_gauge(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn describe_histogram(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn register_counter(
-            &self,
-            key: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Counter {
-            self.0.lock().expect("keys").push(key.clone());
-            metrics::Counter::noop()
-        }
-
-        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
-            metrics::Gauge::noop()
-        }
-
-        fn register_histogram(
-            &self,
-            _: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Histogram {
-            metrics::Histogram::noop()
-        }
-    }
-
     #[tokio::test]
     async fn a_cleanup_run_without_a_database_counts_as_failed_and_removes_nothing() {
-        let keys = Keys::default();
+        let keys = CounterKeys::default();
         let _local = metrics::set_default_local_recorder(&keys);
         // Nothing listens on port 1, so every acquire ends at the pool's bound.
         let pool = sqlx::postgres::PgPoolOptions::new()

@@ -31,6 +31,7 @@ does not make every available check mandatory locally.
 | --- | --- | --- |
 | OpenAPI document drift or compatibility | [Generated Contracts](validation/generated.md) | `make openapi-check`, `make openapi-breaking BASE_OPENAPI=<file>` |
 | Dependency advisories, licenses, unused dependencies, secrets, workflow security, image vulnerabilities | [Security](validation/security.md) | matching security target |
+| Bounded clone admission or declared crate direction | [Readability commands](build-test-and-development-commands.md#readability-and-crate-boundaries), [Boundary policy](architecture/boundaries.md#executable-dependency-policy) | `make duplication-check`, `make architecture-check`, `make quality-check-self-test`; source-only `make template-quality-projections` |
 | CI workflows, shell scripts, tool pins, Dockerfile lint, publication naming | [Delivery](validation/delivery.md) | matching delivery leaf |
 | Runtime image build, lifecycle, scan, or SBOM | [Containers](validation/containers.md) | `ALLOW_HEAVY=1 make runtime-image-build` and the required scenario |
 | Observed transaction, locking, commit-outcome, readiness, or migration behavior on a real PostgreSQL; the image's migration rehearsal | [PostgreSQL](validation/postgres.md) | `ALLOW_HEAVY=1 make test-integration-db`, `make migration-check`, `ALLOW_HEAVY=1 make migration-validate` |
@@ -74,6 +75,20 @@ crate's `tests/` directory reselecting only that crate. A manifest, lockfile,
 or toolchain change, a Rust file outside `crates/`, or a closure covering 80%
 of the workspace runs the workspace instead. `make lint-changed PKGS=…` and
 `make test-changed PKGS=…` consume the list it prints.
+
+The `duplication` surface scans the complete handwritten workspace scope,
+including unchanged source that can match a new copy. The `architecture`
+surface checks the complete declared main graph. Source selects duplication;
+manifest, lockfile, toolchain, tool pins and shared checker integration select
+both. Each policy/checker selects its own gate and the shared checker self-test;
+boundary documentation selects architecture. Unrelated documentation retains
+its existing route. In the source template either surface also selects the
+four checker projection representatives, without per-harness builds.
+
+Both surfaces require Python, Cargo, rustup and `npx` because their shared
+self-test exercises the real tools. Missing prerequisites block verification.
+Policy/config/checker inputs join the receipt fingerprint; the version manifest
+joins the environment identity. A passing report never modifies admission.
 
 `ALLOW_FULL=1 make check` remains the explicit deterministic full-repository
 gate, never a default follow-up. `ALLOW_HEAVY=1` guards the image targets,

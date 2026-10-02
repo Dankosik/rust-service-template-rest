@@ -68,3 +68,12 @@ test/tests/webhooks/
 evals/template-initializer/
 evals/rust-reliability/
 specs/template-initializer/
+
+# Readability checker sources and service-owned policies.
+.jscpd.json
+quality/architecture.json
+quality/duplication-baseline.json
+scripts/ci/architecture-check.py
+scripts/ci/duplication-check.py
+scripts/tests/quality-checks.py
+crates/infra-webhooks/src/test_metrics.rs

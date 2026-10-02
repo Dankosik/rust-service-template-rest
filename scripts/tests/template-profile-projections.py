@@ -13,6 +13,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -969,6 +970,53 @@ def check(source: Path) -> None:
         _check_object_storage_projections(source, candidate, initializer, work)
 
 
+def check_quality(source: Path) -> None:
+    """Prove checker usability once per distinct retained/removed graph, not harness."""
+    initializer = _load_initializer(source)
+    source = initializer.git_root(source)
+    initializer._tracked_checkout_is_clean(source)
+    candidate = initializer.git_head(source)
+    # All identities differ from the template. Each webhook direction also
+    # compiles its tests alone, so their shared recorder cannot depend on the
+    # independently removable sibling module.
+    scenarios = (
+        ("minimal", _inputs(initializer, "none", "none", "none", "none", "none", "none", "none", "core")),
+        ("retained", _inputs(
+            initializer, "postgres", "oidc-introspection", "bounded", "postgres", "postgres",
+            "durable", "standard-webhooks", "core", outbound_auth="oauth2-client-credentials",
+            grpc="enabled", messaging="nats-jetstream", outbox="postgres", cache="redis", object_storage="s3",
+        )),
+        ("outbound-only", _inputs(
+            initializer, "postgres", "oidc-jwt", "bounded", "none", "postgres", "durable", "none", "core",
+        )),
+        ("inbound-only", _inputs(
+            initializer, "postgres", "none", "none", "none", "postgres", "none", "standard-webhooks", "core",
+        )),
+    )
+    with tempfile.TemporaryDirectory(prefix="template-quality-projections-") as temporary:
+        for name, inputs in scenarios:
+            tree = Path(temporary) / name
+            _project(source, candidate, initializer, inputs, tree)
+            # Checkers read an initialized checkout, including nonignored
+            # untracked Rust. A private empty Git index exercises that path.
+            commands = (
+                ["git", "init", "-q"],
+                [sys.executable, "scripts/ci/architecture-check.py", "--root", os.fspath(tree)],
+                [sys.executable, "scripts/ci/duplication-check.py", "check", "--root", os.fspath(tree)],
+            )
+            if name in {"inbound-only", "outbound-only"}:
+                commands += (["cargo", "check", "--tests", "-p", "infra-webhooks", "--locked"],)
+            for command in commands:
+                result = subprocess.run(command, cwd=tree, capture_output=True, text=True, check=False)
+                if result.returncode:
+                    raise initializer.Refusal(
+                        f"quality projection {name}: {' '.join(command)} failed ({result.returncode})\n"
+                        f"{result.stdout}{result.stderr}"
+                    )
+            _emit("quality-selection", scenario=name, candidate=candidate,
+                  identity=inputs.identity(), profiles=inputs.profiles(), result="passed")
+
+
 def _expect_refusal(initializer, action, label: str) -> None:
     try:
         action()
@@ -1165,12 +1213,16 @@ def self_test(source: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="compare canonical template profile projections")
     parser.add_argument("--source", required=True, type=Path)
-    parser.add_argument("--self-test", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--quality-only", action="store_true")
     arguments = parser.parse_args()
     try:
         source = arguments.source.resolve(strict=True)
         if arguments.self_test:
             self_test(source)
+        elif arguments.quality_only:
+            check_quality(source)
         else:
             check(source)
         return 0

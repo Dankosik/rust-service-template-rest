@@ -1,9 +1,9 @@
 # Source-template checks. This include is intentionally absent from generated
 # services, so their standard aggregate cannot recurse into the source matrix.
 
-SOURCE_CHECK_TARGETS := template-owned-purity-check template-init-check
+SOURCE_CHECK_TARGETS := template-owned-purity-check template-init-check template-quality-projections
 
-.PHONY: template-owned-purity-check template-init-check template-init-projections
+.PHONY: template-owned-purity-check template-init-check template-init-projections template-quality-projections
 
 template-owned-purity-check: ## Check source-only manifest and portability boundaries
 	python3 scripts/tests/template-owned-purity.py --repo .
@@ -14,3 +14,6 @@ template-init-check: ## Check 368 canonical projections and sixty-three runtime 
 
 template-init-projections: ## Check the 368 canonical projections alone, without Cargo
 	bash scripts/ci/template-init-check.sh --repo . --projections-only
+
+template-quality-projections: ## Exercise readability checkers on four retained/removed, renamed profile graphs
+	bash scripts/ci/template-init-check.sh --repo . --quality-projections

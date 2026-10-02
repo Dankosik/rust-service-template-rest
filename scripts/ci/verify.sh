@@ -60,7 +60,13 @@ fingerprint_candidate() {
 		else
 			records+=("deleted  ${file}")
 		fi
-	done <"${files_path}"
+	done < <(
+		cat "${files_path}"
+		if [[ ${surface_duplication:-false} == true || ${surface_architecture:-false} == true ]]; then
+			printf '%s\n' .jscpd.json quality/duplication-baseline.json quality/architecture.json \
+				scripts/ci/duplication-check.py scripts/ci/architecture-check.py scripts/tests/quality-checks.py
+		fi
+	)
 	: >"${tmp}/file-hashes"
 	if ((${#hash_files[@]})); then
 		shasum -a 256 -- "${hash_files[@]}" >"${tmp}/file-hashes" || return
@@ -104,7 +110,7 @@ prepare_command() {
 }
 
 self_test() (
-	local output fixture scratch script attempt_path receipts_before crate
+	local output fixture scratch script attempt_path receipts_before crate path
 	# plan_section NAME: one section of the plan in ${output}, header included.
 	plan_section() { sed -n "/^$1:\$/,/^[^ ]/p" <<<"${output}"; }
 	fixture=$(mktemp -d)
@@ -165,6 +171,13 @@ self_test() (
 		[[ $(fingerprint_candidate) != "${original}" ]]
 		rm deleted
 		[[ $(fingerprint_candidate) == "${original}" ]]
+		# Policy participates even when --files named only a Rust source.
+		mkdir quality
+		printf '{"cases": []}\n' >quality/duplication-baseline.json
+		surface_duplication=true
+		original=$(fingerprint_candidate)
+		printf '{"cases": ["changed"]}\n' >quality/duplication-baseline.json
+		[[ $(fingerprint_candidate) != "${original}" ]]
 	)
 	bash "${ROOT_DIR}/scripts/ci/git-changed-paths.sh" --self-test
 
@@ -191,7 +204,7 @@ self_test() (
 	output=$(bash "${script}" --plan --files scripts/init-module.sh)
 	grep -q '^  make template-init-check$' <<<"${output}"
 	if grep -q 'requires_heavy=true' <<<"${output}"; then return 1; fi
-	output=$(bash "${script}" --plan --files scripts/tests/template-profile-projections.py)
+	output=$(bash "${script}" --plan --files scripts/ci/initializer-matrix.py)
 	grep -q '^  make template-init-check$' <<<"${output}"
 	grep -q 'cost_class=cpu requires_heavy=false requires_docker=true' <<<"${output}"
 	output=$(bash "${script}" --plan --files crates/infra-bearerauthn/src/claims.rs)
@@ -199,12 +212,14 @@ self_test() (
 	# The initializer matrix is CI-owned unless ALLOW_FULL=1 keeps it local; a
 	# route with nothing else to prove runs nothing and names CI.
 	grep -q '^  make template-init-check$' <<<"$(plan_section ci-owned)"
-	output=$(ALLOW_FULL=1 bash "${script}" --plan --files scripts/tests/template-profile-projections.py)
+	output=$(ALLOW_FULL=1 bash "${script}" --plan --files scripts/ci/initializer-matrix.py)
 	grep -q '^  make template-init-check$' <<<"$(plan_section commands)"
 	if grep -q '^ci-owned:$' <<<"${output}"; then return 1; fi
-	output=$(bash "${script}" --files scripts/tests/template-profile-projections.py)
+	output=$(bash "${script}" --files scripts/ci/initializer-matrix.py)
 	grep -q '^verification not applicable locally: CI owns make template-init-check$' <<<"${output}"
-	# Projected text alone selects the Cargo-free projections, run locally.
+	# Readability proof stays separate from the Cargo-free text projections.
+	output=$(bash "${script}" --plan --files quality/architecture.json)
+	grep -q '^  make template-quality-projections$' <<<"$(plan_section commands)"
 	output=$(bash "${script}" --plan --files docs/outbound-http.md)
 	grep -q '^  make template-init-projections$' <<<"$(plan_section commands)"
 	if grep -q 'template-init-check' <<<"${output}"; then return 1; fi
@@ -216,6 +231,22 @@ EOF
 	grep -q 'module_initializer=false' <<<"${output}"
 	if grep -q 'template-init-check' <<<"${output}"; then return 1; fi
 	rm template.lock
+
+	for path in .jscpd.json quality/duplication-baseline.json scripts/ci/duplication-check.py; do
+		output=$(bash "${script}" --plan --files "${path}")
+		grep -q '^  make duplication-check$' <<<"${output}"
+		grep -q '^  make quality-check-self-test$' <<<"${output}"
+		if grep -q '^  make architecture-check$' <<<"${output}"; then return 1; fi
+	done
+	output=$(bash "${script}" --plan --files quality/architecture.json)
+	grep -q '^  make architecture-check$' <<<"${output}"
+	grep -q '^  make quality-check-self-test$' <<<"${output}"
+	if grep -q '^  make duplication-check$' <<<"${output}"; then return 1; fi
+	output=$(bash "${script}" --plan --files scripts/tests/quality-checks.py)
+	grep -q '^  make duplication-check$' <<<"${output}"
+	grep -q '^  make architecture-check$' <<<"${output}"
+	output=$(bash "${script}" --plan --files README.md)
+	if grep -q '^  make \(duplication-check\|architecture-check\|quality-check-self-test\)$' <<<"${output}"; then return 1; fi
 
 	output=$(bash "${script}" --plan --files tools/versions.env)
 	grep -q 'make tools-check' <<<"${output}"
@@ -376,7 +407,7 @@ check-instructions:
 	@printf 'local step ran\n'
 MAKE
 	: >make/source.mk
-	output=$(VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py scripts/tests/template-profile-projections.py)
+	output=$(VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py scripts/ci/initializer-matrix.py)
 	grep -q 'local step ran' <<<"${output}"
 	grep -q '^status: partially_verified$' <<<"${output}"
 	grep -q '^ci_owned: make template-init-check$' <<<"${output}"
@@ -388,6 +419,8 @@ MAKE
 	cat >Makefile <<'MAKE'
 tools-check:
 	@printf 'tools\n' >>invoked
+quality-check-self-test duplication-check architecture-check:
+	@:
 check-instructions:
 	@printf 'skills\n' >>invoked
 	@test -f allow-skills
@@ -404,9 +437,9 @@ MAKE
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
 	[[ -f ${attempt_path} ]]
 	grep -q '^step_state: 1 passed ' "${attempt_path}"
-	grep -q '^step_state: 2 failed ' "${attempt_path}"
-	grep -q '^step_state: 3 pending$' "${attempt_path}"
-	if grep -q '^step_state: 3 running ' "${attempt_path}"; then return 1; fi
+	grep -q '^step_state: 5 failed ' "${attempt_path}"
+	grep -q '^step_state: 6 pending$' "${attempt_path}"
+	if grep -q '^step_state: 6 running ' "${attempt_path}"; then return 1; fi
 	grep -q '^command: make secret-scan$' "${attempt_path}"
 	grep -q '^attempt_state: failed$' "${attempt_path}"
 	[[ $(cat invoked) == $'tools\nskills' ]]
@@ -420,7 +453,7 @@ MAKE
 	output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml)
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
 	grep -q '^attempt_state: passed$' "${attempt_path}"
-	[[ $(grep -c '^step_state: [123] passed ' "${attempt_path}") == 3 ]]
+	[[ $(grep -c '^step_state: [123456] passed ' "${attempt_path}") == 6 ]]
 	grep -q '^result: pass$' <<<"${output}"
 	# A step that mutates the selected candidate must not leave reusable success.
 	cat >Makefile <<'MAKE'
@@ -609,6 +642,18 @@ if is_true validation_system; then
 	add_command make validation-lock-self-test "validation routing changed" "make validation-lock-self-test" cheap false false
 	add_command make verify-check "validation routing changed" "make verify-check" cpu false false
 fi
+if is_true duplication || is_true architecture; then
+	add_command make quality-check-self-test "readability policy, source, graph, or checker integration changed" "make quality-check-self-test" cpu false false
+	if [[ -f make/source.mk ]]; then
+		add_command make template-quality-projections "readability checks must remain usable after profile projection and rename" "make template-quality-projections" cpu false false
+	fi
+fi
+if is_true duplication; then
+	add_command make duplication-check "Rust source, clone admission, or detector inputs changed" "make duplication-check" cpu false false
+fi
+if is_true architecture; then
+	add_command make architecture-check "declared graph, boundary policy, or checker inputs changed" "make architecture-check" cheap false false
+fi
 if is_true initializer_runtime; then
 	add_command make template-init-check "canonical projections and twenty-six runtime representatives" "make template-init-check" cpu false true
 elif is_true module_initializer; then
@@ -773,12 +818,15 @@ blocked() {
 	exit 2
 }
 
-for binary in git make shasum; do command -v "${binary}" >/dev/null 2>&1 || blocked "required binary is unavailable: ${binary}"; done
-if is_true rust_source || is_true cargo_dependencies || is_true dependency_policy || is_true lint_config || is_true openapi || is_true validation_system || is_true module_initializer || is_true tool_manifest; then
+for binary in git make shasum python3; do command -v "${binary}" >/dev/null 2>&1 || blocked "required binary is unavailable: ${binary}"; done
+if is_true rust_source || is_true cargo_dependencies || is_true dependency_policy || is_true lint_config || is_true openapi || is_true validation_system || is_true module_initializer || is_true tool_manifest || is_true duplication || is_true architecture; then
 	command -v cargo >/dev/null 2>&1 || blocked "required binary is unavailable: cargo"
 fi
-if is_true openapi || is_true migrations; then command -v npx >/dev/null 2>&1 || blocked "required binary is unavailable: npx"; fi
+if is_true openapi || is_true migrations || is_true duplication || is_true architecture; then command -v npx >/dev/null 2>&1 || blocked "required binary is unavailable: npx"; fi
 if is_true github_workflows || is_true secret_scanning; then command -v go >/dev/null 2>&1 || blocked "required binary is unavailable: go"; fi
+if is_true duplication || is_true architecture; then
+	command -v rustup >/dev/null 2>&1 || blocked "required binary is unavailable: rustup"
+fi
 docker_command=${VERIFY_DOCKER_COMMAND:-docker}
 if [[ ${requires_docker} == true ]]; then
 	command -v "${docker_command}" >/dev/null 2>&1 || blocked "Docker is required"

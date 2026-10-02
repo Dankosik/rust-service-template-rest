@@ -1,0 +1,176 @@
+{
+  "version": 1,
+  "members": {
+    "crates/config/Cargo.toml": {"role": "config"},
+    "crates/domain-events/Cargo.toml": {"role": "contract"},
+    "crates/grpc-contracts/Cargo.toml": {"role": "contract"},
+    "crates/health/Cargo.toml": {"role": "health"},
+    "crates/infra-bearerauthn/Cargo.toml": {"role": "bearer"},
+    "crates/infra-cache/Cargo.toml": {"role": "health-provider"},
+    "crates/infra-grpc/Cargo.toml": {"role": "grpc"},
+    "crates/infra-http/Cargo.toml": {"role": "http"},
+    "crates/infra-idempotency-store/Cargo.toml": {"role": "postgres-provider"},
+    "crates/infra-jobs/Cargo.toml": {"role": "postgres-provider"},
+    "crates/infra-messaging/Cargo.toml": {"role": "messaging"},
+    "crates/infra-oauth2-client-credentials/Cargo.toml": {"role": "oauth"},
+    "crates/infra-object-storage/Cargo.toml": {"role": "health-provider"},
+    "crates/infra-outbound-http/Cargo.toml": {"role": "outbound-http"},
+    "crates/infra-postgres/Cargo.toml": {"role": "health-provider"},
+    "crates/infra-telemetry/Cargo.toml": {"role": "telemetry"},
+    "crates/infra-webhooks/Cargo.toml": {"role": "webhooks"},
+    "crates/jobs-worker/Cargo.toml": {"role": "root"},
+    "crates/migrate/Cargo.toml": {"role": "migrator"},
+    "crates/service/Cargo.toml": {"role": "root"},
+    "crates/service-failure/Cargo.toml": {"role": "contract"},
+    "test/Cargo.toml": {"role": "test"}
+  },
+  "roles": {
+    "root": {
+      "rule": "composition-root-direction",
+      "allow_roles": ["config", "health", "contract", "http", "grpc", "bearer", "outbound-http", "telemetry", "health-provider", "postgres-provider", "webhooks", "messaging", "oauth", "migrator", "feature", "feature-provider"]
+    },
+    "config": {"rule": "independent-config-leaf"},
+    "health": {"rule": "independent-health-leaf"},
+    "contract": {"rule": "independent-shared-contract"},
+    "bearer": {"rule": "independent-bearer-provider"},
+    "outbound-http": {"rule": "independent-outbound-http-provider"},
+    "telemetry": {"rule": "independent-telemetry-provider"},
+    "migrator": {
+      "rule": "migrator-dependencies",
+      "allow_members": {
+        "crates/config/Cargo.toml": {
+          "reason": "The migrator consumes validated service configuration.",
+          "authority": "docs/architecture/boundaries.md#postgresql-owners"
+        },
+        "crates/infra-telemetry/Cargo.toml": {
+          "reason": "The migrator owns its process telemetry initialization.",
+          "authority": "docs/architecture/boundaries.md#dependency-direction"
+        },
+        "crates/infra-postgres/Cargo.toml": {
+          "reason": "The runner reuses PostgreSQL admission and budget rendering.",
+          "authority": "docs/architecture/boundaries.md#postgresql-owners"
+        }
+      }
+    },
+    "feature": {
+      "rule": "feature-contracts-and-reviewed-capabilities",
+      "allow_roles": ["feature", "contract"],
+      "allow_members": {
+        "crates/infra-http/Cargo.toml": {
+          "reason": "Feature HTTP modules consume inbound contracts and register routes.",
+          "authority": "docs/architecture/boundaries.md#dependency-direction"
+        },
+        "crates/infra-cache/Cargo.toml": {
+          "reason": "Features own keys, TTL policy and namespace get/set/delete use.",
+          "authority": "docs/architecture/boundaries.md#dependency-direction"
+        },
+        "crates/infra-object-storage/Cargo.toml": {
+          "reason": "Features own keys and policy for object operations and presigned GET.",
+          "authority": "docs/architecture/boundaries.md#dependency-direction"
+        }
+      }
+    },
+    "feature-provider": {
+      "rule": "feature-provider-explicit-reviewed-dependencies",
+      "deny_roles": ["root", "config", "test"]
+    },
+    "http": {
+      "rule": "http-inbound-contract-dependencies",
+      "allow_roles": ["health", "bearer"],
+      "allow_members": {
+        "crates/service-failure/Cargo.toml": {
+          "reason": "HTTP projects shared failure codes into Problem responses.",
+          "authority": "docs/architecture/boundaries.md#dependency-direction"
+        },
+        "crates/infra-idempotency-store/Cargo.toml": {
+          "reason": "The retained idempotency profile composes durable arbitration.",
+          "authority": "docs/architecture/boundaries.md#dependency-direction"
+        },
+        "crates/infra-postgres/Cargo.toml": {
+          "reason": "The idempotency inbound contract re-exports PostgreSQL Tx.",
+          "authority": "docs/architecture/boundaries.md#dependency-direction"
+        },
+        "crates/infra-webhooks/Cargo.toml": {
+          "reason": "Inbound webhook route policy consumes verification and receipt contracts.",
+          "authority": "docs/architecture/boundaries.md#webhook-provider-boundary"
+        }
+      }
+    },
+    "grpc": {
+      "rule": "grpc-transport-dependencies",
+      "allow_roles": ["health", "bearer", "http"],
+      "allow_members": {
+        "crates/service-failure/Cargo.toml": {
+          "reason": "gRPC projects shared failure codes into tonic Status.",
+          "authority": "docs/architecture/boundaries.md#dependency-direction"
+        }
+      }
+    },
+    "health-provider": {
+      "rule": "provider-readiness-contract-only",
+      "allow_roles": ["health"]
+    },
+    "postgres-provider": {
+      "rule": "durable-provider-postgres-only",
+      "allow_members": {
+        "crates/infra-postgres/Cargo.toml": {
+          "reason": "Jobs and idempotency reuse the PostgreSQL connection/transaction owner.",
+          "authority": "docs/architecture/boundaries.md#dependency-direction"
+        }
+      }
+    },
+    "webhooks": {
+      "rule": "webhooks-provider-capabilities",
+      "allow_members": {
+        "crates/infra-jobs/Cargo.toml": {
+          "reason": "Webhook delivery and inbound processing use the existing jobs engine.",
+          "authority": "docs/architecture/boundaries.md#webhook-provider-boundary"
+        },
+        "crates/infra-postgres/Cargo.toml": {
+          "reason": "Webhook receipt and delivery adapters reuse PostgreSQL ownership.",
+          "authority": "docs/architecture/boundaries.md#webhook-provider-boundary"
+        },
+        "crates/infra-outbound-http/Cargo.toml": {
+          "reason": "Outbound webhook delivery uses the bounded trusted-origin HTTP client.",
+          "authority": "docs/architecture/boundaries.md#webhook-provider-boundary"
+        }
+      }
+    },
+    "messaging": {
+      "rule": "messaging-and-outbox-capabilities",
+      "allow_roles": ["health"],
+      "allow_members": {
+        "crates/domain-events/Cargo.toml": {
+          "reason": "Messaging admits and transports feature-owned event envelopes.",
+          "authority": "docs/architecture/boundaries.md#dependency-direction"
+        },
+        "crates/infra-jobs/Cargo.toml": {
+          "reason": "The outbox publication handler uses the existing jobs queue.",
+          "authority": "docs/architecture/boundaries.md#dependency-direction"
+        },
+        "crates/infra-postgres/Cargo.toml": {
+          "reason": "Outbox enqueue shares the caller's PostgreSQL transaction.",
+          "authority": "docs/architecture/boundaries.md#dependency-direction"
+        }
+      }
+    },
+    "oauth": {
+      "rule": "oauth-resource-client-and-optional-grpc-bridge",
+      "allow_members": {
+        "crates/infra-outbound-http/Cargo.toml": {
+          "reason": "Private credentials acquisition uses bounded trusted-origin HTTP exchanges.",
+          "authority": "docs/architecture/boundaries.md#dependency-direction"
+        },
+        "crates/infra-grpc/Cargo.toml": {
+          "reason": "The optional bridge supplies an authenticated Service within the private credentials owner.",
+          "authority": "docs/architecture/boundaries.md#dependency-direction",
+          "optional_only": true
+        }
+      }
+    },
+    "test": {
+      "rule": "test-owner-composition",
+      "test_only": true
+    }
+  }
+}

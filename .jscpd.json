@@ -1,0 +1,13 @@
+{
+  "format": [
+    "rust"
+  ],
+  "mode": "mild",
+  "minTokens": 100,
+  "minLines": 15,
+  "reporters": [
+    "console",
+    "json"
+  ],
+  "failOnEmpty": true
+}

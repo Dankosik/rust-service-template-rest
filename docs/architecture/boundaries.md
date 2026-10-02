@@ -223,6 +223,37 @@ and call feature use cases; features never depend on `infra-jobs`; the
 service composes nothing for jobs; the worker composes its own process.
 <!-- template:end jobs:docs-boundaries-jobs-composition -->
 
+## Executable dependency policy
+
+`make architecture-check` reads `cargo metadata --locked --no-deps
+--format-version 1` and the service-owned
+[`quality/architecture.json`](../../quality/architecture.json). Members are
+classified by manifest path, so a service package rename preserves its role.
+The portable checker enforces declared crate direction; it does not certify
+which APIs a module uses or replace review of this document.
+
+Normal and build dependencies obey the same role rules, including optional,
+inactive-target and renamed edges. Dev dependencies may compose classified
+members for fixtures. The `test/Cargo.toml` owner is test-only even for its
+normal/build edges; production must never depend on it. Unclassified members,
+unknown dependency kinds and local paths outside the classified workspace fail.
+Registry/git dependencies are outside this local-direction check.
+
+Composition roots may compose retained contracts, transports, providers,
+features and the migrator, but never another root or the test-only owner.
+Leaves remain independent. Providers retain their named capability edges;
+feature-to-cache and feature-to-object-storage access are explicit exceptions
+to the general feature/provider separation above. A new feature-specific
+provider may depend on its registered feature and reviewed adapters, never on
+configuration, roots or test-only code. New capabilities or members require a
+policy entry with a reviewed reason, and a newly permitted direction must
+update this boundary authority in the same change.
+
+Missing optional members do not invalidate the policy: permitted edges are not
+mandatory dependencies. The initializer removes absent-profile declarations
+through its existing projection rules and retains local architecture policy.
+Template sync updates the generic checker, preserving the service's policy.
+
 ## Decisions Recorded Here
 
 <!-- template:begin webhooks-common:docs-boundaries-webhooks-provider -->

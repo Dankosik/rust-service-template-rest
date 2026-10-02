@@ -27,7 +27,7 @@ runtime_graph_selected() {
 
 while (($#)); do
 	case "$1" in
-	--self-test | --source-checks | --projections-only | --list-graphs)
+	--self-test | --source-checks | --projections-only | --quality-projections | --list-graphs)
 		[[ ${mode} == full ]] || { echo "validation modes cannot be combined" >&2; exit 2; }
 		mode=${1#--}
 		shift
@@ -45,7 +45,7 @@ while (($#)); do
 		shift 2
 		;;
 	*)
-		echo "usage: $0 [--repo ROOT] [--source-checks|--projections-only|--runtime-graphs IDS|--list-graphs|--self-test]" >&2
+		echo "usage: $0 [--repo ROOT] [--source-checks|--projections-only|--quality-projections|--runtime-graphs IDS|--list-graphs|--self-test]" >&2
 		exit 2
 		;;
 	esac
@@ -430,6 +430,10 @@ run_validation() {
 			"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-profile-projections.py" --source "${source}" --self-test
 		record_command "${receipt}" "${log_dir}/projections.log" "canonical-projections" \
 			"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-profile-projections.py" --source "${source}"
+	fi
+	if [[ ${mode} == quality-projections ]]; then
+		record_command "${receipt}" "${log_dir}/quality-projections.log" "quality-projections" \
+			"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-profile-projections.py" --source "${source}" --quality-only
 	fi
 	if [[ ${mode} == full || ${mode} == runtime-graphs ]]; then
 		each_runtime_graph run_graph

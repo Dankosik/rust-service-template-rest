@@ -52,3 +52,6 @@ scripts/ci/runtime-image-check.sh
 scripts/ci/tools-check.sh
 scripts/ci/validation-lock.sh
 scripts/ci/verify.sh
+scripts/ci/duplication-check.py
+scripts/ci/architecture-check.py
+scripts/tests/quality-checks.py
