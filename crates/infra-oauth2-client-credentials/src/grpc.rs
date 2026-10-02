@@ -3,6 +3,7 @@
 use std::{
     future::Future,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
@@ -23,6 +24,19 @@ const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
 pub struct AuthenticatedClient {
     credentials: Credentials,
     resource: Client,
+    subject_required: bool,
+}
+
+impl AuthenticatedClient {
+    /// Refuses a call without [`OnBehalfOf`] instead of sending the service
+    /// token. For an integration that only ever acts for a verified user, so
+    /// that a forgotten subject is an error and never a call made with the
+    /// service's own authority.
+    #[must_use]
+    pub fn require_on_behalf_of(mut self) -> Self {
+        self.subject_required = true;
+        self
+    }
 }
 
 impl std::fmt::Debug for AuthenticatedClient {
@@ -38,6 +52,7 @@ impl Credentials {
         AuthenticatedClient {
             credentials: self.clone(),
             resource,
+            subject_required: false,
         }
     }
 }
@@ -58,6 +73,11 @@ impl Service<Request<Body>> for AuthenticatedClient {
             ))));
         }
         let on_behalf_of = request.extensions_mut().remove::<OnBehalfOf>();
+        if self.subject_required && on_behalf_of.is_none() {
+            return Box::pin(std::future::ready(Err(Status::invalid_argument(
+                "on-behalf-of subject is required",
+            ))));
+        }
         let budget = infra_grpc::grpc_timeout(request.headers());
         let started = Instant::now();
         let deadline = started + budget.unwrap_or(FETCH_TIMEOUT);
@@ -115,11 +135,23 @@ fn unauthenticated(response: &Response<Body>) -> bool {
             && !response.headers().contains_key(GRPC_STATUS))
 }
 
+/// A failure that may pass unchanged later is `UNAVAILABLE`; any other is
+/// `UNAUTHENTICATED`, as gRPC clients report credentials that could not
+/// produce call metadata. The closed
+/// reason stays reachable as the status source and never crosses the wire.
 fn acquisition_status(error: AcquisitionError) -> Status {
-    match error {
+    let mut status = match error {
         AcquisitionError::Timeout => Status::deadline_exceeded("request deadline exceeded"),
-        _ => Status::unavailable("client credentials unavailable"),
-    }
+        AcquisitionError::Transport | AcquisitionError::Unavailable => {
+            Status::unavailable("client credentials unavailable")
+        }
+        AcquisitionError::ResponseLimit
+        | AcquisitionError::Rejected(_)
+        | AcquisitionError::InvalidResponse
+        | AcquisitionError::Assertion => Status::unauthenticated("client credentials refused"),
+    };
+    status.set_source(Arc::new(error));
+    status
 }
 
 /// Encodes whole milliseconds, or whole seconds beyond eight millisecond digits.

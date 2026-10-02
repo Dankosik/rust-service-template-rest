@@ -59,7 +59,7 @@ each integration's OAuth tuple in TOML, for example:
 token_url = "https://identity.example/oauth2/token"
 client_id = "billing-service"
 key_id = "billing-service-2026"
-algorithm = "RS256"
+algorithm = "ES256"
 assertion_audience = "https://identity.example/"
 scopes = ["billing.read"]
 audience = "billing-api"
@@ -96,7 +96,9 @@ behalf of a verified user, insert
 `OnBehalfOf::new(principal.access_token().clone())` into the outbound
 request's extensions before dispatch, using `http::Request::extensions_mut`;
 the gRPC binding takes the same value through
-`tonic::Request::extensions_mut`. See [Outbound machine
+`tonic::Request::extensions_mut`. A request without it is sent as the service
+itself; bind an integration that only ever acts for a user with
+`.require_on_behalf_of()`, which refuses such a request instead. See [Outbound machine
 authentication](outbound-machine-authentication.md#acquisition-and-reuse) for
 reuse, deadlines, and eviction bounds.
 
@@ -252,9 +254,13 @@ authenticate a service-to-service call.
   accepts a Kubernetes service-account or OIDC token as the client assertion,
   which removes that key, but Railway issues no workload token to a running
   service. Reopen when the platform does.
-- **Assertion algorithm.** `RS256` stays the default because every
-  shortlisted server accepts it. Prefer `ES256` or `PS256` for a new key: FAPI
-  2.0 admits no PKCS#1 v1.5 signatures.
+- **Assertion algorithm.** `algorithm` has no default: it must match the key,
+  and a default would silently select `RS256`. Prefer `ES256` or `PS256` for
+  a new key: FAPI 2.0 admits no PKCS#1 v1.5 signatures. `RS256` stays
+  accepted because every shortlisted server accepts it. `EdDSA` is not
+  offered: RFC 9864 deprecates that identifier in favor of `Ed25519`, which
+  `jsonwebtoken` 11.1.0 cannot sign. Reopen when it and the chosen
+  authorization server accept `Ed25519`.
 - **Transaction Tokens** — not adopted: still a draft, no shortlisted
   authorization server issues them, and a Txn-Token is not itself an access
   token. Reopen when it is published and a chosen server issues it.

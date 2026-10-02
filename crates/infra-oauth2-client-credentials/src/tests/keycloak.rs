@@ -211,6 +211,7 @@ impl Realm {
             assertion_audience: self.issuer(),
             scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
             audience: audience.map(str::to_owned),
+            exchange_cache_capacity: 1024,
         };
         Credentials::prepare(
             options,

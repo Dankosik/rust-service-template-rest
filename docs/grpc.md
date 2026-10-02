@@ -313,7 +313,18 @@ the client then sends an exchanged token addressed to this integration
 instead of the service token. The acquisition deadline is `grpc-timeout` when that header is
 present and well formed; otherwise it is the owner's five-second fetch
 timeout. Token wait spends that deadline: a wait of at least a millisecond
-rewrites `grpc-timeout` to the remaining budget before dispatch. Acquisition failure prevents dispatch. One bearer is inserted at
+rewrites `grpc-timeout` to the remaining budget before dispatch. Acquisition
+failure prevents dispatch: `UNAVAILABLE` / `client credentials unavailable`
+when the provider could not be reached or answered 5xx or 429, and
+`UNAUTHENTICATED` / `client credentials refused` when it refused the request
+or answered unusably, as gRPC clients report credentials that produced no
+call metadata. The message is fixed because a handler may forward the
+status; the closed `AcquisitionError`, with the provider's registered error
+code, is the status source. A handler should translate this status rather
+than forward it: `UNAUTHENTICATED` here means the service's own credentials
+were refused, not its caller's. `credentials.grpc(channel).require_on_behalf_of()`
+binds a client that answers `INVALID_ARGUMENT` to a call without `OnBehalfOf`
+instead of sending the service token. One bearer is inserted at
 opening and is not refreshed mid-stream.
 
 Eviction runs only on the initial response: `grpc-status` `UNAUTHENTICATED`,
