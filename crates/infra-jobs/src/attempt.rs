@@ -629,11 +629,7 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch) {
         batch.generations.push(queued.generation);
     }
     let result = within(shared, deadline, backstop(Box::pin(async {
-        let mut connection = shared
-            .pool
-            .acquire()
-            .await
-            .map_err(OperationError::Acquire)?;
+        infra_postgres::with_connection(&shared.pool, async |connection| {
         if expired(shared, deadline) {
             return Err(OperationError::TimedOut);
         }
@@ -651,10 +647,13 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch) {
                 &batch.ids,
                 &batch.generations,
             )
-            .fetch_all(&mut *connection),
+            .fetch_all(connection),
         )
         .await
         .map_err(OperationError::from)
+        })
+        .await
+        .map_err(OperationError::Acquire)?
     })))
     .await;
     match result {
@@ -687,14 +686,13 @@ async fn send_outcome(
 ) -> Result<u64, Option<OperationError>> {
     // An sqlx statement future is about 16 KiB; box it once so the supervisor stays small.
     backstop(Box::pin(async {
-        let mut connection = shared
-            .pool
-            .acquire()
-            .await
-            .map_err(OperationError::Acquire)?;
-        execute(&mut connection, attempt.id, attempt.generation, transition)
-            .await
-            .map_err(OperationError::from)
+        infra_postgres::with_connection(&shared.pool, async |connection| {
+            execute(connection, attempt.id, attempt.generation, transition)
+                .await
+                .map_err(OperationError::from)
+        })
+        .await
+        .map_err(OperationError::Acquire)?
     }))
     .await
     .map_err(Some)

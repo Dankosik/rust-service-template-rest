@@ -445,7 +445,8 @@ def assert_profile_packs(
         source, target, "rustls", grpc == "enabled" or cache == "redis" or outbound_http == "bounded"
     )
     assert_profile_pack(
-        source, target, "request-budget", outbound_http == "bounded" or http_idempotency == "postgres"
+        source, target, "request-budget",
+        outbound_http == "bounded" or http_idempotency == "postgres" or inbound_webhooks == "standard-webhooks",
     )
     assert_profile_pack(source, target, "http-idempotency", http_idempotency == "postgres")
     assert_profile_pack(
@@ -1211,26 +1212,29 @@ def check(source: Path) -> None:
         )
         if outbox_revert_mismatch.returncode == 0 or state(outbox_target) != outbox_before:
             raise AssertionError("complete outbox lock accepted a profile migration back to none")
-        webhooks_target = work / "webhooks-replay"
-        clone(source, webhooks_target)
-        webhooks_result = init(
-            source, webhooks_target, "--database", "postgres", "--jobs", "postgres", "--outbound-http", "bounded",
-            "--webhooks", "durable", "--inbound-webhooks", "standard-webhooks", "--agent-harness", "core",
-        )
-        if webhooks_result.returncode:
-            raise AssertionError(f"webhooks initialization failed: {webhooks_result.stderr}")
-        assert_profile_packs(
-            source, webhooks_target, database="postgres", authn="none", outbound_http="bounded",
-            http_idempotency="none", jobs="postgres", webhooks="durable", inbound_webhooks="standard-webhooks",
-        )
-        assert_lock_webhooks(webhooks_target, "durable", "standard-webhooks")
-        webhooks_before = state(webhooks_target)
-        webhooks_replay = init(
-            source, webhooks_target, "--database", "postgres", "--jobs", "postgres", "--outbound-http", "bounded",
-            "--webhooks", "durable", "--inbound-webhooks", "standard-webhooks", "--agent-harness", "core",
-        )
-        if webhooks_replay.returncode or state(webhooks_target) != webhooks_before:
-            raise AssertionError("complete webhook lock replay changed target bytes")
+        # Inbound-only needs the request deadline even without outbound HTTP
+        # or HTTP idempotency selecting its shared carrier.
+        for outbound_http, webhooks in (("bounded", "durable"), ("none", "none")):
+            webhooks_target = work / f"webhooks-replay-{webhooks}"
+            clone(source, webhooks_target)
+            webhooks_result = init(
+                source, webhooks_target, "--database", "postgres", "--jobs", "postgres", "--outbound-http", outbound_http,
+                "--webhooks", webhooks, "--inbound-webhooks", "standard-webhooks", "--agent-harness", "core",
+            )
+            if webhooks_result.returncode:
+                raise AssertionError(f"webhooks initialization failed: {webhooks_result.stderr}")
+            assert_profile_packs(
+                source, webhooks_target, database="postgres", authn="none", outbound_http=outbound_http,
+                http_idempotency="none", jobs="postgres", webhooks=webhooks, inbound_webhooks="standard-webhooks",
+            )
+            assert_lock_webhooks(webhooks_target, webhooks, "standard-webhooks")
+            webhooks_before = state(webhooks_target)
+            webhooks_replay = init(
+                source, webhooks_target, "--database", "postgres", "--jobs", "postgres", "--outbound-http", outbound_http,
+                "--webhooks", webhooks, "--inbound-webhooks", "standard-webhooks", "--agent-harness", "core",
+            )
+            if webhooks_replay.returncode or state(webhooks_target) != webhooks_before:
+                raise AssertionError("complete webhook lock replay changed target bytes")
         for permitted in ("union", "raw"):
             allowed = work / f"permitted-{permitted}"
             clone(source, allowed)

@@ -33,6 +33,21 @@ fn receiver(pool: PgPool) -> Receiver {
     )
 }
 
+fn mounted_receiver(receiver: Receiver, budget: Duration) -> axum::Router {
+    let app = infra_http::finalize_public(infra_http::webhooks::router())
+        .expect("webhook operation is public")
+        .with_state(infra_http::webhooks::WebhookState::active(receiver));
+    infra_http::harden(
+        app,
+        &infra_http::HardenOptions {
+            max_body_bytes: infra_webhooks::protocol::MAX_BODY_BYTES + 1,
+            request_timeout: budget,
+            max_in_flight: None,
+            log_health_probes: false,
+        },
+    )
+}
+
 fn signed_headers(keys: &KeyRing, message_id: impl AsRef<[u8]>, body: &[u8]) -> HeaderMap {
     let message_id = message_id.as_ref();
     let timestamp: i64 = SystemTime::now()
@@ -550,11 +565,7 @@ async fn missing_consumer_spends_attempts_and_exhausts_the_normal_budget(pool: P
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn mounted_percent_decoded_endpoint_reaches_signature_rejection(pool: PgPool) {
-    let app = infra_http::finalize_public(infra_http::webhooks::router())
-        .expect("webhook operation is public")
-        .with_state(infra_http::webhooks::WebhookState::active(receiver(
-            pool.clone(),
-        )));
+    let app = mounted_receiver(receiver(pool.clone()), Duration::from_secs(8));
     let response = TestServer::new(app)
         .post("/webhooks/partner%2Fa%3F%23")
         .add_header("webhook-id", "message-decoded")
@@ -565,6 +576,127 @@ async fn mounted_percent_decoded_endpoint_reaches_signature_rejection(pool: PgPo
     response.assert_status(StatusCode::BAD_REQUEST);
     assert_eq!(receipt_count(&pool).await, 0);
     super::close(&[&pool]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the fixture occupies the only pool permit to observe HTTP acquisition cancellation"
+)]
+async fn mounted_receipt_cutoff_reserves_response_time_and_same_identity_recovers(pool: PgPool) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Poll;
+
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt as _;
+
+    struct CountedVerifier(Arc<AtomicUsize>, KeyRing);
+    impl Verifier for CountedVerifier {
+        fn verify(
+            &self,
+            headers: &HeaderMap,
+            body: &[u8],
+            now: SystemTime,
+        ) -> Result<Bytes, Rejection> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Verifier::verify(&self.1, headers, body, now)
+        }
+    }
+
+    // template:begin http-idempotency:test-webhook-cutoff-metric-recorder
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    // template:end http-idempotency:test-webhook-cutoff-metric-recorder
+    let writer = super::template_pool(&dsn_for(&pool).await, 1).await;
+    let held = writer.acquire().await.expect("occupy the only permit");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let keys = KeyRing::from_encoded(KEY, None).expect("key");
+    let receiver = Receiver::new(
+        writer.clone(),
+        [(
+            ENDPOINT.to_owned(),
+            Arc::new(CountedVerifier(Arc::clone(&calls), keys.clone())) as Arc<dyn Verifier>,
+        )],
+    );
+    let request = || {
+        let mut request = http::Request::post("/webhooks/partner%2Fa%3F%23")
+            .body(Body::from("{}"))
+            .expect("request");
+        *request.headers_mut() = signed_headers(&keys, "message-budget", b"{}");
+        request
+    };
+
+    tokio::time::pause();
+    for (budget, may_start) in [
+        (Duration::from_millis(100), false),
+        (Duration::from_secs(1), true),
+    ] {
+        let app = mounted_receiver(receiver.clone(), budget);
+        let start = tokio::time::Instant::now();
+        let response = app.oneshot(request());
+        tokio::pin!(response);
+        let first_poll = futures_util::poll!(response.as_mut());
+        let response = if may_start {
+            assert!(first_poll.is_pending());
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            tokio::time::advance(Duration::from_millis(900)).await;
+            super::bounded("receipt cutoff response", response)
+                .await
+                .expect("response")
+        } else {
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "exhausted receipt is never polled"
+            );
+            let Poll::Ready(response) = first_poll else {
+                panic!("the reserve exhausts the attempt before acquisition");
+            };
+            response.expect("response")
+        };
+        assert!(tokio::time::Instant::now() < start + budget);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/problem+json"
+        );
+        let body = to_bytes(response.into_body(), 4096)
+            .await
+            .expect("problem body");
+        let problem: serde_json::Value = serde_json::from_slice(&body).expect("problem JSON");
+        assert_eq!(problem["code"], "service_unavailable");
+    }
+    tokio::time::resume();
+    assert_eq!(receipt_count(&pool).await, 0);
+    assert_eq!(job_count(&pool).await, 0);
+    drop(held);
+    let app = mounted_receiver(receiver, Duration::from_secs(8));
+    for _ in 0..2 {
+        let response = super::bounded("same-identity retry", app.clone().oneshot(request()))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+    assert_eq!(receipt_count(&pool).await, 1);
+    assert_eq!(job_count(&pool).await, 1);
+    // template:begin http-idempotency:test-webhook-cutoff-metric-assertions
+    let scrape = recorder.handle().render();
+    let outcomes: Vec<_> = scrape
+        .lines()
+        .filter(|line| line.starts_with("webhook_ingress_outcomes_total{"))
+        .collect();
+    assert_eq!(outcomes.len(), 3, "{scrape}");
+    for (outcome, count) in [("unavailable", 2), ("accepted", 1), ("duplicate", 1)] {
+        assert!(
+            outcomes
+                .iter()
+                .any(|line| line.contains(&format!("outcome=\"{outcome}\""))
+                    && line.ends_with(&format!(" {count}"))),
+            "{scrape}"
+        );
+    }
+    // template:end http-idempotency:test-webhook-cutoff-metric-assertions
+    super::close(&[&writer, &pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -725,11 +857,7 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt as _;
 
-    let app = infra_http::finalize_public(infra_http::webhooks::router())
-        .expect("public contract")
-        .with_state(infra_http::webhooks::WebhookState::active(receiver(
-            pool.clone(),
-        )));
+    let app = mounted_receiver(receiver(pool.clone()), Duration::from_secs(8));
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
     for (id, body, content_type, status) in [
         (

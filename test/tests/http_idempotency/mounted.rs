@@ -1648,24 +1648,30 @@ async fn p9_a_held_key_answers_in_progress_with_a_retry_hint(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn p9_an_expired_budget_answers_504_and_counts_abandoned(pool: PgPool) {
+async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(pool: PgPool) {
     let recorder = PrometheusBuilder::new().build_recorder();
     let _local = metrics::set_default_local_recorder(&recorder);
     let mounted = Mounted::on(&pool, SHORT_BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
 
-    // The chain's timer answers while the work waits inside its transaction,
-    // which rolls back.
+    // The inner cutoff cancels work inside its transaction, leaving time for
+    // the canonical unavailable response before the outer timeout.
     mounted.hold.arm();
-    let expired = mounted.create(ALICE, "k-5", &input, "req-expired").await;
+    let advance = async {
+        mounted.hold.entered().await;
+        tokio::time::pause();
+        // Let the paused runtime advance to the attempt's next timer.
+    };
+    let (expired, ()) = tokio::join!(mounted.create(ALICE, "k-5", &input, "req-expired"), advance);
     problem(
         &expired,
-        StatusCode::GATEWAY_TIMEOUT,
-        "gateway_timeout",
+        StatusCode::SERVICE_UNAVAILABLE,
+        "idempotency_unavailable",
         "req-expired",
     );
-    mounted.hold.entered().await;
-    assert_eq!(outcomes(&recorder), counts(&[("abandoned", 1)]));
+    assert_eq!(retry_after(&expired).as_deref(), Some("1"));
+    assert_eq!(outcomes(&recorder), counts(&[("unavailable", 1)]));
+    tokio::time::resume();
     assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
 
     // The key is free once `PostgreSQL` ends the dropped transaction.
@@ -1674,7 +1680,7 @@ async fn p9_an_expired_budget_answers_504_and_counts_abandoned(pool: PgPool) {
     assert_eq!(
         outcomes(&recorder),
         counts(&[
-            ("abandoned", 1),
+            ("unavailable", 1),
             ("in_progress", conflicts),
             ("executed", 1)
         ])

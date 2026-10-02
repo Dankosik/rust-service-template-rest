@@ -1042,6 +1042,7 @@
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-http-idempotency-errors", "bootstrap-http-idempotency-composer", "bootstrap-http-idempotency-contract-composer", "bootstrap-http-idempotency-activation", "bootstrap-http-idempotency-module"]},
       {"path": "crates/service/tests/openapi.rs", "ids": ["service-openapi-http-idempotency-contract"]},
       {"path": "test/Cargo.toml", "ids": ["test-http-idempotency-dependencies"]},
+      {"path": "test/tests/webhooks/inbound.rs", "ids": ["test-webhook-cutoff-metric-recorder", "test-webhook-cutoff-metric-assertions"]},
       {"path": "test/README.md", "ids": ["test-readme-http-idempotency"]},
       {"path": "env/config/local.toml", "ids": ["local-config-http-idempotency"]},
       {"path": "migrations/README.md", "ids": ["migrations-readme-http-idempotency"]},

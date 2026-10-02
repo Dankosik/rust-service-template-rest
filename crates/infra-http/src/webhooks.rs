@@ -19,8 +19,9 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::extract::Path;
+use crate::harden::{RequestDeadline, postgres_attempt_end};
 use crate::problem::responses::WebhookProblemResponses;
-use crate::problem::{Code, Problem};
+use crate::problem::{Code, Problem, sanitized_internal_error};
 
 /// Webhook ingress results. Label `outcome` is `accepted`, `duplicate`,
 /// `rejected`, `unavailable`, or `unknown_endpoint`. A configured endpoint
@@ -132,10 +133,21 @@ async fn receive(
             return Problem::new(Code::WebhookRejected).into_response();
         }
     };
-    match receiver
-        .receive(&endpoint_id, &parts.headers, &body, SystemTime::now())
+    let Some(deadline) = parts.extensions.get::<RequestDeadline>() else {
+        tracing::error!(failure = "deadline_missing", "webhook_wiring_failed");
+        return sanitized_internal_error();
+    };
+    let result = if let Some(attempt_end) = postgres_attempt_end(deadline.at()) {
+        tokio::time::timeout_at(
+            attempt_end,
+            receiver.receive(&endpoint_id, &parts.headers, &body, SystemTime::now()),
+        )
         .await
-    {
+        .unwrap_or(Err(ReceiveError::Unavailable))
+    } else {
+        Err(ReceiveError::Unavailable)
+    };
+    match result {
         Ok(outcome) => {
             let outcome = match outcome {
                 ReceiptOutcome::Accepted => "accepted",

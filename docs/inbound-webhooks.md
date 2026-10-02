@@ -84,12 +84,38 @@ is the fixed 128 KiB boundary. Key material is redacted after construction.
 | Other body-read failure or message ID over 255 bytes | `400 webhook_rejected`; no durable effect |
 | First verified endpoint/message ID | one receipt and one processing job commit atomically, then `204` |
 | Same endpoint/message ID, including changed body or content type | `204`; no extra job, original payload stays authoritative, even after processing |
-| Database or commit acknowledgement unavailable/unknown | `503`; no false `204`, sender retries same identity/body |
+| Database or commit acknowledgement unavailable/unknown, or receipt attempt cutoff exhausted | `503 service_unavailable`; no false `204`, sender retries same identity/body |
 
 A duplicate still passes current signature/timestamp verification; deduplication
 is not authentication bypass. Identity is the exact endpoint and raw message-ID
 bytes; replay never replaces the first accepted body or content type. Existing overload, timeout, header-limit, panic,
 method, and server outcomes remain effective contract behavior.
+
+The complete receipt attempt uses the hardened chain's existing
+`RequestDeadline.at() - 100 ms`, including acquisition, BEGIN, receipt and job
+statements, COMMIT and connection release. Body reading and earlier request work consume the same original
+budget. The 100 ms reserve is for bounded in-memory response mapping; a
+successful receipt has no response body. It is not a response-delivery SLA.
+With the default eight-second request and a full three-second acquire wait,
+at most 4.9 seconds remain for the rest of the attempt, including release.
+No fresh timeout or separate per-statement allowance starts at database entry.
+
+An exhausted cutoff returns 503 `service_unavailable` before polling the receipt
+operation, without database dispatch. This includes a configured 100 ms HTTP
+request or entry with 100 ms or less remaining. Expiry during the receipt
+attempt returns the same 503, while the outer deadline retains
+`gateway_timeout` 504. Cancellation reaches the shared query-pool guard:
+work cancellation detaches the connection immediately, and ordinary release
+uses one absolute one-second bound over SQLx's native return future.
+Cleanup does not replace a computed operation result. Neither 503 nor 504
+proves rollback; COMMIT may have succeeded before cancellation or while its
+acknowledgement was lost. Retry the same endpoint/message identity and body
+with current valid signature/timestamp evidence so receipt arbitration can
+recover the outcome. The receiver adds no automatic retry.
+
+This HTTP bound does not reduce worker, maintenance, migration or session
+budgets. See [Persistence Architecture](architecture/persistence.md#http-attempts)
+for the allocation and the separate query-pool cleanup guarantee.
 
 ## Receipt and consumer processing
 

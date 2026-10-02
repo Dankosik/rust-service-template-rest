@@ -889,7 +889,7 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
     if inputs.webhooks == "durable":
         selected.add("webhooks")
     if inputs.inbound_webhooks == "standard-webhooks":
-        selected.add("inbound-webhooks")
+        selected.update(("inbound-webhooks", "request-budget"))
     return selected
 
 

@@ -35,6 +35,9 @@ disallowed-methods = [
     { path = "sqlx_core::pool::Pool::begin_with", reason = "open the transaction with infra_postgres::in_tx_with" },
     { path = "sqlx_core::pool::Pool::try_begin", reason = "open the transaction with infra_postgres::in_tx" },
     { path = "sqlx_core::pool::Pool::try_begin_with", reason = "open the transaction with infra_postgres::in_tx_with" },
+    # Direct checkout bypasses cancellation ownership and bounded return.
+    { path = "sqlx_core::pool::Pool::acquire", reason = "borrow through infra_postgres::with_connection or open infra_postgres::in_tx" },
+    { path = "sqlx_core::pool::Pool::try_acquire", reason = "borrow through infra_postgres::with_connection or open infra_postgres::in_tx" },
 ]
 
 # Request data enters through `infra_http::extract::{Json, Query, Path}`, whose
