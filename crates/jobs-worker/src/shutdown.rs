@@ -159,6 +159,89 @@ impl Signals {
     }
 }
 
+/// The worker's background tasks and their root cancellation token.
+///
+/// Every task runs until its token is cancelled, and nothing cancels before
+/// teardown, so a task that ends earlier is a panic or a defect: the worker
+/// stops rather than run without it, as the service does. A task spawned
+/// through [`Self::spawn`] reports that end by name. The engines spawn their
+/// loops on [`Self::tracker`] and report through `Started::failed`.
+#[derive(Clone)]
+pub(crate) struct Background {
+    pub(crate) cancel: CancellationToken,
+    pub(crate) tracker: TaskTracker,
+    stopped: watch::Sender<Option<&'static str>>,
+}
+
+impl Background {
+    pub(crate) fn new() -> Self {
+        Self {
+            cancel: CancellationToken::new(),
+            tracker: TaskTracker::new(),
+            stopped: watch::Sender::new(None),
+        }
+    }
+
+    /// Spawn the task `start` builds from a child of the root token.
+    pub(crate) fn spawn<F>(&self, name: &'static str, start: impl FnOnce(CancellationToken) -> F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let cancel = self.cancel.child_token();
+        let guard = ReportUnlessCancelled {
+            name,
+            cancel: cancel.clone(),
+            stopped: self.stopped.clone(),
+        };
+        let task = start(cancel);
+        self.tracker.spawn(async move {
+            let _guard = guard;
+            task.await;
+        });
+    }
+
+    /// Resolve with the name of the first task that ended while its token
+    /// was live. Pending while every task runs.
+    pub(crate) async fn stopped(&self) -> &'static str {
+        let mut stopped = self.stopped.subscribe();
+        loop {
+            if let Some(name) = *stopped.borrow_and_update() {
+                return name;
+            }
+            if stopped.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
+/// Dropped when its task ends, a panic included.
+struct ReportUnlessCancelled {
+    name: &'static str,
+    cancel: CancellationToken,
+    stopped: watch::Sender<Option<&'static str>>,
+}
+
+impl Drop for ReportUnlessCancelled {
+    fn drop(&mut self) {
+        if self.cancel.is_cancelled() {
+            return;
+        }
+        tracing::error!(
+            task = self.name,
+            panicked = std::thread::panicking(),
+            "background_task_stopped"
+        );
+        self.stopped.send_if_modified(|first| {
+            let unset = first.is_none();
+            if unset {
+                *first = Some(self.name);
+            }
+            unset
+        });
+    }
+}
+
 /// The listeners bound so far. The shutdown plan and `abort_startup` close
 /// whichever are present.
 #[derive(Debug, Default)]
@@ -188,8 +271,7 @@ pub(crate) struct Plan<'a> {
     pub(crate) http: &'a HttpConfig,
     pub(crate) readiness: &'a Readiness,
     pub(crate) resources: Resources,
-    pub(crate) cancel: CancellationToken,
-    pub(crate) tracker: TaskTracker,
+    pub(crate) background: Background,
     pub(crate) tracer_provider: TracerProviderHandle,
     pub(crate) signals: &'a mut Signals,
 }
@@ -201,8 +283,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         http,
         readiness,
         mut resources,
-        cancel,
-        tracker,
+        background,
         tracer_provider,
         signals,
     } = plan;
@@ -222,7 +303,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         budget.remaining(LISTENERS),
     )
     .await;
-    degraded |= join_background(&cancel, &tracker, budget.remaining(BACKGROUND_JOIN)).await;
+    degraded |= join_background(&background, budget.remaining(BACKGROUND_JOIN)).await;
     degraded |= close_dependencies(&mut resources, budget.remaining(DEPENDENCY_CLOSE)).await;
     degraded |= flush_telemetry(tracer_provider, budget.remaining(TELEMETRY_FLUSH)).await;
     let outcome = if degraded {
@@ -239,17 +320,13 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
 /// Each stage is bounded by its own ceiling. There is no grace deadline,
 /// because no stop signal started it. It flushes no telemetry and returns
 /// nothing: the exit code is 1 whatever it did.
-pub(crate) async fn abort_startup(
-    mut resources: Resources,
-    cancel: &CancellationToken,
-    tracker: &TaskTracker,
-) {
+pub(crate) async fn abort_startup(mut resources: Resources, background: &Background) {
     finish_work(&mut resources, Instant::now() + CLEANUP).await;
     // template:begin messaging:worker-shutdown-abort-drop-consumer
     drop(resources.consumer.take());
     // template:end messaging:worker-shutdown-abort-drop-consumer
     let _ = close_listeners(std::mem::take(&mut resources.listeners), LISTENERS).await;
-    let _ = join_background(cancel, tracker, BACKGROUND_JOIN).await;
+    let _ = join_background(background, BACKGROUND_JOIN).await;
     let _ = close_dependencies(&mut resources, DEPENDENCY_CLOSE).await;
 }
 
@@ -433,14 +510,10 @@ async fn close_diagnostics(server: Option<Server>, budget: Duration) {
     }
 }
 
-async fn join_background(
-    cancel: &CancellationToken,
-    tracker: &TaskTracker,
-    budget: Duration,
-) -> bool {
-    cancel.cancel();
-    tracker.close();
-    match tokio::time::timeout(budget, tracker.wait()).await {
+async fn join_background(background: &Background, budget: Duration) -> bool {
+    background.cancel.cancel();
+    background.tracker.close();
+    match tokio::time::timeout(budget, background.tracker.wait()).await {
         Ok(()) => {
             tracing::info!("background_joined");
             false
@@ -571,15 +644,35 @@ mod tests {
 
     #[tokio::test]
     async fn abort_startup_cancels_and_joins_a_tracked_task() {
-        let cancel = CancellationToken::new();
-        let tracker = TaskTracker::new();
-        let child = cancel.child_token();
-        tracker.spawn(async move {
-            child.cancelled().await;
-        });
-        abort_startup(Resources::default(), &cancel, &tracker).await;
-        assert!(cancel.is_cancelled());
-        assert!(tracker.is_closed());
-        assert!(tracker.is_empty());
+        let background = Background::new();
+        background.spawn("waits", CancellationToken::cancelled_owned);
+        abort_startup(Resources::default(), &background).await;
+        assert!(background.cancel.is_cancelled());
+        assert!(background.tracker.is_closed());
+        assert!(background.tracker.is_empty());
+        assert!(
+            background.stopped.borrow().is_none(),
+            "a task that ends at its cancellation is not a failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_that_returns_early_is_reported_by_name() {
+        let background = Background::new();
+        background.spawn("waits", CancellationToken::cancelled_owned);
+        background.spawn("returns", |_cancel| async {});
+        assert_eq!(background.stopped().await, "returns");
+    }
+
+    #[tokio::test]
+    async fn a_task_that_panics_is_reported_by_name() {
+        let background = Background::new();
+        background.spawn("panics", |_cancel| async { panic!("task defect") });
+        assert_eq!(background.stopped().await, "panics");
+        background.tracker.close();
+        background.tracker.wait().await;
+        background.spawn("later", |_cancel| async {});
+        background.tracker.wait().await;
+        assert_eq!(background.stopped().await, "panics", "the first end stands");
     }
 }

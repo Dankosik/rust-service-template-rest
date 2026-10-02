@@ -562,6 +562,9 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     assert_eq!((status, body.as_str()), (200, "ok"));
     let (status, _) = get(&format!("http://{api}/api")).expect("GET /api");
     assert_eq!(status, 404);
+    let (status, body) =
+        get(&format!("http://{diagnostics}/health/live")).expect("GET diagnostics /health/live");
+    assert_eq!((status, body.as_str()), (200, "ok"));
 
     wait_completed(&pool, &id).await;
     await_completed_probe_metrics(&format!("http://{diagnostics}/metrics"));
@@ -572,6 +575,73 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-3
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-3
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn background_task_that_ends_stops_the_worker_with_exit_1(pool: PgPool) {
+    prepare(&pool).await;
+    let database_url = child_database_url(&pool).await;
+    // template:begin outbox:test-jobs-process-nats-fixture-use-6
+    let nats = NatsFixture::create().await;
+    // template:end outbox:test-jobs-process-nats-fixture-use-6
+    let worker = Worker::spawn(
+        &database_url,
+        // template:begin outbox:test-jobs-process-nats-fixture-argument-6
+        &nats,
+        // template:end outbox:test-jobs-process-nats-fixture-argument-6
+        &[(integration_tests::jobs::BACKGROUND_TASK_RETURNS, "1")],
+    );
+    let stopped = worker.await_record("background_task_stopped");
+    assert_eq!(stopped["task"], "fixture", "{stopped}");
+    assert_eq!(stopped["panicked"], false, "{stopped}");
+    // The staged plan still runs before the error exit.
+    worker.await_record("shutdown_completed");
+    assert_refused(
+        worker,
+        "background task fixture stopped without a stop signal",
+    );
+    // template:begin outbox:test-jobs-process-nats-fixture-cleanup-6
+    nats.cleanup().await;
+    // template:end outbox:test-jobs-process-nats-fixture-cleanup-6
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn handler_panic_is_recorded_by_location_and_never_by_message(pool: PgPool) {
+    prepare(&pool).await;
+    let id = enqueue_committed(&pool, ProbeAction::Panic).await;
+    let database_url = child_database_url(&pool).await;
+    // template:begin outbox:test-jobs-process-nats-fixture-use-7
+    let nats = NatsFixture::create().await;
+    // template:end outbox:test-jobs-process-nats-fixture-use-7
+    let worker = Worker::spawn(
+        &database_url,
+        // template:begin outbox:test-jobs-process-nats-fixture-argument-7
+        &nats,
+        // template:end outbox:test-jobs-process-nats-fixture-argument-7
+        &[],
+    );
+    let panicked = worker.await_record("panicked");
+    assert!(
+        panicked["panic.file"]
+            .as_str()
+            .is_some_and(|file| file.ends_with("jobs.rs")),
+        "{panicked}"
+    );
+    assert!(panicked["panic.line"].is_u64(), "{panicked}");
+    assert!(
+        !panicked.to_string().contains("probe panicked"),
+        "{panicked}"
+    );
+    assert_eq!(probe_attempts(&pool, &id).await.first(), Some(&1));
+
+    // The panic is a retried attempt: the worker keeps running and stops cleanly.
+    worker.terminate();
+    let (code, stderr) = worker.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(!stderr.contains("probe panicked"), "stderr: {stderr}");
+    // template:begin outbox:test-jobs-process-nats-fixture-cleanup-7
+    nats.cleanup().await;
+    // template:end outbox:test-jobs-process-nats-fixture-cleanup-7
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

@@ -245,17 +245,17 @@ for the shipped binary, and the test-only `jobs-worker-fixture` suite in
 | 3 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)` |
 | 4 | Build the multi-thread runtime | `build tokio runtime: ...` |
 | 5 | Install `Signals` (SIGINT, then SIGTERM) | `install stop signal handlers: ...` |
-| 6 | Tracer provider with the worker identity, subscriber, recorder, and the retained messaging panic hook (it records the panic's file, line, and column, never its message) | the telemetry errors, as in the service |
+| 6 | Tracer provider with the worker identity, subscriber, recorder, and the panic hook (it records the panic's file, line, and column, never its message) | the telemetry errors, as in the service |
 | 7 | Register optional jobs and typed-message capabilities through `register(&mut registration)`, which fills `Registration::jobs` and `Registration::messages`; validate each nonempty registry. A composition with no retained capability refuses after configuration is loaded | `job kind registration failed: ...`; `job kinds are invalid: ...`; `typed message handlers are invalid: ...`; `no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs` |
 | 8 | `jobs_worker_starting` record; metrics upkeep and Tokio runtime metrics join the tracker | |
 | 9 | After registration, determine whether retained capabilities need PostgreSQL; validate `postgres.enabled` and mode-aware pool capacity, then admit the DSN/pool and migration history | `postgres.enabled must be true to run the jobs worker`; capacity, DSN, pool, or history refusal |
 | 10 | When messaging or outbox is retained, validate producer/consumer configuration, connect NATS under its startup budget, and admit a consumer only for registered typed handlers | messaging configuration, connection, topology, bounds, or consumer refusal |
 | 11 | Construct every required ordinary and reserved publication `Engine`, then run each `Engine::check_startup` | `jobs startup check: ...` |
-| 12 | Bind the health listener (`http.addr`), then the diagnostics listener (`observability.metrics.addr`, when set); `http listener bound`, `diagnostics listener bound` | `bind http listener ...` |
+| 12 | Bind the health listener (`http.addr`), then the diagnostics listener (`observability.metrics.addr`, when set), which serves `/metrics` and `GET /health/live`; `http listener bound`, `diagnostics listener bound` | `bind http listener ...` |
 | 13 | Readiness admission (`refresh`, then cached verdict over retained PostgreSQL and messaging probes), raced against stop signals | `startup admission: ...` |
 | 14 | Only after admission, start every `Engine` and the admitted consumer; `jobs_claiming_started` and `messaging_consuming_started` | |
 | 15 | Refresher task; `jobs_worker_ready` | |
-| 16 | Wait for a stop signal, an engine failure, or a consumer failure | |
+| 16 | Wait for a stop signal, an engine failure, a consumer failure, or a background task that ended | |
 
 Steps 1-7 open no dependency. Registration follows configuration and
 constructs only local registries. Signal streams exist from step 5, so a
@@ -308,6 +308,16 @@ readiness propagation delay: it stops claims and pulls at once. The background
 join is 3 s (the service's is 5 s) because attempts are drained and their outcomes
 are finished before that stage and every joined task stops at its next await.
 
+**Background tasks.** Every task the worker spawns runs until its token is
+cancelled, and nothing cancels before teardown, so a task that ends earlier
+is a panic or a defect. The worker then stops rather than run without it, as
+the service does. Its own tasks (metrics upkeep, runtime metrics, pool
+metrics, password refresh when `postgres.password_file` is set, the readiness
+refresher, and tasks a registration spawned) record `background_task_stopped`
+with `task` and `panicked`; an engine's claim loop, retention, listener, and
+sampling record `jobs_engine_task_stopped` and fail that engine. A task that
+ends during startup is reported when startup completes.
+
 **Exit codes.** `exit_code` is the one mapping. `process::exit` is never
 called.
 
@@ -315,7 +325,7 @@ called.
 | --- | --- |
 | `0` | A stop signal, and every stage completed inside its ceiling; the drain ended with `drained()`, so no attempt was cancelled at its end |
 | `3` | A stop signal, and any stage voted degraded, including a forced drain (budget or second signal), which is the only way an attempt is cancelled at the drain's end |
-| `1` | A startup refusal, or a started engine or consumer fails without a stop signal; the reported failure names which one stopped, and a consumer failure carries its cause. After the failure the same staged plan runs, with its deadline starting at the failure, and its outcome does not change the code |
+| `1` | A startup refusal, or a started engine, consumer, or background task ends without a stop signal; the reported failure names which one stopped, and a consumer failure carries its cause. After the failure the same staged plan runs, with its deadline starting at the failure, and its outcome does not change the code |
 
 The [guide](../background-jobs.md#run-and-stop-the-worker) covers running and
 stopping the worker. [Async Architecture](async.md) records the mechanism.
