@@ -274,9 +274,9 @@ constraint, never the submitted value. `Failure::retry_after` adds
 | `already_exists` | `ALREADY_EXISTS` |
 | `conflict`, `idempotency_request_in_progress` | `ABORTED` |
 | `method_not_allowed` | `UNIMPLEMENTED` |
-| `request_entity_too_large`, `request_header_fields_too_large`, `too_many_requests` | `RESOURCE_EXHAUSTED` |
+| `request_entity_too_large`, `too_many_requests` | `RESOURCE_EXHAUSTED` |
 | `service_unavailable`, `authentication_unavailable`, `idempotency_unavailable` | `UNAVAILABLE` |
-| `request_timeout` | `DEADLINE_EXCEEDED` |
+| `gateway_timeout` | `DEADLINE_EXCEEDED` |
 | `internal_error` | `INTERNAL` |
 
 The transport answers its own rejections from the same catalog, so each
@@ -290,7 +290,7 @@ carries a reason:
 | Authentication provider unavailable | `UNAVAILABLE` | `AUTHENTICATION_UNAVAILABLE` |
 | Missing required scope | `PERMISSION_DENIED` | `FORBIDDEN` |
 | Concurrency shed | `RESOURCE_EXHAUSTED` | `SERVICE_UNAVAILABLE` |
-| Header deadline elapsed | `DEADLINE_EXCEEDED` | `REQUEST_TIMEOUT` |
+| Header deadline elapsed | `DEADLINE_EXCEEDED` | `GATEWAY_TIMEOUT` |
 | Recovered panic | `INTERNAL` | `INTERNAL_ERROR` |
 
 The shed is the one answer whose gRPC code differs from its catalog row: it
@@ -418,7 +418,8 @@ The server span, like the HTTP one, carries only `otel.name` and `otel.kind`
 as `tracing` fields, so the JSON log layer does not serialize and repeat the
 RPC attributes on every record; `rpc.system`, `rpc.service`, `rpc.method`,
 `rpc.grpc.status_code`, `server.address`, `server.port` and
-`user_agent.original` go to the OpenTelemetry span alone. The parent is the
+`user_agent.original` go to the OpenTelemetry span alone, as does
+`failure.code` when the answer is a catalog failure. The parent is the
 extracted incoming context, kept current even when the span is disabled.
 Client spans are built the same way. Metrics follow the grpc-ecosystem Prometheus
 names, so standard gRPC dashboards and alerts apply:
@@ -427,6 +428,13 @@ names, so standard gRPC dashboards and alerts apply:
 `grpc_client_handled_total` (`grpc_service`, `grpc_method`, `grpc_code`), the
 histograms `grpc_server_handling_seconds` and `grpc_client_handling_seconds`
 (`grpc_service`, `grpc_method`), and `grpc_server_shed_requests_total`.
+`grpc_server_failures_total` (`grpc_service`, `grpc_method`, `failure_code`)
+is the template's own addition: it counts the calls answered with a failure
+from the shared catalog, under the catalog code as HTTP's access log spells
+it in `problem_code`, so the failures that share one `grpc_code`
+(`authentication_unavailable` and `service_unavailable` are both
+`Unavailable`) stay apart. A status a handler builds without
+`infra_grpc::Failure` is not counted there.
 Started minus handled is the number of calls waiting for response headers.
 `grpc_code` is the grpc-go code name, one of all 17: `OK`, `Canceled`,
 `InvalidArgument`, `FailedPrecondition` and so on. The histograms measure time

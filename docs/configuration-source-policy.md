@@ -366,7 +366,7 @@ fields.
 - `http.request_timeout` (default `8s`) is the per-request handler budget and
   the only bound on how long one request may hold a task and its pooled
   resources. Body reads happen inside it because extractors run inside the
-  handler future. Expiry answers a `504` problem with code `request_timeout`.
+  handler future. Expiry answers a `504` problem with code `gateway_timeout`.
   It must not exceed the drain budget left after readiness propagation, so
   in-flight requests can finish inside the drain.
 - `http.header_read_timeout` (default `5s`) bounds delivery of a request head

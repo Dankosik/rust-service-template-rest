@@ -1048,7 +1048,7 @@ async fn outer_http_timeout_cancels_inflight_verification_and_owns_504() {
     problem(
         &response,
         StatusCode::GATEWAY_TIMEOUT,
-        "request_timeout",
+        "gateway_timeout",
         "outer-timeout",
     );
     assert!(response.maybe_header(WWW_AUTHENTICATE).is_none());
@@ -1658,7 +1658,7 @@ async fn p9_an_expired_budget_answers_504_and_counts_abandoned(pool: PgPool) {
     problem(
         &expired,
         StatusCode::GATEWAY_TIMEOUT,
-        "request_timeout",
+        "gateway_timeout",
         "req-expired",
     );
     mounted.hold.entered().await;
