@@ -133,7 +133,9 @@ DLQ as permanent, so keep the filter as narrow as the handled subjects.
 replica bounds its own in-flight work by the configured concurrency. The
 application never creates, deletes, or repairs streams. A deleted or replaced
 durable consumer stops the worker unready. The worker checks its durable
-before the first pull and after an incomplete, failed or expired batch.
+before every pull and after an incomplete, failed or expired batch. The
+identity check is a broker round trip per batch, including a one-message
+batch; it detects replacement even while the source continuously has backlog.
 One batch waits at most 30 seconds, independently of the client's fallback
 timer. A missing durable or source stream, changed consumer creation identity,
 or replacement with a push consumer is terminal. An unanswered lookup is a

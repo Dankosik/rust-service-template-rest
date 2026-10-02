@@ -1719,6 +1719,82 @@ async fn deleting_a_durable_with_a_waiting_batch_stops_the_consumer() {
 }
 
 #[tokio::test]
+async fn a_durable_replaced_between_full_batches_stops_before_another_handler() {
+    let fixture = Fixture::create(false).await;
+    let cancel = CancellationToken::new();
+    let messaging = Messaging::connect(
+        options(&fixture, Some(consumer_options(&fixture)), 1024),
+        deadline(),
+        cancel.clone(),
+    )
+    .await
+    .unwrap();
+    for id in ["before-replacement", "pending-after-replacement"] {
+        let prepared = registry(&fixture).prepare(&event(id), 1024).unwrap();
+        messaging
+            .producer()
+            .publish(&prepared, deadline(), &cancel)
+            .await
+            .unwrap();
+    }
+    let entered = Arc::new(Notify::new());
+    let release = CancellationToken::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registered = registry(&fixture);
+    registered
+        .register::<ExampleEvent, _, _>({
+            let entered = Arc::clone(&entered);
+            let calls = Arc::clone(&calls);
+            let release = release.clone();
+            move |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                entered.notify_one();
+                let release = release.clone();
+                async move {
+                    release.cancelled().await;
+                    Ok(())
+                }
+            }
+        })
+        .unwrap();
+    let mut handle = messaging.consumer(registered).await.unwrap().start(&cancel);
+    timeout(Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    fixture
+        .jetstream
+        .delete_consumer_from_stream(&fixture.durable, &fixture.stream)
+        .await
+        .unwrap();
+    source
+        .create_consumer(consumer::pull::Config {
+            durable_name: Some(fixture.durable.clone()),
+            filter_subject: fixture.subject.clone(),
+            ack_policy: consumer::AckPolicy::Explicit,
+            ack_wait: Duration::from_secs(41),
+            max_deliver: -1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    release.cancel();
+    assert!(matches!(
+        timeout(Duration::from_secs(10), handle.failed())
+            .await
+            .expect("a successful previous batch cannot hide replacement"),
+        ConsumerError::ConsumerLost
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        handle.finish(deadline()).await,
+        Err(ConsumerError::ConsumerLost)
+    ));
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
     let fixture = Fixture::create(false).await;
     let relay = OutageRelay::start().await;

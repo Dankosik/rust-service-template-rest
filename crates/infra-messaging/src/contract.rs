@@ -101,7 +101,7 @@ impl Registry {
 
 /// One event type and version: the five identity headers every publication
 /// carries and a payload schema whose local references resolve independently
-/// of the surrounding AsyncAPI document.
+/// of the surrounding `AsyncAPI` document.
 fn message(
     event_type: &str,
     schema_version: u16,

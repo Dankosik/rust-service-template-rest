@@ -289,11 +289,6 @@ impl Consumer {
         force: &CancellationToken,
     ) -> Result<(), ConsumerError> {
         let envelope_bytes = self.delivery.shared.max_payload_bytes + HEADER_LIMIT_BYTES;
-        // A durable deleted before the first pull has no waiting request the
-        // broker could terminate. An unanswered lookup is only an outage.
-        if durable_is_gone(&self.pull).await {
-            return Err(ConsumerError::ConsumerLost);
-        }
         'pulls: loop {
             while deliveries.len() == self.concurrency {
                 tokio::select! {
@@ -306,6 +301,12 @@ impl Consumer {
             }
             if stop.is_cancelled() {
                 break;
+            }
+            // Pull requests address a durable by name, not creation identity.
+            // A replacement between successful full batches has no waiting
+            // request to terminate, so verify identity before every new pull.
+            if durable_is_gone(&self.pull).await {
+                return Err(ConsumerError::ConsumerLost);
             }
             // Each unconsumed batch entry already owns a free slot. Completed
             // tasks can only increase capacity while this request is alive.
@@ -327,16 +328,15 @@ impl Consumer {
                     joined = deliveries.join_next(), if !deliveries.is_empty() => {
                         joined.transpose().map_err(|_| ConsumerError::Close)?;
                     }
-                    result = &mut request => match result {
-                        Ok(Ok(messages)) => break messages,
-                        _ => {
-                            pull_failed();
-                            if durable_is_gone(&self.pull).await {
-                                return Err(ConsumerError::ConsumerLost);
-                            }
-                            tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
-                            continue 'pulls;
+                    result = &mut request => if let Ok(Ok(messages)) = result {
+                        break messages;
+                    } else {
+                        pull_failed();
+                        if durable_is_gone(&self.pull).await {
+                            return Err(ConsumerError::ConsumerLost);
                         }
+                        tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
+                        continue 'pulls;
                     }
                 }
             };
