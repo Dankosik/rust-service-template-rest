@@ -37,7 +37,7 @@ use crate::{AcquisitionError, OnBehalfOf, Rejection};
 struct Peer {
     calls: Arc<AtomicUsize>,
     authorizations: Arc<Mutex<Vec<String>>>,
-    timeouts: Arc<Mutex<Vec<String>>>,
+    timeouts: Arc<Mutex<Vec<Duration>>>,
     started: Arc<Notify>,
     release: Arc<Notify>,
     released: Arc<std::sync::atomic::AtomicBool>,
@@ -210,7 +210,7 @@ async fn route(request: HyperRequest<Incoming>, peer: Peer) -> HyperResponse<Bod
         return response.body(Body::empty()).unwrap();
     }
     if request.uri().path() == "/example.v1.EchoService/Unary" {
-        if let Some(timeout) = header_string(request.headers(), "grpc-timeout") {
+        if let Some(timeout) = infra_grpc::grpc_timeout(request.headers()) {
             peer.timeouts.lock().unwrap().push(timeout);
         }
         return tonic::server::Grpc::new(
@@ -437,18 +437,22 @@ async fn token_wait_is_subtracted_from_the_propagated_grpc_timeout() {
     let [timeout] = timeouts.as_slice() else {
         panic!("expected one propagated timeout: {timeouts:?}");
     };
-    let millis = timeout.strip_suffix('m').unwrap().parse::<u64>().unwrap();
-    assert!((1..=400).contains(&millis), "propagated {timeout}");
+    assert!(
+        !timeout.is_zero() && *timeout <= Duration::from_millis(400),
+        "propagated {timeout:?}"
+    );
     resource.finish().await;
     tokens.finish().await;
 }
 
 #[tokio::test]
-async fn a_reused_token_forwards_the_callers_grpc_timeout_unchanged() {
+async fn a_reused_token_preserves_the_budget_remaining_at_transport_handoff() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let mut client = resource.client(&tokens.credentials(&[], None));
+    let mut elapsed = Vec::new();
     for _ in 0..4 {
+        let started = Instant::now();
         client
             .unary(rpc(
                 UnaryRequest {
@@ -458,14 +462,20 @@ async fn a_reused_token_forwards_the_callers_grpc_timeout_unchanged() {
             ))
             .await
             .unwrap();
+        elapsed.push(started.elapsed());
     }
     let timeouts = resource.peer.timeouts.lock().unwrap().clone();
-    // Tonic encodes one second as microseconds. A reuse that a scheduler pause
-    // stretches past a millisecond is rewritten, so one unchanged value proves it.
-    assert!(
-        timeouts[1..].iter().any(|timeout| timeout == "1000000u"),
-        "{timeouts:?}"
-    );
+    assert_eq!(timeouts.len(), 4);
+    assert_eq!(tokens.token_requests().len(), 1);
+    // Reused credentials add no fresh wait. The transport still subtracts its
+    // own elapsed time; encoding below a second can round down a microsecond.
+    for (timeout, elapsed) in timeouts.iter().zip(elapsed).skip(1) {
+        let minimum = Duration::from_secs(1).saturating_sub(elapsed + Duration::from_micros(1));
+        assert!(
+            (minimum..=Duration::from_secs(1)).contains(timeout),
+            "propagated {timeout:?}, elapsed {elapsed:?}"
+        );
+    }
     resource.finish().await;
     tokens.finish().await;
 }
