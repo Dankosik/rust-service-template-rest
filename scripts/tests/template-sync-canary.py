@@ -222,7 +222,8 @@ def assert_profile_output(
     assert_profile_pack(source, target, "cache", cache == "redis")
     assert_profile_pack(source, target, "object-storage", object_storage == "s3")
     assert_profile_pack(
-        source, target, "request-budget", outbound_http == "bounded" or http_idempotency == "postgres"
+        source, target, "request-budget",
+        outbound_http == "bounded" or http_idempotency == "postgres" or inbound_webhooks == "standard-webhooks",
     )
     assert_profile_pack(source, target, "http-idempotency", http_idempotency == "postgres")
     assert_profile_pack(
@@ -279,26 +280,27 @@ def check(source: Path) -> None:
         if initialized.returncode:
             raise AssertionError(initialized.stderr)
         assert_profile_output(source, target, "oidc-jwt", "bounded")
-        webhook_target = work / "webhooks"
-        clone(source, webhook_target)
-        webhook_initialized = initialize(
-            source, webhook_target, "none", "bounded", database="postgres", jobs="postgres",
-            webhooks="durable", inbound_webhooks="standard-webhooks",
-        )
-        if webhook_initialized.returncode:
-            raise AssertionError(webhook_initialized.stderr)
-        assert_profile_output(
-            source, webhook_target, "none", "bounded", jobs="postgres",
-            webhooks="durable", inbound_webhooks="standard-webhooks",
-        )
-        # Initialization removes unselected adapter carriers. Commit that
-        # derived baseline before sync admission, as the existing jobs-none
-        # canary does, so the sync check exercises parity rather than its
-        # production dirty-selected-target refusal.
-        commit(webhook_target, "initialize webhook profiles")
-        webhook_sync = sync(source, webhook_target, "--check")
-        if webhook_sync.returncode:
-            raise AssertionError(f"webhook profile sync parity failed: {webhook_sync.stderr}")
+        for outbound_http, webhooks in (("bounded", "durable"), ("none", "none")):
+            webhook_target = work / f"webhooks-{webhooks}"
+            clone(source, webhook_target)
+            webhook_initialized = initialize(
+                source, webhook_target, "none", outbound_http, database="postgres", jobs="postgres",
+                webhooks=webhooks, inbound_webhooks="standard-webhooks",
+            )
+            if webhook_initialized.returncode:
+                raise AssertionError(webhook_initialized.stderr)
+            assert_profile_output(
+                source, webhook_target, "none", outbound_http, jobs="postgres",
+                webhooks=webhooks, inbound_webhooks="standard-webhooks",
+            )
+            # Initialization removes unselected adapter carriers. Commit that
+            # derived baseline before sync admission, as the existing jobs-none
+            # canary does, so the sync check exercises parity rather than its
+            # production dirty-selected-target refusal.
+            commit(webhook_target, "initialize webhook profiles")
+            webhook_sync = sync(source, webhook_target, "--check")
+            if webhook_sync.returncode:
+                raise AssertionError(f"webhook profile sync parity failed: {webhook_sync.stderr}")
         for authn in ("oidc-introspection", None):
             profile_target = work / f"profile-{authn or 'historical-none'}"
             clone(source, profile_target)

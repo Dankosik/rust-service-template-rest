@@ -42,7 +42,7 @@ pub(crate) const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 /// the bound; that one is logged with a bounded cause.
 pub(crate) async fn check_startup(shared: &Shared) -> Result<(), StartupError> {
     let session = async {
-        let mut connection = shared.pool.acquire().await?;
+        infra_postgres::with_connection(&shared.pool, async |connection| {
         // Whether the current session has the worker's required defaults. Migration-history
         // admission owns schema compatibility; this check keeps only live session properties.
         let session = observed(
@@ -50,7 +50,7 @@ pub(crate) async fn check_startup(shared: &Shared) -> Result<(), StartupError> {
             sqlx::query!("SELECT current_setting('server_encoding') AS \"server_encoding!\", \
      NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS \"writable!\", \
      current_setting('default_transaction_isolation') = 'read committed' AS \"read_committed!\"")
-            .fetch_one(&mut *connection),
+            .fetch_one(connection),
         )
         .await
         ?;
@@ -59,6 +59,8 @@ pub(crate) async fn check_startup(shared: &Shared) -> Result<(), StartupError> {
             session.writable,
             session.read_committed,
         ))
+        })
+        .await?
     };
     match tokio::time::timeout(STARTUP_CHECK_BUDGET, session).await {
         Ok(Ok((encoding, _, _))) if encoding != "UTF8" => Err(StartupError::UnsupportedEncoding),
