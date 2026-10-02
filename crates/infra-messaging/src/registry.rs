@@ -88,6 +88,7 @@ impl std::fmt::Debug for Registry {
         formatter
             .debug_struct("Registry")
             .field("routes", &self.routes)
+            .field("documented_count", &self.schemas.len())
             .field("handler_count", &self.handlers.len())
             .finish()
     }
