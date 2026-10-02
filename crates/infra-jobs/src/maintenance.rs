@@ -126,42 +126,35 @@ const SAMPLE_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '2000ms'";
 /// [`StartupError::NotWritable`] when `writable` is false, and
 /// [`StartupError::UnsupportedIsolation`] when the pool default is not read
 /// committed, and [`StartupError::Unavailable`] for anything else, including
-/// the bound.
+/// the bound; that one is logged with a bounded cause.
 pub(crate) async fn check_startup(shared: &Shared) -> Result<(), StartupError> {
-    let check = async {
-        let mut connection = shared
-            .pool
-            .acquire()
-            .await
-            .map_err(|_| StartupError::Unavailable)?;
+    let session = async {
+        let mut connection = shared.pool.acquire().await?;
         let row = sqlx::query(STARTUP_CHECK)
             .fetch_one(&mut *connection)
-            .await
-            .map_err(|_| StartupError::Unavailable)?;
-        let encoding: String = row
-            .try_get("server_encoding")
-            .map_err(|_| StartupError::Unavailable)?;
-        if encoding != "UTF8" {
-            return Err(StartupError::UnsupportedEncoding);
-        }
-        let writable: bool = row
-            .try_get("writable")
-            .map_err(|_| StartupError::Unavailable)?;
-        if !writable {
-            return Err(StartupError::NotWritable);
-        }
-        let read_committed: bool = row
-            .try_get("read_committed")
-            .map_err(|_| StartupError::Unavailable)?;
-        if !read_committed {
-            return Err(StartupError::UnsupportedIsolation);
-        }
-        Ok(())
+            .await?;
+        let encoding: String = row.try_get("server_encoding")?;
+        let writable: bool = row.try_get("writable")?;
+        let read_committed: bool = row.try_get("read_committed")?;
+        Ok::<_, sqlx::Error>((encoding, writable, read_committed))
     };
-    match tokio::time::timeout(STARTUP_CHECK_BUDGET, check).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(refusal)) => Err(refusal),
-        Err(_elapsed) => Err(StartupError::Unavailable),
+    match tokio::time::timeout(STARTUP_CHECK_BUDGET, session).await {
+        Ok(Ok((encoding, _, _))) if encoding != "UTF8" => Err(StartupError::UnsupportedEncoding),
+        Ok(Ok((_, false, _))) => Err(StartupError::NotWritable),
+        Ok(Ok((_, _, false))) => Err(StartupError::UnsupportedIsolation),
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(err)) => {
+            tracing::warn!(
+                sqlstate = infra_postgres::sqlstate(&err).as_deref(),
+                cause = infra_postgres::failure_cause(&err),
+                "jobs_startup_check_failed"
+            );
+            Err(StartupError::Unavailable)
+        }
+        Err(_elapsed) => {
+            tracing::warn!(cause = "timeout", "jobs_startup_check_failed");
+            Err(StartupError::Unavailable)
+        }
     }
 }
 
