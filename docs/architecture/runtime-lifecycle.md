@@ -412,8 +412,8 @@ not add a second budget or change NATS/provider shutdown ownership. See
 - **`CancellationToken` (`tokio-util`) and a Tokio `JoinSet`** for the
   service's background work: `child_token()` is one-directional, and the set
   reports a task that ends early, panics included, which a `TaskTracker`
-  does not. The worker keeps its tracker beside its own engine failure
-  channels.
+  does not. The worker keeps a tracker, which the engines spawn on, and
+  gives each task a guard that reports the same early end by name.
 - **Signal streams are created before anything can send a signal and kept
   alive**; a dropped `tokio::signal::unix::signal` stream swallows later
   signals.

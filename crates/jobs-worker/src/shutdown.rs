@@ -188,12 +188,12 @@ impl Background {
         F: Future<Output = ()> + Send + 'static,
     {
         let cancel = self.cancel.child_token();
+        let task = start(cancel.clone());
         let guard = ReportUnlessCancelled {
             name,
-            cancel: cancel.clone(),
+            cancel,
             stopped: self.stopped.clone(),
         };
-        let task = start(cancel);
         self.tracker.spawn(async move {
             let _guard = guard;
             task.await;

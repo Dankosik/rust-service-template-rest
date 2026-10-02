@@ -135,8 +135,8 @@ struct Prepared {
 /// Install stop signals, admit dependencies, then wait until a stop signal or
 /// a terminal engine, consumer, or background-task failure. A failed signal install returns
 /// before anything is open. Every later refusal goes through
-/// `shutdown::abort_startup` exactly once. A stop signal or an engine failure
-/// runs the staged shutdown plan.
+/// `shutdown::abort_startup` exactly once. A stop signal or any of those
+/// failures runs the staged shutdown plan.
 pub(crate) async fn serve(
     config: Config,
     register: Register<'_>,
