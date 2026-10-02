@@ -1,6 +1,6 @@
 use std::fmt;
 
-use http::{HeaderValue, uri::Scheme};
+use http::{HeaderValue, Method, Version, uri::Scheme};
 #[cfg(feature = "test-support")]
 use url::Host;
 use url::Url;
@@ -98,6 +98,9 @@ pub(crate) fn admit_test_http_origin(url: &Url) -> Result<Target, BuildError> {
 /// so it is refused. The host compares ASCII case-insensitively with the
 /// origin's serialized host; any other spelling of the same address, such as
 /// a non-canonical IP literal, is refused rather than normalized.
+///
+/// The transport's own request properties are then set, whatever the caller
+/// wrote: the version it speaks and the framing of the buffered body.
 pub(crate) fn admit_request(
     target: &Target,
     mut request: Request<Bytes>,
@@ -118,12 +121,35 @@ pub(crate) fn admit_request(
     if !admitted {
         return Err(Error::InvalidTarget);
     }
+    // Hyper connects before it refuses a version it cannot send.
+    *request.version_mut() = Version::HTTP_11;
+    frame_body(&mut request);
     let headers = request.headers_mut();
     headers.insert(header::HOST, target.host_header.clone());
     headers
         .entry(header::ACCEPT)
         .or_insert(HeaderValue::from_static("*/*"));
     Ok(request)
+}
+
+/// States the length of the buffered body. Hyper sends a caller
+/// `Content-Length` as written, so a value other than the body's length would
+/// leave bytes on a pooled connection for the provider to read as the next
+/// request. A request with content, or whose method expects content, carries
+/// its length (RFC 9110 section 8.6); any other carries none.
+fn frame_body(request: &mut Request<Bytes>) {
+    let length = request.body().len();
+    let expects_content = matches!(
+        *request.method(),
+        Method::POST | Method::PUT | Method::PATCH
+    );
+    let headers = request.headers_mut();
+    headers.remove(header::TRANSFER_ENCODING);
+    if length > 0 || expects_content {
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+    } else {
+        headers.remove(header::CONTENT_LENGTH);
+    }
 }
 
 fn has_userinfo(url: &Url) -> bool {
