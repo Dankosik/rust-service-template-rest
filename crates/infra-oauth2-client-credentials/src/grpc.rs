@@ -67,14 +67,18 @@ impl Service<Request<Body>> for AuthenticatedClient {
     }
 
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
+        // Both refusals are this service's own composition mistakes. They are
+        // `INTERNAL`, as gRFC A54 has a channel report failed call credentials:
+        // a code reserved for the application would blame the inbound caller
+        // when a handler forwards the status.
         if request.headers().contains_key(AUTHORIZATION) {
-            return Box::pin(std::future::ready(Err(Status::invalid_argument(
+            return Box::pin(std::future::ready(Err(Status::internal(
                 "authorization conflicts with client credentials",
             ))));
         }
         let on_behalf_of = request.extensions_mut().remove::<OnBehalfOf>();
         if self.subject_required && on_behalf_of.is_none() {
-            return Box::pin(std::future::ready(Err(Status::invalid_argument(
+            return Box::pin(std::future::ready(Err(Status::internal(
                 "on-behalf-of subject is required",
             ))));
         }

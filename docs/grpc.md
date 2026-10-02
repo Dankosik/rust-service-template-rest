@@ -305,7 +305,7 @@ let authenticated = credentials.grpc(channel);
 let client = EchoServiceClient::new(authenticated);
 ```
 
-A caller-supplied `Authorization` is `INVALID_ARGUMENT` before any token or
+A caller-supplied `Authorization` is `INTERNAL` before any token or
 resource I/O. To call on behalf of a verified user instead of as the service
 itself, attach `OnBehalfOf::new(principal.access_token().clone())` to the
 call's extensions through `tonic::Request::extensions_mut` before dispatch;
@@ -323,8 +323,10 @@ status; the closed `AcquisitionError`, with the provider's registered error
 code, is the status source. A handler should translate this status rather
 than forward it: `UNAUTHENTICATED` here means the service's own credentials
 were refused, not its caller's. `credentials.grpc(channel).require_on_behalf_of()`
-binds a client that answers `INVALID_ARGUMENT` to a call without `OnBehalfOf`
-instead of sending the service token. One bearer is inserted at
+binds a client that answers `INTERNAL` to a call without `OnBehalfOf`
+instead of sending the service token. Both refusals are `INTERNAL` because
+they are this service's composition mistakes, and gRFC A54 keeps
+`INVALID_ARGUMENT` for the application. One bearer is inserted at
 opening and is not refreshed mid-stream.
 
 Eviction runs only on the initial response: `grpc-status` `UNAUTHENTICATED`,

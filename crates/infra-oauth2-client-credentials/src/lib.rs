@@ -19,7 +19,7 @@ use http::{
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
 };
 use infra_outbound_http::{Client, Limits};
-use moka::Expiry;
+use moka::{Expiry, ops::compute::Op};
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::time::Instant;
 use url::Url;
@@ -632,13 +632,24 @@ impl Credentials {
     }
 
     async fn reject_exchanged(&self, key: [u8; 32], used: &Arc<Token>) {
-        if !used.is_evictable(Instant::now()) {
-            return;
+        if used.is_evictable(Instant::now()) {
+            self.forget_exchanged(key, used).await;
         }
-        let current = self.0.exchanged.get(&key).await;
-        if current.is_some_and(|token| Arc::ptr_eq(&token, used)) {
-            self.0.exchanged.invalidate(&key).await;
-        }
+    }
+
+    /// Removes `used` only while it is still the entry the cache returns for
+    /// `key`, so a token another caller stored meanwhile survives. Moka runs
+    /// such steps for one key one at a time and each completes without I/O,
+    /// so this wait needs no deadline.
+    async fn forget_exchanged(&self, key: [u8; 32], used: &Arc<Token>) {
+        self.0
+            .exchanged
+            .entry(key)
+            .and_compute_with(|current| {
+                let unchanged = current.is_some_and(|entry| Arc::ptr_eq(entry.value(), used));
+                std::future::ready(if unchanged { Op::Remove } else { Op::Nop })
+            })
+            .await;
     }
 
     /// Returns a live exchanged token for `subject`, exchanging it when the
@@ -661,7 +672,7 @@ impl Credentials {
         if fresh || token.is_reusable(Instant::now()) {
             return Ok(token);
         }
-        self.0.exchanged.invalidate(&key).await;
+        self.forget_exchanged(key, &token).await;
         Ok(self.exchanged_or_fetch(key, subject, deadline).await?.0)
     }
 
