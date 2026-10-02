@@ -150,9 +150,9 @@ struct Report {
 }
 
 /// Returns process success, never maps an exit code or retries an operation.
-pub(crate) fn run(options: &LoadOptions, request: Request) -> bool {
+pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
     let report = match service_config::load_jobs_operator(options) {
-        Ok(config) => run_configured(&config.postgres, &request),
+        Ok(config) => run_configured(&config.postgres, request),
         Err(error) => {
             let _ = process_failure(&error.to_string());
             request.failed("configuration", false)
@@ -175,12 +175,11 @@ fn run_configured(config: &PostgresConfig, request: &Request) -> Report {
     if !config.enabled {
         return request.failed("postgres_disabled", false);
     }
-    let runtime = match tokio::runtime::Builder::new_current_thread()
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-    {
-        Ok(runtime) => runtime,
-        Err(_) => return request.failed("runtime", false),
+    else {
+        return request.failed("runtime", false);
     };
     let report = runtime.block_on(serve(config, request));
     runtime.shutdown_timeout(crate::RUNTIME_SHUTDOWN_TIMEOUT);
@@ -188,18 +187,15 @@ fn run_configured(config: &PostgresConfig, request: &Request) -> Report {
 }
 
 async fn serve(config: &PostgresConfig, request: &Request) -> Report {
-    let mut signals = match Signals::install() {
-        Ok(signals) => signals,
-        Err(_) => return request.failed("signals", false),
+    let Ok(mut signals) = Signals::install() else {
+        return request.failed("signals", false);
     };
-    let raw = match config.required_dsn() {
-        Ok(raw) => raw,
-        Err(_) => return request.failed("dsn", false),
+    let Ok(raw) = config.required_dsn() else {
+        return request.failed("dsn", false);
     };
-    let dsn = match Dsn::admit_with(raw.expose_secret(), config.password_file.as_deref()) {
-        Ok(dsn) => dsn,
+    let Ok(dsn) = Dsn::admit_with(raw.expose_secret(), config.password_file.as_deref()) else {
         // Do not repeat an arbitrary URL parameter from DsnError::Parameter.
-        Err(_) => return request.failed("dsn", false),
+        return request.failed("dsn", false);
     };
     let options = PoolOptions {
         max_connections: NonZeroU32::MIN,

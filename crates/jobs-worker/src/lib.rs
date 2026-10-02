@@ -127,7 +127,7 @@ where
         };
         return ExitCode::from(exit_code(&ProcessResult::Command(operator::run(
             &args.options,
-            request,
+            &request,
         ))));
     }
     // template:end jobs:worker-operator-dispatch
