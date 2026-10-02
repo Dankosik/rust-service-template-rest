@@ -33,7 +33,7 @@ released 2026-09-25, Apache-2.0, MSRV 1.94.1, about weekly releases.
 `object_store` 0.14.2, 2026-09-15, MIT/Apache-2.0. `opendal` 0.59.3,
 2026-09-22, Apache-2.0. `aws-sdk-s3-transfer-manager` 0.3.0, 2026-10-01
 (fetched 2026-10-02). `rust-s3` 0.37.2, 2026-05-04. `minio` 0.4.0, 2026-04-23.
-Every MSRV fits workspace Rust 1.98.
+Every MSRV fits workspace Rust 1.99.
 
 The 2026-10-02 review checked the supported zero-retry alternative against
 `object_store` 0.14.2's [public configuration](https://docs.rs/object_store/0.14.2/object_store/struct.RetryConfig.html)
