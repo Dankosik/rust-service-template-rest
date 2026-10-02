@@ -11,7 +11,7 @@ use std::time::Duration;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use secrecy::SecretString;
 
-use crate::{Cache, CacheError, CacheOptions};
+use crate::{Cache, CacheError, CacheOptions, ClientCertificate};
 
 fn options(
     dsn: &str,
@@ -23,6 +23,7 @@ fn options(
         dsn: SecretString::from(dsn.to_owned()),
         password_file: None,
         root_ca_path,
+        client_certificate: None,
         allow_plaintext,
         allow_unauthenticated,
         command_timeout: Duration::from_millis(100),
@@ -173,6 +174,137 @@ fn a_root_ca_with_a_certificate_header_and_invalid_base64_is_invalid() {
     ))
     .unwrap_err();
     assert_eq!(err, CacheError::InvalidCa);
+    assert!(!format!("{err} {err:?}").contains("hunter2"));
+}
+
+/// A PEM file holding one block of `der` under `label`.
+fn write_pem(label: &str, der: &[u8]) -> tempfile::NamedTempFile {
+    use base64::Engine;
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut body = String::new();
+    for line in encoded.as_bytes().chunks(64) {
+        body.push_str(std::str::from_utf8(line).expect("base64 is ascii"));
+        body.push('\n');
+    }
+    let pem = format!("-----BEGIN {label}-----\n{body}-----END {label}-----\n");
+    let file = tempfile::NamedTempFile::new().expect("temp pem");
+    std::fs::write(file.path(), pem).expect("write pem");
+    file
+}
+
+/// A self-signed certificate and its PKCS #8 key, each in its own PEM file.
+fn client_identity() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
+    let key = rcgen::KeyPair::generate().expect("client key");
+    let certificate = rcgen::CertificateParams::new(vec!["cache-client".to_owned()])
+        .expect("client certificate params")
+        .self_signed(&key)
+        .expect("client certificate");
+    (
+        write_pem("CERTIFICATE", certificate.der()),
+        write_pem("PRIVATE KEY", &key.serialize_der()),
+    )
+}
+
+fn with_client_certificate(dsn: &str, cert_path: PathBuf, key_path: PathBuf) -> CacheOptions {
+    CacheOptions {
+        client_certificate: Some(ClientCertificate {
+            cert_path,
+            key_path,
+        }),
+        ..options(dsn, true, false, None)
+    }
+}
+
+const TLS_DSN: &str = "rediss://:hunter2@127.0.0.1:6379";
+
+#[test]
+fn a_client_certificate_with_its_key_is_admitted_without_dialing() {
+    let (cert, key) = client_identity();
+    on_runtime(|| {
+        Cache::connect_lazy(with_client_certificate(
+            TLS_DSN,
+            cert.path().to_path_buf(),
+            key.path().to_path_buf(),
+        ))
+        .expect("a matching pair is admitted")
+    });
+}
+
+#[test]
+fn a_client_certificate_on_plaintext_is_refused_before_the_files_are_read() {
+    let err = Cache::connect_lazy(with_client_certificate(
+        "redis://:hunter2@127.0.0.1:6379",
+        PathBuf::from("/no/such/client.crt"),
+        PathBuf::from("/no/such/client.key"),
+    ))
+    .unwrap_err();
+    assert_eq!(err, CacheError::ClientCertificateRequiresTls);
+}
+
+#[test]
+fn a_missing_client_certificate_or_key_file_reports_only_the_io_kind() {
+    let (cert, key) = client_identity();
+    let err = Cache::connect_lazy(with_client_certificate(
+        TLS_DSN,
+        PathBuf::from("/no/such/client.crt"),
+        key.path().to_path_buf(),
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(err, CacheError::ClientCertificateFile { kind } if kind == std::io::ErrorKind::NotFound),
+        "{err:?}"
+    );
+    assert!(!format!("{err} {err:?}").contains("/no/such"), "{err:?}");
+
+    let err = Cache::connect_lazy(with_client_certificate(
+        TLS_DSN,
+        cert.path().to_path_buf(),
+        PathBuf::from("/no/such/client.key"),
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(err, CacheError::ClientKeyFile { kind } if kind == std::io::ErrorKind::NotFound),
+        "{err:?}"
+    );
+    assert!(!format!("{err} {err:?}").contains("/no/such"), "{err:?}");
+}
+
+#[test]
+fn a_client_certificate_file_without_a_pem_certificate_is_invalid() {
+    let (_, key) = client_identity();
+    let file = tempfile::NamedTempFile::new().expect("temp certificate");
+    std::fs::write(file.path(), b"not a certificate").expect("write certificate");
+    let err = Cache::connect_lazy(with_client_certificate(
+        TLS_DSN,
+        file.path().to_path_buf(),
+        key.path().to_path_buf(),
+    ))
+    .unwrap_err();
+    assert_eq!(err, CacheError::InvalidClientCertificate);
+}
+
+#[test]
+fn a_client_key_that_is_unusable_or_belongs_to_another_certificate_is_invalid() {
+    let (cert, _) = client_identity();
+    let (_, other_key) = client_identity();
+    let err = Cache::connect_lazy(with_client_certificate(
+        TLS_DSN,
+        cert.path().to_path_buf(),
+        other_key.path().to_path_buf(),
+    ))
+    .unwrap_err();
+    assert_eq!(err, CacheError::InvalidClientKey);
+
+    let garbage = tempfile::NamedTempFile::new().expect("temp key");
+    std::fs::write(garbage.path(), b"not a key").expect("write key");
+    let err = Cache::connect_lazy(with_client_certificate(
+        TLS_DSN,
+        cert.path().to_path_buf(),
+        garbage.path().to_path_buf(),
+    ))
+    .unwrap_err();
+    assert_eq!(err, CacheError::InvalidClientKey);
     assert!(!format!("{err} {err:?}").contains("hunter2"));
 }
 
@@ -358,7 +490,14 @@ fn a_dropped_get_records_cancelled_without_the_key() {
                     });
                 }
             });
-            let cache = admitted(&format!("redis://{address}"), true, true);
+            // A command timeout far above the drop below: on a stalled
+            // runner both timers could otherwise be due at one poll, and the
+            // command's own would record `timeout`.
+            let cache = Cache::connect_lazy(CacheOptions {
+                command_timeout: Duration::from_secs(30),
+                ..options(&format!("redis://{address}"), true, true, None)
+            })
+            .expect("lazy connect admits without a server");
             let namespace = cache.namespace("obs");
             let mut operation = std::pin::pin!(namespace.get("hunter2-key"));
             let _ = tokio::time::timeout(Duration::from_millis(30), &mut operation).await;
@@ -400,6 +539,7 @@ fn a_silent_server_records_timeout() {
                 dsn: SecretString::from(format!("redis://{address}")),
                 password_file: None,
                 root_ca_path: None,
+                client_certificate: None,
                 allow_plaintext: true,
                 allow_unauthenticated: true,
                 command_timeout: Duration::from_millis(200),
@@ -471,6 +611,7 @@ async fn a_reply_inside_the_command_timeout_is_not_cut_short() {
         dsn: SecretString::from(format!("redis://{address}")),
         password_file: None,
         root_ca_path: None,
+        client_certificate: None,
         allow_plaintext: true,
         allow_unauthenticated: true,
         command_timeout: Duration::from_secs(1),
@@ -699,6 +840,7 @@ async fn a_refused_auth_is_retried_after_the_client_gives_up() {
         dsn: SecretString::from(format!("redis://:secret@{}", gate.address)),
         password_file: None,
         root_ca_path: None,
+        client_certificate: None,
         allow_plaintext: true,
         allow_unauthenticated: false,
         command_timeout: Duration::from_millis(200),
@@ -742,6 +884,7 @@ async fn a_readonly_reply_reconnects_to_the_new_primary() {
         dsn: SecretString::from(format!("redis://{}", server.address)),
         password_file: None,
         root_ca_path: None,
+        client_certificate: None,
         allow_plaintext: true,
         allow_unauthenticated: true,
         command_timeout: Duration::from_millis(200),
@@ -788,6 +931,7 @@ async fn a_refused_hello_is_reported_as_auth() {
         dsn: SecretString::from(format!("redis://:secret@{}", gate.address)),
         password_file: None,
         root_ca_path: None,
+        client_certificate: None,
         allow_plaintext: true,
         allow_unauthenticated: false,
         command_timeout: Duration::from_millis(200),
