@@ -36,3 +36,14 @@ disallowed-methods = [
     { path = "sqlx_core::pool::Pool::try_begin", reason = "open the transaction with infra_postgres::in_tx" },
     { path = "sqlx_core::pool::Pool::try_begin_with", reason = "open the transaction with infra_postgres::in_tx_with" },
 ]
+
+# Request data enters through `infra_http::extract::{Json, Query, Path}`, whose
+# rejections are Problems; axum's own answer `text/plain`. `infra_http`'s
+# `Json` is also the response body, so the one import serves both directions.
+# `allow-invalid`: a crate that builds axum without its `json` or `query`
+# feature has no such type to resolve.
+disallowed-types = [
+    { path = "axum::Json", reason = "use infra_http::extract::Json: its rejections are Problems and it renders the same response", allow-invalid = true },
+    { path = "axum::extract::Query", reason = "use infra_http::extract::Query: its rejections are Problems", allow-invalid = true },
+    { path = "axum::extract::Path", reason = "use infra_http::extract::Path: its rejections are Problems", allow-invalid = true },
+]

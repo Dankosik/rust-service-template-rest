@@ -8,6 +8,15 @@
 //! location with a fixed reason, and axum's own message, which quotes the
 //! value, is dropped. A body location is the caller's own member name, so it
 //! is bounded.
+//!
+//! `clippy.toml` disallows axum's three types in application code, so a
+//! handler cannot take the `text/plain` rejections by accident. [`Json`] is
+//! therefore also the JSON response body, as `axum::Json` is.
+
+#![allow(
+    clippy::disallowed_types,
+    reason = "the wrappers delegate to the axum extractors they replace"
+)]
 
 use std::error::Error as StdError;
 
@@ -15,6 +24,8 @@ use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{FromRequest, FromRequestParts, RawPathParams, Request};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
+use axum::response::{IntoResponse, Response};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_path_to_error::Segment;
 
@@ -34,11 +45,13 @@ const SCHEMA_REASON: &str = "is missing or does not match the declared schema";
 /// unbounded one.
 const MAX_PARAM_NAME_BYTES: usize = 256;
 
-/// A JSON request body: `axum::Json` with [`Problem`] rejections.
+/// A JSON body: `axum::Json` with [`Problem`] rejections.
 ///
-/// A missing or wrong `Content-Type` answers `415`, malformed JSON `400`, a
-/// body that parses but does not fit `T` `422` with the member's RFC 6901
-/// pointer in `invalid_params`, and an oversize body `413`.
+/// As an extractor, a missing or wrong `Content-Type` answers `415`,
+/// malformed JSON `400`, a body that parses but does not fit `T` `422` with
+/// the member's RFC 6901 pointer in `invalid_params`, and an oversize body
+/// `413`. As a response it renders `application/json` exactly as `axum::Json`
+/// does.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Json<T>(pub T);
 
@@ -54,6 +67,15 @@ where
             Ok(axum::Json(value)) => Ok(Self(value)),
             Err(rejection) => Err(json_problem(&rejection)),
         }
+    }
+}
+
+impl<T> IntoResponse for Json<T>
+where
+    T: Serialize,
+{
+    fn into_response(self) -> Response {
+        axum::Json(self.0).into_response()
     }
 }
 
@@ -331,6 +353,20 @@ mod tests {
         assert_eq!(
             response.into_body().collect().await.unwrap().to_bytes(),
             "2"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_json_response_is_what_axum_renders() {
+        let response = Json(json!({"slug": "a"})).into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            r#"{"slug":"a"}"#
         );
     }
 

@@ -22,20 +22,21 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Bytes;
-use axum::extract::{FromRef, Path, State};
+use axum::extract::{FromRef, State};
 use axum::http::header::{
     CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LANGUAGE, ETAG, LAST_MODIFIED, LOCATION,
     RETRY_AFTER, WWW_AUTHENTICATE, X_CONTENT_TYPE_OPTIONS,
 };
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{Extension, Json, Router};
+use axum::{Extension, Router};
 use axum_test::{TestRequest, TestResponse, TestServer};
 use health::{Readiness, RefreshPolicy};
 use infra_bearerauthn::test_support::{FixtureTransport, prepare_introspection_with_fixture};
 use infra_bearerauthn::{
     EndpointUrl, IntrospectionCacheOptions, IntrospectionOptions, IssuerUrl, Verifier,
 };
+use infra_http::extract::{Json, Path};
 use infra_http::idempotency::{
     Activation, Composer, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, Tx,
 };

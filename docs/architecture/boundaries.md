@@ -14,7 +14,7 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | `infra-grpc` (`crates/infra-grpc`) | Tonic route assembly, auth/deadline/capacity middleware, health projection, server TLS config and lazy clients. | Configuration loading, handler validation, feature behavior, OAuth tokens, process signals or a second lifecycle budget. |
 | `grpc-contracts` (`crates/grpc-contracts`) | Committed prost messages, native tonic traits, the descriptor set they were generated from, and the per-call codec buffer sizes the generated code names. | Business behavior, listener or middleware policy, or a runtime generator. |
 <!-- template:end grpc:docs-boundaries-grpc-owners -->
-| `infra-http` (`crates/infra-http`) | The hardened middleware chain, the bounded accept loop (`Server`), the probe handlers with their `#[utoipa::path]` contract, the RFC 9457 `Problem` type and closed code catalog, request-id admission, the route-template access log. | Business rules, configuration loading, feature routes (they merge in `service::api`). |
+| `infra-http` (`crates/infra-http`) | The hardened middleware chain, the bounded accept loop (`Server`), the probe handlers with their `#[utoipa::path]` contract, the RFC 9457 `Problem` type and closed code catalog, the request extractors whose rejections are Problems, contract finalization from the assembled document, request-id admission, the route-template access log, and the inbound contract surface of each retained profile. | Business rules, configuration loading, feature routes (they merge in `service::api`). |
 | `infra-telemetry` (`crates/infra-telemetry`) | Subscriber installation (`json`/`text`), the tracer provider with the OTLP endpoint resolution and ambient-credential refusal, the Prometheus recorder with process and Tokio runtime metrics, the diagnostics router. | Feature semantics, startup logging content, request routing, which fields a handler emits. |
 <!-- template:begin authn:docs-boundaries-authn-owner -->
 | `infra-bearerauthn` (`crates/infra-bearerauthn`) | Bearer-envelope parsing, sealed verified identity and immutable typed claims access, canonical provider URL admission, and the selected OIDC JWT or introspection verifier with its trusted provider transport. | Authorization policy, configuration loading, route assembly, readiness, or application-visible raw tokens or mutable claim evidence. |
@@ -273,6 +273,16 @@ silently reopen:
 - **`infra-http` owns the probe handlers and their contract**, because the
   probes are platform behavior every derived service keeps; feature
   operations merge beside them in `service::api::contract()`.
+- **Every inbound HTTP contract surface a profile adds lives in `infra-http`**
+  (authentication finalization, idempotent composition, signed webhook
+  ingress) rather than in a crate per profile. Each one reads crate-private
+  transport state: the compiled security policy, the sealed principal, the
+  request deadline, the sanitized failure. A split would publish those seams,
+  and a feature would then choose among several transport crates. The price
+  is a provider edge on the transport crate per retained profile, each inside
+  that profile's markers, so a service without the profile does not carry it.
+  Reopen when a surface needs a dependency its profile markers cannot remove,
+  or when a binary that serves no API measurably pays for these edges.
 - **The `Problem` type is template-owned** (about sixty lines) with `code`,
   `request_id`, and `invalid_params` first-class; `problem_details` was the
   acceptable crate alternative and may replace it if the catalog outgrows the

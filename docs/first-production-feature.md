@@ -125,7 +125,7 @@ generated from it ([HTTP Architecture](architecture/http.md#adding-an-operation)
 
 ```rust
 // crates/greeting/src/http.rs (operation and router; other imports omitted)
-use infra_http::extract::Path;
+use infra_http::extract::{Json, Path};
 use utoipa_axum::router::OpenApiRouter;
 const GREETING_PATH: &str = "/greetings/{name}";
 
@@ -204,8 +204,9 @@ What each choice buys:
   is registered through the pack's own composer.
 - `IntoResponses` documents the statuses; the hand-written `IntoResponse`
   serves them, and the contract tests assert both agree. `Json` gives the
-  declared `application/json`; a `Problem` renders `application/problem+json`
-  with the closed `code` from the catalog. `Code` is a closed enum: a code
+  declared `application/json`; it is the same `infra_http::extract::Json` a
+  handler takes a body through, and Clippy refuses axum's own. A `Problem`
+  renders `application/problem+json` with the closed `code` from the catalog. `Code` is a closed enum: a code
   the catalog lacks is a reviewed contract change, not a string.
 - The hardened chain fills `request_id` into every Problem, so a
   handler-produced problem carries the same id as the log line.
