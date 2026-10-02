@@ -669,8 +669,8 @@ fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
 
 /// A server that refuses authentication until told otherwise and answers
 /// every `GET` with a miss. The client authenticates inside `HELLO 3`; the
-/// server counts those attempts so the test can wait for the client's own
-/// reconnect chain to give up. Each accepted connection records the primary
+/// server counts those attempts so tests can observe the complete setup retry
+/// allowance. Each accepted connection records the primary
 /// generation; a `SET` on an older generation is `READONLY`. With a
 /// `password` set, authentication succeeds only with that password.
 struct FakeServer {
@@ -681,6 +681,8 @@ struct FakeServer {
     primary: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     sessions: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    observed: std::sync::Arc<SocketObservations>,
+    listener: tokio::task::JoinHandle<()>,
 }
 
 impl FakeServer {
@@ -704,9 +706,12 @@ impl FakeServer {
             connections.clone(),
             sessions.clone(),
         );
-        tokio::spawn(async move {
+        let observed = std::sync::Arc::new(SocketObservations::default());
+        let events = observed.clone();
+        let listener = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                accepted.fetch_add(1, Ordering::SeqCst);
+                let id = accepted.fetch_add(1, Ordering::SeqCst) + 1;
+                let socket = ObservedSocket::new(id, events.clone());
                 let recorded = generation.load(Ordering::SeqCst);
                 let session = tokio::spawn(serve_resp(
                     stream,
@@ -715,6 +720,7 @@ impl FakeServer {
                     attempts.clone(),
                     recorded,
                     generation.clone(),
+                    socket,
                 ));
                 open.lock().expect("sessions lock").push(session);
             }
@@ -727,6 +733,8 @@ impl FakeServer {
             primary,
             connections,
             sessions,
+            observed,
+            listener,
         }
     }
 
@@ -739,7 +747,7 @@ impl FakeServer {
 
     /// Accept only this password from now on.
     fn require_password(&self, password: &str) {
-        *self.password.lock().expect("password lock") = Some(password.to_ascii_uppercase());
+        *self.password.lock().expect("password lock") = Some(password.to_owned());
     }
 
     fn attempts(&self) -> usize {
@@ -758,6 +766,7 @@ async fn serve_resp(
     auth_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     generation: usize,
     primary: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    socket: ObservedSocket,
 ) {
     use std::sync::atomic::Ordering;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -795,8 +804,26 @@ async fn serve_resp(
                 return;
             }
             bulk.truncate(length);
-            arguments.push(String::from_utf8_lossy(&bulk).to_ascii_uppercase());
+            arguments.push(String::from_utf8_lossy(&bulk).into_owned());
         }
+        socket
+            .observed
+            .commands
+            .lock()
+            .expect("commands lock")
+            .push((socket.id, arguments.clone()));
+        socket.observed.changed.notify_waiters();
+        if socket.observed.silence_all.load(Ordering::SeqCst)
+            || socket.id <= socket.observed.silence_through.load(Ordering::SeqCst)
+        {
+            // Keep reading to detect client EOF and count dispatched commands,
+            // but never answer a slot on a deliberately stalled connection.
+            continue;
+        }
+        let auth_error = format!(
+            "-WRONGPASS {}\r\n",
+            socket.observed.auth_error.lock().expect("auth error lock")
+        );
         let authenticates = match arguments.first().map(String::as_str) {
             Some("AUTH") => true,
             Some("HELLO") => arguments.iter().any(|argument| argument == "AUTH"),
@@ -805,19 +832,35 @@ async fn serve_resp(
         let reply: &[u8] = match arguments.first().map(String::as_str) {
             _ if authenticates => {
                 auth_attempts.fetch_add(1, Ordering::SeqCst);
-                // Arguments were upper-cased above, and so was the password.
                 let accepted = match password.lock().expect("password lock").as_ref() {
                     Some(expected) => arguments.last() == Some(expected),
                     None => accept_auth.load(Ordering::SeqCst),
-                };
+                } && socket
+                    .observed
+                    .username
+                    .lock()
+                    .expect("username lock")
+                    .as_ref()
+                    .is_none_or(|expected| arguments.get(arguments.len() - 2) == Some(expected));
                 if accepted {
+                    socket
+                        .observed
+                        .auth_successes
+                        .fetch_add(1, Ordering::SeqCst);
+                    socket.observed.changed.notify_waiters();
                     b"+OK\r\n"
                 } else {
-                    b"-WRONGPASS invalid username-password pair\r\n"
+                    socket
+                        .observed
+                        .auth_rejections
+                        .fetch_add(1, Ordering::SeqCst);
+                    socket.observed.changed.notify_waiters();
+                    auth_error.as_bytes()
                 }
             }
             Some("GET") => b"$-1\r\n",
             Some("PING") => b"+PONG\r\n",
+            Some("DEL") => b":1\r\n",
             Some("SET") => {
                 if generation == primary.load(Ordering::SeqCst) {
                     b"+OK\r\n"
@@ -848,33 +891,29 @@ async fn a_refused_auth_is_retried_after_the_client_gives_up() {
     .expect("lazy connect");
     let namespace = cache.namespace("auth");
 
-    // Drive redis's own reconnect chain (one attempt plus its retries) until it
-    // gives up; the lazy chain advances only while a caller awaits it. From
-    // then on redis's manager answers every call with the stored AUTH failure
-    // and never dials again.
-    let chain = crate::NUMBER_OF_RETRIES + 1;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while gate.attempts() < chain {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "reconnect chain never finished"
-        );
-        assert_eq!(namespace.get("key").await, Err(crate::Unavailable));
-    }
-
+    // Keep AUTH unavailable for a complete setup chain, then make the
+    // endpoint usable. Recovery must outlive the initial retry allowance.
+    let chain = 7; // The accepted setup chain is one attempt plus six retries.
+    gate.wait_for(
+        Duration::from_secs(20),
+        "setup retry chain did not progress without traffic",
+        || gate.attempts() >= chain,
+    )
+    .await;
     gate.accept_auth
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if namespace.get("key").await == Ok(None) {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the cache stayed unavailable after the server accepted AUTH again"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    gate.wait_for(
+        Duration::from_secs(5),
+        "authentication did not recover without traffic after the first setup chain",
+        || {
+            gate.observed
+                .auth_successes
+                .load(std::sync::atomic::Ordering::SeqCst)
+                > 0
+        },
+    )
+    .await;
+    assert_eq!(namespace.get("key").await, Ok(None));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -985,7 +1024,7 @@ async fn a_replaced_connection_dials_without_waiting_for_a_call() {
         Err(crate::Unavailable)
     );
 
-    // No cache call from here on: the replaced manager must dial on its own.
+    // No cache call from here on: recovery must dial on its own.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while server.connections() < 2 {
         assert!(
@@ -1019,8 +1058,7 @@ async fn a_rotated_password_file_authenticates_the_next_connection() {
     .expect("lazy connect");
     let namespace = cache.namespace("rotation");
     assert_eq!(namespace.get("key").await, Ok(None));
-    // One `HELLO … AUTH`; the live connection's own subscription may already
-    // have repeated it.
+    // Successful setup must authenticate with the file's current bytes.
     let opened = server.attempts();
     assert!(opened >= 1, "the file's password was not sent");
 
@@ -1060,4 +1098,516 @@ async fn the_first_connection_dials_without_waiting_for_a_call() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+#[derive(Default)]
+struct SocketObservations {
+    active: std::sync::Mutex<std::collections::HashSet<usize>>,
+    commands: std::sync::Mutex<Vec<(usize, Vec<String>)>>,
+    silence_through: std::sync::atomic::AtomicUsize,
+    silence_all: std::sync::atomic::AtomicBool,
+    auth_successes: std::sync::atomic::AtomicUsize,
+    auth_rejections: std::sync::atomic::AtomicUsize,
+    auth_error: std::sync::Mutex<String>,
+    username: std::sync::Mutex<Option<String>>,
+    changed: tokio::sync::Notify,
+}
+
+struct ObservedSocket {
+    id: usize,
+    observed: std::sync::Arc<SocketObservations>,
+}
+
+impl ObservedSocket {
+    fn new(id: usize, observed: std::sync::Arc<SocketObservations>) -> Self {
+        observed.active.lock().expect("active lock").insert(id);
+        observed.changed.notify_waiters();
+        Self { id, observed }
+    }
+}
+
+impl Drop for ObservedSocket {
+    fn drop(&mut self) {
+        self.observed
+            .active
+            .lock()
+            .expect("active lock")
+            .remove(&self.id);
+        self.observed.changed.notify_waiters();
+    }
+}
+
+impl Drop for FakeServer {
+    fn drop(&mut self) {
+        self.listener.abort();
+        self.hang_up();
+    }
+}
+
+impl FakeServer {
+    async fn wait_for(&self, budget: Duration, reason: &str, ready: impl Fn() -> bool) {
+        tokio::time::timeout(budget, async {
+            loop {
+                let changed = self.observed.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if ready() {
+                    break;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{reason}"));
+    }
+
+    fn active(&self) -> usize {
+        self.observed.active.lock().expect("active lock").len()
+    }
+
+    fn command_count(&self, command: &str, key: Option<&str>) -> usize {
+        self.observed
+            .commands
+            .lock()
+            .expect("commands lock")
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|name| name == command)
+                    && key.is_none_or(|key| args.get(1).is_some_and(|arg| arg == key))
+            })
+            .count()
+    }
+
+    fn stall_existing(&self) -> usize {
+        let through = self.connections();
+        self.observed
+            .silence_through
+            .store(through, std::sync::atomic::Ordering::SeqCst);
+        through
+    }
+
+    fn closed_through(&self, through: usize) -> bool {
+        self.observed
+            .active
+            .lock()
+            .expect("active lock")
+            .iter()
+            .all(|id| *id > through)
+    }
+}
+
+// These tests exercise real socket readiness and EOF. Bounded event waits keep
+// the clock running with I/O, avoiding paused-time auto-advance past OS events.
+#[tokio::test]
+async fn reliability_stalled_generations_recover_without_replaying_writes() {
+    let server = FakeServer::start().await;
+    let cache = admitted(&format!("redis://{}", server.address), true, true);
+    let namespace = cache.namespace("stalled");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+
+    for cycle in 0..3 {
+        let old = server.stall_existing();
+        let key = format!("write-{cycle}");
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            namespace
+                .set(&key, b"effect-may-have-happened", Duration::from_secs(1))
+                .await,
+            Err(crate::Unavailable)
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "SET exceeded its 100 ms budget plus scheduling allowance"
+        );
+        server
+            .wait_for(
+                Duration::from_secs(4),
+                "stalled generation was not replaced and released",
+                || server.connections() > old && server.closed_through(old),
+            )
+            .await;
+        assert_eq!(namespace.get("ready").await, Ok(None));
+        assert_eq!(
+            server.command_count("SET", Some(&format!("stalled:{key}"))),
+            1,
+            "effect-ambiguous SET was replayed"
+        );
+        assert_eq!(
+            server.active(),
+            1,
+            "retired sockets accumulated across recovery cycles"
+        );
+    }
+
+    let old = server.stall_existing();
+    assert_eq!(
+        namespace.delete("delete-once").await,
+        Err(crate::Unavailable)
+    );
+    server
+        .wait_for(
+            Duration::from_secs(4),
+            "DEL timeout did not recover",
+            || server.connections() > old && server.closed_through(old),
+        )
+        .await;
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    assert_eq!(
+        server.command_count("DEL", Some("stalled:delete-once")),
+        1,
+        "effect-ambiguous DEL was replayed"
+    );
+}
+
+#[tokio::test]
+async fn reliability_cancelled_long_command_and_probe_slots_are_retired() {
+    use health::Probe;
+
+    let server = FakeServer::start().await;
+    let cache = Cache::connect_lazy(CacheOptions {
+        command_timeout: Duration::from_secs(30),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("lazy cache");
+    let namespace = cache.namespace("cancelled");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let old = server.stall_existing();
+    let cancelled_namespace = namespace.clone();
+    let cancelled = tokio::spawn(async move { cancelled_namespace.get("cancel-me").await });
+    server
+        .wait_for(
+            Duration::from_secs(1),
+            "cancelled GET never reached established socket",
+            || server.command_count("GET", Some("cancelled:cancel-me")) == 1,
+        )
+        .await;
+    cancelled.abort();
+    assert!(cancelled.await.expect_err("cancelled task").is_cancelled());
+
+    let mut survivor = std::pin::pin!(namespace.get("old-waiter"));
+    tokio::select! {
+        result = &mut survivor => panic!("silent old GET completed before retirement: {result:?}"),
+        () = server.wait_for(
+            Duration::from_secs(1),
+            "old GET never reached established socket",
+            || server.command_count("GET", Some("cancelled:old-waiter")) == 1,
+        ) => {}
+    }
+    // Keep this old operation unpolled until a successor has served a call.
+    // Its late failure must only retire the identity it originally acquired.
+    let pings = server.command_count("PING", None);
+    let probe = cache.probe();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), probe.check())
+            .await
+            .is_err()
+    );
+    assert!(
+        server.command_count("PING", None) > pings,
+        "probe must have a sent slot before cancellation"
+    );
+
+    server
+        .wait_for(
+            Duration::from_secs(5),
+            "cancelled response slots prevented replacement of the silent connection",
+            || server.connections() > old,
+        )
+        .await;
+    assert_eq!(
+        namespace.get("successor-before-old-failure").await,
+        Ok(None)
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), &mut survivor)
+            .await
+            .expect("retirement ends old operation before its 30 s deadline"),
+        Err(crate::Unavailable)
+    );
+    assert_eq!(namespace.get("successor-after-old-failure").await, Ok(None));
+    probe.check().await.expect("healthy probe");
+    server
+        .wait_for(
+            Duration::from_secs(1),
+            "old response slots survived their final operation",
+            || server.closed_through(old),
+        )
+        .await;
+    assert_eq!(
+        server.active(),
+        1,
+        "old failures must not spoil the healthy successor"
+    );
+}
+
+#[tokio::test]
+async fn reliability_final_owner_drop_cancels_inflight_setup() {
+    let server = FakeServer::start().await;
+    server
+        .observed
+        .silence_all
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let cache = admitted(&format!("redis://{}", server.address), true, true);
+    server
+        .wait_for(
+            Duration::from_secs(1),
+            "setup never reached the socket",
+            || server.command_count("HELLO", None) > 0,
+        )
+        .await;
+    drop(cache);
+    server
+        .wait_for(
+            Duration::from_millis(500),
+            "final drop retained setup until the connection or warm-up timeout",
+            || server.active() == 0,
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_cancelled() {
+    use health::Probe;
+
+    let server = FakeServer::start().await;
+    let cache = admitted(&format!("redis://{}", server.address), true, true);
+    let namespace = cache.namespace("lifetime");
+    let probe = cache.probe();
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    drop(cache);
+    assert_eq!(namespace.get("namespace-owner").await, Ok(None));
+    drop(namespace);
+    probe.check().await.expect("healthy probe");
+    server.stall_existing();
+    let pings = server.command_count("PING", None);
+    server
+        .wait_for(
+            Duration::from_secs(3),
+            "live maintenance did not reach the socket",
+            || server.command_count("PING", None) > pings,
+        )
+        .await;
+    drop(probe);
+    server
+        .wait_for(
+            Duration::from_millis(500),
+            "last probe retained cache-owned maintenance",
+            || server.active() == 0,
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
+    use std::sync::atomic::Ordering;
+
+    let captured = CapturedLogs::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let server = FakeServer::start().await;
+    server.require_password("initial-password");
+    let file = tempfile::NamedTempFile::new().expect("password file");
+    std::fs::write(file.path(), "initial-password\n").expect("initial password");
+    let cache = Cache::connect_lazy(with_password_file(
+        &format!("redis://{}", server.address),
+        file.path().to_path_buf(),
+    ))
+    .expect("lazy cache");
+    let namespace = cache.namespace("retry_password");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    std::fs::write(file.path(), "pending-password\n").expect("pending password");
+    server
+        .wait_for(
+            Duration::from_secs(7),
+            "changed password was never attempted",
+            || server.observed.auth_rejections.load(Ordering::SeqCst) > 0,
+        )
+        .await;
+    let successes = server.observed.auth_successes.load(Ordering::SeqCst);
+    server.require_password("pending-password");
+    // Keep file bytes and sockets unchanged, and issue no cache operations.
+    server
+        .wait_for(
+            Duration::from_secs(11),
+            "rejected unchanged credentials were never retried without traffic",
+            || server.observed.auth_successes.load(Ordering::SeqCst) > successes,
+        )
+        .await;
+    assert_eq!(namespace.get("recovered").await, Ok(None));
+
+    let authenticated = server.observed.auth_successes.load(Ordering::SeqCst);
+    let connections = server.connections();
+    std::fs::remove_file(file.path()).expect("temporarily unavailable password file");
+    captured
+        .wait_for(Duration::from_secs(7), |logs| {
+            logs.contains("cache_password_file_unreadable")
+        })
+        .await;
+    assert_eq!(namespace.get("usable-during-file-outage").await, Ok(None));
+    assert_eq!(
+        server.observed.auth_successes.load(Ordering::SeqCst),
+        authenticated
+    );
+    assert_eq!(
+        server.connections(),
+        connections,
+        "unreadable file must preserve the usable authenticated socket"
+    );
+
+    server.require_password("later-password");
+    std::fs::write(file.path(), "later-password\r\n").expect("restore usable password file");
+    server
+        .wait_for(
+            Duration::from_secs(11),
+            "file outage ended future credential refresh",
+            || server.observed.auth_successes.load(Ordering::SeqCst) > authenticated,
+        )
+        .await;
+    assert_eq!(namespace.get("recovered-after-file-outage").await, Ok(None));
+}
+
+#[tokio::test]
+async fn reliability_password_file_preserves_case_crlf_and_username() {
+    for user in [None, Some("ServiceUser")] {
+        let server = FakeServer::start().await;
+        server.require_password(" MiXeD-Password ");
+        *server.observed.username.lock().expect("username lock") =
+            Some(user.unwrap_or("default").to_owned());
+        let file = tempfile::NamedTempFile::new().expect("password file");
+        std::fs::write(file.path(), " MiXeD-Password \r\n").expect("password with CRLF");
+        let authority = user.map_or_else(
+            || server.address.to_string(),
+            |user| format!("{user}@{}", server.address),
+        );
+        let cache = Cache::connect_lazy(with_password_file(
+            &format!("redis://{authority}"),
+            file.path().to_path_buf(),
+        ))
+        .expect("lazy cache");
+        assert_eq!(
+            cache.namespace("credential_bytes").get("ready").await,
+            Ok(None),
+            "AUTH must preserve password case and spaces, remove one CRLF, and select the correct user"
+        );
+    }
+}
+
+#[derive(Clone, Default)]
+struct CapturedLogs {
+    bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    changed: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl CapturedLogs {
+    fn rendered(&self) -> String {
+        String::from_utf8(self.bytes.lock().expect("logs lock").clone()).expect("UTF-8 logs")
+    }
+
+    async fn wait_for(&self, budget: Duration, ready: impl Fn(&str) -> bool) {
+        tokio::time::timeout(budget, async {
+            loop {
+                if ready(&self.rendered()) {
+                    break;
+                }
+                self.changed.notified().await;
+            }
+        })
+        .await
+        .expect("expected credential diagnostic was not emitted");
+    }
+}
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes
+            .lock()
+            .expect("logs lock")
+            .extend_from_slice(bytes);
+        self.changed.notify_one();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn reliability_auth_errors_are_sanitized_through_the_dependency_log_bridge() {
+    static BRIDGE: std::sync::Once = std::sync::Once::new();
+    BRIDGE.call_once(|| {
+        tracing_log::LogTracer::init().expect("install actual dependency log bridge")
+    });
+    let captured = CapturedLogs::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    tracing_log::log::warn!("cache-test-log-bridge-control");
+    assert!(
+        captured
+            .rendered()
+            .contains("cache-test-log-bridge-control"),
+        "the real log bridge must be active"
+    );
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    runtime.block_on(async {
+        let server = FakeServer::start().await;
+        let marker = "raw-server-auth-marker-9e3b7a";
+        *server.observed.auth_error.lock().expect("auth error lock") =
+            format!("{marker} rejected-secret-value");
+        server.require_password("accepted-secret-value");
+        let file = tempfile::NamedTempFile::new().expect("password file");
+        std::fs::write(file.path(), "accepted-secret-value\n").expect("initial password");
+        let dsn = format!("redis://{}", server.address);
+        let cache = Cache::connect_lazy(with_password_file(&dsn, file.path().to_path_buf()))
+            .expect("lazy cache");
+        let namespace = cache.namespace("logs");
+        assert_eq!(namespace.get("sensitive-key").await, Ok(None));
+        std::fs::write(file.path(), "rejected-secret-value\n").expect("rejected password");
+        tokio::time::timeout(Duration::from_secs(7), async {
+            loop {
+                let rendered = captured.rendered();
+                if rendered.contains("Failed to re-authenticate")
+                    || rendered.contains("error.type=\"auth\"")
+                    || rendered.contains("error.type=auth")
+                {
+                    break;
+                }
+                captured.changed.notified().await;
+            }
+        })
+        .await
+        .expect("AUTH rejection must emit a bounded failure classification");
+        let rendered = format!("{} {cache:?} {namespace:?}", captured.rendered());
+        for secret in [
+            marker,
+            "accepted-secret-value",
+            "rejected-secret-value",
+            "sensitive-key",
+            dsn.as_str(),
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "dependency diagnostics disclosed {secret}: {rendered}"
+            );
+        }
+        assert!(
+            !rendered.contains("cache_password_reloaded"),
+            "reading a rejected credential must not report authenticated acceptance: {rendered}"
+        );
+    });
 }
