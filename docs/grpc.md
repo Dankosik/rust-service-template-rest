@@ -158,7 +158,8 @@ Outermost to innermost:
 
 1. Observation.
 2. Panic recovery, inside the observation layer. The response is `INTERNAL` / `request failed`. The payload
-   goes to the normal panic hook, as on HTTP. There is no suppressing hook.
+   goes to the process panic hook, which records it as an ERROR log record,
+   as on HTTP.
 3. Business routes only: bearer authentication, when that profile is
    retained. Health is outside it. Missing, malformed and invalid bearers are
    `UNAUTHENTICATED` / `authentication failed`. Provider unavailability is

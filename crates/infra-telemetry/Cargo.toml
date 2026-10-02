@@ -26,6 +26,9 @@ opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry-otlp = { workspace = true, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "gzip-http", "trace", "internal-logs"] }
 opentelemetry-semantic-conventions = { workspace = true, features = ["semconv_experimental"] }
 opentelemetry_sdk = { workspace = true, features = ["trace"] }
+# The exporter's client when a standard trust variable names a certificate
+# file; the same client and TLS stack `opentelemetry-otlp` builds by default.
+reqwest = { workspace = true, features = ["blocking", "rustls"] }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
@@ -40,4 +43,7 @@ tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter",
 
 [dev-dependencies]
 futures-util = { workspace = true, features = ["std"] }
+rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
+rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
