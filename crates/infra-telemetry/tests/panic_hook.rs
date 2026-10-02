@@ -34,6 +34,7 @@ impl<'writer> MakeWriter<'writer> for Buffer {
 
 #[test]
 fn a_panic_is_one_error_record_with_its_place_and_its_message_only_when_recorded() {
+    let original_hook = std::panic::take_hook();
     let record_of_a_panic = |message| {
         install_panic_hook(message);
         let buffer = Buffer::default();
@@ -50,7 +51,11 @@ fn a_panic_is_one_error_record_with_its_place_and_its_message_only_when_recorded
     };
 
     let recorded = record_of_a_panic(PanicMessage::Recorded);
-    assert_eq!(recorded.lines().count(), 1, "{recorded}");
+    let withheld = record_of_a_panic(PanicMessage::Withheld);
+    // Assertion failures should use the test runner's hook. A backtrace may
+    // add continuation lines, but each panic still emits one ERROR record.
+    std::panic::set_hook(original_hook);
+    assert_eq!(recorded.matches(" ERROR ").count(), 1, "{recorded}");
     assert!(recorded.contains("ERROR"), "{recorded}");
     assert!(
         recorded.contains(r#"panic.message="refused caller text""#),
@@ -59,8 +64,7 @@ fn a_panic_is_one_error_record_with_its_place_and_its_message_only_when_recorded
     assert!(recorded.contains("panic_hook.rs"), "{recorded}");
     assert!(recorded.contains("panic.line="), "{recorded}");
 
-    let withheld = record_of_a_panic(PanicMessage::Withheld);
-    assert_eq!(withheld.lines().count(), 1, "{withheld}");
+    assert_eq!(withheld.matches(" ERROR ").count(), 1, "{withheld}");
     assert!(!withheld.contains("caller text"), "{withheld}");
     assert!(!withheld.contains("panic.message"), "{withheld}");
     assert!(withheld.contains("panic_hook.rs"), "{withheld}");
