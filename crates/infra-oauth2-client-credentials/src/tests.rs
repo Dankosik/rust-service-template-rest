@@ -531,6 +531,23 @@ fn direct_construction_repeats_sensitive_option_admission() {
     }
 }
 
+/// `Url` parses these to a URL without userinfo; the typed configuration
+/// section refuses them, so direct construction does too.
+#[test]
+fn a_token_url_with_an_at_sign_in_its_raw_authority_is_refused() {
+    for token_url in [
+        "https://@identity.example/token",
+        r"https://identity.example\@other.example/token",
+    ] {
+        let error = Credentials::new(Options {
+            token_url: token_url.to_owned(),
+            ..valid_options()
+        })
+        .unwrap_err();
+        assert_eq!(error.key, "token_url", "{token_url}");
+    }
+}
+
 #[test]
 fn a_key_mismatched_with_its_algorithm_or_not_pem_is_refused_at_construction() {
     let ec_pem = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
@@ -963,6 +980,39 @@ async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
 }
 
 #[tokio::test]
+async fn a_waiter_restarts_the_exchange_its_leader_ran_out_of_budget_for() {
+    let fixture = Fixture::new().await;
+    fixture.token_json("200 OK", &exchange_response("exchanged"));
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    let gate = fixture.block_tokens();
+    let mut leader = Box::pin(client.execute(
+        fixture.on_behalf_of_request("subject"),
+        deadline(Duration::from_secs(1)),
+    ));
+    tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
+    let mut waiter = Box::pin(client.execute(
+        fixture.on_behalf_of_request("subject"),
+        deadline(Duration::from_secs(4)),
+    ));
+    poll_pending(waiter.as_mut()).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(matches!(
+        leader.await,
+        Err(Error::Acquisition(AcquisitionError::Timeout))
+    ));
+    tokio::time::resume();
+    tokio::select! { () = fixture.token_received() => {}, result = &mut waiter => panic!("replacement must be gated: {result:?}"), }
+    gate.add_permits(2);
+    waiter.await.unwrap();
+    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.resource_requests().len(), 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn a_resource_401_evicts_only_that_subjects_exchanged_token() {
     let fixture = Fixture::new().await;
     fixture.token_json("200 OK", &exchange_response("shared"));
@@ -1244,6 +1294,91 @@ async fn a_failed_background_refresh_keeps_the_token_and_retries_after_a_pause()
 }
 
 /// This crate's events with their fields, in emission order.
+/// The `oauth2_token_acquisitions_total` series a scrape holds, as
+/// `(grant, outcome, count)`.
+fn acquisition_counts(scrape: &str) -> Vec<(String, String, u64)> {
+    let label = |line: &str, name: &str| {
+        let (_, rest) = line.split_once(&format!("{name}=\"")).unwrap();
+        rest.split_once('"').unwrap().0.to_owned()
+    };
+    let mut counts: Vec<_> = scrape
+        .lines()
+        .filter(|line| line.starts_with("oauth2_token_acquisitions_total{"))
+        .map(|line| {
+            let count = line.rsplit_once(' ').unwrap().1.parse().unwrap();
+            (label(line, "grant"), label(line, "outcome"), count)
+        })
+        .collect();
+    counts.sort();
+    counts
+}
+
+#[test]
+fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    metrics::with_local_recorder(&recorder, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let fixture = Fixture::new().await;
+                let client = || {
+                    fixture
+                        .credentials(&[], None)
+                        .http(fixture.resource_client())
+                };
+                let far = || deadline(Duration::from_secs(10));
+                // One request, then a reuse that makes none.
+                let reused = client();
+                for _ in 0..2 {
+                    reused.execute(fixture.request(), far()).await.unwrap();
+                }
+                fixture.token_raw(response(
+                    "400 Bad Request",
+                    br#"{"error":"invalid_client"}"#,
+                ));
+                client()
+                    .execute(fixture.request(), far())
+                    .await
+                    .unwrap_err();
+                fixture.token_raw(response(
+                    "400 Bad Request",
+                    br#"{"error":"invalid_target"}"#,
+                ));
+                client()
+                    .execute(fixture.on_behalf_of_request("subject"), far())
+                    .await
+                    .unwrap_err();
+                let gate = fixture.block_tokens();
+                let timed = client();
+                let mut timed = Box::pin(
+                    timed.execute(fixture.request(), deadline(Duration::from_secs(1))),
+                );
+                tokio::select! { () = fixture.token_received() => {}, result = &mut timed => panic!("response must be gated: {result:?}"), }
+                advance(Duration::from_secs(1)).await;
+                timed.await.unwrap_err();
+                let dropped = client();
+                let mut dropped = Box::pin(dropped.execute(fixture.request(), far()));
+                tokio::select! { () = fixture.token_received() => {}, result = &mut dropped => panic!("response must be gated: {result:?}"), }
+                drop(dropped);
+                drop(gate);
+                fixture.finish().await;
+            });
+    });
+    let count = |grant: &str, outcome: &str| (grant.to_owned(), outcome.to_owned(), 1);
+    assert_eq!(
+        acquisition_counts(&recorder.handle().render()),
+        [
+            count("client_credentials", "cancelled"),
+            count("client_credentials", "invalid_client"),
+            count("client_credentials", "success"),
+            count("client_credentials", "timeout"),
+            count("token_exchange", "invalid_target"),
+        ]
+    );
+}
+
 #[derive(Clone, Default)]
 struct Events(Arc<Mutex<Vec<String>>>);
 
@@ -1571,6 +1706,17 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
                 br#"{"error":"provider-secret-body"}"#,
             ),
             AcquisitionError::Rejected(Rejection::Other),
+        ),
+        (
+            json_response(
+                "200 OK",
+                &serde_json::json!({"access_token":"token", "token_type":"MAC", "expires_in":3600}),
+            ),
+            AcquisitionError::InvalidResponse,
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}".to_vec(),
+            AcquisitionError::InvalidResponse,
         ),
         (
             // RFC 6749 section 5.1 defines a number; a string is not admitted.
