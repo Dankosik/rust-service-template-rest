@@ -50,8 +50,10 @@ const TOKEN_LIMITS: Limits = Limits {
     response_header_count: 64,
     response_body_bytes: 1024 * 1024,
 };
-/// The largest number of distinct subjects whose exchanged token is retained.
-const EXCHANGED_CACHE_CAPACITY: u64 = 1024;
+/// The admitted number of subjects whose exchanged token is retained. The
+/// bound counts entries, not bytes: at a few KiB a token, the largest cache
+/// is a few hundred MiB.
+const EXCHANGE_CACHE_CAPACITY: std::ops::RangeInclusive<u32> = 1..=65_536;
 /// RFC 7523 section 2.2 and the OIDF client-assertion notice: one string
 /// audience, a fresh `jti`, and an assertion signed for at most this long.
 const ASSERTION_LIFETIME_SECS: u64 = 60;
@@ -69,10 +71,9 @@ const TOKEN_TYPE_ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_t
 const METRIC_GRANT_TOKEN_EXCHANGE: &str = "token_exchange";
 
 /// The client-assertion signing algorithm. One algorithm per key (RFC 8725bis
-/// section 3.1); `RS256` is accepted by every shortlisted authorization server.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// section 3.1), so it is always stated and never defaulted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Algorithm {
-    #[default]
     Rs256,
     Ps256,
     Es256,
@@ -99,6 +100,9 @@ pub struct Options {
     pub assertion_audience: String,
     pub scopes: Vec<String>,
     pub audience: Option<String>,
+    /// The largest number of distinct subjects whose exchanged token is
+    /// retained.
+    pub exchange_cache_capacity: u32,
 }
 
 impl fmt::Debug for Options {
@@ -213,6 +217,8 @@ impl fmt::Display for Rejection {
 pub enum Error {
     #[error("caller Authorization header conflicts with OAuth2 authentication")]
     AuthorizationConflict,
+    #[error("request carries no subject to act on behalf of")]
+    SubjectRequired,
     #[error(transparent)]
     Acquisition(#[from] AcquisitionError),
     #[error(transparent)]
@@ -461,7 +467,7 @@ impl Credentials {
             cached: Mutex::default(),
             refresh: tokio::sync::Mutex::new(()),
             exchanged: moka::future::Cache::builder()
-                .max_capacity(EXCHANGED_CACHE_CAPACITY)
+                .max_capacity(u64::from(options.exchange_cache_capacity))
                 .expire_after(ExchangedExpiry)
                 .build(),
         })))
@@ -473,6 +479,7 @@ impl Credentials {
         AuthenticatedClient {
             credentials: self.clone(),
             resource,
+            subject_required: false,
         }
     }
 
@@ -688,6 +695,7 @@ impl Credentials {
 pub struct AuthenticatedClient {
     credentials: Credentials,
     resource: Client,
+    subject_required: bool,
 }
 
 impl fmt::Debug for AuthenticatedClient {
@@ -697,6 +705,16 @@ impl fmt::Debug for AuthenticatedClient {
 }
 
 impl AuthenticatedClient {
+    /// Refuses a request without [`OnBehalfOf`] instead of sending the service
+    /// token. For an integration that only ever acts for a verified user, so
+    /// that a forgotten subject is an error and never a call made with the
+    /// service's own authority.
+    #[must_use]
+    pub fn require_on_behalf_of(mut self) -> Self {
+        self.subject_required = true;
+        self
+    }
+
     /// Acquires credentials, injects Bearer, and spends the original deadline.
     /// A request carrying [`OnBehalfOf`] in its extensions is sent with a
     /// token exchanged for that subject instead of the service token; the
@@ -705,8 +723,10 @@ impl AuthenticatedClient {
     /// token it used so the next call acquires anew.
     ///
     /// # Errors
-    /// Rejects caller Authorization before I/O, acquisition failure before
-    /// resource dispatch, and otherwise preserves bounded resource errors.
+    /// Rejects caller Authorization, or a missing subject this client
+    /// [requires](Self::require_on_behalf_of), before I/O, acquisition failure
+    /// before resource dispatch, and otherwise preserves bounded resource
+    /// errors.
     pub async fn execute(
         &self,
         mut request: Request<Bytes>,
@@ -716,6 +736,9 @@ impl AuthenticatedClient {
             return Err(Error::AuthorizationConflict);
         }
         let on_behalf_of = request.extensions_mut().remove::<OnBehalfOf>();
+        if self.subject_required && on_behalf_of.is_none() {
+            return Err(Error::SubjectRequired);
+        }
         let acquired = self
             .credentials
             .authorize(request.headers_mut(), on_behalf_of, deadline)
@@ -856,7 +879,8 @@ fn map_transport_error(error: &infra_outbound_http::Error) -> AcquisitionError {
     match error {
         infra_outbound_http::Error::Timeout => AcquisitionError::Timeout,
         infra_outbound_http::Error::ResponseBodyTooLarge => AcquisitionError::ResponseLimit,
-        _ => AcquisitionError::Transport,
+        infra_outbound_http::Error::InvalidTarget
+        | infra_outbound_http::Error::Transport { .. } => AcquisitionError::Transport,
     }
 }
 
@@ -963,16 +987,18 @@ impl Drop for AttemptMetric {
 
 fn admit_options(options: &Options) -> Result<Url, ConfigurationError> {
     let error = |key, reason| Err(ConfigurationError { key, reason });
-    if options.client_id.is_empty() {
+    // The same rules as the typed configuration section, which refuses a
+    // whitespace-only value as empty.
+    if options.client_id.trim().is_empty() {
         return error("client_id", "must be nonempty");
     }
-    if options.key_id.is_empty() {
+    if options.key_id.trim().is_empty() {
         return error("key_id", "must be nonempty");
     }
-    if options.assertion_audience.is_empty() {
+    if options.assertion_audience.trim().is_empty() {
         return error("assertion_audience", "must be nonempty");
     }
-    if options.private_key.expose_secret().is_empty() {
+    if options.private_key.expose_secret().trim().is_empty() {
         return error("private_key", "must be nonempty");
     }
     if options.scopes.iter().any(|scope| {
@@ -985,6 +1011,9 @@ fn admit_options(options: &Options) -> Result<Url, ConfigurationError> {
     }
     if options.audience.as_ref().is_some_and(String::is_empty) {
         return error("audience", "must be nonempty when configured");
+    }
+    if !EXCHANGE_CACHE_CAPACITY.contains(&options.exchange_cache_capacity) {
+        return error("exchange_cache_capacity", "must be from 1 to 65536");
     }
     // `Url::parse` silently strips tabs and newlines, so refuse them first.
     if options

@@ -10,7 +10,7 @@ cross-service evidence path changes.
 Record a neighbour when this service calls it, is called by it, or shares
 durable state with it. Point to the real contract and the concrete runtime
 evidence path joined by the request id or W3C trace context (every log
-record inside a request carries `openTelemetry.traceId` and `spanId`). Store
+record inside a request carries `trace_id` and `span_id`). Store
 the access shape, never credentials, tokens, or customer data.
 
 ## Adding a dependency
@@ -40,8 +40,8 @@ general many-authority transport, proxy handling, redirects, or an inner retry.
 Inbound webhook processing crosses to adopter code through a registered consumer
 that receives immutable incoming bytes and `&mut Tx`. Database effects and
 fenced completion share that transaction; external recipients must be
-idempotent. Adopters register real adapters once in
-`webhook_consumers::consumers()`, which both roots use for startup admission.
+idempotent. Adopters register real adapters once in the worker's `register`,
+which checks every configured endpoint before claiming.
 A historical job with a missing binding retries, consumes attempts, and
 eventually exhausts.
 <!-- template:end inbound-webhooks:docs-integration-webhooks-inbound -->

@@ -117,12 +117,12 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
 }
 
 /// The fixture worker's registration, the one test-only kind with the default policy.
-/// The public worker callback type owns its profile-dependent argument types.
-pub const REGISTER: jobs_worker::Register = |kinds,
-                                             // template:begin messaging:integration-jobs-register-messaging-parameter
-                                             _messages,
-                                             // template:end messaging:integration-jobs-register-messaging-parameter
-                                             _support| {
-    kinds.register(Policy::default(), handle);
+///
+/// # Errors
+/// Never; the worker's registration contract is fallible.
+pub fn register(
+    registration: &mut jobs_worker::Registration<'_>,
+) -> Result<(), jobs_worker::BuildError> {
+    registration.jobs.register(Policy::default(), handle);
     Ok(())
-};
+}

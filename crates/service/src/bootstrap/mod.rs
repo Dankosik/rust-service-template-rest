@@ -124,8 +124,6 @@ pub(crate) enum BootstrapError {
         #[source]
         source: infra_webhooks::protocol::ProtocolError,
     },
-    #[error("inbound webhook endpoint {endpoint} has no consumer binding")]
-    InboundWebhookConsumerMissing { endpoint: String },
     // template:end inbound-webhooks:bootstrap-webhooks-errors
     #[error(transparent)]
     Server(#[from] infra_http::ServerError),

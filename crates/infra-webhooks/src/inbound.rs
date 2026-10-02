@@ -1,15 +1,18 @@
 //! Durable receipt admission and processing for inbound Standard Webhooks.
 //!
-//! This module verifies a configured endpoint before it reaches PostgreSQL,
-//! then owns the one transaction that writes a receipt and enqueues processing.
+//! This module verifies a configured endpoint through its [`Verifier`] before
+//! it reaches PostgreSQL, then owns the one transaction that writes a receipt
+//! and enqueues processing.
 //! Processing invokes one explicit adopter callback and completes its fenced job
 //! in that callback's transaction.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use bytes::Bytes;
 use http::HeaderMap;
 use http::header::CONTENT_TYPE;
 use infra_jobs::{
@@ -24,7 +27,7 @@ use sqlx::postgres::PgPool;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::KeyRing;
+use crate::protocol::{KeyRing, MAX_MESSAGE_ID_BYTES, ProtocolError};
 
 /// Re-exported so a consumer crate implements [`Consumer`] without its own
 /// `async-trait` dependency, as `tonic::async_trait` does for services.
@@ -49,23 +52,28 @@ const INSERT_RECEIPT: &str = "INSERT INTO webhook_receipts (endpoint_id, message
 /// one signed request.
 const RECEIPT_RETENTION: Duration = Duration::from_hours(7 * 24);
 
+#[allow(
+    clippy::cast_possible_wrap,
+    reason = "seven days of seconds is far inside i64"
+)]
+const RETENTION_SECONDS: i64 = RECEIPT_RETENTION.as_secs() as i64;
+
 /// Cleanup cadence; the first run starts at once.
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
-/// The most rows one cleanup batch deletes: the `LIMIT` in [`CLEANUP_BATCH`].
-const CLEANUP_BATCH_ROWS: u64 = 500;
+/// The most rows one cleanup batch deletes.
+const CLEANUP_BATCH_ROWS: i64 = 500;
 
 /// Bounds a cleanup batch on the server, so a batch whose client has gone
 /// still ends within 1 s.
 const CLEANUP_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '1000ms'";
 
-/// One batch of expired receipts. The `interval '7 days'` is [`RECEIPT_RETENTION`].
+/// One batch of expired receipts: `$1` is the retention in seconds and `$2`
+/// the batch size.
 const CLEANUP_BATCH: &str = "DELETE FROM webhook_receipts WHERE (endpoint_id, message_id) IN \
     (SELECT endpoint_id, message_id FROM webhook_receipts \
-    WHERE received_at < statement_timestamp() - interval '7 days' \
-    ORDER BY received_at LIMIT 500 FOR UPDATE SKIP LOCKED)";
-
-const _: () = assert!(RECEIPT_RETENTION.as_secs() == 7 * 24 * 60 * 60);
+    WHERE received_at < statement_timestamp() - $1::bigint * interval '1 second' \
+    ORDER BY received_at LIMIT $2 FOR UPDATE SKIP LOCKED)";
 
 /// The durable admission result for one verified delivery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,30 +85,113 @@ pub enum ReceiptOutcome {
 }
 
 /// A closed inbound admission failure for the HTTP adapter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ReceiveError {
     /// No receiving binding owns the requested endpoint.
+    #[error("inbound webhook endpoint is not configured")]
     UnknownEndpoint,
-    /// Verification did not establish acceptable Standard Webhooks evidence.
-    Rejected,
+    /// The endpoint's verifier did not establish acceptable evidence.
+    #[error("inbound webhook delivery was rejected: {}", .0.reason())]
+    Rejected(Rejection),
     /// Receipt persistence or its commit acknowledgement was unavailable.
+    #[error("inbound webhook receipt storage is unavailable")]
     Unavailable,
+}
+
+/// Why a [`Verifier`] refused a delivery.
+///
+/// The reason is a static label from a small closed set, safe as a log field
+/// and a metric label. It never carries request, signature, or key bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rejection(&'static str);
+
+impl Rejection {
+    /// A rejection with a static `snake_case` reason label.
+    #[must_use]
+    pub const fn new(reason: &'static str) -> Self {
+        Self(reason)
+    }
+
+    /// The reason label.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        self.0
+    }
+}
+
+impl From<ProtocolError> for Rejection {
+    fn from(error: ProtocolError) -> Self {
+        Self(error.reason())
+    }
+}
+
+/// One endpoint's sender authentication.
+///
+/// [`KeyRing`] is the Standard Webhooks verifier. A provider that signs
+/// another way implements this for its own scheme and keeps the durable
+/// receipt, deduplication, and processing path.
+pub trait Verifier: Send + Sync + 'static {
+    /// Authenticate one delivery and return its message identity: the
+    /// provider's stable ID for this message, 1 to [`MAX_MESSAGE_ID_BYTES`]
+    /// bytes, equal on every redelivery. `body` is the raw request body and
+    /// `now` the admission time for replay windows.
+    ///
+    /// # Errors
+    ///
+    /// A [`Rejection`] when the evidence is missing, malformed, stale, or does
+    /// not match the endpoint's key.
+    fn verify(&self, headers: &HeaderMap, body: &[u8], now: SystemTime)
+    -> Result<Bytes, Rejection>;
+}
+
+impl Verifier for KeyRing {
+    fn verify(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+        now: SystemTime,
+    ) -> Result<Bytes, Rejection> {
+        let verified = KeyRing::verify(self, headers, body, now)?;
+        Ok(verified.message_id().clone())
+    }
+}
+
+/// A shared verifier, so one receiver can mix schemes as `Arc<dyn Verifier>`.
+impl<V: Verifier + ?Sized> Verifier for Arc<V> {
+    fn verify(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+        now: SystemTime,
+    ) -> Result<Bytes, Rejection> {
+        (**self).verify(headers, body, now)
+    }
 }
 
 /// Configured receiving endpoints and their durable receipt store.
 #[derive(Clone)]
 pub struct Receiver {
     pool: PgPool,
-    endpoints: Arc<HashMap<String, KeyRing>>,
+    endpoints: Arc<HashMap<String, Arc<dyn Verifier>>>,
 }
 
 impl Receiver {
-    /// Build a receiver over the configured endpoint keys. Construction does no I/O.
+    /// Build a receiver over each configured endpoint's verifier. Construction does no I/O.
     #[must_use]
-    pub fn new(pool: PgPool, endpoints: impl IntoIterator<Item = (String, KeyRing)>) -> Self {
+    pub fn new<V: Verifier>(
+        pool: PgPool,
+        endpoints: impl IntoIterator<Item = (String, V)>,
+    ) -> Self {
         Self {
             pool,
-            endpoints: Arc::new(endpoints.into_iter().collect()),
+            endpoints: Arc::new(
+                endpoints
+                    .into_iter()
+                    .map(|(endpoint_id, verifier)| {
+                        (endpoint_id, Arc::new(verifier) as Arc<dyn Verifier>)
+                    })
+                    .collect(),
+            ),
         }
     }
 
@@ -117,8 +208,9 @@ impl Receiver {
     ///
     /// # Errors
     ///
-    /// Returns a closed rejection for an unknown endpoint or invalid signature,
-    /// or unavailable when receipt ownership could not be acknowledged.
+    /// Returns a closed rejection for an unknown endpoint, refused evidence, or
+    /// a message identity outside 1 to [`MAX_MESSAGE_ID_BYTES`] bytes, or
+    /// unavailable when receipt ownership could not be acknowledged.
     pub async fn receive(
         &self,
         endpoint_id: &str,
@@ -126,12 +218,26 @@ impl Receiver {
         body: &[u8],
         now: SystemTime,
     ) -> Result<ReceiptOutcome, ReceiveError> {
-        let Some(keys) = self.endpoints.get(endpoint_id) else {
+        let Some(verifier) = self.endpoints.get(endpoint_id) else {
             return Err(ReceiveError::UnknownEndpoint);
         };
-        let verified = keys
+        let message_id = verifier
             .verify(headers, body, now)
-            .map_err(|_| ReceiveError::Rejected)?;
+            .and_then(|message_id| {
+                // The receipt key is indexed, so a verifier's identity is bounded here.
+                if message_id.is_empty() || message_id.len() > MAX_MESSAGE_ID_BYTES {
+                    return Err(ProtocolError::InvalidMessageId.into());
+                }
+                Ok(message_id)
+            })
+            .map_err(|rejection| {
+                tracing::info!(
+                    webhook.endpoint = endpoint_id,
+                    webhook.reason = rejection.reason(),
+                    "webhook_delivery_rejected"
+                );
+                ReceiveError::Rejected(rejection)
+            })?;
         let content_type = headers
             .get(CONTENT_TYPE)
             .map(|value| value.as_bytes().to_vec());
@@ -141,13 +247,13 @@ impl Receiver {
             async |tx| -> Result<ReceiptOutcome, ReceiptFailure> {
                 let inserted = sqlx::query_scalar::<_, Vec<u8>>(INSERT_RECEIPT)
                     .bind(endpoint_id)
-                    .bind(verified.message_id().as_ref())
+                    .bind(message_id.as_ref())
                     .fetch_optional(&mut *tx)
                     .await?;
                 if inserted.is_some() {
                     let incoming = Incoming::new(
                         endpoint_id,
-                        verified.message_id().as_ref(),
+                        message_id.as_ref(),
                         content_type.as_deref(),
                         body,
                     );
@@ -174,7 +280,11 @@ impl Receiver {
                     | ReceiptFailure::Enqueue(_)
                     | ReceiptFailure::Transaction(_) => "unavailable",
                 };
-                tracing::warn!(event = "webhook_receipt_unavailable", reason);
+                tracing::warn!(
+                    webhook.endpoint = endpoint_id,
+                    webhook.reason = reason,
+                    "webhook_receipt_unavailable"
+                );
                 Err(ReceiveError::Unavailable)
             }
         }
@@ -198,6 +308,8 @@ impl Receiver {
                     .await
                     .map_err(|_| CleanupFailure(CleanupError::Statement))?;
                 let deleted = sqlx::query(CLEANUP_BATCH)
+                    .bind(RETENTION_SECONDS)
+                    .bind(CLEANUP_BATCH_ROWS)
                     .execute(&mut *tx)
                     .await
                     .map_err(|_| CleanupFailure(CleanupError::Statement))?;
@@ -206,7 +318,7 @@ impl Receiver {
             .await
             .map_err(|CleanupFailure(failure)| failure)?;
             removed += batch;
-            if batch < CLEANUP_BATCH_ROWS {
+            if batch < CLEANUP_BATCH_ROWS.unsigned_abs() {
                 return Ok(removed);
             }
         }
@@ -316,7 +428,7 @@ impl fmt::Debug for Incoming {
         formatter
             .debug_struct("Incoming")
             .field("version", &self.version)
-            .field("endpoint_id", &"[REDACTED]")
+            .field("endpoint_id", &self.endpoint_id)
             .field("message_id", &"[REDACTED]")
             .field("content_type", &self.content_type.is_some())
             .field("body", &"[REDACTED]")
@@ -330,7 +442,12 @@ impl JobKind for Incoming {
 
 const _: () = infra_jobs::assert_valid_kind_name(Incoming::NAME);
 
-/// A provider adapter that applies one retained delivery inside its transaction.
+/// An adapter that applies one retained delivery inside its transaction.
+///
+/// `tx` stays open, and holds a pooled connection, until `process` returns
+/// and the job completes in it. Keep `process` to database effects. For an
+/// effect outside PostgreSQL, enqueue a job on `tx` and let that job make the
+/// call, so a slow recipient holds neither a transaction nor a connection.
 ///
 /// Implement it under [`async_trait`](macro@async_trait), the workspace idiom
 /// for object-safe async traits.
@@ -354,12 +471,25 @@ impl Consumers {
     }
 
     /// Bind one configured endpoint to its consumer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DuplicateConsumer`] when the endpoint already has a binding;
+    /// the first binding stays.
     pub fn insert(
         &mut self,
         endpoint_id: impl Into<String>,
         consumer: Arc<dyn Consumer>,
-    ) -> Option<Arc<dyn Consumer>> {
-        self.entries.insert(endpoint_id.into(), consumer)
+    ) -> Result<(), DuplicateConsumer> {
+        match self.entries.entry(endpoint_id.into()) {
+            Entry::Occupied(bound) => Err(DuplicateConsumer {
+                endpoint: bound.key().clone(),
+            }),
+            Entry::Vacant(unbound) => {
+                unbound.insert(consumer);
+                Ok(())
+            }
+        }
     }
 
     /// Fail when a configured endpoint has no consumer binding.
@@ -384,6 +514,14 @@ impl Consumers {
     fn get(&self, endpoint_id: &str) -> Option<Arc<dyn Consumer>> {
         self.entries.get(endpoint_id).cloned()
     }
+}
+
+/// An inbound endpoint bound to a consumer twice.
+#[derive(Debug, thiserror::Error)]
+#[error("inbound webhook endpoint {endpoint} already has a consumer binding")]
+pub struct DuplicateConsumer {
+    /// The endpoint ID bound twice.
+    pub endpoint: String,
 }
 
 /// A configured inbound endpoint with no consumer binding.
@@ -436,8 +574,8 @@ impl Handler<Incoming> for Processor {
         async move {
             let Some(consumer) = consumer else {
                 tracing::warn!(
-                    event = "webhook_processor_missing_binding",
-                    reason = "missing_binding"
+                    webhook.endpoint = job.payload().endpoint_id(),
+                    "webhook_processor_missing_binding"
                 );
                 return Err(JobError::retryable(
                     "inbound webhook consumer is unavailable",
@@ -504,5 +642,37 @@ impl From<TxError> for CleanupFailure {
             TxError::Begin(_) => CleanupError::Begin,
             TxError::CommitFailed(_) | TxError::CommitUnknown(_) => CleanupError::Commit,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Ignore;
+
+    #[async_trait]
+    impl Consumer for Ignore {
+        async fn process(&self, _tx: &mut Tx<'_>, _incoming: &Incoming) -> Result<(), JobError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_second_binding_for_one_endpoint_is_refused_and_an_unbound_one_is_named() {
+        let mut consumers = Consumers::new();
+        consumers
+            .insert("partner", Arc::new(Ignore))
+            .expect("first binding");
+        let duplicate = consumers
+            .insert("partner", Arc::new(Ignore))
+            .expect_err("second binding");
+        assert_eq!(duplicate.endpoint, "partner");
+
+        assert!(consumers.require(["partner"]).is_ok());
+        let missing = consumers
+            .require(["partner", "other"])
+            .expect_err("unbound endpoint");
+        assert_eq!(missing.endpoint, "other");
     }
 }

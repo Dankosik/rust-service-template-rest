@@ -136,26 +136,6 @@ impl Signals {
             });
             Ok(Self { stop })
         }
-        #[cfg(not(any(unix, windows)))]
-        {
-            // Not in the TaskTracker: this listener must outlive background join.
-            tokio::spawn(async move {
-                loop {
-                    match tokio::signal::ctrl_c().await {
-                        Ok(()) => {
-                            tracing::info!(signal = "ctrl-c", "stop requested");
-                            tx.send_modify(|count| *count = count.wrapping_add(1));
-                        }
-                        Err(err) => {
-                            tracing::error!(error = %err, "failed to listen for ctrl-c");
-                            tx.send_modify(|count| *count = count.wrapping_add(1));
-                            std::future::pending::<()>().await;
-                        }
-                    }
-                }
-            });
-            Ok(Self { stop })
-        }
     }
 
     /// Resolve on the next stop signal.

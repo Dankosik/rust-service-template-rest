@@ -4,9 +4,14 @@
 The `INBOUND_WEBHOOKS=standard-webhooks` profile exposes durable receipt and
 processing for authenticated Standard Webhooks v1 notifications. It requires
 `DATABASE=postgres` and `JOBS=postgres`; every profile defaults to `none`. An
-empty endpoint map is inert. An active endpoint needs a pool and an explicit
-consumer binding in the shared adopter registry, so partial wiring fails startup rather
-than accepting work into a successful no-op.
+empty endpoint map is inert. An active endpoint needs a pool in the service and
+an explicit consumer binding in the worker, so partial wiring fails startup
+rather than accepting work into a successful no-op.
+
+Verification covers the symmetric `v1` scheme (HMAC-SHA256) only. A sender
+with its own signature scheme, such as Stripe or GitHub, cannot use this
+route, and neither can the asymmetric `v1a` (Ed25519) scheme. Either is a
+separate verification capability, not a consumer binding.
 
 ## Static receiving bindings
 
@@ -61,7 +66,9 @@ is 1–255 bytes and cannot contain the signing dot. The protocol rejects a long
 ID. Historical jobs already queued with longer IDs remain processable. Conflicting identity/timestamp
 headers reject; identical repeats are allowed. Candidates are space-delimited:
 unknown versions and mismatches do not prevent another valid v1 candidate with a
-current or predecessor key.
+current or predecessor key. Verification computes the expected tag once per key
+and compares every candidate against it in constant time, so one request costs
+at most two HMACs over the body however many candidates its headers carry.
 
 The common protocol surface constructs a `SigningKey` with
 `SigningKey::from_encoded`, then `KeyRing::new` or `KeyRing::from_encoded`.
@@ -72,7 +79,7 @@ is the fixed 128 KiB boundary. Key material is redacted after construction.
 | Request | Response and durable effect |
 | --- | --- |
 | Unknown endpoint | `404` problem; no receipt/job |
-| Missing, malformed, stale/future, or invalid evidence | `400 webhook_rejected`; no durable effect |
+| Missing, malformed, stale/future, or invalid evidence | `400 webhook_rejected`; no durable effect; reason logged and counted |
 | Body above 128 KiB | `413`; no durable effect |
 | Other body-read failure or message ID over 255 bytes | `400 webhook_rejected`; no durable effect |
 | First verified endpoint/message ID | one receipt and one processing job commit atomically, then `204` |
@@ -86,26 +93,33 @@ method, and server outcomes remain effective contract behavior.
 
 ## Receipt and consumer processing
 
-The provider API is `infra_webhooks::inbound::{Receiver, ReceiptOutcome,
-ReceiveError, Incoming, Consumer, Consumers, Processor}`. Construction uses
-`Receiver::new(PgPool, endpoint_key_rings)`; admission is
+The provider API is `infra_webhooks::inbound::{Receiver, Verifier, Rejection,
+ReceiptOutcome, ReceiveError, Incoming, Consumer, Consumers, Processor}`.
+Construction uses `Receiver::new(PgPool, endpoint_verifiers)`; admission is
 `receive(endpoint_id, &HeaderMap, body, SystemTime)` and returns Accepted,
 or Duplicate, or closed UnknownEndpoint, Rejected, or Unavailable
-errors. `Incoming` exposes original endpoint, message-ID, body, and optional
+errors. `Rejected` carries the verifier's `Rejection`, a static reason label.
+`Incoming` exposes original endpoint, message-ID, body, and optional
 byte-safe content type. A registered `Consumer` implements
 `async fn process(&self, &mut Tx, &Incoming) -> Result<(), JobError>` under the
 re-exported `#[infra_webhooks::inbound::async_trait]`; `Processor` owns the
-binding lookup, transaction, and fenced completion. `Consumers::require` fails
-startup when a configured endpoint has no binding. `Processor::register` installs
+binding lookup, transaction, and fenced completion. `Consumers::insert` refuses
+a second binding for one endpoint, and `Consumers::require` fails startup when
+a configured endpoint has no binding. `Processor::register` installs
 `webhooks.process` with the default jobs policy.
 
-A derived service edits `consumers()` in `crates/webhook-consumers/src/lib.rs`
-to register its `Arc<dyn Consumer>` adapters. Both roots call that one constructor
-and check every configured endpoint before serving or claiming. The worker
-moves that same registry into `Processor::new(...).register(kinds)`; it does not
-construct a second registry.
+A derived service binds its `Arc<dyn Consumer>` adapters in `register` in
+`crates/jobs-worker/src/main.rs`, beside its job kinds and message handlers.
+The worker checks every configured endpoint before claiming and moves the
+registry into `Processor::new(...).register(kinds)`. The service process holds
+no consumer: it admits a verified delivery durably, and the worker that
+refuses to start without the binding is the signal that nothing processes it.
 
 ```rust,ignore
+use std::sync::Arc;
+
+use infra_jobs::JobError;
+use infra_postgres::Tx;
 use infra_webhooks::inbound::{Consumer, Consumers, Incoming, async_trait};
 
 struct Partner;
@@ -118,17 +132,39 @@ impl Consumer for Partner {
     }
 }
 
-pub fn consumers() -> Consumers {
-    let mut consumers = Consumers::new();
-    consumers.insert("partner", Arc::new(Partner));
-    consumers
-}
+// In `register`:
+let mut consumers = Consumers::new();
+consumers.insert("partner", Arc::new(Partner))?;
 ```
+
+The transaction, and its pooled connection, stay open until `process` returns.
+Keep `process` to database effects; for an effect outside PostgreSQL, enqueue a
+job on `tx` and let that job make the call.
+
+
+### Providers that sign another way
+
+Each endpoint authenticates its sender through a `Verifier`:
+`verify(&HeaderMap, body, SystemTime) -> Result<Bytes, Rejection>` returns the
+provider's stable message identity or a static rejection reason. `KeyRing` is
+the Standard Webhooks verifier and the only one the template wires. A provider
+with its own signature scheme (a different header, digest, or an identity
+carried in the body) implements `Verifier` in the derived service and takes
+that endpoint's place in `prepare_inbound_webhooks`; a receiver that mixes
+schemes takes each endpoint as `Arc<dyn Verifier>`. The receipt, duplicate
+arbitration, job, and consumer path are unchanged. The receiver refuses an
+identity outside 1--255 bytes because the receipt key is indexed, and the
+128 KiB body bound still applies. A verifier never puts request, signature, or
+key bytes in its reason, and it bounds its own work per request.
 
 The template deliberately supplies an empty registry because it has no business
 consumer. It is not a successful default: active ingress without the derived
 service's binding fails startup in both processes. A historical queued job whose
 binding is no longer configured retries and spends its normal attempt budget.
+
+Every endpoint shares the one `webhooks.process` kind and the worker's job
+slots, so one endpoint's slow consumer delays the others. Deliveries of one
+endpoint run concurrently and in no guaranteed order.
 
 PostgreSQL arbitrates concurrent deliveries. In one explicit READ COMMITTED
 transaction it inserts a receipt and enqueues `webhooks.process`. The composite
@@ -174,10 +210,21 @@ forward. An uncommitted failed migration leaves the old schema available for
 restoring the previous binaries/configuration. PostgreSQL remains the readiness
 and shutdown dependency; no sender network probe gates startup.
 
-Incoming telemetry has bounded outcomes: accepted, duplicate, rejected,
-unavailable, and unknown endpoint. Logs have closed missing-binding,
-missing-secret, and delivery-classification reasons. Never use endpoint IDs,
-webhook IDs, URLs, payloads, signatures, secrets, or arbitrary errors as labels
-or diagnostic values. Jobs owns queue/attempt telemetry; no second webhook
-worker, lifecycle, or delivery observer exists.
+`webhook_ingress_outcomes_total` counts admissions with the bounded `outcome`
+label: accepted, duplicate, rejected, unavailable, and unknown_endpoint. A
+configured endpoint adds its ID as `endpoint`, and a rejection adds `reason`:
+the verifier's label (`missing_header`, `conflicting_header`,
+`invalid_message_id`, `invalid_timestamp`, `timestamp_out_of_window`,
+`invalid_signature`) or the route's `body_too_large` and `body_unreadable`. A
+steady `timestamp_out_of_window` points at clock skew, `invalid_signature` at a
+wrong or rotated key. The `webhook_delivery_rejected`,
+`webhook_receipt_unavailable`, and `webhook_processor_missing_binding` events
+carry the same endpoint and reason as fields.
+
+Endpoint IDs are operator configuration, so the configured set bounds the
+label. A requested ID that matches no configured endpoint is caller-controlled:
+it is counted as unknown_endpoint without an `endpoint` label and never logged.
+Never use webhook IDs, URLs, payloads, signatures, secrets, or arbitrary errors
+as labels or diagnostic values. Jobs owns queue/attempt telemetry; no second
+webhook worker, lifecycle, or delivery observer exists.
 <!-- template:end inbound-webhooks:docs-inbound-webhooks-guide -->

@@ -225,8 +225,8 @@ for the shipped binary, and the test-only `jobs-worker-fixture` suite in
 | 3 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)` |
 | 4 | Build the multi-thread runtime | `build tokio runtime: ...` |
 | 5 | Install `Signals` (SIGINT, then SIGTERM) | `install stop signal handlers: ...` |
-| 6 | Tracer provider with the worker identity, subscriber, recorder, and the retained messaging panic hook | the telemetry errors, as in the service |
-| 7 | Register optional jobs and typed-message capabilities through `register(&mut kinds, &mut messages, &support)`; validate each nonempty registry. A composition with no retained capability refuses after configuration is loaded | `job kind registration failed: ...`; `job kinds are invalid: ...`; `typed message handlers are invalid: ...`; `no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs` |
+| 6 | Tracer provider with the worker identity, subscriber, recorder, and the retained messaging panic hook (it records the panic's file, line, and column, never its message) | the telemetry errors, as in the service |
+| 7 | Register optional jobs and typed-message capabilities through `register(&mut registration)`, which fills `Registration::jobs` and `Registration::messages`; validate each nonempty registry. A composition with no retained capability refuses after configuration is loaded | `job kind registration failed: ...`; `job kinds are invalid: ...`; `typed message handlers are invalid: ...`; `no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs` |
 | 8 | `jobs_worker_starting` record; metrics upkeep and Tokio runtime metrics join the tracker | |
 | 9 | After registration, determine whether retained capabilities need PostgreSQL; validate `postgres.enabled` and mode-aware pool capacity, then admit the DSN/pool and migration history | `postgres.enabled must be true to run the jobs worker`; capacity, DSN, pool, or history refusal |
 | 10 | When messaging or outbox is retained, validate producer/consumer configuration, connect NATS under its startup budget, and admit a consumer only for registered typed handlers | messaging configuration, connection, topology, bounds, or consumer refusal |
@@ -295,7 +295,7 @@ called.
 | --- | --- |
 | `0` | A stop signal, and every stage completed inside its ceiling; the drain ended with `drained()`, so no attempt was cancelled at its end |
 | `3` | A stop signal, and any stage voted degraded, including a forced drain (budget or second signal), which is the only way an attempt is cancelled at the drain's end |
-| `1` | A startup refusal, or a started engine or consumer fails without a stop signal. After the failure the same staged plan runs, with its deadline starting at the failure, and its outcome does not change the code |
+| `1` | A startup refusal, or a started engine or consumer fails without a stop signal; the reported failure names which one stopped, and a consumer failure carries its cause. After the failure the same staged plan runs, with its deadline starting at the failure, and its outcome does not change the code |
 
 The [guide](../background-jobs.md#run-and-stop-the-worker) covers running and
 stopping the worker. [Async Architecture](async.md) records the mechanism.

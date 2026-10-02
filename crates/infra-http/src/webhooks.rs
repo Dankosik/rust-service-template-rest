@@ -22,7 +22,11 @@ use crate::extract::Path;
 use crate::problem::responses::WebhookProblemResponses;
 use crate::problem::{Code, Problem};
 
-/// Bounded result labels for webhook ingress telemetry.
+/// Webhook ingress results. Label `outcome` is `accepted`, `duplicate`,
+/// `rejected`, `unavailable`, or `unknown_endpoint`. A configured endpoint
+/// adds its operator-chosen ID as `endpoint`, and a rejection adds the
+/// verifier's static `reason`. A requested ID that matches no configured
+/// endpoint is caller-controlled and never becomes a label.
 pub const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
 
 /// Route state supplied by the composition root.
@@ -71,6 +75,11 @@ where
     WebhookState: FromRef<S>,
     S: Clone + Send + Sync + 'static,
 {
+    metrics::describe_counter!(
+        WEBHOOK_INGRESS_OUTCOMES_METRIC,
+        metrics::Unit::Count,
+        "Inbound webhook deliveries by admission outcome."
+    );
     OpenApiRouter::with_openapi(crate::problem::responses::ProblemComponents::openapi())
         .routes(routes!(receive))
 }
@@ -106,43 +115,70 @@ async fn receive(
     request: Request,
 ) -> Response {
     let Some(receiver) = state.receiver.as_ref() else {
-        return outcome_problem(Code::NotFound, "unknown_endpoint");
+        return unknown_endpoint();
     };
     if !receiver.has_endpoint(&endpoint_id) {
-        return outcome_problem(Code::NotFound, "unknown_endpoint");
+        return unknown_endpoint();
     }
     let (parts, body) = request.into_parts();
     let body = match Limited::new(body, MAX_BODY_BYTES).collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(error) if error.is::<http_body_util::LengthLimitError>() => {
-            return outcome_problem(Code::RequestEntityTooLarge, "rejected");
+            record_rejection(&endpoint_id, "body_too_large");
+            return Problem::new(Code::RequestEntityTooLarge).into_response();
         }
-        Err(_) => return outcome_problem(Code::WebhookRejected, "rejected"),
+        Err(_) => {
+            record_rejection(&endpoint_id, "body_unreadable");
+            return Problem::new(Code::WebhookRejected).into_response();
+        }
     };
     match receiver
         .receive(&endpoint_id, &parts.headers, &body, SystemTime::now())
         .await
     {
-        Ok(ReceiptOutcome::Accepted) => outcome_no_content("accepted"),
-        Ok(ReceiptOutcome::Duplicate) => outcome_no_content("duplicate"),
-        Err(ReceiveError::UnknownEndpoint) => outcome_problem(Code::NotFound, "unknown_endpoint"),
-        Err(ReceiveError::Rejected) => outcome_problem(Code::WebhookRejected, "rejected"),
-        Err(ReceiveError::Unavailable) => outcome_problem(Code::ServiceUnavailable, "unavailable"),
+        Ok(outcome) => {
+            let outcome = match outcome {
+                ReceiptOutcome::Accepted => "accepted",
+                ReceiptOutcome::Duplicate => "duplicate",
+            };
+            record_outcome(&endpoint_id, outcome);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(ReceiveError::UnknownEndpoint) => unknown_endpoint(),
+        Err(ReceiveError::Rejected(rejection)) => {
+            record_rejection(&endpoint_id, rejection.reason());
+            Problem::new(Code::WebhookRejected).into_response()
+        }
+        Err(ReceiveError::Unavailable) => {
+            record_outcome(&endpoint_id, "unavailable");
+            Problem::new(Code::ServiceUnavailable).into_response()
+        }
     }
 }
 
-fn outcome_no_content(outcome: &'static str) -> Response {
-    record_outcome(outcome);
-    StatusCode::NO_CONTENT.into_response()
+fn unknown_endpoint() -> Response {
+    metrics::counter!(WEBHOOK_INGRESS_OUTCOMES_METRIC, "outcome" => "unknown_endpoint")
+        .increment(1);
+    Problem::new(Code::NotFound).into_response()
 }
 
-fn outcome_problem(code: Code, outcome: &'static str) -> Response {
-    record_outcome(outcome);
-    Problem::new(code).into_response()
+fn record_outcome(endpoint_id: &str, outcome: &'static str) {
+    metrics::counter!(
+        WEBHOOK_INGRESS_OUTCOMES_METRIC,
+        "endpoint" => endpoint_id.to_owned(),
+        "outcome" => outcome
+    )
+    .increment(1);
 }
 
-fn record_outcome(outcome: &'static str) {
-    metrics::counter!(WEBHOOK_INGRESS_OUTCOMES_METRIC, "outcome" => outcome).increment(1);
+fn record_rejection(endpoint_id: &str, reason: &'static str) {
+    metrics::counter!(
+        WEBHOOK_INGRESS_OUTCOMES_METRIC,
+        "endpoint" => endpoint_id.to_owned(),
+        "outcome" => "rejected",
+        "reason" => reason
+    )
+    .increment(1);
 }
 
 #[cfg(test)]
@@ -155,6 +191,92 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    /// Collects the key of every counter the route registers.
+    #[derive(Default)]
+    struct Keys(std::sync::Mutex<Vec<metrics::Key>>);
+
+    impl metrics::Recorder for Keys {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            self.0.lock().expect("keys").push(key.clone());
+            metrics::Counter::noop()
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    #[test]
+    fn outcomes_label_a_configured_endpoint_and_never_an_unknown_one() {
+        let keys = Keys::default();
+        metrics::with_local_recorder(&keys, || {
+            record_outcome("partner", "accepted");
+            record_rejection("partner", "invalid_signature");
+            let _ = unknown_endpoint();
+        });
+        let labels: Vec<Vec<(String, String)>> = keys
+            .0
+            .lock()
+            .expect("keys")
+            .iter()
+            .map(|key| {
+                assert_eq!(key.name(), WEBHOOK_INGRESS_OUTCOMES_METRIC);
+                key.labels()
+                    .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                    .collect()
+            })
+            .collect();
+        let pair = |key: &str, value: &str| (key.to_owned(), value.to_owned());
+        assert_eq!(
+            labels,
+            [
+                vec![pair("endpoint", "partner"), pair("outcome", "accepted")],
+                vec![
+                    pair("endpoint", "partner"),
+                    pair("outcome", "rejected"),
+                    pair("reason", "invalid_signature"),
+                ],
+                vec![pair("outcome", "unknown_endpoint")],
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn inert_receiver_returns_a_problem_before_reading_or_authenticating_the_body() {

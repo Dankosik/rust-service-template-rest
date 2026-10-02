@@ -48,9 +48,22 @@ The transport never repeats a request that may have reached the provider and nev
 
 ## Error and observation contract
 
-The client returns `InvalidConfiguration`, `InvalidTarget`, `Timeout`, `ResponseBodyTooLarge`, `ClientBuild`, or `Transport`. Retained transport errors carry no request URL, headers, or body. Provider adapters map these errors at their own boundary; this client does not construct inbound Problems.
+Construction returns a `BuildError`: `InvalidConfiguration` for a refused origin or limit, or `Tls` when the platform verifier cannot be built. An exchange returns an `Error`: `InvalidTarget`, `Timeout`, `ResponseBodyTooLarge`, or `Transport`. Retained transport errors carry no request URL, headers, or body. Provider adapters map these errors at their own boundary; this client does not construct inbound Problems.
 
 Each polled attempt that passes deadline and target admission records a bounded client span, exported under the OpenTelemetry name of its method (`HTTP` for a non-standard method), and the OpenTelemetry `http.client.request.duration` histogram, exported in the service's Prometheus naming as `http_client_request_duration_seconds`. The signal contains only the standard method or `_OTHER`, configured origin address/port, a finite outcome, known status, and a static failure type. It never includes a full URL, path, query, headers, credentials, body, request identifier, or arbitrary error text. A dropped pending attempt is observed as caller cancellation rather than provider success or failure.
+
+The failure type (`error.type`) of a failed exchange is one of:
+
+| `error.type` | Meaning |
+| --- | --- |
+| `timeout` | The deadline or `Limits::operation_timeout` ended the exchange. A known status means the response head had arrived. |
+| `response_body_too_large` | The body exceeded `Limits::response_body_bytes`. |
+| `connect` | No connection was established: name resolution, a refused or unanswered TCP connect. |
+| `tls` | The TLS handshake was refused: an untrusted, expired, or mismatched certificate, or a protocol alert. |
+| `protocol` | The response head could not be parsed, or exceeded the header count or the head buffer. |
+| `transport` | Any other transport failure, such as a connection lost during the exchange. |
+
+An adapter maps `Transport` to its own closed outcome and drops the source, so the client tells the cause itself: each `Transport` failure logs one `outbound_http_transport_failed` warning inside the client span, whose `error` field is the library error and its sources on one line, for example `client error (Connect): invalid peer certificate: BadSignature`. That text comes from hyper, rustls, and the operating system; it can name the configured host and a resolved address, and carries no request URL, headers, or body.
 
 ## Test-only HTTP mock support
 
@@ -67,6 +80,6 @@ Shared generated TLS material is test-only and is retained when authentication o
 
 ## Compatibility and decisions
 
-This API removes `Operation` (pass the deadline directly), `Limits::max_active` with `AtCapacity`, the per-operation response-body limit, origin-form request targets, and the removal of `traceparent`, `tracestate`, `baggage`, and `X-Request-ID`. `Client::new` and `Client::new_for_test_http` take a `Url`. `Timeout` no longer carries a source. Adopters pass absolute same-origin request URLs and drop obsolete error matches. The initializer choice remains `OUTBOUND_HTTP=none|bounded`.
+This API removes `Operation` (pass the deadline directly), `Limits::max_active` with `AtCapacity`, the per-operation response-body limit, origin-form request targets, and the removal of `traceparent`, `tracestate`, `baggage`, and `X-Request-ID`. `Client::new` and `Client::new_for_test_http` take a `Url`. `Timeout` no longer carries a source. Construction failures moved from `Error` to `BuildError` (`InvalidConfiguration`, and `Tls` in place of `ClientBuild`), so a match on an exchange `Error` needs no arm for them. The `error.type` of a transport failure is now `connect`, `tls`, `protocol`, or `transport`, where it was always `transport`; a dashboard or alert that selects `error_type="transport"` should select all four. Adopters pass absolute same-origin request URLs and drop obsolete error matches. The initializer choice remains `OUTBOUND_HTTP=none|bounded`.
 
 [Outbound HTTP decisions](outbound-http-decisions.md) records the resolved library versions, telemetry conventions, and reopen conditions. A proxy, HTTP/2, streaming, automatic decompression, a raw-target API, or an untrusted destination need a new contract and proof.

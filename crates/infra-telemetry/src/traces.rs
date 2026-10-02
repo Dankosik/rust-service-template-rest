@@ -8,6 +8,8 @@
 //! When the typed endpoint selects the collector, ambient header variables
 //! are refused because the SDK would merge them into the typed request, so
 //! one collector's credential is never sent to another.
+//! `OTEL_EXPORTER_OTLP_COMPRESSION` and its traces variant select `gzip`;
+//! the default is uncompressed, as the specification has it.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -17,10 +19,15 @@ use opentelemetry::trace::TracerProvider;
 use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
-use opentelemetry_sdk::trace::{self as sdktrace, SdkTracer, SdkTracerProvider};
+use opentelemetry_sdk::trace::{
+    self as sdktrace, SdkTracer, SdkTracerProvider, SpanData, SpanExporter,
+};
 use opentelemetry_semantic_conventions::attribute;
 use secrecy::{ExposeSecret, SecretString};
+
+use crate::metrics::TRACE_SPANS_EXPORTED_METRIC;
 
 /// Trace sampler selected by typed configuration, with the ratio already
 /// attached to the variants that use it.
@@ -203,7 +210,7 @@ pub fn install_tracer_provider(
         None => ExporterState::Disabled,
         Some(source) => match span_exporter(options.otlp_endpoint.as_deref(), headers) {
             Ok(span_exporter) => {
-                builder = builder.with_batch_exporter(span_exporter);
+                builder = builder.with_batch_exporter(Counted(span_exporter));
                 ExporterState::Initialized {
                     endpoint_source: source,
                     ignored_variables: UNSUPPORTED_TRUST_VARS
@@ -315,6 +322,44 @@ fn span_exporter(
         builder = builder.with_headers(headers);
     }
     builder.build()
+}
+
+/// Counts the spans of every finished export under
+/// [`TRACE_SPANS_EXPORTED_METRIC`], so delivery to the collector is a
+/// metric and not only an SDK log line.
+#[derive(Debug)]
+struct Counted<E>(E);
+
+impl<E: SpanExporter> SpanExporter for Counted<E> {
+    async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+        let spans = u64::try_from(batch.len()).unwrap_or(u64::MAX);
+        let result = self.0.export(batch).await;
+        match &result {
+            Ok(()) => metrics::counter!(TRACE_SPANS_EXPORTED_METRIC).increment(spans),
+            Err(err) => {
+                let error_type = match err {
+                    OTelSdkError::Timeout(_) => "timeout",
+                    OTelSdkError::AlreadyShutdown => "already_shutdown",
+                    OTelSdkError::InternalFailure(_) => "internal_failure",
+                };
+                metrics::counter!(TRACE_SPANS_EXPORTED_METRIC, "error_type" => error_type)
+                    .increment(spans);
+            }
+        }
+        result
+    }
+
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        self.0.shutdown_with_timeout(timeout)
+    }
+
+    fn force_flush(&self) -> OTelSdkResult {
+        self.0.force_flush()
+    }
+
+    fn set_resource(&mut self, resource: &Resource) {
+        self.0.set_resource(resource);
+    }
 }
 
 /// The SDK uses a programmatic endpoint verbatim. Apply the
@@ -532,6 +577,73 @@ mod tests {
             !message.contains("URL scheme is not allowed"),
             "https must be a permitted scheme: {message}"
         );
+    }
+
+    #[test]
+    fn gzip_compression_is_available_to_the_exporter() {
+        // `OTEL_EXPORTER_OTLP_COMPRESSION=gzip` reaches the same check; without
+        // the `gzip-http` feature the build fails and tracing degrades.
+        use opentelemetry_otlp::WithHttpConfig as _;
+
+        opentelemetry_otlp::SpanExporter::builder()
+            .with_http()
+            .with_compression(opentelemetry_otlp::Compression::Gzip)
+            .build()
+            .expect("gzip must be a supported compression");
+    }
+
+    #[derive(Debug)]
+    struct Fixed(fn() -> OTelSdkResult);
+
+    impl SpanExporter for Fixed {
+        fn export(&self, _batch: Vec<SpanData>) -> impl Future<Output = OTelSdkResult> + Send {
+            std::future::ready((self.0)())
+        }
+    }
+
+    #[test]
+    fn finished_exports_are_counted_by_outcome() {
+        use futures_util::FutureExt;
+        use opentelemetry::trace::{SpanContext, SpanKind, Status};
+
+        let span = || SpanData {
+            span_context: SpanContext::empty_context(),
+            parent_span_id: opentelemetry::trace::SpanId::INVALID,
+            parent_span_is_remote: false,
+            span_kind: SpanKind::Internal,
+            name: "span".into(),
+            start_time: std::time::SystemTime::UNIX_EPOCH,
+            end_time: std::time::SystemTime::UNIX_EPOCH,
+            attributes: Vec::new(),
+            dropped_attributes_count: 0,
+            events: sdktrace::SpanEvents::default(),
+            links: sdktrace::SpanLinks::default(),
+            status: Status::Unset,
+            instrumentation_scope: opentelemetry::InstrumentationScope::default(),
+        };
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        metrics::with_local_recorder(&recorder, || {
+            let export = |exporter: Fixed, spans: usize| {
+                let _ = Counted(exporter)
+                    .export((0..spans).map(|_| span()).collect())
+                    .now_or_never()
+                    .expect("the fixed exporter is ready");
+            };
+            export(Fixed(|| Ok(())), 3);
+            export(Fixed(|| Err(OTelSdkError::Timeout(Duration::ZERO))), 2);
+            export(
+                Fixed(|| Err(OTelSdkError::InternalFailure("refused".into()))),
+                1,
+            );
+        });
+        let rendered = recorder.handle().render();
+        for series in [
+            "otel_sdk_exporter_span_exported_total 3",
+            "otel_sdk_exporter_span_exported_total{error_type=\"timeout\"} 2",
+            "otel_sdk_exporter_span_exported_total{error_type=\"internal_failure\"} 1",
+        ] {
+            assert!(rendered.contains(series), "{series}: {rendered}");
+        }
     }
 
     #[test]
