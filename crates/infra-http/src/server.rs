@@ -7,6 +7,7 @@
 //! long to wait.
 
 use std::future::Future;
+use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -15,12 +16,12 @@ use std::time::Duration;
 use axum::Router;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
-use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 /// Connection-level policy the router cannot express.
 #[derive(Clone, Copy, Debug)]
@@ -41,6 +42,15 @@ pub struct ServerOptions {
     pub max_header_bytes: usize,
     /// Accepted connections at once; `None` accepts without a bound.
     pub max_connections: Option<NonZeroU32>,
+    /// Age after which a connection is told to finish and close, as at
+    /// drain: HTTP/2 gets GOAWAY and its open streams complete, HTTP/1
+    /// closes after the response in flight. A client that reconnects is
+    /// balanced again, which a long-lived connection behind a
+    /// connection-level balancer never is. Each connection's age is spread
+    /// by up to 10% either way, as grpc-go spreads `MaxConnectionAge`, so
+    /// connections opened together do not all close together. `None` keeps
+    /// a connection for as long as its peer does.
+    pub max_connection_age: Option<Duration>,
 }
 
 /// Server failures visible to the composition root.
@@ -74,7 +84,10 @@ pub enum Drained {
 pub struct Server {
     local_addr: SocketAddr,
     stop_accepting: CancellationToken,
-    accept_loop: Option<JoinHandle<GracefulShutdown>>,
+    accept_loop: Option<JoinHandle<()>>,
+    /// Tells every connection to finish its current requests and close.
+    finish_connections: CancellationToken,
+    connections: TaskTracker,
 }
 
 impl Server {
@@ -142,9 +155,11 @@ impl Server {
         let Some(accept_loop) = self.accept_loop.take() else {
             return Ok(Drained::Complete);
         };
-        let graceful = accept_loop.await.map_err(ServerError::AcceptTask)?;
-        let remaining_connections = graceful.count();
-        match tokio::time::timeout(budget, graceful.shutdown()).await {
+        accept_loop.await.map_err(ServerError::AcceptTask)?;
+        self.connections.close();
+        let remaining_connections = self.connections.len();
+        self.finish_connections.cancel();
+        match tokio::time::timeout(budget, self.connections.wait()).await {
             Ok(()) => Ok(Drained::Complete),
             Err(_elapsed) => Ok(Drained::TimedOut {
                 remaining_connections,
@@ -222,17 +237,23 @@ where
         .local_addr()
         .map_err(|source| ServerError::Bind { addr, source })?;
     let stop_accepting = CancellationToken::new();
+    let finish_connections = CancellationToken::new();
+    let connections = TaskTracker::new();
     let accept_loop = tokio::spawn(accept_loop(
         listener,
         app,
         options,
         stop_accepting.clone(),
+        finish_connections.clone(),
+        connections.clone(),
         prepare_io,
     ));
     Ok(Server {
         local_addr,
         stop_accepting,
         accept_loop: Some(accept_loop),
+        finish_connections,
+        connections,
     })
 }
 
@@ -241,15 +262,15 @@ async fn accept_loop<F, Fut, IO>(
     app: Router,
     options: ServerOptions,
     stop: CancellationToken,
+    finish_connections: CancellationToken,
+    connections: TaskTracker,
     prepare_io: F,
-) -> GracefulShutdown
-where
+) where
     F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = Option<IO>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let builder = connection_builder(options);
-    let graceful = GracefulShutdown::new();
     let permits = options
         .max_connections
         .map(|limit| Arc::new(Semaphore::new(limit.get() as usize)));
@@ -285,7 +306,7 @@ where
                 continue;
             }
         };
-        let watcher = graceful.watcher();
+        let finish = finish_connections.clone();
         let builder = builder.clone();
         let app = app.clone();
         let prepare_io = prepare_io.clone();
@@ -293,7 +314,7 @@ where
         // segments; with Nagle on, each can wait for the peer's delayed ACK
         // (about 40 ms). Failing to set it only costs latency.
         let _ = stream.set_nodelay(true);
-        tokio::spawn(async move {
+        connections.spawn(async move {
             // Keep admission for the first-byte wait, TLS handshake, and the
             // entire hyper connection, releasing it on every exit path.
             let _permit = permit;
@@ -304,17 +325,44 @@ where
                 return;
             };
             let connection = builder
-                .serve_connection_with_upgrades(TokioIo::new(io), TowerToHyperService::new(app))
-                .into_owned();
-            if let Err(err) = watcher.watch(connection).await {
+                .serve_connection_with_upgrades(TokioIo::new(io), TowerToHyperService::new(app));
+            tokio::pin!(connection);
+            let ended = tokio::select! {
+                ended = connection.as_mut() => Some(ended),
+                () = finish.cancelled() => None,
+                () = reached_age(options.max_connection_age) => None,
+            };
+            let ended = if let Some(ended) = ended {
+                ended
+            } else {
+                connection.as_mut().graceful_shutdown();
+                connection.await
+            };
+            if let Err(err) = ended {
                 tracing::debug!(%peer, error = %err, "connection ended with error");
             }
         });
     }
     // Dropping the listener here refuses new connections at once; the
-    // accepted ones keep running under their watchers.
+    // accepted ones keep running in their tracked tasks.
     drop(listener);
-    graceful
+}
+
+/// Resolves when a connection has lived for its spread age; never without one.
+async fn reached_age(max_connection_age: Option<Duration>) {
+    match max_connection_age {
+        Some(age) => tokio::time::sleep(spread(age)).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// `age` scaled by a factor drawn from 0.9 to 1.1. The draw is the standard
+/// library's randomly keyed hasher: enough to spread closes, not a secret.
+fn spread(age: Duration) -> Duration {
+    let draw = RandomState::new().build_hasher().finish() % 201;
+    let permille = 900 + u32::try_from(draw).unwrap_or(100);
+    age.checked_mul(permille)
+        .map_or(age, |scaled| scaled / 1000)
 }
 
 /// Counter of connections closed at accept because `max_connections` was
@@ -356,6 +404,7 @@ mod tests {
             header_read_timeout: Duration::from_millis(300),
             max_header_bytes: 8 * 1024,
             max_connections: NonZeroU32::new(4),
+            max_connection_age: None,
         }
     }
 
@@ -486,6 +535,45 @@ mod tests {
         );
         drop(first);
         server.drain(Duration::from_secs(1)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_connection_past_its_age_closes_once_idle_and_new_ones_are_served() {
+        let mut opts = options();
+        opts.header_read_timeout = Duration::from_secs(5);
+        opts.max_connection_age = Some(Duration::from_millis(200));
+        let server = Server::bind(loopback(), app(), opts).await.unwrap();
+        let addr = server.local_addr();
+        let mut kept = TcpStream::connect(addr).await.unwrap();
+        kept.write_all(b"GET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        // The keep-alive response, then EOF when the age is reached: far
+        // sooner than the five-second idle bound.
+        let mut response = Vec::new();
+        let closed =
+            tokio::time::timeout(Duration::from_secs(2), kept.read_to_end(&mut response)).await;
+        assert!(matches!(closed, Ok(Ok(_))), "{closed:?}");
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 200 "), "{text}");
+        assert!(text.ends_with("ok"), "{text}");
+        assert!(fetch(addr, "/ok").await.starts_with("HTTP/1.1 200 "));
+        let drained = server.drain(Duration::from_secs(2)).await.unwrap();
+        assert_eq!(drained, Drained::Complete);
+    }
+
+    #[test]
+    fn a_connection_age_is_spread_within_a_tenth() {
+        let age = Duration::from_mins(30);
+        let spreads: Vec<Duration> = (0..64).map(|_| spread(age)).collect();
+        assert!(
+            spreads
+                .iter()
+                .all(|spread| (age * 9 / 10..=age * 11 / 10).contains(spread)),
+            "{spreads:?}"
+        );
+        assert!(spreads.iter().any(|spread| *spread != spreads[0]));
+        assert_eq!(spread(Duration::MAX), Duration::MAX);
     }
 
     #[tokio::test]

@@ -88,7 +88,10 @@ fn accepted(message: String) -> Result<String, Status> {
     }
 }
 
-fn register(services: &mut Services) -> Result<(), infra_grpc::Error> {
+/// `Echo` keeps no state; a server that reads a dependency takes it from
+/// the state here, as an HTTP handler takes it through `State`.
+fn register(services: &mut Services, _state: &service::AppState) -> Result<(), infra_grpc::Error> {
+    services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
     services.add(EchoServiceServer::new(Echo))
 }
 

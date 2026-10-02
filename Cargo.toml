@@ -119,6 +119,7 @@ tonic-health = { version = "=0.14.6", default-features = false }
 tonic-reflection = { version = "=0.14.6", default-features = false }
 tonic-types = { version = "=0.14.6", default-features = false }
 prost = { version = "=0.14.4", default-features = false }
+prost-types = { version = "=0.14.4", default-features = false }
 tokio-stream = { version = "0.1.19", default-features = false }
 # template:end grpc:workspace-grpc-dependencies
 # template:begin rustls:workspace-rustls

@@ -270,6 +270,18 @@ listener performs no TLS or network work. Config Debug omits all trust and
 identity material. Client integration inputs select a trusted destination,
 explicit security, optional CA and optional paired certificate/key; they do
 not create a client registry or token owner. See [gRPC](grpc.md).
+
+The listener's runtime budgets are non-secret and follow normal file and
+environment precedence; they are checked only while `grpc.enabled` is true.
+`grpc.request_timeout` (default `8s`, `100ms` to `10m`) caps a business
+call's time to response headers and must fit inside the effective HTTP drain
+budget, which both listeners share. `grpc.max_in_flight` (default `256`,
+zero disables shedding) bounds business calls running at once.
+`grpc.max_connections` (default `4096`, zero is unbounded) bounds accepted
+connections; many calls share one HTTP/2 connection, so it is independent of
+`max_in_flight`. `grpc.max_connection_age` (default `30m`, `0s` off,
+otherwise `1s` to `1d`) sends GOAWAY to a connection that reached it, spread
+by up to 10% either way.
 <!-- template:end grpc:docs-config-grpc -->
 
 Typed configuration owns service identity and takes precedence; the official
@@ -394,6 +406,14 @@ fields.
   so a saturated instance is not restarted as dead. `http.max_connections` (default `4096`) bounds accepted
   connections; the excess is closed at accept without a response. It must be
   at least `max_in_flight` so the informative rejection stays the common one.
+- `http.max_connection_age` (default `0s`, off) tells a connection that
+  reached it to finish and close, as at drain, so its client reconnects and
+  is balanced again; each connection's age is spread by up to 10% either
+  way. A set value must be between `1s` and `1d`. It stays off by default
+  because an HTTP/1 proxy that reuses an idle connection just as the server
+  closes it sees a failed request; set it when HTTP/2 clients hold
+  connections behind a connection-level balancer. The diagnostics listener
+  shares the HTTP listener's options, this one included.
 - `http.access_log_health_probes` defaults to `false`, so matched
   `GET /health/live` and `GET /health/ready` requests are served without an
   access-log line. The exclusion is by route template: an unmatched path that

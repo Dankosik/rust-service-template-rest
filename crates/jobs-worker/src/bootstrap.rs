@@ -782,6 +782,7 @@ fn server_options(config: &Config) -> ServerOptions {
         max_header_bytes: usize::try_from(config.http.max_header_bytes.as_u64())
             .unwrap_or(usize::MAX),
         max_connections: config.http.connection_cap(),
+        max_connection_age: config.http.connection_age(),
     }
 }
 

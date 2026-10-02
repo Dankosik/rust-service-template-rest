@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use http::{Request, Response};
 use opentelemetry::trace::SpanKind;
@@ -67,7 +67,9 @@ impl Client {
             .map_err(|_| Error::InvalidDestination)?
             .connect_timeout(Duration::from_secs(5))
             .tcp_keepalive(Some(Duration::from_secs(60)))
-            .http2_keep_alive_interval(Duration::from_secs(20))
+            // gRPC's keepalive guide asks clients not to ping much more
+            // often than once a minute, and only while a call is open.
+            .http2_keep_alive_interval(Duration::from_secs(60))
             .keep_alive_timeout(Duration::from_secs(20))
             // Receive windows follow the bandwidth-delay product, as the server's do.
             .http2_adaptive_window(true);
@@ -102,29 +104,23 @@ impl tower::Service<Request<Body>> for Client {
     }
 
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
-        let span = crate::observe::make_span(&request, &SpanKind::Client);
+        let call = crate::observe::Call::start(&self.series, &request, SpanKind::Client);
         otel_http::inject_context(
-            &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(&span),
+            &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
             request.headers_mut(),
         );
-        let started = Instant::now();
-        // Shares the request's bytes; the path is read after the call.
-        let uri = request.uri().clone();
         let mut channel = self.channel.clone();
-        let series = Arc::clone(&self.series);
         Box::pin(async move {
             let result = async {
                 let ready = channel.ready().await.map_err(transport_status)?;
                 ready.call(request).await.map_err(transport_status)
             }
-            .instrument(span.clone())
+            .instrument(call.span().clone())
             .await;
-            let code = match &result {
+            call.finish(match &result {
                 Ok(response) => crate::observe::code_from_headers(response.headers()),
                 Err(status) => status.code(),
-            };
-            crate::observe::update_span(&span, code, &SpanKind::Client);
-            series.record(uri.path(), code, started.elapsed());
+            });
             result
         })
     }
@@ -152,15 +148,22 @@ fn client_tls(material: &ClientTlsMaterial) -> Result<ClientTlsConfig, Error> {
 }
 
 /// The caller sees a fixed status, because a handler may forward it to its
-/// own caller; the cause is logged inside the client span.
+/// own caller; the cause is logged inside the client span. The call's own
+/// `grpc-timeout` running out, which tonic's channel enforces, is the
+/// caller's deadline and not a transport fault: it is `DEADLINE_EXCEEDED`,
+/// so a caller that retries `UNAVAILABLE` does not repeat a call the server
+/// may still be running.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "used as a `map_err` callback, which hands over the owned error"
 )]
 fn transport_status(error: tonic::transport::Error) -> tonic::Status {
-    tracing::warn!(
-        error = &error as &dyn std::error::Error,
-        "grpc_client_transport_failed"
-    );
+    let error = &error as &(dyn std::error::Error + 'static);
+    if std::iter::successors(Some(error), |error| error.source())
+        .any(<dyn std::error::Error>::is::<tonic::TimeoutExpired>)
+    {
+        return tonic::Status::deadline_exceeded("request deadline exceeded");
+    }
+    tracing::warn!(error, "grpc_client_transport_failed");
     tonic::Status::unavailable("transport unavailable")
 }

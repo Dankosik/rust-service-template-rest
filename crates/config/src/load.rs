@@ -587,6 +587,46 @@ mod tests {
     }
 
     #[test]
+    fn grpc_limits_load_from_the_environment_and_a_bad_one_names_its_key() {
+        let listener = [
+            ("APP__GRPC__ENABLED", "true"),
+            ("APP__GRPC__ADDR", "127.0.0.1:0"),
+            ("APP__GRPC__SECURITY", "plaintext"),
+        ];
+        let limits = [
+            ("APP__GRPC__REQUEST_TIMEOUT", "3s"),
+            ("APP__GRPC__MAX_IN_FLIGHT", "32"),
+            ("APP__GRPC__MAX_CONNECTIONS", "0"),
+            ("APP__GRPC__MAX_CONNECTION_AGE", "5m"),
+        ];
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[listener.as_slice(), limits.as_slice()].concat()),
+        )
+        .unwrap();
+        assert_eq!(cfg.grpc.request_timeout, Duration::from_secs(3));
+        assert_eq!(
+            cfg.grpc.in_flight_cap().map(std::num::NonZeroU32::get),
+            Some(32)
+        );
+        assert_eq!(cfg.grpc.connection_cap(), None);
+        assert_eq!(cfg.grpc.connection_age(), Some(Duration::from_mins(5)));
+
+        let over_drain = [("APP__GRPC__REQUEST_TIMEOUT", "11s")];
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[listener.as_slice(), over_drain.as_slice()].concat()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Validate(error) if error.key == "grpc.request_timeout"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn grpc_private_key_is_environment_only_and_debug_is_redacted() {
         let dir = tempfile::tempdir().unwrap();
         let listener = write(
@@ -2387,6 +2427,7 @@ mod tests {
                 ("APP__HTTP__REQUEST_TIMEOUT", "500ms"),
                 ("APP__HTTP__MAX_BODY_BYTES", "2 MiB"),
                 ("APP__HTTP__MAX_IN_FLIGHT", "12"),
+                ("APP__HTTP__MAX_CONNECTION_AGE", "1h"),
                 ("APP__HTTP__ACCESS_LOG_HEALTH_PROBES", "true"),
                 ("APP__LOG__FORMAT", "text"),
                 ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER", "always_on"),
@@ -2397,6 +2438,7 @@ mod tests {
         assert_eq!(cfg.http.request_timeout, Duration::from_millis(500));
         assert_eq!(cfg.http.max_body_bytes, bytesize::ByteSize::mib(2));
         assert_eq!(cfg.http.max_in_flight, 12);
+        assert_eq!(cfg.http.connection_age(), Some(Duration::from_hours(1)));
         assert!(cfg.http.access_log_health_probes);
         assert_eq!(cfg.log.format, LogFormat::Text);
         assert_eq!(

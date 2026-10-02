@@ -7,9 +7,9 @@
 //! the RPC attributes go to the OpenTelemetry span alone, and nothing is
 //! `Span::record`ed afterwards, since every record re-serializes the fields.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
-use std::sync::{Once, OnceLock, PoisonError, RwLock};
+use std::sync::{Arc, Once, OnceLock, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt as _;
@@ -22,10 +22,12 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
 
+const SERVER_STARTED: &str = "grpc_server_started_total";
 const SERVER_HANDLED: &str = "grpc_server_handled_total";
 /// Server time to response headers, a histogram by service and method.
 pub const SERVER_HANDLING_SECONDS: &str = "grpc_server_handling_seconds";
 const SERVER_SHED: &str = "grpc_server_shed_requests_total";
+const CLIENT_STARTED: &str = "grpc_client_started_total";
 const CLIENT_HANDLED: &str = "grpc_client_handled_total";
 /// Client time to response headers, a histogram by service and method.
 pub const CLIENT_HANDLING_SECONDS: &str = "grpc_client_handling_seconds";
@@ -38,37 +40,24 @@ pub const HANDLING_SECONDS_BUCKETS: &[f64] = &[
 
 static DESCRIBE: Once = Once::new();
 
-/// Response marker set once a registered generated service handled the call.
-#[derive(Clone, Copy)]
-struct Dispatched;
-
-pub(crate) fn mark_dispatched<B>(mut response: http::Response<B>) -> http::Response<B> {
-    response.extensions_mut().insert(Dispatched);
-    response
-}
-
-/// Server span and metrics. The path becomes labels only for a dispatched call
-/// that the generated service recognized, so caller-chosen paths cannot create
-/// series; every other call is counted under `unknown`. A panicking handler
-/// becomes a sanitized `Internal` answer, observed like any other call.
+/// Server span and metrics. A panicking handler becomes a sanitized
+/// `Internal` answer, observed like any other call.
 pub(crate) async fn observe(
-    axum::extract::State(series): axum::extract::State<std::sync::Arc<Series>>,
+    axum::extract::State(series): axum::extract::State<Arc<Series>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let started = Instant::now();
-    // Shares the request's bytes; the path is read after the call.
-    let uri = request.uri().clone();
-    let span = make_span(&request, &SpanKind::Server);
-    let fallback = set_parent_or_fallback(&span, otel_http::extract_context(request.headers()));
-    let call = AssertUnwindSafe(next.run(request))
+    let call = Call::start(&series, &request, SpanKind::Server);
+    let fallback =
+        set_parent_or_fallback(call.span(), otel_http::extract_context(request.headers()));
+    let answer = AssertUnwindSafe(next.run(request))
         .catch_unwind()
-        .instrument(span.clone());
+        .instrument(call.span().clone());
     let response = match fallback {
-        None => call.await,
+        None => answer.await,
         // The span is disabled: keep the caller's context current instead,
         // so it still reaches outbound calls.
-        Some(context) => call.with_context(context).await,
+        Some(context) => answer.with_context(context).await,
     }
     .unwrap_or_else(|_panic| {
         tonic::Status::from(crate::Failure::new(
@@ -76,21 +65,72 @@ pub(crate) async fn observe(
         ))
         .into_http()
     });
-    let code = code_from_headers(response.headers());
-    update_span(&span, code, &SpanKind::Server);
-    let dispatched = response.extensions().get::<Dispatched>().is_some();
-    let path = if dispatched && code != Code::Unimplemented {
-        uri.path()
-    } else {
-        UNKNOWN_PATH
-    };
-    series.record(path, code, started.elapsed());
+    call.finish(code_from_headers(response.headers()));
     response
 }
 
-/// The RPC span with its OpenTelemetry attributes.
-pub(crate) fn make_span<B>(request: &http::Request<B>, kind: &SpanKind) -> tracing::Span {
-    let (service, method) = service_and_method(request.uri().path());
+/// One observed call: counted as started when created and as handled, with
+/// its status code, when finished. A call dropped before that was abandoned
+/// by its caller, which stopped waiting or reset the stream, and is recorded
+/// as `Cancelled`, as grpc-go records it.
+pub(crate) struct Call {
+    series: Arc<Series>,
+    /// Shares the request's bytes. `None` when the path is not a label.
+    uri: Option<http::Uri>,
+    span: tracing::Span,
+    kind: SpanKind,
+    started: Instant,
+    finished: bool,
+}
+
+impl Call {
+    pub(crate) fn start<B>(
+        series: &Arc<Series>,
+        request: &http::Request<B>,
+        kind: SpanKind,
+    ) -> Self {
+        let started = Instant::now();
+        let path = series.label(request.uri().path());
+        let span = make_span(request, path, &kind);
+        series.started(path);
+        Self {
+            series: Arc::clone(series),
+            uri: (path != UNKNOWN_PATH).then(|| request.uri().clone()),
+            span,
+            kind,
+            started,
+            finished: false,
+        }
+    }
+
+    pub(crate) fn span(&self) -> &tracing::Span {
+        &self.span
+    }
+
+    pub(crate) fn finish(mut self, code: Code) {
+        self.record(code);
+        self.finished = true;
+    }
+
+    fn record(&self, code: Code) {
+        update_span(&self.span, code, &self.kind);
+        let path = self.uri.as_ref().map_or(UNKNOWN_PATH, http::Uri::path);
+        self.series.handled(path, code, self.started.elapsed());
+    }
+}
+
+impl Drop for Call {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.record(Code::Cancelled);
+        }
+    }
+}
+
+/// The RPC span with its OpenTelemetry attributes. `path` is the label path,
+/// so a path that is no known method names the span `unknown/unknown`.
+fn make_span<B>(request: &http::Request<B>, path: &str, kind: &SpanKind) -> tracing::Span {
+    let (service, method) = labels(path);
     let span = otel_trace_span!(
         "GRPC request",
         otel.name = format!("{service}/{method}"),
@@ -115,7 +155,7 @@ pub(crate) fn make_span<B>(request: &http::Request<B>, kind: &SpanKind) -> traci
 
 /// The status code attribute, and an error status for the codes the RPC
 /// semantic conventions treat as errors on that side of the call.
-pub(crate) fn update_span(span: &tracing::Span, code: Code, kind: &SpanKind) {
+fn update_span(span: &tracing::Span, code: Code, kind: &SpanKind) {
     span.set_attribute("rpc.grpc.status_code", i64::from(code as i32));
     if otel_http::grpc::status_is_error(code as u16, matches!(kind, SpanKind::Server)) {
         span.set_status(opentelemetry::trace::Status::error(""));
@@ -127,60 +167,116 @@ pub(crate) fn record_shed() {
     metrics::counter!(SERVER_SHED).increment(1);
 }
 
+/// Path whose labels are `unknown`.
+const UNKNOWN_PATH: &str = "";
+
 pub(crate) fn code_from_headers(headers: &HeaderMap) -> Code {
     headers
         .get("grpc-status")
         .map_or(Code::Ok, |value| Code::from_bytes(value.as_bytes()))
 }
 
-/// Path whose labels are `unknown`.
-const UNKNOWN_PATH: &str = "";
-
 /// Metric handles by call path, registered on first use so a call does not
 /// rebuild label strings and look its series up in the recorder. The server
-/// records recognized, dispatched methods or `unknown`; the client records
-/// outbound paths, which are fixed method paths when using generated tonic
-/// clients. The client's `Service<Request<Body>>` API does not restrict paths.
+/// labels the described methods of its registered services and counts every
+/// other path under `unknown`, so a caller-chosen path cannot create a
+/// series. The client labels outbound paths, which are fixed method paths
+/// when using generated tonic clients; its `Service<Request<Body>>` API does
+/// not restrict paths.
 pub(crate) struct Series {
+    started: &'static str,
     handled: &'static str,
     handling_seconds: &'static str,
+    /// The paths that become labels; `None` labels every path.
+    methods: Option<HashSet<Box<str>>>,
     paths: RwLock<HashMap<Box<str>, Handles>>,
 }
 
 struct Handles {
+    started: metrics::Counter,
     handling_seconds: metrics::Histogram,
     /// Indexed by status code.
     handled: [OnceLock<metrics::Counter>; 17],
 }
 
 impl Series {
-    pub(crate) fn server() -> Self {
-        Self::new(SERVER_HANDLED, SERVER_HANDLING_SECONDS)
+    pub(crate) fn server(methods: HashSet<Box<str>>) -> Self {
+        Self::new(
+            SERVER_STARTED,
+            SERVER_HANDLED,
+            SERVER_HANDLING_SECONDS,
+            Some(methods),
+        )
     }
 
     pub(crate) fn client() -> Self {
-        Self::new(CLIENT_HANDLED, CLIENT_HANDLING_SECONDS)
+        Self::new(
+            CLIENT_STARTED,
+            CLIENT_HANDLED,
+            CLIENT_HANDLING_SECONDS,
+            None,
+        )
     }
 
-    fn new(handled: &'static str, handling_seconds: &'static str) -> Self {
+    fn new(
+        started: &'static str,
+        handled: &'static str,
+        handling_seconds: &'static str,
+        methods: Option<HashSet<Box<str>>>,
+    ) -> Self {
         describe();
         Self {
+            started,
             handled,
             handling_seconds,
+            methods,
             paths: RwLock::default(),
         }
     }
 
-    pub(crate) fn record(&self, path: &str, code: Code, elapsed: Duration) {
+    /// `path` when it becomes labels, [`UNKNOWN_PATH`] otherwise.
+    fn label<'a>(&self, path: &'a str) -> &'a str {
+        match &self.methods {
+            Some(methods) if !methods.contains(path) => UNKNOWN_PATH,
+            _ => path,
+        }
+    }
+
+    fn started(&self, path: &str) {
+        self.with(path, |handles| handles.started.increment(1));
+    }
+
+    fn handled(&self, path: &str, code: Code, elapsed: Duration) {
+        self.with(path, |handles| {
+            handles.handling_seconds.record(elapsed.as_secs_f64());
+            handles.handled[code as usize]
+                .get_or_init(|| {
+                    let (service, method) = labels(path);
+                    metrics::counter!(
+                        self.handled,
+                        "grpc_service" => service.to_owned(),
+                        "grpc_method" => method.to_owned(),
+                        "grpc_code" => code_name(code),
+                    )
+                })
+                .increment(1);
+        });
+    }
+
+    fn with(&self, path: &str, record: impl FnOnce(&Handles)) {
         {
             let paths = self.paths.read().unwrap_or_else(PoisonError::into_inner);
             if let Some(handles) = paths.get(path) {
-                self.record_in(handles, path, code, elapsed);
-                return;
+                return record(handles);
             }
         }
         let (service, method) = labels(path);
         let handles = Handles {
+            started: metrics::counter!(
+                self.started,
+                "grpc_service" => service.to_owned(),
+                "grpc_method" => method.to_owned(),
+            ),
             handling_seconds: metrics::histogram!(
                 self.handling_seconds,
                 "grpc_service" => service.to_owned(),
@@ -189,23 +285,7 @@ impl Series {
             handled: Default::default(),
         };
         let mut paths = self.paths.write().unwrap_or_else(PoisonError::into_inner);
-        let handles = paths.entry(path.into()).or_insert(handles);
-        self.record_in(handles, path, code, elapsed);
-    }
-
-    fn record_in(&self, handles: &Handles, path: &str, code: Code, elapsed: Duration) {
-        handles.handling_seconds.record(elapsed.as_secs_f64());
-        handles.handled[code as usize]
-            .get_or_init(|| {
-                let (service, method) = labels(path);
-                metrics::counter!(
-                    self.handled,
-                    "grpc_service" => service.to_owned(),
-                    "grpc_method" => method.to_owned(),
-                    "grpc_code" => code_name(code),
-                )
-            })
-            .increment(1);
+        record(paths.entry(path.into()).or_insert(handles));
     }
 }
 
@@ -231,6 +311,16 @@ fn service_and_method(path: &str) -> (&str, &str) {
 }
 fn describe() {
     DESCRIBE.call_once(|| {
+        metrics::describe_counter!(
+            SERVER_STARTED,
+            metrics::Unit::Count,
+            "Server gRPC calls received by service and method"
+        );
+        metrics::describe_counter!(
+            CLIENT_STARTED,
+            metrics::Unit::Count,
+            "Client gRPC calls sent by service and method"
+        );
         metrics::describe_counter!(
             SERVER_HANDLED,
             metrics::Unit::Count,
