@@ -180,8 +180,8 @@ token already past its expiry when the response arrives cannot authorize
 dispatch. Hits never slide expiry. Failed attempts are not cached, and no token
 is reused past its cutoff. A later operation may fetch again. Unknown response
 fields and refresh tokens are discarded; JWT claims are not interpreted.
-`expires_in` is a JSON number, as RFC 6749 section 5.1 defines it; a response
-that sends it as a string is an invalid response. Only
+`expires_in` is a JSON number of whole seconds, as RFC 6749 section 5.1
+defines it; a response that sends it as a string is an invalid response. Only
 case-insensitive Bearer tokens that are nonempty and form a valid header value
 are admitted. A present Content-Type must be `application/json`; there is no
 custom TTL ceiling or stricter JSON or duplicate-field rule.

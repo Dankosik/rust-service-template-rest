@@ -1572,6 +1572,14 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
             ),
             AcquisitionError::Rejected(Rejection::Other),
         ),
+        (
+            // RFC 6749 section 5.1 defines a number; a string is not admitted.
+            json_response(
+                "200 OK",
+                &serde_json::json!({"access_token":"token", "token_type":"Bearer", "expires_in":"3600"}),
+            ),
+            AcquisitionError::InvalidResponse,
+        ),
     ] {
         fixture.token_raw(response);
         let error = fixture

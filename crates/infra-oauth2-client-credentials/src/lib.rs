@@ -637,8 +637,10 @@ impl Credentials {
         }
     }
 
-    /// Removes `used` only while it is still the entry for `key`, in one step
-    /// on that key, so a token another caller stored meanwhile survives.
+    /// Removes `used` only while it is still the entry the cache returns for
+    /// `key`, so a token another caller stored meanwhile survives. Moka runs
+    /// such steps for one key one at a time and each completes without I/O,
+    /// so this wait needs no deadline.
     async fn forget_exchanged(&self, key: [u8; 32], used: &Arc<Token>) {
         self.0
             .exchanged
