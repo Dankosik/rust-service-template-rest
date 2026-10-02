@@ -345,7 +345,8 @@ drain yields the established degraded exit code rather than clean shutdown.
 ## Cache lifecycle
 
 `Cache::connect_lazy` admits configuration and builds a lazy `ConnectionManager`.
-It does no network I/O. Startup then runs one probe check inside a 1 s bound.
+It waits for no network I/O; the connection is dialed in the background from
+then on. Startup then runs one probe check inside a 1 s bound.
 Success logs `cache_connected`. Failure logs `cache_unavailable_at_startup`
 and startup continues. The cache is not a readiness probe unless composition
 pushes `cache.probe()` into the probe list. It is never a liveness check. A

@@ -82,7 +82,7 @@ fn a_missing_password_is_refused_without_the_allow_flag() {
 }
 
 #[test]
-fn an_authenticated_tls_address_is_admitted_without_dialing() {
+fn an_authenticated_tls_address_is_admitted_without_a_server() {
     let cache = admitted("rediss://:hunter2@cache.example:6380", false, false);
     assert!(cache.server().tls);
     assert_eq!(cache.server().port, 6380);
@@ -891,4 +891,20 @@ async fn a_rotated_password_file_authenticates_the_next_connection() {
         server.attempts() > opened,
         "the new connection did not authenticate"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_first_connection_dials_without_waiting_for_a_call() {
+    let server = FakeServer::start().await;
+    let _cache = admitted(&format!("redis://{}", server.address), true, true);
+
+    // No cache call at all: admission itself must start the connection.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while server.connections() < 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the first connection waited for a call before it dialed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
