@@ -35,7 +35,7 @@ where
 }
 
 /// Owns the connection through BEGIN, callback work and COMMIT. In particular,
-/// SQLx 0.9.0 has not yet armed its rollback guard during a pending BEGIN.
+/// `SQLx` 0.9.0 has not yet armed its rollback guard during a pending BEGIN.
 pub(crate) struct Checkout {
     connection: Option<PoolConnection<Postgres>>,
 }
