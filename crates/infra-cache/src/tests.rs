@@ -435,24 +435,33 @@ async fn a_reply_inside_the_command_timeout_is_not_cut_short() {
         let Ok((mut stream, _)) = listener.accept().await else {
             return;
         };
-        // Setup commands arrive pipelined and are answered at once; only
-        // `GET` is slow.
+        // Commands arrive pipelined (setup, the background `PING`, the `GET`)
+        // and each is answered in order; only a read that holds `GET` is slow.
         let mut request = [0; 512];
         loop {
             let read = stream.read(&mut request).await.unwrap_or(0);
             if read == 0 {
                 return;
             }
-            let request = &request[..read];
-            let reply = if request.windows(5).any(|w| w == b"\r\nGET") {
+            let mut reply = Vec::new();
+            let mut slow = false;
+            let mut lines = request[..read].split(|&b| b == b'\n');
+            while let Some(line) = lines.next() {
+                if line.first() != Some(&b'*') {
+                    continue;
+                }
+                // The argument count is followed by the name's length, then the name.
+                let _length = lines.next();
+                if lines.next().is_some_and(|name| name.starts_with(b"GET")) {
+                    slow = true;
+                    reply.extend_from_slice(b"$-1\r\n");
+                } else {
+                    reply.extend_from_slice(b"+OK\r\n");
+                }
+            }
+            if slow {
                 tokio::time::sleep(Duration::from_millis(700)).await;
-                b"$-1\r\n".to_vec()
-            } else {
-                let commands = request
-                    .split(|&b| b == b'\n')
-                    .filter(|l| l.first() == Some(&b'*'));
-                b"+OK\r\n".repeat(commands.count())
-            };
+            }
             if stream.write_all(&reply).await.is_err() {
                 return;
             }
