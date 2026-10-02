@@ -291,13 +291,12 @@ enum ClaimRound {
 async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
     let sent = Instant::now();
     let result = backstop(async {
-        let mut connection = shared
-            .pool
-            .acquire()
-            .await
-            .map_err(OperationError::Acquire)?;
-        let rows = claim(&mut connection, shared, requested).await?;
-        Ok((sent, rows))
+        infra_postgres::with_connection(&shared.pool, async |connection| {
+            let rows = claim(connection, shared, requested).await?;
+            Ok((sent, rows))
+        })
+        .await
+        .map_err(OperationError::Acquire)?
     })
     .await;
     metrics::histogram!(CLAIM_DURATION_METRIC).record(sent.elapsed().as_secs_f64());

@@ -48,6 +48,69 @@ compatibility limits.
 <!-- template:end outbound-auth:docs-commands-outbound-auth -->
 
 
+## Readability and crate boundaries
+
+| Command | Does | Needs |
+| --- | --- | --- |
+| `make duplication-check` | Scan all handwritten main-workspace Rust and reject substantial clones outside reviewed source bounds | Python 3, pinned Cargo, Git, Node.js (`npx`) |
+| `make duplication-report OUTPUT=<directory>` | Write gated-source and dedicated-test reports; default `target/quality-reports`; never renew admissions | Same tools |
+| `make architecture-check` | Check all declared workspace dependency edges against service policy | Python 3, pinned Cargo |
+| `make quality-check-self-test` | Temporary checker fixtures plus small real jscpd and Clippy smoke cases | Python 3, Git, pinned Cargo/Clippy (`rustup`), Node.js (`npx`) |
+| `make template-quality-projections` | Source-template-only checker proof on four renamed retained/removed profile representatives, independent of harness variants | Same tools; runner snapshots the current candidate privately |
+
+Install the toolchain with `rustup toolchain install` and provide Node.js with
+`npx`; the wrapper resolves jscpd at `JSCPD_VERSION` in `tools/versions.env`
+(5.4.0). No global npm installation or npm project is needed. Missing tools,
+version mismatch, invalid policy, malformed reports, and unexpected empty
+source scope fail the selected check.
+
+Clippy's `excessive_nesting` limit in `clippy.toml` is six. A seventh nested
+block fails the existing lint target; an exception belongs on the smallest
+owning function with a concrete reason. The security JSON table declares each
+expected result directly; the gRPC provider fixture returns early on a failed
+TLS handshake. Both stay below the limit without an allowance.
+The introspection provider's `Fixture::new` and the messaging handler-token
+cancellation test retain function-local allowances: their nested connection
+tasks, bounded exchanges, teardown and callback ownership are explicit parts
+of those test harnesses. Reconsider them when an independently reusable
+exchange or duplicated callback emerges; extraction solely to lower a depth
+counter adds no behavioral owner.
+
+`.jscpd.json` selects Rust, mild matching, 100 tokens and a line-index distance
+of 15 (normally 16 inclusive lines). The gated scan includes inline tests;
+dedicated test, bench, example and fixture files have a separate report-only
+scan. Generated gRPC Rust is excluded by its exact generated owner. Reports
+measure copied text, not semantic similarity or overall test quality.
+
+`quality/duplication-baseline.json` is reviewed service policy. Each admission
+names its reason, source occurrences, bounded text and token ceilings. Harmless
+shifts and deletion-only shrinkage can retain admission; growth, changed code,
+new paths and extra copies fail. To change an admission, inspect both reported
+ranges and deliberately update the case, its anchors and its reason. Neither
+checking, reporting, initialization nor CI refreshes the baseline. Removing a
+profile leaves unused admissions harmless; it does not increase another case's
+allowance. Keep the calibrated config and both `quality/` policies service-owned
+when syncing portable checker scripts.
+
+The diagnosed repetitions have individual maintenance decisions:
+
+| Admission | Decision and reason | Reconsider when |
+| --- | --- | --- |
+| P1 histogram scaffolding | Keep beside cache and object-storage metrics; their dimensions and provider ownership differ. | A real shared metric owner replaces both implementations without joining provider lifecycles. |
+| P2 cleanup failure mapping | Keep transaction-outcome mapping beside each cleanup operation and its log domain. | Both owners deliberately adopt the same failure policy and reporting owner. |
+| P3 periodic cleanup | Keep SQL, cadence, cancellation and metrics together in their provider. | A shared lifecycle owner is needed for behavior, beyond removing copied lines. |
+| T1 actor and T5 shutdown scenarios | Keep independent expected cases at JWT/introspection and service/worker boundaries. | The scenario contract itself changes; repeated assertions alone do not justify shared policy code. |
+| T2–T4 metric recorders | Inbound/outbound webhook tests share one crate-private `cfg(test)` counter-key recorder. HTTP and JWT retain their own recorders, with no cross-crate test dependency. | Recorder responsibilities converge across an existing shared test owner, or their observed events diverge. |
+
+The webhook fixture lives outside the independently removed direction modules.
+The factored quality projection check compiles its inbound-only and outbound-only
+test consumers; it does not rebuild the harness matrix.
+
+The [boundary policy](architecture/boundaries.md#executable-dependency-policy)
+owns allowed crate directions. Architecture checks inspect declarations,
+including optional, target-specific, aliased and build dependencies, regardless
+of the active features or host.
+
 ## Contract
 
 | Command | Does | Needs |
@@ -115,7 +178,7 @@ version. CI installs the same versions as prebuilt binaries.
 | `make plan` | Classify the worktree's changes since `BASE_REF` and print the route: files, surfaces, commands with reasons and cost, CI-owned steps, surfaces with nothing to run |
 | `make verify` | Run that route's local steps under the validation lock; write an attempt record and, on a complete pass, a receipt under `<git-common-dir>/codex/verify` that is partial while CI-owned steps remain |
 | `make changed-surfaces-check`, `make affected-crates-check`, `make validation-lock-self-test`, `make verify-check` | The validation scripts' self-tests |
-| `ALLOW_FULL=1 make check` | The full repository gate under the lock: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-instructions`, `docs-check`, selected profile checks, and the five self-tests |
+| `ALLOW_FULL=1 make check` | The full repository gate under the lock: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-instructions`, `docs-check`, `duplication-check`, `architecture-check`, `quality-check-self-test`, selected profile checks, and the validation self-tests |
 
 In the source template, `ALLOW_FULL=1 make template-init-check` checks 208
 canonical projections and initializes/builds/tests twenty-six distinct runtime

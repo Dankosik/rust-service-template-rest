@@ -31,7 +31,7 @@ rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 secrecy = { workspace = true }
 service-failure = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tonic = { workspace = true, features = ["router", "channel", "server", "codegen", "tls-aws-lc", "tls-native-roots"] }
 tonic-health = { workspace = true }
 tonic-reflection = { workspace = true, features = ["server"] }

@@ -37,7 +37,7 @@ use crate::{AcquisitionError, OnBehalfOf, Rejection};
 struct Peer {
     calls: Arc<AtomicUsize>,
     authorizations: Arc<Mutex<Vec<String>>>,
-    timeouts: Arc<Mutex<Vec<String>>>,
+    timeouts: Arc<Mutex<Vec<Duration>>>,
     started: Arc<Notify>,
     release: Arc<Notify>,
     released: Arc<std::sync::atomic::AtomicBool>,
@@ -210,7 +210,7 @@ async fn route(request: HyperRequest<Incoming>, peer: Peer) -> HyperResponse<Bod
         return response.body(Body::empty()).unwrap();
     }
     if request.uri().path() == "/example.v1.EchoService/Unary" {
-        if let Some(timeout) = header_string(request.headers(), "grpc-timeout") {
+        if let Some(timeout) = infra_grpc::grpc_timeout(request.headers()) {
             peer.timeouts.lock().unwrap().push(timeout);
         }
         return tonic::server::Grpc::new(
@@ -333,6 +333,45 @@ async fn acquisition_failure_prevents_dispatch_and_reports_whether_it_may_pass_l
 }
 
 #[tokio::test]
+async fn provider_capacity_is_unavailable_with_typed_source_before_resource_dispatch() {
+    let tokens = Fixture::new().await;
+    let resource = Resource::new().await;
+    let credentials = tokens.prepare(crate::Options {
+        provider_concurrency: 1,
+        ..tokens.options(&[], None)
+    });
+    let http = credentials.http(tokens.resource_client());
+    let gate = tokens.block_tokens();
+    let mut exchange = Box::pin(http.execute(
+        tokens.on_behalf_of_request("active"),
+        Instant::now() + Duration::from_secs(10),
+    ));
+    tokio::select! { () = tokens.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
+    let error = resource
+        .client(&credentials)
+        .unary(rpc(
+            UnaryRequest {
+                message: "capacity".to_owned(),
+            },
+            Duration::from_secs(10),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(error.message(), "client credentials unavailable");
+    let source = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<AcquisitionError>());
+    assert_eq!(source, Some(&AcquisitionError::AtCapacity));
+    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(resource.calls(), 0);
+    assert!(tokens.resource_requests().is_empty());
+    drop(exchange);
+    drop(gate);
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
 async fn one_cached_bearer_is_sent_and_reused() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
@@ -369,6 +408,45 @@ async fn one_cached_bearer_is_sent_and_reused() {
         resource.authorizations(),
         ["Bearer fixture-token", "Bearer fixture-token"]
     );
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
+async fn a_dropped_refresh_driver_closes_cached_grpc_calls_before_dispatch() {
+    let tokens = Fixture::new().await;
+    let resource = Resource::new().await;
+    let (credentials, driver) = tokens.build(tokens.options(&[], None));
+    let mut client = resource.client(&credentials);
+    client
+        .unary(rpc(
+            UnaryRequest {
+                message: "warm".to_owned(),
+            },
+            Duration::from_secs(10),
+        ))
+        .await
+        .unwrap();
+    let token_requests = tokens.token_requests().len();
+    let resource_calls = resource.calls();
+    drop(driver);
+    for (after, expected) in [
+        (Duration::from_secs(10), Code::Unavailable),
+        (Duration::ZERO, Code::DeadlineExceeded),
+    ] {
+        let error = client
+            .unary(rpc(
+                UnaryRequest {
+                    message: "closed".to_owned(),
+                },
+                after,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), expected);
+    }
+    assert_eq!(tokens.token_requests().len(), token_requests);
+    assert_eq!(resource.calls(), resource_calls);
     resource.finish().await;
     tokens.finish().await;
 }
@@ -437,18 +515,22 @@ async fn token_wait_is_subtracted_from_the_propagated_grpc_timeout() {
     let [timeout] = timeouts.as_slice() else {
         panic!("expected one propagated timeout: {timeouts:?}");
     };
-    let millis = timeout.strip_suffix('m').unwrap().parse::<u64>().unwrap();
-    assert!((1..=400).contains(&millis), "propagated {timeout}");
+    assert!(
+        !timeout.is_zero() && *timeout <= Duration::from_millis(400),
+        "propagated {timeout:?}"
+    );
     resource.finish().await;
     tokens.finish().await;
 }
 
 #[tokio::test]
-async fn a_reused_token_forwards_the_callers_grpc_timeout_unchanged() {
+async fn a_reused_token_preserves_the_budget_remaining_at_transport_handoff() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let mut client = resource.client(&tokens.credentials(&[], None));
+    let mut elapsed = Vec::new();
     for _ in 0..4 {
+        let started = Instant::now();
         client
             .unary(rpc(
                 UnaryRequest {
@@ -458,14 +540,20 @@ async fn a_reused_token_forwards_the_callers_grpc_timeout_unchanged() {
             ))
             .await
             .unwrap();
+        elapsed.push(started.elapsed());
     }
     let timeouts = resource.peer.timeouts.lock().unwrap().clone();
-    // Tonic encodes one second as microseconds. A reuse that a scheduler pause
-    // stretches past a millisecond is rewritten, so one unchanged value proves it.
-    assert!(
-        timeouts[1..].iter().any(|timeout| timeout == "1000000u"),
-        "{timeouts:?}"
-    );
+    assert_eq!(timeouts.len(), 4);
+    assert_eq!(tokens.token_requests().len(), 1);
+    // Reused credentials add no fresh wait. The transport still subtracts its
+    // own elapsed time; encoding below a second can round down a microsecond.
+    for (timeout, elapsed) in timeouts.iter().zip(elapsed).skip(1) {
+        let minimum = Duration::from_secs(1).saturating_sub(elapsed + Duration::from_micros(1));
+        assert!(
+            (minimum..=Duration::from_secs(1)).contains(timeout),
+            "propagated {timeout:?}, elapsed {elapsed:?}"
+        );
+    }
     resource.finish().await;
     tokens.finish().await;
 }

@@ -15,7 +15,7 @@ should weigh before reopening them.
 
 | Owner | Owns | Does not own |
 | --- | --- | --- |
-| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`) and of a rotated password file (`refresh_password_periodically`), the pool with the template's session budgets and their verification (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), the pool, transaction and statement signals (`observed`), the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
+| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`) and of a rotated password file (`refresh_password_periodically`), the pool with the template's session budgets and their verification (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), guarded query-pool access (`with_connection`), the pool, transaction and statement signals (`observed`), the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
 | `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), read-only embedded-history verification (`verify_history`), the shared history rule, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
 | `migrations/` | Forward-only SQL files, one transaction each unless marked `-- no-transaction`, `<version>_<snake_case>.sql` ([rules](../../migrations/README.md)). | Access code; a repository adapts to the schema, never the reverse. |
 | `service-config` (`postgres` section) | `postgres.enabled`, `postgres.dsn` (secret, environment only), `postgres.password_file`, `postgres.session_budgets`, `postgres.max_connections`. | DSN shape (the adapter refuses what the driver would accept). |
@@ -81,6 +81,7 @@ two exceptions are the values no constant can know, named below the table.
 | Connection lifetime | 30 min | `PgPoolOptions::max_lifetime`: how long a session outlives a rotated password, a changed role default, or a moved DNS answer |
 | Idle connection timeout | 10 min | `PgPoolOptions::idle_timeout`: a pool sized for a peak returns its server slots after it |
 | Idle connection ping | 1 s | Bounds the ping a connection idle for over a second gets before it is handed out |
+| Query-pool return | 1 s | One absolute deadline from completion through the complete native SQLx return future; cancellation discards the connection |
 | Password file refresh | 5 s | How often a configured `postgres.password_file` is read again |
 | Slow statement warning | 1 s | `warn` with SQL text and duration; statement logging is otherwise off |
 | Readiness probe | health `probe_budget` | The refresher bounds the acquire plus ping |
@@ -118,6 +119,45 @@ choose. `postgres.session_budgets` says where the values come from:
 The migrator always publishes its own budgets and takes a session advisory
 lock, so it connects to the server directly whichever value is set.
 
+### HTTP attempts
+
+The supported HTTP PostgreSQL paths, idempotency execution and inbound webhook
+receipt, use the hardened chain's existing `RequestDeadline`. Each bounds the
+complete store or receipt future at `RequestDeadline.at() - 100 ms`, including
+acquisition, BEGIN, all statements and user work, bounded response-body capture,
+COMMIT, and connection release. Time already spent reading the body or handling
+the request reduces what remains; database entry never starts a fresh budget.
+
+The 100 ms reserve is for the current bounded in-memory terminal response
+mapping, which performs no further database or provider I/O. It reuses the
+smallest admitted complete HTTP request budget as a conservative allocation
+for that smaller task; it is not a measured response-delivery SLA. Reopen the
+allocation if terminal mapping gains asynchronous I/O or unbounded body work,
+or measurements show it inadequate. With the default eight-second request
+and the full three-second acquire budget spent, at most 4.9 seconds remain
+for transaction work, COMMIT and release, leaving 0.1 seconds for mapping.
+That 4.9 seconds includes up to one second of release; it is not a separate
+statement limit or an additional timeout.
+
+An exhausted cutoff returns the existing 503 unavailable response before the
+operation is polled, with no database dispatch. A configured 100 ms HTTP
+request, or database entry with 100 ms or less remaining, therefore admits no
+database attempt. Positive remaining time permits one best-effort attempt;
+there is no promise that BEGIN or COMMIT can finish. The inner cutoff produces
+`idempotency_unavailable` (with its existing retry hint) or `service_unavailable`
+for webhook receipt; the outer deadline retains `gateway_timeout` 504.
+Neither response establishes non-commit. Recover using the same idempotency
+key or webhook message identity, including after cancellation during COMMIT
+or after acknowledgement while release or response delivery is pending.
+There is no automatic retry.
+
+The eight-second session statement and idle-in-transaction limits remain
+server fallbacks for jobs, autocommit work and a lost client. They do not bound
+an arbitrary multi-statement transaction. Jobs, maintenance and migration
+budgets retain their own owners; the HTTP reserve changes no session setting.
+Future request paths must adopt the existing deadline explicitly. Callers
+still own meaningful transaction boundaries and effects outside PostgreSQL.
+
 ## Readiness
 
 `PostgresProbe` acquires a pooled connection and pings it. It shares the pool
@@ -144,13 +184,52 @@ itself answers.
 opaque `&mut Tx`. The handle is a `sqlx` executor, used the way a
 connection is: `sqlx::query(..).execute(&mut *tx)`. It exposes no
 constructor or transaction-control methods. The boundary commits on `Ok`
-and rolls back on `Err`, returning the closure's error at once: dropping the
-sqlx transaction queues the `ROLLBACK`, and the pool's return ping sends it
-with its own round trip instead of the caller waiting for one. A rollback
-the server rejects fails that ping, and the pool closes the connection
-instead of reusing it. A guard discards a connection whose `BEGIN` future
-was cancelled, which sqlx 0.9 would return to the pool inside an open
-transaction.
+and rolls back on `Err`, preserving the closure's error. Dropping the SQLx
+transaction queues `ROLLBACK`; the bounded return below flushes it before a
+connection can be reused. Cleanup failure does not replace the caller's error
+or an acknowledged commit with a different outcome.
+
+### Query-pool checkout and cancellation
+
+`in_tx[_with]` and `with_connection(&pool, async |connection| ...)` share one
+private checkout guard. Use `with_connection` for non-transaction operations;
+it lends `&mut PgConnection`, and its outer `Result<T, sqlx::Error>` reports
+acquisition failure while `T` preserves the callback's output and error type.
+Only `in_tx[_with]` owns application transaction control.
+
+Dropping a pending operation during BEGIN, work or COMMIT synchronously
+detaches and drops its physical connection, releasing local pool capacity
+without a network wait. Failed BEGIN and `CommitUnknown` also discard it.
+After ordinary completion the guard awaits SQLx's native
+`PoolConnection::return_to_pool()` future under one absolute one-second
+deadline captured when work ends. The bound includes buffer shrinking,
+rollback flush, return ping and any driver-selected close path. Cancellation
+or expiry drops that owning future, its connection and its pool permit;
+unresolved state cannot be reused. Successful ordinary return retains reuse.
+This assumes the Tokio runtime can progress. It bounds local capacity release,
+not server rollback, database reachability, or the outcome of an in-flight
+COMMIT. Cleanup never restarts the deadline or overrides the operation result.
+
+All canonical shared query-pool access created by `connect` uses these
+boundaries: transactions, session verification, readiness, startup history
+inspection, idempotency maintenance and jobs' query operations. Raw
+`Pool::acquire`, `Pool::begin`, or query execution on `&PgPool` bypasses the
+guard; the direct-acquire lint and caller review keep those out of production
+query access. This is not a guarantee for arbitrary SQLx pools. The jobs
+worker's private `PgListener` pool and the migrator's dedicated connection
+retain their separate lifecycle owners and are outside this reclamation claim.
+
+The return shim relies on locked SQLx 0.9.0 source: `return_to_pool` is public
+but documentation-hidden, and owns the connection and decrement-size guard
+before it is polled. Recheck ownership, drop and permit release before a SQLx
+upgrade or changing the current `min_connections = 0`. The full-checkout guard
+also replaces the narrower cancelled-BEGIN guard; an upstream merge alone
+never justifies removing that protection. Replace the shim only when a
+selected released driver provides equally bounded, cancellation-safe return.
+These driver facts are source-backed reasoning, not an observed production
+network-blackhole result.
+
+### Transaction truth
 
 PostgreSQL answers `COMMIT` in an aborted transaction with a silent
 `ROLLBACK` and `sqlx` does not check the command tag, so a closure that
@@ -227,8 +306,8 @@ the SQL text of a statement that took over a second.
 
 The gauge names, the wait histogram and the statement histogram follow the
 OpenTelemetry database client conventions; the Prometheus exporter spells dots as underscores. The
-wait histogram covers `in_tx` only: a statement a crate runs straight on the
-pool acquires inside the driver, which reports no wait. `rolled_back` is the
+wait histogram covers `in_tx` only; non-transaction access through
+`with_connection` does not record a transaction acquire wait. `rolled_back` is the
 closure's own `Err` and is not marked as a span error, because whether it is
 one is the caller's business rule. A statement gets its span only inside
 another span: a loop that polls outside any span (the jobs claim, the
@@ -293,16 +372,15 @@ else can work:
   agent, a mounted Kubernetes secret, and a sidecar that writes short-lived
   tokens. Client certificates (`sslcert`/`sslkey`) are refused by admission,
   and the adapter mints no cloud IAM token itself.
-- **A silently dropped network path is bounded for idle connections only.**
-  `sqlx` 0.9 sets no TCP keepalive. A connection idle for more than a second
-  is pinged before use and discarded when the ping takes more than a second,
-  so a pool whose peers vanished without a reset (a load balancer's idle
-  cut-off, a failed node) sheds one dead connection per second of a
-  caller's acquire budget: with three or more of them the first caller
-  still times out, and the ones after it get fresh connections. A connection
-  that dies while a statement runs is different: the caller's own deadline
-  ends the wait, and the driver's return-to-pool ping, which has no timeout,
-  holds the pool slot until the kernel gives up on the socket.
+- **A silently dropped network path cannot indefinitely retain query-pool
+  capacity after its owner stops waiting.** `sqlx` 0.9 sets no TCP keepalive.
+  An idle connection is pinged before use after one second idle; that ping
+  has a one-second limit within the three-second acquire budget. During
+  checked-out work the caller's deadline ends the wait and the guard discards
+  the connection. Ordinary return has its own absolute one-second bound.
+  See [Query-pool checkout and cancellation](#query-pool-checkout-and-cancellation)
+  for scope and evidence limits. Fresh work may still fail while the server
+  or network is unavailable.
 
 ## Migrations
 
@@ -424,17 +502,14 @@ New records use native `http_idempotency_header_pair[]` values (`name text`,
 identity metadata plus scope digest. SQLx 0.9.0's narrow `derive` feature
 provides the composite `Type`/`Encode`/`Decode` and array support. Native
 `bytea` preserves every header value byte without a binary format or the
-extra byte-encoding policy that `jsonb` would require. No query macros or
-offline metadata are introduced for these constant statements.
+extra byte-encoding policy that `jsonb` would require. These statements use
+checked query macros and root `.sqlx/` metadata, and `observed` records their
+statement timing and spans under the shared [statement policy](#statements).
 Startup admits the profile schema through the general migration-history
 check ([Migrations](#migrations)); the store probes no table, column, or type
 and keeps only its writable-session check.
 
-This retargets three persistence deferrals: `query!` with offline `.sqlx`
-metadata and `sqlx-cli`, and per-query tracing spans, move from "the first
-repository" to the first *feature-owned* repository, because the store's own
-statements are template-owned constants proven by the retained database
-suite. The canonical profile migration is ordinary embedded history. The static
+The canonical profile migration is ordinary embedded history. The static
 source gate permits only the reviewed pre-adoption four-file rewrite; runtime
 history never recognizes the former migration set.
 <!-- template:end http-idempotency:docs-persistence-http-idempotency -->
@@ -468,10 +543,22 @@ on a character boundary so the suffix survives PostgreSQL's 63-byte limit;
 no key controls it. Size `postgres.max_connections` for the worker as at
 least `jobs.max_workers + 2` (one connection per concurrent attempt plus the
 engine's statements and the readiness probe); the worker refuses less. The
-statements are template-owned constants proven by the jobs database suite,
-so they adopt no `query!` (the deferral stays at the first feature-owned
-repository). The canonical migration includes JSONB payloads, C-collated text
-unique keys, and trace state. It is ordinary embedded history. See the
+statements use checked query macros with root `.sqlx/` metadata and
+`observed` instrumentation; the jobs database suite owns their observed behavior. The canonical migrations include JSONB payloads, C-collated text
+unique keys, trace state, and additive `recovery_history` with a separate
+concurrent failed-kind index. They are ordinary embedded history. Failed rows
+remain until explicit redrive/discard; only completed rows expire after 24 hours.
+The jobs operator locks one failed identity/version in the caller's transaction;
+redrive archives the cycle and obtains a fresh claim-generation sequence value
+before rejoining live uniqueness. An exact live-key conflict rolls back the
+archive/reset. Successful provider results remain provisional until commit is
+acknowledged; uncertain commit never authorizes automatic retry. Inspection is
+payload-free and read-only. The short-lived operator pool uses one connection,
+`READ COMMITTED`, fixed `application_name=jobs-worker-operator`, the existing
+session budgets and embedded-history admission; mutation also requires a
+writable session. No operator code performs startup DDL or resets the sequence.
+See the
+
 [guide](../background-jobs.md) and
 [Async Architecture](async.md).
 <!-- template:end jobs:docs-persistence-jobs -->
@@ -567,26 +654,32 @@ scratch project against `postgres:18.4`):
   consumer yet. Reopen either with the first service that needs it. The
   refresh polls instead of reacting to `28P01` because the driver has no
   before-connect hook; five seconds bounds the window either way.
-- **The idle ping is bounded; the return ping is the driver's.** The ping
-  before handing out an idle connection is the template's hook, so it
-  carries a one-second timeout. The ping `sqlx` sends when a connection
-  returns to the pool is not reachable from a hook without paying a second
-  round trip on every release.
-- **`Pool::begin` is a lint error outside the adapter** (`clippy.toml`
-  `disallowed-methods`): the pool is a plain `sqlx` pool, so nothing else
-  kept a caller from opening a transaction that skips the commit-outcome
-  policy and the transaction signals. A test that needs a raw lock holder
-  says so with `#[expect]`.
+- **Native SQLx return has a one-second absolute bound.** One private guard
+  owns query-pool capacity through work and return; cancellation detaches
+  during work or drops the owning return future during cleanup. A timeout
+  around `after_release` alone would leave the driver's subsequent ping
+  unbounded. Always detaching would lose ordinary reuse; `close_on_drop`
+  can retain capacity during its five-second close. The selected shim uses
+  the existing driver future instead of a fork, replacement pool or cleanup
+  manager. Its version-sensitive assumptions and replacement condition are
+  recorded under [Query-pool checkout and cancellation](#query-pool-checkout-and-cancellation).
+- **`Pool::acquire` and `Pool::begin` are lint errors outside their owners**
+  (`clippy.toml` `disallowed-methods`). The plain SQLx pool remains available,
+  so caller review must also catch implicit acquisition by execution against
+  `&PgPool`. A test deliberately holding a raw lock documents its exception
+  with `#[expect]`.
 - **`transaction_timeout` is not set.** It exists from PostgreSQL 17, and
-  publishing an unknown parameter fails the connection on 14 to 16. A
-  request's transaction is already bounded by the request deadline on the
-  client and by the two session budgets on the server; reopen when 17 is
-  the minimum supported server.
+  publishing an unknown parameter fails the connection on 14 to 16. Current
+  HTTP paths enforce the complete attempt cutoff above; server statement and
+  idle limits remain fallbacks, not a transaction-duration bound. Reopen when
+  17 is the minimum supported server.
 - **Waiting on `sqlx` after 0.9.0** (merged upstream, unreleased on
-  2026-10-02): rollback of a `BEGIN` cancelled in flight (`DiscardOnDrop`
-  can then go), `TCP_NODELAY`, a pool `num_idle` underflow that can spin a
-  core, and invalidation of stale prepared statements. TCP keepalive and a
-  timeout on the return ping are still open there.
+  2026-10-02): rollback of a `BEGIN` cancelled in flight, `TCP_NODELAY`, a pool
+  `num_idle` underflow that can spin a core, and invalidation of stale prepared
+  statements. The selected guard already protects cancelled BEGIN and the
+  complete checkout; keep that guarantee across any driver upgrade. TCP
+  keepalive and native bounded return remain upstream concerns; the template
+  shim bounds current canonical query-pool return locally.
 - **Embedded migrations, forward-only**: `sqlx::migrate!` replaces the Go
   template's runtime directory with its symlink and nesting checks; a
   `build.rs` `rerun-if-changed=../../migrations` is required because the

@@ -12,7 +12,7 @@
 //! one server do not collide. The namespace name is also the bounded `cache`
 //! metric label.
 //!
-//! A read-through use: a hit returns the bytes, a miss or an outage takes
+//! In a service/composition adapter, a hit returns the bytes; a miss or outage takes
 //! the source of truth, and the write back is best effort.
 //!
 //! ```no_run
@@ -20,7 +20,8 @@
 //! # use infra_cache::{Cache, Unavailable};
 //! # async fn load_from_source_of_truth(_key: &str) -> Vec<u8> { Vec::new() }
 //! # async fn user_profile(cache: &Cache, key: &str) -> Vec<u8> {
-//! // Build the namespace once and keep it, for example in the feature's state.
+//! // Build the namespace once and keep it in the adapter's state.
+//! // The feature owns the behavior and never depends on this provider crate.
 //! let profiles = cache.namespace("user_profile");
 //! match profiles.get(key).await {
 //!     Ok(Some(bytes)) => return bytes,
@@ -32,6 +33,7 @@
 //! # }
 //! ```
 
+mod connection;
 mod credentials;
 mod observe;
 
@@ -39,38 +41,23 @@ mod observe;
 mod tests;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
-use redis::aio::ConnectionManager;
 use redis::{IntoConnectionInfo, SetExpiry, SetOptions};
 use secrecy::{ExposeSecret, SecretString};
 
+use self::connection::Link;
 use self::credentials::PasswordFile;
-use self::observe::{ErrorType, Histograms, Operation, OperationGuard, Outcome};
+use self::observe::{Histograms, Operation, OperationGuard, Outcome};
 pub use self::observe::{OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
 
-/// One reconnect attempt stays inside the startup check.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
-/// Floor of the client's exponential reconnect backoff.
-const MIN_DELAY: Duration = Duration::from_millis(100);
-/// Cap so a long outage does not park one reconnect chain for minutes. Also
-/// the minimum spacing between two replacements of a stuck manager.
-const MAX_DELAY: Duration = Duration::from_secs(2);
-/// Factor of the client's exponential reconnect schedule.
-const EXPONENT_BASE: f32 = 2.0;
-/// Bound one reconnect chain; a later command may start another.
-const NUMBER_OF_RETRIES: usize = 6;
 /// Detect a dead peer before the platform's connection idle timeout.
 const KEEPALIVE_TIME: Duration = Duration::from_secs(30);
 /// Space between keepalive probes once the idle time has elapsed.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// Give up on a silent peer after a few probes, where the platform allows it.
 const KEEPALIVE_RETRIES: u32 = 3;
-/// Bound for the background `PING` that drives a new manager's lazy
-/// connection. Longer than one reconnect chain: seven attempts of at most
-/// [`CONNECT_TIMEOUT`] and six waits of at most [`MAX_DELAY`].
-const WARM_UP_TIMEOUT: Duration = Duration::from_secs(20);
 /// Linux `TCP_USER_TIMEOUT`: a half-open connection is failed and reconnected.
 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
 const USER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -208,96 +195,6 @@ pub struct Cache {
     command_timeout: Duration,
 }
 
-/// Shared server identity and the replaceable connection manager.
-///
-/// redis 1.7.1 reconnects a `ConnectionManager` after an I/O error and after
-/// the few kinds it calls unrecoverable. Other failures leave it failing
-/// without dialing again. A refused `HELLO` (`WRONGPASS`, `NOAUTH`, a full
-/// client table while a failover is saturating the server) is a plain server
-/// error, which the manager stores and returns forever. After `READONLY`
-/// from a primary demoted by failover, the manager keeps writing to that
-/// replica. Replacing the manager from the retained client is the reconnect
-/// it does not perform.
-/// go-redis closes a `READONLY` connection for the same reason (go-redis
-/// issue #790). Replacement happens at most once per [`MAX_DELAY`], so a
-/// failing server costs one reconnect chain per interval rather than one per
-/// call.
-///
-/// A manager is built lazy, the first one and every replacement, and a lazy
-/// connection advances only while a caller awaits it. One background `PING`
-/// drives each, so neither the first connection nor recovery waits for
-/// calls to arrive.
-struct Link {
-    server: ServerIdentity,
-    client: redis::Client,
-    config: redis::aio::ConnectionManagerConfig,
-    state: Mutex<LinkState>,
-}
-
-struct LinkState {
-    manager: ConnectionManager,
-    replaced_at: Option<Instant>,
-}
-
-impl std::fmt::Debug for Link {
-    /// The client holds the DSN, so nothing of it is printed.
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Link")
-            .field("server", &self.server)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Link {
-    /// Clone the multiplexed handle, sharing its connection and reconnect state.
-    /// The lock is released before the caller waits on any network I/O.
-    fn clone_manager(&self) -> ConnectionManager {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .manager
-            .clone()
-    }
-
-    fn replace_if_stuck(&self, error: &redis::RedisError) {
-        if !leaves_manager_stuck(error) {
-            return;
-        }
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.replaced_at.is_some_and(|at| at.elapsed() < MAX_DELAY) {
-            return;
-        }
-        // Keep the spacing check and replacement under one lock so concurrent
-        // failures cannot each replace the manager. Lazy construction does no I/O.
-        if let Ok(fresh) =
-            ConnectionManager::new_lazy_with_config(self.client.clone(), self.config.clone())
-        {
-            state.manager = fresh.clone();
-            state.replaced_at = Some(Instant::now());
-            tokio::spawn(warm_up(fresh));
-        }
-    }
-}
-
-/// Drive a lazy manager's connection without a caller. The result is not
-/// used: a failure is seen, and acted on, by the next call.
-async fn warm_up(mut manager: ConnectionManager) {
-    let ping = redis::Cmd::ping();
-    let _ = tokio::time::timeout(WARM_UP_TIMEOUT, ping.query_async::<()>(&mut manager)).await;
-}
-
-/// Errors after which redis 1.7.1 may keep answering from the same manager.
-///
-/// An I/O error is the manager's own reconnect path. A caller cannot tell a
-/// stored setup failure from a reply to its own command: both arrive as the
-/// same server error. Every other error therefore replaces the manager,
-/// including a per-command reply such as `OOM`. That is accepted because a
-/// replacement only makes the next call dial again, at the bounded rate.
-fn leaves_manager_stuck(error: &redis::RedisError) -> bool {
-    !error.is_io_error()
-}
-
 impl Cache {
     /// Admit the DSN and build the connection without waiting for the network.
     ///
@@ -347,8 +244,7 @@ impl Cache {
             .as_ref()
             .map(read_client_certificate)
             .transpose()?;
-        // RESP3 whatever the DSN asks: only then does the manager reconnect
-        // when the socket closes instead of failing the next command first.
+        // RESP3 supplies an idle disconnection notification to the supervisor.
         let settings = info
             .redis_settings()
             .clone()
@@ -374,21 +270,9 @@ impl Cache {
         if tokio::runtime::Handle::try_current().is_err() {
             return Err(CacheError::NoRuntime);
         }
-        let config = manager_config(password_file);
-        let manager = ConnectionManager::new_lazy_with_config(client.clone(), config.clone())
-            .map_err(|_| CacheError::Client)?;
-        tokio::spawn(warm_up(manager.clone()));
         observe::describe();
         Ok(Self {
-            link: Arc::new(Link {
-                server,
-                client,
-                config,
-                state: Mutex::new(LinkState {
-                    manager,
-                    replaced_at: None,
-                }),
-            }),
+            link: Arc::new(Link::start(server, client, password_file, command_timeout)),
             command_timeout,
         })
     }
@@ -523,25 +407,15 @@ impl CacheNamespace {
             operation,
             &self.cache.link.server,
         );
-        let mut manager = self.cache.link.clone_manager();
-        // The span is not entered while polling: redis emits nothing on the
-        // command path, and entering on every poll costs each subscriber layer
-        // an enter and an exit.
-        let reply = tokio::time::timeout(
-            self.cache.command_timeout,
-            command.query_async::<T>(&mut manager),
-        )
-        .await;
+        // One deadline includes connection wait and exactly one dispatch.
+        let deadline = tokio::time::Instant::now() + self.cache.command_timeout;
+        let reply = self.cache.link.command(&command, deadline).await;
         match reply {
-            Ok(Ok(value)) => {
+            Ok(value) => {
                 guard.succeed(outcome(&value));
                 Ok(value)
             }
-            Ok(Err(error)) => {
-                self.cache.link.replace_if_stuck(&error);
-                Err(guard.fail(observe::error_type(&error)))
-            }
-            Err(_elapsed) => Err(guard.fail(ErrorType::Timeout)),
+            Err(error) => Err(guard.fail(error)),
         }
     }
 
@@ -555,8 +429,8 @@ impl CacheNamespace {
 
 /// `PING` probe. The name is `cache`. Failure text is `cache ping failed: <error.type>` only.
 ///
-/// The check has no timeout of its own: the readiness refresher bounds every
-/// probe with its budget, and startup bounds its single check separately.
+/// Acquisition uses the caller's startup/readiness budget. Once connected,
+/// PING has a one-second ceiling and ends if its generation retires.
 #[derive(Clone, Debug)]
 pub struct CacheProbe {
     cache: Cache,
@@ -569,17 +443,9 @@ impl health::Probe for CacheProbe {
     }
 
     async fn check(&self) -> Result<(), health::ProbeError> {
-        let mut manager = self.cache.link.clone_manager();
-        redis::Cmd::ping()
-            .query_async::<()>(&mut manager)
-            .await
-            .map_err(|error| {
-                self.cache.link.replace_if_stuck(&error);
-                health::ProbeError::new(format!(
-                    "cache ping failed: {}",
-                    observe::error_type(&error).label()
-                ))
-            })
+        self.cache.link.probe().await.map_err(|error| {
+            health::ProbeError::new(format!("cache ping failed: {}", error.label()))
+        })
     }
 }
 
@@ -685,28 +551,6 @@ fn tcp_settings() -> redis::io::tcp::TcpSettings {
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     let settings = settings.set_user_timeout(USER_TIMEOUT);
     settings
-}
-
-/// Reconnect bounds only. Commands are bounded by `command_timeout` in
-/// [`CacheNamespace::run`], which also covers the wait for a reconnect, so
-/// redis's own 500 ms response timeout is off: it would cut a longer
-/// `command_timeout` short and arm a second timer on every command.
-///
-/// A password file becomes the client's credentials provider: every
-/// connection attempt reads the file, and a live connection re-authenticates
-/// when its content changes.
-fn manager_config(password_file: Option<PasswordFile>) -> redis::aio::ConnectionManagerConfig {
-    let config = redis::aio::ConnectionManagerConfig::new()
-        .set_connection_timeout(Some(CONNECT_TIMEOUT))
-        .set_response_timeout(None)
-        .set_min_delay(MIN_DELAY)
-        .set_exponent_base(EXPONENT_BASE)
-        .set_max_delay(MAX_DELAY)
-        .set_number_of_retries(NUMBER_OF_RETRIES);
-    match password_file {
-        Some(password_file) => config.set_credentials_provider(password_file),
-        None => config,
-    }
 }
 
 /// redis-rs builds its TLS config from the process default provider. The

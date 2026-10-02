@@ -1,10 +1,11 @@
 # Background jobs
 
 Select `JOBS=postgres` with `DATABASE=postgres`. The default `JOBS=none`
-removes the jobs migration, `infra-jobs`, `jobs-worker`, this guide, the
+removes the jobs migrations, `infra-jobs`, the operator commands, this guide, the
 async architecture leaf, jobs tests, configuration, and the worker image
-entrypoint. The retained pack stays inert: service code touches the table only
-when it calls `enqueue`, and an operator separately runs `/jobs-worker`.
+entrypoint unless messaging retains the worker. A messaging-only worker keeps
+the loader CLI but has no jobs operator. The retained pack stays inert: service
+code touches the table only when it calls `enqueue`, and an operator separately runs `/jobs-worker`.
 
 The pack durably enqueues with a business write in PostgreSQL and runs each
 committed registered job at least once. A claim is permission for one attempt,
@@ -32,7 +33,13 @@ const _: () = infra_jobs::assert_valid_kind_name(<Welcome as infra_jobs::JobKind
 
 Runtime registration and enqueue still reject invalid reachable names with a
 typed error. Renaming a kind strands its live rows until a worker registers its
-old name.
+old name; a rename is not a queue migration. Across rolling deployments and
+backup restore, retain handlers that understand every outstanding kind and
+payload version. Inspect stranded or failed identities and restore compatible
+code, or perform a separately reviewed data conversion, before recovery.
+Redrive resets attempts; it does not repair a poison payload, rename a kind,
+or reinterpret stored intent. Malformed or incompatible payloads keep their
+existing retry/exhaustion classification and sanitized failure behavior.
 
 `infra_jobs::enqueue(tx, &payload, options)` takes the shared opaque
 `&mut infra_postgres::Tx` that an `in_tx` or `in_tx_with` closure receives,
@@ -57,8 +64,9 @@ include `InvalidKind`, `InvalidUniqueKey`, `InvalidDelay`,
 abort the caller transaction in the ordinary PostgreSQL way.
 
 A payload carries identifiers, not secrets or copies of business data. It is
-stored as queryable JSONB, kept with terminal history (24 hours, or seven
-days after a failure), and readable by anyone who can read the table.
+stored as queryable JSONB and readable by anyone who can read the table.
+Completed jobs remain for 24 hours; failed jobs remain until explicit recovery
+or discard. Size and protect storage for unresolved failures and their history.
 
 ```rust,ignore
 infra_postgres::in_tx(pool, async |tx| {
@@ -208,7 +216,15 @@ kind's jobs and does not partition them by payload.
 
 PostgreSQL computes `attempt^4 * (0.9 + 0.2 * random())` seconds (floored by
 `retry_after_at_least`) when it writes the retry; a re-sent fenced write may
-redraw. Exhaustion and permanent failure are terminal. Summaries replace
+redraw. With immediate failures and no extra floor, queueing, downtime, or
+handler cost, the nominal delays before the final attempt sum to
+`sum(a^4, a=1..24) = 1,763,020 seconds` (about 20.4 days) for 25 attempts.
+For 20 attempts, `sum(a^4, a=1..19) = 562,666 seconds` (about 6.51 days).
+Independent jitter gives a +/-10% jitter-only range. These are policy arithmetic,
+not a delivery bound: handler time, retry floors, outage, backpressure, and
+scheduling can lengthen the horizon.
+
+Exhaustion and permanent failure are terminal. Summaries replace
 controls with spaces and are limited to 1024 UTF-8 bytes; handlers must not
 include secrets in them. `error_summary` holds the most recent summary. The
 `errors` JSONB array keeps the history: every failed attempt (retry,
@@ -216,9 +232,13 @@ exhaustion, permanent failure, timeout, panic, undecodable payload) and every
 lease-expiry rescue appends one `{"attempt", "at", "error"}` entry. Snooze
 and forced-drain release append nothing, so a job has at most one entry per
 spent attempt, 25 at the largest policy.
-Successful jobs remain for 24 hours and failed jobs for seven days. Retention
-runs every minute in batches of 500 and never deletes live jobs. Unknown kinds
-remain unclaimed; terminal retention is independent of registered kinds.
+Successful jobs remain for 24 hours. Failed jobs remain until explicit redrive
+or discard; they are neither claimed nor owners of live unique keys. Retention
+runs every minute in batches of 500, deletes only completed jobs, and is
+independent of registered kinds. Unknown kinds remain unclaimed. Each redrive
+archives the previous cycle in `recovery_history` and starts a fresh attempt
+budget; archive growth has no automatic cap or truncation. Completed retention
+or explicit discard deletes the entire row, including its archive.
 
 ## Configure and size the worker
 
@@ -296,9 +316,11 @@ One supervisor owns each admitted claim, slot, handler, deadline, and
 intended queue transition through cleanup. The handler runs on the
 supervisor's task. On timeout or forced drain it first cancels the handler,
 gives it up to 100 ms of cooperative completion inside the existing deadline,
-and drops only a still-running handler. The slot returns as soon as the
-handler's result is known, so the next claim does not wait for the outcome
-write; the supervisor keeps that write, and a drain still waits for it.
+and drops only a still-running handler. Global and per-kind capacity remains
+held through the outcome write, retry waits, and queued or in-flight completion
+bookkeeping. Capacity returns only after that responsibility ends or its
+immutable deadline expires and all retained bookkeeping is dropped. Saturated
+bookkeeping therefore leaves further due jobs unclaimed.
 Completions queued while an earlier completion write is in flight share the
 next write. It records a known
 handler result once and gives that result precedence over force or timeout.
@@ -371,28 +393,146 @@ for the five-second bound, before startup fails. A handler panic logs
 panic hook in every profile, so the panic text, which can quote the payload,
 is never printed.
 
-Every worker samples only registered kinds every ten seconds. For each kind and
-`available`, `scheduled`, or `running` state, it counts at most 1000 indexed
-rows and publishes the value; 1000 means at least 1000 rows. Oldest available
-age uses an independent indexed due-row lookup. These samples are per-process
-and must not be summed across replicas; unknown kinds are not aggregated. Live
-jobs of a kind no worker registers, for example after a rename, appear only in SQL:
+One process-owned sampler runs every ten seconds over the union of registered
+ordinary and publisher kinds. Each kind's `available`, `scheduled`, `running`,
+and `failed` count is capped at 1000; 1000 means at least that many rows.
+`jobs_failed_jobs{kind}` reports failed rows separately from
+`jobs_live_jobs{kind,state}`. Oldest available age uses an independent indexed
+due-row lookup. Samples are per-process and must not be summed across replicas.
+Unknown kinds require explicit operator inspection below, not metric labels.
 
-```sql
-SELECT kind, state, count(*) FROM background_jobs
-WHERE state IN ('pending', 'running')
-  AND kind <> ALL (ARRAY['widgets.welcome'])  -- the registered kinds
-GROUP BY kind, state;
+`jobs_oldest_available_age_seconds` and
+`jobs_observation_timestamp_seconds` share the same complete union sample.
+Startup publishes zero for every registered value and timestamp. Only a
+complete decoded sample publishes all values, then its database timestamp.
+SQL or decode failure retains all last-good values and the timestamp. Alerting
+requires a nonzero timestamp no older than 30 seconds. A successful empty queue
+reports zero values with a nonzero timestamp. The two-second sample timeout
+bounds elapsed time, not physical pages or dead tuples scanned.
+
+## Inspect and recover retained jobs
+
+The same executable supplies PostgreSQL-only commands. Loader flags precede
+the command; omitting it runs the normal worker. Operator commands load only
+the typed PostgreSQL configuration, use one pooled connection, and admit migration
+history and UTF-8/writable/READ COMMITTED session settings against the canonical
+writable queue, including for inspection. Read operations then use read-only
+transactions. They start no handler registry, broker,
+listener, telemetry exporter, claim loop, or maintenance task. The common
+loader still refuses secret-like values anywhere in TOML; unrelated provider
+sections otherwise need not be valid. Password files are read once. The
+operator requires `postgres.enabled`; ordinary worker capacity and HTTP
+budgets do not apply.
+
+```text
+jobs-worker [--config PATH] [--config-overlay PATH] [--secrets-dir PATH] inspect ID
+jobs-worker [loader flags] failed [--after CURSOR] [--limit 100]
+jobs-worker [loader flags] unhandled --handled-kinds LIST [--after CURSOR] [--limit 100]
+jobs-worker [loader flags] redrive ID --kind KIND --version VERSION
 ```
 
-Only `jobs_live_jobs`, `jobs_oldest_available_age_seconds`, and
-`jobs_observation_timestamp_seconds` represent sampling. Startup publishes
-zero for every registered kind/state and timestamp. A complete successful
-sample publishes values then timestamp; an SQL or decode failure
-retains the last good values and timestamp while operation-failure telemetry
-records the failure. Alerting requires a nonzero timestamp no older than 30
-seconds. A successful empty queue reports zero values with a nonzero timestamp.
-The two-second sample timeout is an elapsed-time limit, not a scan-size claim.
+Each executed command emits one JSON document with `schema_version: 1`,
+`action`, and `outcome`; help and pre-execution usage errors keep their CLI
+presentation. Inspection includes database `observed_at` and safe snapshots: id,
+kind, state, lossless decimal-string version, attempts, failure reason,
+created/scheduled/claim-expiry/finished times, and recovery count. It never
+returns payloads, unique keys, trace carriers, error summaries, error arrays,
+or archived bodies. Timestamps use UTC RFC3339 with six fractional digits,
+nullable where absent. `inspect` reports `found` or `missing`.
+
+`failed` includes every failed kind. `unhandled` requires the explicit
+comma-separated union of kinds handled anywhere in the intended fleet, with
+no whitespace normalization. For example, if the fleet handles ordinary
+`widgets.welcome` and outbox publication, pass
+`--handled-kinds widgets.welcome,publish_domain_event`; include any retained
+webhook kinds too. An explicit `--handled-kinds ''` means none. Omission is a
+usage error. The request accepts at most 1024 input names and 66,559 bytes.
+Every unhandled response after argument admission, including failure results,
+echoes the validated, sorted, deduplicated `handled_kinds` array; the explicit
+empty set returns `[]`. A different handled set changes the question: restart
+traversal without a cursor after changing it.
+
+Each page scans at most `limit` primary-key-ordered rows (1–500, default 100),
+then filters them. JSON includes `scanned`, `items`, `complete`, and
+`next_cursor`. A cursor is `v1:<canonical UUID>` for the last scanned row,
+including nonmatches. Follow it even when `items` is empty; a full final page
+may need an extra empty page. A timeout/error is unavailable, never an empty
+successful page. Traversal is complete over unchanged data; concurrent changes
+behind the cursor require a later traversal. No fixed physical-I/O bound is
+claimed.
+
+Before redrive, reconcile any possible prior effect, repair its cause, restore
+a compatible handler, and inspect the exact identity. Supply its id, kind,
+and version unchanged. Recovery locks the failed row, fences on all three
+values, archives the previous attempt cycle, and resets attempts to zero on
+the same row. The new version comes from the non-reusable claim-generation
+sequence. Job id, payload, unique key, creation time, and traces stay unchanged.
+The next claim spends attempt 1 under the current policy; normal polling picks
+it up. A competing live unique key causes `conflict` and leaves the failed row
+and history intact. Recovery performs no business-closure replay and gives no
+exactly-once external effect guarantee. Failed custody and permitted manual
+replay have no automatic expiry, so any finite consumer deduplication TTL can
+expire before a permitted replay. Retain durable logical-ID effect identity
+for the full permitted replay lifetime, or reconcile effects and explicitly
+constrain replay before expiring that identity. A redrive receipt or unchanged
+completion write does not establish whether an external effect happened.
+
+**Discard permanently abandons unresolved work.** It deletes the inspected
+failed row and all its history. Use it only after deciding that this exact work
+must never be retried; absence later cannot identify who deleted it.
+
+```text
+jobs-worker [loader flags] discard ID --kind KIND --version VERSION
+```
+
+Mutation receipts contain `action`, `id`, `kind`, `expected_version`, and
+`outcome`; only acknowledged `redriven` adds `new_version`. Outcomes are
+`redriven`, `discarded`, `missing`, `stale`, `conflict`, `failed`, and `unknown`.
+Only an acknowledged commit establishes success. A stale state/kind/version
+or absent row is not success. An uncertain commit, signal, or timeout after
+mutation invocation returns `unknown`; inspect the same id before any deliberate
+retry. A new state/version may show recovery, the old failed version may still
+be eligible, and absence establishes only absence. Never retry automatically.
+Database diagnostics carry bounded SQLSTATE/cause, never raw database details.
+
+Success exits 0, unsuccessful operations exit 1, and CLI usage exits 2.
+`cleanup="incomplete"` preserves an acknowledged outcome but exits 1; missing
+stdout/receipt cannot undo a commit and requires inspection. After argument,
+configuration, and file admission, network work and teardown have a 33-second
+ceiling: connect 5s, history 5s, session check 5s, operation 12s, pool close 5s,
+and runtime close 1s. Reads and mutations set a transaction-local two-second
+statement limit; mutations set it before the initial row lock. The 12-second
+operation backstop includes acquire, begin, and commit; ordinary pooled session
+budgets are unchanged after the transaction. This does not bound filesystem
+latency.
+
+## Upgrade and custody
+
+Apply both additive migrations before starting corrected workers. Old binaries
+admit newer successful history, but can still delete failures older than seven
+days. The retained-failure guarantee and supported recovery activation require
+**every old retention owner for the database stopped or replaced**, including
+custom `Engine::new` users. A rolling overlap does not establish that gate;
+no migration restores already deleted rows. New binaries refuse missing or
+mismatched history and never repair schema during startup.
+
+Keep the additive schema and roll forward to a corrected worker. An old-binary
+rollback restores failed deletion, early capacity release, and the observation
+race. Stop claims/retention while repairing if custody must remain assured.
+Never reset the claim-generation sequence or clear history; restore the sequence
+above every persisted version so stale recovery tokens cannot become valid.
+That fence does not survive restoring an earlier database history. Restore the
+queue, history, and sequence consistently; invalidate saved pre-restore tokens,
+commands, and receipts. Restore compatible handlers for outstanding kinds and
+payload versions, reconcile already-applied effects, then re-inspect individual
+identities before recovery. Never reuse a saved command as restore authority.
+
+Static leases still delay uncertain/crashed-attempt recovery until expiry;
+revisit them only for changed availability needs or measured unacceptable rescue
+latency. The outbox retains one publisher slot and the combined worker failure
+domain: NATS startup refusal can prevent ordinary jobs from starting, and a
+critical engine/consumer failure stops the process. Independent throughput or
+availability requirements require a separate design.
 
 <!-- template:begin webhooks-common:docs-background-jobs-webhooks -->
 ## Webhook kinds
@@ -423,7 +563,7 @@ configured inbound endpoint without a consumer before claiming. The registry is
 empty until an adopter binds its real consumer.
 <!-- template:end inbound-webhooks:docs-background-jobs-webhooks-inbound -->
 
-The pack still has no operator pause, cancel, redrive, priority, queue,
+The pack still has no operator pause, cancel, bulk/force recovery, priority, queue,
 workflow, or generic business-closure replay API. The webhook provider and
 the messaging outbox, where retained, reuse its scheduling, attempt, and
 completion mechanics. A lifecycle-crate extraction remains deliberately deferred under the condition in

@@ -37,8 +37,8 @@ use infra_bearerauthn::{
 };
 // template:end authn:grpc-transport-test-auth-imports
 use infra_grpc::{
-    ClientIdentity, ClientSecurity, ClientTlsMaterial, ERROR_DOMAIN, Error, Failure, Limits,
-    ServerTlsMaterial, Services, server_options, server_tls_config,
+    ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial, ERROR_DOMAIN, Error, Failure,
+    Limits, ServerTlsMaterial, Services, server_options, server_tls_config,
 };
 use infra_http::{Drained, Server};
 use rcgen::{
@@ -82,7 +82,7 @@ const UNSCOPED: &str = "unscoped";
 const UNARY_PATH: &str = "/example.v1.EchoService/Unary";
 // template:end authn:grpc-transport-test-accepted-token
 
-/// The longest a test client waits for response headers.
+/// The ordinary test client's whole-RPC budget.
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -156,6 +156,7 @@ impl Hold {
 struct Echo {
     calls: Arc<Mutex<Vec<SeenCall>>>,
     hold: Arc<Hold>,
+    stream_dropped: Arc<Notify>,
 }
 
 impl Echo {
@@ -163,6 +164,7 @@ impl Echo {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
             hold: Arc::new(Hold::new()),
+            stream_dropped: Arc::new(Notify::new()),
         }
     }
 
@@ -246,6 +248,31 @@ impl EchoService for Echo {
             message: message.clone(),
         })]);
         Ok(Response::new(match message.as_str() {
+            "hold-after-first" => {
+                let hold = Arc::clone(&self.hold);
+                let dropped = NotifyOnDrop(Arc::clone(&self.stream_dropped));
+                Box::pin(first.chain(futures_util::stream::once(async move {
+                    let _dropped = dropped;
+                    hold.wait().await;
+                    Ok(ServerStreamResponse {
+                        message: "released".to_owned(),
+                    })
+                })))
+            }
+            "flood" => {
+                let dropped = NotifyOnDrop(Arc::clone(&self.stream_dropped));
+                Box::pin(futures_util::stream::unfold(
+                    dropped,
+                    |dropped| async move {
+                        Some((
+                            Ok(ServerStreamResponse {
+                                message: "x".repeat(256 * 1024),
+                            }),
+                            dropped,
+                        ))
+                    },
+                ))
+            }
             "fail-after-first" => Box::pin(first.chain(futures_util::stream::iter([Err(
                 Failure::new(FailureCode::Conflict).into(),
             )]))),
@@ -263,15 +290,32 @@ impl EchoService for Echo {
         request: Request<tonic::Streaming<BidiStreamRequest>>,
     ) -> Result<Response<Self::BidiStreamStream>, Status> {
         self.observe(&request, Seen::BidiStream);
-        let mut input = request.into_inner();
-        let message = input
-            .message()
-            .await?
-            .expect("client sends one message")
-            .message;
-        Ok(Response::new(Box::pin(tonic::codegen::tokio_stream::iter(
-            [Ok(BidiStreamResponse { message })],
+        let input = request.into_inner();
+        let dropped = NotifyOnDrop(Arc::clone(&self.stream_dropped));
+        Ok(Response::new(Box::pin(futures_util::stream::unfold(
+            (input, dropped),
+            |(mut input, dropped)| async move {
+                match input.message().await {
+                    Ok(Some(item)) => Some((
+                        Ok(BidiStreamResponse {
+                            message: item.message,
+                        }),
+                        (input, dropped),
+                    )),
+                    Ok(None) => None,
+                    Err(status) => Some((Err(status), (input, dropped))),
+                }
+            },
         ))))
+    }
+}
+
+/// Source destruction, including while no further message is polled.
+struct NotifyOnDrop(Arc<Notify>);
+
+impl Drop for NotifyOnDrop {
+    fn drop(&mut self) {
+        self.0.notify_one();
     }
 }
 
@@ -564,6 +608,45 @@ async fn all_cardinalities_round_trip() {
 
 fn tokio_stream_once<T>(item: T) -> impl tonic::codegen::tokio_stream::Stream<Item = T> {
     tonic::codegen::tokio_stream::iter([item])
+}
+
+#[tokio::test]
+async fn client_observation_fallback_preserves_raw_request_routing() {
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
+
+    let fixture = Fixture::plaintext().await;
+    for mismatched_extension in [false, true] {
+        let builder = http::Request::builder()
+            .method("POST")
+            .uri(ECHO_SERVICE_UNARY)
+            .header("content-type", "application/grpc")
+            .header("te", "trailers");
+        let authentication = request(()).into_parts().0.into_headers();
+        let mut request = builder
+            .body(tonic::body::Body::new(http_body_util::Full::new(
+                bytes::Bytes::from(grpc_frame("raw route")),
+            )))
+            .unwrap();
+        request.headers_mut().extend(authentication);
+        if mismatched_extension {
+            request
+                .extensions_mut()
+                .insert(tonic::GrpcMethod::new("unrelated.Service", "Wrong"));
+        }
+        let response = timeout(WAIT, plaintext_client(fixture.address).oneshot(request))
+            .await
+            .unwrap()
+            .unwrap();
+        let body = timeout(WAIT, response.into_body().collect())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(body.trailers().unwrap().get("grpc-status").unwrap(), "0");
+        assert_eq!(body.to_bytes(), grpc_frame("raw route"));
+    }
+    assert_seen(&fixture.echo, &[Seen::Unary, Seen::Unary]);
+    fixture.stop().await;
 }
 
 /// The `google.rpc.ErrorInfo` reason of a catalog failure.
@@ -861,6 +944,307 @@ async fn the_configured_limit_sheds_the_next_call_without_starving_health() {
     .unwrap();
     assert_eq!(followed.into_inner().message, "after");
     drop(held);
+    fixture.stop().await;
+}
+
+/// The first response message proves opening, while Hold retains stream work.
+#[tokio::test]
+async fn opened_stream_holds_capacity_until_terminal_release() {
+    let fixture = Fixture::limited(1).await;
+    let mut client = fixture.echo_client();
+    let mut stream = timeout(
+        WAIT,
+        client.server_stream(request(ServerStreamRequest {
+            message: "hold-after-first".to_owned(),
+        })),
+    )
+    .await
+    .expect("stream opens")
+    .unwrap()
+    .into_inner();
+    assert_eq!(
+        timeout(WAIT, stream.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .message,
+        "hold-after-first"
+    );
+    fixture.echo.hold.wait_for(1).await;
+    let second = timeout(
+        WAIT,
+        client.unary(request(UnaryRequest {
+            message: "must shed".to_owned(),
+        })),
+    )
+    .await
+    .expect("overload is answered");
+    fixture.echo.hold.release();
+    assert_eq!(
+        timeout(WAIT, stream.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .message,
+        "released"
+    );
+    assert!(
+        timeout(WAIT, stream.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    let recovered = timeout(
+        WAIT,
+        client.unary(request(UnaryRequest {
+            message: "admitted".to_owned(),
+        })),
+    )
+    .await
+    .expect("capacity recovers")
+    .unwrap();
+    fixture.stop().await;
+    assert_eq!(second.unwrap_err().code(), Code::ResourceExhausted);
+    assert_eq!(recovered.into_inner().message, "admitted");
+}
+
+#[tokio::test]
+async fn duplex_progresses_before_request_eof_and_drop_stops_upload_and_recovers_capacity() {
+    let fixture = Fixture::limited(1).await;
+    let mut client = fixture.echo_client();
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    let upload_dropped = Arc::new(Notify::new());
+    let upload = futures_util::stream::unfold(
+        (receiver, NotifyOnDrop(Arc::clone(&upload_dropped))),
+        |(mut receiver, dropped)| async move {
+            receiver
+                .recv()
+                .await
+                .map(|item| (item, (receiver, dropped)))
+        },
+    );
+    let mut response = timeout(WAIT, client.bidi_stream(request(upload)))
+        .await
+        .expect("duplex opens before upload EOF")
+        .unwrap()
+        .into_inner();
+    for message in ["first", "second", "third"] {
+        timeout(
+            WAIT,
+            sender.send(BidiStreamRequest {
+                message: message.to_owned(),
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            timeout(WAIT, response.message())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .message,
+            message
+        );
+    }
+    let shed = timeout(
+        WAIT,
+        client.unary(request(UnaryRequest {
+            message: "occupied".to_owned(),
+        })),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(shed.code(), Code::ResourceExhausted);
+    // The sender remains alive: only cancellation can close this upload source.
+    drop(response);
+    timeout(WAIT, upload_dropped.notified())
+        .await
+        .expect("client drops upload source");
+    timeout(WAIT, sender.closed())
+        .await
+        .expect("upload producer observes cancellation");
+    timeout(WAIT, fixture.echo.stream_dropped.notified())
+        .await
+        .expect("server drops request/response work");
+    let admitted = timeout(
+        WAIT,
+        client.unary(request(UnaryRequest {
+            message: "recovered".to_owned(),
+        })),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(admitted.into_inner().message, "recovered");
+    drop(sender);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn opened_stream_without_caller_deadline_outlives_both_opening_caps() {
+    let fixture = Fixture::open_with(
+        true,
+        None,
+        Limits {
+            request_timeout: Duration::from_millis(100),
+            max_in_flight: NonZeroU32::new(1),
+            ..limits()
+        },
+    )
+    .await;
+    let adapter = infra_grpc::Client::with_timeout_policy(
+        &format!("http://{}", fixture.address),
+        ClientSecurity::Plaintext,
+        ClientTimeout::OpeningOnly(Duration::from_millis(100)),
+    )
+    .unwrap();
+    let mut client = EchoServiceClient::new(adapter);
+    let mut response = timeout(
+        WAIT,
+        client.server_stream(request(ServerStreamRequest {
+            message: "hold-after-first".to_owned(),
+        })),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .into_inner();
+    assert!(
+        timeout(WAIT, response.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_some()
+    );
+    fixture.echo.hold.wait_for(1).await;
+    // Waiting beyond both opening budgets cannot terminate an opened stream.
+    assert!(
+        timeout(Duration::from_millis(200), response.message())
+            .await
+            .is_err()
+    );
+    fixture.echo.hold.release();
+    assert_eq!(
+        timeout(WAIT, response.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .message,
+        "released"
+    );
+    assert!(
+        timeout(WAIT, response.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn supplied_caller_deadline_expires_open_stream_and_recovers_capacity() {
+    let fixture = Fixture::limited(1).await;
+    let adapter = infra_grpc::Client::with_timeout_policy(
+        &format!("http://{}", fixture.address),
+        ClientSecurity::Plaintext,
+        ClientTimeout::OpeningOnly(Duration::from_secs(1)),
+    )
+    .unwrap();
+    let mut client = EchoServiceClient::new(adapter);
+    let mut call = request(ServerStreamRequest {
+        message: "hold-after-first".to_owned(),
+    });
+    call.set_timeout(Duration::from_millis(200));
+    let mut response = timeout(WAIT, client.server_stream(call))
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner();
+    assert!(
+        timeout(WAIT, response.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_some()
+    );
+    let error = timeout(WAIT, response.message())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.code(), Code::DeadlineExceeded);
+    timeout(WAIT, fixture.echo.stream_dropped.notified())
+        .await
+        .expect("deadline releases server stream");
+    let recovered = timeout(
+        WAIT,
+        client.unary(request(UnaryRequest {
+            message: "recovered".to_owned(),
+        })),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(recovered.into_inner().message, "recovered");
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn unread_flow_controlled_response_releases_server_work_at_caller_deadline() {
+    let fixture = Fixture::limited(1).await;
+    let stream = TcpStream::connect(fixture.address).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::handshake(
+        hyper_util::rt::TokioExecutor::new(),
+        hyper_util::rt::TokioIo::new(stream),
+    )
+    .await
+    .unwrap();
+    let driver = tokio::spawn(connection);
+    let builder = http::Request::builder()
+        .method("POST")
+        .uri(format!(
+            "http://{}/example.v1.EchoService/ServerStream",
+            fixture.address
+        ))
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .header("grpc-timeout", "300m");
+    let mut outgoing = builder
+        .body(axum::body::Body::from(grpc_frame("flood")))
+        .unwrap();
+    outgoing
+        .headers_mut()
+        .extend(request(()).into_parts().0.into_headers());
+    let response = timeout(WAIT, sender.send_request(outgoing))
+        .await
+        .unwrap()
+        .unwrap();
+    // The raw peer has no local timer and never polls DATA. The server's timer
+    // must drop its source even after HTTP/2 receive credit has been exhausted.
+    timeout(WAIT, fixture.echo.stream_dropped.notified())
+        .await
+        .expect("unread server stream is released");
+    let recovered = timeout(
+        WAIT,
+        fixture.echo_client().unary(request(UnaryRequest {
+            message: "recovered".to_owned(),
+        })),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(recovered.into_inner().message, "recovered");
+    drop(response);
+    drop(sender);
+    driver.abort();
+    let _ = driver.await;
     fixture.stop().await;
 }
 
@@ -1344,9 +1728,6 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
         format!(r#"grpc_server_handled_total{{{unary},grpc_code="DeadlineExceeded"}} 1"#),
         r#"grpc_server_started_total{grpc_service="unknown",grpc_method="unknown"} 1"#.to_owned(),
         r#"grpc_server_handled_total{grpc_service="unknown",grpc_method="unknown",grpc_code="Unimplemented"} 1"#.to_owned(),
-        format!("grpc_client_started_total{{{unary}}} 3"),
-        format!(r#"grpc_client_handled_total{{{unary},grpc_code="OK"}} 1"#),
-        format!(r#"grpc_client_handled_total{{{unary},grpc_code="Canceled"}} 1"#),
     ];
     // The server learns of the abandoned call when the reset arrives.
     let rendered = timeout(WAIT, async {
@@ -1441,10 +1822,6 @@ async fn a_stream_is_counted_with_the_status_that_ended_it() {
         format!(r#"grpc_server_handled_total{{{stream},grpc_code="Internal"}} 1"#),
         format!(r#"grpc_server_failures_total{{{stream},failure_code="conflict"}} 1"#),
         format!(r#"grpc_server_failures_total{{{stream},failure_code="internal_error"}} 1"#),
-        format!("grpc_client_started_total{{{stream}}} 3"),
-        format!(r#"grpc_client_handled_total{{{stream},grpc_code="Aborted"}} 1"#),
-        format!(r#"grpc_client_handled_total{{{stream},grpc_code="Internal"}} 1"#),
-        format!(r#"grpc_client_handled_total{{{stream},grpc_code="Canceled"}} 1"#),
     ];
     timeout(WAIT, async {
         while !expected.iter().all(|line| handle.render().contains(line)) {
@@ -1455,6 +1832,89 @@ async fn a_stream_is_counted_with_the_status_that_ended_it() {
     .unwrap_or_else(|_| panic!("metrics settle: {}", handle.render()));
     drop(client);
     fixture.stop().await;
+}
+
+fn stalled_unary_response(
+    send_data: bool,
+    peer_polled: Arc<Notify>,
+    dropped: NotifyOnDrop,
+) -> http::Response<axum::body::Body> {
+    let first = send_data.then(|| {
+        Ok::<_, std::convert::Infallible>(http_body::Frame::data(bytes::Bytes::from(grpc_frame(
+            "reply",
+        ))))
+    });
+    let frames = futures_util::stream::iter(first).chain(futures_util::stream::once(async move {
+        let _dropped = dropped;
+        peer_polled.notify_one();
+        std::future::pending().await
+    }));
+    http::Response::builder()
+        .header("content-type", "application/grpc")
+        .body(axum::body::Body::new(http_body_util::StreamBody::new(
+            frames,
+        )))
+        .unwrap()
+}
+
+/// A peer that accepts and never answers: the call's own deadline ends it.
+#[tokio::test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "native gRPC response-body wire fixture is outside REST application contract authoring"
+)]
+async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
+    for send_data in [false, true] {
+        let peer_polled = Arc::new(Notify::new());
+        let body_dropped = Arc::new(Notify::new());
+        let app = axum::Router::new().route(
+            ECHO_SERVICE_UNARY,
+            axum::routing::post({
+                let peer_polled = Arc::clone(&peer_polled);
+                let body_dropped = Arc::clone(&body_dropped);
+                move || {
+                    let peer_polled = Arc::clone(&peer_polled);
+                    let dropped = NotifyOnDrop(Arc::clone(&body_dropped));
+                    async move { stalled_unary_response(send_data, peer_polled, dropped) }
+                }
+            }),
+        );
+        let server = Server::bind(loopback(), app, server_options(limits()))
+            .await
+            .unwrap();
+        let adapter = infra_grpc::Client::new(
+            &format!("http://{}", server.local_addr()),
+            ClientSecurity::Plaintext,
+            Duration::from_millis(200),
+        )
+        .unwrap();
+        let call = tokio::spawn(async move {
+            EchoServiceClient::new(adapter)
+                .unary(Request::new(UnaryRequest {
+                    message: "request".to_owned(),
+                }))
+                .await
+        });
+        timeout(WAIT, peer_polled.notified())
+            .await
+            .expect("peer has opened and stalled its body");
+        let status = timeout(WAIT, call).await.unwrap().unwrap().unwrap_err();
+        assert_eq!(
+            status.code(),
+            Code::DeadlineExceeded,
+            "send_data={send_data}"
+        );
+        timeout(WAIT, body_dropped.notified())
+            .await
+            .expect("peer sees cancellation");
+        assert_eq!(
+            timeout(WAIT, server.drain(Duration::from_secs(1)))
+                .await
+                .unwrap()
+                .unwrap(),
+            Drained::Complete
+        );
+    }
 }
 
 /// A peer that accepts and never answers: the call's own deadline ends it.
@@ -1498,6 +1958,7 @@ async fn a_call_whose_deadline_runs_out_is_deadline_exceeded_not_unavailable() {
     .unwrap_err();
     assert_eq!(status.code(), Code::DeadlineExceeded);
     silent.abort();
+    assert!(silent.await.unwrap_err().is_cancelled());
 }
 
 fn pem(bytes: &[u8]) -> String {
@@ -1567,27 +2028,28 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
                 let acceptor = acceptor.clone();
                 let silent = Arc::clone(&silent);
                 tokio::spawn(async move {
-                    if let Ok(mut stream) = acceptor.accept(stream).await {
-                        // The form body can arrive after the request head.
-                        let mut request = [0_u8; 4096];
-                        let mut read = 0;
-                        let contains = |seen: &[u8], needle: &[u8]| {
-                            seen.windows(needle.len()).any(|window| window == needle)
-                        };
-                        while !contains(&request[..read], b"token=") {
-                            match stream.read(&mut request[read..]).await {
-                                Ok(more) if more > 0 => read += more,
-                                _ => break,
-                            }
+                    let Ok(mut stream) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    // The form body can arrive after the request head.
+                    let mut request = [0_u8; 4096];
+                    let mut read = 0;
+                    let contains = |seen: &[u8], needle: &[u8]| {
+                        seen.windows(needle.len()).any(|window| window == needle)
+                    };
+                    while !contains(&request[..read], b"token=") {
+                        match stream.read(&mut request[read..]).await {
+                            Ok(more) if more > 0 => read += more,
+                            _ => break,
                         }
-                        if silent.load(Ordering::Acquire) {
-                            std::future::pending::<()>().await;
-                        }
-                        let unscoped = contains(&request[..read], b"token=unscoped");
-                        let response = introspection_response(unscoped);
-                        let _ = stream.write_all(response.as_bytes()).await;
-                        let _ = stream.shutdown().await;
                     }
+                    if silent.load(Ordering::Acquire) {
+                        std::future::pending::<()>().await;
+                    }
+                    let unscoped = contains(&request[..read], b"token=unscoped");
+                    let response = introspection_response(unscoped);
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
                 });
             }
         }

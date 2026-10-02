@@ -9,7 +9,7 @@ failure-semantics choices.
 ## What the profile retains
 
 `crates/infra-object-storage` holds one concrete client, `ObjectStorage`, over
-`aws-sdk-s3`. A feature calls:
+`aws-sdk-s3`. A feature's provider adapter calls:
 
 | Call | S3 operation | Notes |
 | --- | --- | --- |
@@ -28,9 +28,10 @@ keys.
 It does not add listing, multipart upload, range reads, copy, tagging, user
 metadata, presigned PUT, bucket management, a filesystem backend, or a port
 trait. The feature owns keys, authorization, content policy, retention,
-create-only intent, and who receives a presigned URL. A feature that needs one
-more S3 operation adds it to `ObjectStorage` beside the others, so it shares
-admission, retries, and observation; it does not hold a raw SDK client.
+create-only intent, and who receives a presigned URL. When a feature needs one
+more S3 operation, extend `ObjectStorage` beside the others so its provider
+adapter shares admission, retries, and observation; it does not hold a raw SDK
+client.
 
 ## Select and configure
 
@@ -151,13 +152,24 @@ operation_timeout = "5s"
 # secret_access_key is environment-only: APP__OBJECT_STORAGE__SECRET_ACCESS_KEY
 ```
 
-## Use it from a feature
+## Wire it to a feature
 
-Hold an `ObjectStorage` from composition. Keys are `ObjectKey` values: 1 to
+The feature owns a narrow business interface, such as storing a result or
+loading a document. Its provider adapter implements that interface over an
+`ObjectStorage` supplied by composition. The feature depends on neither
+`infra-object-storage` nor SDK types: the adapter validates keys, translates
+storage errors into feature-owned errors, and returns bytes or feature-owned
+values. This follows the [component boundaries](architecture/boundaries.md).
+The interface protects dependency direction even with one implementation;
+the template needs no general storage trait before a feature exists.
+
+Inside the adapter, keys are `ObjectKey` values: 1 to
 1024 bytes of `[A-Za-z0-9._~-]` in `/`-separated segments, with no empty, `.`,
 or `..` segment. The grammar is ASCII because R2 normalizes Unicode keys, so
 two distinct keys could name one object. Keys reach provider logs, and the SDK
 logs them at DEBUG: never put personal data in a key.
+
+For example, the provider adapter uses the concrete client as follows:
 
 ```rust
 let key = ObjectKey::new(format!("parse-results/{operation_id}.json"))?;
@@ -188,9 +200,10 @@ A `Download` can be read chunk by chunk with `next_chunk()`. It is also an
 as a response body with `Body::new(download)` and its own `Content-Length`.
 After a failure every later call returns the same error, so a cut body never
 reads as a clean end. The chunk that completes the object is released only
-after the provider's body has ended and a returned checksum has been
-validated: a reader that stops at the declared length, as an HTTP server
-does, never receives a complete object that failed the check. An empty
+after the provider's body has ended and any SDK-supported full-object checksum
+has been validated (see [Integrity](#integrity)): a reader that stops at the
+declared length, as an HTTP server does, never receives a complete object that
+failed the check. An empty
 object's download has already ended when `get` returns.
 
 A streamed download holds its admission slot for as long as its reader takes.
@@ -213,7 +226,7 @@ keeps the slot, and `max_concurrency` such clients make every other call
 | --- | --- | --- |
 | `NotFound` | The object does not exist (see the note below on Amazon and on `head`) | Business decision |
 | `AlreadyExists` | A create-only put found the key | Business decision |
-| `TooLarge` | A declared or stored size exceeds `max_object_bytes`; nothing was sent | Refuse the input |
+| `TooLarge` | A declared or stored size exceeds `max_object_bytes`; a put sends nothing, a get refuses the body after receiving its headers | Refuse the input |
 | `Busy` | The admission limit is full; nothing was sent | Shed load, for example HTTP 503 |
 | `Unavailable` | Transient: a read failed, the workload identity yielded no credentials (nothing was sent), or the provider refused a mutation before applying it (409, 429, 503, or S3's `400 RequestTimeout`) | Retry later |
 | `Rejected` | Permanent: another 4xx, 501, a missing bucket, a streamed body that does not match its length, or an out-of-range presign lifetime | Fix configuration, credentials, or input |
@@ -262,8 +275,15 @@ A `head` response has no body, so a missing bucket on `head` also reads as
 - `object_storage.max_object_bytes` (default `8 MiB`, at most 4.995 GiB, the
   smallest single-upload limit of the supported providers) bounds a put before
   anything is sent and a get before its body is read. `head` reports the real
-  size even above it. Buffered reads through `bytes()` can hold up to
-  `max_concurrency * max_object_bytes` in memory: 64 MiB with the defaults.
+  size even above it. `max_concurrency * max_object_bytes` budgets the object
+  payload collected by downloads still holding a slot: 64 MiB with the
+  defaults. It is not a process memory ceiling. `bytes()` copies chunks into
+  a collection buffer, and the SDK's buffers and allocation overhead add to
+  it. At EOF the slot is released; the returned `Bytes` remain allocated
+  until every owner drops them. Eight completed 8 MiB HTTP responses plus
+  eight new downloads can therefore retain 128 MiB of payload. Bound buffered
+  responses with the consuming HTTP/job path's concurrency and payload
+  budgets; use presigned URLs for objects that do not fit that budget.
 
 ## Integrity
 
@@ -278,12 +298,18 @@ computes it, where the provider is known to accept it:
 | `s3_compatible` | None: nothing is assumed about the store |
 | `local` | As `amazon_s3` |
 
-Every get asks for the stored checksum, and the SDK validates a full-object
-checksum at the end of the body; a mismatch is `Integrity`. An object without
-a returned checksum is still readable, because objects written by other
-clients (the Go SDK defaults to CRC32) must stay readable. A feature that
-needs end-to-end integrity keeps its own digest, as both GonkaGate consumers
-already do in PostgreSQL.
+Every get asks for the stored checksum. When the pinned SDK finds a supported,
+decodable full-object checksum, it validates it at the end of the body; a
+mismatch is `Integrity`. It allows a response without a checksum, skips
+composite/part-level checksums with a `-N` suffix, and logs then skips a checksum
+that is not valid base64. A successful download therefore proves body length
+and completion, but does not attest that a checksum was present or validated.
+This keeps objects written by other clients readable.
+
+A feature that requires end-to-end integrity owns an expected digest from its
+authoritative record. Its adapter checks the downloaded bytes against that
+digest before returning a verified value. ETag and size alone are not a
+content digest. Both GonkaGate consumers already keep SHA-256 in PostgreSQL.
 
 ## Presigned URLs
 
@@ -430,13 +456,14 @@ env/docker-compose.yml down -v` drops the emulator with its objects.
 
 ## Test a feature that uses it
 
-The crate ships no fake and no trait (see [Decisions](object-storage-decisions.md)).
-A feature proves its storage path one of two ways:
+The crate ships no fake and no general storage trait (see
+[Decisions](object-storage-decisions.md)). The feature's business interface
+from [composition](#wire-it-to-a-feature) is also its test seam:
 
 | Test | How |
 | --- | --- |
-| Against a real S3 implementation | Build `ObjectStorage` with `Provider::Local` for the Compose emulator and `template-bucket`, as `crates/infra-object-storage/tests/emulator.rs` does, and write under a prefix unique to the test. This runs the real client, so create-only, `NotFound`, and checksums are the client's own, not a fake's. |
-| Without storage | Put a narrow trait at the feature's own boundary, named for what the feature does (store a result, load a document), implement it over `ObjectStorage`, and give the test an in-memory implementation. A `Download` cannot be built outside the crate, so the trait returns `Bytes` or the feature's own type; `ObjectStorageError` variants are plain values a fake can return. |
+| Against a real S3 implementation | Build the provider adapter with `ObjectStorage`, `Provider::Local`, and the Compose bucket `template-bucket`, as `crates/infra-object-storage/tests/emulator.rs` does, and write under a prefix unique to the test. Exercise the feature's business interface through that adapter, including its error and digest mapping. |
+| Without storage | Give the feature an in-memory implementation of its own business interface. It returns bytes or feature-owned values and errors; `ObjectKey`, `Download`, and `ObjectStorageError` stay in the provider adapter and its tests. |
 
 A fake cannot show that a provider honors create-only or returns a checksum:
 keep at least one emulator test for the feature's write path.

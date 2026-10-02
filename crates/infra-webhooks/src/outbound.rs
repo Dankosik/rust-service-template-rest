@@ -477,6 +477,7 @@ fn unix_timestamp(now: SystemTime) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_metrics::CounterKeys;
     use std::time::{Duration, UNIX_EPOCH};
 
     use http::{HeaderMap, HeaderValue, header};
@@ -582,57 +583,6 @@ mod tests {
         );
     }
 
-    /// Collects the key of every counter a delivery registers.
-    #[derive(Default)]
-    struct Keys(std::sync::Mutex<Vec<metrics::Key>>);
-
-    impl metrics::Recorder for Keys {
-        fn describe_counter(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn describe_gauge(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn describe_histogram(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn register_counter(
-            &self,
-            key: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Counter {
-            self.0.lock().expect("keys").push(key.clone());
-            metrics::Counter::noop()
-        }
-
-        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
-            metrics::Gauge::noop()
-        }
-
-        fn register_histogram(
-            &self,
-            _: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Histogram {
-            metrics::Histogram::noop()
-        }
-    }
-
     #[test]
     fn each_attempt_is_counted_by_endpoint_outcome_and_reason_without_the_status() {
         let response = |status: u16| {
@@ -641,7 +591,7 @@ mod tests {
                 .body(bytes::Bytes::new())
                 .unwrap())
         };
-        let keys = Keys::default();
+        let keys = CounterKeys::default();
         metrics::with_local_recorder(&keys, || {
             for exchange in [
                 response(204),

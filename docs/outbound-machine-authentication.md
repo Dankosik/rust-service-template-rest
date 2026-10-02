@@ -35,6 +35,7 @@ assertion_audience = "https://identity.example/"
 scopes = ["billing.read"]
 # audience = "https://billing-api.example"
 # exchange_cache_capacity = 1024
+# provider_concurrency = 32
 ```
 
 Supply the private key only as the variable
@@ -55,7 +56,10 @@ billing.write`; TOML uses a list. Omitted or empty scopes send no scope
 parameter. Each list member is an RFC 6749 scope token; a configured audience
 must be nonempty. `exchange_cache_capacity` (default 1024, inclusive 1–65536)
 bounds how many subjects keep a token exchanged on their behalf; see [Token
-exchange](#token-exchange-for-user-context). Credentials and configuration
+exchange](#token-exchange-for-user-context). `provider_concurrency` defaults to 32
+and accepts a positive `u32` integer or integer string; zero, fractions,
+booleans, negatives, and overflow fail startup. It bounds actual token attempts
+across both grants, independently of retained cache entries. Credentials and configuration
 are immutable; rotate by restart. Client IDs are nonempty without additional length or character
 restrictions; the private key must be a PKCS#8 or PKCS#1 PEM matching
 `algorithm`, or construction fails with a sanitized configuration error
@@ -85,9 +89,67 @@ infra-oauth2-client-credentials = { path = "crates/infra-oauth2-client-credentia
 That provider then declares `infra-oauth2-client-credentials = { workspace = true }`
 in its own `[dependencies]`.
 
-`infra-oauth2-client-credentials` owns an opaque cloneable `Credentials`, prepared
-from its `Options`. Composition code translates one named config into options,
-constructs credentials, and binds them with `credentials.http(resource_client)`.
+`infra-oauth2-client-credentials` owns an opaque cloneable `Credentials` and a
+non-cloneable, must-use `RefreshDriver`. Composition translates one named config
+into options and prepares both without I/O:
+
+```rust,ignore
+let (credentials, driver) = Credentials::prepare(options)?;
+let client = credentials.http(resource_client);
+```
+
+The concrete integration owns `driver.run(shutdown)`, where `shutdown` is its
+existing cancellation future. It drives that future for as long as credentials
+or authenticated-client clones are in use, and awaits its completion in the
+existing background-join stage before dropping dependencies. That expected
+completion is distinct from an unexpected background-task exit in a process
+root. For a shorter integration lifetime, dropping the final
+`Credentials`/client owner also completes the driver; a surviving client is
+closed if its driver is dropped. A detached `spawn` is not a completion owner.
+
+For a scoped integration, join the work and the driver. The work future owns
+the final client clone, so its return drops that clone and lets the pending
+driver return:
+
+```rust,ignore
+let (credentials, driver) = Credentials::prepare(options)?;
+let client = credentials.http(resource_client);
+drop(credentials);
+let work = async move { run_integration(client).await };
+let (result, ()) = tokio::join!(work, driver.run(std::future::pending()));
+result
+```
+
+For a process-lifetime integration, an existing lifecycle owner may spawn the
+driver only while it retains its handle. Clone the existing cancellation token
+into the `'static` driver future. When service work returns, whether normally or
+with an error, cancel that token. Await the expected `Ok(())` under the existing
+`background_join_deadline` before dropping dependencies; a `JoinError` remains
+an unexpected task failure. On that existing deadline, abort the retained handle
+and await it before recording degraded shutdown and dropping dependencies:
+
+```rust,ignore
+let driver_shutdown = shutdown.clone();
+let mut refresh_driver = tokio::spawn(async move {
+    driver.run(driver_shutdown.cancelled()).await;
+});
+let service_result = serve_until_shutdown(client, &shutdown).await;
+shutdown.cancel();
+let degraded = match tokio::time::timeout_at(background_join_deadline, &mut refresh_driver).await {
+    Ok(Ok(())) => false, // expected after shutdown or final client-owner release
+    Ok(Err(error)) => return Err(report_unexpected_background_exit(error)),
+    Err(_) => {
+        refresh_driver.abort();
+        let _ = refresh_driver.await;
+        true
+    }
+};
+drop(dependencies);
+if degraded {
+    return Err(report_degraded_shutdown());
+}
+service_result
+```
 The resulting cloneable `AuthenticatedClient::execute(request, deadline)` takes
 the existing `http::Request<Bytes>` and an absolute `tokio::time::Instant` and
 returns the existing bounded response or the OAuth adapter's sanitized error.
@@ -95,7 +157,30 @@ There is no public token getter, generic token-source trait, or business client
 generator. Each concrete provider adapter receives its own authenticated client;
 feature code receives only its existing provider port. Reusing a `Credentials`
 clone is an explicit composition decision for the same immutable tuple; separate
-constructions never share token state.
+constructions never share token state or provider capacity. Transfer the configured
+limit at the same composition boundary as the other fields:
+
+```rust,ignore
+use infra_oauth2_client_credentials::{Algorithm, Options};
+use service_config::OAuthAlgorithm;
+
+let options = Options {
+    token_url: oauth.token_url.clone(),
+    client_id: oauth.client_id.clone(),
+    private_key: oauth.private_key.clone(),
+    key_id: oauth.key_id.clone(),
+    algorithm: match oauth.algorithm {
+        OAuthAlgorithm::Rs256 => Algorithm::Rs256,
+        OAuthAlgorithm::Ps256 => Algorithm::Ps256,
+        OAuthAlgorithm::Es256 => Algorithm::Es256,
+    },
+    assertion_audience: oauth.assertion_audience.clone(),
+    scopes: oauth.scopes.as_slice().to_vec(),
+    audience: oauth.audience.clone(),
+    exchange_cache_capacity: oauth.exchange_cache_capacity,
+    provider_concurrency: oauth.provider_concurrency,
+};
+```
 
 No example integration or unused registry is wired into the service. Config
 validates every configured tuple during the ordinary snapshot load, including
@@ -155,22 +240,50 @@ every token request and never cached or reused; two requests never share a
 `jti`.
 
 One owner never runs two service-token requests at once; [token
-exchange](#token-exchange-for-user-context) is coalesced per subject
-instead. Callers that arrive while a request is in flight wait for it, then
-reuse its token if it is reusable. After a failure, each waiting caller makes
-its own request in turn. Every caller bounds its own wait by its own absolute
-deadline. Dropping the requesting future cancels its request and lets the
-next waiter proceed. Dropping the last
-client/owner releases the cached token.
+exchange](#token-exchange-for-user-context) is coalesced per subject instead.
+Callers that arrive while service acquisition is in flight wait under their
+own absolute deadline, then independently re-evaluate the reusable token and
+completed-failure record. A reusable token always wins over that record. A
+completed provider refusal, transport/limit/unavailable/invalid-response or
+assertion failure, and a full five-second adapter timeout, are shared for one
+second without another token request; success clears the record. Cancellation,
+lock waiting, and a caller deadline shorter than the five-second attempt do
+not install it, so another caller remains eligible under its own budget.
+Dropping a requesting future cancels its request and lets the next waiter
+proceed. Expiry or an eligible 401 eviction does not erase a completed failure
+record. Dropping the last client/owner releases cached state.
+
+After cache lookup and same-key coalescing, each actual initializer tries to
+acquire one shared provider slot before signing or token I/O. Saturation returns
+`AcquisitionError::AtCapacity` immediately, with no admission queue, reservation,
+priority, automatic retry, or cached failure. An already expired deadline wins
+over capacity refusal. Hits and coalesced waiters use no slot, and callers keep
+their original absolute budgets. The permit lasts through body completion,
+parsing, and token admission, then releases on success, error, timeout, or drop.
+Cancelling a waiter cannot release another caller's live slot; a replacement
+initializer after leader cancellation must acquire its own. Local cancellation
+does not promise physical cancellation of provider work or system DNS.
+
+At default capacity, at most 32 active token attempts can hold response bodies
+with the 1 MiB payload ceiling each. Requested accumulator storage is at most
+32 MiB between growths, or 64 MiB allowing concurrent relocation, plus current
+transport frames/read buffers, parser and token storage. Cache storage and
+allocator/RSS costs are separate; these are not measured memory or throughput
+claims. See the [transport bounds](outbound-http.md#deadline-transport-and-retry-ownership).
 
 Once a quarter of the reuse period, or at most five minutes, remains before the
-reuse cutoff, the first caller to find the token also starts one detached
-refresh, as Azure.Core refreshes five minutes early. No caller waits for it
-while the current token is reusable: every caller keeps that token until the
-new one is stored. The attempt has only the five-second cap and takes the
-refresh lock like any other request. A failure keeps the current token until its
-reuse cutoff. After either outcome the next background attempt waits at least
-thirty seconds. The attempt is not joined at shutdown; the runtime cancels it.
+reuse cutoff, the first caller to find the token queues one refresh for the
+owned `RefreshDriver`, as Azure.Core refreshes five minutes early. No caller
+waits while the current token is reusable: every caller keeps that token until
+the new one is stored. The attempt's five-second cap starts when it is
+scheduled and includes waiting for acquisition ownership and the network
+operation. A completed provider failure is shared for one second, preventing
+queued callers from amplifying provider load; a success clears that record. A
+failure keeps the current token until its reuse cutoff, including a provider-capacity refusal. Foreground hits still use that token. After either outcome
+the next background attempt waits at least thirty seconds. Driver shutdown or
+final-owner loss cancels queued or active refresh work and its awaited return
+establishes completion.
+
 
 A positive `expires_in` establishes a conservative monotonic expiry from
 acquisition start. Keep the Go ten-second margin as a *reuse cutoff*: reuse the
@@ -179,12 +292,14 @@ already within that margin, including any lifetime at most ten seconds, serves
 only the request that fetched it. This avoids rejecting short-lived valid
 responses.
 
-A missing or unrepresentably large lifetime has no reuse cutoff: as in Go's
-`oauth2`, the token is reused until a resource 401 evicts it. Zero lifetime or a
-token already past its expiry when the response arrives cannot authorize
-dispatch. Hits never slide expiry. Failed attempts are not cached, and no token
-is reused past its cutoff. A later operation may fetch again. Unknown response
-fields and refresh tokens are discarded; JWT claims are not interpreted.
+A missing `expires_in` permits the acquisition that received it to dispatch
+once, but never enters either cache; a later call acquires again. A present
+zero, expired, or unrepresentably large lifetime is an invalid response and
+cannot authorize dispatch. Hits never slide expiry. Token and exchange failures
+are never cached; service acquisition has the separate one-second completed
+failure record above. No token is reused past its cutoff. A later operation may
+fetch again. Unknown response fields and refresh tokens are discarded; JWT
+claims are not interpreted.
 `expires_in` is a JSON number of whole seconds, as RFC 6749 section 5.1
 defines it; a response that sends it as a string is an invalid response. Only
 case-insensitive Bearer tokens that are nonempty and form a valid header value
@@ -206,19 +321,24 @@ the access-token type URI; anything else is an invalid-response failure and
 no token is used.
 
 Exchanged tokens are cached per credential owner, keyed by the SHA-256 digest
-of the subject token, bounded to `exchange_cache_capacity` entries (default
-1024), each until its own reuse cutoff (the same ten-second margin as above).
-Past that bound a subject without a retained token is exchanged on every
-call, which `oauth2_token_acquisitions_total{grant="token_exchange"}` shows
-as a rate tracking the request rate; size the bound to the users active on
-one replica within a token lifetime. Concurrent requests for one
+of the subject token, until their reuse cutoff (the same ten-second margin as
+above). Settled retention targets both `exchange_cache_capacity` entries
+(default 1024) and 16 MiB of Bearer-token bytes: cache weight applies the
+tighter target to each entry. Both are best-effort retention targets, not
+instantaneous admission or a process-memory/RSS ceiling; concurrent insertions,
+active calls, keys, metadata and allocator overhead can temporarily exceed
+them. Past settled retention, a subject without a retained token is exchanged
+on every call, which `oauth2_token_acquisitions_total{grant="token_exchange"}`
+shows as a rate tracking the request rate; size the count target to users active
+on one replica within a token lifetime. Concurrent requests for one
 subject share a single in-flight exchange: the first caller's, bounded by
 that caller's deadline and the five-second cap. A failure is returned to
 every caller that waited for it. When the first caller is dropped or out of
 budget, its exchange is cancelled and a waiting caller starts its own, so no
 caller fails because of another's deadline. Exchanges for different subjects
-run concurrently, and nothing in this adapter limits how many: the admission
-of the requests that carry those subjects is the bound. A resource 401 evicts only that
+run concurrently within the same owner's `provider_concurrency`, shared with
+service-token and background-refresh attempts. A capacity refusal neither
+substitutes a service token nor evicts another subject's cached token. A resource 401 evicts only that
 subject's cache entry, not the whole cache. An exchanged token with no
 `expires_in` serves only the request that fetched it and is never stored;
 failed exchanges are never cached.
@@ -231,7 +351,7 @@ conflict or, on a client bound with `require_on_behalf_of()`, a missing
 subject. A key that is not PEM, or that does not match `algorithm`,
 fails construction with a sanitized configuration error naming
 `private_key`; no I/O happens. Runtime token failures use closed reasons for
-deadline, transport, response limit, provider unavailability (5xx or 429),
+deadline, local provider capacity, transport, response limit, provider unavailability (5xx or 429),
 provider rejection, invalid response, and `assertion` for an assertion-signing
 failure. A rejection carries a closed `Rejection`: the response's `error` code
 when it is `invalid_request`, `invalid_client`, `invalid_grant`,
@@ -252,6 +372,13 @@ Debug implementations are redacted. Token attempt metrics are
 `oauth2_token_acquisitions_total{grant, outcome}`, with `grant` in
 `client_credentials | token_exchange` and a finite outcome label; there is no integration/URL label.
 A rejection's outcome is its registered error code, or `rejected` for `Other`.
+Capacity refusal emits `capacity` once per rejected initializer; coalesced
+waiters add no observations, and a refusal emits no outbound-HTTP attempt.
+HTTP callers receive the closed acquisition error before resource dispatch;
+gRPC maps capacity to `UNAVAILABLE` with `client credentials unavailable` and
+the typed local error source. Direct Rust `Options` literals must add
+`provider_concurrency`, and exhaustive acquisition-error matches must handle
+`AtCapacity`; existing configuration files retain the default.
 Existing safe
 outbound transport observation remains enabled. Cancellation records an
 outcome without claiming a provider result. A caller receives every token

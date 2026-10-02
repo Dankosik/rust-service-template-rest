@@ -257,19 +257,22 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
 async fn verify_session(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), ConnectError> {
     // The effective session budgets and default isolation, in milliseconds as
     // `pg_settings` stores both timeouts.
-    let session = observed(
-        "check session budgets",
-        sqlx::query!(
-            "SELECT \
+    let session = observed("check session budgets", async {
+        crate::with_connection(pool, async |connection| {
+            sqlx::query!(
+                "SELECT \
              (SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout') \
                  AS \"statement_ms!\", \
              (SELECT setting::bigint FROM pg_settings \
                WHERE name = 'idle_in_transaction_session_timeout') \
                  AS \"idle_in_transaction_ms!\", \
              current_setting('default_transaction_isolation') AS \"isolation!\""
-        )
-        .fetch_one(pool),
-    )
+            )
+            .fetch_one(connection)
+            .await
+        })
+        .await?
+    })
     .await
     .map_err(ConnectError::Connect)?;
     for (setting, found_ms, budget) in [

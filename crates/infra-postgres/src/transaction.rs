@@ -15,13 +15,13 @@ use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
 use futures_util::Stream;
-use sqlx::pool::PoolConnection;
 use sqlx::postgres::{
     PgConnection, PgPool, PgQueryResult, PgRow, PgStatement, PgTypeInfo, Postgres,
 };
 use sqlx::{Connection, Either, Execute, Executor, SqlStr};
 use tracing::Instrument;
 
+use crate::checkout::Checkout;
 use crate::observe::{self, Observed, Outcome};
 use crate::sqlstate;
 
@@ -155,26 +155,6 @@ impl<T> Stream for Proving<'_, T> {
     }
 }
 
-/// A pooled connection that is closed instead of returned to the pool
-/// while `discard` is set.
-///
-/// sqlx 0.9 does not roll back a `BEGIN` whose future is cancelled: its
-/// guard only acts once the transaction depth was incremented, which happens
-/// after the server answered. The pool's return ping succeeds, so the
-/// connection would re-enter the pool inside an open transaction.
-struct DiscardOnDrop {
-    connection: PoolConnection<Postgres>,
-    discard: bool,
-}
-
-impl Drop for DiscardOnDrop {
-    fn drop(&mut self) {
-        if self.discard {
-            self.connection.close_on_drop();
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Isolation {
     /// Omit the isolation clause; the server uses `default_transaction_isolation`.
@@ -254,31 +234,28 @@ where
     let span = observe::transaction_span(pool);
     let mut observed = Observed::start(span.clone());
     async {
-        let acquired = pool.acquire().await;
+        let acquired = Checkout::acquire(pool).await;
         observed.waited();
-        let mut guard = DiscardOnDrop {
-            connection: acquired.map_err(|err| observed.fail(TxError::Acquire(err)))?,
-            discard: true,
-        };
+        let mut checkout = acquired.map_err(|err| observed.fail(TxError::Acquire(err)))?;
         let mut tx = match options.begin_statement() {
-            None => guard.connection.begin().await,
-            Some(statement) => guard.connection.begin_with(statement).await,
+            None => checkout.connection().begin().await,
+            Some(statement) => checkout.connection().begin_with(statement).await,
         }
         .map_err(|err| observed.fail(TxError::Begin(err)))?;
-        guard.discard = false;
 
         let mut handle = Tx {
             conn: &mut tx,
             not_aborted: true,
         };
-        // On `Err`, dropping `tx` queues the rollback and the pool's return
-        // ping sends it, so the caller does not wait a round trip for it. A
-        // rollback the server rejects fails that ping, and the pool closes
-        // the connection instead of reusing it.
+        // Dropping `tx` queues rollback before bounded return flushes it. A
+        // cancelled callback instead drops the checkout and releases capacity
+        // immediately, without claiming the server confirmed rollback.
         let value = match f(&mut handle).await {
             Ok(value) => value,
             Err(err) => {
                 observed.end(Outcome::RolledBack);
+                drop(tx);
+                checkout.release().await;
                 return Err(err);
             }
         };
@@ -291,15 +268,23 @@ where
             // that swallowed a failed statement does not look committed.
             // The commit is not sent after any failure here, so nothing was
             // written whatever the failure was.
-            (&mut *tx)
-                .execute("SELECT 1")
-                .await
-                .map_err(|err| observed.fail(TxError::CommitFailed(err)))?;
+            if let Err(err) = (&mut *tx).execute("SELECT 1").await {
+                let failure = observed.fail(TxError::CommitFailed(err));
+                drop(tx);
+                checkout.release().await;
+                return Err(failure.into());
+            }
         }
-        tx.commit()
-            .await
-            .map_err(|err| observed.fail(classify_commit(err)))?;
+        if let Err(err) = tx.commit().await {
+            let failure = observed.fail(classify_commit(err));
+            if matches!(failure, TxError::CommitFailed(_)) {
+                checkout.release().await;
+            }
+            // An unresolved commit reply never returns to the pool.
+            return Err(failure.into());
+        }
         observed.end(Outcome::Committed);
+        checkout.release().await;
         Ok(value)
     }
     .instrument(span)

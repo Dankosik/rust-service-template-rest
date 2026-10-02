@@ -60,11 +60,15 @@ shutdown stage. The client adds no readiness probe or teardown stage. JWT refres
 remains the separate process-owned task that bootstrap cancels and joins.
 <!-- template:end outbound-http:docs-lifecycle-outbound -->
 <!-- template:begin outbound-auth:docs-lifecycle-outbound-auth -->
-The retained OAuth2 profile is inert until a concrete integration constructs an
-authenticated client. Token acquisition is request-owned work: it consumes the
-caller deadline and releases its private cache when its last owner is dropped.
-The only detached work is one early refresh attempt of at most five seconds,
-which the runtime cancels rather than joins. It adds no readiness probe,
+The retained OAuth2 profile is inert until a concrete integration prepares an
+authenticated client and its `RefreshDriver`. Token acquisition is
+request-owned work and consumes the caller deadline. The integration drives
+`driver.run(existing_shutdown)` while credential/client clones are live and
+awaits that expected completion in the existing background-join stage before
+dependencies drop; it must not report it as an unexpected task failure. Final
+credential/client-owner drop also ends the driver for a shorter integration
+lifetime. Dropping the driver closes any surviving clients, whose subsequent
+calls fail through the normal closed-owner path. This adds no readiness probe,
 bootstrap provider call, or teardown stage.
 <!-- template:end outbound-auth:docs-lifecycle-outbound-auth -->
 
@@ -237,11 +241,12 @@ with its refusals; signals, the stage budget, the shutdown plan, and
 for the shipped binary, and the test-only `jobs-worker-fixture` suite in
 `test/tests/jobs/`.
 
-**Startup.** Each refusal below exits `1`, except step 1, which exits `2`.
+**Ordinary startup.** With no subcommand, each refusal below exits `1`,
+except step 1, which exits `2`.
 
 | Step | What | Refusal (exit 1) |
 | --- | --- | --- |
-| 1 | `LoadOptions::parse_from` (`--help` exits `0`) | clap usage error (exit 2) |
+| 1 | `WorkerArgs` flattens `LoadOptions` (`--help` exits `0`) | clap usage error (exit 2) |
 | 2 | `service_config::load` (same sources, precedence, unknown-key and secret rules as the service) | `configuration is invalid: ...` |
 | 3 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)` |
 | 4 | Build the multi-thread runtime | `build tokio runtime: ...` |
@@ -319,7 +324,7 @@ with `task` and `panicked`; an engine's claim loop, retention, listener, and
 sampling record `jobs_engine_task_stopped` and fail that engine. A task that
 ends during startup is reported when startup completes.
 
-**Exit codes.** `exit_code` is the one mapping. `process::exit` is never
+**Ordinary exit codes.** `exit_code` is the one mapping. `process::exit` is never
 called.
 
 | Code | When |
@@ -327,6 +332,27 @@ called.
 | `0` | A stop signal, and every stage completed inside its ceiling; the drain ended with `drained()`, so no attempt was cancelled at its end |
 | `3` | A stop signal, and any stage voted degraded, including a forced drain (budget or second signal), which is the only way an attempt is cancelled at the drain's end |
 | `1` | A startup refusal, or a started engine, consumer, or background task ends without a stop signal; the reported failure names which one stopped, and a consumer failure carries its cause. After the failure the same staged plan runs, with its deadline starting at the failure, and its outcome does not change the code |
+
+**Operator mode.** `cli.rs` selects optional inspect/failed/unhandled/redrive/
+discard commands before ordinary configuration and startup; `operator.rs`
+loads only `JobsOperatorConfig`, installs signal streams and admits a one-slot
+PostgreSQL pool with fixed `application_name=jobs-worker-operator`. It starts
+no registry, engine, broker, listener, exporter, password refresher or maintenance.
+The same history verifier and shared jobs UTF-8/writable/READ COMMITTED session
+check admit every mode against the canonical writable queue before one operation.
+Inspection then uses a read-only transaction; mutation uses the caller-owned
+transaction. Both set a two-second local statement timeout, before the mutation's
+initial row lock, without changing ordinary pooled session budgets.
+
+After argument/configuration/file admission, connect/history/session/operation/
+pool-close/runtime ceilings are 5/5/5/12/5/1 seconds. Signals cancel the current
+future then close admitted resources. Mutation after invocation is conservatively
+unknown on interruption; inspection is unavailable. Only acknowledged commit
+produces `redriven` or `discarded`. Central mapping returns 0 for success, 1 for
+failure/unknown or incomplete cleanup, and 2 for usage. Cleanup or stdout failure
+cannot undo a committed mutation; an absent receipt requires inspection.
+Messaging-only projection keeps the loader parser and clap while removing
+operator modes. See the [safe command contract](../background-jobs.md#inspect-and-recover-retained-jobs).
 
 The [guide](../background-jobs.md#run-and-stop-the-worker) covers running and
 stopping the worker. [Async Architecture](async.md) records the mechanism.
@@ -355,18 +381,29 @@ drain yields the established degraded exit code rather than clean shutdown.
 <!-- template:begin cache:docs-lifecycle-cache -->
 ## Cache lifecycle
 
-`Cache::connect_lazy` admits configuration and builds a lazy `ConnectionManager`.
-It waits for no network I/O; the connection is dialed in the background from
-then on. Startup then runs one probe check inside a 1 s bound.
-Success logs `cache_connected`. Failure logs `cache_unavailable_at_startup`
-and startup continues. The cache is not a readiness probe unless composition
-pushes `cache.probe()` into the probe list. It is never a liveness check. A
-gate would turn an outage into total unavailability.
+`Cache::connect_lazy` admits configuration and starts one owned supervisor over
+canonical multiplexed connections, without waiting for network I/O. Setup and
+recovery advance without traffic. Each setup attempt is bounded at 1 s, with
+capped backoff and repeated retry chains. Generation identity fences retirement
+so late failures cannot remove a successor. A periodic PING every 2 s has a
+`min(command_timeout, 1 s)` response budget. Password refresh every 5 s shares
+a 1 s read/direct-AUTH budget; rejected unchanged credentials remain retryable.
+
+Startup runs one probe check inside its existing 1 s bound. Success logs
+`cache_connected`; failure logs `cache_unavailable_at_startup` and startup
+continues. The cache is not a readiness probe unless composition pushes
+`cache.probe()` into the probe list. Probe acquisition uses its caller's
+budget; a connected PING has a 1 s ceiling and ends on generation retirement.
+It is never a liveness check.
 
 Shutdown drops `Option<Cache>` inside `Dependencies::close`, in the dependency
-stage after HTTP drain. The connection closes when its last clone drops, and
-the drop does not add to `DEPENDENCY_CLOSE`. The same drop runs on the
-startup-failure and stopped-startup paths. The [guide](../cache.md) shows the
+stage after HTTP drain. Cache, namespace and probe handles retain one shared
+application owner. Its final drop withdraws the connection and cancels/aborts
+the supervisor, which holds no owner cycle. Runtime scheduling completes
+destruction and last-clone drop aborts the canonical connection driver. A
+retained namespace or probe legitimately keeps the cache alive. The synchronous
+drop adds no wait to `DEPENDENCY_CLOSE`; the same path covers failed and
+interrupted startup. See the [guide](../cache.md) for recovery bounds and
 readiness opt-in.
 <!-- template:end cache:docs-lifecycle-cache -->
 <!-- template:begin object-storage:docs-lifecycle-object-storage -->

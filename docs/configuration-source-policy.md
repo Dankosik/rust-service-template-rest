@@ -19,7 +19,7 @@ is what the template adds on top. The `service-config` crate owns it.
 - CLI flags are loader controls: `--config PATH` selects the base file,
   `--config-overlay PATH` (repeatable, ordered) adds overlays, and
   `--secrets-dir PATH` names the secrets directory. They never set
-  individual keys, and a positional argument is refused.
+  individual keys. The service and migrator refuse positional arguments.
 
 Runtime value precedence, last wins:
 
@@ -217,7 +217,11 @@ Quote text in TOML.
   an unknown key and fails startup. Nonsecret
   `scopes`, optional `audience` (not blank when set), and `exchange_cache_capacity` (a whole
   number, default 1024, inclusive 1–65536) follow normal TOML/environment
-  layering; scopes use a TOML list or one space-separated environment value. File secrets
+  layering. `provider_concurrency` defaults to 32 and accepts a positive `u32`
+  integer or integer string; zero, fractions, booleans, negatives, and overflow
+  fail startup. It bounds actual token attempts across both grants on one
+  prepared owner, independently of cache capacity. Scopes use a TOML list or
+  one space-separated environment value. File secrets
   are refused by the recursive secret guard. The [outbound machine-authentication
   guide](outbound-machine-authentication.md) owns endpoint admission and
   provider compatibility.
@@ -482,7 +486,9 @@ into its panic.
 <!-- template:begin jobs:docs-config-jobs -->
 - `jobs.max_workers` (environment `APP__JOBS__MAX_WORKERS`, default `1`,
   `1..500`) is the most attempts one jobs worker process runs at once; every
-  binary validates it and only the worker uses it. The worker refuses
+  ordinary full-configuration binary validates it and only the worker uses it.
+  Admission covers handler execution and all outcome bookkeeping; per-kind
+  limits have the same lifetime. The worker refuses
   `postgres.max_connections` below `jobs.max_workers + 2`. The worker reuses
   `http.grace_period` and `http.drain_timeout` with its own `17s` teardown
   tail (release `2s`, listeners `2s`, background join `3s`, dependency close
@@ -494,6 +500,22 @@ into its panic.
   the service name cut to 51 bytes so the suffix survives PostgreSQL's
   63-byte limit); no key controls it.
   See the [guide](background-jobs.md#configure-and-size-the-worker).
+- The jobs worker additionally accepts `inspect`, `failed`, `unhandled`,
+  `redrive` and `discard` after its loader flags. `load_jobs_operator` decodes
+  only `JobsOperatorConfig.postgres`, retaining the common sources, precedence,
+  namespace/file/secret pre-scans and value-free errors. Unknown PostgreSQL
+  keys are refused; unrelated sections are ignored except the common secret
+  scan. No new runtime key is added. It requires `postgres.enabled`, reads a
+  password file once, and uses a one-connection pool with fixed
+  `application_name=jobs-worker-operator`. It requires no ordinary jobs
+  capacity, HTTP, telemetry, auth, webhook or messaging configuration. Every
+  mode requires canonical writable UTF-8/READ COMMITTED session admission;
+  inspection then uses a read-only transaction. Both reads and mutations set a
+  two-second transaction-local statement timeout, before the mutation's initial
+  lock, within the existing 12-second operation backstop including acquire,
+  begin, and commit. Ordinary pooled session budgets remain unchanged. Operator
+  timeouts are code-owned ceilings; see the
+  [command contract](background-jobs.md#inspect-and-recover-retained-jobs).
 <!-- template:end jobs:docs-config-jobs -->
 <!-- template:begin authn:docs-config-authn-budgets -->
 - Authentication provider calls have an independent fixed three-second cap through body completion; discovery plus initial keys share a six-second startup cap. Authentication accepts no request deadline or response reserve. The outer hardened timer alone emits `504 request_timeout`; a completed provider timeout is `503 authentication_unavailable` while the request is live. Introspection admits its configured number of simultaneous exchanges and rejects excess distinct misses as unavailable without queueing; live cache hits and coalesced waiters need no extra permit.
@@ -520,8 +542,12 @@ into its panic.
   that many calls at once and refuses the excess without queueing; a download
   holds its slot until its body ends. `object_storage.max_object_bytes`
   (default `8 MiB`, at most 4.995 GiB, the smallest single-upload limit of the
-  supported providers) bounds a put and a get. Buffered reads cost up to
-  `max_concurrency * max_object_bytes` of memory. See the
+  supported providers) bounds a put and a get. The payload collected by
+  downloads still holding a slot is budgeted as
+  `max_concurrency * max_object_bytes`; collection copies, SDK buffers, and
+  allocation overhead add to it. Completed `Bytes` outlive their slots, so
+  this is not a process memory ceiling. The consuming HTTP/job path owns
+  concurrency and payload budgets for those retained responses. See the
   [object storage guide](object-storage.md).
 <!-- template:end object-storage:docs-config-object-storage-budget -->
 

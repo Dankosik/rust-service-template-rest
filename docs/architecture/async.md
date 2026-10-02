@@ -8,9 +8,9 @@ contract is the [Background jobs](../background-jobs.md) guide.
 
 | Owner | Responsibility |
 | --- | --- |
-| `infra-jobs` | All `background_jobs` statements, enqueue and kind contracts, claim and attempt supervision, maintenance, and the `trace_context` carrier. |
-| `jobs-worker` | Worker composition, registration, startup and process shutdown. |
-| `service-config` | `jobs.max_workers`; it does not own queue policy. |
+| `infra-jobs` | All `background_jobs` statements, enqueue and kind contracts, claim and attempt supervision, maintenance, safe inspection/recovery, and the `trace_context` carrier. |
+| `jobs-worker` | Worker composition, registration, startup, process shutdown, and the PostgreSQL-only operator CLI. |
+| `service-config` | `jobs.max_workers` and the PostgreSQL-only operator projection; no queue policy. |
 | `migrations/` | The canonical table migration; neither service nor worker changes schema at runtime. |
 | `crates/infra-<provider>` | Concrete kinds, handlers, and producer calls. Features never depend on `infra-jobs`. |
 
@@ -110,8 +110,8 @@ PostgreSQL's notify queue lock: notifying each enqueue halved concurrent
 enqueue throughput at 16 connections, and a wake per notification turned
 into a claim storm at 1000 jobs/s. A worker process listens on one connection
 outside its pool: the engine built with `Engine::new` owns that listener and
-terminal retention, and an engine built with `Engine::beside` it shares both
-and its worker id instead of repeating them. Polling remains the recovery
+completed retention and the union sampler, and an engine built with
+`Engine::beside` shares those duties and its worker id instead of repeating them. Polling remains the recovery
 path, and the only path through a transaction-mode pooler, where `LISTEN`
 succeeds and delivers nothing. The listener subscribes at most once per poll
 interval and reports each lost connection as a `listen` failure: the driver
@@ -145,10 +145,13 @@ arguments once. The handler runs on the supervisor's task behind
 `catch_unwind`, which removed one task spawn per attempt (-11% worker CPU per
 job at 64 slots). On timeout or forced drain it first cancels the handler and
 allows up to 100 ms of cooperative completion inside the existing deadline,
-then drops a still-running handler. The slot returns when the handler's result
-is known, before the outcome write, as River frees a worker before its batch
-completer writes; the supervisor still owns that write and the drain still
-waits for it (+17-23% jobs/s at 4-16 slots). A handler result that joins before the
+then drops a still-running handler. Shared global/per-kind admission remains
+owned until outcome persistence or uncertainty and the last queued/in-flight
+completion bookkeeping have ended. Cancellation unregisters queued work; an
+in-flight batch retains admission and retires membership before waking a retry.
+Queued plus in-flight completion entries stay within admitted capacity, so a
+blocked database cannot accumulate an unbounded backlog of finished handlers.
+No local or cleanup deadline is extended. A handler result that joins before the
 cancellation is known and wins over force/timeout. After the cancellation only
 a successful join is known; an error, snooze, or panic that answers it takes
 the cancellation's disposition, so a forced drain releases the job however a
@@ -195,14 +198,16 @@ place in claim order rather than queueing behind the backlog.
 
 ## Observation and retention
 
-Every ten seconds each worker samples only registered kinds. For each kind and
+Every ten seconds one process-owned sampler snapshots the union of registered
+ordinary and publisher kinds. For each kind and
 `available`, `scheduled`, and `running`, an indexed query publishes the count
 capped at 1000; a value of 1000 means at least that many rows. The oldest
 available age is a separate indexed, due-pending lookup from the same database
 timestamp. These are per-process samples, not replica sums; the removed
 `<unregistered>` aggregate is not replaced. Unknown kinds remain unconsumed.
 
-The only sampling gauges are `jobs_live_jobs{kind,state}`,
+Failed rows have their own indexed, 1000-row-capped gauge,
+`jobs_failed_jobs{kind}`. The other sampling gauges are `jobs_live_jobs{kind,state}`,
 `jobs_oldest_available_age_seconds{kind}`, and
 `jobs_observation_timestamp_seconds`. Before first success every registered
 value and timestamp is zero. A completely decoded successful sample publishes
@@ -211,8 +216,46 @@ failure retains the last good values and timestamp; operation-failure telemetry
 still records the failure. `jobs_operation_failed` carries `sqlstate` or
 `cause`. Consumers reject timestamp zero or a timestamp older
 than 30 seconds. The two-second statement timeout is a time backstop, not a
-scan-size proof. Retention remains bounded terminal deletion; it never deletes
-live rows. Terminal retention is independent of registered kinds.
+scan-size proof. Retention deletes completed rows older than 24 hours in
+500-row batches every minute, independent of registered kinds. Failed rows
+remain until explicit redrive or discard. Unknown kinds have no periodic
+aggregate; the bounded operator traversal uses an explicit fleet kind set.
+
+## Operator recovery
+
+`infra_jobs::operator` owns validated requests, payload-free snapshots and
+all inspection/recovery SQL. `jobs-worker` owns syntax, PostgreSQL-only
+admission, one-shot lifetime, safe JSON receipts and exit codes. It bypasses
+ordinary registrations, NATS and listeners. All modes admit the canonical
+writable UTF-8/READ COMMITTED queue; inspection then uses a read-only transaction.
+Both reads and mutations set a two-second local statement timeout, before the
+mutation's initial lock, inside the existing 12-second operation backstop.
+Executed JSON carries `schema_version: 1`; unhandled results, including failures
+after argument admission, echo the validated sorted, deduplicated `handled_kinds`.
+See the
+[operator contract](../background-jobs.md#inspect-and-recover-retained-jobs).
+
+Mutations lock one failed row by id and require the inspected kind and
+claim-generation version. Redrive archives the previous cycle in
+`recovery_history`, preserves identity and payload, and resets the row to
+pending with a fresh sequence version and attempt budget. Live uniqueness
+arbitrates conflicts. Discard deletes that exact failed row permanently.
+The caller-owned `infra_postgres::Tx` supplies final commit semantics: provider
+results are provisional until acknowledged commit. Unknown results require
+inspection and never automatic business replay. History has no truncation cap;
+operators own retained storage until completion or explicit discard. The
+[upgrade gate](../background-jobs.md#upgrade-and-custody) stops every old
+failed-retention owner before relying on custody or activating recovery.
+
+Retain compatible handlers for outstanding kinds/payload versions across rolling
+deployment and backup restore. A rename is not migration, and redrive cannot
+repair poison payloads. Restore invalidates saved tokens, commands, and receipts:
+restore queue/history/sequence consistently, reconcile effects, and re-inspect
+before recovery. Indefinite failed custody and manual replay exceed any finite
+consumer deduplication TTL; retain durable logical-ID effect identity for the
+permitted replay lifetime, or reconcile and explicitly constrain replay before
+expiring it. The [retry policy arithmetic](../background-jobs.md#register-kinds-and-retain-terminal-history)
+illustrates the unchanged retry horizon; it is not a delivery bound.
 
 ## Proof boundary
 
@@ -300,7 +343,7 @@ owns only its existing claims, attempts, and terminal history.
 <!-- template:begin outbox:docs-async-outbox -->
 The transactional outbox reuses that jobs authority without adding a table,
 queue loop, or transaction owner. A second one-slot engine, built beside the
-ordinary one so both share one listener, retention loop, and worker id,
+ordinary one so both share one listener, completed-retention loop, union sampler, and worker id,
 registers only the private publication kind. Combined ordinary jobs plus outbox need `N + 5` pool
 connections; outbox-only needs three. Its claim loop, jobs maintenance, and
 all engines share the worker's existing shutdown deadlines. See

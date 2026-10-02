@@ -125,8 +125,8 @@ impl Engine {
     /// Call [`Self::check_startup`] before starting it. Does no I/O.
     ///
     /// This engine owns what a worker process needs once: the `LISTEN`
-    /// connection and terminal retention. Engines made with [`Self::beside`]
-    /// share them.
+    /// connection, completed retention, and registered-kind sampling. Engines
+    /// made with [`Self::beside`] share them.
     #[must_use]
     pub fn new(pool: PgPool, registry: Registry, max_workers: NonZeroU32) -> Self {
         Self::build(
@@ -143,8 +143,8 @@ impl Engine {
     /// own kinds, slots, and claim loop, so its work is not delayed by this
     /// engine's occupied slots.
     ///
-    /// It claims under this engine's worker id, and this engine's listener
-    /// and retention serve it: start both.
+    /// It claims under this engine's worker id, and this engine's listener,
+    /// retention, and sampling serve it: start both.
     #[must_use]
     pub fn beside(&self, registry: Registry, max_workers: NonZeroU32) -> Self {
         Self::build(
@@ -167,13 +167,23 @@ impl Engine {
     ) -> Self {
         let slots = usize::try_from(max_workers.get()).unwrap_or(usize::MAX);
         let wake = Arc::new(Notify::new());
-        peers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(Peer {
-                kinds: registry.names().collect(),
+        {
+            let mut peers = peers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous = registered_kinds(&peers);
+            let kinds: Vec<_> = registry.names().collect();
+            for &kind in &kinds {
+                if previous.binary_search(&kind).is_err() {
+                    maintenance::init_kind_metrics(kind);
+                }
+            }
+            peers.push(Peer {
+                kinds,
                 wake: Arc::clone(&wake),
             });
+            maintenance::invalidate_sample();
+        }
         Self {
             shared: Arc::new(Shared {
                 pool,
@@ -209,10 +219,10 @@ impl Engine {
     /// for incompatible session defaults, and [`StartupError::Unavailable`] for
     /// anything else, including the bound.
     pub async fn check_startup(&self) -> Result<(), StartupError> {
-        maintenance::check_startup(&self.shared).await
+        maintenance::check_startup(&self.shared.pool).await
     }
 
-    /// Delete expired terminal jobs once and return how many were deleted.
+    /// Delete expired completed jobs once and return how many were deleted.
     ///
     /// # Errors
     ///
@@ -221,8 +231,8 @@ impl Engine {
         maintenance::remove_expired(&self.shared).await
     }
 
-    /// Spawn the claim loop and gauge sampling on `tracker`, and for an
-    /// engine built with [`Self::new`] also the listener and retention.
+    /// Spawn the claim loop on `tracker`, and for an engine built with
+    /// [`Self::new`] also the listener, retention, and process-wide sampling.
     ///
     /// Each task runs under a child of `cancel`. Does no I/O before it returns.
     #[must_use]
@@ -234,7 +244,14 @@ impl Engine {
                 .set(crate::attempt::KindMetrics::new(registered.name));
         }
         claim::describe_metrics();
-        maintenance::init_metrics(&self.shared);
+        if self.shared.owns_process_duties {
+            let peers = self
+                .shared
+                .peers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            maintenance::init_metrics(&registered_kinds(&peers));
+        }
         metrics::describe_counter!(
             OPERATION_FAILURES_METRIC,
             "Failed worker database operations"
@@ -258,8 +275,8 @@ impl Engine {
         if self.shared.owns_process_duties {
             spawn("retention", cancel.child_token(), Run::Retention);
             spawn("listener", cancel.child_token(), Run::Listener);
+            spawn("sampling", cancel.child_token(), Run::Sampling);
         }
-        spawn("sampling", cancel.child_token(), Run::Sampling);
         Started {
             shared: Arc::clone(&self.shared),
             stop,
@@ -388,10 +405,20 @@ impl Drop for Guard {
 /// Stands in for a cleanup budget too long to add to the clock.
 const NO_CLEANUP_DEADLINE: Duration = Duration::from_hours(24 * 365);
 
-/// One engine as the process's listener sees it.
+/// One engine as the process's listener and sampler see it.
 pub(crate) struct Peer {
     kinds: Vec<&'static str>,
     wake: Arc<Notify>,
+}
+
+fn registered_kinds(peers: &[Peer]) -> Vec<&'static str> {
+    let mut kinds: Vec<_> = peers
+        .iter()
+        .flat_map(|peer| peer.kinds.iter().copied())
+        .collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    kinds
 }
 
 pub(crate) struct Shared {
@@ -413,11 +440,34 @@ pub(crate) struct Shared {
     pub(crate) wake: Arc<Notify>,
     /// Every engine of this worker process, this one included.
     peers: Arc<Mutex<Vec<Peer>>>,
-    /// Whether this engine runs the listener and retention.
+    /// Whether this engine runs the listener, retention, and sampler.
     owns_process_duties: bool,
 }
 
 impl Shared {
+    /// Snapshot the registered union without holding the peer lock across I/O.
+    pub(crate) fn registered_kinds(&self) -> Vec<&'static str> {
+        let peers = self
+            .peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registered_kinds(&peers)
+    }
+
+    /// Publication and peer admission share the lock so stale membership cannot
+    /// restore freshness after a newly registered kind invalidated it.
+    pub(crate) fn publish_for_kinds(&self, kinds: &[&str], publish: impl FnOnce()) -> bool {
+        let peers = self
+            .peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if registered_kinds(&peers) != kinds {
+            return false;
+        }
+        publish();
+        true
+    }
+
     /// Resolves once the budget of a forced cleanup is spent; pending until
     /// a cleanup is forced.
     pub(crate) async fn cleanup_ended(&self) {
@@ -585,7 +635,134 @@ pub(crate) async fn backstop<T>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use metrics::{
+        Counter, Gauge, GaugeFn, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
+    };
+    use serde::{Deserialize, Serialize};
+
     use super::*;
+
+    #[derive(Default)]
+    struct RecordedGauge(Mutex<f64>);
+
+    impl GaugeFn for RecordedGauge {
+        fn increment(&self, value: f64) {
+            *self.0.lock().unwrap() += value;
+        }
+
+        fn decrement(&self, value: f64) {
+            *self.0.lock().unwrap() -= value;
+        }
+
+        fn set(&self, value: f64) {
+            *self.0.lock().unwrap() = value;
+        }
+    }
+
+    #[derive(Default)]
+    struct Gauges(Mutex<HashMap<Key, Arc<RecordedGauge>>>);
+
+    impl Gauges {
+        fn get(&self, name: &'static str, kind: Option<&'static str>) -> f64 {
+            let key = match kind {
+                Some(kind) => Key::from_parts(name, &[("kind", kind)]),
+                None => Key::from_name(name),
+            };
+            *self.0.lock().unwrap()[&key].0.lock().unwrap()
+        }
+    }
+
+    impl Recorder for Gauges {
+        fn describe_counter(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+        fn describe_gauge(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+        fn describe_histogram(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+
+        fn register_counter(&self, _: &Key, _: &Metadata<'_>) -> Counter {
+            Counter::noop()
+        }
+
+        fn register_gauge(&self, key: &Key, _: &Metadata<'_>) -> Gauge {
+            Gauge::from_arc(Arc::clone(
+                self.0.lock().unwrap().entry(key.clone()).or_default(),
+            ))
+        }
+
+        fn register_histogram(&self, _: &Key, _: &Metadata<'_>) -> Histogram {
+            Histogram::noop()
+        }
+    }
+
+    #[derive(Deserialize, Serialize)]
+    struct Ordinary;
+
+    impl crate::JobKind for Ordinary {
+        const NAME: &'static str = "ordinary";
+    }
+
+    #[derive(Deserialize, Serialize)]
+    struct Publisher;
+
+    impl crate::JobKind for Publisher {
+        const NAME: &'static str = "publisher";
+    }
+
+    #[tokio::test]
+    #[allow(clippy::float_cmp, reason = "integer-valued fixture gauges are exact")]
+    async fn late_peer_invalidates_freshness_and_rejects_an_in_flight_old_union() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let gauges = Gauges::default();
+        metrics::with_local_recorder(&gauges, || {
+            let mut kinds = crate::Kinds::new();
+            kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
+                Ok(())
+            });
+            let engine = Engine::new(pool.clone(), kinds.validate().unwrap(), NonZeroU32::MIN);
+            let sampled_kinds = engine.shared.registered_kinds();
+            assert!(engine.shared.publish_for_kinds(&sampled_kinds, || {
+                metrics::gauge!(maintenance::FAILED_JOBS_METRIC, "kind" => "ordinary").set(3.0);
+                metrics::gauge!(maintenance::OBSERVATION_TIMESTAMP_METRIC).set(100.0);
+            }));
+
+            let mut kinds = crate::Kinds::new();
+            kinds.register(crate::Policy::default(), |_: crate::Job<Publisher>| async {
+                Ok(())
+            });
+            let _publisher = engine.beside(kinds.validate().unwrap(), NonZeroU32::MIN);
+            assert_eq!(
+                gauges.get(maintenance::OBSERVATION_TIMESTAMP_METRIC, None),
+                0.0
+            );
+            assert_eq!(
+                gauges.get(maintenance::FAILED_JOBS_METRIC, Some("ordinary")),
+                3.0
+            );
+            assert_eq!(
+                gauges.get(maintenance::FAILED_JOBS_METRIC, Some("publisher")),
+                0.0
+            );
+            assert!(!engine.shared.publish_for_kinds(&sampled_kinds, || {
+                panic!("an observation from before peer admission must not publish");
+            }));
+            assert_eq!(
+                gauges.get(maintenance::OBSERVATION_TIMESTAMP_METRIC, None),
+                0.0
+            );
+
+            let current = engine.shared.registered_kinds();
+            assert!(engine.shared.publish_for_kinds(&current, || {
+                metrics::gauge!(maintenance::OBSERVATION_TIMESTAMP_METRIC).set(200.0);
+            }));
+            assert_eq!(
+                gauges.get(maintenance::OBSERVATION_TIMESTAMP_METRIC, None),
+                200.0
+            );
+        });
+        pool.close().await;
+    }
 
     #[tokio::test(start_paused = true)]
     async fn backstop_bounds_an_unacknowledged_operation() {

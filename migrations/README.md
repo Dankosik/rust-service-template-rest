@@ -33,6 +33,21 @@ applies it with the rest of the set.
 failure history and drops the unused random `id` default, since enqueue
 supplies a time-ordered id. Neither the service nor worker creates or
 alters schema at runtime, and only `crates/infra-jobs` names the table.
+`20261002150001_add_background_job_recovery_history.sql` adds
+`recovery_history jsonb NOT NULL DEFAULT '[]'` for prior recovery cycles.
+`20261002150002_index_failed_background_jobs.sql` then adds
+`background_jobs_failed_kind (kind,id) WHERE state='failed'` concurrently,
+using the canonical single-statement `-- no-transaction` path and runner
+budgets. These identifiers follow the immutable `20261002150000` high-water
+mark, which was ahead of current UTC when allocated; no applied file changed.
+
+Old workers remain schema-compatible but still delete seven-day failures.
+Apply both migrations and stop/replace every old retention owner before
+activating recovery or relying on retained-failure custody. New workers require
+their complete admitted history. Keep the additive schema on rollback and roll
+forward: an old binary restores failed deletion. Never clear recovery history
+or reset claim-generation sequences as a rollback step. See
+[upgrade and custody](../docs/background-jobs.md#upgrade-and-custody).
 <!-- template:end jobs:migrations-readme-jobs -->
 
 Rules, proven by `cargo test -p migrate` over the embedded set:

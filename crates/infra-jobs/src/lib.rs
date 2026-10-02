@@ -10,6 +10,7 @@ mod engine;
 mod enqueue;
 mod kind;
 mod maintenance;
+pub mod operator;
 mod trace_context;
 
 pub use attempt::{ATTEMPT_DURATION_BUCKETS, ATTEMPT_DURATION_METRIC};

@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod call;
 mod client;
 mod error;
 mod health;
@@ -14,7 +15,7 @@ mod router;
 mod status;
 mod tls;
 
-pub use client::{Client, ClientIdentity, ClientSecurity, ClientTlsMaterial};
+pub use client::{Client, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial};
 pub use error::Error;
 pub use observe::{CLIENT_HANDLING_SECONDS, HANDLING_SECONDS_BUCKETS, SERVER_HANDLING_SECONDS};
 pub use router::{Limits, Services, grpc_timeout, router, server_options};

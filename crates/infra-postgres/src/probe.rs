@@ -30,8 +30,10 @@ impl Probe for PostgresProbe {
     }
 
     async fn check(&self) -> Result<(), ProbeError> {
-        let mut conn = self.pool.acquire().await.map_err(|err| probe_error(&err))?;
-        conn.ping().await.map_err(|err| probe_error(&err))
+        crate::with_connection(&self.pool, async |conn| conn.ping().await)
+            .await
+            .map_err(|err| probe_error(&err))?
+            .map_err(|err| probe_error(&err))
     }
 }
 

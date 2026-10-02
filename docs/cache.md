@@ -7,10 +7,11 @@ lifecycle choices.
 
 ## What the profile retains
 
-The pack is one standalone client. A feature calls `get`, `set`, and `delete`
-on a `CacheNamespace` and receives bytes. Rate limits and locks are not part
-of this profile; a feature that needs them adds its own operation beside
-`get`, `set`, and `delete` on the same connection.
+The pack is one standalone client. Composition or a service adapter calls
+`get`, `set`, and `delete` on a `CacheNamespace`, translating feature-defined
+requests and results. Features own behavior and do not depend on `infra-cache`.
+Rate limits and locks are not part of this profile; an accepted capability
+that needs them can add a provider operation beside these commands.
 
 It does not add a generic `Cache<K, V>`, get-or-load, a serializer, a global
 TTL, or a lock API. The feature owns keys, serialization, TTL policy, and
@@ -19,11 +20,11 @@ invalidation. `set` stores the given bytes with `SET` and `PX`. A TTL below
 
 ## When process-local moka is enough
 
-`moka` 0.12.16 is already the process-local cache. Use it when the data is
-per process, the service runs as one replica, and nothing must be shared or
-limited across replicas. It does not share state across replicas and cannot
-back a distributed rate limit or lock. This profile is for bytes that more
-than one replica must see.
+`moka` 0.12.16 is already the process-local cache. Multiple replicas may each
+keep independent copies when their expiration and invalidation semantics meet
+the feature's needs. Replica count alone does not require a shared cache.
+Moka does not share state across replicas and cannot back a distributed rate
+limit or lock. This profile is for bytes that replicas must share.
 
 ## Select and configure
 
@@ -67,17 +68,23 @@ Kubernetes secret, a secrets manager's agent, or a sidecar that writes
 short-lived tokens such as cloud IAM tokens. The DSN then carries no
 password; a password in both places, or a file that is missing or empty at
 startup, fails startup. A blank `password_file` value is unset. The user is the DSN's, or `default` when it names
-none. Every connection attempt reads the file. An open connection reads it
-again every 5 s and sends `AUTH` when the content changed, so a token must
-be rewritten at least that long before it expires. Replace the file
-atomically (write a new file, then rename it, as a Kubernetes mount does): a
-half-written password is refused by the server, and after a refused `AUTH`
-the client stops following the file for that connection, which keeps its
-earlier authentication until it reconnects and reads the file again. A
-change logs
-`cache_password_reloaded`; a file that became unreadable logs
-`cache_password_file_unreadable` once per outage and the connection keeps
-the password it has. The key is a path, so a file or
+none. Every connection attempt rereads the file within its 1 s setup budget;
+if the file is unavailable, it cannot use a remembered password to connect.
+An open connection checks the file every 5 s. Reading and, when needed,
+direct `AUTH` share a 1 s budget. Only successful authentication records the
+password as accepted and logs `cache_password_reloaded`. Rejected bytes stay
+pending and are retried on later ticks even when the file is unchanged. A
+plain AUTH rejection may preserve the previously authenticated connection;
+a timeout, I/O failure, or unusable protocol retires it for recovery.
+
+Replace the file atomically (write a new file, then rename it, as a Kubernetes
+mount does). A later unreadable or empty file logs
+`cache_password_file_unreadable` once per outage and preserves a usable
+connection and its accepted password. Refresh continues without traffic.
+Once the file and server are usable, refresh on a retained connection takes
+at most 7 s; recovery requiring reconnection has a conservative 11 s bound,
+assuming a reachable server accepts that credential. Rewrite expiring tokens
+with enough margin for that recovery. The key is a path, so a file or
 `APP__CACHE__PASSWORD_FILE` may set it.
 
 `allow_plaintext` and `allow_unauthenticated` are accepted only when `app.env`
@@ -96,16 +103,20 @@ command_timeout = "100ms"
 # allow_plaintext and allow_unauthenticated are local or development only.
 ```
 
-## Use it from a feature
+## Wire feature-owned behavior
 
-Hold a `Cache` from composition. `namespace` panics unless the name matches
+Composition or a service adapter holds the `Cache` and `CacheNamespace`.
+It translates feature-defined requests and results without introducing a
+feature-to-provider dependency or a generic cache interface. `namespace` panics
+unless the name matches
 `^[a-z][a-z0-9_]{0,63}$`. That is a programmer error. The name is both the
 `cache` metric label and the key prefix: a namespace stores `key` as
 `{name}:{key}`, so two features sharing one server cannot read each other's
 entries. The feature still puts a format version in its key.
 
 ```rust
-// Build the namespace once and keep it, for example in the feature's state.
+// Adapter/composition code: build the namespace once and retain it here.
+// The feature supplies key, TTL, serialization, and fallback policy.
 let profiles = cache.namespace("user_profile");
 match profiles.get(&key).await {
     Ok(Some(bytes)) => return Ok(bytes),
@@ -120,20 +131,20 @@ compiled doctest.
 
 `Ok(None)` is a miss. `Err(Unavailable)` is an outage or a timeout. Both take
 the source of truth. A best-effort `set` may ignore `Unavailable`. An
-operation that cannot run without the cache maps `Unavailable` to HTTP 503 in
-that handler. The adapter does not choose the
-status.
+operation that cannot run without the cache defines its unavailable behavior
+in the feature; the HTTP handler maps that result to HTTP 503. The provider
+does not choose the status.
 
-The adapter does not coalesce concurrent misses. When a load is expensive and
-many requests can miss one key at once, coalesce it in the feature, for
-example with `moka::future::Cache::try_get_with` around the cache read and
-the load.
+The provider does not coalesce concurrent misses. When a load is expensive
+and many requests can miss one key at once, the feature defines coalescing
+policy. Its composition or adapter can apply `moka::future::Cache::try_get_with`
+around the provider read and source-of-truth load.
 
 ## Failure and budgets
 
 A miss and an outage are degradation, not a failed process. Every `get`,
-`set`, and `delete` runs inside `tokio::time::timeout(command_timeout)`.
-That bound covers waiting for a reconnect and the reply. During an outage each
+`set`, and `delete` has one absolute `command_timeout` budget.
+That bound covers waiting for a connection and the reply. During an outage each
 call costs at most `command_timeout`.
 
 `cache.command_timeout` must satisfy
@@ -144,40 +155,50 @@ another `command_timeout`, and the example above spends two on a miss (a
 `get`, then a `set`). The feature counts its calls: calls × `command_timeout`, plus its
 source-of-truth work, plus a reserve for writing the response, must fit in
 `http.request_timeout`. With the defaults (100 ms and 8 s) that is not tight.
-There is no per-command retry. A timed-out `SET` is ambiguous, and the TTL
-bounds how long a missed write can stay stale.
+There is no per-command retry. A timed-out `SET` or `DEL` may already have
+taken effect; timeout proves neither success nor absence of the effect. A
+stored entry still has its TTL.
 
-Connect, backoff, and TCP are constants, not keys. Connect waits at most 1 s.
-Reconnect backoff starts at 100 ms, doubles, and caps at 2 s, with 6 retries.
+Connect, backoff, and TCP are constants, not keys. One owned supervisor opens
+canonical redis-rs multiplexed connections, with one current generation and
+at most one setup or maintenance operation in progress. Each setup attempt
+has a 1 s envelope for file read, client construction, and DNS/TCP/TLS/HELLO.
+The existing `backon` schedule starts at 100 ms and doubles with jitter; each
+yielded sleep is capped at 2 s. Six retries follow the first attempt, then a
+2 s pause starts another chain while the cache has an owner. All setup errors,
+including rejected authentication, retry independently of user calls.
+
 TCP nodelay is on. Keepalive is 30 s, then 10 s, with 3 retries where the
-platform supports them. On Linux, `user_timeout` is 10 s so a half-open
-connection is detected and reconnected.
+platform supports them. Linux `user_timeout` is 10 s. RESP3 disconnects,
+command errors (including `READONLY` or `OOM`), and timeouts after dispatch
+retire their connection generation immediately. Replacement dial eligibility
+may wait until 2 s after that generation's publication. Late failures from an
+old generation cannot retire a successor. Waiting for a connection consumes
+the caller's command budget but does not cancel setup progress; a command is
+dispatched at most once.
 
-On RESP3 the client notices a closed socket at once and reconnects in the
-background, so an idle connection the server or a load balancer dropped is
-back before the next call instead of failing it.
+The supervisor also sends one PING every 2 s with response budget
+`min(command_timeout, 1 s)`. Refresh and PING never overlap or accumulate
+missed ticks; a due credential refresh has priority. A PING failure retires
+the generation even with no traffic, so unanswered slots from cancelled
+callers cannot remain forever. Caller cancellation alone does not retire a
+healthy connection. Retirement wakes operations and releases published and
+maintenance handles; dropping the last canonical connection clone aborts its
+driver, including unanswered slots.
 
-redis 1.7.1 reconnects only after an I/O error. A connection whose setup
-fails otherwise, for example `HELLO` refused with `WRONGPASS` or a full
-client table while a failover saturates the server, would stay failed until
-the process restarts. A `READONLY` reply (a demoted primary after a failover)
-would keep writing to that replica. The cache cannot tell a stored setup
-failure from a reply to one command, so after any error that is not an I/O
-error it replaces the connection from the retained client, at most once per
-2 s. A per-command server error such as `OOM` therefore also costs one new
-connection per 2 s. The first connection and every replaced one dial at
-once, each driven by one background `PING` bounded at 20 s, so neither
-startup against a server that is down nor recovery depends on further
-calls; the manager's own reconnect after an I/O error or a closed socket
-also runs in the background. A command timeout does not by itself
-reconnect.
+For a public command timeout C, old operation handles last at most
+`B = max(C, 1 s)`; successful publications are spaced by 2 s. The conservative
+bound is `1 + ceil(B / 2 s)` live generations: two with service-validated
+C <= 1 s, or sixteen for a direct caller using C = 30 s. This bounds generation
+count and retention time, not bytes or request count under arbitrary fan-in.
+These time bounds assume the async executor continues running.
 
 ## Readiness and shutdown
 
 The cache does not gate readiness. A gate would turn a cache outage into total
 unavailability and contradict degradation. `Cache::connect_lazy` admits
-configuration and builds a lazy `ConnectionManager`. It waits for no network
-I/O and starts the first connection in the background.
+configuration and starts one owned connection supervisor. Construction waits
+for no network I/O; the supervisor advances the first setup in the background.
 Startup then runs one `probe` check inside a 1 s bound, long enough for
 the first DNS, TCP, TLS, and `AUTH` exchange. Success logs
 `cache_connected` with `server.address`, `server.port`, and `cache.tls`.
@@ -190,15 +211,22 @@ A service whose traffic requires the cache opts in by pushing the probe in
 probes.push(Box::new(cache.probe()));
 ```
 
-The probe name is `cache`. It sends `PING` and has no timeout of its own: the
-readiness refresher bounds it with `health.probe_budget`. Do not add it to liveness.
+The probe name is `cache`. Connection acquisition uses the caller's startup
+or `health.probe_budget` bound; a connected PING has a 1 s internal ceiling
+and also stops when its generation retires. Do not add it to liveness.
 
-Dropping the last `ConnectionManager` clone closes the socket. Bootstrap
-records `Option<Cache>` in the startup `Dependencies` and drops it inside
-`Dependencies::close`, in the dependency stage after HTTP drain. The drop is
-synchronous, so it does not add to `DEPENDENCY_CLOSE`. The same drop runs on
-the startup-failure and stopped-startup paths. A background `PING` for the
-first connection or after a replacement holds its own clone until it ends or the runtime stops.
+`Cache`, namespaces, and probes share the application owner. Dropping its last
+handle withdraws the connection, requests cancellation, and aborts the
+supervisor; it does not wait for a warm-up or retry chain. The supervisor holds
+no application-owner cycle. Runtime scheduling completes destruction, and an
+already dispatched filesystem OS read may finish without being able to publish
+credentials or continue recovery.
+
+Bootstrap records `Option<Cache>` in the startup `Dependencies` and drops it
+inside `Dependencies::close`, in the dependency stage after HTTP drain. The
+drop is synchronous and adds no wait to `DEPENDENCY_CLOSE`. The same path runs
+on startup failure and interrupted startup. A legitimately retained namespace
+or probe keeps the cache alive until that handle is released.
 
 ## Observability
 
@@ -234,8 +262,10 @@ instead. `error.type` takes the same values as the `error_type` label; a TLS
 handshake failure, including a client certificate the server refuses,
 surfaces as `io`, and a `HELLO` refused with `WRONGPASS`
 or `NOAUTH`, or a password file that cannot be read when a connection
-opens, as `auth`. Metrics, spans, and logs never carry keys, values, the DSN, or raw server text. `CacheError` Display follows the same
-rule.
+opens, as `auth`. Setup, direct AUTH, maintenance PING, and command failures
+retain only bounded error classification. Metrics, spans, and logs never carry
+keys, values, passwords, the DSN, or raw server text, including bridged
+dependency logs. `CacheError` Display follows the same rule.
 
 ## Operate the server
 
@@ -243,8 +273,8 @@ The tested server is Valkey 9.1.2
 (`valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11`).
 Redis 7.2 and later is compatible for the command subset the client uses:
 `GET`, `SET` with `PX`, `DEL`, and `PING`, plus `HELLO 3` (with `AUTH`
-inside it), `CLIENT SETINFO`, and `SELECT` by the client. Topology is
-standalone TCP only.
+inside it), `CLIENT SETINFO`, `SELECT`, and direct `AUTH` for password rotation.
+Topology is standalone TCP only.
 
 Set `maxmemory` and an eviction policy, such as `allkeys-lru`. Every entry
 carries a TTL, so `volatile-lru` also works on a server this profile does not

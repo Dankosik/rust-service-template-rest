@@ -10,6 +10,7 @@
 //! transaction. Rationale and the decisions behind each budget:
 //! `docs/architecture/persistence.md`.
 
+mod checkout;
 mod credentials;
 mod dsn;
 mod error;
@@ -18,6 +19,7 @@ mod pool;
 mod probe;
 mod transaction;
 
+pub use checkout::with_connection;
 pub use credentials::{PASSWORD_REFRESH_INTERVAL, refresh_password_periodically};
 pub use dsn::{Dsn, DsnError};
 pub use error::{failure_cause, sqlstate, transient};

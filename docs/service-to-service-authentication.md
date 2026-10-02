@@ -72,7 +72,8 @@ PEM may live, and a file value is refused by the secret guard.
 Every token request signs a fresh client assertion instead of sending a
 secret. Its header is `{alg, kid, typ: "client-authentication+jwt"}`; its
 claims are `iss` = `sub` = the client ID, `aud` = `assertion_audience` as one
-string, `iat` = `nbf` = now, `exp` = now + 60 seconds, and `jti` = a new
+string, `iat` = `nbf` = signing time minus 10 seconds, `exp` = 60 seconds
+after that backdated instant (50 seconds after signing), and `jti` = a new
 random UUID v4 that is never reused across requests.
 
 `assertion_audience` is the authorization server's issuer identifier, not its
@@ -91,8 +92,14 @@ authorization server beside the old one, deploy the new `private_key` and
 delete the old public key. The service serves no `jwks_uri`; rotation is a
 deploy, not a runtime call.
 
-Compose the authenticated client with `credentials.http(client)`. To call on
-behalf of a verified user, insert
+Prepare the authenticated client as
+`let (credentials, driver) = Credentials::prepare(options)?;`, bind it with
+`credentials.http(client)`, and drive and await
+`driver.run(existing_shutdown)` in the integration's existing lifecycle join
+before dependencies are dropped. Driver completion after final credential/client
+owner release is expected; a retained spawned handle must report a `JoinError`
+as an unexpected task failure, while a driver dropped with a surviving client
+closes that client. To call on behalf of a verified user, insert
 `OnBehalfOf::new(principal.access_token().clone())` into the outbound
 request's extensions before dispatch, using `http::Request::extensions_mut`;
 the gRPC binding takes the same value through
@@ -243,9 +250,11 @@ authenticate a service-to-service call.
 - **Private network is not identity.** Railway's private network encrypts
   traffic but authenticates no service; tokens, not network location, carry
   identity. Reopen if the platform issues workload identity.
-- **DPoP (RFC 9449)** — not adopted: Keycloak supports it since 26.4, but no
-  maintained Rust client exists, and it adds a signed proof, nonce state and a retry to
-  every token and resource request.
+- **DPoP (RFC 9449)** — not adopted: Keycloak supports it since 26.4, and
+  Huskarl is a maintained Rust client with DPoP support, but this profile does
+  not select a migration or a DPoP rollout. Sender constraint would add signed
+  proof, nonce state and retry behavior to token and resource requests; reopen
+  the retained-library decision when that rollout is required.
 - **mTLS-bound tokens (RFC 8705), SPIFFE, WIMSE** — not adopted: no
   per-service certificates or mesh on the target platform, and WIMSE has no
   mainstream implementation.

@@ -89,12 +89,15 @@ ADAPTERS: dict[str, AdapterPack] = {
     ),
 }
 
-# These remain deliberately small.  They are service-owned documents that the
-# portable agent and validation methods refer to for concrete local facts.
+# These remain deliberately small. They are service-owned policies and documents
+# that portable agent and validation methods need for concrete local facts.
 REQUIRED_AUTHORITIES = frozenset(
     {
         "Cargo.toml",
         "rust-toolchain.toml",
+        ".jscpd.json",
+        "quality/duplication-baseline.json",
+        "quality/architecture.json",
         "docs/repo-architecture.md",
         "docs/architecture/boundaries.md",
         "docs/architecture/persistence.md",
@@ -817,6 +820,7 @@ _PROTECTED_MANIFEST_FILES = frozenset(
         "CONTRIBUTING.md",
         "SECURITY.md",
         ".gitleaks.toml",
+        ".jscpd.json",
         "deny.toml",
         "template.lock",
         "make/service.mk",
@@ -840,6 +844,7 @@ _PROTECTED_MANIFEST_FILES = frozenset(
     }
 )
 _PROTECTED_MANIFEST_PREFIXES = (
+    "quality/",
     "api/",
     "build/",
     "crates/",

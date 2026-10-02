@@ -21,12 +21,12 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
-use commit_proxy::CommitProxy;
+use commit_proxy::{CommitProxy, ReadyBoundary};
 use health::Probe;
 use infra_postgres::{
     ACQUIRE_TIMEOUT, ConnectError, Dsn, Isolation, PASSWORD_REFRESH_INTERVAL, PgPool, PoolOptions,
     PostgresProbe, SessionBudgets, TxError, TxOptions, connection, in_tx, in_tx_with,
-    refresh_password_periodically, sqlstate,
+    refresh_password_periodically, sqlstate, with_connection,
 };
 use integration_tests::{DATABASE_URL, dsn_for, fixture_dir, pooler_dsn_for, url_for};
 use migrate::{HistoryError, MIGRATOR, RunError, RunOptions};
@@ -224,6 +224,10 @@ async fn pool_default_isolation_survives_replacement_and_explicit_transactions_o
         .fetch_one(&ours)
         .await
         .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the fixture forces physical session replacement"
+    )]
     let physical_connection = ours.acquire().await.unwrap();
     physical_connection.close().await.unwrap();
 
@@ -505,6 +509,10 @@ async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: P
     .unwrap();
     // The open session stays authenticated; a new connection is refused
     // while the file still holds the old password.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the rotation fixture forces a new physical session"
+    )]
     ours.acquire().await.unwrap().close().await.unwrap();
     let refused = current_user().await.unwrap_err();
     assert_eq!(sqlstate(&refused).as_deref(), Some("28P01"), "{refused}");
@@ -539,6 +547,10 @@ async fn probe_is_ready_and_fails_generically_when_the_pool_is_exhausted(pool: P
     assert_eq!(probe.name(), "postgres");
     probe.check().await.expect("ready");
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the readiness fixture deliberately exhausts the pool"
+    )]
     let _held = ours.acquire().await.unwrap();
     let started = std::time::Instant::now();
     let err = probe.check().await.unwrap_err();
@@ -706,25 +718,27 @@ async fn a_failure_on_the_borrowed_connection_is_found_before_the_commit(pool: P
     // cannot know what happened on it.
     let result: Result<(), AppError> = in_tx(&pool, async |tx| {
         tx.execute("INSERT INTO t VALUES (1)").await?;
-        let _ = tx.execute("INSERT INTO t VALUES (1)").await;
+        let _ = connection(tx).execute("INSERT INTO t VALUES (1)").await;
         Ok(())
     })
     .await;
-    assert!(
-        matches!(result, Err(AppError::Tx(TxError::CommitFailed(_)))),
-        "{result:?}"
-    );
+    match result {
+        Err(AppError::Tx(TxError::CommitFailed(err))) => {
+            assert_eq!(sqlstate(&err).as_deref(), Some("25P02"));
+        }
+        other => panic!("expected CommitFailed from the borrowed connection, got {other:?}"),
+    }
 
     // The same borrow with nothing failing commits, and so does a statement
     // through the handle after it.
     let borrowed: Result<(), AppError> = in_tx(&pool, async |tx| {
-        tx.execute("INSERT INTO t VALUES (2)").await?;
+        connection(tx).execute("INSERT INTO t VALUES (2)").await?;
         Ok(())
     })
     .await;
     assert!(borrowed.is_ok(), "{borrowed:?}");
     let through_the_handle: Result<(), AppError> = in_tx(&pool, async |tx| {
-        tx.execute("INSERT INTO t VALUES (3)").await?;
+        connection(tx).execute("INSERT INTO t VALUES (3)").await?;
         tx.execute("INSERT INTO t VALUES (4)").await?;
         Ok(())
     })
@@ -822,7 +836,7 @@ async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_opt
     // the pending-BEGIN guard, the next statement reuses a server session that
     // has entered the held transaction but has not delivered ReadyForQuery.
     let (proxy, proxied) = proxied_pool(&pool, 1).await;
-    proxy.arm_begin_ready_hold();
+    proxy.arm_ready_hold(ReadyBoundary::Begin);
     let mut pending = Box::pin(in_tx_with(
         &proxied,
         TxOptions {
@@ -833,10 +847,15 @@ async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_opt
     ));
     tokio::select! {
         outcome = &mut pending => panic!("BEGIN completed before its acknowledgement was held: {outcome:?}"),
-        () = proxy.begin_ready_held() => {}
+        () = proxy.ready_held() => {}
     }
     drop(pending);
-    proxy.release_begin_ready();
+    assert_eq!(
+        proxied.size(),
+        0,
+        "cancelled BEGIN releases capacity before its reply"
+    );
+    proxy.release_ready();
 
     sqlx::query("INSERT INTO pending_begin_visibility VALUES (1)")
         .execute(&proxied)
@@ -889,6 +908,143 @@ async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_opt
         infra_postgres::Closed::Complete
     );
     proxy.shutdown().await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn cancelled_query_reclaims_capacity_and_normal_queries_reuse_a_connection(pool: PgPool) {
+    let (proxy, ours) = proxied_pool(&pool, 1).await;
+    let pid = async |conn: &mut sqlx::PgConnection| {
+        sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(conn)
+            .await
+    };
+    let before = with_connection(&ours, pid).await.unwrap().unwrap();
+    assert_eq!(with_connection(&ours, pid).await.unwrap().unwrap(), before);
+
+    proxy.arm_ready_hold(ReadyBoundary::Sync);
+    let mut pending = Box::pin(with_connection(&ours, async |conn| conn.ping().await));
+    tokio::select! {
+        result = &mut pending => panic!("the query reply is held: {result:?}"),
+        () = proxy.ready_held() => {}
+    }
+    drop(pending);
+    assert_eq!(
+        ours.size(),
+        0,
+        "cancellation releases capacity without the peer"
+    );
+    proxy.release_ready();
+    let replacement = with_connection(&ours, pid).await.unwrap().unwrap();
+    assert_ne!(replacement, before, "the unresolved session is not reused");
+    assert_eq!(
+        with_connection(&ours, pid).await.unwrap().unwrap(),
+        replacement
+    );
+    ours.close().await;
+    proxy.shutdown().await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn cancelled_transaction_work_and_commit_release_capacity_before_the_reply(pool: PgPool) {
+    pool.execute("CREATE TABLE cancelled_effects (id int PRIMARY KEY)")
+        .await
+        .unwrap();
+    for (id, boundary) in [(1, ReadyBoundary::Sync), (2, ReadyBoundary::Commit)] {
+        let (proxy, ours) = proxied_pool(&pool, 1).await;
+        let mut pending = Box::pin(in_tx(&ours, async |tx| -> Result<(), AppError> {
+            sqlx::query("INSERT INTO cancelled_effects VALUES ($1)")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            proxy.arm_ready_hold(boundary);
+            if boundary == ReadyBoundary::Sync {
+                connection(tx).ping().await?;
+            }
+            Ok(())
+        }));
+        tokio::select! {
+            result = &mut pending => panic!("the transaction reply is held: {result:?}"),
+            () = proxy.ready_held() => {}
+        }
+        drop(pending);
+        assert_eq!(ours.size(), 0, "cancellation does not wait for the reply");
+        proxy.release_ready();
+        let written: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cancelled_effects WHERE id = $1)")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            written,
+            boundary == ReadyBoundary::Commit,
+            "reclaimed capacity does not imply that an unacknowledged commit failed"
+        );
+        ours.close().await;
+        proxy.shutdown().await;
+    }
+}
+
+#[sqlx::test(migrations = false)]
+async fn stalled_or_failed_return_preserves_the_operation_result_and_releases_capacity(
+    pool: PgPool,
+) {
+    pool.execute("CREATE TABLE release_effects (id int PRIMARY KEY)")
+        .await
+        .unwrap();
+    for (id, commit, fail_return) in [(1, true, false), (2, false, false), (3, true, true)] {
+        let (proxy, ours) = proxied_pool(&pool, 1).await;
+        let mut operation = Box::pin(in_tx(&ours, async |tx| -> Result<i32, AppError> {
+            sqlx::query("INSERT INTO release_effects VALUES ($1)")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            proxy.arm_ready_hold(ReadyBoundary::Sync);
+            if commit {
+                Ok(id)
+            } else {
+                Err(AppError::Business)
+            }
+        }));
+        tokio::select! {
+            result = &mut operation => panic!("the return ping reply is held: {result:?}"),
+            () = proxy.ready_held() => {}
+        }
+        assert_eq!(ours.size(), 1, "cleanup still owns the connection");
+        if fail_return {
+            // Stop the transport after COMMIT was acknowledged, during return.
+            proxy.cancel();
+        } else {
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        let result = tokio::time::timeout(Duration::from_millis(100), operation)
+            .await
+            .expect("return cannot extend the one-second maintenance budget");
+        if !fail_return {
+            tokio::time::resume();
+            proxy.release_ready();
+        }
+        if commit {
+            assert!(matches!(result, Ok(value) if value == id), "{result:?}");
+        } else {
+            assert!(matches!(result, Err(AppError::Business)), "{result:?}");
+        }
+        assert_eq!(
+            ours.size(),
+            0,
+            "failed return cannot retain the local permit"
+        );
+        let written: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM release_effects WHERE id = $1)")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(written, commit, "cleanup does not change transaction truth");
+        ours.close().await;
+        proxy.shutdown().await;
+    }
 }
 
 #[sqlx::test(migrations = false)]
@@ -1002,6 +1158,10 @@ async fn an_older_release_admits_the_history_of_a_later_one(pool: PgPool) {
 #[sqlx::test(migrations = false)]
 async fn a_held_session_lock_fails_in_the_lock_stage(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the migration fixture holds an advisory lock"
+    )]
     let mut holder = pool.acquire().await.unwrap();
     holder.lock().await.unwrap();
 
@@ -1036,6 +1196,10 @@ async fn the_deadline_drops_the_session_and_leaves_no_partial_history(pool: PgPo
     // migration's own row and its table are rolled back when the session is
     // dropped. `client_connection_check_interval` lets the server end it promptly.
     assert_eq!(applied_count(&pool).await, 0);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the migration fixture inspects a dedicated raw session"
+    )]
     let mut conn = pool.acquire().await.unwrap();
     conn.lock()
         .await
@@ -1081,6 +1245,10 @@ async fn a_no_transaction_build_is_refused_until_its_invalid_index_is_dropped(po
 
     // A concurrent build waits for every transaction that wrote to the table
     // before it; that wait outlives the session `lock_timeout` here.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the concurrent-index fixture retains a blocking writer"
+    )]
     let mut writer = pool.acquire().await.unwrap();
     writer.execute("BEGIN").await.unwrap();
     writer
