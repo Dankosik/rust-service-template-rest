@@ -57,7 +57,7 @@ counterpart has:
 ```toml
 [grpc]
 request_timeout = "8s"      # cap on a call's time to response headers, authentication included
-max_in_flight = 256         # business calls at once; 0 never sheds
+max_in_flight = 256         # active business calls, open streams included; 0 never sheds
 max_connections = 4096      # accepted connections; 0 is unbounded
 max_connection_age = "30m"  # GOAWAY after this age; "0s" sets no age
 ```
@@ -165,9 +165,11 @@ Outermost to innermost:
    as on HTTP.
    A response stream that panics after its headers ends with the same
    status in its trailers, instead of a reset stream.
-3. Business routes only: deadline `min(grpc-timeout, grpc.request_timeout)`,
-   measured until the handler returns response headers. Expiry is
-   `DEADLINE_EXCEEDED` / `request deadline exceeded`. A malformed
+3. Business routes only: an opening budget of
+   `min(grpc-timeout, grpc.request_timeout)` through response headers. A valid
+   caller `grpc-timeout` also bounds the response DATA and trailers from the
+   same admission time. Expiry is `DEADLINE_EXCEEDED` /
+   `request deadline exceeded`, with catalog reason `GATEWAY_TIMEOUT`. A malformed
    `grpc-timeout`, including more than eight digits, counts as absent and
    `grpc.request_timeout` applies. The deadline is outside authentication,
    so the time a verification takes is spent from the caller's budget, as
@@ -184,10 +186,12 @@ Outermost to innermost:
    unless configured, and none at zero. A shed call is
    `RESOURCE_EXHAUSTED` / `server is at capacity` and increments
    `grpc_server_shed_requests_total`. Health is outside this limit. It is
-   innermost, so a call that failed authentication never holds a permit. A permit
-   is held until response headers, so it bounds unary and client-streaming
-   calls; server-streaming and bidi streams that are already open are bounded
-   by the connection cap and the HTTP/2 stream limit instead.
+   innermost, so a call that failed authentication never holds a permit. Each
+   admitted call holds one permit through terminal status, failure, deadline
+   or cancellation. Open server-streaming and bidi calls consume capacity too;
+   size the limit for those live streams as well as short calls. Headers alone
+   do not release capacity. The listener limits are not measured application
+   capacity.
 
 An authentication failure or a shed call is answered after reading the rest
 of its request body, for at most 100 ms and 64 KiB. A caller sends request
@@ -197,18 +201,34 @@ with every other call on it.
 
 ## Deadlines
 
-`grpc.request_timeout`, eight seconds unless configured, is tonic
-`Server::timeout` placement with a `DEADLINE_EXCEEDED` status. It is not a
-body-lifetime timer. It starts before authentication.
+`grpc.request_timeout`, eight seconds unless configured, caps opening:
+authentication, handler work and response headers. A valid incoming
+`grpc-timeout` supplies a separate whole-call budget that starts at the same
+boundary. The earlier bound applies before headers; only the caller budget
+continues after them. Without caller metadata, an opened server stream has no
+transport lifetime or idle cap. Headers never prove that unary DATA has been
+decoded or terminal trailers received. Health is exempt from both business
+budgets and capacity.
 
-- Unary: the whole call, because the handler returns the response.
-- Client-streaming: the upload must finish and the handler must return within
-  the budget.
-- Server-streaming and bidi: the handler must return its stream within the
-  budget. After response headers, the stream is bounded by the caller and by
-  process drain, not by this timer.
+Expiry drops the transport-owned future or stream and releases its permit and
+observation even if the peer is flow-controlled and the response is not being
+polled. A finite stream has one response-owned timer; it adds no message queue
+or read-ahead. Once a terminal status is observed before expiry it stays
+final. An expired call emits deadline trailers when the transport can read
+them, but a disconnected or unread peer cannot be promised status delivery.
+Hyper may still hold one DATA frame awaiting send capacity.
 
-Health is outside the deadline.
+The response retains the timer handle and reaps completion when polled.
+Dropping the response clears application resources synchronously and requests
+timer abortion; that request is not an awaited join. The timer has only a weak
+reference to the call, so it cannot retain its stream or permit. Synchronous
+feature polling and destructors must cooperate with the runtime.
+
+Dropping a handler future or response stream conveys cancellation to resources
+it owns. Feature-spawned tasks remain the feature's responsibility: instrument
+them explicitly and stop producers when their receiver closes. Cancellation
+neither aborts detached tasks nor rolls back effects. Features own aggregate
+message and idle policies; there is no global idle timer.
 
 ## Listener bounds
 
@@ -225,7 +245,8 @@ Listener options, shared with HTTP except for the values below:
   connection's age is spread by up to 10% either way, as grpc-go spreads
   `MaxConnectionAge`, so connections opened together do not all reconnect
   together. There is no forced close after the age: a stream that outlives
-  it keeps its connection until it ends.
+  it keeps its connection until it ends. Connection age is neither a stream
+  lifetime nor an application idle timeout, and does not discover endpoints.
 - 5 seconds for the TLS handshake, then 5 seconds for the HTTP/2 preface.
   A handshake error or either timeout closes the connection without a
   response.
@@ -300,7 +321,7 @@ carries a reason:
 | Authentication provider unavailable | `UNAVAILABLE` | `AUTHENTICATION_UNAVAILABLE` |
 | Missing required scope | `PERMISSION_DENIED` | `FORBIDDEN` |
 | Concurrency shed | `RESOURCE_EXHAUSTED` | `SERVICE_UNAVAILABLE` |
-| Header deadline elapsed | `DEADLINE_EXCEEDED` | `GATEWAY_TIMEOUT` |
+| Opening or caller lifetime deadline elapsed | `DEADLINE_EXCEEDED` | `GATEWAY_TIMEOUT` |
 | Recovered panic | `INTERNAL` | `INTERNAL_ERROR` |
 
 The shed is the one answer whose gRPC code differs from its catalog row: it
@@ -315,7 +336,7 @@ carries no reason. Tonic's own decode-limit status is unchanged.
 ## Reuse clients and original deadlines
 
 Create one lazy `infra_grpc::Client` per trusted operator destination.
-`Client::new(destination, ClientSecurity)` performs no DNS or socket I/O.
+`Client::new(destination, security, timeout)` performs no DNS or socket I/O.
 `ClientSecurity::Plaintext` or `ClientSecurity::Tls(ClientTlsMaterial)` is
 explicit, and the destination scheme must agree: `http` for plaintext,
 `https` for TLS. Tonic applies TLS only to `https`, so a mismatch is
@@ -333,21 +354,45 @@ answer a stream that stays silent for minutes with `GOAWAY too_many_pings`;
 such a server sets its `PermitWithoutStream`/`MinTime` policy for long quiet
 streams. Clones share the lazy channel and its metric handles.
 
-`Client::new(destination, security, timeout)` takes the longest wait for a
-call's response headers once the call is on the channel, so a call that sets
-no deadline of its own still ends. It is adapter policy, like the limits of the outbound HTTP client: pick
-it for the dependency. It bounds this side only and sends no `grpc-timeout`,
-so a response stream that has opened is not cut by it; a unary or
-client-streaming call is bounded whole, because its headers arrive with its
-answer.
+`Client::new(destination, security, timeout)` selects
+`ClientTimeout::FullRpc(timeout)`: one finite budget from adapter entry through
+channel readiness, queueing, headers, DATA and terminal trailers, for every
+cardinality. This tightens the former header-only behavior. The local policy
+sends no `grpc-timeout` of its own. Choose it for the dependency; the OAuth
+wrapper's token acquisition precedes entry into this adapter.
 
-Set a call's own budget with tonic `Request::set_timeout`. That writes
-`grpc-timeout`, which the server enforces too, and tonic's channel ends the
-call at the shorter of the two; a longer `grpc-timeout` does not extend the
-client's timeout. Either way the caller gets `DEADLINE_EXCEEDED` /
-`request deadline exceeded`, never `UNAVAILABLE`: the server may still be
-running the call, so a caller that retries `UNAVAILABLE` must not repeat it.
-The server still applies `min(grpc-timeout, grpc.request_timeout)`.
+For intentionally long-lived streams, opt in explicitly:
+
+```rust,ignore
+let channel = infra_grpc::Client::with_timeout_policy(
+    destination,
+    security,
+    infra_grpc::ClientTimeout::OpeningOnly(std::time::Duration::from_secs(10)),
+)?;
+```
+
+`OpeningOnly` still bounds readiness, queueing and headers, but has no local
+lifetime cap after opening. A valid supplied `Request::set_timeout` bounds the
+whole RPC under either policy. A shorter caller deadline wins; a longer one
+cannot extend the local FullRpc budget or either policy's opening cap. Zero
+expires immediately; malformed metadata keeps the absent-value behavior.
+
+At handoff to tonic, the adapter rewrites supplied `grpc-timeout` to the
+remaining caller budget after its own readiness wait. Tonic's opaque queue
+and subsequent network transit can consume more time after this header is
+fixed; the peer does not receive an identical absolute expiry. The independent
+local deadline still includes those intervals. Expiry yields
+`DEADLINE_EXCEEDED` / `request deadline exceeded`, including while waiting for
+a message or trailers. A previously observed terminal peer status remains
+final.
+
+Expiry before handoff prevents submission. After handoff, cancellation closes
+the response receiver so Tower discards buffered work when it observes that
+closure. Concurrent admission/dispatch can win that race: the remote effect
+is then unknown. Expiry or response drop also clears the locally owned upload
+source even if HTTP/2 would keep its send half open. Already queued bytes
+cannot be recalled. None of these outcomes promises rollback or safe replay;
+no retry is added.
 
 ```rust,ignore
 let timeout = std::time::Duration::from_secs(10);
@@ -365,10 +410,11 @@ status; the cause is logged as `grpc_client_transport_failed` inside the
 client span. There is no application retry, replay, hedging,
 discovery or client health polling. A `Client` is one HTTP/2 connection to
 whatever address its destination resolved to when it connected: it does not
-watch DNS or balance across addresses. Behind a connection-level balancer the
-server's `grpc.max_connection_age` is what moves it to another replica; a
-caller that needs more than one connection's streams, 200 against this
-template's listener, creates more clients. gRPC messages are not compressed
+watch DNS or balance RPCs across addresses. This is appropriate for a service
+or mesh destination; GOAWAY lets a later connection be assigned by its
+balancer. A headless DNS name supplies no endpoint watcher or per-RPC
+balancing, and connection age does not add either. A concrete dependency
+requiring direct multi-endpoint discovery reopens the integration design. gRPC messages are not compressed
 in either direction: tonic's compression features are off, so a peer that
 sends a compressed message gets `UNIMPLEMENTED`.
 
@@ -477,11 +523,13 @@ deadline and a unary failure carry `grpc-status` in the response headers and
 are handled there. Every other answer is followed through its response body
 to the trailers, so a stream that fails after its first message is counted
 with that failure, not as `OK`, and the span ends with the call and carries
-its real status. Following the body costs no task and holds nothing back:
-frames pass through as they are produced. The span is current while the
-handler runs and not while the response stream is polled, so a stream that
-logs or calls out as it produces messages instruments itself, for example
-with `tracing::Instrument::in_current_span`.
+its real status. Frames pass through without an added queue or read-ahead.
+Finite lifetimes use one weak response-owned timer to release the raw body,
+upload source, permit and observation even when body polling stops. The span
+and incoming fallback context are entered only during each synchronous lazy
+response poll, so logs and nested RPCs created there correlate with the call.
+The context is restored between polls; feature-spawned tasks still need
+explicit instrumentation, for example `tracing::Instrument::in_current_span`.
 
 On the server, `grpc_service` and `grpc_method` come from the request path
 only when it is a described method of a registered service or of health.
@@ -495,6 +543,17 @@ waiting or drops a response stream it has not read to the end. An answer
 that ends with no `grpc-status` at all is `Unknown`, as tonic's client reports
 it. Payloads, metadata
 values, bearer tokens and raw errors are not transport attributes.
+
+Clients derive metric and span method identity from tonic's native `GrpcMethod`
+extension only when its service and method exactly match the two URI segments.
+A raw URI alone uses `unknown/unknown`; routing still uses the original URI.
+The extension is public, so one process-wide registry admits at most 256
+distinct pairs plus unknown, with at most 256 bytes per component. Oversized
+or mismatched candidates and new pairs after saturation use unknown. Existing
+admitted identities remain; there is no eviction or reset when clients are
+reconstructed. This bounds cached handles and recorder labels together. An
+adopter needing more than 256 observed generated methods must revisit that
+telemetry policy. Handles bind to the recorder installed before serving starts.
 
 ## Generate and verify
 
