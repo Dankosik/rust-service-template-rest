@@ -1954,7 +1954,7 @@ fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing() {
             advance(Duration::from_secs(31)).await;
             client.execute(fixture.request(), deadline(Duration::from_secs(10))).await.unwrap();
             fixture.token_received().await;
-            let refresh = tokio::time::timeout(Duration::from_secs(2), credentials.0.refresh.lock()).await.unwrap();
+            let refresh = tokio::time::timeout(Duration::from_secs(2), credentials.0.inner.refresh.lock()).await.unwrap();
             drop(refresh);
             assert_eq!(fixture.token_requests().len(), 3);
             assert!(fixture.resource_requests().iter().all(|request| request.header("authorization") == Some("Bearer kept")));

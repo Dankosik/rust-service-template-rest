@@ -24,7 +24,6 @@ use moka::{Expiry, ops::compute::Op};
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::{
     sync::{Semaphore, SemaphorePermit, mpsc, oneshot},
-
     time::Instant,
 };
 use url::Url;
@@ -949,7 +948,6 @@ impl Inner {
         self.permits
             .try_acquire()
             .map_err(|_| AcquisitionError::AtCapacity)
-
     }
 
     /// Performs one client-credentials token request, bounded by the
