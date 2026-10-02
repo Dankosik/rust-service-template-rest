@@ -617,19 +617,18 @@ async fn client_observation_fallback_preserves_raw_request_routing() {
 
     let fixture = Fixture::plaintext().await;
     for mismatched_extension in [false, true] {
-        let mut builder = http::Request::builder()
+        let builder = http::Request::builder()
             .method("POST")
             .uri(ECHO_SERVICE_UNARY)
             .header("content-type", "application/grpc")
             .header("te", "trailers");
-        // template:begin authn:grpc-transport-test-raw-routing-bearer
-        builder = builder.header("authorization", format!("Bearer {ACCEPTED}"));
-        // template:end authn:grpc-transport-test-raw-routing-bearer
+        let authentication = request(()).into_parts().0.into_headers();
         let mut request = builder
             .body(tonic::body::Body::new(http_body_util::Full::new(
                 bytes::Bytes::from(grpc_frame("raw route")),
             )))
             .unwrap();
+        request.headers_mut().extend(authentication);
         if mismatched_extension {
             request
                 .extensions_mut()
@@ -1088,7 +1087,7 @@ async fn duplex_progresses_before_request_eof_and_drop_stops_upload_and_recovers
 }
 
 #[tokio::test]
-async fn opening_caps_end_at_headers_but_caller_deadlines_end_streams() {
+async fn opened_stream_without_caller_deadline_outlives_both_opening_caps() {
     let fixture = Fixture::open_with(
         true,
         None,
@@ -1148,7 +1147,10 @@ async fn opening_caps_end_at_headers_but_caller_deadlines_end_streams() {
             .is_none()
     );
     fixture.stop().await;
+}
 
+#[tokio::test]
+async fn supplied_caller_deadline_expires_open_stream_and_recovers_capacity() {
     let fixture = Fixture::limited(1).await;
     let adapter = infra_grpc::Client::with_timeout_policy(
         &format!("http://{}", fixture.address),
@@ -1205,7 +1207,7 @@ async fn unread_flow_controlled_response_releases_server_work_at_caller_deadline
     .await
     .unwrap();
     let driver = tokio::spawn(connection);
-    let mut builder = http::Request::builder()
+    let builder = http::Request::builder()
         .method("POST")
         .uri(format!(
             "http://{}/example.v1.EchoService/ServerStream",
@@ -1214,20 +1216,16 @@ async fn unread_flow_controlled_response_releases_server_work_at_caller_deadline
         .header("content-type", "application/grpc")
         .header("te", "trailers")
         .header("grpc-timeout", "300m");
-    // template:begin authn:grpc-transport-test-unread-bearer
-    builder = builder.header("authorization", format!("Bearer {ACCEPTED}"));
-    // template:end authn:grpc-transport-test-unread-bearer
-    let response = timeout(
-        WAIT,
-        sender.send_request(
-            builder
-                .body(axum::body::Body::from(grpc_frame("flood")))
-                .unwrap(),
-        ),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let mut outgoing = builder
+        .body(axum::body::Body::from(grpc_frame("flood")))
+        .unwrap();
+    outgoing
+        .headers_mut()
+        .extend(request(()).into_parts().0.into_headers());
+    let response = timeout(WAIT, sender.send_request(outgoing))
+        .await
+        .unwrap()
+        .unwrap();
     // The raw peer has no local timer and never polls DATA. The server's timer
     // must drop its source even after HTTP/2 receive credit has been exhausted.
     timeout(WAIT, fixture.echo.stream_dropped.notified())
@@ -1838,6 +1836,10 @@ async fn a_stream_is_counted_with_the_status_that_ended_it() {
 
 /// A peer that accepts and never answers: the call's own deadline ends it.
 #[tokio::test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "native gRPC response-body wire fixture is outside REST application contract authoring"
+)]
 async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
     for send_data in [false, true] {
         let peer_polled = Arc::new(Notify::new());

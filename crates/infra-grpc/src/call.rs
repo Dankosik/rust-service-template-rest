@@ -41,7 +41,7 @@ impl Deadline {
         // Large legal grpc-timeout values need not fit an Instant addition.
         // Recheck elapsed time after each bounded sleep, including early wakes.
         while !self.expired() {
-            tokio::time::sleep(self.remaining().min(Duration::from_secs(86_400))).await;
+            tokio::time::sleep(self.remaining().min(Duration::from_hours(24))).await;
         }
     }
 }
@@ -284,7 +284,7 @@ where
                 let result = AssertUnwindSafe(async {
                     deadline.wait().await;
                     if let Some(state) = weak.upgrade() {
-                        terminate(&state, side.deadline());
+                        terminate(&state, &side.deadline());
                     }
                 })
                 .catch_unwind()
@@ -292,7 +292,7 @@ where
                 if result.is_err()
                     && let Some(state) = weak.upgrade()
                 {
-                    terminate(&state, internal());
+                    terminate(&state, &internal());
                 }
             }));
         }
@@ -305,16 +305,16 @@ where
         {
             self.timer = None;
             if result.is_err() {
-                terminate(&self.state, internal());
+                terminate(&self.state, &internal());
             }
         }
     }
 }
 
-fn terminate<B: Body>(state: &Mutex<State<B>>, status: tonic::Status) {
+fn terminate<B: Body>(state: &Mutex<State<B>>, status: &tonic::Status) {
     let (completion, waker) = {
         let mut state = lock(state);
-        let completion = state.status(&status);
+        let completion = state.status(status);
         (completion, state.waker.take())
     };
     if let Some(waker) = waker {

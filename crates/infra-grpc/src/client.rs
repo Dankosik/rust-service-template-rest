@@ -311,7 +311,7 @@ mod tests {
         );
         // Even legal wire timeouts larger than a practical Instant horizon
         // must not overflow while a finite local budget remains enforceable.
-        let largest_wire = Duration::from_secs(99_999_999 * 3_600);
+        let largest_wire = Duration::from_hours(99_999_999);
         let (opening, _) = ClientTimeout::FullRpc(local).deadlines(origin, Some(largest_wire));
         assert!(opening.expired());
         assert!(!Deadline::new(origin, largest_wire).expired());

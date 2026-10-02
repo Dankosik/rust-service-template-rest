@@ -505,6 +505,15 @@ mod tests {
     /// One recorder owns the process-wide client handles for this unit-test
     /// binary. Replacing/resetting that registry for tests would evade its bound.
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one process-wide metric registry must cover admission and terminal paths without a test-only reset"
+    )]
+    #[allow(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "native gRPC wire peer is outside REST application contract authoring"
+    )]
     async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
         const WAIT: Duration = Duration::from_secs(5);
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
