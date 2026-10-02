@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE background_jobs SET state = 'failed', failure_reason = $3, finished_at = statement_timestamp(), claim_expires_at = NULL, error_summary = $4, errors = errors || jsonb_build_object('attempt', attempts, 'at', statement_timestamp(), 'error', $4::text) WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "92b1006d0f5acc87a6ea5d4a363b08c14d98295cdbc85a00d12f5a9b5ab16c51"
+}

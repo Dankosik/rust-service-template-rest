@@ -186,27 +186,9 @@ where
     }
 }
 
-async fn serve(
-    config: Config,
-    // template:begin grpc:bootstrap-grpc-serve-registration-parameter
-    grpc_registration: Option<crate::GrpcRegistration>,
-    // template:end grpc:bootstrap-grpc-serve-registration-parameter
-) -> Result<Outcome, BootstrapError> {
-    // Before this point SIGTERM has its default disposition and kills the
-    // process; install the handlers first and keep them for the lifetime.
-    let mut signals = Signals::install().map_err(BootstrapError::Signals)?;
-
-    let tracer_provider =
-        install_tracer_provider(&tracing_options(&config, replica_instance_id(&config.app)))?;
-    install_subscriber(&LoggingOptions {
-        level: &config.log.level,
-        format: match config.log.format {
-            LogFormat::Json => LoggingFormat::Json,
-            LogFormat::Text => LoggingFormat::Text,
-        },
-        tracer_provider: Some(&tracer_provider),
-    })?;
-    let metrics = Metrics::install(&[
+/// The metrics recorder with every retained crate's histogram buckets.
+fn install_metrics() -> Result<Metrics, BootstrapError> {
+    Ok(Metrics::install(&[
         (
             HTTP_REQUESTS_DURATION_SECONDS,
             HTTP_REQUESTS_DURATION_BUCKETS,
@@ -219,6 +201,10 @@ async fn serve(
         (
             infra_postgres::TRANSACTION_DURATION_METRIC,
             infra_postgres::TRANSACTION_DURATION_BUCKETS,
+        ),
+        (
+            infra_postgres::OPERATION_DURATION_METRIC,
+            infra_postgres::OPERATION_DURATION_BUCKETS,
         ),
         // template:end postgres:bootstrap-postgres-histograms
         // template:begin outbound-http:service-bootstrap-outbound-histogram
@@ -249,7 +235,30 @@ async fn serve(
             infra_object_storage::OPERATION_DURATION_BUCKETS,
         ),
         // template:end object-storage:service-bootstrap-object-storage-histogram
-    ])?;
+    ])?)
+}
+
+async fn serve(
+    config: Config,
+    // template:begin grpc:bootstrap-grpc-serve-registration-parameter
+    grpc_registration: Option<crate::GrpcRegistration>,
+    // template:end grpc:bootstrap-grpc-serve-registration-parameter
+) -> Result<Outcome, BootstrapError> {
+    // Before this point SIGTERM has its default disposition and kills the
+    // process; install the handlers first and keep them for the lifetime.
+    let mut signals = Signals::install().map_err(BootstrapError::Signals)?;
+
+    let tracer_provider =
+        install_tracer_provider(&tracing_options(&config, replica_instance_id(&config.app)))?;
+    install_subscriber(&LoggingOptions {
+        level: &config.log.level,
+        format: match config.log.format {
+            LogFormat::Json => LoggingFormat::Json,
+            LogFormat::Text => LoggingFormat::Text,
+        },
+        tracer_provider: Some(&tracer_provider),
+    })?;
+    let metrics = install_metrics()?;
     metrics.record_trace_exporter_initialized(matches!(
         tracer_provider.exporter_state,
         ExporterState::Initialized { .. }

@@ -35,6 +35,22 @@ Without Docker the target refuses with exit 2; `REQUIRE_DOCKER=1` (what CI
 sets) turns that into a failure, because a skipped required test is not a
 pass.
 
+Statement metadata, when a checked statement (`sqlx::query!`) or a
+migration changed:
+
+```bash
+make sqlx-prepare               # regenerate .sqlx/
+ALLOW_HEAVY=1 make sqlx-check   # fail when .sqlx/ is stale; what CI runs
+```
+
+Both start the compose PostgreSQL on an ephemeral port, create a database
+of their own, apply `migrations/` with the pinned `sqlx-cli` (built once
+into the Git common directory), and describe every checked statement in the
+workspace against it. A statement whose metadata is missing already fails
+an ordinary build; the check adds what a build cannot see, metadata that no
+longer matches the schema. Unused metadata is reported as a warning and
+removed by the next `make sqlx-prepare`.
+
 Migration source shape and the static append-only rule:
 
 ```bash

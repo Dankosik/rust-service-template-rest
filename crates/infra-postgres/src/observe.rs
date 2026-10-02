@@ -1,16 +1,17 @@
 //! What an operator sees of the pool and of each transaction.
 //!
-//! Three questions, one signal each: how full the pool is (the occupancy
+//! Four questions, one signal each: how full the pool is (the occupancy
 //! gauges and their limit), whether callers wait for a connection (the wait
-//! histogram), and how long a transaction holds one and how it ends (the
-//! duration histogram and the span). Statements are not instrumented here;
-//! the driver's slow-statement warning names the ones that matter.
+//! histogram), how long a transaction holds one and how it ends (the
+//! duration histogram and the span), and how long each statement takes and
+//! how it fails ([`observed`]). The driver's slow-statement warning adds the
+//! SQL text of the ones that matter.
 
 use std::time::Instant;
 
-use metrics::Unit;
+use metrics::{SharedString, Unit};
 use sqlx::postgres::PgPool;
-use tracing::Span;
+use tracing::{Instrument, Span};
 
 use crate::error::{failure_cause, sqlstate};
 use crate::transaction::TxError;
@@ -45,7 +46,22 @@ pub const TRANSACTION_DURATION_BUCKETS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 8.0,
 ];
 
-/// Describes the pool and transaction metrics to the installed recorder.
+/// How long one statement took from sending it to its complete answer
+/// (`db.client.operation.duration`), by `db.query.summary` and, when it
+/// failed, `error.type`.
+pub const OPERATION_DURATION_METRIC: &str = "db_client_operation_duration_seconds";
+
+/// Buckets in seconds for [`OPERATION_DURATION_METRIC`]: the boundaries the
+/// OpenTelemetry convention advises for this histogram. The composition
+/// root passes both to the Prometheus recorder.
+pub const OPERATION_DURATION_BUCKETS: &[f64] =
+    &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0];
+
+/// `error.type` of a statement whose caller stopped waiting for it.
+const CANCELLED: &str = "cancelled";
+
+/// Describes the pool, transaction and statement metrics to the installed
+/// recorder.
 /// Repeating it is harmless.
 pub(crate) fn describe() {
     metrics::describe_gauge!(
@@ -66,6 +82,99 @@ pub(crate) fn describe() {
         Unit::Seconds,
         "PostgreSQL transaction duration in seconds, including the wait for a connection"
     );
+    metrics::describe_histogram!(
+        OPERATION_DURATION_METRIC,
+        Unit::Seconds,
+        "PostgreSQL statement duration in seconds"
+    );
+}
+
+/// Run one statement and record how long it took and how it ended.
+///
+/// `summary` is the statement's `db.query.summary`: its SQL command and the
+/// table it targets (`"UPDATE background_jobs"`), written by the caller
+/// because nothing here parses SQL. It becomes a metric label and the span
+/// name, so it is a literal, never built from a value.
+///
+/// The statement gets a client span only inside another span. A background
+/// loop that polls outside any span would otherwise start a one-span trace
+/// per tick; its statements are still measured.
+///
+/// # Errors
+///
+/// The statement's own error, unchanged.
+pub async fn observed<T>(
+    summary: &'static str,
+    statement: impl Future<Output = Result<T, sqlx::Error>>,
+) -> Result<T, sqlx::Error> {
+    let span = if Span::current().is_none() {
+        Span::none()
+    } else {
+        tracing::info_span!(
+            "postgres_statement",
+            otel.name = summary,
+            otel.kind = "client",
+            db.system.name = "postgresql",
+            db.query.summary = summary,
+            db.response.status_code = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+        )
+    };
+    let mut statement_end = StatementEnd {
+        started: Instant::now(),
+        span: span.clone(),
+        summary,
+        error_type: Some(SharedString::const_str(CANCELLED)),
+    };
+    let result = statement.instrument(span).await;
+    statement_end.error_type = match &result {
+        Ok(_) => None,
+        Err(error) => Some(match sqlstate(error) {
+            Some(code) => {
+                statement_end
+                    .span
+                    .record("db.response.status_code", code.as_ref());
+                SharedString::from(code.into_owned())
+            }
+            None => SharedString::const_str(failure_cause(error)),
+        }),
+    };
+    result
+}
+
+/// One statement being observed. Dropping it records the end it holds;
+/// until the statement answers, that is `cancelled`.
+struct StatementEnd {
+    started: Instant,
+    span: Span,
+    summary: &'static str,
+    error_type: Option<SharedString>,
+}
+
+impl Drop for StatementEnd {
+    fn drop(&mut self) {
+        let elapsed = self.started.elapsed().as_secs_f64();
+        match self.error_type.take() {
+            None => metrics::histogram!(
+                OPERATION_DURATION_METRIC,
+                "db.system.name" => "postgresql",
+                "db.query.summary" => self.summary
+            )
+            .record(elapsed),
+            Some(error_type) => {
+                self.span.record("error.type", error_type.as_ref());
+                self.span.record("otel.status_code", "ERROR");
+                metrics::histogram!(
+                    OPERATION_DURATION_METRIC,
+                    "db.system.name" => "postgresql",
+                    "db.query.summary" => self.summary,
+                    "error.type" => error_type
+                )
+                .record(elapsed);
+            }
+        }
+    }
 }
 
 /// Every `outcome` label of [`TRANSACTION_DURATION_METRIC`].
@@ -250,5 +359,63 @@ mod tests {
         // Two outcomes and one pool: nothing else became a series.
         assert_eq!(scrape.matches("_count{").count(), 3, "{scrape}");
         assert!(!scrape.contains("pw"), "{scrape}");
+    }
+
+    #[test]
+    fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
+        let recorder = PrometheusBuilder::new()
+            .set_buckets_for_metric(
+                Matcher::Full(OPERATION_DURATION_METRIC.to_owned()),
+                OPERATION_DURATION_BUCKETS,
+            )
+            .expect("the buckets are valid")
+            .build_recorder();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                assert_eq!(observed("read widget", async { Ok(7) }).await.unwrap(), 7);
+                let rejected = observed("write widget", async {
+                    Err::<(), _>(crate::error::tests::database("23505"))
+                })
+                .await;
+                assert_eq!(sqlstate(&rejected.unwrap_err()).as_deref(), Some("23505"));
+                let lost = observed("write widget", async {
+                    Err::<(), _>(sqlx::Error::Io(std::io::Error::other(
+                        "reset by db.internal",
+                    )))
+                })
+                .await;
+                assert!(lost.is_err());
+                // The caller stops waiting before the server answers.
+                let abandoned = tokio::time::timeout(
+                    Duration::from_millis(1),
+                    observed(
+                        "slow widget",
+                        std::future::pending::<Result<(), sqlx::Error>>(),
+                    ),
+                )
+                .await;
+                assert!(abandoned.is_err());
+            });
+        });
+        let scrape = recorder.handle().render();
+        let series = |labels: &str| {
+            format!(
+                "db_client_operation_duration_seconds_count{{db_system_name=\"postgresql\",{labels}}} 1"
+            )
+        };
+        for line in [
+            series("db_query_summary=\"read widget\""),
+            series("db_query_summary=\"write widget\",error_type=\"23505\""),
+            series("db_query_summary=\"write widget\",error_type=\"io\""),
+            series("db_query_summary=\"slow widget\",error_type=\"cancelled\""),
+        ] {
+            assert!(scrape.contains(&line), "{line} is missing from:\n{scrape}");
+        }
+        assert_eq!(scrape.matches("_count{").count(), 4, "{scrape}");
+        assert!(!scrape.contains("db.internal"), "{scrape}");
     }
 }

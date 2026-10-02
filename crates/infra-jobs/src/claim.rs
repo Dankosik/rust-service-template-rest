@@ -3,8 +3,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use sqlx::FromRow;
-use sqlx::postgres::{PgListener, PgPool, PgPoolOptions};
+use infra_postgres::observed;
+use sqlx::postgres::{PgConnection, PgListener, PgPool, PgPoolOptions};
 use tokio::sync::{OwnedSemaphorePermit, SemaphorePermit};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -30,87 +30,6 @@ pub const QUEUE_WAIT_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
     1800.0, 3600.0, 10_800.0, 21_600.0, 43_200.0, 86_400.0,
 ];
-
-/// Claim due pending jobs and expired running jobs, up to the free slots.
-///
-/// Each per-kind scan locks rows while it reads them (`SKIP LOCKED` inside the
-/// lateral), so a row another session holds is skipped and the scan moves on.
-/// Choosing ids first and locking them afterwards hands concurrent workers the
-/// same few ids: the losers claim nothing until the next poll.
-const CLAIM: &str = "WITH policy AS ( \
-         SELECT policy.kind, policy.max_attempts, policy.timeout_micros \
-         FROM unnest($1::text[], $2::smallint[], $3::bigint[]) \
-             AS policy (kind, max_attempts, timeout_micros) \
-     ), \
-     candidates AS ( \
-         SELECT candidate.id, candidate.not_before \
-         FROM policy \
-         CROSS JOIN LATERAL ( \
-             SELECT job.id, job.not_before \
-             FROM background_jobs AS job \
-             WHERE job.state = 'pending' \
-               AND job.kind = policy.kind \
-               AND job.not_before <= statement_timestamp() \
-             ORDER BY job.not_before, job.id \
-             LIMIT $4 \
-             FOR UPDATE SKIP LOCKED \
-         ) AS candidate \
-         UNION ALL \
-         SELECT candidate.id, candidate.not_before \
-         FROM policy \
-         CROSS JOIN LATERAL ( \
-             SELECT job.id, job.not_before \
-             FROM background_jobs AS job \
-             WHERE job.state = 'running' \
-               AND job.kind = policy.kind \
-               AND job.claim_expires_at <= statement_timestamp() \
-             ORDER BY job.not_before, job.id \
-             LIMIT $4 \
-             FOR UPDATE SKIP LOCKED \
-         ) AS candidate \
-     ), \
-     picked AS ( \
-         SELECT candidates.id \
-         FROM candidates \
-         ORDER BY candidates.not_before, candidates.id \
-         LIMIT $4 \
-     ) \
-     UPDATE background_jobs AS job \
-     SET state = CASE WHEN job.attempts >= policy.max_attempts THEN 'failed' ELSE 'running' END, \
-         failure_reason = CASE WHEN job.attempts >= policy.max_attempts THEN 'exhausted' END, \
-         finished_at = CASE WHEN job.attempts >= policy.max_attempts THEN statement_timestamp() END, \
-         claim_expires_at = CASE WHEN job.attempts >= policy.max_attempts THEN NULL \
-                                 ELSE statement_timestamp() \
-                                      + policy.timeout_micros * interval '1 microsecond' \
-                                      + $6::bigint * interval '1 microsecond' END, \
-         attempts = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempts \
-                         ELSE job.attempts + 1 END, \
-         attempted_by = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempted_by \
-                             ELSE $5 END, \
-         error_summary = CASE WHEN job.state = 'running' \
-                                   AND job.claim_expires_at <= statement_timestamp() \
-                              THEN 'lease expired; rescued' \
-                              WHEN job.attempts >= policy.max_attempts \
-                              THEN COALESCE(job.error_summary, 'attempt budget spent') \
-                              ELSE job.error_summary END, \
-         errors = CASE WHEN job.state = 'running' \
-                            AND job.claim_expires_at <= statement_timestamp() \
-                       THEN job.errors || jsonb_build_object( \
-                                'attempt', job.attempts, 'at', statement_timestamp(), \
-                                'error', 'lease expired; rescued') \
-                       ELSE job.errors END, \
-         claim_generation = nextval('background_jobs_claim_generation') \
-     FROM policy \
-     WHERE job.id = ANY (ARRAY(SELECT picked.id FROM picked)) \
-       AND policy.kind = job.kind \
-       AND ((job.state = 'pending' AND job.not_before <= statement_timestamp()) \
-            OR (job.state = 'running' AND job.claim_expires_at <= statement_timestamp())) \
-     RETURNING job.id, job.kind, (job.state = 'failed') AS exhausted, job.attempts, \
-               job.claim_generation, \
-               CASE WHEN job.state = 'running' THEN job.payload::text END AS payload, \
-               job.trace_context, job.trace_state, job.error_summary, \
-               EXTRACT(EPOCH FROM statement_timestamp() - job.not_before)::double precision \
-                   AS queue_wait_seconds";
 
 /// A row CLAIM set `running`.
 #[derive(Debug)]
@@ -308,23 +227,13 @@ enum ClaimRound {
 
 async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
     let sent = Instant::now();
-    let (names, max_attempts, timeouts) = policy_binds(&shared.registry);
     let result = backstop(async {
         let mut connection = shared
             .pool
             .acquire()
             .await
             .map_err(OperationError::Acquire)?;
-        let rows = sqlx::query(CLAIM)
-            .bind(&names)
-            .bind(&max_attempts)
-            .bind(&timeouts)
-            .bind(requested)
-            .bind(shared.worker_id)
-            .bind(lease_reserve_micros())
-            .try_map(|row| ClaimRow::from_row(&row)?.into_drawn(&shared.registry))
-            .fetch_all(&mut *connection)
-            .await?;
+        let rows = claim(&mut connection, shared, requested).await?;
         Ok((sent, rows))
     })
     .await;
@@ -333,6 +242,109 @@ async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
         Ok((sent, rows)) => ClaimRound::Known { sent, rows },
         Err(error) => ClaimRound::Failed(error),
     }
+}
+
+/// Claim due pending jobs and expired running jobs, up to the free slots.
+///
+/// Each per-kind scan locks rows while it reads them (`SKIP LOCKED` inside the
+/// lateral), so a row another session holds is skipped and the scan moves on.
+/// Choosing ids first and locking them afterwards hands concurrent workers the
+/// same few ids: the losers claim nothing until the next poll.
+async fn claim(
+    connection: &mut PgConnection,
+    shared: &Shared,
+    requested: i64,
+) -> Result<Vec<Drawn>, sqlx::Error> {
+    let (names, max_attempts, timeouts) = policy_binds(&shared.registry);
+    observed(
+        "claim jobs",
+        sqlx::query_as!(
+            ClaimRow,
+            "WITH policy AS ( \
+                 SELECT policy.kind, policy.max_attempts, policy.timeout_micros \
+                 FROM unnest($1::text[], $2::smallint[], $3::bigint[]) \
+                     AS policy (kind, max_attempts, timeout_micros) \
+             ), \
+             candidates AS ( \
+                 SELECT candidate.id, candidate.not_before \
+                 FROM policy \
+                 CROSS JOIN LATERAL ( \
+                     SELECT job.id, job.not_before \
+                     FROM background_jobs AS job \
+                     WHERE job.state = 'pending' \
+                       AND job.kind = policy.kind \
+                       AND job.not_before <= statement_timestamp() \
+                     ORDER BY job.not_before, job.id \
+                     LIMIT $4 \
+                     FOR UPDATE SKIP LOCKED \
+                 ) AS candidate \
+                 UNION ALL \
+                 SELECT candidate.id, candidate.not_before \
+                 FROM policy \
+                 CROSS JOIN LATERAL ( \
+                     SELECT job.id, job.not_before \
+                     FROM background_jobs AS job \
+                     WHERE job.state = 'running' \
+                       AND job.kind = policy.kind \
+                       AND job.claim_expires_at <= statement_timestamp() \
+                     ORDER BY job.not_before, job.id \
+                     LIMIT $4 \
+                     FOR UPDATE SKIP LOCKED \
+                 ) AS candidate \
+             ), \
+             picked AS ( \
+                 SELECT candidates.id \
+                 FROM candidates \
+                 ORDER BY candidates.not_before, candidates.id \
+                 LIMIT $4 \
+             ) \
+             UPDATE background_jobs AS job \
+             SET state = CASE WHEN job.attempts >= policy.max_attempts THEN 'failed' ELSE 'running' END, \
+                 failure_reason = CASE WHEN job.attempts >= policy.max_attempts THEN 'exhausted' END, \
+                 finished_at = CASE WHEN job.attempts >= policy.max_attempts THEN statement_timestamp() END, \
+                 claim_expires_at = CASE WHEN job.attempts >= policy.max_attempts THEN NULL \
+                                         ELSE statement_timestamp() \
+                                              + policy.timeout_micros * interval '1 microsecond' \
+                                              + $6::bigint * interval '1 microsecond' END, \
+                 attempts = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempts \
+                                 ELSE job.attempts + 1 END, \
+                 attempted_by = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempted_by \
+                                     ELSE $5 END, \
+                 error_summary = CASE WHEN job.state = 'running' \
+                                           AND job.claim_expires_at <= statement_timestamp() \
+                                      THEN 'lease expired; rescued' \
+                                      WHEN job.attempts >= policy.max_attempts \
+                                      THEN COALESCE(job.error_summary, 'attempt budget spent') \
+                                      ELSE job.error_summary END, \
+                 errors = CASE WHEN job.state = 'running' \
+                                    AND job.claim_expires_at <= statement_timestamp() \
+                               THEN job.errors || jsonb_build_object( \
+                                        'attempt', job.attempts, 'at', statement_timestamp(), \
+                                        'error', 'lease expired; rescued') \
+                               ELSE job.errors END, \
+                 claim_generation = nextval('background_jobs_claim_generation') \
+             FROM policy \
+             WHERE job.id = ANY (ARRAY(SELECT picked.id FROM picked)) \
+               AND policy.kind = job.kind \
+               AND ((job.state = 'pending' AND job.not_before <= statement_timestamp()) \
+                    OR (job.state = 'running' AND job.claim_expires_at <= statement_timestamp())) \
+             RETURNING job.id, job.kind, (job.state = 'failed') AS \"exhausted!\", job.attempts, \
+                       job.claim_generation, \
+                       CASE WHEN job.state = 'running' THEN job.payload::text END AS payload, \
+                       job.trace_context, job.trace_state, job.error_summary, \
+                       EXTRACT(EPOCH FROM statement_timestamp() - job.not_before)::double precision \
+                           AS \"queue_wait_seconds!\"",
+            &names as _,
+            &max_attempts,
+            &timeouts,
+            requested,
+            shared.worker_id,
+            lease_reserve_micros(),
+        )
+        .try_map(|row| row.into_drawn(&shared.registry))
+        .fetch_all(&mut *connection),
+    )
+    .await
 }
 
 fn lease_reserve_micros() -> i64 {
@@ -470,24 +482,23 @@ enum Drawn {
     },
 }
 
-#[derive(sqlx::FromRow)]
-struct ClaimRow<'a> {
+struct ClaimRow {
     id: uuid::Uuid,
-    kind: &'a str,
+    kind: String,
     exhausted: bool,
     attempts: i16,
     claim_generation: i64,
     payload: Option<String>,
     trace_context: Option<String>,
     trace_state: Option<String>,
-    error_summary: Option<&'a str>,
+    error_summary: Option<String>,
     queue_wait_seconds: f64,
 }
 
-impl ClaimRow<'_> {
+impl ClaimRow {
     fn into_drawn(self, registry: &crate::Registry) -> Result<Drawn, sqlx::Error> {
         let id = JobId(self.id);
-        let Some(registered) = registry.get(self.kind) else {
+        let Some(registered) = registry.get(&self.kind) else {
             return Err(decode("unknown job kind"));
         };
         let attempt = u16::try_from(self.attempts).map_err(|_| decode("attempt does not fit"))?;
@@ -496,7 +507,7 @@ impl ClaimRow<'_> {
                 id,
                 kind: registered.name,
                 attempt,
-                error_summary: self.error_summary.map(str::to_owned),
+                error_summary: self.error_summary,
             });
         }
         let Some(payload) = self.payload else {

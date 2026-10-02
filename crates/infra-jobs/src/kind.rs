@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use infra_postgres::Tx;
+use infra_postgres::{Tx, observed};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sqlx::postgres::PgPool;
@@ -125,10 +125,8 @@ impl<K: JobKind> Job<K> {
     /// [`CompleteError::StaleClaim`] when this running claim no longer exists,
     /// or [`CompleteError::Database`] when the statement fails.
     pub async fn complete_in_tx(&self, tx: &mut Tx<'_>) -> Result<(), CompleteError> {
-        let affected = sqlx::query(crate::attempt::COMPLETE)
-            .bind(self.attempt.id.0)
-            .bind(self.attempt.generation)
-            .execute(&mut *tx)
+        let complete = crate::attempt::complete(self.attempt.id.0, self.attempt.generation);
+        let affected = observed("complete job", complete.execute(&mut *tx))
             .await?
             .rows_affected();
         if affected == 1 {

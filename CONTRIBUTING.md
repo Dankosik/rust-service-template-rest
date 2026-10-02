@@ -85,7 +85,9 @@ proven on a real PostgreSQL with `ALLOW_HEAVY=1 make test-integration-db`,
 and CI runs it on the `db_integration` surface. A new migration is a new
 file only: `make migration-check` refuses an edited, deleted, or renamed
 one and an out-of-order version, and `ALLOW_HEAVY=1 make migration-validate`
-rehearses the image against a fresh database
+rehearses the image against a fresh database. A changed `sqlx::query!`
+statement or a new migration comes with `make sqlx-prepare` and the
+`.sqlx/` changes it writes; CI refuses stale metadata
 ([PostgreSQL Validation](docs/validation/postgres.md)).
 <!-- template:end postgres:contributing-postgres-proof -->
 

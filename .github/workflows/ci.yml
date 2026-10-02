@@ -602,6 +602,36 @@ jobs:
           PGBOUNCER_DATABASE_URL='postgres://app:app@127.0.0.1:6432/app?sslmode=disable'
           NATS_URL=nats://127.0.0.1:4222
           make test-integration-db
+      - name: Load tool manifest
+        if: needs.changes.outputs.db_integration == 'true'
+        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
+      - name: Restore sqlx-cli
+        # sqlx-cli publishes no release binaries; make builds the pinned
+        # version once and this cache keeps it until the pin moves.
+        if: needs.changes.outputs.db_integration == 'true'
+        id: sqlx-cli-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .git/tools/sqlx-cli-${{ env.SQLX_CLI_VERSION }}
+          key: sqlx-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.SQLX_CLI_VERSION }}
+      - name: Query metadata
+        # .sqlx/ against the statements and a database that holds exactly
+        # the embedded migrations; offline builds trust it.
+        if: needs.changes.outputs.db_integration == 'true'
+        run: >-
+          bash ./scripts/ci/measure.sh integration-query-metadata --
+          env INTEGRATION_COMPOSE_MANAGED=1
+          DATABASE_URL='postgres://app:app@127.0.0.1:5432/app?sslmode=disable'
+          make sqlx-check
+      - name: Save sqlx-cli
+        if: >-
+          needs.changes.outputs.db_integration == 'true' &&
+          steps.sqlx-cli-cache.outputs.cache-hit != 'true' &&
+          github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .git/tools/sqlx-cli-${{ env.SQLX_CLI_VERSION }}
+          key: ${{ steps.sqlx-cli-cache.outputs.cache-primary-key }}
       - name: Cache proof
         if: needs.changes.outputs.cache_integration == 'true'
         run: >-

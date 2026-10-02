@@ -3,5 +3,8 @@
 # Cargo.lock is committed for a binary template; keep merges explicit.
 Cargo.lock merge=binary linguist-generated=true
 
+# Query metadata written by `make sqlx-prepare`.
+.sqlx/*.json linguist-generated=true
+
 # Encoded protobuf descriptor sets must not be line-ending normalized.
 *.binpb binary

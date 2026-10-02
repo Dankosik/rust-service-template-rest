@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE background_jobs SET state = 'pending', claim_expires_at = NULL, attempts = attempts - 1 WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4f1f0d4733dbec9a20d12c1675bff6296eed1116bba83b14dfd30d3cde9745ad"
+}
