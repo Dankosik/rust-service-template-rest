@@ -302,7 +302,7 @@
       {"path": "crates/config/src/load.rs", "ids": ["load-token-profile-import", "load-jwt-token-profile-environment", "load-jwt-token-profile-file"]},
       {"path": "crates/config/src/secret_policy.rs", "ids": ["secret-policy-token-profile-exception", "secret-policy-token-profile-vector", "secret-policy-token-profile-fixture"]},
       {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-jwt-dependency"]},
-      {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-get-json", "authn-provider-tls-bounds-test", "authn-provider-issuer-url"]},
+      {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-get-json", "authn-provider-document", "authn-provider-document-test-import", "authn-provider-tls-bounds-test", "authn-provider-issuer-url"]},
       {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-jwt-module", "authn-refresh-module", "authn-jwt-prepare-export", "authn-jwt-reasons", "authn-jwt-reason-labels", "authn-jwt-engine", "authn-jwt-verifier", "authn-jwt-verify"]},
       {"path": "crates/service/src/bootstrap/authn.rs", "ids": ["bootstrap-prepare-auth-jwt", "bootstrap-auth-jwt-algorithm-import", "bootstrap-auth-jwt-algorithm-converter"]},
       {"path": "docs/authentication.md", "ids": ["authentication-jwt"]},

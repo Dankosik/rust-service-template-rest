@@ -13,7 +13,7 @@ use tracing::warn;
 use crate::{
     EndpointUrl, JwtAlgorithm,
     jwt::{KeySet, KeySetError, parse_key_set},
-    provider::{ProviderClient, ProviderFailure},
+    provider::{Document, ProviderClient, ProviderFailure},
 };
 
 const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
@@ -22,7 +22,9 @@ const REFRESH_METRIC: &str = "authn_jwks_refreshes_total";
 
 /// The outcome of asking for keys a token needs but the installed set lacks.
 pub(crate) enum UnknownKeyRefresh {
-    /// A fetch finished after the request and installed this set.
+    /// A newer set than the one the token was checked against is installed:
+    /// by a fetch that finished after the request, or by one that finished
+    /// between that check and the request.
     Refreshed(Arc<KeySet>),
     /// A fetch succeeded within the cooldown, so the key is really unknown.
     StillUnknown,
@@ -69,8 +71,10 @@ impl KeyStore {
         self.state.borrow().keys.clone()
     }
 
-    /// Joins the fetch in flight, or starts one outside the cooldown.
-    pub(crate) async fn refresh_for_unknown_key(&self) -> UnknownKeyRefresh {
+    /// Joins the fetch in flight, or starts one outside the cooldown. `checked`
+    /// is the set the token was checked against; when a newer one is already
+    /// installed, that set is the answer and no fetch is needed.
+    pub(crate) async fn refresh_for_unknown_key(&self, checked: &Arc<KeySet>) -> UnknownKeyRefresh {
         let mut ticket = None;
         let mut answer = UnknownKeyRefresh::Unavailable;
         // Inspect the cooldown and claim or join a ticket under the same watch
@@ -81,6 +85,10 @@ impl KeyStore {
             }
             if state.requested > state.finished {
                 ticket = Some(state.requested);
+                return false;
+            }
+            if !Arc::ptr_eq(&state.keys, checked) {
+                answer = UnknownKeyRefresh::Refreshed(state.keys.clone());
                 return false;
             }
             if state.last_started.elapsed() < REFRESH_COOLDOWN {
@@ -205,7 +213,7 @@ async fn fetch_key_set(
     algorithms: &[JwtAlgorithm],
 ) -> Result<Arc<KeySet>, RefreshFailure> {
     let bytes = provider
-        .get_json(jwks_uri.url())
+        .get_json(jwks_uri.url(), Document::Jwks)
         .await
         .map_err(RefreshFailure::Fetch)?;
     parse_key_set(&bytes, algorithms)
@@ -262,7 +270,7 @@ mod tests {
     fn spawn_refresh(store: &Arc<KeyStore>) -> tokio::task::JoinHandle<Option<bool>> {
         let store = Arc::clone(store);
         tokio::spawn(async move {
-            match store.refresh_for_unknown_key().await {
+            match store.refresh_for_unknown_key(&store.keys()).await {
                 UnknownKeyRefresh::Refreshed(keys) => Some(keys.has_kid("new")),
                 UnknownKeyRefresh::StillUnknown => None,
                 UnknownKeyRefresh::Unavailable => Some(false),
@@ -316,6 +324,29 @@ mod tests {
         assert_eq!(waiter.await.unwrap(), Some(false));
         assert_eq!(spawn_refresh(&store).await.unwrap(), Some(false));
         assert!(store.keys().has_kid("old"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_set_installed_after_the_token_was_checked_is_the_answer_without_a_fetch() {
+        let store = KeyStore::new(key_set("old"));
+        let checked = store.keys();
+        store.permit_unknown_refresh_for_test();
+        let rotation = spawn_refresh(&store);
+        tokio::task::yield_now().await;
+        store.finish(1, Ok(key_set("new")));
+        assert_eq!(rotation.await.unwrap(), Some(true));
+        // The token missed in the old set while that fetch was finishing.
+        let UnknownKeyRefresh::Refreshed(keys) = store.refresh_for_unknown_key(&checked).await
+        else {
+            panic!("the newer installed set must be offered");
+        };
+        assert!(keys.has_kid("new"));
+        assert_eq!(store.pending(), None);
+        // A token checked against the installed set is really unknown.
+        assert!(matches!(
+            store.refresh_for_unknown_key(&keys).await,
+            UnknownKeyRefresh::StillUnknown
+        ));
     }
 
     #[tokio::test]

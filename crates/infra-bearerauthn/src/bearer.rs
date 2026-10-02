@@ -1,14 +1,14 @@
 //! Strict RFC 6750 bearer-envelope parsing.
 
-use std::{borrow::Cow, fmt};
+use std::fmt;
 
 use crate::Failure;
 
-/// The accepted bearer token bytes. Its contents are intentionally opaque and
+/// The accepted bearer token text. Its contents are intentionally opaque and
 /// its debug form is redacted.
 #[derive(Eq, PartialEq)]
 pub struct BearerToken<'a> {
-    bytes: &'a [u8],
+    text: &'a str,
 }
 
 impl fmt::Debug for BearerToken<'_> {
@@ -19,19 +19,17 @@ impl fmt::Debug for BearerToken<'_> {
 
 impl<'a> BearerToken<'a> {
     pub(crate) fn as_bytes(&self) -> &'a [u8] {
-        self.bytes
+        self.text.as_bytes()
     }
 
-    /// The exact presented token text. `valid_token` already restricts these
-    /// bytes to the RFC 6750 token alphabet, which is ASCII, so this never
-    /// loses data.
-    pub(crate) fn as_str(&self) -> Cow<'a, str> {
-        String::from_utf8_lossy(self.bytes)
+    /// The exact presented token text.
+    pub(crate) fn as_str(&self) -> &'a str {
+        self.text
     }
 
     /// The presented token text, for a verified engine to retain on its principal.
     pub(crate) fn access_token(&self) -> secrecy::SecretString {
-        self.as_str().into_owned().into()
+        self.text.to_owned().into()
     }
 }
 
@@ -77,7 +75,9 @@ pub fn parse_bearer<'a>(
     if !valid_token(credentials) {
         return Err(Failure::Malformed);
     }
-    Ok(BearerToken { bytes: credentials })
+    // The RFC 6750 token alphabet is ASCII, so this conversion cannot fail.
+    let text = std::str::from_utf8(credentials).map_err(|_| Failure::Malformed)?;
+    Ok(BearerToken { text })
 }
 
 fn is_tchar(byte: u8) -> bool {
