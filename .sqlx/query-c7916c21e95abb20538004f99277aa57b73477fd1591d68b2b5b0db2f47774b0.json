@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE background_jobs SET\n            recovery_history = recovery_history || jsonb_build_array(jsonb_build_object(\n                'version', claim_generation::text, 'attempts', attempts,\n                'failure_reason', failure_reason, 'finished_at', finished_at,\n                'attempted_by', attempted_by, 'error_summary', error_summary,\n                'errors', errors, 'redriven_at', statement_timestamp())),\n            state = 'pending', not_before = statement_timestamp(), attempts = 0,\n            claim_generation = nextval('background_jobs_claim_generation'),\n            claim_expires_at = NULL, attempted_by = NULL, finished_at = NULL,\n            failure_reason = NULL, error_summary = NULL, errors = '[]'\n        WHERE id = $1 AND kind = $2 AND claim_generation = $3 AND state = 'failed'\n        RETURNING claim_generation::text AS \"version!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "c7916c21e95abb20538004f99277aa57b73477fd1591d68b2b5b0db2f47774b0"
+}

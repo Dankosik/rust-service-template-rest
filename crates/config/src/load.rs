@@ -134,6 +134,33 @@ where
 }
 // template:end postgres:load-migration
 
+// template:begin jobs:load-jobs-operator
+/// Load only PostgreSQL configuration for a jobs operator command.
+///
+/// # Errors
+///
+/// Enforces the same namespace, file and secret rules as [`load`], but only
+/// decodes and validates the PostgreSQL section. Other sections are ignored.
+pub fn load_jobs_operator(options: &LoadOptions) -> Result<crate::JobsOperatorConfig, Error> {
+    load_jobs_operator_from(options, std::env::vars_os())
+}
+
+/// [`load_jobs_operator`] over an explicit environment, for tests.
+pub(crate) fn load_jobs_operator_from<I, K, V>(
+    options: &LoadOptions,
+    environment: I,
+) -> Result<crate::JobsOperatorConfig, Error>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<OsString>,
+    V: Into<OsString>,
+{
+    let snapshot: crate::JobsOperatorConfig = merge(options, environment)?;
+    snapshot.validate()?;
+    Ok(snapshot)
+}
+// template:end jobs:load-jobs-operator
+
 /// Merge the files and the `APP__` variables, then decode the result.
 fn merge<T, I, K, V>(options: &LoadOptions, environment: I) -> Result<T, Error>
 where
@@ -2363,6 +2390,149 @@ mod tests {
         assert!(matches!(err, Error::SecretInFile { .. }), "{err}");
     }
     // template:end postgres:load-migration-test
+
+    // template:begin jobs:load-jobs-operator-tests
+    #[test]
+    fn jobs_operator_ignores_unrelated_sections_and_worker_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(
+            &dir,
+            "operator.toml",
+            "[postgres]\nenabled = true\nmax_connections = 1\n\
+             [http]\nrequest_timeout = \"invalid\"\n\
+             [jobs]\nmax_workers = 0\n",
+        );
+        let cfg = load_jobs_operator_from(
+            &LoadOptions {
+                config: Some(file),
+                ..LoadOptions::default()
+            },
+            env(&[
+                ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+                ("APP__AUTHN__MODE", "invalid"),
+                ("APP__MESSAGING__ENABLED", "invalid"),
+                ("APP__WEBHOOKS__MAX_CONCURRENT_DELIVERIES", "invalid"),
+                ("APP__OBJECT_STORAGE__ENABLED", "invalid"),
+                ("APP__LOG__FORMAT", "invalid"),
+                ("APP__OBSERVABILITY__OTEL", "invalid"),
+            ]),
+        )
+        .unwrap();
+        assert!(cfg.postgres.enabled);
+        assert!(cfg.postgres.has_dsn());
+        assert_eq!(cfg.postgres.max_connections.get(), 1);
+    }
+
+    #[test]
+    fn jobs_operator_uses_the_shared_source_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = tempfile::tempdir().unwrap();
+        let mut options = LoadOptions::default();
+        let defaults = load_jobs_operator_from(&options, env(&[])).unwrap();
+        assert_eq!(defaults.postgres.max_connections.get(), 4);
+
+        options.config = Some(write(
+            &dir,
+            "base.toml",
+            "[postgres]\nmax_connections = 5\n",
+        ));
+        let base = load_jobs_operator_from(&options, env(&[])).unwrap();
+        assert_eq!(base.postgres.max_connections.get(), 5);
+        for connections in [6, 7] {
+            options.config_overlay.push(write(
+                &dir,
+                &format!("overlay-{connections}.toml"),
+                &format!("[postgres]\nmax_connections = {connections}\n"),
+            ));
+            let overlay = load_jobs_operator_from(&options, env(&[])).unwrap();
+            assert_eq!(overlay.postgres.max_connections.get(), connections);
+        }
+        write(&secrets, "APP__POSTGRES__MAX_CONNECTIONS", "8");
+        write(&secrets, "APP__POSTGRES__DSN", "postgres://localhost/app");
+        options.secrets_dir = Some(secrets.path().to_owned());
+        let secret = load_jobs_operator_from(&options, env(&[])).unwrap();
+        assert_eq!(secret.postgres.max_connections.get(), 8);
+        assert!(secret.postgres.has_dsn());
+        let environment = load_jobs_operator_from(
+            &options,
+            env(&[
+                ("APP__POSTGRES__MAX_CONNECTIONS", "9"),
+                ("APP__POSTGRES__DSN", ""),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(environment.postgres.max_connections.get(), 9);
+        assert!(!environment.postgres.has_dsn());
+    }
+
+    #[test]
+    fn jobs_operator_keeps_postgres_validation_and_value_free_errors() {
+        let options = LoadOptions::default();
+        let unknown =
+            load_jobs_operator_from(&options, env(&[("APP__POSTGRES__BOGUS", "1")])).unwrap_err();
+        assert!(matches!(unknown, Error::Deserialize(_)), "{unknown}");
+        for (name, value, key) in [
+            (
+                "APP__POSTGRES__MAX_CONNECTIONS",
+                "501",
+                "postgres.max_connections",
+            ),
+            ("APP__POSTGRES__ENABLED", "true", "postgres.dsn"),
+        ] {
+            let error = load_jobs_operator_from(&options, env(&[(name, value)])).unwrap_err();
+            assert!(
+                matches!(&error, Error::Validate(error) if error.key == key),
+                "{error}"
+            );
+        }
+        let secret = "fixture-private-value";
+        let error = load_jobs_operator_from(&options, env(&[("APP__POSTGRES__ENABLED", secret)]))
+            .unwrap_err();
+        assert!(matches!(error, Error::Deserialize(_)), "{error}");
+        assert!(!error.to_string().contains(secret));
+        assert!(!format!("{error:?}").contains(secret));
+    }
+
+    #[test]
+    fn jobs_operator_prescans_unrelated_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let leaked = write(
+            &dir,
+            "leaked.toml",
+            "[unrelated]\nsecret = \"fixture-private-value\"\n",
+        );
+        let error = load_jobs_operator_from(
+            &LoadOptions {
+                config: Some(leaked),
+                ..LoadOptions::default()
+            },
+            env(&[]),
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::SecretInFile { .. }), "{error}");
+        assert!(!error.to_string().contains("fixture-private-value"));
+
+        let unaddressable = write(&dir, "unaddressable.toml", "[Unrelated]\nvalue = 1\n");
+        let error = load_jobs_operator_from(
+            &LoadOptions {
+                config: Some(unaddressable),
+                ..LoadOptions::default()
+            },
+            env(&[]),
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::UnaddressableKey { .. }), "{error}");
+        let malformed = load_jobs_operator_from(
+            &LoadOptions::default(),
+            env(&[("APP__UNRELATED__", "fixture-private-value")]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(malformed, Error::MalformedEnvName { .. }),
+            "{malformed}"
+        );
+    }
+    // template:end jobs:load-jobs-operator-tests
 
     #[test]
     fn rejected_environment_values_are_not_echoed() {

@@ -1,4 +1,4 @@
-//! Jobs worker capacity: the one key the optional jobs pack adds.
+//! Jobs worker capacity and its PostgreSQL-only operator snapshot.
 //!
 //! Every binary validates it with the rest of the snapshot; only the
 //! `jobs-worker` binary uses it. The pool bound it implies is checked by
@@ -11,6 +11,20 @@ use serde::Deserialize;
 
 use crate::postgres::PostgresConfig;
 use crate::validate::{ValidationError, int_range};
+
+/// The only section jobs operator commands read. Unrelated sections are
+/// ignored, while the shared loader still enforces namespace and file rules.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct JobsOperatorConfig {
+    pub postgres: PostgresConfig,
+}
+
+impl JobsOperatorConfig {
+    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        self.postgres.validate()
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]

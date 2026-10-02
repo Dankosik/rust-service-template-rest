@@ -10,6 +10,10 @@
 //! docs/architecture/runtime-lifecycle.md (section "Jobs worker").
 
 mod bootstrap;
+mod cli;
+// template:begin jobs:worker-operator-module
+mod operator;
+// template:end jobs:worker-operator-module
 mod shutdown;
 
 use std::ffi::OsString;
@@ -17,6 +21,7 @@ use std::fmt;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use clap::Parser;
 use service_config::{BuildInfo, LoadOptions, process_failure};
 use tokio_util::sync::CancellationToken;
 
@@ -98,22 +103,55 @@ where
     I: IntoIterator<Item = OsString>,
     R: FnOnce(&mut Registration<'_>) -> Result<(), BuildError>,
 {
-    let options = LoadOptions::parse_from(args);
-    let result = start(&options, Box::new(register));
+    let args = match cli::WorkerArgs::try_parse_from(args) {
+        Ok(args) => args,
+        Err(error) => {
+            let result = if error.kind() == clap::error::ErrorKind::DisplayHelp {
+                ProcessResult::Command(error.print().is_ok())
+            } else {
+                // clap's detailed usage errors can repeat arbitrary rejected values.
+                let _ = process_failure("invalid command arguments; use --help for usage");
+                ProcessResult::Usage
+            };
+            return ExitCode::from(exit_code(&result));
+        }
+    };
+    // template:begin jobs:worker-operator-dispatch
+    if let Some(command) = args.command {
+        let request = match operator::Request::new(command) {
+            Ok(request) => request,
+            Err(error) => {
+                let _ = process_failure(&error.to_string());
+                return ExitCode::from(exit_code(&ProcessResult::Usage));
+            }
+        };
+        return ExitCode::from(exit_code(&ProcessResult::Command(operator::run(
+            &args.options,
+            request,
+        ))));
+    }
+    // template:end jobs:worker-operator-dispatch
+    let result = start(&args.options, Box::new(register));
     if let Err(err) = &result {
         tracing::error!(error = %err, "jobs worker failed");
         let _ = process_failure(&err.to_string());
     }
-    ExitCode::from(exit_code(&result))
+    ExitCode::from(exit_code(&ProcessResult::Worker(result)))
 }
 
-/// The one owner of the exit-code table. No other code in the crate maps an
-/// outcome or an error to an exit code.
-fn exit_code(result: &Result<shutdown::Outcome, bootstrap::WorkerError>) -> u8 {
+enum ProcessResult {
+    Worker(Result<shutdown::Outcome, bootstrap::WorkerError>),
+    Command(bool),
+    Usage,
+}
+
+/// The one owner of the exit-code table, including one-shot commands.
+fn exit_code(result: &ProcessResult) -> u8 {
     match result {
-        Ok(shutdown::Outcome::Graceful) => 0,
-        Ok(shutdown::Outcome::Degraded) => EXIT_DEGRADED_SHUTDOWN,
-        Err(_) => 1,
+        ProcessResult::Worker(Ok(shutdown::Outcome::Graceful)) | ProcessResult::Command(true) => 0,
+        ProcessResult::Worker(Ok(shutdown::Outcome::Degraded)) => EXIT_DEGRADED_SHUTDOWN,
+        ProcessResult::Worker(Err(_)) | ProcessResult::Command(false) => 1,
+        ProcessResult::Usage => 2,
     }
 }
 
@@ -143,15 +181,21 @@ mod tests {
 
     use super::bootstrap::WorkerError;
     use super::shutdown::Outcome;
-    use super::{exit_code, start};
+    use super::{ProcessResult, exit_code, start};
 
     #[test]
     fn exit_code_maps_the_three_rows() {
-        assert_eq!(exit_code(&Ok(Outcome::Graceful)), 0);
-        assert_eq!(exit_code(&Ok(Outcome::Degraded)), 3);
-        assert_eq!(exit_code(&Err(WorkerError::NoRegistrations)), 1);
+        assert_eq!(exit_code(&ProcessResult::Worker(Ok(Outcome::Graceful))), 0);
+        assert_eq!(exit_code(&ProcessResult::Worker(Ok(Outcome::Degraded))), 3);
+        assert_eq!(
+            exit_code(&ProcessResult::Worker(Err(WorkerError::NoRegistrations))),
+            1
+        );
         // template:begin jobs:worker-lib-test-postgres-refusal
-        assert_eq!(exit_code(&Err(WorkerError::PostgresDisabled)), 1);
+        assert_eq!(
+            exit_code(&ProcessResult::Worker(Err(WorkerError::PostgresDisabled))),
+            1
+        );
         // template:end jobs:worker-lib-test-postgres-refusal
     }
 

@@ -237,11 +237,12 @@ with its refusals; signals, the stage budget, the shutdown plan, and
 for the shipped binary, and the test-only `jobs-worker-fixture` suite in
 `test/tests/jobs/`.
 
-**Startup.** Each refusal below exits `1`, except step 1, which exits `2`.
+**Ordinary startup.** With no subcommand, each refusal below exits `1`,
+except step 1, which exits `2`.
 
 | Step | What | Refusal (exit 1) |
 | --- | --- | --- |
-| 1 | `LoadOptions::parse_from` (`--help` exits `0`) | clap usage error (exit 2) |
+| 1 | `WorkerArgs` flattens `LoadOptions` (`--help` exits `0`) | clap usage error (exit 2) |
 | 2 | `service_config::load` (same sources, precedence, unknown-key and secret rules as the service) | `configuration is invalid: ...` |
 | 3 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)` |
 | 4 | Build the multi-thread runtime | `build tokio runtime: ...` |
@@ -319,7 +320,7 @@ with `task` and `panicked`; an engine's claim loop, retention, listener, and
 sampling record `jobs_engine_task_stopped` and fail that engine. A task that
 ends during startup is reported when startup completes.
 
-**Exit codes.** `exit_code` is the one mapping. `process::exit` is never
+**Ordinary exit codes.** `exit_code` is the one mapping. `process::exit` is never
 called.
 
 | Code | When |
@@ -327,6 +328,25 @@ called.
 | `0` | A stop signal, and every stage completed inside its ceiling; the drain ended with `drained()`, so no attempt was cancelled at its end |
 | `3` | A stop signal, and any stage voted degraded, including a forced drain (budget or second signal), which is the only way an attempt is cancelled at the drain's end |
 | `1` | A startup refusal, or a started engine, consumer, or background task ends without a stop signal; the reported failure names which one stopped, and a consumer failure carries its cause. After the failure the same staged plan runs, with its deadline starting at the failure, and its outcome does not change the code |
+
+**Operator mode.** `cli.rs` selects optional inspect/failed/unhandled/redrive/
+discard commands before ordinary configuration and startup; `operator.rs`
+loads only `JobsOperatorConfig`, installs signal streams and admits a one-slot
+PostgreSQL pool with fixed `application_name=jobs-worker-operator`. It starts
+no registry, engine, broker, listener, exporter, password refresher or maintenance.
+The same history verifier and shared jobs session check run before one operation.
+Inspection uses read-only transactions and a two-second statement limit;
+mutation uses the caller-owned transaction and existing session budgets.
+
+After argument/configuration/file admission, connect/history/session/operation/
+pool-close/runtime ceilings are 5/5/5/12/5/1 seconds. Signals cancel the current
+future then close admitted resources. Mutation after invocation is conservatively
+unknown on interruption; inspection is unavailable. Only acknowledged commit
+produces `redriven` or `discarded`. Central mapping returns 0 for success, 1 for
+failure/unknown or incomplete cleanup, and 2 for usage. Cleanup or stdout failure
+cannot undo a committed mutation; an absent receipt requires inspection.
+Messaging-only projection keeps the loader parser and clap while removing
+operator modes. See the [safe command contract](../background-jobs.md#inspect-and-recover-retained-jobs).
 
 The [guide](../background-jobs.md#run-and-stop-the-worker) covers running and
 stopping the worker. [Async Architecture](async.md) records the mechanism.

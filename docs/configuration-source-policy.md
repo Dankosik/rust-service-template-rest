@@ -19,7 +19,7 @@ is what the template adds on top. The `service-config` crate owns it.
 - CLI flags are loader controls: `--config PATH` selects the base file,
   `--config-overlay PATH` (repeatable, ordered) adds overlays, and
   `--secrets-dir PATH` names the secrets directory. They never set
-  individual keys, and a positional argument is refused.
+  individual keys. The service and migrator refuse positional arguments.
 
 Runtime value precedence, last wins:
 
@@ -482,7 +482,9 @@ into its panic.
 <!-- template:begin jobs:docs-config-jobs -->
 - `jobs.max_workers` (environment `APP__JOBS__MAX_WORKERS`, default `1`,
   `1..500`) is the most attempts one jobs worker process runs at once; every
-  binary validates it and only the worker uses it. The worker refuses
+  ordinary full-configuration binary validates it and only the worker uses it.
+  Admission covers handler execution and all outcome bookkeeping; per-kind
+  limits have the same lifetime. The worker refuses
   `postgres.max_connections` below `jobs.max_workers + 2`. The worker reuses
   `http.grace_period` and `http.drain_timeout` with its own `17s` teardown
   tail (release `2s`, listeners `2s`, background join `3s`, dependency close
@@ -494,6 +496,17 @@ into its panic.
   the service name cut to 51 bytes so the suffix survives PostgreSQL's
   63-byte limit); no key controls it.
   See the [guide](background-jobs.md#configure-and-size-the-worker).
+- The jobs worker additionally accepts `inspect`, `failed`, `unhandled`,
+  `redrive` and `discard` after its loader flags. `load_jobs_operator` decodes
+  only `JobsOperatorConfig.postgres`, retaining the common sources, precedence,
+  namespace/file/secret pre-scans and value-free errors. Unknown PostgreSQL
+  keys are refused; unrelated sections are ignored except the common secret
+  scan. No new runtime key is added. It requires `postgres.enabled`, reads a
+  password file once, and uses a one-connection pool with fixed
+  `application_name=jobs-worker-operator`. It requires no ordinary jobs
+  capacity, HTTP, telemetry, auth, webhook or messaging configuration. Operator
+  timeouts are existing code-owned ceilings; see the
+  [command contract](background-jobs.md#inspect-and-recover-retained-jobs).
 <!-- template:end jobs:docs-config-jobs -->
 <!-- template:begin authn:docs-config-authn-budgets -->
 - Authentication provider calls have an independent fixed three-second cap through body completion; discovery plus initial keys share a six-second startup cap. Authentication accepts no request deadline or response reserve. The outer hardened timer alone emits `504 request_timeout`; a completed provider timeout is `503 authentication_unavailable` while the request is live. Introspection admits its configured number of simultaneous exchanges and rejects excess distinct misses as unavailable without queueing; live cache hits and coalesced waiters need no extra permit.
