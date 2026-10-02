@@ -9,7 +9,7 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | Service package (`crates/service/Cargo.toml`) | The main binary named by that manifest: `main` maps the bootstrap result to an exit code; `bootstrap` composes configuration, telemetry, readiness, the route tree, the two listeners, background tasks, signals, and the staged teardown; `api` merges every `OpenApiRouter` into the one contract and finalizes its served router; the `openapi` binary renders its document; the process tests drive the built binary. | Business behavior, request handling beyond composition, provider details. |
 | `service-config` (`crates/config`) | One validated immutable snapshot: section types with defaults and validation in `<section>.rs`, loader precedence, the `APP__` name pre-scan, the secret-in-file refusal, `SecretString` fields, human-form durations and sizes, build metadata (`app.version`, `app.commit`). | Feature behavior, dependency wiring, request handling, telemetry construction. |
 | `health` (`crates/health`) | The readiness refresher over `tokio::sync::watch`: probe trait, failure threshold, staleness guard, drain flag, O(1) snapshot reads, the `readiness_checks_total` counter and the readiness log events. | Probe implementations, HTTP handlers, the schedule (bootstrap owns the policy values). |
-| `service-failure` (`crates/service-failure`) | Closed failure identity, wire code spelling and transport-neutral meaning. | HTTP response metadata, tonic Status, arbitrary detail text, configuration or provider calls. |
+| `service-failure` (`crates/service-failure`) | The closed catalog of failure codes and their wire spelling. | HTTP status, tonic Status, arbitrary detail text, configuration or provider calls. |
 <!-- template:begin grpc:docs-boundaries-grpc-owners -->
 | `infra-grpc` (`crates/infra-grpc`) | Tonic route assembly, auth/deadline/capacity middleware, health projection, server TLS config and lazy clients. | Configuration loading, handler validation, feature behavior, OAuth tokens, process signals or a second lifecycle budget. |
 | `grpc-contracts` (`crates/grpc-contracts`) | Committed prost messages, native tonic traits, the descriptor set they were generated from, and the per-call codec buffer sizes the generated code names. | Business behavior, listener or middleware policy, or a runtime generator. |
@@ -155,7 +155,9 @@ integration-tests (test/)
   -> utility and transport recipes, health
 ```
 
-Each transport projects `service-failure`; the shared leaf imports no transport.
+Each transport projects `service-failure` into its own wire format
+(`infra_http::problem`, `infra_grpc::Failure`); the shared leaf imports no
+transport.
 <!-- template:begin grpc:docs-boundaries-grpc-edges -->
 `service -> infra-grpc -> infra-http, health, service-failure` owns transport
 composition. The listener is `infra_http::Server`, plaintext `bind` or
@@ -244,8 +246,8 @@ scheduling.
 <!-- template:end webhooks:docs-boundaries-webhooks-outbound -->
 
 <!-- template:begin inbound-webhooks:docs-boundaries-webhooks-inbound -->
-The inbound module owns raw-byte verification, receipt arbitration, and the
-consumer registry/processor. It may use protocol, jobs, PostgreSQL, and SQLx;
+The inbound module owns raw-byte verification behind its per-endpoint
+`Verifier`, receipt arbitration, and the consumer registry/processor. It may use protocol, jobs, PostgreSQL, and SQLx;
 it does not own router middleware, endpoint configuration precedence, or a
 business event schema. `infra-http::webhooks` owns route annotation and problem
 mapping, not receipt SQL or signature implementation.

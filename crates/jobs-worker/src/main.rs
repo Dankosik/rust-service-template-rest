@@ -31,10 +31,9 @@ enum RegistrationError {
 }
 
 fn register_outbound(
-    kinds: &mut infra_jobs::Kinds,
-    support: &jobs_worker::Support<'_>,
+    registration: &mut jobs_worker::Registration<'_>,
 ) -> Result<(), jobs_worker::BuildError> {
-    let config = support.config();
+    let config = registration.config();
     let mut endpoints = BTreeMap::new();
     for (endpoint_id, endpoint) in &config.webhooks.endpoints {
         let keys = KeyRing::from_encoded(
@@ -50,7 +49,7 @@ fn register_outbound(
         })?;
         endpoints.insert(endpoint_id.clone(), Endpoint::new(&endpoint.url, keys)?);
     }
-    Dispatcher::new(endpoints).register(kinds);
+    Dispatcher::new(endpoints).register(&mut registration.jobs);
     Ok(())
 }
 // template:end webhooks:worker-webhooks-outbound-registration
@@ -58,19 +57,13 @@ fn register_outbound(
 #[allow(
     clippy::unnecessary_wraps,
     unused_variables,
-    reason = "the registration signature stays fixed across independently retained profiles"
+    reason = "independently retained profiles supply the registrations"
 )]
 fn register(
-    // template:begin jobs:worker-main-register-jobs-parameter
-    kinds: &mut infra_jobs::Kinds,
-    // template:end jobs:worker-main-register-jobs-parameter
-    // template:begin messaging:worker-main-register-messaging-parameter
-    _messages: &mut infra_messaging::Registry,
-    // template:end messaging:worker-main-register-messaging-parameter
-    support: &jobs_worker::Support<'_>,
+    registration: &mut jobs_worker::Registration<'_>,
 ) -> Result<(), jobs_worker::BuildError> {
     // template:begin webhooks:worker-webhooks-register-outbound
-    register_outbound(kinds, support)?;
+    register_outbound(registration)?;
     // template:end webhooks:worker-webhooks-register-outbound
     // template:begin inbound-webhooks:worker-webhooks-register-inbound
     // Bind each configured endpoint to its adapter here:
@@ -78,14 +71,14 @@ fn register(
     // business consumer, so a configured endpoint refuses startup below.
     let consumers = Consumers::new();
     consumers.require(
-        support
+        registration
             .config()
             .inbound_webhooks
             .endpoints
             .keys()
             .map(String::as_str),
     )?;
-    Processor::new(consumers).register(kinds);
+    Processor::new(consumers).register(&mut registration.jobs);
     // template:end inbound-webhooks:worker-webhooks-register-inbound
     Ok(())
 }

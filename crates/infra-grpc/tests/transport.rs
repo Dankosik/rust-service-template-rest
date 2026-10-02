@@ -35,8 +35,8 @@ use infra_bearerauthn::{
 };
 // template:end authn:grpc-transport-test-auth-imports
 use infra_grpc::{
-    ClientIdentity, ClientSecurity, ClientTlsMaterial, Error, ServerTlsMaterial, Services,
-    classified_status, server_options, server_tls_config,
+    ClientIdentity, ClientSecurity, ClientTlsMaterial, ERROR_DOMAIN, Error, Failure,
+    ServerTlsMaterial, Services, server_options, server_tls_config,
 };
 use infra_http::{Drained, Server};
 use rcgen::{
@@ -50,7 +50,7 @@ use rustls::{
 // template:begin authn:grpc-transport-test-auth-secret
 use secrecy::SecretString;
 // template:end authn:grpc-transport-test-auth-secret
-use service_failure::{ClassifiedFailure, Code as FailureCode};
+use service_failure::Code as FailureCode;
 use tokio::{io::AsyncReadExt as _, net::TcpStream, sync::Notify, time::timeout};
 // template:begin authn:grpc-transport-test-auth-listener
 use tokio::net::TcpListener;
@@ -196,9 +196,9 @@ impl EchoService for Echo {
         self.observe(&request, Seen::Unary);
         match request.into_inner().message.as_str() {
             "panic" => panic!("panic detail: do not leak"),
-            "classified" => Err(classified_status(ClassifiedFailure::new(
-                FailureCode::BadRequest,
-            ))),
+            "classified" => Err(Failure::new(FailureCode::BadRequest)
+                .field_violation("message", "is reserved")
+                .into()),
             "hold" => {
                 self.hold.wait().await;
                 Ok(Response::new(UnaryResponse {
@@ -508,6 +508,14 @@ fn tokio_stream_once<T>(item: T) -> impl tonic::codegen::tokio_stream::Stream<It
     tonic::codegen::tokio_stream::iter([item])
 }
 
+/// The `google.rpc.ErrorInfo` reason of a catalog failure.
+fn reason(status: &Status) -> String {
+    let info = status.get_error_details().error_info().cloned();
+    let info = info.expect("error info");
+    assert_eq!(info.domain, ERROR_DOMAIN);
+    info.reason
+}
+
 // template:begin authn:grpc-transport-test-unauthenticated
 #[tokio::test]
 async fn missing_and_malformed_bearers_are_unauthenticated_and_health_is_public() {
@@ -524,6 +532,7 @@ async fn missing_and_malformed_bearers_are_unauthenticated_and_health_is_public(
     .unwrap_err();
     assert_eq!(missing.code(), Code::Unauthenticated);
     assert_eq!(missing.message(), "authentication failed");
+    assert_eq!(reason(&missing), "AUTHENTICATION_REQUIRED");
 
     let mut malformed = Request::new(UnaryRequest {
         message: "malformed".to_owned(),
@@ -537,6 +546,7 @@ async fn missing_and_malformed_bearers_are_unauthenticated_and_health_is_public(
         .unwrap_err();
     assert_eq!(malformed.code(), Code::Unauthenticated);
     assert_eq!(malformed.message(), "authentication failed");
+    assert_eq!(reason(&malformed), "AUTHENTICATION_MALFORMED");
     assert!(fixture.echo.calls.lock().expect("observations").is_empty());
 
     let mut health = fixture.health();
@@ -601,6 +611,7 @@ async fn a_principal_without_a_declared_scope_is_denied_before_the_handler() {
         denied.message(),
         "the verified principal lacks the required scope"
     );
+    assert_eq!(reason(&denied), "FORBIDDEN");
     assert!(fixture.echo.calls.lock().expect("observations").is_empty());
 
     // A method with no declared requirement admits any authenticated caller.
@@ -744,6 +755,7 @@ async fn business_limit_sheds_the_next_call_without_starving_health() {
     .unwrap_err();
     assert_eq!(exhausted.code(), Code::ResourceExhausted);
     assert_eq!(exhausted.message(), service_failure::AT_CAPACITY_DETAIL);
+    assert_eq!(reason(&exhausted), "SERVICE_UNAVAILABLE");
 
     let serving = timeout(
         WAIT,
@@ -870,6 +882,7 @@ async fn handler_panic_is_internal_and_the_server_keeps_serving() {
     .unwrap_err();
     assert_eq!(error.code(), Code::Internal);
     assert_eq!(error.message(), "request failed");
+    assert_eq!(reason(&error), "INTERNAL_ERROR");
     let followed = timeout(
         WAIT,
         fixture.echo_client().unary(request(UnaryRequest {
@@ -884,7 +897,7 @@ async fn handler_panic_is_internal_and_the_server_keeps_serving() {
 }
 
 #[tokio::test]
-async fn classified_status_passes_through_with_error_info() {
+async fn a_handler_failure_carries_its_reason_and_field_violations() {
     let fixture = Fixture::plaintext().await;
     let error = timeout(
         WAIT,
@@ -896,10 +909,12 @@ async fn classified_status_passes_through_with_error_info() {
     .expect("classified call")
     .unwrap_err();
     assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(reason(&error), "BAD_REQUEST");
     let details = error.get_error_details();
-    let info = details.error_info().expect("error info");
-    assert_eq!(info.reason, FailureCode::BadRequest.as_str());
-    assert_eq!(info.domain, "service");
+    let violations = &details.bad_request().expect("bad request").field_violations;
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].field, "message");
+    assert_eq!(violations[0].description, "is reserved");
     fixture.stop().await;
 }
 

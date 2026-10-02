@@ -35,7 +35,9 @@ use tokio_rustls::{
 
 use hyper_util::client::legacy::connect::dns::Name;
 
-use crate::{Client, Error, Limits, Url, build_transport, observe, policy, tls::TlsMaterial};
+use crate::{
+    BuildError, Client, Error, Limits, Url, build_transport, observe, policy, tls::TlsMaterial,
+};
 
 const FIXTURE_HOST: &str = "authn.fixture.test";
 const FIXTURE_URL: &str = "https://authn.fixture.test/fixture";
@@ -789,6 +791,165 @@ fn observation_records_timeout_and_polled_drop_once() {
     }));
 }
 
+/// The name of the span an event was logged in, and the event's fields.
+type EventFields = (Option<&'static str>, SpanFields);
+
+/// Events of this crate.
+#[derive(Clone, Default)]
+struct EventDiagnostics(Arc<Mutex<Vec<EventFields>>>);
+
+impl<S> tracing_subscriber::Layer<S> for EventDiagnostics
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if !event.metadata().target().starts_with("infra_outbound_http") {
+            return;
+        }
+        let mut fields = FieldVisitor(SpanFields::new());
+        event.record(&mut fields);
+        let span = context.event_span(event).map(|span| span.name());
+        self.0
+            .lock()
+            .expect("event diagnostic lock")
+            .push((span, fields.0));
+    }
+}
+
+/// One failure of each transport class, in the order `tls`, `connect`,
+/// `protocol`, `transport`. Returns the deepest source of each error.
+async fn exercise_transport_failures() -> Vec<String> {
+    let sensitive_request = || {
+        Request::get("https://authn.fixture.test/sentinel-path?token=sentinel-query")
+            .header(header::AUTHORIZATION, "Bearer sentinel-header")
+            .body(Bytes::from_static(b"sentinel-body"))
+            .expect("sensitive fixture request")
+    };
+    let root_cause = |result: Result<http::Response<Bytes>, Error>| {
+        let error = result.expect_err("transport failure");
+        assert!(matches!(error, Error::Transport { .. }), "{error:?}");
+        std::iter::successors(error.source(), |cause| (*cause).source())
+            .last()
+            .expect("transport source")
+            .to_string()
+    };
+    let mut roots = Vec::new();
+    let material = TlsMaterial::new(FIXTURE_HOST);
+
+    let (address, server) =
+        tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let mut untrusted = TlsMaterial::new(FIXTURE_HOST);
+    untrusted.root = material.untrusted_root.clone();
+    let untrusted = fixture_client(address, &untrusted)
+        .execute(sensitive_request(), deadline())
+        .await;
+    roots.push(root_cause(untrusted));
+    server.await.expect("untrusted fixture joins");
+
+    let unresolved = fixture_client_resolving(FIXTURE_HOST, vec![], &material, limits())
+        .execute(sensitive_request(), deadline())
+        .await;
+    roots.push(root_cause(unresolved));
+
+    let (address, server) = tls_server(
+        &material,
+        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Overflow: one\r\n\r\n",
+    )
+    .await;
+    let overflow = fixture_client_with_limits(
+        address,
+        &material,
+        Limits {
+            response_header_count: 1,
+            ..limits()
+        },
+    )
+    .execute(sensitive_request(), deadline())
+    .await;
+    roots.push(root_cause(overflow));
+    server.await.expect("parser fixture joins");
+
+    let (address, server) =
+        tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\no").await;
+    let truncated = fixture_client(address, &material)
+        .execute(sensitive_request(), deadline())
+        .await;
+    roots.push(root_cause(truncated));
+    server.await.expect("truncated fixture joins");
+    roots
+}
+
+#[test]
+fn transport_failures_are_classed_and_their_cause_is_logged_in_the_client_span() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let recorder = observation_recorder();
+    let diagnostics = EventDiagnostics::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let roots = metrics::with_local_recorder(&recorder, || {
+        let subscriber = tracing_subscriber::registry().with(diagnostics.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            // See `observation_records_polled_attempts_once_without_request_data`.
+            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+            runtime.block_on(exercise_transport_failures())
+        })
+    });
+
+    let scrape = recorder.handle().render();
+    for (class, after_headers) in [
+        ("tls", false),
+        ("connect", false),
+        ("protocol", false),
+        // The body broke after a complete response head.
+        ("transport", true),
+    ] {
+        let class_label = format!("error_type=\"{class}\"");
+        assert_eq!(
+            recorded_count(&scrape, &["outbound_outcome=\"error\"", &class_label]),
+            1,
+            "one {class} attempt in {scrape}",
+        );
+        assert_eq!(
+            scrape
+                .lines()
+                .any(|line| line.contains(&class_label)
+                    && line.contains("http_response_status_code")),
+            after_headers,
+            "{class} status label",
+        );
+    }
+
+    let events = diagnostics.0.lock().expect("event diagnostic lock");
+    let causes: Vec<&str> = events
+        .iter()
+        .map(|(span, fields)| {
+            assert_eq!(*span, Some("outbound_http"));
+            assert_eq!(fields["message"], "outbound_http_transport_failed");
+            fields["error"].as_str()
+        })
+        .collect();
+    let [tls, connect, _protocol, _transport] = causes.as_slice() else {
+        panic!("one event for each transport failure, got {causes:?}");
+    };
+    assert!(tls.contains("peer certificate"), "{tls}");
+    assert!(connect.contains("no fixture listener"), "{connect}");
+    for (cause, root) in causes.iter().zip(&roots) {
+        assert!(cause.ends_with(root.as_str()), "{cause} lacks {root}");
+    }
+    for cause in &causes {
+        for secret in REQUEST_SENTINELS {
+            assert!(!cause.contains(secret), "{cause} disclosed request data");
+        }
+    }
+}
+
 #[tokio::test]
 async fn advertised_overflow_and_missing_exact_cap_eof_do_not_return_a_body() {
     let material = TlsMaterial::new(FIXTURE_HOST);
@@ -1032,7 +1193,7 @@ fn client_binds_one_https_origin() {
         assert!(
             matches!(
                 Client::new(&url(origin), limits()),
-                Err(Error::InvalidConfiguration)
+                Err(BuildError::InvalidConfiguration)
             ),
             "{origin} must be refused"
         );
@@ -1117,7 +1278,7 @@ fn limits_must_be_positive_and_bounded() {
         mutate(&mut invalid);
         assert!(matches!(
             policy::validate_limits(&invalid),
-            Err(Error::InvalidConfiguration)
+            Err(BuildError::InvalidConfiguration)
         ));
     }
 }

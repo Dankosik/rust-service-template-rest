@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::{error::Error as StdError, fmt, sync::Arc, time::Instant};
 
 use http::{HeaderMap, Method, StatusCode};
 use metrics::{Label, SharedString, Unit};
@@ -36,6 +36,7 @@ impl Server {
 
 /// One polled outbound attempt. The guard retains only bounded configured
 /// identity and outcome state, never caller request data or transport errors.
+/// A transport failure's cause is logged once, when the attempt finishes.
 pub(crate) struct Attempt {
     started: Instant,
     method: &'static str,
@@ -98,7 +99,19 @@ impl Attempt {
                 let is_http_error = error_type.is_some();
                 self.emit("response", error_type, is_http_error);
             }
-            Err(error) => self.emit("error", Some(error_type(error).into()), false),
+            Err(error) => {
+                self.emit("error", Some(error_type(error).into()), false);
+                // Adapters map this error to their own closed outcome and
+                // drop its source, so the client span is where it is told.
+                if let Error::Transport { source } = error {
+                    self.span.in_scope(|| {
+                        tracing::warn!(
+                            error = %Causes(&**source),
+                            "outbound_http_transport_failed"
+                        );
+                    });
+                }
+            }
         }
     }
 
@@ -196,10 +209,63 @@ fn http_error_type(status: StatusCode) -> Option<SharedString> {
 
 fn error_type(error: &Error) -> &'static str {
     match error {
-        Error::InvalidConfiguration => "invalid_configuration",
         Error::InvalidTarget => "invalid_target",
         Error::Timeout => "timeout",
         Error::ResponseBodyTooLarge => "response_body_too_large",
-        Error::ClientBuild { .. } | Error::Transport { .. } => "transport",
+        Error::Transport { source } => transport_error_type(&**source),
+    }
+}
+
+/// The class of a transport failure, read from the typed causes the libraries
+/// retain: `tls` for a certificate or handshake refusal, `connect` when no
+/// connection was established (name resolution included), `protocol` for a
+/// response head hyper refused to parse, and `transport` for the rest, such
+/// as a connection lost during the exchange.
+fn transport_error_type(source: &(dyn StdError + 'static)) -> &'static str {
+    let mut class = "transport";
+    for cause in std::iter::successors(Some(source), |cause| next_cause(*cause)) {
+        if cause.is::<rustls::Error>() {
+            return "tls";
+        }
+        if cause
+            .downcast_ref::<hyper_util::client::legacy::Error>()
+            .is_some_and(hyper_util::client::legacy::Error::is_connect)
+        {
+            class = "connect";
+        }
+        if cause
+            .downcast_ref::<hyper::Error>()
+            .is_some_and(hyper::Error::is_parse)
+        {
+            class = "protocol";
+        }
+    }
+    class
+}
+
+/// The cause one level down. An I/O error holds its custom error as a payload
+/// that `source()` skips, and the TLS connector hands over a rustls error
+/// that way.
+fn next_cause<'a>(error: &'a (dyn StdError + 'static)) -> Option<&'a (dyn StdError + 'static)> {
+    match error
+        .downcast_ref::<std::io::Error>()
+        .and_then(std::io::Error::get_ref)
+    {
+        Some(payload) => Some(payload),
+        None => error.source(),
+    }
+}
+
+/// An error and its sources on one line. Hyper and hyper-util name only the
+/// failed step in their own text and keep the reason in `source()`.
+struct Causes<'a>(&'a (dyn StdError + 'static));
+
+impl fmt::Display for Causes<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0)?;
+        for cause in std::iter::successors(self.0.source(), |cause| (*cause).source()) {
+            write!(formatter, ": {cause}")?;
+        }
+        Ok(())
     }
 }
