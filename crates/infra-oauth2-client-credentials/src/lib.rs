@@ -669,10 +669,10 @@ impl Credentials {
             .clone();
         if cached.refresh_after.is_some_and(|after| now >= after)
             && !cached.refresh_pending
-            && !cached
+            && cached
                 .failure
                 .as_ref()
-                .is_some_and(|failure| now < failure.until)
+                .is_none_or(|failure| now >= failure.until)
         {
             cached.refresh_after = Some(now + REFRESH_RETRY);
             cached.refresh_pending = true;

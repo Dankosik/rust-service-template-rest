@@ -4,10 +4,13 @@ Date: 2026-10-02. Method: [Implementation Review](../../docs/spec-first-workflow
 Independent reviewer: `/root/oauth_delivery_resume/final_review`, fresh native
 reviewer-agent, `gpt-6-astra` / `high`, with no inherited conversation.
 
-candidate: HEAD `7f0c85e67eff8c02194bc3dbb77efdf57548b3ef` plus the ten-file
-source/documentation binary diff SHA256
+candidate: current bounded CI repair, published HEAD
+`e3e2df17aebf91a99e2151f03006aaada7aebe28` plus source-only binary diff SHA256
+`d6207799a19a3d629edb271d0a112f0da4d0911b09bd31c20f0d2c5b8a15bb50`.
+The original final-delivery review below covered HEAD
+`7f0c85e67eff8c02194bc3dbb77efdf57548b3ef` plus the ten-file diff
 `b19549655940ad7fc0d37a1205d9962b2b2a8ee7c9b1bc28aa69874820e58ac0`.
-This identity excludes this review and the completion receipt added afterward.
+Evidence-only receipt edits are excluded from the source identity.
 
 verdict: PASS
 
@@ -40,3 +43,17 @@ performance or RSS claim follows from local proof.
 
 reopen_owner: none. Acceptance belongs to the delivery Lead; publication and
 selected CI completion belong to the root continuation owner.
+
+## CI repair delta recheck
+
+The same reviewer independently checked the one-line semantic delta from
+negated `is_some_and` to `is_none_or` at the refresh failure-window guard.
+None returns true in both forms. A present failure returns false before its
+expiry and true at or after expiry. Tokio Instant ordering preserves equality
+and the comparison's complement; evaluation has no changed side effect or
+lifetime. The previous review reasoning remains valid.
+
+Verdict: PASS, no findings. Candidate identity was reverified; focused
+Clippy with all targets and the integration feature, formatting and diff-check
+receipts passed. This recheck does not claim new full-workspace, provider or
+final-candidate CI execution. Acceptance/publication owners remain unchanged.

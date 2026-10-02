@@ -6,12 +6,16 @@ unit: Completion
 
 verdict: Accepted for local delivery under the [plan](plan.md).
 
-candidate: branch `codex/oauth2-client-credentials-closeout-20261002`, HEAD
-`7f0c85e67eff8c02194bc3dbb77efdf57548b3ef`, plus ten changed source/operator-documentation
-files. Their `git diff --binary HEAD` SHA256 is
-`b19549655940ad7fc0d37a1205d9962b2b2a8ee7c9b1bc28aa69874820e58ac0`.
-The completion and review files are evidence added after that frozen candidate;
-they contain no runtime changes.
+candidate: branch `codex/oauth2-client-credentials-closeout-20261002`, published
+HEAD `e3e2df17aebf91a99e2151f03006aaada7aebe28`, plus the bounded Clippy repair in
+`crates/infra-oauth2-client-credentials/src/lib.rs`. The source-only
+`git diff --binary HEAD -- crates/infra-oauth2-client-credentials/src/lib.rs`
+SHA256 is `d6207799a19a3d629edb271d0a112f0da4d0911b09bd31c20f0d2c5b8a15bb50`.
+This identity excludes the evidence updates in this file and the review.
+The initial accepted delivery was HEAD
+`7f0c85e67eff8c02194bc3dbb77efdf57548b3ef` plus the ten-file source/documentation
+diff `b19549655940ad7fc0d37a1205d9962b2b2a8ee7c9b1bc28aa69874820e58ac0`, subsequently
+committed as the published candidate above.
 
 ## Delivered behavior
 
@@ -80,6 +84,29 @@ These logs establish local observations, not external CI or deployment.
 review: [Fresh final Implementation Review](implementation-review.md) PASS,
 same reviewer retained for bounded test repair; no remaining findings.
 
+## Bounded CI repair
+
+The published candidate's quality job `110908698466` reported
+`clippy::nonminimal_bool` at the service refresh failure-window guard. Its build
+and workspace tests still passed; the root also observed a successful
+OAuth/Keycloak integration job on that candidate. The quality log was retained
+as `ci-quality-before-repair.log` in the same Git-common evidence directory.
+
+One structural `ast-grep` rewrite replaced
+`!cached.failure.as_ref().is_some_and(|failure| now < failure.until)` with
+`cached.failure.as_ref().is_none_or(|failure| now >= failure.until)`.
+This preserves absence, before-expiry, equality and after-expiry behavior;
+no failure policy, interface, dependency, test, or lint configuration changed.
+
+`make lint-changed PKGS=infra-oauth2-client-credentials` passed under the shared
+validation lock. It executed
+`cargo clippy -p infra-oauth2-client-credentials --all-targets --keep-going --features infra-oauth2-client-credentials/integration --locked -- -D warnings`
+on Rust 1.99.0, finishing in 5.19s. Evidence is `ci-repair-lint.log`.
+Formatting and diff checks passed; receipt links were rechecked after editing.
+Prior build/tests remain applicable to this equivalent boolean expression;
+no full workspace or profile matrix was repeated. The same independent reviewer
+returned PASS for this bounded delta, with no findings.
+
 ## Remaining external owner and stop
 
 next_owner: root continuation owner commits/pushes this accepted delivery,
@@ -89,8 +116,10 @@ establish the skipped Keycloak or initializer/profile gates. Local lint,
 unused-dependency, integration and profile matrices were not duplicated for
 confidence; existing selected CI gates remain intact.
 
-Keycloak, profile initialization/removal and other selected CI outcomes are
-pending their real run. No live-provider, memory/RSS, performance, merge or
+The repaired commit still needs its selected final-candidate CI results;
+previous-candidate Keycloak success is retained evidence, not a substitute for
+that run. Profile initialization/removal and other selected gates remain with
+the root's CI closeout. No live-provider, memory/RSS, performance, merge or
 deployment result is claimed. The local Lead stops at accepted delivery and
 remains available for in-scope CI repair. Merge, deployment, provider/platform
 migration and DPoP rollout remain outside this outcome.
