@@ -49,11 +49,14 @@ pub(super) async fn open(
         METRICS_MAINTENANCE_INTERVAL,
         cancel.child_token(),
     ));
-    // Ends at once unless `postgres.password_file` is set.
-    background.spawn(infra_postgres::refresh_password_periodically(
-        pool.clone(),
-        dsn,
-        cancel.child_token(),
-    ));
+    // The rotation task ends at once without a password file, and an ended
+    // background task is a service failure.
+    if dsn.password_file().is_some() {
+        background.spawn(infra_postgres::refresh_password_periodically(
+            pool.clone(),
+            dsn,
+            cancel.child_token(),
+        ));
+    }
     Ok(Some(pool))
 }
