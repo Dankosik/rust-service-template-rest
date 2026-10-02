@@ -316,8 +316,8 @@ jobs:
           if [[ "${EVENT_NAME}" == pull_request || "${EVENT_NAME}" == merge_group ]]; then
             git fetch --no-tags --depth=1 origin "${BASE_SHA}"
             bash ./scripts/ci/measure.sh quality-migrations -- make migration-check BASE_REF="${BASE_SHA}"
-          elif [[ "${EVENT_NAME}" == push && "${BEFORE_SHA}" =~ ^[0-9a-f]{40}$ && ! "${BEFORE_SHA}" =~ ^0+$ ]] &&
-            git fetch --no-tags --depth=1 origin "${BEFORE_SHA}"; then
+          elif [[ "${EVENT_NAME}" == push && "${BEFORE_SHA}" =~ ^[0-9a-f]{40}$ && ! "${BEFORE_SHA}" =~ ^0+$ ]]; then
+            git fetch --no-tags --depth=1 origin "${BEFORE_SHA}"
             bash ./scripts/ci/measure.sh quality-migrations -- make migration-check BASE_REF="${BEFORE_SHA}"
           else
             bash ./scripts/ci/measure.sh quality-migrations -- make migration-check BASE_REF=HEAD
