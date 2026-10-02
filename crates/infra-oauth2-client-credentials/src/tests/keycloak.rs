@@ -7,7 +7,7 @@
 //! an exchanged token for these request forms, and reports refusals with the
 //! error codes the adapter classifies.
 
-use std::time::Duration;
+use std::{sync::Mutex, time::Duration};
 
 use bytes::Bytes;
 use http::{Method, Request, StatusCode, header};
@@ -15,7 +15,7 @@ use infra_outbound_http::Client;
 use jsonwebtoken::jwk::Jwk;
 use rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256, PKCS_RSA_SHA256};
 use secrecy::SecretString;
-use tokio::time::Instant;
+use tokio::{sync::watch, task::JoinHandle, time::Instant};
 use url::Url;
 use uuid::Uuid;
 
@@ -35,6 +35,8 @@ struct Realm {
     http: Client,
     admin: String,
     name: String,
+    driver_shutdown: watch::Sender<()>,
+    drivers: Mutex<Vec<JoinHandle<()>>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -53,11 +55,14 @@ impl Realm {
         });
         let origin = Url::parse(&origin).unwrap();
         let http = Client::new_for_test_http(&origin, TOKEN_LIMITS).unwrap();
+        let (driver_shutdown, _) = watch::channel(());
         let mut realm = Self {
             origin,
             http,
             admin: String::new(),
             name: format!("oauth-{}", Uuid::new_v4()),
+            driver_shutdown,
+            drivers: Mutex::default(),
         };
         // The bootstrap administrator of the Compose service.
         let admin = realm
@@ -212,12 +217,20 @@ impl Realm {
             audience: audience.map(str::to_owned),
             exchange_cache_capacity: 1024,
         };
-        Credentials::prepare(
+        let (credentials, driver) = Credentials::build(
             options,
             &endpoint,
             Client::new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
         )
-        .unwrap()
+        .unwrap();
+        let mut shutdown = self.driver_shutdown.subscribe();
+        self.drivers
+            .lock()
+            .unwrap()
+            .push(tokio::spawn(driver.run(async move {
+                let _ = shutdown.changed().await;
+            })));
+        credentials
     }
 
     /// A real access token whose audience includes every `caller-*` client.
@@ -233,6 +246,17 @@ impl Realm {
             )
             .await,
         )
+    }
+
+    async fn finish(self) {
+        self.driver_shutdown.send_replace(());
+        let drivers = self.drivers.into_inner().unwrap();
+        for driver in drivers {
+            tokio::time::timeout(Duration::from_secs(2), driver)
+                .await
+                .unwrap()
+                .unwrap();
+        }
     }
 }
 
@@ -337,6 +361,7 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
         assert_eq!(exchanged.azp, caller(algorithm));
         assert_eq!(audiences(&exchanged), [TARGET]);
     }
+    realm.finish().await;
 }
 
 #[tokio::test]
@@ -370,4 +395,5 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
             .unwrap_err(),
         AcquisitionError::Rejected(Rejection::InvalidRequest)
     );
+    realm.finish().await;
 }

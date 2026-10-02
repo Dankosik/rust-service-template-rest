@@ -37,7 +37,7 @@ secrecy = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 tracing = { workspace = true, features = ["std"] }
 url = { workspace = true, features = ["std"] }
 uuid = { workspace = true, features = ["v4"] }

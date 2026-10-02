@@ -374,6 +374,45 @@ async fn one_cached_bearer_is_sent_and_reused() {
 }
 
 #[tokio::test]
+async fn a_dropped_refresh_driver_closes_cached_grpc_calls_before_dispatch() {
+    let tokens = Fixture::new().await;
+    let resource = Resource::new().await;
+    let (credentials, driver) = tokens.build(tokens.options(&[], None));
+    let mut client = resource.client(&credentials);
+    client
+        .unary(rpc(
+            UnaryRequest {
+                message: "warm".to_owned(),
+            },
+            Duration::from_secs(10),
+        ))
+        .await
+        .unwrap();
+    let token_requests = tokens.token_requests().len();
+    let resource_calls = resource.calls();
+    drop(driver);
+    for (after, expected) in [
+        (Duration::from_secs(10), Code::Unavailable),
+        (Duration::ZERO, Code::DeadlineExceeded),
+    ] {
+        let error = client
+            .unary(rpc(
+                UnaryRequest {
+                    message: "closed".to_owned(),
+                },
+                after,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), expected);
+    }
+    assert_eq!(tokens.token_requests().len(), token_requests);
+    assert_eq!(resource.calls(), resource_calls);
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
 async fn a_token_past_its_reuse_cutoff_is_refreshed_before_dispatch() {
     let tokens = Fixture::new().await;
     tokens.token_json(

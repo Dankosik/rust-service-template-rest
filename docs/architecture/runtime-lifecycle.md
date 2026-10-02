@@ -60,11 +60,15 @@ shutdown stage. The client adds no readiness probe or teardown stage. JWT refres
 remains the separate process-owned task that bootstrap cancels and joins.
 <!-- template:end outbound-http:docs-lifecycle-outbound -->
 <!-- template:begin outbound-auth:docs-lifecycle-outbound-auth -->
-The retained OAuth2 profile is inert until a concrete integration constructs an
-authenticated client. Token acquisition is request-owned work: it consumes the
-caller deadline and releases its private cache when its last owner is dropped.
-The only detached work is one early refresh attempt of at most five seconds,
-which the runtime cancels rather than joins. It adds no readiness probe,
+The retained OAuth2 profile is inert until a concrete integration prepares an
+authenticated client and its `RefreshDriver`. Token acquisition is
+request-owned work and consumes the caller deadline. The integration drives
+`driver.run(existing_shutdown)` while credential/client clones are live and
+awaits that expected completion in the existing background-join stage before
+dependencies drop; it must not report it as an unexpected task failure. Final
+credential/client-owner drop also ends the driver for a shorter integration
+lifetime. Dropping the driver closes any surviving clients, whose subsequent
+calls fail through the normal closed-owner path. This adds no readiness probe,
 bootstrap provider call, or teardown stage.
 <!-- template:end outbound-auth:docs-lifecycle-outbound-auth -->
 
