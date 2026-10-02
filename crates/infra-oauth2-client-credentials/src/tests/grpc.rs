@@ -333,6 +333,45 @@ async fn acquisition_failure_prevents_dispatch_and_reports_whether_it_may_pass_l
 }
 
 #[tokio::test]
+async fn provider_capacity_is_unavailable_with_typed_source_before_resource_dispatch() {
+    let tokens = Fixture::new().await;
+    let resource = Resource::new().await;
+    let credentials = tokens.prepare(crate::Options {
+        provider_concurrency: 1,
+        ..tokens.options(&[], None)
+    });
+    let http = credentials.http(tokens.resource_client());
+    let gate = tokens.block_tokens();
+    let mut exchange = Box::pin(http.execute(
+        tokens.on_behalf_of_request("active"),
+        Instant::now() + Duration::from_secs(10),
+    ));
+    tokio::select! { () = tokens.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
+    let error = resource
+        .client(&credentials)
+        .unary(rpc(
+            UnaryRequest {
+                message: "capacity".to_owned(),
+            },
+            Duration::from_secs(10),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(error.message(), "client credentials unavailable");
+    let source = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<AcquisitionError>());
+    assert_eq!(source, Some(&AcquisitionError::AtCapacity));
+    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(resource.calls(), 0);
+    assert!(tokens.resource_requests().is_empty());
+    drop(exchange);
+    drop(gate);
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
 async fn one_cached_bearer_is_sent_and_reused() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
