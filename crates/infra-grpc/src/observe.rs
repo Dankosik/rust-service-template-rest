@@ -548,7 +548,8 @@ mod tests {
             .route(
                 "/example.v1.EchoService/Unary",
                 axum::routing::post(|| async {
-                    tonic::Status::invalid_argument("native generated method").into_http()
+                    tonic::Status::invalid_argument("native generated method")
+                        .into_http::<tonic::body::Body>()
                 }),
             );
         let server = infra_http::Server::bind(

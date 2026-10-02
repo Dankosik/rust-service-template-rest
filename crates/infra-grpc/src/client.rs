@@ -225,8 +225,9 @@ fn forward_timeout(headers: &mut http::HeaderMap, caller: Deadline) -> Result<()
     }
     let mut request = tonic::Request::new(());
     request.set_timeout(remaining);
-    if let Some(value) = request.metadata().get("grpc-timeout") {
-        headers.insert("grpc-timeout", value.clone().into());
+    let encoded = request.into_parts().0.into_headers();
+    if let Some(value) = encoded.get("grpc-timeout") {
+        headers.insert("grpc-timeout", value.clone());
     }
     Ok(())
 }
