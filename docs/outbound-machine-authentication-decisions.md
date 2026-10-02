@@ -146,8 +146,8 @@ seconds; each caller stops waiting at its own deadline.
 
 The caller's resource deadline is forwarded unchanged after acquisition.
 The token client uses constants: five seconds, 64 response headers, 1 MiB encoded body. One MiB matches the existing provider envelope and
-allows provider extras without a token-size policy; 64 counts metadata rather
-than pretending reqwest exposes a header-byte limit. No claims about measured
+allows provider extras without a token-size policy; 64 counts metadata, because
+the shared client exposes a header count and no configurable header-byte limit. No claims about measured
 latency, memory, or provider capacity are made by these bounds.
 
 ## Ownership and proving surfaces
