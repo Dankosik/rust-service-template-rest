@@ -70,7 +70,12 @@ pub(crate) async fn observe(
         // so it still reaches outbound calls.
         Some(context) => call.with_context(context).await,
     }
-    .unwrap_or_else(|_panic| tonic::Status::internal("request failed").into_http());
+    .unwrap_or_else(|_panic| {
+        tonic::Status::from(crate::Failure::new(
+            service_failure::Code::InternalServerError,
+        ))
+        .into_http()
+    });
     let code = code_from_headers(response.headers());
     update_span(&span, code, &SpanKind::Server);
     let dispatched = response.extensions().get::<Dispatched>().is_some();

@@ -9,10 +9,11 @@ use axum::middleware::Next;
 use axum::response::Response;
 use bytes::Bytes;
 use http_body_util::BodyExt as _;
+use service_failure::{AT_CAPACITY_DETAIL, Code};
 use tokio::sync::Semaphore;
 use tonic::server::NamedService as _;
 
-use crate::Error;
+use crate::{Error, Failure};
 
 /// Upper bound for the time to response headers of any business call, and the
 /// floor for the process drain budget.
@@ -212,16 +213,22 @@ fn with_health(
 async fn admit(State(limit): State<Arc<Semaphore>>, request: Request, next: Next) -> Response {
     let Ok(_permit) = limit.try_acquire_owned() else {
         crate::observe::record_shed();
-        let status = tonic::Status::resource_exhausted(service_failure::AT_CAPACITY_DETAIL);
-        return reject(request, status).await;
+        return reject(request, at_capacity()).await;
     };
     let budget = grpc_timeout(request.headers())
         .unwrap_or(CALL_DEADLINE_CAP)
         .min(CALL_DEADLINE_CAP);
     match tokio::time::timeout(budget, next.run(request)).await {
         Ok(response) => crate::observe::mark_dispatched(response),
-        Err(_elapsed) => tonic::Status::deadline_exceeded("request deadline exceeded").into_http(),
+        Err(_elapsed) => tonic::Status::from(Failure::new(Code::RequestTimeout)).into_http(),
     }
+}
+
+/// The shed answer. It is `RESOURCE_EXHAUSTED`, so a client that retries
+/// `UNAVAILABLE` adds no load, under the identity HTTP's shed answers with.
+fn at_capacity() -> tonic::Status {
+    Failure::new(Code::ServiceUnavailable)
+        .into_status_as(tonic::Code::ResourceExhausted, AT_CAPACITY_DETAIL)
 }
 
 /// Longest wait for the rest of a rejected call's request body.
@@ -277,7 +284,8 @@ async fn authenticate(
             .all(|scope| principal.scopes().binary_search(scope).is_ok())
     });
     if !granted {
-        let status = tonic::Status::permission_denied(INSUFFICIENT_SCOPE_DETAIL);
+        let status = Failure::new(Code::Forbidden)
+            .into_status_as(tonic::Code::PermissionDenied, INSUFFICIENT_SCOPE_DETAIL);
         return reject(request, status).await;
     }
     request.extensions_mut().insert(principal);
@@ -286,15 +294,12 @@ async fn authenticate(
 }
 
 fn authentication_status(failure: infra_bearerauthn::Failure) -> tonic::Status {
-    match failure {
-        infra_bearerauthn::Failure::Unavailable => {
-            tonic::Status::unavailable("authentication is unavailable")
-        }
-        infra_bearerauthn::Failure::Missing
-        | infra_bearerauthn::Failure::Malformed
-        | infra_bearerauthn::Failure::Invalid => {
-            tonic::Status::unauthenticated("authentication failed")
-        }
-    }
+    Failure::new(match failure {
+        infra_bearerauthn::Failure::Missing => Code::AuthenticationRequired,
+        infra_bearerauthn::Failure::Malformed => Code::AuthenticationMalformed,
+        infra_bearerauthn::Failure::Invalid => Code::AuthenticationInvalid,
+        infra_bearerauthn::Failure::Unavailable => Code::AuthenticationUnavailable,
+    })
+    .into()
 }
 // template:end authn:grpc-authenticate

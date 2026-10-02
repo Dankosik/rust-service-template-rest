@@ -9,7 +9,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use aws_lc_rs::hmac;
+use aws_lc_rs::{constant_time, hmac};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue};
@@ -72,9 +72,8 @@ impl KeyRing {
 
     /// Decode the active key and optional predecessor for one endpoint.
     ///
-    /// This convenience constructor is useful at a composition root; workers
-    /// that resolve immutable historical key references construct individual
-    /// [`SigningKey`] values and then use [`Self::new`].
+    /// A composition root that resolves each key by reference decodes
+    /// individual [`SigningKey`] values and uses [`Self::new`] instead.
     ///
     /// # Errors
     ///
@@ -101,17 +100,21 @@ impl KeyRing {
         timestamp: i64,
         body: &[u8],
     ) -> Result<String, ProtocolError> {
-        let message = signed_message(message_id, timestamp, body)?;
+        ensure_body_size(body)?;
+        ensure_message_id(message_id)?;
         let mut signatures = String::from("v1,");
-        signatures.push_str(&STANDARD.encode(hmac::sign(&self.active.0, &message).as_ref()));
+        signatures.push_str(&STANDARD.encode(tag(&self.active, message_id, timestamp, body)));
         if let Some(previous) = &self.previous {
             signatures.push_str(" v1,");
-            signatures.push_str(&STANDARD.encode(hmac::sign(&previous.0, &message).as_ref()));
+            signatures.push_str(&STANDARD.encode(tag(previous, message_id, timestamp, body)));
         }
         Ok(signatures)
     }
 
     /// Verify signed headers and raw body against this key ring.
+    ///
+    /// The expected tag is computed once per key, so the work is at most two
+    /// HMACs over the body however many candidates the caller supplies.
     ///
     /// # Errors
     ///
@@ -128,25 +131,23 @@ impl KeyRing {
         ensure_message_id(message_id.as_bytes())?;
         let timestamp = parse_timestamp(unambiguous_header(headers, "webhook-timestamp")?)?;
         ensure_timestamp_window(timestamp, now)?;
-        let message = signed_message(message_id.as_bytes(), timestamp, body)?;
 
-        let mut saw_signature = false;
-        for value in &headers.get_all("webhook-signature") {
-            saw_signature = true;
-            if signature_matches(&self.active, &message, value)
-                || self
-                    .previous
-                    .as_ref()
-                    .is_some_and(|key| signature_matches(key, &message, value))
-            {
-                return Ok(VerifiedMessage {
-                    message_id: Bytes::copy_from_slice(message_id.as_bytes()),
-                    timestamp,
-                });
-            }
-        }
-        if !saw_signature {
+        let mut values = headers.get_all("webhook-signature").iter().peekable();
+        if values.peek().is_none() {
             return Err(ProtocolError::MissingHeader);
+        }
+        let candidates: Vec<Vec<u8>> = values.flat_map(v1_candidates).collect();
+        let matches = |key: &SigningKey| {
+            let expected = tag(key, message_id.as_bytes(), timestamp, body);
+            candidates.iter().any(|candidate| {
+                constant_time::verify_slices_are_equal(expected.as_ref(), candidate).is_ok()
+            })
+        };
+        if matches(&self.active) || self.previous.as_ref().is_some_and(matches) {
+            return Ok(VerifiedMessage {
+                message_id: Bytes::copy_from_slice(message_id.as_bytes()),
+                timestamp,
+            });
         }
         Err(ProtocolError::InvalidSignature)
     }
@@ -208,6 +209,23 @@ pub enum ProtocolError {
     InvalidSignature,
 }
 
+impl ProtocolError {
+    /// The stable, bounded label for this failure in logs and metrics.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::InvalidKey => "invalid_key",
+            Self::BodyTooLarge => "body_too_large",
+            Self::MissingHeader => "missing_header",
+            Self::ConflictingHeader => "conflicting_header",
+            Self::InvalidMessageId => "invalid_message_id",
+            Self::InvalidTimestamp => "invalid_timestamp",
+            Self::TimestampOutOfWindow => "timestamp_out_of_window",
+            Self::InvalidSignature => "invalid_signature",
+        }
+    }
+}
+
 fn ensure_body_size(body: &[u8]) -> Result<(), ProtocolError> {
     (body.len() <= MAX_BODY_BYTES)
         .then_some(())
@@ -252,44 +270,32 @@ fn ensure_timestamp_window(timestamp: i64, now: SystemTime) -> Result<(), Protoc
         .ok_or(ProtocolError::TimestampOutOfWindow)
 }
 
-fn signed_message(
-    message_id: &[u8],
-    timestamp: i64,
-    body: &[u8],
-) -> Result<Vec<u8>, ProtocolError> {
-    ensure_body_size(body)?;
-    ensure_message_id(message_id)?;
-    let timestamp = timestamp.to_string();
-    let capacity = message_id
-        .len()
-        .checked_add(timestamp.len())
-        .and_then(|size| size.checked_add(body.len()))
-        .and_then(|size| size.checked_add(2))
-        .ok_or(ProtocolError::BodyTooLarge)?;
-    let mut message = Vec::with_capacity(capacity);
-    message.extend_from_slice(message_id);
-    message.push(b'.');
-    message.extend_from_slice(timestamp.as_bytes());
-    message.push(b'.');
-    message.extend_from_slice(body);
-    Ok(message)
+/// The v1 HMAC-SHA256 tag over `message-id "." canonical-timestamp "." body`.
+fn tag(key: &SigningKey, message_id: &[u8], timestamp: i64, body: &[u8]) -> hmac::Tag {
+    let mut context = hmac::Context::with_key(&key.0);
+    context.update(message_id);
+    context.update(b".");
+    context.update(timestamp.to_string().as_bytes());
+    context.update(b".");
+    context.update(body);
+    context.sign()
 }
 
-fn signature_matches(key: &SigningKey, message: &[u8], value: &HeaderValue) -> bool {
+/// The decoded tags of the well-formed v1 candidates in one header value.
+fn v1_candidates(value: &HeaderValue) -> impl Iterator<Item = Vec<u8>> {
     value
         .as_bytes()
         .split(u8::is_ascii_whitespace)
-        .any(|candidate| {
-            candidate
-                .strip_prefix(SIGNATURE_PREFIX)
-                .and_then(|encoded| STANDARD.decode(encoded).ok())
-                .is_some_and(|tag| hmac::verify(&key.0, message, &tag).is_ok())
+        .filter_map(|candidate| {
+            STANDARD
+                .decode(candidate.strip_prefix(SIGNATURE_PREFIX)?)
+                .ok()
         })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
     use http::{HeaderMap, HeaderValue};
 
@@ -445,6 +451,37 @@ mod tests {
         assert!(
             keys.verify(&headers, body, UNIX_EPOCH + Duration::from_secs(1))
                 .is_ok()
+        );
+    }
+
+    // The header limit admits thousands of candidates. Verification used to
+    // run one HMAC over the body per candidate and key, about 3000 times the
+    // cost of one candidate; it now runs at most one per key.
+    #[test]
+    fn many_signature_candidates_do_not_multiply_the_hmac_work() {
+        let keys = KeyRing::from_encoded(ARBITRARY_BYTES_KEY, Some(UPSTREAM_KEY)).unwrap();
+        let body = vec![0; MAX_BODY_BYTES];
+        let fastest = |signature: &str| {
+            let headers = headers("msg_1", "1", signature);
+            (0..5)
+                .map(|_| {
+                    let start = Instant::now();
+                    assert_eq!(
+                        keys.verify(&headers, &body, UNIX_EPOCH + Duration::from_secs(1)),
+                        Err(ProtocolError::InvalidSignature)
+                    );
+                    start.elapsed()
+                })
+                .min()
+                .unwrap()
+        };
+
+        let one = fastest("v1,");
+        let many = fastest(&vec!["v1,"; 3800].join(" "));
+
+        assert!(
+            many < one * 50,
+            "one candidate {one:?}, 3800 candidates {many:?}"
         );
     }
 
