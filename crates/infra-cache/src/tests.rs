@@ -360,7 +360,7 @@ fn redis_errors_map_to_bounded_error_types() {
     for (kind, expected) in cases {
         let error = redis::RedisError::from((kind, "hunter2 must not leak"));
         assert_eq!(crate::observe::error_type(&error).label(), expected);
-        assert!(!error.to_string().is_empty());
+        assert_ne!(error.to_string(), "");
     }
     let server = redis::RedisError::from((
         redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),

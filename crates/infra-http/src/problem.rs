@@ -399,7 +399,7 @@ mod tests {
                 format!("\"{}\"", code.as_str())
             );
             assert!(http_status(*code).is_client_error() || http_status(*code).is_server_error());
-            assert!(!http_title(*code).is_empty());
+            assert_ne!(http_title(*code), "");
         }
         assert_eq!(http_status(Code::AlreadyExists), StatusCode::CONFLICT);
         assert_eq!(http_title(Code::RequestEntityTooLarge), "Content Too Large");
