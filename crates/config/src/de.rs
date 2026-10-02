@@ -7,8 +7,9 @@ use serde::Deserialize;
 use serde::de::{Error as _, Unexpected};
 
 /// Marks a decode message this crate wrote without the value it rejects, so
-/// the loader shows it as written. An environment variable cannot contain
-/// NUL, so no supplied value can forge the mark.
+/// the loader shows it as written. No variable holds NUL, so no supplied
+/// value can forge the mark: an environment variable cannot contain one, and
+/// the loader refuses a secrets-directory file that does.
 pub(crate) const VALUE_FREE: char = '\0';
 
 /// What a listen address must be, for the decode message.

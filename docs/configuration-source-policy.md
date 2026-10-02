@@ -32,7 +32,8 @@ Runtime value precedence, last wins:
 An empty `APP__` value is still an explicit final override; it flows into
 validation and fails when the key cannot be empty. An optional text, path, or
 secret key reads an empty or whitespace-only value as unset, so an empty
-variable also unsets what a file set. Unknown keys from files or
+variable also unsets what a file set; the exceptions are the trust inputs
+whose section says a blank value is refused, which fail validation instead. Unknown keys from files or
 variables fail startup (`#[serde(deny_unknown_fields)]` on every
 section), and so does a malformed variable name such as `APP____ADDR`,
 `APP__HTTP__ADDR__`, or `APP__HTTP[0]`: each segment is letters, digits, `_`,
@@ -53,6 +54,10 @@ The same rule applies to a value that refers to an environment-supplied entry.
 Values keep their human forms in both files and the environment: durations
 as `"8s"`, `"250ms"`, `"1m 30s"`; byte sizes as `"1 MiB"`, `"16 KiB"`, or a
 plain integer; booleans as `true`/`false`; enums by their documented spelling.
+Because a variable is always text, config-rs converts between scalar forms on
+demand in every section: numeric text sets a number, and an unquoted TOML
+number or boolean given to a text key is read as its text (`1.50` as `1.5`).
+Quote text in TOML.
 
 ## Secret Rules
 
@@ -219,8 +224,8 @@ a second set of keys.
 - The directory is read once, at startup, and symbolic links are followed. A
   rotated file takes effect at the next restart, like every other key of the
   immutable snapshot.
-- A directory that cannot be listed, an entry that cannot be read or is not
-  valid Unicode, and a malformed name fail startup. The message names the
+- A directory that cannot be listed, an entry that cannot be read, is not
+  valid Unicode, or holds a NUL byte, and a malformed name fail startup. The message names the
   path and never the content.
 - Any key may be supplied this way; the rule that keeps secrets out of TOML
   files is unchanged.
@@ -527,7 +532,7 @@ only with new evidence.
 | The `config` crate (`toml` feature only) with `serde`, layered builder, `#[serde(deny_unknown_fields, default)]` per section | `figment` | no release since 2024 and it silently drops a malformed environment name; config-rs reports the unknown field, and the template's pre-scan names the variable |
 | `--secrets-dir`: one directory whose files are named as `APP__` variables, merged under the process environment | a `*_FILE` twin per variable; a path key beside every secret key; the environment as the only carrier | platforms mount secrets as files (Kubernetes Secret volumes, Docker secrets, systemd credentials), the CIS Kubernetes Benchmark (5.4.1) prefers that to environment variables, and a multi-line PEM key is awkward in a variable. A directory reuses the one variable namespace: no key gains a twin, validation and the decode-failure redaction cover both carriers, and a secret still cannot sit in TOML. `*_FILE` would collide with a real key whose name ends in `_file` and need a registry of declared keys to tell them apart; a path key per secret doubles every secret key. The shape is pydantic-settings' `secrets_dir`; config-rs has no such source and no crate on crates.io adds one (searched 2026-10-02), so the loader lists the directory itself, about thirty lines. Reopen for a key that must follow rotation without a restart: that is a decision for that key, with its own reader |
 | TOML baseline files | YAML | the Rust convention with a maintained crate; `serde_yaml` is archived, `serde_yml` carries RUSTSEC-2025-0068; config-rs's `yaml` feature stays available for a service that must consume YAML |
-| Secrets as `secrecy::SecretString`; environment is the only secret source; each file is pre-scanned for non-empty secret-like keys (`password`, `secret`, `credentials`, `token`, `dsn`, `authorization`, `api_key`, `private_key`, `otlp_headers`) | trusting file contents | a committed baseline cannot leak a credential; `Debug` prints `[REDACTED]` |
+| Secrets as `secrecy::SecretString`; `APP__` variables are the only secret source; each TOML file is pre-scanned for non-empty secret-like keys (`password`, `secret`, `credentials`, `token`, `dsn`, `authorization`, `api_key`, `private_key`, `otlp_headers`) | trusting file contents | a committed baseline cannot leak a credential; `Debug` prints `[REDACTED]` |
 | `tracing` + `tracing-subscriber` (`EnvFilter` parses `log.level`; a directive without span filters runs as the equivalent `Targets`); the telemetry crate's JSON layer for `log.format = json`, `fmt::layer()` for `text`; `log` records bridged | `json-subscriber` 0.3 (chosen in stage 2) | it wrote the same line but built a JSON value map for the event and another for the span list on every record, and re-serialized all of a span's fields on every `record`: 61% of a small request's instructions. The crate's layer wrote the identical line (a differential corpus of 64 records matched byte for byte) with two thirds fewer instructions per record ([Telemetry performance](infra-telemetry-performance.md)). It has since left that line in three places where the line was the defect: a key an event shared with a span was written twice, which a strict JSON consumer rejects; a `log` crate record had the target `log`; and the trace context was nested as `openTelemetry.traceId` and `spanId`, where OpenTelemetry names it `trace_id`, `span_id`, and `trace_flags` for a non-OTLP log format. `EnvFilter` takes a shared lock on every span enter, exit, and close even without span directives. Reopen if an upstream layer flattens span fields without per-record maps |
 | Tracer provider always installed; the OTLP HTTP/protobuf batch exporter added only when a typed endpoint or a standard `OTEL_EXPORTER_OTLP_*ENDPOINT` resolves one; `TraceContextPropagator` installed explicitly | exporter `disabled` when no endpoint, provider absent | trace ids in every log line cost nothing without an exporter and avoid connection-refused noise against the SDK's `localhost:4318` default |
 | Ambient `OTEL_EXPORTER_OTLP_*HEADERS` fail validation when the typed endpoint selects the destination; unread trust variables are named in a startup warning | letting the SDK merge them | one collector's credential is never sent to another; the mechanism stays the SDK's, the safety property is a validation rule |

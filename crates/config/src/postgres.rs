@@ -1,8 +1,8 @@
 //! PostgreSQL profile switch, connection source, and pool capacity.
 //!
 //! The profile is inert until `enabled` is set. The DSN is the only
-//! connection source and, being secret-like, arrives through the environment
-//! only; its admission rules (URL form, explicit `sslmode`, no libpq side
+//! connection source and, being secret-like, arrives only as its `APP__`
+//! variable; its admission rules (URL form, explicit `sslmode`, no libpq side
 //! channels) live in `infra-postgres`, which is the crate that knows what
 //! the driver would otherwise read. Timeouts are template constants there
 //! as well; the pool size is the one capacity value without a universal

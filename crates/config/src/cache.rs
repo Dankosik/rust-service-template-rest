@@ -1,7 +1,7 @@
 //! Optional cache profile: DSN, TLS escape hatches, and the command budget.
 //!
 //! The section is inert until `dsn` is set. The DSN is secret-like, so it
-//! arrives through the environment only. URL shape, TLS, and password
+//! arrives only as its `APP__` variable. URL shape, TLS, and password
 //! admission stay in `infra-cache`, which is the crate that parses what the
 //! driver would connect to. `command_timeout` is the one budget an operator
 //! sets; connect and keepalive ceilings are template constants there.

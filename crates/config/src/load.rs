@@ -385,7 +385,7 @@ where
 /// one variable and its content the value. Every other entry is skipped,
 /// which leaves out the `..data` links a Kubernetes volume keeps beside its
 /// files. A value ends before its trailing line breaks, since most tools
-/// write one; every other byte is kept.
+/// write one; every other byte is kept, and a NUL byte is refused.
 fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
     let unreadable = |error| Error::ReadSecretsDir {
         path: dir.to_owned(),
@@ -404,8 +404,15 @@ fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
         if !is_key_path(path) {
             return Err(Error::MalformedSecretName { path: file });
         }
-        let value = std::fs::read_to_string(&file)
-            .map_err(|error| Error::ReadSecret { path: file, error })?;
+        let value = match std::fs::read_to_string(&file) {
+            // The environment cannot carry NUL, and `VALUE_FREE` relies on it.
+            Ok(value) if value.contains('\0') => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the value contains a NUL byte, which no variable can hold",
+            )),
+            read => read,
+        }
+        .map_err(|error| Error::ReadSecret { path: file, error })?;
         admit(
             &mut variables,
             &name,
@@ -2643,15 +2650,19 @@ mod tests {
             Err(Error::ReadSecret { .. })
         ));
 
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("APP__LOG__LEVEL");
-        std::fs::write(&file, b"hunter2\xff").unwrap();
-        let err = load_from(&with_secrets(&dir), BUILD, env(&[])).unwrap_err();
-        assert!(
-            matches!(&err, Error::ReadSecret { path, .. } if *path == file),
-            "{err}"
-        );
-        assert!(!err.to_string().contains("hunter2"), "{err}");
+        // Not Unicode, and a NUL byte, which would let a value forge the
+        // mark of a value-free message.
+        for content in [&b"hunter2\xff"[..], &b"\0hunter2"[..]] {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("APP__LOG__LEVEL");
+            std::fs::write(&file, content).unwrap();
+            let err = load_from(&with_secrets(&dir), BUILD, env(&[])).unwrap_err();
+            assert!(
+                matches!(&err, Error::ReadSecret { path, .. } if *path == file),
+                "{err}"
+            );
+            assert!(!err.to_string().contains("hunter2"), "{err}");
+        }
     }
 
     #[test]
