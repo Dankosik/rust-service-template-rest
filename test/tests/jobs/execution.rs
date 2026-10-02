@@ -1078,21 +1078,53 @@ async fn k1_a_kinds_max_running_leaves_the_other_slots_to_other_kinds(pool: PgPo
         ["pending", "pending", "running"]
     );
 
-    // Each finished attempt hands its place to the next due job.
-    for finished in 1..=3 {
+    let running: String = sqlx::query_scalar(
+        "SELECT id::text FROM background_jobs WHERE kind = $1 AND state = 'running'",
+    )
+    .bind(Gate::NAME)
+    .fetch_one(&jobs)
+    .await
+    .expect("the capped running job");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test holds a raw transaction open to keep a lock"
+    )]
+    let mut hold = pool.begin().await.expect("the completion row lock begins");
+    sqlx::query("SELECT 1 FROM background_jobs WHERE id::text = $1 FOR UPDATE")
+        .bind(&running)
+        .execute(&mut *hold)
+        .await
+        .expect("the capped completion is blocked");
+    capped.open.add_permits(1);
+    super::wait_for_lock_waiter(&jobs).await;
+
+    // The per-kind slot, as well as the engine slot, covers the outcome write.
+    // Observe for a full polling interval, so an accidental release cannot hide
+    // behind notification or claim-loop scheduling.
+    absent_for(POLL_INTERVAL + POLL, async || {
+        assert_eq!(
+            states(&jobs, Gate::NAME).await,
+            ["pending", "pending", "running"]
+        );
+        assert_eq!(capped.running.load(Ordering::SeqCst), 0);
+    })
+    .await;
+    hold.commit()
+        .await
+        .expect("the capped completion lock releases");
+    completed(&jobs, &running).await;
+
+    // Acknowledged completion hands its place to the next due job.
+    for finished in 2..=3 {
         capped.open.add_permits(1);
-        until(
-            "the next bounded job takes the place",
-            super::WAIT,
-            async || {
-                let completed = states(&jobs, Gate::NAME)
-                    .await
-                    .iter()
-                    .filter(|state| *state == "completed")
-                    .count();
-                (completed == finished).then_some(())
-            },
-        )
+        until("the next bounded job completes", super::WAIT, async || {
+            let completed = states(&jobs, Gate::NAME)
+                .await
+                .iter()
+                .filter(|state| *state == "completed")
+                .count();
+            (completed == finished).then_some(())
+        })
         .await;
     }
     assert_eq!(capped.peak.load(Ordering::SeqCst), 1);
@@ -1623,6 +1655,27 @@ async fn w4_known_result_beats_forced_release_while_its_write_waits(pool: PgPool
     gate.open.notify_one();
     super::wait_for_lock_waiter(&jobs).await;
 
+    let pending = must(
+        in_tx(&jobs, async |tx| -> Result<String, Step> {
+            Ok(
+                created(enqueue(tx, &Gate { token: 2 }, EnqueueOptions::default()).await?)
+                    .to_string(),
+            )
+        })
+        .await,
+        "the next due job commits while completion is blocked",
+    );
+    // The handler has ended, but its completion still owns the only slot.
+    absent_for(POLL_INTERVAL + POLL, async || {
+        let view = load(&jobs, &pending).await;
+        assert_eq!(view.state, "pending");
+        assert_eq!(
+            view.attempts, 0,
+            "bookkeeping must retain admitted capacity"
+        );
+    })
+    .await;
+
     assert!(
         tokio::time::timeout(
             Duration::from_millis(50),
@@ -2014,7 +2067,7 @@ async fn x7_undecodable_payload_is_retryable_without_the_handler(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn x11_retention_deletes_only_old_terminal_rows(pool: PgPool) {
+async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     sqlx::query(
         "INSERT INTO background_jobs (id, kind, payload, state, finished_at, not_before) \
@@ -2042,7 +2095,7 @@ async fn x11_retention_deletes_only_old_terminal_rows(pool: PgPool) {
     );
     let deleted = engine.remove_expired().await.expect("retention");
     let after = super::job_count(&jobs).await;
-    assert_eq!(deleted, 1203);
+    assert_eq!(deleted, 1201);
     assert_eq!(
         before - after,
         i64::try_from(deleted).expect("deleted count")
@@ -2062,12 +2115,14 @@ async fn x11_retention_deletes_only_old_terminal_rows(pool: PgPool) {
     .await
     .expect("old failed");
     assert_eq!(old_completed, 0);
-    assert_eq!(old_failed, 0);
+    assert_eq!(old_failed, 2);
     assert_eq!(count_state(&jobs, "completed").await, 2);
-    assert_eq!(count_state(&jobs, "failed").await, 2);
+    assert_eq!(count_state(&jobs, "failed").await, 4);
     assert_eq!(count_state(&jobs, "pending").await, 2);
     assert_eq!(count_state(&jobs, "running").await, 2);
+    // Retention also preserves failed kinds this engine does not register.
     for kind in [Probe::NAME, Stranded::NAME] {
+        assert_eq!(count_kind_state(&jobs, kind, "failed").await, 2);
         assert_eq!(count_kind_state(&jobs, kind, "pending").await, 1);
         assert_eq!(count_kind_state(&jobs, kind, "running").await, 1);
     }

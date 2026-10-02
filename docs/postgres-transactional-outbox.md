@@ -36,8 +36,8 @@ intent; `Different` is an event-ID conflict; `NoLongerLive` means the row
 ended between the duplicate and comparison and requires the caller's existing
 transaction-retry path with the same prepared event. It is neither acceptance
 nor conflict. Live-key uniqueness is finite: the fenced terminal transition
-releases the pending/running unique-key slot; terminal retention later removes
-the historical row. Consumer effects need their own durable logical-ID
+releases the pending/running unique-key slot; completed retention later removes
+the historical row, while failed rows remain until explicit recovery or discard. Consumer effects need their own durable logical-ID
 deduplication for every stream-retention, DLQ, restore, and replay horizon.
 
 The canonical guides show the transaction boundary explicitly:
@@ -94,15 +94,29 @@ deduplicates only inside the stream's duplicate window (two minutes by
 default); the fourth retry already waits longer. A retry outside the window
 stores the event again, which consumers absorb by deduplicating on the logical
 ID. After the last attempt the job stays visible in the `failed`
-state for an operator to retry. Malformed stored intent is a visible terminal
+state until explicit recovery or discard. Malformed stored intent is a visible terminal
 job failure, never a completed publication.
 
 Operators retain the pending job when recovering or rolling back an application
 change. Do not disable the outbox while unpublished intent is live, and do not
 delete unfamiliar pending publication jobs as rollback cleanup. Restore the
 compatible outbox owner or roll forward so it can publish the retained identity.
-No migration, second outbox table, or schema cleanup is required for this
-design.
+Use the jobs worker's [inspection and recovery commands](background-jobs.md#inspect-and-recover-retained-jobs).
+Include `publish_domain_event` in the explicit fleet handled-kind union. Inspect
+the failed id/kind/version and reconcile a possible prior publication before
+redrive. Redrive preserves the same job ID, logical/publication IDs, route,
+unique key, and exact prepared bytes; it resets the retry budget on that row
+without re-enqueuing or replaying the business operation. A competing live
+identity refuses recovery as a conflict. An unknown outcome requires fresh
+inspection, never automatic replay. Discard permanently abandons unpublished
+intent and removes its history.
+
+Broker deduplication still ends at the configured duplicate window. Consumer
+logical-ID deduplication must cover the full retained-failure, redrive, restore,
+stream-retention and DLQ horizon; the default two-minute broker window is not
+that guarantee. The jobs history/index migrations and the
+[all-old-retention-owners-stopped gate](background-jobs.md#upgrade-and-custody)
+apply to publisher jobs too. Old-binary rollback can delete retained failures.
 
 ## Capacity, lifecycle, and proof
 
@@ -111,14 +125,18 @@ With ordinary jobs and outbox active, the shared PostgreSQL pool requires
 `jobs.max_workers + 5` connections: the ordinary `N + 2` allowance, one
 publisher, and two management connections. An outbox-only worker requires
 three. The publisher engine is built beside the ordinary one: both share the
-worker's one `LISTEN` connection outside the pool, one retention loop, and one
-worker id. Separate registrations and claim loops ensure that occupied webhook
-slots do not prevent due publication; this makes no throughput or latency SLO.
+worker's one `LISTEN` connection outside the pool, one retention loop, one
+sampler over both registered-kind sets, and one worker id. The publisher slot remains held through outcome bookkeeping and
+its retry waits, separately from ordinary capacity. Separate registrations and
+claim loops ensure that occupied webhook slots do not prevent due publication; this makes no throughput or latency SLO.
 
 The two engines, NATS consumer work, and dependency resources share the
 process's existing absolute drain, cleanup, and close deadlines. They do not
-receive a full grace period each. At a forced drain, existing jobs release and
-fencing rules retain recoverable publication intent.
+receive a full grace period each. NATS admission failure can prevent ordinary
+jobs from starting, and a critical engine/consumer failure stops the whole
+process. The one publisher slot and this shared failure domain remain deliberate
+limits; independent throughput or availability needs reopen the architecture.
+At a forced drain, existing jobs release and fencing rules retain recoverable publication intent.
 
 The assembled validation plan must use real PostgreSQL and NATS to cover
 commit/rollback, same/different/lost live-key outcomes, final-attempt failure,

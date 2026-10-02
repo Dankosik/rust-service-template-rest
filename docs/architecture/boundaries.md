@@ -29,8 +29,8 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | `infra-idempotency-store` (`crates/infra-idempotency-store`) | PostgreSQL idempotency arbitration and durable records ([guide](../http-idempotency.md)). | Migration-history admission, transaction lifecycle/connection ownership, HTTP types/Problems, business rules, readiness registration, or request routing. |
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-owner -->
 <!-- template:begin jobs:docs-boundaries-jobs-owners -->
-| `infra-jobs` (`crates/infra-jobs`) | The job table's statements, enqueue, the job-kind and handler contracts (`JobKind`, `Handler`, `Kinds`), and the engine ([guide](../background-jobs.md)). | Concrete kinds or handlers (they live in adapter crates), configuration, process lifecycle, or business rules. |
-| `jobs-worker` (`crates/jobs-worker`) | The worker's composition root and binary. | Engine mechanics, feature behavior. |
+| `infra-jobs` (`crates/infra-jobs`) | The job table's statements, enqueue, the job-kind and handler contracts (`JobKind`, `Handler`, `Kinds`), the engine, and validated payload-free inspection/recovery SQL ([guide](../background-jobs.md)). | Concrete kinds or handlers (they live in adapter crates), configuration, process lifecycle, or business rules. |
+| `jobs-worker` (`crates/jobs-worker`) | The worker's composition root, binary, and PostgreSQL-only operator CLI/lifetime/receipts. | Engine mechanics, feature behavior. |
 <!-- template:end jobs:docs-boundaries-jobs-owners -->
 <!-- template:begin messaging:docs-boundaries-messaging-owner -->
 | `domain-events` (`crates/domain-events`) | Typed event payload contract (type/version) and the event value: logical ID, occurrence time, and payload. Wire limits and validation live in `infra-messaging`. | Subjects, broker metadata, ID minting, clocks, configuration, or tasks. |
@@ -221,6 +221,12 @@ Jobs are a provider seam, not a transport contract: an adapter enqueues on
 the connection it already holds; kinds and handlers live in adapter crates
 and call feature use cases; features never depend on `infra-jobs`; the
 service composes nothing for jobs; the worker composes its own process.
+`infra_jobs::operator` borrows the shared transaction and owns row locks,
+version fencing and safe DTOs. It has no CLI/configuration or commit/retry
+policy. The worker's operator mode bypasses ordinary bootstrap and registry;
+`service-config` owns its PostgreSQL-only projection and shared secret checks.
+The loader CLI and clap remain in messaging-only workers; operator modules
+and commands are jobs-owned removals.
 <!-- template:end jobs:docs-boundaries-jobs-composition -->
 
 ## Decisions Recorded Here

@@ -468,10 +468,21 @@ on a character boundary so the suffix survives PostgreSQL's 63-byte limit;
 no key controls it. Size `postgres.max_connections` for the worker as at
 least `jobs.max_workers + 2` (one connection per concurrent attempt plus the
 engine's statements and the readiness probe); the worker refuses less. The
-statements are template-owned constants proven by the jobs database suite,
-so they adopt no `query!` (the deferral stays at the first feature-owned
-repository). The canonical migration includes JSONB payloads, C-collated text
-unique keys, and trace state. It is ordinary embedded history. See the
+statements remain template-owned; the jobs database suite owns their observed
+behavior, and checked operator queries use generated `.sqlx/` metadata. The canonical migrations include JSONB payloads, C-collated text
+unique keys, trace state, and additive `recovery_history` with a separate
+concurrent failed-kind index. They are ordinary embedded history. Failed rows
+remain until explicit redrive/discard; only completed rows expire after 24 hours.
+The jobs operator locks one failed identity/version in the caller's transaction;
+redrive archives the cycle and obtains a fresh claim-generation sequence value
+before rejoining live uniqueness. An exact live-key conflict rolls back the
+archive/reset. Successful provider results remain provisional until commit is
+acknowledged; uncertain commit never authorizes automatic retry. Inspection is
+payload-free and read-only. The short-lived operator pool uses one connection,
+`READ COMMITTED`, fixed `application_name=jobs-worker-operator`, the existing
+session budgets and embedded-history admission; mutation also requires a
+writable session. No operator code performs startup DDL or resets the sequence.
+See the
 [guide](../background-jobs.md) and
 [Async Architecture](async.md).
 <!-- template:end jobs:docs-persistence-jobs -->

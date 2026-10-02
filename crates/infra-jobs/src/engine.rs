@@ -125,8 +125,8 @@ impl Engine {
     /// Call [`Self::check_startup`] before starting it. Does no I/O.
     ///
     /// This engine owns what a worker process needs once: the `LISTEN`
-    /// connection and terminal retention. Engines made with [`Self::beside`]
-    /// share them.
+    /// connection, completed retention, and registered-kind sampling. Engines
+    /// made with [`Self::beside`] share them.
     #[must_use]
     pub fn new(pool: PgPool, registry: Registry, max_workers: NonZeroU32) -> Self {
         Self::build(
@@ -143,8 +143,8 @@ impl Engine {
     /// own kinds, slots, and claim loop, so its work is not delayed by this
     /// engine's occupied slots.
     ///
-    /// It claims under this engine's worker id, and this engine's listener
-    /// and retention serve it: start both.
+    /// It claims under this engine's worker id, and this engine's listener,
+    /// retention, and sampling serve it: start both.
     #[must_use]
     pub fn beside(&self, registry: Registry, max_workers: NonZeroU32) -> Self {
         Self::build(
@@ -209,10 +209,10 @@ impl Engine {
     /// for incompatible session defaults, and [`StartupError::Unavailable`] for
     /// anything else, including the bound.
     pub async fn check_startup(&self) -> Result<(), StartupError> {
-        maintenance::check_startup(&self.shared).await
+        maintenance::check_startup(&self.shared.pool, true).await
     }
 
-    /// Delete expired terminal jobs once and return how many were deleted.
+    /// Delete expired completed jobs once and return how many were deleted.
     ///
     /// # Errors
     ///
@@ -221,8 +221,8 @@ impl Engine {
         maintenance::remove_expired(&self.shared).await
     }
 
-    /// Spawn the claim loop and gauge sampling on `tracker`, and for an
-    /// engine built with [`Self::new`] also the listener and retention.
+    /// Spawn the claim loop on `tracker`, and for an engine built with
+    /// [`Self::new`] also the listener, retention, and process-wide sampling.
     ///
     /// Each task runs under a child of `cancel`. Does no I/O before it returns.
     #[must_use]
@@ -234,7 +234,9 @@ impl Engine {
                 .set(crate::attempt::KindMetrics::new(registered.name));
         }
         claim::describe_metrics();
-        maintenance::init_metrics(&self.shared);
+        if self.shared.owns_process_duties {
+            maintenance::init_metrics(&self.shared);
+        }
         metrics::describe_counter!(
             OPERATION_FAILURES_METRIC,
             "Failed worker database operations"
@@ -258,8 +260,8 @@ impl Engine {
         if self.shared.owns_process_duties {
             spawn("retention", cancel.child_token(), Run::Retention);
             spawn("listener", cancel.child_token(), Run::Listener);
+            spawn("sampling", cancel.child_token(), Run::Sampling);
         }
-        spawn("sampling", cancel.child_token(), Run::Sampling);
         Started {
             shared: Arc::clone(&self.shared),
             stop,
@@ -388,7 +390,7 @@ impl Drop for Guard {
 /// Stands in for a cleanup budget too long to add to the clock.
 const NO_CLEANUP_DEADLINE: Duration = Duration::from_hours(24 * 365);
 
-/// One engine as the process's listener sees it.
+/// One engine as the process's listener and sampler see it.
 pub(crate) struct Peer {
     kinds: Vec<&'static str>,
     wake: Arc<Notify>,
@@ -413,11 +415,25 @@ pub(crate) struct Shared {
     pub(crate) wake: Arc<Notify>,
     /// Every engine of this worker process, this one included.
     peers: Arc<Mutex<Vec<Peer>>>,
-    /// Whether this engine runs the listener and retention.
+    /// Whether this engine runs the listener, retention, and sampler.
     owns_process_duties: bool,
 }
 
 impl Shared {
+    /// Snapshot the registered union without holding the peer lock across I/O.
+    pub(crate) fn registered_kinds(&self) -> Vec<&'static str> {
+        let mut kinds: Vec<_> = self
+            .peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .flat_map(|peer| peer.kinds.iter().copied())
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        kinds
+    }
+
     /// Resolves once the budget of a forced cleanup is spent; pending until
     /// a cleanup is forced.
     pub(crate) async fn cleanup_ended(&self) {

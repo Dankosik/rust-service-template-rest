@@ -270,7 +270,7 @@ fn await_completed_probe_metrics(url: &str) {
     panic!("metrics never showed the completed probe attempt:\n{scraped}");
 }
 
-fn capped_scheduled_probe_sample(body: &str) -> bool {
+fn capped_scheduled_probe_sample(body: &str, failed_kinds: &[&str]) -> bool {
     let mut scheduled = false;
     let mut timestamp = false;
     for line in body.lines() {
@@ -291,33 +291,39 @@ fn capped_scheduled_probe_sample(body: &str) -> bool {
             timestamp = true;
         }
     }
-    scheduled && timestamp
+    let failed: Vec<_> = body
+        .lines()
+        .filter(|line| line.starts_with("jobs_failed_jobs{"))
+        .collect();
+    scheduled
+        && timestamp
+        && failed.len() == failed_kinds.len()
+        && failed_kinds.iter().all(|kind| {
+            let label = format!("kind=\"{kind}\"");
+            failed.iter().any(|line| {
+                line.contains(&label)
+                    && line
+                        .split_ascii_whitespace()
+                        .last()
+                        .and_then(|value| value.parse::<f64>().ok())
+                        == Some(1_000.0)
+            })
+        })
 }
 
-fn await_capped_scheduled_probe_sample(url: &str) {
+fn await_capped_scheduled_probe_sample(url: &str, failed_kinds: &[&str]) {
     let deadline = Instant::now() + METRICS_BOUND;
     let mut scraped = String::new();
     while Instant::now() < deadline {
         if let Ok((status, body)) = get(url) {
             scraped = body;
-            if status == 200 && capped_scheduled_probe_sample(&scraped) {
+            if status == 200 && capped_scheduled_probe_sample(&scraped, failed_kinds) {
                 return;
             }
         }
         std::thread::sleep(POLL);
     }
     panic!("metrics never showed the capped scheduled sample:\n{scraped}");
-}
-
-fn observation_timestamp(body: &str) -> Option<f64> {
-    body.lines().find_map(|line| {
-        line.starts_with("jobs_observation_timestamp_seconds ")
-            .then(|| {
-                line.split_ascii_whitespace()
-                    .last()
-                    .and_then(|value| value.parse::<f64>().ok())
-            })?
-    })
 }
 
 /// Whether the worker counted a failure of `operation`.
@@ -372,20 +378,37 @@ async fn wake_listener(pool: &PgPool, except: Option<i32>) -> i32 {
     .expect("the worker listens for wake notifications")
 }
 
-fn failed_sample_keeps_timestamp(body: &str, timestamp: f64) -> bool {
-    operation_failed(body, "sample")
-        && capped_scheduled_probe_sample(body)
-        && observation_timestamp(body)
-            .is_some_and(|current| current.to_bits() == timestamp.to_bits())
+fn queue_observation(body: &str) -> std::collections::BTreeMap<String, u64> {
+    body.lines()
+        .filter(|line| {
+            line.starts_with("jobs_live_jobs{")
+                || line.starts_with("jobs_failed_jobs{")
+                || line.starts_with("jobs_oldest_available_age_seconds{")
+                || line.starts_with("jobs_observation_timestamp_seconds ")
+        })
+        .map(|line| {
+            let (key, value) = line.rsplit_once(' ').expect("metric name and value");
+            (
+                key.to_owned(),
+                value.parse::<f64>().expect("gauge value").to_bits(),
+            )
+        })
+        .collect()
 }
 
-fn await_failed_sample_with_last_good_values(url: &str, timestamp: f64) {
+fn await_failed_sample_with_last_good_values(
+    url: &str,
+    before: &std::collections::BTreeMap<String, u64>,
+) {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut scraped = String::new();
     while Instant::now() < deadline {
         if let Ok((status, body)) = get(url) {
             scraped = body;
-            if status == 200 && failed_sample_keeps_timestamp(&scraped, timestamp) {
+            if status == 200
+                && operation_failed(&scraped, "sample")
+                && queue_observation(&scraped) == *before
+            {
                 return;
             }
         }
@@ -701,9 +724,28 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     .expect("the scheduled jobs");
     assert_eq!(inserted.rows_affected(), 1_001);
     let database_url = child_database_url(&pool).await;
+    let failed_kinds = vec![Probe::NAME];
     // template:begin outbox:test-jobs-process-nats-fixture-use-4
     let nats = NatsFixture::create().await;
+    let failed_kinds = {
+        let mut kinds = failed_kinds;
+        kinds.push("publish_domain_event");
+        kinds
+    };
     // template:end outbox:test-jobs-process-nats-fixture-use-4
+    for kind in failed_kinds.iter().copied().chain(["test.unregistered"]) {
+        sqlx::query(
+            "INSERT INTO background_jobs \
+             (id, kind, payload, state, failure_reason, not_before, finished_at) \
+             SELECT gen_random_uuid(), $1, '{}'::jsonb, 'failed', 'exhausted', \
+                    statement_timestamp(), statement_timestamp() \
+             FROM generate_series(1, 1001)",
+        )
+        .bind(kind)
+        .execute(&pool)
+        .await
+        .expect("retained failures for registered and unknown kinds");
+    }
     let worker = Worker::spawn(
         &database_url,
         // template:begin outbox:test-jobs-process-nats-fixture-argument-4
@@ -714,7 +756,7 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     let diagnostics = listener_addr(&worker, "diagnostics listener bound");
     worker.await_record("jobs_worker_ready");
     let metrics = format!("http://{diagnostics}/metrics");
-    await_capped_scheduled_probe_sample(&metrics);
+    await_capped_scheduled_probe_sample(&metrics, &failed_kinds);
     // Make the data statement fail immediately; a table lock could instead
     // stall a claim holding the shared engine permit before the sample runs.
     sqlx::query("ALTER TABLE background_jobs RENAME TO unavailable_background_jobs")
@@ -722,8 +764,8 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
         .await
         .expect("the disposable fixture table becomes unavailable");
     let (_, before) = get(&metrics).expect("the last good metrics scrape");
-    let timestamp = observation_timestamp(&before).expect("the last good sample timestamp");
-    await_failed_sample_with_last_good_values(&metrics, timestamp);
+    let before = queue_observation(&before);
+    await_failed_sample_with_last_good_values(&metrics, &before);
     sqlx::query("ALTER TABLE unavailable_background_jobs RENAME TO background_jobs")
         .execute(&pool)
         .await

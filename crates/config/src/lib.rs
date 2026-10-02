@@ -109,7 +109,8 @@ pub use postgres::{MigrationConfig, PostgresConfig, PostgresSessionBudgets};
 pub use http_idempotency::HttpIdempotencyConfig;
 // template:end http-idempotency:config-http-idempotency-export
 // template:begin jobs:config-jobs-export
-pub use jobs::JobsConfig;
+pub use jobs::{JobsConfig, JobsOperatorConfig};
+pub use load::load_jobs_operator;
 // template:end jobs:config-jobs-export
 // template:begin webhooks:config-webhooks-export
 pub use webhooks::{WebhookEndpointConfig, WebhooksConfig};

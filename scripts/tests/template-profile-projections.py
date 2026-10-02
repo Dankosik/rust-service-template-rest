@@ -553,6 +553,28 @@ def _check_oauth_projections(source: Path, candidate: str, initializer, work: Pa
         )
 
 
+def _check_messaging_without_jobs(source: Path, candidate: str, initializer, work: Path) -> None:
+    """Removing jobs must remove its operator while preserving the messaging worker graph."""
+
+    inputs = _inputs(
+        initializer, "postgres", "none", "none", "none", "none", "none", "none",
+        "core", messaging="nats-jetstream",
+    )
+    with tempfile.TemporaryDirectory(prefix="messaging-without-jobs-", dir=work) as selection:
+        nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+    _assert_no_jobs_output(initializer, nodes, _jobs_output_paths(source, initializer))
+    worker_paths = frozenset(
+        relative.rstrip("/") for relative in initializer._profile_data(source).removals["worker"]
+    )
+    _assert_profile_output(initializer, nodes, "worker", worker_paths)
+    _emit(
+        "messaging-without-jobs-selection",
+        profiles=inputs.profiles(),
+        tree_sha256=_tree_digest(nodes),
+        lock_sha256=hashlib.sha256(initializer._lock_bytes(inputs, candidate, "complete")).hexdigest(),
+    )
+
+
 def _check_grpc_projections(source: Path, candidate: str, initializer, work: Path) -> None:
     """Exercise the five gRPC graphs that add independent profile reachability."""
 
@@ -964,6 +986,7 @@ def check(source: Path) -> None:
                 if refusal is not None:
                     raise initializer.Refusal(refusal)
         _check_oauth_projections(source, candidate, initializer, work)
+        _check_messaging_without_jobs(source, candidate, initializer, work)
         _check_grpc_projections(source, candidate, initializer, work)
         _check_cache_projections(source, candidate, initializer, work)
         _check_object_storage_projections(source, candidate, initializer, work)

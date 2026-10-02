@@ -23,6 +23,7 @@
 mod commit_proxy;
 mod enqueue;
 mod execution;
+mod operator;
 mod process;
 // template:begin jobs-http-idempotency:jobs-http-idempotency-module
 mod http_idempotency;

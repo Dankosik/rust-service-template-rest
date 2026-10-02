@@ -2993,6 +2993,7 @@ dependencies = [
 name = "jobs-worker"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "futures-util",
  "gethostname",
  "health",
@@ -3005,6 +3006,7 @@ dependencies = [
  "infra-webhooks",
  "migrate",
  "secrecy",
+ "serde_json",
  "service-config",
  "thiserror",
  "tikv-jemallocator",
