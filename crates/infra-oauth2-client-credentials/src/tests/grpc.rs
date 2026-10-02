@@ -130,6 +130,7 @@ impl Resource {
         let channel = Client::new(
             &format!("http://{}", self.address),
             ClientSecurity::Plaintext,
+            Duration::from_secs(10),
         )
         .unwrap();
         EchoServiceClient::new(credentials.grpc(channel))
@@ -667,6 +668,7 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     let channel = Client::new(
         &format!("http://{}", resource.address),
         ClientSecurity::Plaintext,
+        Duration::from_secs(10),
     )
     .unwrap();
     let mut client = EchoServiceClient::new(credentials.grpc(channel).require_on_behalf_of());

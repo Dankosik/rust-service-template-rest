@@ -17,6 +17,7 @@ bytes = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }
 health = { workspace = true }
 http = { workspace = true }
+http-body = { workspace = true }
 http-body-util = { workspace = true }
 infra-http = { workspace = true }
 # template:begin authn:grpc-bearer-dependency
