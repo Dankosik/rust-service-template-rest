@@ -70,7 +70,7 @@ fn plaintext_and_a_missing_password_are_admitted_when_allowed() {
     let debug = format!("{cache:?}");
     assert!(
         debug.contains("127.0.0.1") && !debug.contains("redis://"),
-        "{debug}"
+        "cache debug output must identify the server without the DSN"
     );
 }
 
@@ -87,7 +87,10 @@ fn an_authenticated_tls_address_is_admitted_without_dialing() {
     assert!(cache.server().tls);
     assert_eq!(cache.server().port, 6380);
     let rendered = format!("{cache:?} {}", cache.server().host);
-    assert!(!rendered.contains("hunter2"), "{rendered}");
+    assert!(
+        !rendered.contains("hunter2"),
+        "cache debug output disclosed a password"
+    );
 }
 
 #[test]
@@ -192,7 +195,10 @@ fn options_debug_redacts_the_dsn() {
         "{:?}",
         options("redis://:hunter2@127.0.0.1:6379", true, true, None)
     );
-    assert!(!rendered.contains("hunter2"), "{rendered}");
+    assert!(
+        !rendered.contains("hunter2"),
+        "cache debug output disclosed a password"
+    );
 }
 
 #[test]
@@ -840,9 +846,19 @@ async fn a_replaced_connection_dials_without_waiting_for_a_call() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_rotated_password_file_authenticates_the_next_connection() {
     let server = FakeServer::start().await;
-    server.require_password("first");
+    let mut password_bytes = [0_u8; 32];
+    let random = rustls::crypto::aws_lc_rs::default_provider().secure_random;
+    random
+        .fill(&mut password_bytes)
+        .expect("ephemeral password");
+    let first = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, password_bytes);
+    random
+        .fill(&mut password_bytes)
+        .expect("rotated ephemeral password");
+    let second = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, password_bytes);
+    server.require_password(&first);
     let file = tempfile::NamedTempFile::new().expect("temp password");
-    std::fs::write(file.path(), "first\n").expect("write password");
+    std::fs::write(file.path(), format!("{first}\n")).expect("write password");
     let cache = Cache::connect_lazy(with_password_file(
         &format!("redis://{}", server.address),
         file.path().to_path_buf(),
@@ -856,8 +872,8 @@ async fn a_rotated_password_file_authenticates_the_next_connection() {
     assert!(opened >= 1, "the file's password was not sent");
 
     // The platform rotates the password; the old connection is gone.
-    std::fs::write(file.path(), "second\n").expect("rotate password");
-    server.require_password("second");
+    std::fs::write(file.path(), format!("{second}\n")).expect("rotate password");
+    server.require_password(&second);
     server.hang_up();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

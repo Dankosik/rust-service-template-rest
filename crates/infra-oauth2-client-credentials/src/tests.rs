@@ -30,7 +30,7 @@ use url::Url;
 
 use super::{
     AcquisitionError, Algorithm, Cached, Credentials, EVICTION_MIN_AGE, Error, FETCH_TIMEOUT,
-    OnBehalfOf, Options, Rejection, TOKEN_LIMITS, subject_key,
+    OnBehalfOf, Options, Rejection, TOKEN_LIMITS,
 };
 
 // template:begin outbound-auth-grpc:oauth-grpc-tests-module

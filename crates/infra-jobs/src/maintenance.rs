@@ -54,7 +54,11 @@ pub(crate) async fn check_startup(shared: &Shared) -> Result<(), StartupError> {
         )
         .await
         ?;
-        Ok::<_, sqlx::Error>((session.server_encoding, session.writable, session.read_committed))
+        Ok::<_, sqlx::Error>((
+            session.server_encoding,
+            session.writable,
+            session.read_committed,
+        ))
     };
     match tokio::time::timeout(STARTUP_CHECK_BUDGET, session).await {
         Ok(Ok((encoding, _, _))) if encoding != "UTF8" => Err(StartupError::UnsupportedEncoding),

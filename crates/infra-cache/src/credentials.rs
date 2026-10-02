@@ -182,20 +182,30 @@ mod tests {
         let mut watch = watch(file.path());
 
         let first = watch.next().await.unwrap();
-        assert_eq!((first.username(), first.password()), ("default", "first"));
+        assert_eq!(first.username(), "default");
+        assert!(first.password() == "first", "initial password differs");
         assert!(watch.step().await.is_none());
 
         std::fs::write(file.path(), "second").unwrap();
-        assert_eq!(watch.step().await.unwrap().password(), "second");
+        assert!(
+            watch.step().await.unwrap().password() == "second",
+            "rotated password differs"
+        );
 
         // An unreadable or empty file keeps the last password.
         std::fs::write(file.path(), "").unwrap();
         assert!(watch.step().await.is_none());
         assert!(watch.unreadable);
-        assert_eq!(watch.current.as_deref(), Some("second"));
+        assert!(
+            watch.current.as_deref() == Some("second"),
+            "last password changed"
+        );
 
         std::fs::write(file.path(), "third\r\n").unwrap();
-        assert_eq!(watch.step().await.unwrap().password(), "third");
+        assert!(
+            watch.step().await.unwrap().password() == "third",
+            "recovered password differs"
+        );
         assert!(!watch.unreadable);
     }
 
@@ -223,7 +233,10 @@ mod tests {
 
         std::fs::write(&path, "late").unwrap();
         let started = tokio::time::Instant::now();
-        assert_eq!(watch.next().await.unwrap().password(), "late");
+        assert!(
+            watch.next().await.unwrap().password() == "late",
+            "late password differs"
+        );
         assert!(started.elapsed() >= PASSWORD_REFRESH_INTERVAL);
     }
 }

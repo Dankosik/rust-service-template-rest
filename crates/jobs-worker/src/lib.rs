@@ -166,6 +166,9 @@ mod tests {
             &missing_file(),
             Box::new(|_| Err("registration must not run before configuration".into())),
         );
-        assert!(matches!(started, Err(WorkerError::Load(_))), "{started:?}");
+        assert!(
+            matches!(started, Err(WorkerError::Load(_))),
+            "configuration must fail before registration"
+        );
     }
 }
