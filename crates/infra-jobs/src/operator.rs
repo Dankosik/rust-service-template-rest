@@ -281,15 +281,15 @@ impl OperatorError {
     /// A bounded database code; no DETAIL, query, value, or connection string.
     #[must_use]
     pub fn sqlstate(&self) -> Option<Cow<'_, str>> {
-        let error = match self {
-            Self::Database(error)
-            | Self::Transaction(
-                TxError::Acquire(error)
-                | TxError::Begin(error)
-                | TxError::CommitFailed(error)
-                | TxError::CommitUnknown(error),
-            ) => error,
-            _ => return None,
+        let (Self::Database(error)
+        | Self::Transaction(
+            TxError::Acquire(error)
+            | TxError::Begin(error)
+            | TxError::CommitFailed(error)
+            | TxError::CommitUnknown(error),
+        )) = self
+        else {
+            return None;
         };
         infra_postgres::sqlstate(error)
     }

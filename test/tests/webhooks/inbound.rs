@@ -906,10 +906,12 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
             .fetch_all(&pool)
             .await
             .expect("jobs after");
-    // The migration adds the failure-history column; every existing row starts empty.
+    // Forward migrations add both history columns; every existing row starts empty.
     for job in &mut jobs_after {
-        let errors = job.as_object_mut().and_then(|row| row.remove("errors"));
-        assert_eq!(errors, Some(serde_json::json!([])));
+        for column in ["errors", "recovery_history"] {
+            let history = job.as_object_mut().and_then(|row| row.remove(column));
+            assert_eq!(history, Some(serde_json::json!([])), "{column}");
+        }
     }
     assert_eq!(jobs_after, jobs_before);
     let approximation: bool = sqlx::query_scalar("SELECT count(DISTINCT received_at) = 1 AND bool_and(received_at >= $1::text::timestamptz AND received_at <= now()) FROM webhook_receipts")
