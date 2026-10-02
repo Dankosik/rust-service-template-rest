@@ -57,7 +57,12 @@ password; a password in both places, or a file that is missing or empty at
 startup, fails startup. The user is the DSN's, or `default` when it names
 none. Every connection attempt reads the file. An open connection reads it
 again every 5 s and sends `AUTH` when the content changed, so a token must
-be rewritten at least that long before it expires. A change logs
+be rewritten at least that long before it expires. Replace the file
+atomically (write a new file, then rename it, as a Kubernetes mount does): a
+half-written password is refused by the server, and after a refused `AUTH`
+the client stops following the file for that connection, which keeps its
+earlier authentication until it reconnects and reads the file again. A
+change logs
 `cache_password_reloaded`; a file that became unreadable logs
 `cache_password_file_unreadable` once per outage and the connection keeps
 the password it has. The key is a path, so a file or

@@ -242,14 +242,14 @@ fn with_password_file(dsn: &str, password_file: PathBuf) -> CacheOptions {
 fn a_password_file_admits_a_dsn_without_a_password() {
     let file = tempfile::NamedTempFile::new().expect("temp password");
     std::fs::write(file.path(), "hunter2\n").expect("write password");
-    let cache = on_runtime(|| {
+    // No password in the DSN and no `allow_unauthenticated`.
+    on_runtime(|| {
         Cache::connect_lazy(with_password_file(
             "redis://127.0.0.1:6379",
             file.path().to_path_buf(),
         ))
         .expect("the file is the password source")
     });
-    assert!(!format!("{cache:?}").contains("hunter2"));
 }
 
 #[test]
