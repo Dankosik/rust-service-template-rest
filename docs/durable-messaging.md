@@ -107,8 +107,12 @@ no handler admitted is returned at drain with a one-second redelivery delay
 instead of waiting for ack wait; the broker still counts it as a delivery. The
 worker declares its named durable
 consumer (create or update): explicit ACK, `DeliverAll`, `AckWait=41s`,
-unlimited broker delivery, `ReplayInstant`, and the fixed filter. `MaxAckPending`
-keeps the broker default, which bounds the durable across all replicas; each
+unlimited broker delivery, `ReplayInstant`, and the fixed filter. Startup
+refuses a handler whose route subject the filter does not select; a route
+without a handler is one the process only publishes to and may lie outside the
+filter. A delivery the filter selects but no handler claims transfers to the
+DLQ as permanent, so keep the filter as narrow as the handled subjects.
+`MaxAckPending` keeps the broker default, which bounds the durable across all replicas; each
 replica bounds its own in-flight work by the configured concurrency. The
 application never creates, deletes, or repairs streams. Only a deleted or
 replaced durable consumer stops the worker unready. The broker reports that on
@@ -149,8 +153,17 @@ and fails with sanitized configuration, authentication, connection, topology,
 bounds, or timeout reasons. A refused stream or durable request also logs
 `messaging_admission_failed` with the request, that reason, and the broker's
 numeric JetStream error code; the broker's description can quote configuration
-and is not logged. The connection carries the worker's identity as its NATS
-client name. Readiness uses the existing refresher and reads
+and is not logged. A failed first connection logs the same event with
+`operation="connect"` and an `error.type` that names the stage: `dns`, `tls`,
+`io`, `timeout`, `authentication`, `authorization_violation`, `server_parse`,
+or `max_reconnects`; unparseable credentials log `operation="credentials"`.
+The connection carries the worker's identity as its NATS client name. After
+startup the client reconnects on its own, and every change logs
+`messaging_connection` with its `result`: `connected`, `disconnected`,
+`lame_duck`, `draining`, `closed`, `server_error`, or `client_error`, the last
+two with a closed `error.type` such as `authorization_violation` for revoked
+credentials. A slow-consumer event repeats per dropped message and is only
+counted. Readiness uses the existing refresher and reads
 only local connection state; a lost connection fails its next evaluation. On shutdown, readiness drains, pulls
 stop, admitted handlers settle under the existing shared deadline, application
 tasks join, and dependency close waits for the NATS closed event. A forced drain
@@ -165,16 +178,39 @@ connection result vocabularies, plus counters for pull-stream errors and
 failed settlements. It never labels metrics or logs with payloads,
 credentials, arbitrary errors, or event IDs.
 
+| Metric | Labels |
+| --- | --- |
+| `messaging_publish_total`, `messaging_publish_duration_seconds` | `result`: `acknowledged`, `rejected`, `ambiguous` |
+| `messaging_handler_total`, `messaging_handler_duration_seconds` | `event_type`; `outcome`: `success`, `permanent`, `retryable`, `timeout`, `panic` |
+| `messaging_dead_letter_total` | `event_type`; `reason`: `malformed`, `permanent`, `exhausted`; `outcome`: `accepted`, `rejected`, `ambiguous` |
+| `messaging_settlement_failures_total` | `operation`: `ack`, `nak` |
+| `messaging_consumer_stream_errors_total` | none |
+| `messaging_connection_events_total` | `result`, as logged by `messaging_connection`, plus `slow_consumer` |
+
+`event_type` is the event type of a registered handler, so the worker's
+handlers bound its values; schema versions of one type share it. A delivery
+whose type has no handler, including a malformed envelope, is counted as
+`unregistered`: the type a publisher wrote into a header never becomes a
+label. Publication metrics carry no event type. A publication outcome is the
+broker's answer rather than a property of the event, the outbox publisher
+restores the type from a stored row instead of a compiled constant, and
+`messaging_publish_failed` already names the subject.
+
 Publication runs in a `messaging_publish` producer span and writes that span's
 W3C `traceparent` and `tracestate` into the message headers, as the Go
 template does; no other propagation field is written. An admitted delivery runs
 its handler and settlement in a `messaging_process` consumer span whose parent
 is the publisher's span, so one trace covers the outbox job, the publication,
 and the handler. A delivery without a valid trace context starts its own
-trace. Both spans carry the subject and the closed outcome. A failed
+trace. Both spans carry the subject and the closed outcome. Their exported
+names are `publish <subject>` and `process <consumer filter>`, with
+`messaging.operation.name` and, on the delivery, the filter as
+`messaging.destination.template`; a delivery's own subject is not a span name
+because any publisher under the filter chooses it. A result other than
+success sets the span status to error and `error.type` to the outcome. A failed
 publication logs `messaging_publish_failed`, and a handler result other than
-success logs `messaging_delivery_failed` with the subject, the delivery
-attempt, and the outcome. `HandlerError` carries no cause; a handler logs its
+success logs `messaging_delivery_failed` with the subject, the event type as
+labelled above, the delivery attempt, and the outcome. `HandlerError` carries no cause; a handler logs its
 own cause inside the delivery span, where the record shares the trace.
 
 To remove the profile, initialize or migrate a service with `MESSAGING=none` so

@@ -20,7 +20,7 @@ type ErasedHandler = Arc<dyn Fn(InboundEnvelope, CancellationToken) -> HandlerFu
 
 /// Event type and schema version. Every key comes from an [`EventPayload`]
 /// constant, so building one to look up a route does not allocate.
-type RouteKey = (&'static str, u16);
+pub(crate) type RouteKey = (&'static str, u16);
 
 /// The route key of a payload type; rejects version zero at compile time.
 const fn route_key<T: EventPayload>() -> RouteKey {
@@ -213,8 +213,12 @@ impl Registry {
         self.routes.get(&route_key::<T>()).map(String::as_str)
     }
 
-    pub(crate) fn subjects(&self) -> impl Iterator<Item = &str> {
-        self.routes.values().map(String::as_str)
+    /// The route key and subject of every registered handler. A route
+    /// without a handler is one this process only publishes to.
+    pub(crate) fn handled(&self) -> impl Iterator<Item = (RouteKey, &str)> {
+        self.handlers
+            .keys()
+            .filter_map(|key| Some((*key, self.routes.get(key)?.as_str())))
     }
 
     pub(crate) async fn dispatch(
