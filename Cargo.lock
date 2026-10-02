@@ -2605,6 +2605,7 @@ dependencies = [
  "infra-outbound-http",
  "jsonwebtoken",
  "metrics",
+ "metrics-exporter-prometheus",
  "moka",
  "rcgen",
  "secrecy",
