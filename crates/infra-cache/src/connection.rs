@@ -359,6 +359,8 @@ async fn maintain(
             biased;
             () = generation.retired.cancelled() => return,
             () = sleep_until(next_refresh), if password_file.is_some() => {
+                // A rejected AUTH must not add its duration to the next refresh.
+                next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
                 if let Some(file) = password_file {
                     let refresh = refresh(generation, file, &mut authenticated, &mut unreadable);
                     let result = tokio::select! {
@@ -371,7 +373,6 @@ async fn maintain(
                         if error != ErrorType::Auth { shared.retire(generation); return; }
                     }
                 }
-                next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
             }
             () = sleep_until(next_ping) => {
                 let deadline = Instant::now() + command_timeout.min(CONNECT_TIMEOUT);

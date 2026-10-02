@@ -870,6 +870,20 @@ async fn serve_resp(
             }
             _ => b"+OK\r\n",
         };
+        let reply_delay = match arguments.first().map(String::as_str) {
+            Some("AUTH") => *socket.observed.auth_reply_delay.lock().expect("delay lock"),
+            Some("PING") => socket
+                .observed
+                .ping_reply_delays
+                .lock()
+                .expect("delay lock")
+                .pop_front()
+                .unwrap_or_default(),
+            _ => Duration::ZERO,
+        };
+        if !reply_delay.is_zero() {
+            tokio::time::sleep(reply_delay).await;
+        }
         if write.write_all(reply).await.is_err() {
             return;
         }
@@ -1110,6 +1124,8 @@ struct SocketObservations {
     auth_rejections: std::sync::atomic::AtomicUsize,
     auth_error: std::sync::Mutex<String>,
     username: std::sync::Mutex<Option<String>>,
+    auth_reply_delay: std::sync::Mutex<Duration>,
+    ping_reply_delays: std::sync::Mutex<std::collections::VecDeque<Duration>>,
     changed: tokio::sync::Notify,
 }
 
@@ -1413,13 +1429,20 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
     server.require_password("initial-password");
     let file = tempfile::NamedTempFile::new().expect("password file");
     std::fs::write(file.path(), "initial-password\n").expect("initial password");
-    let cache = Cache::connect_lazy(with_password_file(
+    let mut options = with_password_file(
         &format!("redis://{}", server.address),
         file.path().to_path_buf(),
-    ))
-    .expect("lazy cache");
+    );
+    options.command_timeout = Duration::from_secs(1);
+    let cache = Cache::connect_lazy(options).expect("lazy cache");
     let namespace = cache.namespace("retry_password");
     assert_eq!(namespace.get("ready").await, Ok(None));
+    *server.observed.auth_reply_delay.lock().expect("delay lock") = Duration::from_millis(900);
+    *server
+        .observed
+        .ping_reply_delays
+        .lock()
+        .expect("delay lock") = [0, 0, 400, 400, 900].map(Duration::from_millis).into();
     std::fs::write(file.path(), "pending-password\n").expect("pending password");
     server
         .wait_for(
@@ -1428,16 +1451,28 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
             || server.observed.auth_rejections.load(Ordering::SeqCst) > 0,
         )
         .await;
-    let successes = server.observed.auth_successes.load(Ordering::SeqCst);
+    let connections = server.connections();
     server.require_password("pending-password");
-    // Keep file bytes and sockets unchanged, and issue no cache operations.
-    server
-        .wait_for(
-            Duration::from_secs(11),
-            "rejected unchanged credentials were never retried without traffic",
-            || server.observed.auth_successes.load(Ordering::SeqCst) > successes,
-        )
+    let usable_since = tokio::time::Instant::now();
+    // Acceptance changes while the rejected reply is still delayed. Every
+    // exchange fits its 1 s budget, but completion-relative refresh scheduling
+    // lets the PINGs at 6, 8.4 and 10.8 s push recovery past the 7 s bound.
+    // Keep file bytes and sockets unchanged, and issue no cache operations;
+    // the client must consume a successful reply, not merely send another AUTH.
+    captured
+        .wait_for(Duration::from_secs(7), |logs| {
+            logs.contains("cache_password_reloaded")
+        })
         .await;
+    eprintln!(
+        "retained credential recovery completed in {:?}",
+        usable_since.elapsed()
+    );
+    assert_eq!(
+        server.connections(),
+        connections,
+        "the retained-socket recovery bound must not be satisfied by reconnecting"
+    );
     assert_eq!(namespace.get("recovered").await, Ok(None));
 
     let authenticated = server.observed.auth_successes.load(Ordering::SeqCst);
