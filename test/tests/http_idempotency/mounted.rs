@@ -867,7 +867,10 @@ async fn authorized_without_idempotency(
     assert_eq!(principal.scopes(), ["widgets:write"]);
     assert!(principal.claims::<BTreeMap<String, u64>>().is_err());
     // The verified token stays available only as a token-exchange subject.
-    assert!(!secrecy::ExposeSecret::expose_secret(principal.access_token()).is_empty());
+    assert_ne!(
+        secrecy::ExposeSecret::expose_secret(principal.access_token()),
+        ""
+    );
     assert!(principal.actor().is_none());
     (
         StatusCode::OK,
