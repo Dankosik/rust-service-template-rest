@@ -1568,7 +1568,11 @@ async fn uncertain_transactional_complete_uses_ordinary_fenced_retry(pool: &PgPo
         async || {
             let view = load(&jobs, &id).await;
             match fault {
-                Fault::ForwardThenDrop if view.state == "completed" => Some(view),
+                Fault::ForwardThenDrop | Fault::ForwardThenCorruptReady
+                    if view.state == "completed" =>
+                {
+                    Some(view)
+                }
                 Fault::DropBeforeForward if view.state == "pending" => Some(view),
                 _ => None,
             }
@@ -1581,7 +1585,7 @@ async fn uncertain_transactional_complete_uses_ordinary_fenced_retry(pool: &PgPo
         .await
         .expect("business effects count");
     match fault {
-        Fault::ForwardThenDrop => {
+        Fault::ForwardThenDrop | Fault::ForwardThenCorruptReady => {
             assert_eq!(effects, 1, "the committed effect is not replayed");
             assert_eq!(first.attempts, 1);
             assert!(first.claim_cleared);

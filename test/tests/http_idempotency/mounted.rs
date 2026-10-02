@@ -44,8 +44,8 @@ use infra_http::problem::SANITIZED_DETAIL;
 use infra_http::problem::responses::ProtectedOperationProblemResponses;
 use infra_http::{Code, HardenOptions, Problem, REQUEST_ID_HEADER, VerifiedPrincipal, harden};
 use infra_idempotency_store::Store;
-use infra_postgres::PgPool;
-use integration_tests::dsn_for;
+use infra_postgres::{Dsn, PgPool};
+use integration_tests::{DATABASE_URL, dsn_for, url_for};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusRecorder};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,7 @@ use tokio_util::task::TaskTracker;
 use utoipa::ToSchema;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
+use crate::commit_proxy::{CommitProxy, Fault};
 use crate::{
     Hold, RETENTION, RETRY_PAUSE, WAIT, bounded, close, count, make_read_only, template_pool,
 };
@@ -1714,6 +1715,119 @@ async fn p9_a_read_only_writer_answers_unavailable(pool: PgPool) {
     assert_eq!(outcomes(&recorder), counts(&[("unavailable", 1)]));
     assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
     mounted.finish().await;
+}
+
+/// An ambiguous COMMIT must answer a retryable Problem whatever the driver
+/// error, and the same-key retry must reconcile the actual database outcome.
+async fn uncertain_commit(pool: PgPool, fault: Fault) {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    create_widgets(&pool).await;
+    let dsn = dsn_for(&pool).await;
+    assert_eq!(dsn.ssl_mode_name(), "disable", "the proxy frames plaintext");
+    let host = dsn.host().trim_start_matches('[').trim_end_matches(']');
+    let address = bounded(
+        "resolve the database",
+        tokio::net::lookup_host((host, dsn.port())),
+    )
+    .await
+    .expect("the database address resolves")
+    .next()
+    .expect("the database has an address");
+    let proxy = CommitProxy::start(address).await;
+    let mut url = url_for(&pool, DATABASE_URL).await;
+    url.set_ip_host(proxy.address().ip()).expect("the proxy IP");
+    url.set_port(Some(proxy.address().port()))
+        .expect("the proxy port");
+    let proxied = Dsn::admit(url.as_str()).expect("the proxied DSN is admitted");
+    let mounted = Mounted::new(template_pool(&proxied, 4).await, BUDGET).await;
+    let input = json!({"name": "gizmo", "color": "red"});
+
+    proxy.arm(fault);
+    let first = bounded("the uncertain request answers", async {
+        mounted
+            .create(ALICE, "k-uncertain", &input, "req-uncertain")
+            .await
+    })
+    .await;
+    assert_eq!(proxy.fired(), Some(fault), "the fault reached COMMIT");
+    let committed = fault != Fault::DropBeforeForward;
+    assert_eq!(count(&pool, WIDGET_ROWS).await, i64::from(committed));
+    let original: Option<Vec<u8>> = sqlx::query_scalar("SELECT body FROM http_idempotency_records")
+        .fetch_optional(&pool)
+        .await
+        .expect("read the actual durable response");
+    assert_eq!(
+        original.is_some(),
+        committed,
+        "effect and response share fate"
+    );
+    problem(
+        &first,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "idempotency_unavailable",
+        "req-uncertain",
+    );
+    assert_eq!(retry_after(&first).as_deref(), Some("1"));
+    assert!(first.maybe_header("idempotent-replayed").is_none());
+    assert_eq!(outcomes(&recorder), counts(&[("unavailable", 1)]));
+
+    let (retry, conflicts) =
+        until_free(|| mounted.create(ALICE, "k-uncertain", &input, "req-retry")).await;
+    created(&retry, "req-retry");
+    if let Some(original) = original {
+        assert_eq!(retry.as_bytes().as_ref(), original.as_slice());
+        assert_eq!(
+            retry.maybe_header("idempotent-replayed"),
+            Some(HeaderValue::from_static("true"))
+        );
+    } else {
+        assert!(retry.maybe_header("idempotent-replayed").is_none());
+    }
+    assert_eq!(
+        count(&pool, WIDGET_ROWS).await,
+        1,
+        "one business effect commits"
+    );
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM http_idempotency_records").await,
+        1
+    );
+    assert_eq!(
+        outcomes(&recorder),
+        counts(&[
+            ("unavailable", 1),
+            ("in_progress", conflicts),
+            (if committed { "replayed" } else { "executed" }, 1),
+        ]),
+    );
+    let replay = mounted
+        .create(ALICE, "k-uncertain", &input, "req-replay")
+        .await;
+    created(&replay, "req-replay");
+    assert_eq!(replay.as_bytes(), retry.as_bytes());
+    assert_eq!(
+        replay.maybe_header("idempotent-replayed"),
+        Some(HeaderValue::from_static("true"))
+    );
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    mounted.finish().await;
+    proxy.shutdown().await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p9_a_lost_commit_ack_replays_the_committed_effect(pool: PgPool) {
+    uncertain_commit(pool, Fault::ForwardThenDrop).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p9_a_commit_not_forwarded_retries_the_rolled_back_effect(pool: PgPool) {
+    uncertain_commit(pool, Fault::DropBeforeForward).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p9_a_corrupt_commit_ack_keeps_uncertainty_and_replays(pool: PgPool) {
+    uncertain_commit(pool, Fault::ForwardThenCorruptReady).await;
 }
 
 /// Router state only: these tests never read the readiness verdict.

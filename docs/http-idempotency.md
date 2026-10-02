@@ -167,7 +167,11 @@ connection/availability fault or uncertain commit returns 503
 it can replay, receive 409 while the attempt is live, or execute after rollback.
 There is no automatic work retry or post-commit readback. Known non-transient
 database/programming/data faults, including SQLSTATE `25P02`, are sanitized 500,
-not 503. Logs retain only bounded failure class and SQLSTATE/cause category.
+not 503 when the transaction boundary establishes that no commit occurred.
+Every unknown COMMIT outcome is 503, including a malformed protocol response:
+the fault's permanence does not establish rollback. Retry with the identical
+request and key; never substitute a new key to resolve an uncertain attempt.
+Logs retain only bounded failure class and SQLSTATE/cause category.
 
 The complete store attempt ends at the hardened chain's
 `RequestDeadline.at() - 100 ms`. Acquisition, BEGIN, all work statements,
@@ -196,6 +200,7 @@ returns to normal arbitration. Background cleanup, jobs and migration retain
 their existing budgets; the HTTP cutoff lowers no global session limit. See
 [Persistence Architecture](architecture/persistence.md#query-pool-checkout-and-cancellation)
 for the query-pool guarantee and SQLx upgrade conditions.
+
 
 `http_idempotency_outcomes_total` counts exactly one `outcome` per attempt
 and has no other label. An attempt is a request the boundary refused for its
@@ -277,6 +282,12 @@ cutoff and then gets 503 `idempotency_unavailable`. Size
 `postgres.max_connections` for concurrent work, replays, the readiness probe,
 and one cleanup connection, and keep the work inside `execute` short.
 
+The transaction also buffers the successful response before committing, so
+serialization and body production hold its connection and locks. Return a
+small bounded response; a long-running operation can commit a durable job
+and return its identifier. Moving response capture after COMMIT would lose
+the atomic replay guarantee.
+
 While the boundary is active, a background task deletes expired records once
 a minute in batches of 500 rows, each its own `READ COMMITTED` transaction
 under a 1 s statement timeout, skipping rows a live attempt holds. The level
@@ -344,11 +355,18 @@ inside a published window.
 
 ## Mechanism and reopen conditions
 
-The boundary is template-owned because no maintained crate commits the replay
-record inside the caller's PostgreSQL transaction: `axum-idempotent` 0.4.0
+The 2026-10-02 library comparison keeps the boundary template-owned:
+[`axum-idempotent` 0.4.0](https://crates.io/crates/axum-idempotent/0.4.0)
 caches responses in a session store and lets concurrent duplicates reach the
-handler, and `idempotent` 2.0.0 keeps leases in a separate store. Reassess
-when a maintained crate joins the caller's transaction.
+handler, and [`idempotent` 2.0.0](https://docs.rs/idempotent/2.0.0/idempotent/)
+keeps leases in a separate store. Neither shares the business write's commit.
+[`naidempotency-pgsql` 2.0.0](https://docs.rs/naidempotency-pgsql/2.0.0/naidempotency_pgsql/)
+does commit records with business writes through its `natx-pgsql` ambient
+transaction. Adopting it would replace this service's explicit borrowed `Tx`
+and pool wiring, and its lease/state schema and caller/route identity would
+need a compatibility assessment against this replay and retention contract.
+Reassess when a maintained adapter supports the caller-owned transaction and
+the current contract, or the service adopts that runtime for another reason.
 
 Each attempt is one explicit `READ COMMITTED` transaction on the writer. Its
 first statement refuses a recovering or read-only session, takes
@@ -370,12 +388,22 @@ same cancellation and capacity guarantees and their regression proof.
 Reopen for measured harmful 409 churn or an operation that needs stricter
 isolation.
 
+The work itself also runs at `READ COMMITTED`. Arbitration protects one key;
+different keys can still contend on the same business state. The feature's
+adapter must preserve its invariants with atomic conditional statements,
+constraints, or row locks. An operation requiring a stronger isolation level
+reopens the transaction design before composition.
+
 The fingerprint hashes the received request rather than a typed or canonical
 form, so it cannot omit a path, query, or body value; RFC 8785 serializes
 numbers as IEEE 754 doubles, so integers above 2^53 would collide. A client
 that re-serializes an equal body differently gets 422, a safe refusal.
-Reopen when a real consumer needs representation-tolerant retries. Keys
-accept the expired IETF draft's Structured Field string through `sfv` and
+Reopen when a real consumer needs representation-tolerant retries. Before
+composition, check whether an excluded header, such as `If-Match` or a tenant
+selector, distinguishes operations the service must refuse to replay. If it
+does, request identity must cover that input. Extending the framing changes a
+persistent format and needs a compatibility plan for live records.
+Keys accept the expired IETF draft's Structured Field string through `sfv` and
 Stripe-compatible unquoted visible ASCII. An uncertain commit answers 503 and
 is resolved by the client's same-key retry; a post-commit readback would only
 turn that rare 503 into a 2xx. Headers are `http_idempotency_header_pair[]`
@@ -386,7 +414,11 @@ a failed attempt rolls its effect back; the key is scoped to the verified
 caller, so an authentication engine is required; retention has no template
 default. Cleanup deletes 500-row batches every 60 s under a 1 s statement
 timeout; reopen for a backlog one tick cannot drain or for lock waits cleanup
-causes.
+causes. The one-second limit applies to each batch, not the whole run; a run
+keeps draining until a batch removes fewer than 500 rows and cancellation can
+stop it. Add pacing or a total run budget when measured backlog or maintenance
+load competes with requests. Autovacuum thresholds trigger cleanup; they are
+not a hard size bound while vacuum is blocked or cannot keep up.
 
 Expiry stays a batched `DELETE` followed by vacuum. Range partitioning on
 `expires_at` with partition drops would remove both, but a partitioned
