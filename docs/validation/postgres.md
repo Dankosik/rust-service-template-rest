@@ -66,9 +66,13 @@ added version older than the newest the base already has. Its only
 pre-adoption exception recognizes the reviewed exact jobs canonical-blob
 endpoint, including its retained historical PR #60 transition where applicable;
 it rejects partial or other rewrites. Runtime migration history remains strict.
-The source rules (positive version, forward-only, one transaction,
-`snake_case`) are the `migrate` crate's tests over the embedded set. Neither
-needs Docker.
+The same script then lints the files the change adds with Squawk
+(`SQUAWK_CLI_VERSION` in `tools/versions.env`, run through `npx`), a
+`-- no-transaction` file as outside a transaction and every other as inside
+one; it lints nothing when the change adds no migration.
+The source rules (positive version, forward-only, `snake_case`) are the
+`migrate` crate's tests over the embedded set. None of the three needs
+Docker; the lint needs Node.js.
 
 The runtime rehearsal, when the image's migration path or readiness with the
 pool open is the claim:

@@ -20,6 +20,8 @@ repository surface that can prove them.
   <!-- template:begin postgres:contributing-postgres-prerequisites -->
   PostgreSQL proof uses `test-integration-db`, `migration-validate`, and
   `compose-up`; its heavy targets are also behind `ALLOW_HEAVY=1`.
+  `make migration-check` needs Node.js as well when a change adds a
+  migration: it lints the added file with Squawk through `npx`.
   <!-- template:end postgres:contributing-postgres-prerequisites -->
   <!-- template:begin messaging:contributing-messaging-prerequisites -->
   JetStream integration and actual-Go compatibility proof use the retained
@@ -84,7 +86,8 @@ transaction, lock, commit outcome, or migration behaves as described is
 proven on a real PostgreSQL with `ALLOW_HEAVY=1 make test-integration-db`,
 and CI runs it on the `db_integration` surface. A new migration is a new
 file only: `make migration-check` refuses an edited, deleted, or renamed
-one and an out-of-order version, and `ALLOW_HEAVY=1 make migration-validate`
+one and an out-of-order version, lints the added file for DDL that blocks a
+running service, and `ALLOW_HEAVY=1 make migration-validate`
 rehearses the image against a fresh database. A changed `sqlx::query!`
 statement or a new migration comes with `make sqlx-prepare` and the
 `.sqlx/` changes it writes; CI refuses stale metadata

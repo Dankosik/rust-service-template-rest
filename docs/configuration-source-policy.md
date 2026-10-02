@@ -460,10 +460,14 @@ into its panic.
 <!-- template:begin postgres:docs-config-postgres-budget -->
 - `postgres.enabled` (default `false`) selects the PostgreSQL profile;
   `postgres.max_connections` (default `4`, `1..500`) is the pool's upper
-  bound and the one database capacity value an operator sets. The acquire
+  bound and the one database capacity value an operator sets.
+  `postgres.migration_deadline` (environment
+  `APP__POSTGRES__MIGRATION_DEADLINE`, default `5m`, `1s..24h`) bounds one
+  `migrate` run and each `-- no-transaction` migration in it; the service
+  and the worker decode it and do not use it. The acquire
   budget (`3s`), the session `statement_timeout` and
-  `idle_in_transaction_session_timeout` (`8s`), and the migration budgets
-  are constants in the adapter
+  `idle_in_transaction_session_timeout` (`8s`), and the other migration
+  budgets are constants in the adapter and the runner
   ([Persistence](architecture/persistence.md#budgets)); the readiness probe
   draws `health.probe_budget`, and the pool closes inside the `5s`
   dependency-close stage. Enabled service and worker startup also bound the

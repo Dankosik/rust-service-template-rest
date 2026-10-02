@@ -177,7 +177,7 @@ async fn fixture(name: &str) -> Migrator {
 }
 
 fn options(dsn: &Dsn) -> RunOptions<'_> {
-    RunOptions::defaults(dsn, APP)
+    RunOptions::defaults(dsn, APP, Duration::from_secs(300))
 }
 
 async fn applied_count(pool: &PgPool) -> i64 {
@@ -1041,6 +1041,97 @@ async fn the_deadline_drops_the_session_and_leaves_no_partial_history(pool: PgPo
         .await
         .expect("the dropped session released the lock");
     conn.unlock().await.unwrap();
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_no_transaction_build_is_refused_until_its_invalid_index_is_dropped(pool: PgPool) {
+    let dsn = dsn_for(&pool).await;
+    let fixture = fixture("concurrent_index").await;
+
+    // The table migration commits; the unique build then fails on the
+    // duplicate and leaves its index behind, invalid, with no history row.
+    let err = migrate::run(&fixture, &options(&dsn)).await.unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            RunError::Migrate(MigrateError::ExecuteMigration(_, 20_260_918_000_002))
+        ),
+        "{err}"
+    );
+    assert_eq!(applied_count(&pool).await, 1);
+
+    // `IF NOT EXISTS` alone would now record the invalid index as built.
+    let err = migrate::run(&fixture, &options(&dsn)).await.unwrap_err();
+    assert_eq!(err.stage(), "execute", "{err}");
+    assert!(
+        matches!(
+            &err,
+            RunError::InvalidIndexes { version: 20_260_918_000_002, indexes } if indexes == "widgets_sku"
+        ),
+        "{err}"
+    );
+    assert_eq!(applied_count(&pool).await, 1);
+
+    pool.execute("DROP INDEX CONCURRENTLY widgets_sku")
+        .await
+        .unwrap();
+    pool.execute("DELETE FROM widgets WHERE id = 2")
+        .await
+        .unwrap();
+
+    // A concurrent build waits for every transaction that wrote to the table
+    // before it; that wait outlives the session `lock_timeout` here.
+    let mut writer = pool.acquire().await.unwrap();
+    writer.execute("BEGIN").await.unwrap();
+    writer
+        .execute("INSERT INTO widgets (id, sku) VALUES (3, 'c')")
+        .await
+        .unwrap();
+    let commit = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        writer.execute("COMMIT").await.unwrap();
+    });
+    let mut waiting = options(&dsn);
+    waiting.lock_timeout = Duration::from_millis(300);
+    let started = Instant::now();
+    let report = migrate::run(&fixture, &waiting).await.unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    commit.await.unwrap();
+    assert_eq!(report.applied, vec![20_260_918_000_002]);
+    let valid: bool = sqlx::query_scalar(
+        "SELECT indisvalid FROM pg_index WHERE indexrelid = 'widgets_sku'::regclass",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(valid);
+    let replay = migrate::run(&fixture, &options(&dsn)).await.unwrap();
+    assert!(replay.applied.is_empty());
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_no_transaction_migration_is_bounded_by_the_deadline_not_the_statement_budget(
+    pool: PgPool,
+) {
+    let dsn = dsn_for(&pool).await;
+    let mut options = options(&dsn);
+    options.statement_timeout = Duration::from_millis(500);
+    options.deadline = Duration::from_secs(20);
+    let err = migrate::run(&fixture("no_transaction_budget").await, &options)
+        .await
+        .unwrap_err();
+
+    // The first file slept past the statement budget and was applied; the
+    // second ran under the restored budget and was cancelled by the server.
+    let RunError::Migrate(MigrateError::ExecuteMigration(cause, 20_260_918_000_002)) = &err else {
+        panic!("{err}");
+    };
+    assert_eq!(sqlstate(cause).as_deref(), Some("57014"), "{err}");
+    let applied: Vec<i64> = sqlx::query_scalar("SELECT version FROM _sqlx_migrations")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(applied, vec![20_260_918_000_001]);
 }
 
 #[sqlx::test(migrations = false)]

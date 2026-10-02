@@ -777,7 +777,7 @@ for binary in git make shasum; do command -v "${binary}" >/dev/null 2>&1 || bloc
 if is_true rust_source || is_true cargo_dependencies || is_true dependency_policy || is_true lint_config || is_true openapi || is_true validation_system || is_true module_initializer || is_true tool_manifest; then
 	command -v cargo >/dev/null 2>&1 || blocked "required binary is unavailable: cargo"
 fi
-if is_true openapi; then command -v npx >/dev/null 2>&1 || blocked "required binary is unavailable: npx"; fi
+if is_true openapi || is_true migrations; then command -v npx >/dev/null 2>&1 || blocked "required binary is unavailable: npx"; fi
 if is_true github_workflows || is_true secret_scanning; then command -v go >/dev/null 2>&1 || blocked "required binary is unavailable: go"; fi
 docker_command=${VERIFY_DOCKER_COMMAND:-docker}
 if [[ ${requires_docker} == true ]]; then

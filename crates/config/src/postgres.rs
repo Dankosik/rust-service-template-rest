@@ -9,18 +9,21 @@
 //! safe answer, so it is the one an operator sets. Two keys describe the
 //! deployment rather than tune it: where the password comes from when the
 //! platform rotates it, and whether a pooler in front of the database lets
-//! the service publish its session budgets.
+//! the service publish its session budgets. One key bounds a migration run,
+//! because an index built concurrently takes as long as that database's
+//! table is large.
 //!
 //! [`MigrationConfig`] is the narrower snapshot the migration binary loads.
 
 use std::num::NonZeroU32;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::de::{blank_as_none, blank_secret_as_none};
-use crate::validate::{ValidationError, int_range};
+use crate::validate::{ValidationError, duration_range, int_range};
 use crate::{AppConfig, LogConfig, ObservabilityConfig};
 
 /// Where a pooled session's `statement_timeout` and
@@ -59,6 +62,11 @@ pub struct PostgresConfig {
     /// `max_connections` divided across every instance and job that shares
     /// the database, not from the service's concurrency.
     pub max_connections: NonZeroU32,
+    /// Bound on one `migrate` run after it connected, and on each
+    /// `-- no-transaction` migration in it. Raise it for the run that builds
+    /// an index concurrently on a large table; the service ignores it.
+    #[serde(with = "humantime_serde")]
+    pub migration_deadline: Duration,
 }
 
 impl Default for PostgresConfig {
@@ -69,6 +77,9 @@ impl Default for PostgresConfig {
             password_file: None,
             session_budgets: PostgresSessionBudgets::Startup,
             max_connections: const { NonZeroU32::new(4).expect("4 is nonzero") },
+            // Above the two-minute statement budget of a transactional
+            // migration, so a few of them fit in one run.
+            migration_deadline: Duration::from_secs(300),
         }
     }
 }
@@ -101,6 +112,12 @@ impl PostgresConfig {
             u64::from(self.max_connections.get()),
             1,
             500,
+        )?;
+        duration_range(
+            "postgres.migration_deadline",
+            self.migration_deadline,
+            Duration::from_secs(1),
+            Duration::from_hours(24),
         )?;
         Ok(())
     }
@@ -142,6 +159,7 @@ mod tests {
         assert_eq!(config.max_connections.get(), 4);
         assert_eq!(config.password_file, None);
         assert_eq!(config.session_budgets, PostgresSessionBudgets::Startup);
+        assert_eq!(config.migration_deadline, Duration::from_secs(300));
         config.validate().unwrap();
     }
 
@@ -176,6 +194,18 @@ mod tests {
         };
         let err = config.validate().unwrap_err();
         assert_eq!(err.key, "postgres.max_connections");
+    }
+
+    #[test]
+    fn migration_deadline_is_bounded() {
+        for deadline in [Duration::from_millis(999), Duration::from_secs(86_401)] {
+            let config = PostgresConfig {
+                migration_deadline: deadline,
+                ..PostgresConfig::default()
+            };
+            let err = config.validate().unwrap_err();
+            assert_eq!(err.key, "postgres.migration_deadline");
+        }
     }
 
     #[test]

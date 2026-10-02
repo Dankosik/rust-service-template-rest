@@ -25,5 +25,5 @@ secrecy = { workspace = true }
 service-config = { workspace = true }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "migrate", "macros"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "signal", "time"] }
 tracing = { workspace = true, features = ["std"] }

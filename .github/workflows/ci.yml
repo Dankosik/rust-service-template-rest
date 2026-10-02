@@ -301,18 +301,24 @@ jobs:
           bash ./scripts/ci/measure.sh quality-openapi-breaking -- make openapi-breaking BASE_OPENAPI=/tmp/openapi-base.yaml
       # template:begin postgres:ci-quality-migrations
       - name: Migrations
-        # Static append-only history against the base plus the source rules
-        # over the embedded set; the runtime checksum check runs in
-        # test-integration-db and the image rehearsal.
+        # Static append-only history against the base, the lint of the added
+        # files, and the source rules over the embedded set; the runtime
+        # checksum check runs in test-integration-db and the image rehearsal.
+        # A push compares with the commit it replaced, so a migration that a
+        # branch merged behind its base added out of order still fails here.
         if: needs.changes.outputs.migrations == 'true'
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
           if [[ "${EVENT_NAME}" == pull_request || "${EVENT_NAME}" == merge_group ]]; then
             git fetch --no-tags --depth=1 origin "${BASE_SHA}"
             bash ./scripts/ci/measure.sh quality-migrations -- make migration-check BASE_REF="${BASE_SHA}"
+          elif [[ "${EVENT_NAME}" == push && "${BEFORE_SHA}" =~ ^[0-9a-f]{40}$ && ! "${BEFORE_SHA}" =~ ^0+$ ]] &&
+            git fetch --no-tags --depth=1 origin "${BEFORE_SHA}"; then
+            bash ./scripts/ci/measure.sh quality-migrations -- make migration-check BASE_REF="${BEFORE_SHA}"
           else
             bash ./scripts/ci/measure.sh quality-migrations -- make migration-check BASE_REF=HEAD
           fi
