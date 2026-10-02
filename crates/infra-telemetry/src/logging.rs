@@ -87,6 +87,43 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
         .map_err(|_| LoggingError::AlreadyInstalled)
 }
 
+/// Whether the panic hook records the panic's message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanicMessage {
+    /// Record it, as Rust's own hook prints it.
+    Recorded,
+    /// Leave it out: the panicking code may have formatted caller-controlled
+    /// data into it.
+    Withheld,
+}
+
+/// Replace Rust's panic hook with one that reports a panic as an ERROR
+/// record: its place in the source, its thread, its message when `message`
+/// records it, and a backtrace when `RUST_BACKTRACE` asks for one.
+///
+/// Rust's hook prints plain text to stderr, which a JSON log pipeline cannot
+/// parse, and always prints the message. Install after the subscriber; a panic before that has nowhere to be recorded and
+/// keeps Rust's hook. A later call replaces the earlier hook.
+pub fn install_panic_hook(message: PanicMessage) {
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info.location();
+        let backtrace = std::backtrace::Backtrace::capture();
+        let captured = backtrace.status() == std::backtrace::BacktraceStatus::Captured;
+        tracing::error!(
+            panic.message = match message {
+                PanicMessage::Recorded => info.payload_as_str(),
+                PanicMessage::Withheld => None,
+            },
+            panic.file = location.map(std::panic::Location::file),
+            panic.line = location.map(std::panic::Location::line),
+            panic.column = location.map(std::panic::Location::column),
+            panic.thread = std::thread::current().name(),
+            panic.backtrace = captured.then(|| tracing::field::display(&backtrace)),
+            "panicked"
+        );
+    }));
+}
+
 /// The directive's filter with the spans every directive keeps: `Targets`
 /// when that is exact, `EnvFilter` otherwise.
 type LevelFilters = (
@@ -385,7 +422,7 @@ mod tests {
             outer.record("later", 7_u64);
             tracing::info_span!("inner", shared = "inner").in_scope(|| {
                 tracing::info!(
-                    target: "a\"b",
+                    target: "a\"b\n",
                     zeta = 1,
                     alpha = true,
                     ratio = f64::NAN,
@@ -400,8 +437,8 @@ mod tests {
             .expect("the line has a timestamp");
         let (timestamp, tail) = rest.split_once('"').expect("the timestamp is quoted");
         assert_eq!(
-            head, r#"{"level":"INFO","target":"a\"b","#,
-            "level and target come first: {record}"
+            head, r#"{"level":"INFO","target":"a\"b\n","#,
+            "level and target come first, the target escaped like any string: {record}"
         );
         assert_eq!(
             tail,

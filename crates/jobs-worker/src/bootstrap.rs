@@ -24,8 +24,9 @@ use infra_messaging::{
 use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe, SessionBudgets};
 // template:end jobs:worker-bootstrap-postgres-imports
 use infra_telemetry::{
-    ExporterState, LoggingFormat, LoggingOptions, Metrics, TracerProviderHandle, TracingOptions,
-    diagnostics_router, install_subscriber, install_tracer_provider, runtime_metrics,
+    ExporterState, LoggingFormat, LoggingOptions, Metrics, PanicMessage, TracerProviderHandle,
+    TracingOptions, diagnostics_router, install_panic_hook, install_subscriber,
+    install_tracer_provider, runtime_metrics,
 };
 use secrecy::ExposeSecret;
 use service_config::{AppConfig, Config, LogFormat, TracesSampler};
@@ -193,8 +194,13 @@ async fn prepare(
 ) -> Result<Prepared, WorkerError> {
     let identity = worker_identity(&config.observability.otel.service_name);
     let (tracer_provider, metrics) = install_observability(config, &identity)?;
+    install_panic_hook(PanicMessage::Recorded);
     // template:begin messaging:worker-bootstrap-sanitized-panic-hook-call
-    install_sanitized_panic_hook();
+    // The consumer treats a handler panic as a terminal worker fault, and a
+    // handler may format a message's content into its panic. Withhold the
+    // text so it never reaches logs before that typed failure reaches the
+    // lifecycle owner.
+    install_panic_hook(PanicMessage::Withheld);
     // template:end messaging:worker-bootstrap-sanitized-panic-hook-call
     let mut registrations = register_capabilities(config, register, cancel, tracker)?;
     log_startup_record(
@@ -437,23 +443,6 @@ fn refresh_policy(config: &Config) -> RefreshPolicy {
         failure_threshold: config.health.failure_threshold,
     }
 }
-
-// template:begin messaging:worker-bootstrap-sanitized-panic-hook
-/// The consumer treats a handler panic as a terminal worker fault. Replace
-/// Rust's default hook so caller-controlled panic text never reaches logs
-/// before that typed failure reaches the lifecycle owner.
-fn install_sanitized_panic_hook() {
-    std::panic::set_hook(Box::new(|info| {
-        let location = info.location();
-        tracing::error!(
-            panic.file = location.map_or("<unknown>", std::panic::Location::file),
-            panic.line = location.map(std::panic::Location::line),
-            panic.column = location.map(std::panic::Location::column),
-            "background task panicked"
-        );
-    }));
-}
-// template:end messaging:worker-bootstrap-sanitized-panic-hook
 
 fn install_observability(
     config: &Config,

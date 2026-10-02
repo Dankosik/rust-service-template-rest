@@ -19,7 +19,8 @@ it against the built binary.
    drops the unfinished startup at its next await, no listener is bound, and
    the teardown below runs without the listener stages.
 3. The tracer provider is installed, then the subscriber (so SDK warnings are
-   caught), then the Prometheus recorder; the startup record
+   caught), then the panic hook that turns a panic into an ERROR record,
+   then the Prometheus recorder; the startup record
    (`service_starting`) carries the non-secret facts an operator needs:
    `app.env`, `app.version`, `app.commit`, the listeners, the budgets, the
    log level, and the exporter state (`initialized`, `disabled`, `degraded`).
@@ -245,7 +246,7 @@ for the shipped binary, and the test-only `jobs-worker-fixture` suite in
 | 3 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)` |
 | 4 | Build the multi-thread runtime | `build tokio runtime: ...` |
 | 5 | Install `Signals` (SIGINT, then SIGTERM) | `install stop signal handlers: ...` |
-| 6 | Tracer provider with the worker identity, subscriber, recorder, and the retained messaging panic hook (it records the panic's file, line, and column, never its message) | the telemetry errors, as in the service |
+| 6 | Tracer provider with the worker identity, subscriber, recorder, and the panic hook (with messaging retained it records the panic's file, line, column, and thread, never its message) | the telemetry errors, as in the service |
 | 7 | Register optional jobs and typed-message capabilities through `register(&mut registration)`, which fills `Registration::jobs` and `Registration::messages`; validate each nonempty registry. A composition with no retained capability refuses after configuration is loaded | `job kind registration failed: ...`; `job kinds are invalid: ...`; `typed message handlers are invalid: ...`; `no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs` |
 | 8 | `jobs_worker_starting` record; metrics upkeep and Tokio runtime metrics join the tracker | |
 | 9 | After registration, determine whether retained capabilities need PostgreSQL; validate `postgres.enabled` and mode-aware pool capacity, then admit the DSN/pool and migration history | `postgres.enabled must be true to run the jobs worker`; capacity, DSN, pool, or history refusal |
