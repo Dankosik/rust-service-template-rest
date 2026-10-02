@@ -621,7 +621,7 @@ async fn client_credentials_request_has_no_authorization_header_and_expected_fie
         form_value(&pairs, "client_assertion_type"),
         CLIENT_ASSERTION_TYPE
     );
-    assert!(!form_value(&pairs, "client_assertion").is_empty());
+    assert_ne!(form_value(&pairs, "client_assertion"), "");
     assert_eq!(form_value(&pairs, "scope"), "read write");
     assert_eq!(
         form_value(&pairs, "audience"),
@@ -689,7 +689,7 @@ async fn assertion_header_and_claims_are_verifiable_and_two_requests_differ_in_j
             .unwrap()
             .as_secs();
         assert!((10..=15).contains(&(now - claims.iat)));
-        assert!(!claims.jti.is_empty());
+        assert_ne!(claims.jti, "");
     }
     assert_ne!(decoded[0].1.jti, decoded[1].1.jti);
     fixture.finish().await;
@@ -743,7 +743,7 @@ async fn token_exchange_request_has_expected_form_fields() {
         form_value(&pairs, "client_assertion_type"),
         CLIENT_ASSERTION_TYPE
     );
-    assert!(!form_value(&pairs, "client_assertion").is_empty());
+    assert_ne!(form_value(&pairs, "client_assertion"), "");
     assert_eq!(
         fixture.resource_requests()[0].header("authorization"),
         Some("Bearer exchanged")
