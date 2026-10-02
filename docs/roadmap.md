@@ -611,9 +611,10 @@ markers, tests, and initializer support. Order by expected demand:
    failure taxonomy in `crates/infra-bearerauthn`. **Merged via PR #41 at
    `098b4ab18dd5b2d158a94e126798d8cc429ad735`**;
    [adoption and durable decisions](authentication.md).
-2. Bounded outbound HTTP: fixed trusted-origin `reqwest` client with normal
-   TLS/system resolution, finite header-count and encoded-body limits,
-   correlation stripping, no proxy, and bounded telemetry. Its current
+2. Bounded outbound HTTP: fixed trusted-origin `hyper-util` client over
+   `hyper-rustls` with normal TLS/system resolution, finite header-count and
+   encoded-body limits, adapter-owned request headers, no proxy, and bounded
+   telemetry. Its current
    [adoption guide](outbound-http.md) and [decision record](outbound-http-decisions.md)
    define the profile.
 3. HTTP idempotency on PostgreSQL: composed operations, replay evidence and
