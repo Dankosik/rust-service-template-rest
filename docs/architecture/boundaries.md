@@ -34,7 +34,7 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 <!-- template:end jobs:docs-boundaries-jobs-owners -->
 <!-- template:begin messaging:docs-boundaries-messaging-owner -->
 | `domain-events` (`crates/domain-events`) | Typed event payload contract (type/version) and the event value: logical ID, occurrence time, and payload. Wire limits and validation live in `infra-messaging`. | Subjects, broker metadata, ID minting, clocks, configuration, or tasks. |
-| `infra-messaging` (`crates/infra-messaging`) | Go-compatible wire admission, prepared publication, typed registry, bounded JetStream consumer, deterministic DLQ/restore, and connection/probe mapping ([guide](../durable-messaging.md)). | Business events, feature policy, queue SQL or commits, stream administration, configuration loading, signals, or a generic bus. |
+| `infra-messaging` (`crates/infra-messaging`) | Go-compatible wire admission, prepared publication, typed registry and its AsyncAPI contract document, bounded JetStream consumer, deterministic DLQ/restore, and connection/probe mapping ([guide](../durable-messaging.md)). | Business events, feature policy, queue SQL or commits, stream administration, configuration loading, signals, or a generic bus. |
 <!-- template:end messaging:docs-boundaries-messaging-owner -->
 <!-- template:begin cache:docs-boundaries-cache-owner -->
 | `infra-cache` (`crates/infra-cache`) | Bytes-only RESP admission, a lazy `ConnectionManager`, namespace `get`/`set`/`delete`, the `cache` probe, and sanitized observation ([guide](../cache.md)). | Keys, serialization, TTL policy, invalidation, a generic `Cache<K, V>`, get-or-load, locks, rate limits, configuration loading, or readiness policy. |
@@ -113,7 +113,7 @@ infra-http -> infra-bearerauthn
 <!-- template:end authn:docs-boundaries-authn-edges -->
 <!-- template:begin messaging:docs-boundaries-messaging-edges -->
   -> domain-events
-  -> infra-messaging -> domain-events, async-nats, health, tokio, bytes
+  -> infra-messaging -> domain-events, async-nats, health, tokio, bytes, utoipa
 jobs-worker -> infra-messaging only when the messaging profile is retained
 service -> infra-messaging only for optional producer/probe composition
 <!-- template:end messaging:docs-boundaries-messaging-edges -->

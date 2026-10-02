@@ -10,6 +10,7 @@ use serde::de::DeserializeOwned;
 use foldhash::HashMap;
 use tokio_util::sync::CancellationToken;
 
+use crate::contract::{PayloadSchema, payload_schema};
 use crate::error::{HandlerError, RegistryError};
 use crate::prepared::PreparedEvent;
 use crate::wire::{InboundEnvelope, valid_subject};
@@ -33,10 +34,22 @@ const fn route_key<T: EventPayload>() -> RouteKey {
 }
 
 /// Composition-owned subject routing for one typed event.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Route {
     key: RouteKey,
     subject: String,
+    schema: Option<PayloadSchema>,
+}
+
+impl std::fmt::Debug for Route {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Route")
+            .field("key", &self.key)
+            .field("subject", &self.subject)
+            .field("documented", &self.schema.is_some())
+            .finish()
+    }
 }
 
 impl Route {
@@ -46,6 +59,17 @@ impl Route {
         Self {
             key: route_key::<T>(),
             subject: subject.into(),
+            schema: None,
+        }
+    }
+
+    /// Declares the subject and keeps the payload type's schema, so
+    /// [`Registry::asyncapi`] can describe the event.
+    #[must_use]
+    pub fn documented<T: EventPayload + utoipa::ToSchema>(subject: impl Into<String>) -> Self {
+        Self {
+            schema: Some(payload_schema::<T>),
+            ..Self::new::<T>(subject)
         }
     }
 }
@@ -54,6 +78,8 @@ impl Route {
 #[derive(Clone)]
 pub struct Registry {
     routes: HashMap<RouteKey, String>,
+    /// Payload schemas of the routes declared with [`Route::documented`].
+    schemas: HashMap<RouteKey, PayloadSchema>,
     handlers: HashMap<RouteKey, ErasedHandler>,
 }
 
@@ -74,6 +100,7 @@ impl Registry {
     /// Rejects duplicate routes or invalid type, schema and subject declarations.
     pub fn new(routes: impl IntoIterator<Item = Route>) -> Result<Self, RegistryError> {
         let mut mapped = HashMap::default();
+        let mut schemas = HashMap::default();
         for route in routes {
             if crate::wire::validate_text(route.key.0).is_err() {
                 return Err(RegistryError::InvalidRoute("event type is invalid"));
@@ -82,6 +109,9 @@ impl Registry {
                 return Err(RegistryError::InvalidRoute("subject is invalid"));
             }
             let (event_type, schema_version) = route.key;
+            if let Some(schema) = route.schema {
+                schemas.insert(route.key, schema);
+            }
             if mapped.insert(route.key, route.subject).is_some() {
                 return Err(RegistryError::DuplicateRoute {
                     event_type: event_type.to_owned(),
@@ -91,6 +121,7 @@ impl Registry {
         }
         Ok(Self {
             routes: mapped,
+            schemas,
             handlers: HashMap::default(),
         })
     }
@@ -153,6 +184,8 @@ impl Registry {
         PreparedEvent::prepare(subject, event, max_payload_bytes)
     }
 
+    /// Whether no handler is registered. Routes alone do not count: a
+    /// registry with routes and no handler only publishes.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.handlers.is_empty()
@@ -202,5 +235,14 @@ impl Registry {
             return Err(HandlerError::Permanent);
         };
         handler(envelope, cancel).await
+    }
+
+    /// Every route with its subject and, when documented, its payload schema.
+    pub(crate) fn routed(
+        &self,
+    ) -> impl Iterator<Item = ((&'static str, u16), &str, Option<PayloadSchema>)> {
+        self.routes
+            .iter()
+            .map(|(key, subject)| (*key, subject.as_str(), self.schemas.get(key).copied()))
     }
 }
