@@ -8,12 +8,18 @@
 //! transaction, unlock. [`verify_history`] is the read-only startup check.
 //! Both apply one history rule.
 //!
+//! A `-- no-transaction` migration carries what PostgreSQL refuses inside a
+//! transaction (`CREATE INDEX CONCURRENTLY`). Its statement is bounded by the
+//! run's deadline instead of the session `statement_timeout` and
+//! `lock_timeout`, and it is refused while the database holds an invalid
+//! index, which is what an interrupted concurrent build leaves behind.
+//!
 //! Forward-only by policy. The source rules the resolver does not enforce
 //! are a unit test over the embedded set.
 
 use std::time::Duration;
 
-use infra_postgres::{Dsn, SessionOptions, connect_session, sqlstate};
+use infra_postgres::{Dsn, SessionOptions, connect_session, observed, sqlstate};
 use sqlx::Connection;
 use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migration, Migrator};
 use sqlx::postgres::{PgConnection, PgPool};
@@ -21,16 +27,16 @@ use sqlx::postgres::{PgConnection, PgPool};
 /// The repository's migration set.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
-/// Bound on lock, history, and every pending migration after a live session
-/// exists. Connect is a separate [`infra_postgres::ACQUIRE_TIMEOUT`] and is
-/// not inside this value.
-pub const DEADLINE: Duration = Duration::from_secs(300);
 /// Session `statement_timeout` and `idle_in_transaction_session_timeout` of
 /// the migration connection. DDL on a large table legitimately runs longer
-/// than a request; [`DEADLINE`] still bounds the run.
+/// than a request, and a statement that holds a table lock must not run for
+/// as long as [`RunOptions::deadline`] allows. A `-- no-transaction`
+/// migration is bounded by that deadline instead.
 pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Session `lock_timeout`, which also bounds the wait for the advisory
-/// session lock another migrator may hold.
+/// session lock another migrator may hold. A `-- no-transaction` migration
+/// waits up to the deadline instead: a concurrent build waits for every
+/// transaction older than itself and blocks no write while it does.
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
 /// Bound on startup history admission, including pool acquire and its one
 /// read-only snapshot query.
@@ -88,26 +94,31 @@ pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
     }
 }
 
-/// Budgets for one run. [`RunOptions::defaults`] is what the binary uses;
-/// tests shorten them to observe a failure.
+/// Budgets for one run. [`RunOptions::defaults`] is what the binary uses,
+/// with `postgres.migration_deadline`; tests shorten them to observe a
+/// failure.
 #[derive(Clone, Debug)]
 pub struct RunOptions<'a> {
     pub dsn: &'a Dsn,
     /// Reported as `application_name` for the migration session.
     pub application_name: &'a str,
     pub connect_timeout: Duration,
+    /// Bound on lock, history, and every pending migration after a live
+    /// session exists. Connect is not inside this value.
     pub deadline: Duration,
+    pub statement_timeout: Duration,
     pub lock_timeout: Duration,
 }
 
 impl<'a> RunOptions<'a> {
     #[must_use]
-    pub const fn defaults(dsn: &'a Dsn, application_name: &'a str) -> Self {
+    pub const fn defaults(dsn: &'a Dsn, application_name: &'a str, deadline: Duration) -> Self {
         Self {
             dsn,
             application_name,
             connect_timeout: infra_postgres::ACQUIRE_TIMEOUT,
-            deadline: DEADLINE,
+            deadline,
+            statement_timeout: STATEMENT_TIMEOUT,
             lock_timeout: LOCK_TIMEOUT,
         }
     }
@@ -141,6 +152,12 @@ pub enum RunError {
     ConnectTimeout(Duration),
     #[error("migration run exceeded the {0:?} deadline")]
     Deadline(Duration),
+    /// A `-- no-transaction` migration was not started: an interrupted
+    /// concurrent build left an index that `IF NOT EXISTS` would keep.
+    #[error(
+        "migration {version} runs outside a transaction and the database holds invalid indexes ({indexes}); drop each with DROP INDEX CONCURRENTLY, then run again"
+    )]
+    InvalidIndexes { version: i64, indexes: String },
     #[error(transparent)]
     Migrate(#[from] MigrateError),
 }
@@ -161,7 +178,9 @@ impl RunError {
                 "connect"
             }
             Self::Deadline(_) => "deadline",
-            Self::Migrate(MigrateError::ExecuteMigration(..)) => "execute",
+            Self::InvalidIndexes { .. } | Self::Migrate(MigrateError::ExecuteMigration(..)) => {
+                "execute"
+            }
             Self::Migrate(MigrateError::Execute(sqlx::Error::Database(db)))
                 if db.code().as_deref() == Some(LOCK_NOT_AVAILABLE) =>
             {
@@ -177,12 +196,13 @@ impl RunError {
 /// # Errors
 ///
 /// [`RunError`]. [`RunError::stage`] names where it stopped. Each migration
-/// and its history row share one transaction.
+/// and its history row share one transaction, except a `-- no-transaction`
+/// migration, whose row is written after its statement.
 pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report, RunError> {
     let session = SessionOptions {
         application_name: options.application_name,
-        statement_timeout: STATEMENT_TIMEOUT,
-        idle_in_transaction_timeout: STATEMENT_TIMEOUT,
+        statement_timeout: options.statement_timeout,
+        idle_in_transaction_timeout: options.statement_timeout,
         lock_timeout: options.lock_timeout,
         extra: &[
             // `CREATE TABLE IF NOT EXISTS` on the history table raises a
@@ -202,9 +222,12 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
     .await
     .map_err(|_| RunError::ConnectTimeout(options.connect_timeout))?
     .map_err(RunError::Connect)?;
-    let report = tokio::time::timeout(options.deadline, apply_pending(&mut conn, migrator))
-        .await
-        .map_err(|_| RunError::Deadline(options.deadline))??;
+    let report = tokio::time::timeout(
+        options.deadline,
+        apply_pending(&mut conn, migrator, options),
+    )
+    .await
+    .map_err(|_| RunError::Deadline(options.deadline))??;
     // A close error must not fail an applied run. On failure the connection is
     // dropped instead, which ends the session, its lock, and any transaction.
     let _ = conn.close().await;
@@ -218,7 +241,8 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
 async fn apply_pending(
     conn: &mut PgConnection,
     migrator: &Migrator,
-) -> Result<Report, MigrateError> {
+    options: &RunOptions<'_>,
+) -> Result<Report, RunError> {
     conn.lock().await?;
     conn.ensure_migrations_table(&migrator.table_name).await?;
     let history = applied_history(conn, &migrator.table_name).await?;
@@ -227,11 +251,83 @@ async fn apply_pending(
         applied: Vec::new(),
     };
     for migration in pending(migrator, &history)? {
-        conn.apply(&migrator.table_name, migration).await?;
+        tracing::info!(
+            migration.version = migration.version,
+            migration.transaction = !migration.no_tx,
+            "migration_applying"
+        );
+        let elapsed = if migration.no_tx {
+            apply_outside_transaction(conn, &migrator.table_name, migration, options).await?
+        } else {
+            conn.apply(&migrator.table_name, migration).await?
+        };
+        tracing::info!(
+            migration.version = migration.version,
+            migration.duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            "migration_applied"
+        );
         report.applied.push(migration.version);
     }
     conn.unlock().await?;
     Ok(report)
+}
+
+/// Apply one `-- no-transaction` migration.
+///
+/// Nothing rolls such a statement back, so two things differ from a
+/// transactional migration. An invalid index refuses the run before the
+/// statement starts: a failed `CREATE INDEX CONCURRENTLY` leaves one, and the
+/// `IF NOT EXISTS` that makes the file safe to rerun would otherwise accept
+/// it as built. And the statement runs under the deadline instead of the
+/// session `statement_timeout` and `lock_timeout`: a concurrent build takes
+/// as long as the table is large and waits for every older transaction to
+/// end, while holding no lock that blocks writes.
+async fn apply_outside_transaction(
+    conn: &mut PgConnection,
+    table: &str,
+    migration: &Migration,
+    options: &RunOptions<'_>,
+) -> Result<Duration, RunError> {
+    let invalid = observed(
+        "SELECT pg_index",
+        sqlx::query_scalar!(
+            // `relkind = 'i'` leaves out the index of a partitioned table,
+            // which is invalid by design until every partition is attached.
+            r#"SELECT c.oid::regclass::text AS "name!" FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE NOT i.indisvalid AND c.relkind = 'i' ORDER BY 1"#
+        )
+        .fetch_all(&mut *conn),
+    )
+    .await
+    .map_err(MigrateError::Execute)?;
+    if !invalid.is_empty() {
+        return Err(RunError::InvalidIndexes {
+            version: migration.version,
+            indexes: invalid.join(", "),
+        });
+    }
+    set_session_timeouts(conn, options.deadline, options.deadline).await?;
+    let elapsed = conn.apply(table, migration).await?;
+    set_session_timeouts(conn, options.statement_timeout, options.lock_timeout).await?;
+    Ok(elapsed)
+}
+
+async fn set_session_timeouts(
+    conn: &mut PgConnection,
+    statement_timeout: Duration,
+    lock_timeout: Duration,
+) -> Result<(), MigrateError> {
+    observed(
+        "SELECT set_config",
+        sqlx::query!(
+            "SELECT set_config('statement_timeout', $1, false) AS statement_timeout, set_config('lock_timeout', $2, false) AS lock_timeout",
+            format!("{}ms", statement_timeout.as_millis()),
+            format!("{}ms", lock_timeout.as_millis()),
+        )
+        .fetch_one(conn),
+    )
+    .await
+    .map_err(MigrateError::Execute)?;
+    Ok(())
 }
 
 /// Applied rows. A failed row is dirty history, as in `Migrator::run`.
@@ -322,11 +418,6 @@ mod tests {
                 "migration {version} is reversible; the template is forward-only, write a new migration instead of a .down.sql"
             ));
         }
-        if migration.no_tx {
-            return Some(format!(
-                "migration {version} disables its transaction (-- no-transaction); every migration runs in one"
-            ));
-        }
         if !is_canonical_description(&migration.description) {
             let description = migration.description.as_ref();
             return Some(format!(
@@ -358,6 +449,12 @@ mod tests {
                 MigrationType::Simple,
                 false,
             ),
+            migration(
+                20_260_918_120_002,
+                "widgets sku index",
+                MigrationType::Simple,
+                true,
+            ),
         ] {
             assert_eq!(source_rule_violation(&migration), None);
         }
@@ -377,10 +474,6 @@ mod tests {
             (
                 migration(8, "up", MigrationType::ReversibleUp, false),
                 "forward-only",
-            ),
-            (
-                migration(9, "concurrently", MigrationType::Simple, true),
-                "no-transaction",
             ),
             (
                 migration(10, "Create Widgets", MigrationType::Simple, false),
@@ -491,6 +584,14 @@ mod tests {
             )))
             .stage(),
             "connect"
+        );
+        assert_eq!(
+            RunError::InvalidIndexes {
+                version: 3,
+                indexes: "widgets_sku".to_owned(),
+            }
+            .stage(),
+            "execute"
         );
         assert_eq!(
             RunError::Deadline(Duration::from_secs(1)).stage(),

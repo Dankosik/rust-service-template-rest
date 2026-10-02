@@ -256,7 +256,10 @@
       },
       {
         "path": "tools/versions.env",
-        "id": "tools-sqlx-cli-version"
+        "ids": [
+          "tools-sqlx-cli-version",
+          "tools-squawk-cli-version"
+        ]
       }
     ]
   },

@@ -36,8 +36,9 @@ version) and starts only the jobs its surfaces select:
 | `required` | always | fails when any job failed or was cancelled; requires terminal success for a selected initializer matrix |
 
 <!-- template:begin postgres:docs-ci-postgres-gates -->
-With PostgreSQL retained, `quality` also checks migration history and embedded
-source rules. `integration` runs the real database proof on provider, migrator,
+With PostgreSQL retained, `quality` also checks migration history, lints the
+added migrations with Squawk (`SQUAWK_CLI_VERSION`, through `npx` as Redocly
+is), and checks the embedded source rules. `integration` runs the real database proof on provider, migrator,
 migration, DB-test, Compose or DB-script changes, and then `make sqlx-check`:
 `.sqlx/` must equal what the checked statements produce against a database
 holding exactly the embedded migrations. `sqlx-cli` has no release binaries, so
@@ -278,7 +279,7 @@ later change reopens one only with new evidence.
 
 <!-- template:begin postgres:docs-ci-postgres-routing -->
 `db_integration` selects database proof; `migrations` selects static history
-and the image rehearsal in place of the plain lifecycle check. Separate
+with the lint and the image rehearsal in place of the plain lifecycle check. Separate
 surfaces let a schema change require image rehearsal without rebuilding for
 every adapter-only change.
 <!-- template:end postgres:docs-ci-postgres-routing -->

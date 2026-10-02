@@ -103,7 +103,7 @@ version. CI installs the same versions as prebuilt binaries.
 | `ALLOW_HEAVY=1 make test-integration-db` | The database-backed proof: a throwaway compose PostgreSQL on an ephemeral port, `cargo test -p integration-tests --features integration` with `DATABASE_URL`, teardown; `REQUIRE_DOCKER=1` fails instead of refusing without Docker | Docker |
 | `make sqlx-prepare` | Regenerate `.sqlx/`, the statement metadata `sqlx::query!` builds against: a throwaway compose PostgreSQL, the migrations applied, every checked statement described | Docker |
 | `ALLOW_HEAVY=1 make sqlx-check` | Fail when `.sqlx/` differs from what the statements and the migrations produce now | Docker |
-| `make migration-check` | Static append-only history (`BASE_REF` for a range; the worktree with untracked files by default) and the `migrate` crate's source-rule tests over the embedded set | toolchain |
+| `make migration-check` | Static append-only history (`BASE_REF` for a range; the worktree with untracked files by default), Squawk over the migrations the change adds, and the `migrate` crate's source-rule tests over the embedded set | toolchain, Node.js (`npx`) when a migration is added |
 | `make migration-history-self-test` | Self-test of `scripts/ci/migration-history-check.sh` | — |
 | `ALLOW_HEAVY=1 make migration-validate RUNTIME_EXPECTED_COMMIT=<sha>` | Rehearse the image: `/migrate` against a fresh compose database, replay must be `no_change`, then `runtime-image-check` with the profile enabled; uses the local image default from `make/service.mk` | Docker, curl |
 <!-- template:end postgres:commands-postgres -->

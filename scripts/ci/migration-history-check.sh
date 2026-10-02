@@ -5,9 +5,14 @@
 # crates/migrate compares checksums against the database; this one fails the
 # pull request before a rewritten file reaches any database.
 #
+# The files the change adds are then linted with Squawk for DDL that blocks
+# or breaks a running service. Only additions are linted: a file the base
+# already had may be applied somewhere and can no longer be corrected.
+#
 #   migration-history-check.sh              worktree vs HEAD, untracked included
 #   BASE_REF=<ref> migration-history-check.sh   merge-base of BASE_REF and HEAD
 #   migration-history-check.sh --self-test
+#   MIGRATION_LINTER=<command> replaces the pinned `npx squawk-cli`.
 set -euo pipefail
 
 ROOT_DIR="${MIGRATION_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
@@ -28,9 +33,17 @@ self_test() {
 	git -C "${fixture}" add .
 	git -C "${fixture}" commit -qm baseline
 
+	# The linter is replaced by a recorder, so the self-test needs no network
+	# and still proves which files reach it and under which transaction mode.
+	linter_log=$(mktemp -t migration-history-linter.XXXXXX)
+	linter="${fixture}/.git/linter"
+	printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"%s"\n' "${linter_log}" >"${linter}"
+	chmod +x "${linter}"
+	trap 'rm -rf -- "${fixture}" "${linter_log}"' EXIT
+
 	# The fixture has no remote, so the caller's BASE_REF (make exports
 	# origin/main) must not leak in; arguments are KEY=VALUE overrides.
-	run() { env -u BASE_REF -u MIGRATION_DIR "MIGRATION_REPO_ROOT=${fixture}" "$@" bash "${script}"; }
+	run() { env -u BASE_REF -u MIGRATION_DIR "MIGRATION_REPO_ROOT=${fixture}" "MIGRATION_LINTER=${linter}" "$@" bash "${script}"; }
 
 	run >/dev/null || {
 		echo "self-test: clean worktree failed" >&2
@@ -52,6 +65,25 @@ self_test() {
 		echo "self-test: untracked newer addition failed" >&2
 		exit 1
 	}
+	[[ $(cat "${linter_log}") == *"--assume-in-transaction migrations/20260918000004_add.sql" ]] || {
+		echo "self-test: the added migration did not reach the linter as transactional" >&2
+		exit 1
+	}
+	if run MIGRATION_LINTER=false >/dev/null 2>&1; then
+		echo "self-test: a linter finding passed" >&2
+		exit 1
+	fi
+	printf -- '-- no-transaction\nSELECT 5;\n' >"${fixture}/migrations/20260918000005_online.sql"
+	: >"${linter_log}"
+	run >/dev/null || {
+		echo "self-test: untracked no-transaction addition failed" >&2
+		exit 1
+	}
+	[[ $(cat "${linter_log}") == *"--assume-in-transaction migrations/20260918000004_add.sql"*"--no-assume-in-transaction migrations/20260918000005_online.sql" ]] || {
+		echo "self-test: migrations were not linted under their own transaction mode" >&2
+		exit 1
+	}
+	rm "${fixture}/migrations/20260918000005_online.sql"
 	git -C "${fixture}" add migrations/20260918000004_add.sql
 	run >/dev/null || {
 		echo "self-test: staged newer addition failed" >&2
@@ -103,7 +135,7 @@ self_test() {
 	# EXIT runs after this function returns; keep its cleanup paths in script scope.
 	endpoint_fixture=$(mktemp -d -t migration-history-endpoint.XXXXXX)
 	transition_fixture=$(mktemp -d -t migration-history-transition.XXXXXX)
-	trap 'rm -rf -- "${fixture}" "${endpoint_fixture}" "${transition_fixture}"' EXIT
+	trap 'rm -rf -- "${fixture}" "${linter_log}" "${endpoint_fixture}" "${transition_fixture}"' EXIT
 	write_fixture() { mkdir -p "$(dirname "$1")" && cat >"$1"; }
 	assert_fixture_hash() {
 		[[ $(git hash-object "$1") == "$2" ]] || {
@@ -352,7 +384,7 @@ CREATE TABLE http_idempotency_records (
 CREATE INDEX http_idempotency_records_expires_at ON http_idempotency_records (expires_at);
 SQL
 
-	endpoint_run() { env -u BASE_REF -u MIGRATION_DIR "MIGRATION_REPO_ROOT=$1" bash "${script}"; }
+	endpoint_run() { env -u BASE_REF -u MIGRATION_DIR "MIGRATION_REPO_ROOT=$1" "MIGRATION_LINTER=${linter}" bash "${script}"; }
 	for endpoint in "${endpoint_fixture}" "${transition_fixture}"; do
 		git -C "${endpoint}" init -q
 		git -C "${endpoint}" config user.name migration-history
@@ -553,3 +585,43 @@ if [[ -n ${out_of_order} ]]; then
 fi
 
 echo "migration history is append-only (${scope})"
+
+# sqlx runs a file outside a transaction when it starts with this marker.
+transactional=()
+outside_transaction=()
+while IFS= read -r file; do
+	[[ -f ${file} ]] || continue
+	if [[ $(head -c 17 "${file}") == '-- no-transaction' ]]; then
+		outside_transaction+=("${file}")
+	else
+		transactional+=("${file}")
+	fi
+done < <(printf '%s\n' "${added}" | LC_ALL=C awk -F/ "${is_migration}"' { print }' | LC_ALL=C sort)
+if ((${#transactional[@]} + ${#outside_transaction[@]} == 0)); then
+	exit 0
+fi
+
+if [[ -n ${MIGRATION_LINTER:-} ]]; then
+	read -r -a linter <<<"${MIGRATION_LINTER}"
+else
+	# shellcheck source=tools/versions.env
+	. "$(dirname "${BASH_SOURCE[0]}")/../../tools/versions.env"
+	command -v npx >/dev/null 2>&1 || {
+		echo "migration lint requires Node.js (npx) for squawk-cli@${SQUAWK_CLI_VERSION}" >&2
+		exit 2
+	}
+	linter=(env npm_config_prefer_offline=true npx --yes "squawk-cli@${SQUAWK_CLI_VERSION}")
+fi
+# The runner publishes lock_timeout and statement_timeout for the session, so
+# a file does not set them; smallint is this template's type for a bounded
+# count. PostgreSQL 14 is the oldest supported server.
+linter+=(--pg-version 14 --exclude "require-lock-timeout,require-statement-timeout,prefer-bigint-over-smallint")
+lint() {
+	"${linter[@]}" "$@" || {
+		echo "migration lint: correct the migration, or put \`-- squawk-ignore <rule>\` with the reason above the statement" >&2
+		exit 1
+	}
+}
+if ((${#transactional[@]} > 0)); then lint --assume-in-transaction "${transactional[@]}"; fi
+if ((${#outside_transaction[@]} > 0)); then lint --no-assume-in-transaction "${outside_transaction[@]}"; fi
+echo "migration lint passed (${#transactional[@]} transactional, ${#outside_transaction[@]} outside a transaction)"

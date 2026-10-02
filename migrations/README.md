@@ -40,9 +40,23 @@ Rules, proven by `cargo test -p migrate` over the embedded set:
 - File name `<version>_<lowercase_snake_case>.sql`, where `<version>` is a
   positive integer. Use the UTC timestamp `YYYYMMDDHHMMSS` so concurrent
   branches do not collide, for example `20260918120000_create_widgets.sql`.
-- One transaction per file. `-- no-transaction` is refused; an operation
-  that cannot run in a transaction (`CREATE INDEX CONCURRENTLY`) needs its
-  own decision recorded in the persistence document first.
+- One transaction per file, with its history row. The exception is a
+  statement PostgreSQL refuses inside a transaction, in practice
+  `CREATE INDEX CONCURRENTLY` on a table that already holds rows. Such a
+  file starts with the line `-- no-transaction`, holds that one statement,
+  and spells it so that a rerun is safe (`IF NOT EXISTS`), because its
+  history row is written after it:
+
+  ```sql
+  -- no-transaction
+  CREATE INDEX CONCURRENTLY IF NOT EXISTS widgets_sku ON widgets (sku);
+  ```
+
+  The runner bounds it by `postgres.migration_deadline` (default `5m`)
+  instead of the two-minute statement budget and the 15-second lock
+  budget; raise that key on the run that builds an index on a large table. A build that fails leaves an
+  invalid index, and the next run refuses to start the migration until it
+  is dropped (`DROP INDEX CONCURRENTLY <name>`), naming it in the error.
 - No `.up.sql`/`.down.sql` pairs. A rollback is a new forward migration.
 - An applied file is never edited or deleted: the runner compares checksums
   and refuses a history that disagrees with the source. `make migration-check`
@@ -52,6 +66,21 @@ Rules, proven by `cargo test -p migrate` over the embedded set:
   That source-only exception does not make runtime history compatible with the
   former migrations; a database made from the former history must be explicitly
   recreated outside startup.
+- `make migration-check` lints every file a change adds with
+  [Squawk](https://squawk.dev) for DDL that blocks or breaks a running
+  service: an index built without `CONCURRENTLY` on an existing table, a
+  required column without a default, a column type change, a dropped
+  column. When the operation is intended, say why and waive the rule above
+  the statement:
+
+  ```sql
+  -- The previous release stopped reading this column.
+  -- squawk-ignore ban-drop-column
+  ALTER TABLE widgets DROP COLUMN sku;
+  ```
+
+  A file sets no `lock_timeout` or `statement_timeout`; the runner
+  publishes both for its session.
 
 A migration changes what the checked statements (`sqlx::query!`) compile
 against: run `make sqlx-prepare` with it and commit the `.sqlx/` changes.
