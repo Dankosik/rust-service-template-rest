@@ -9,7 +9,7 @@ use std::process::ExitCode;
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 // template:begin inbound-webhooks:worker-webhooks-inbound-imports
-use infra_webhooks::inbound::Processor;
+use infra_webhooks::inbound::{Consumers, Processor};
 // template:end inbound-webhooks:worker-webhooks-inbound-imports
 // template:begin webhooks:worker-webhooks-outbound-imports
 use std::collections::BTreeMap;
@@ -66,7 +66,10 @@ fn register(
     register_outbound(registration)?;
     // template:end webhooks:worker-webhooks-register-outbound
     // template:begin inbound-webhooks:worker-webhooks-register-inbound
-    let consumers = webhook_consumers::consumers();
+    // Bind each configured endpoint to its adapter here:
+    // `consumers.insert("partner", Arc::new(Partner))?`. The template has no
+    // business consumer, so a configured endpoint refuses startup below.
+    let consumers = Consumers::new();
     consumers.require(
         registration
             .config()

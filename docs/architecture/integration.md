@@ -40,8 +40,8 @@ general many-authority transport, proxy handling, redirects, or an inner retry.
 Inbound webhook processing crosses to adopter code through a registered consumer
 that receives immutable incoming bytes and `&mut Tx`. Database effects and
 fenced completion share that transaction; external recipients must be
-idempotent. Adopters register real adapters once in
-`webhook_consumers::consumers()`, which both roots use for startup admission.
+idempotent. Adopters register real adapters once in the worker's `register`,
+which checks every configured endpoint before claiming.
 A historical job with a missing binding retries, consumes attempts, and
 eventually exhausts.
 <!-- template:end inbound-webhooks:docs-integration-webhooks-inbound -->

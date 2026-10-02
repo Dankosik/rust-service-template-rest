@@ -252,13 +252,13 @@ it does not own router middleware, endpoint configuration precedence, or a
 business event schema. `infra-http::webhooks` owns route annotation and problem
 mapping, not receipt SQL or signature implementation.
 
-`webhook-consumers` is the shared adopter composition crate retained only with
-inbound webhooks. Its `consumers()` constructor is the one registration edit
-point used by both service and worker; both roots reject unbound configured
-endpoints before serving or claiming. It initially depends only on
-`infra-webhooks`; adopter adapters keep business behavior in feature owners.
-The worker passes the same registry into the processor. Neither root depends
-on the other, and the provider does not own adopter registrations.
+The worker root owns consumer registration: `register` in
+`crates/jobs-worker/src/main.rs` binds each endpoint beside the job kinds and
+message handlers, rejects an unbound configured endpoint before claiming, and
+passes the registry into the processor. Adopter adapters keep business
+behavior in feature owners. The service root admits receipts and holds no
+consumer, so it never links or constructs one; the provider does not own
+adopter registrations.
 <!-- template:end inbound-webhooks:docs-boundaries-webhooks-inbound -->
 
 Ownership choices made in stages 1 to 3 and 8 that a later change should not

@@ -369,7 +369,7 @@ impl RunningProcessor {
 
     fn with_consumer(pool: &PgPool, consumer: Arc<dyn Consumer>) -> Self {
         let mut consumers = Consumers::new();
-        assert!(consumers.insert(ENDPOINT, consumer).is_none());
+        consumers.insert(ENDPOINT, consumer).expect("first binding");
         Self::start(pool, consumers)
     }
 
