@@ -1,6 +1,6 @@
 # Goal
 
-status: ready
+status: done
 
 Completion: One separate PR contains the assembled T1 reliability correction,
 its meaningful regression coverage, generated sources, profile containment and
@@ -30,7 +30,14 @@ and [Implementation](../../docs/spec-first-workflow/phases/implementation.md).
 
 ## Completion result
 
-Implementation is complete; assembled validation and independent review remain
-pending. The earlier 45 baseline tests and another PR's presence are not this
-candidate's proof. Root assigns the existing Lead as delivery owner; acceptance
-and remote PR/CI state remain outstanding.
+Accepted: local Completion at `86b388431685ec950d5a0df7ec93aa5f3abf5bbe`;
+evidence: [validation.md](validation.md), [independent PASS](implementation-review.md).
+Workspace lint/build/tests passed (817 passes, zero failures, one CI-owned Go
+fixture ignored), as did the selected scoped local steps. The failed aggregate
+remains failed; consolidated claim-matched receipts establish this local result.
+Accepted: global Completion at `86b388431685ec950d5a0df7ec93aa5f3abf5bbe`.
+PR #228 is open and ready for review. CI `37034066726` and CodeQL
+`37034066787` completed successfully on that exact head; all selected image,
+integration, SQLx, provider and profile gates passed. No merge, deployment or
+live recovery result is claimed. Git will archive these receipts; canonical
+jobs/async/outbox/configuration guides own the durable decisions after cleanup.

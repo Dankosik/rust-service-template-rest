@@ -1,6 +1,6 @@
 # Infra-jobs reliability continuation
 
-Status: draft
+Status: done
 
 The user authorized complete justified fixes and one separate pull request,
 then explicitly requested continuation after interruption. Commit, push and PR
@@ -20,14 +20,16 @@ PASS. [Planning](planning-transition.md) is also ready with PASS. Root is the
 sole ledger writer. Narrow Technical Design adoption is ready with delta PASS.
 Root fast-forwarded the isolated branch to immutable foundation
 `5a683be7098fdba4981afffd774f59fed40145ed` and reconciled T1 inputs.
-T1 returned Implemented with all writers joined. Root merged current main
-`546a381` without conflicts, bringing the pinned compiler to Rust 1.99.0.
-Native actor `/root/infra_jobs_implementation` now owns assembled final
-validation/review and serial in-scope repairs. Reconcile native status before
-waiting or resuming this locator.
+T1 is locally Accepted at `86b388431685ec950d5a0df7ec93aa5f3abf5bbe` with
+claim-matched validation and independent PASS. All actors/readers/writers joined.
+Root owns only outstanding PR #228 CI and closeout. Current main `546a381`
+was integrated without conflict; pinned compiler is Rust 1.99.0.
 
-Next: consume final delivery proof/review, then commit/push and PR/CI delivery.
-Preserve reviewed decisions; do not restart discovery.
+CI `37034066726` and CodeQL `37034066787` completed successfully on exact head
+`86b3884`. Global Completion is Accepted. Next: Git archive and remove completed
+execution-only state under Cleanup, validate the changed documentation links,
+then obtain the final published-head gate results without repeating local Rust
+checks. Product-source bytes and their accepted review remain unchanged.
 
 ## Coordination and proof
 
@@ -49,6 +51,7 @@ Docker availability was refreshed to a working existing OrbStack context
 (server 29.4.0), without host mutation by this task. Actual SQL metadata must
 come from the existing `make sqlx-prepare` route. Final checks remain selected
 by repository validation and CI owners, with CPU-heavy work serialized.
-No new implementation commit, push or PR was created by this branch yet.
-Foundation integration includes the common implementation and known CI repairs.
-Its presence alone does not establish Completion.
+This branch delivered PR #228 with common implementation and all corrections;
+it can replace the overlapping #225 candidate, without merging both. Local
+checks and independent review passed after disk capacity recovered. Current CI
+head is `86b3884`; old cancelled draft runs are not its active gate receipts.
