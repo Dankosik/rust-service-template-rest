@@ -19,14 +19,15 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use health::Probe;
-use infra_cache::{Cache, CacheOptions, Unavailable};
+use infra_cache::{Cache, CacheOptions, ClientCertificate, Unavailable};
 use secrecy::SecretString;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_rustls::TlsAcceptor;
-use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use tokio_rustls::rustls::server::WebPkiClientVerifier;
+use tokio_rustls::rustls::{RootCertStore, ServerConfig};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_millis(200);
 const TIMEOUT_BOUND: Duration = Duration::from_millis(450);
@@ -68,6 +69,7 @@ fn options(
         dsn: SecretString::from(dsn.into()),
         password_file: None,
         root_ca_path: root_ca,
+        client_certificate: None,
         allow_plaintext: true,
         allow_unauthenticated: true,
         command_timeout,
@@ -200,31 +202,91 @@ where
 }
 
 fn tls_acceptor(material: &tls::TlsMaterial) -> TlsAcceptor {
-    let config = ServerConfig::builder_with_provider(Arc::new(
-        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .expect("fixture TLS protocol versions")
-    .with_no_client_auth()
-    .with_single_cert(
-        vec![CertificateDer::from(material.cert.clone())],
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
-    )
-    .expect("fixture certificate and key");
+    acceptor(material, None)
+}
+
+/// A TLS endpoint that, given `client_ca`, refuses a client that presents no
+/// certificate signed by it, as a server with `tls-auth-clients yes` does.
+fn acceptor(material: &tls::TlsMaterial, client_ca: Option<&[u8]>) -> TlsAcceptor {
+    let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
+    let builder = ServerConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .expect("fixture TLS protocol versions");
+    let builder = match client_ca {
+        None => builder.with_no_client_auth(),
+        Some(client_ca) => {
+            let mut roots = RootCertStore::empty();
+            roots
+                .add(CertificateDer::from(client_ca.to_vec()))
+                .expect("fixture client CA");
+            builder.with_client_cert_verifier(
+                WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
+                    .build()
+                    .expect("fixture client verifier"),
+            )
+        }
+    };
+    let config = builder
+        .with_single_cert(
+            vec![CertificateDer::from(material.cert.clone())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
+        )
+        .expect("fixture certificate and key");
     TlsAcceptor::from(Arc::new(config))
 }
 
 fn write_pem(der: &[u8]) -> tempfile::NamedTempFile {
+    write_pem_block("CERTIFICATE", der)
+}
+
+fn write_pem_block(label: &str, der: &[u8]) -> tempfile::NamedTempFile {
     let encoded = base64::engine::general_purpose::STANDARD.encode(der);
-    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    let mut body = String::new();
     for line in encoded.as_bytes().chunks(64) {
-        pem.push_str(std::str::from_utf8(line).expect("base64 is ascii"));
-        pem.push('\n');
+        body.push_str(std::str::from_utf8(line).expect("base64 is ascii"));
+        body.push('\n');
     }
-    pem.push_str("-----END CERTIFICATE-----\n");
-    let mut file = tempfile::NamedTempFile::new().expect("ca tempfile");
-    std::io::Write::write_all(&mut file, pem.as_bytes()).expect("write ca pem");
+    let pem = format!("-----BEGIN {label}-----\n{body}-----END {label}-----\n");
+    let mut file = tempfile::NamedTempFile::new().expect("pem tempfile");
+    std::io::Write::write_all(&mut file, pem.as_bytes()).expect("write pem");
     file
+}
+
+/// A client CA and a client-auth leaf it signed, the leaf and its key as PEM files.
+struct ClientIdentity {
+    ca: Vec<u8>,
+    cert: tempfile::NamedTempFile,
+    key: tempfile::NamedTempFile,
+}
+
+impl ClientIdentity {
+    fn new() -> Self {
+        let mut ca = rcgen::CertificateParams::default();
+        ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
+        let issuer = rcgen::CertifiedIssuer::self_signed(
+            ca,
+            rcgen::KeyPair::generate().expect("client CA key"),
+        )
+        .expect("client CA");
+        let key = rcgen::KeyPair::generate().expect("client key");
+        let mut leaf = rcgen::CertificateParams::new(vec!["cache-client".to_owned()])
+            .expect("client certificate params");
+        leaf.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+        let certificate = leaf.signed_by(&key, &issuer).expect("client certificate");
+        Self {
+            ca: issuer.der().to_vec(),
+            cert: write_pem(certificate.der()),
+            key: write_pem_block("PRIVATE KEY", &key.serialize_der()),
+        }
+    }
+
+    fn paths(&self) -> ClientCertificate {
+        ClientCertificate {
+            cert_path: self.cert.path().to_path_buf(),
+            key_path: self.key.path().to_path_buf(),
+        }
+    }
 }
 
 #[tokio::test]
@@ -408,6 +470,55 @@ async fn an_untrusted_ca_is_unavailable() {
     ))
     .expect("admit untrusted CA file");
     let err = cache.namespace("tls").get(&unique_key()).await.unwrap_err();
+    assert!(matches!(err, Unavailable));
+}
+
+#[tokio::test]
+async fn a_client_certificate_roundtrips_through_a_proxy_that_requires_one() {
+    let material = tls::TlsMaterial::new("localhost");
+    let ca = write_pem(&material.root);
+    let identity = ClientIdentity::new();
+    let upstream = upstream_addr(&cache_url());
+    let proxy = Proxy::tls(upstream, acceptor(&material, Some(&identity.ca))).await;
+    let cache = Cache::connect_lazy(CacheOptions {
+        client_certificate: Some(identity.paths()),
+        ..options(
+            format!("rediss://localhost:{}", proxy.port),
+            Duration::from_secs(1),
+            Some(ca.path().to_path_buf()),
+        )
+    })
+    .expect("admit a client certificate");
+    let namespace = cache.namespace("mtls");
+    let key = unique_key();
+    namespace
+        .set(&key, b"mutual", Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert_eq!(
+        namespace.get(&key).await.unwrap().as_deref(),
+        Some(&b"mutual"[..])
+    );
+}
+
+#[tokio::test]
+async fn a_proxy_that_requires_a_client_certificate_refuses_a_client_without_one() {
+    let material = tls::TlsMaterial::new("localhost");
+    let ca = write_pem(&material.root);
+    let identity = ClientIdentity::new();
+    let upstream = upstream_addr(&cache_url());
+    let proxy = Proxy::tls(upstream, acceptor(&material, Some(&identity.ca))).await;
+    let cache = Cache::connect_lazy(options(
+        format!("rediss://localhost:{}", proxy.port),
+        COMMAND_TIMEOUT,
+        Some(ca.path().to_path_buf()),
+    ))
+    .expect("admit TLS without a client certificate");
+    let err = cache
+        .namespace("mtls")
+        .get(&unique_key())
+        .await
+        .unwrap_err();
     assert!(matches!(err, Unavailable));
 }
 

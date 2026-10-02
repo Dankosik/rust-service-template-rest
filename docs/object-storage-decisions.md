@@ -4,8 +4,8 @@
 Stage 10.9 library, provider, and failure decisions, recorded 2026-09-29 and
 amended 2026-10-01 (workload identity, the generic provider, the read attempt
 bound, body types, and failure visibility) and 2026-10-02 (request
-identifiers, empty downloads, who may read a streamed download, and the
-span's region).
+identifiers, empty downloads, who may read a streamed download, the span's
+region, the emulator's bucket, and key rotation).
 [Guide](object-storage.md) owns adoption and observable behavior. This record
 retains the accepted choices and their reopen conditions. The comparison
 behind them, including the Go sibling template's findings, is the stage's
@@ -68,6 +68,7 @@ Every MSRV fits workspace Rust 1.98.
 | Each provider accepts only its own keys; shapes are admitted by the crate | A key another provider owns is refused instead of ignored. `service-config` owns applicability and ranges; `infra-object-storage`, which builds the client, owns value shapes. | |
 | Virtual-hosted addressing for every named production provider; `path_style` only for `s3_compatible` | Tigris dropped path-style for buckets created on or after 2025-02-19, both production Railway buckets run virtual-hosted, and dotless bucket names keep TLS wildcards valid. A self-hosted gateway often serves no per-bucket host. | A Railway bucket that requires path-style. |
 | Typed credentials: `credentials = "access_key"` with `access_key_id` and environment-only `secret_access_key`, or for `amazon_s3` `credentials = "workload_identity"`; no static session token and no default chain | The global `AWS_*` access-key variables would bypass typed configuration and block a second store per process; Railway injects per-bucket values. On AWS a long-lived IAM user key is the discouraged form, so the workload's role is selectable by one explicit key: web identity (EKS IRSA), the container endpoint (ECS, EKS Pod Identity), then the instance profile, in the SDK's order and with its refresh. The instance metadata endpoint is fixed at `http://169.254.169.254`, because the SDK's client would otherwise read it from an AWS profile file. A static session token would expire with no refresher. | A consumer needs R2 temporary credentials or an assumed role chain. |
+| An access key pair is read once, at startup; there is no key file the client follows | Both production consumers run on Railway, which injects the pair as variables and invalidates the old pair at a reset, so a file would change nothing there. R2 and Amazon let two keys overlap, so a rolling restart rotates without a failed call, and on AWS `workload_identity` needs no key at all. A followed file would add a credentials provider and a configuration key with no consumer. | A consumer's platform rotates a mounted key without restarting the workload. |
 | The HTTPS client is built explicitly: no proxy, no redirect | The pinned behavior version's default client reads `HTTP(S)_PROXY`. A signed request must reach only the configured origin. | A deployment needs an egress proxy. |
 | Presign is GET only, 1 s to 7 days | SigV4 and R2 cap at 7 days; Railway allows 90. A presigned PUT cannot enforce the size limit. | A consumer needs uploads from clients. |
 | Expected bucket owner only for `amazon_s3`, required there, and not in presigned URLs | Confused-deputy protection on Amazon; R2 does not implement the header. The Rust SDK signs it as a header, not a query parameter, so a presigned URL carrying it would fail without that header; a presigned URL is refused if it needs any header. | A recorded run shows Railway honors it, or the SDK hoists `x-amz-*` headers into presigned queries. |
@@ -96,7 +97,10 @@ classification, and redaction, plus adapter tests over an in-process HTTP
 stub in `make test` (including the read attempt bound, a non-`Sync` request
 body, the download as a body, an empty download, request identifiers in the
 failure event, and a failed credential load); versitygw v1.8.0 (Apache-2.0, 31 MB, pinned by digest)
-through Compose in the integration job. MinIO is archived upstream with no
+through Compose in the integration job. The Compose service creates
+`template-bucket` as a directory of its posix backend before it listens, so
+the emulator proof, a local run, and a feature's own tests share one bucket
+and no test creates one with a raw SDK client. MinIO is archived upstream with no
 official images, Garage has no conditional writes, S3Mock does not validate
 presigned URLs, and LocalStack requires an account token even in CI. Live
 provider conformance is an ignored test run per provider only with

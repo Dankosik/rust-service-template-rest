@@ -134,7 +134,7 @@ infra-messaging::outbox -> domain-events, infra-jobs, infra-postgres, base64
 infra-outbound-http -> hyper-util, hyper-rustls, rustls, http, bytes, url, tokio, metrics, tracing
 <!-- template:end outbound-http:docs-boundaries-outbound-edges -->
 <!-- template:begin outbound-auth:docs-boundaries-outbound-auth-edges -->
-infra-oauth2-client-credentials -> infra-outbound-http, jsonwebtoken, moka, uuid, http, bytes, tokio, tracing, secrecy, serde, serde_json
+infra-oauth2-client-credentials -> infra-outbound-http, jsonwebtoken, aws-lc-rs, moka, uuid, url, http, bytes, tokio, metrics, tracing, secrecy, serde, serde_json, thiserror
 <!-- template:end outbound-auth:docs-boundaries-outbound-auth-edges -->
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-edges -->
 main binary -> infra-idempotency-store
@@ -291,11 +291,12 @@ silently reopen:
   no maintained crate publishes a cached verdict with a failure threshold,
   staleness guard, and drain flag (`health` on crates.io is unmaintained since
   2022; `axum-health` probes per request).
-- **The accept loop is template-owned** (about eighty lines over
+- **The accept loop is template-owned** (over
   `hyper_util::server::conn::auto`): `axum::serve` sets no timer and exposes
   no connection limits, so hyper's header timeout is silently disabled there
-  (axum #2741) and the `auto` builder starts no timer until the first byte
-  (hyper #3756); the loop adds the permit, the peek, and the timer.
+  (axum #2741) and the `auto` builder starts no timer until the protocol is
+  decided (hyper #3756); the loop adds the permit, the sniff deadline, and
+  the timer.
 <!-- template:begin postgres:docs-boundaries-migrator-decision -->
 - **`migrate` is a library plus a binary in one crate** so the runner is
   testable against fixture migrators while the binary embeds the real set;

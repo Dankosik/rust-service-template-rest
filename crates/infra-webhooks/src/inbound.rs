@@ -19,7 +19,9 @@ use infra_jobs::{
     CompleteError, EnqueueError, EnqueueOptions, Handler, Job, JobError, JobKind, Kinds, Policy,
     enqueue,
 };
-use infra_postgres::{Isolation, Tx, TxError, TxOptions, in_tx, in_tx_with, observed};
+use infra_postgres::{
+    Isolation, Tx, TxError, TxOptions, failure_cause, in_tx, in_tx_with, observed, sqlstate,
+};
 use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
@@ -58,6 +60,12 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The most rows one cleanup batch deletes.
 const CLEANUP_BATCH_ROWS: i64 = 500;
+
+/// Runs of the periodic receipt cleanup, by `outcome` (`completed`, `failed`).
+pub const CLEANUP_RUNS_METRIC: &str = "webhook_receipt_cleanup_runs_total";
+
+/// Expired receipts the cleanup deleted, counted per committed batch.
+pub const CLEANUP_REMOVED_METRIC: &str = "webhook_receipt_cleanup_removed_receipts_total";
 
 /// The durable admission result for one verified delivery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -272,9 +280,12 @@ impl Receiver {
                     | ReceiptFailure::Enqueue(_)
                     | ReceiptFailure::Transaction(_) => "unavailable",
                 };
+                let driver = error.driver();
                 tracing::warn!(
                     webhook.endpoint = endpoint_id,
                     webhook.reason = reason,
+                    sqlstate = driver.and_then(sqlstate).as_deref(),
+                    cause = driver.map(failure_cause),
                     "webhook_receipt_unavailable"
                 );
                 Err(ReceiveError::Unavailable)
@@ -289,12 +300,12 @@ impl Receiver {
     ///
     /// # Errors
     ///
-    /// The failure class of the batch that failed; earlier batches stay
-    /// committed.
+    /// The failure class of the batch that failed, logged with a bounded
+    /// cause; earlier batches stay committed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
         let mut removed = 0;
         loop {
-            let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupFailure> {
+            let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupError> {
                 // Bounds the batch on the server, so a batch whose client has
                 // gone still ends within 1 s.
                 observed(
@@ -302,7 +313,7 @@ impl Receiver {
                     sqlx::query!("SET LOCAL statement_timeout = '1000ms'").execute(&mut *tx),
                 )
                 .await
-                .map_err(|_| CleanupFailure(CleanupError::Statement))?;
+                .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
                 // One batch of expired receipts: `$1` is the retention in
                 // seconds and `$2` the batch size.
                 let deleted = observed(
@@ -318,11 +329,11 @@ impl Receiver {
                     .execute(&mut *tx),
                 )
                 .await
-                .map_err(|_| CleanupFailure(CleanupError::Statement))?;
+                .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
                 Ok(deleted.rows_affected())
             })
-            .await
-            .map_err(|CleanupFailure(failure)| failure)?;
+            .await?;
+            metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
             removed += batch;
             if batch < CLEANUP_BATCH_ROWS.unsigned_abs() {
                 return Ok(removed);
@@ -331,19 +342,31 @@ impl Receiver {
     }
 
     /// The periodic cleanup task body: one [`Self::remove_expired`] run
-    /// every 60 s, the first at once. A failed run logs its class and waits
-    /// for the next tick; it changes neither readiness nor serving. Returns
-    /// when `cancel` fires, dropping a run in flight.
+    /// every 60 s, the first at once. Every run counts its outcome; a failed
+    /// run waits for the next tick and changes neither readiness nor serving.
+    /// Returns when `cancel` fires, dropping a run in flight.
     pub async fn run_cleanup(self, cancel: CancellationToken) {
+        metrics::describe_counter!(
+            CLEANUP_RUNS_METRIC,
+            metrics::Unit::Count,
+            "Runs of the expired webhook receipt cleanup, by outcome."
+        );
+        metrics::describe_counter!(
+            CLEANUP_REMOVED_METRIC,
+            metrics::Unit::Count,
+            "Expired webhook receipts the cleanup deleted."
+        );
         let _ = cancel
             .run_until_cancelled(async {
                 let mut ticker = tokio::time::interval(CLEANUP_INTERVAL);
                 ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
                 loop {
                     ticker.tick().await;
-                    if let Err(failure) = self.remove_expired().await {
-                        tracing::warn!(failure = %failure, "webhook_receipt_cleanup_failed");
-                    }
+                    let outcome = match self.remove_expired().await {
+                        Ok(_) => "completed",
+                        Err(_) => "failed",
+                    };
+                    metrics::counter!(CLEANUP_RUNS_METRIC, "outcome" => outcome).increment(1);
                 }
             })
             .await;
@@ -371,10 +394,28 @@ enum ReceiptFailure {
     Integrity,
 }
 
+impl ReceiptFailure {
+    /// The driver error behind this failure, when one caused it.
+    fn driver(&self) -> Option<&sqlx::Error> {
+        match self {
+            Self::Query(err)
+            | Self::Enqueue(EnqueueError::Database(err))
+            | Self::Transaction(
+                TxError::Acquire(err)
+                | TxError::Begin(err)
+                | TxError::CommitFailed(err)
+                | TxError::CommitUnknown(err),
+            ) => Some(err),
+            Self::Enqueue(_) | Self::Integrity => None,
+        }
+    }
+}
+
 /// The retained payload of a verified inbound delivery.
 ///
-/// Unknown fields are ignored so a queued row written with `"version": 1`
-/// still decodes.
+/// `version` is written and never read: a worker from before the tag became
+/// optional refuses a row without it, so a rolling deploy or a rollback still
+/// needs it on the wire. A reader ignores it, whatever its value.
 #[serde_as]
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Incoming {
@@ -601,7 +642,16 @@ impl Handler<Incoming> for Processor {
             .await;
             match completed {
                 Ok(()) => Ok(()),
-                Err(ProcessFailure::Consumer(error)) => Err(error),
+                Err(ProcessFailure::Consumer(error)) => {
+                    // Every endpoint shares one job kind, so the attempt's own
+                    // event that follows cannot say whose consumer this was.
+                    tracing::info!(
+                        webhook.endpoint = job.payload().endpoint_id(),
+                        permanent = error.is_permanent(),
+                        "webhook_consumer_incomplete"
+                    );
+                    Err(error)
+                }
                 Err(other) => Err(JobError::retryable(other)),
             }
         }
@@ -637,18 +687,28 @@ pub enum CleanupError {
     Commit,
 }
 
-/// A failed cleanup batch, by class, which leaves the batch's transaction as
-/// an error.
-struct CleanupFailure(CleanupError);
-
-impl From<TxError> for CleanupFailure {
+impl From<TxError> for CleanupError {
     fn from(err: TxError) -> Self {
-        Self(match err {
-            TxError::Acquire(_) => CleanupError::Acquire,
-            TxError::Begin(_) => CleanupError::Begin,
-            TxError::CommitFailed(_) | TxError::CommitUnknown(_) => CleanupError::Commit,
-        })
+        match &err {
+            TxError::Acquire(err) => cleanup_failed(err, Self::Acquire),
+            TxError::Begin(err) => cleanup_failed(err, Self::Begin),
+            TxError::CommitFailed(err) | TxError::CommitUnknown(err) => {
+                cleanup_failed(err, Self::Commit)
+            }
+        }
     }
+}
+
+/// Log a failed cleanup batch with only bounded fields, never driver text,
+/// and return its class.
+fn cleanup_failed(err: &sqlx::Error, class: CleanupError) -> CleanupError {
+    tracing::warn!(
+        failure = %class,
+        sqlstate = sqlstate(err).as_deref(),
+        cause = failure_cause(err),
+        "webhook_receipt_cleanup_failed"
+    );
+    class
 }
 
 #[cfg(test)]
@@ -680,5 +740,98 @@ mod tests {
             .require(["partner", "other"])
             .expect_err("unbound endpoint");
         assert_eq!(missing.endpoint, "other");
+    }
+
+    /// Collects the key of every counter the cleanup registers.
+    #[derive(Default)]
+    struct Keys(std::sync::Mutex<Vec<metrics::Key>>);
+
+    impl metrics::Recorder for Keys {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            self.0.lock().expect("keys").push(key.clone());
+            metrics::Counter::noop()
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cleanup_run_without_a_database_counts_as_failed_and_removes_nothing() {
+        let keys = Keys::default();
+        let _local = metrics::set_default_local_recorder(&keys);
+        // Nothing listens on port 1, so every acquire ends at the pool's bound.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(50))
+            .connect_lazy("postgres://127.0.0.1:1/unreachable")
+            .expect("a lazy pool opens no connection");
+        let receiver = Receiver::new(pool, Vec::<(String, KeyRing)>::new());
+        assert_eq!(receiver.remove_expired().await, Err(CleanupError::Acquire));
+
+        let failed = async {
+            loop {
+                let counted = keys.0.lock().expect("keys").iter().any(|key| {
+                    key.name() == CLEANUP_RUNS_METRIC
+                        && key
+                            .labels()
+                            .any(|label| (label.key(), label.value()) == ("outcome", "failed"))
+                });
+                if counted {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        tokio::select! {
+            () = receiver.clone().run_cleanup(CancellationToken::new()) => {
+                panic!("the cleanup task ends only on cancel")
+            }
+            () = failed => {}
+        }
+        assert!(
+            keys.0
+                .lock()
+                .expect("keys")
+                .iter()
+                .all(|key| key.name() != CLEANUP_REMOVED_METRIC),
+            "a failed batch removed nothing"
+        );
     }
 }

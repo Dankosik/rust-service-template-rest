@@ -4,6 +4,12 @@
 //! into an RFC 9457 problem, `infra-grpc` into a status carrying
 //! `google.rpc.ErrorInfo`. The catalog carries no status code, response
 //! schema, or caller-controlled detail text.
+//!
+//! A code that says no more than its HTTP status is named after that status
+//! (`not_found`, `gateway_timeout`); a code that says more names the failure
+//! (`idempotency_key_mismatch`). A code joins the catalog with its first
+//! producer or a reserved use by service handlers; a status only the
+//! connection layer answers, such as hyper's 431, has no code.
 
 use serde::ser::Serializer;
 
@@ -56,13 +62,12 @@ codes! {
     Conflict => "conflict",
     AlreadyExists => "already_exists",
     RequestEntityTooLarge => "request_entity_too_large",
-    RequestHeaderFieldsTooLarge => "request_header_fields_too_large",
     UnsupportedMediaType => "unsupported_media_type",
     UnprocessableContent => "unprocessable_content",
     TooManyRequests => "too_many_requests",
     InternalServerError => "internal_error",
     ServiceUnavailable => "service_unavailable",
-    RequestTimeout => "request_timeout",
+    GatewayTimeout => "gateway_timeout",
 }
 
 /// Caller-visible text for failures a transport refuses to describe.

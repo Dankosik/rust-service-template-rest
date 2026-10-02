@@ -41,8 +41,9 @@ use infra_http::{
     ServerOptions,
 };
 use infra_telemetry::{
-    ExporterState, LoggingFormat, LoggingOptions, Metrics, ResolvedSampler, TracingOptions,
-    diagnostics_router, install_subscriber, install_tracer_provider, runtime_metrics,
+    ExporterState, LoggingFormat, LoggingOptions, Metrics, PanicMessage, ResolvedSampler,
+    TracingOptions, diagnostics_router, install_panic_hook, install_subscriber,
+    install_tracer_provider, runtime_metrics,
 };
 use service_config::{
     AppConfig, BuildInfo, Config, LoadOptions, LogFormat, TracesSampler, process_failure,
@@ -258,6 +259,7 @@ async fn serve(
         },
         tracer_provider: Some(&tracer_provider),
     })?;
+    install_panic_hook(PanicMessage::Recorded);
     let metrics = install_metrics()?;
     metrics.record_trace_exporter_initialized(matches!(
         tracer_provider.exporter_state,

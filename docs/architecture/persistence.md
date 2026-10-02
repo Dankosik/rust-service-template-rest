@@ -120,6 +120,17 @@ receiving traffic instead of queueing it. The verdict message names the
 failure class (`no connection available inside the acquire budget`,
 `connection failed`, ...), never the target.
 
+The cost is that pool saturation is usually shared: instances under the same
+load fill their pools together, leave rotation together, and return together
+once the pause empties the pools. `health.failure_threshold` requires the
+probe to miss the acquire budget in several checks in a row first, and
+`http.max_in_flight` bounds how many requests can wait on the pool at once. A
+probe on its own connection outside the pool would report reachability only;
+it is left out because it costs one more server connection per instance and
+its own reconnect and credential path. Reopen that choice if `readiness_lost`
+events with the acquire-budget reason recur across instances while PostgreSQL
+itself answers.
+
 ## Transactions
 
 `in_tx(&pool, async |tx| ...)` opens a transaction and lends the closure an

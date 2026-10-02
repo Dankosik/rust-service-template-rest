@@ -15,15 +15,15 @@ alternatives they beat, are recorded at the end of this document.
 2. The bounded server (`crates/infra-http/src/server.rs`) owns
    connection-level policy: the connection cap, the header timeout that
    doubles as the keep-alive idle bound, the header-size bound (`431` as
-   `text/plain`, before routing), the silent-client guard, and the graceful
-   drain.
+   `text/plain`, before routing), the deadline on the protocol sniff, and
+   the graceful drain.
 3. The hardened chain (`crates/infra-http/src/harden.rs`) owns request-level
    policy, outermost first: request-id admission and propagation, `nosniff`,
    one observation middleware (the OpenTelemetry server span, HTTP metrics,
    problem completion that fills `request_id` into every Problem, and the
    access log), the `traceparent` response header, in-flight admission
    (`503` shedding with `Retry-After`, which the probe routes bypass), error
-   mapping (`504` timeout with code `request_timeout`), the request timeout,
+   mapping (`504` timeout with code `gateway_timeout`), the request timeout,
    panic recovery (`500`), the tower-http body limit, and the extractor body
    limit (`413`). Every layer is applied with `Router::layer`, so the `404`
    and `405` fallbacks travel through the same chain. There is no CORS
@@ -150,7 +150,7 @@ The hardened chain stamps `infra_http::RequestDeadline` immediately before
 the existing request timer. Its `at()` accessor exposes the same absolute
 instant without allowing a reset. Idempotency uses it for its request-owned work. Authentication has independent
 provider bounds and accepts no deadline stamp or response reserve; the outer
-timer alone owns `504 request_timeout`.
+timer alone owns `504 gateway_timeout`.
 <!-- template:end request-budget:docs-http-request-budget -->
 <!-- template:begin http-idempotency:docs-http-idempotent-composition -->
 With a retained idempotency profile, compose an idempotent operation through
@@ -191,6 +191,20 @@ in the pull request, and is removed after the change merges. Use OpenAPI
 distribution mechanism until a real consumer needs a bundled document or a
 generated client; then publish immutable versioned artifacts.
 
+<!-- template:begin inbound-webhooks:docs-http-inbound-webhooks -->
+## Signed webhook ingress
+
+When retained, `POST /webhooks/{endpoint_id}` is an annotated `OpenApiRouter`
+operation. It deliberately uses the existing zero-group `security()` annotation
+to generate explicit `security: []`, overriding root bearer authentication. That
+OpenAPI expression means bearer is not required; it does not waive the required
+Standard Webhooks header/signature verification performed before persistence.
+
+The handler receives bounded raw bytes, maps receiver outcomes to 204/400/404/
+413/503 problems, and preserves existing hardened-chain outcomes. The
+generated OpenAPI document remains handler-derived and must not be hand-edited.
+<!-- template:end inbound-webhooks:docs-http-inbound-webhooks -->
+
 ## Decisions Recorded Here
 
 Made in stages 2 and 3 with the research behind them; a later change reopens
@@ -210,12 +224,12 @@ one only with new evidence.
 | The server span sets `http.route` and `user_agent.original` only when the request has one, `url.scheme` from an absolute-form target (HTTP/2 `:scheme`) and otherwise `http`, and `error.type` with the status code on a `5xx` | the upstream helpers' empty strings for a missing route, user agent, or scheme | the conventions omit an attribute the request lacks and require `url.scheme`; an HTTP/1 request line carries no scheme and the listener under the hardened chain is plaintext, so `http` is the scheme of the request as received. A deployment that terminates TLS in this process for HTTP/1 revisits it. `error.type` stays off the duration histogram, whose status label already separates failures |
 | The span's `url.query` replaces the values of `AWSAccessKeyId`, `Signature`, `sig`, and `X-Goog-Signature` with `REDACTED` | the raw query string | the HTTP conventions' default redaction list; the rest of the query stays for diagnosis |
 | tower-http `RequestBodyLimitLayer` plus axum `DefaultBodyLimit` at `http.max_body_bytes`; problem completion maps their `text/plain` `413` to the `Problem` envelope | a template-owned body-limit middleware | the stock layer already short-circuits on `Content-Length` and caps streamed bodies; only the envelope is template policy |
-| Template-owned `Problem` (`code`, `request_id`, `invalid_params`) with a closed `Code` catalog | `problem_details` 0.10 (acceptable), `problemdetails` 0.7 (pins tower-http 0.6) | about sixty lines; nothing submitted by the caller is echoed; a new code is a reviewed contract change |
+| Template-owned `Problem` (`code`, `request_id`, `invalid_params`) with a closed `Code` catalog | `problem_details` 0.10 (acceptable), `problemdetails` 0.7 (pins tower-http 0.6) | one serializable struct over the shared `service_failure::Code` catalog, which a general crate cannot close; nothing submitted by the caller is echoed; a new code is a reviewed contract change |
 | Every problem has `type` `about:blank` and the HTTP status phrase as `title`; the `code` extension member is the one identifier | an RFC 9110 section URI per status with a title per code; a service-owned type URI per code | RFC 9457 makes `type` the primary identifier and asks one type to keep one title, but several codes shared a section URI under different titles. `about:blank` is the value the RFC defines for a problem that says no more than its status, and the template has no URI space a derived service owns. Reopen when a service publishes problem documentation at URIs it controls |
-| Template-owned accept loop over `hyper_util::server::conn::auto` with `TokioTimer`, a `Semaphore(max_connections)` permit per connection, and a bounded `peek` before hyper sees the socket | `axum::serve` | `axum::serve` sets no timer and exposes no limits (axum #2741); the `auto` builder starts no timer until the first byte (hyper #3756), so a silent client would hold a connection forever |
+| Template-owned accept loop over `hyper_util::server::conn::auto` with `TokioTimer`, a `Semaphore(max_connections)` permit per connection, and a socket wrapper (`SniffDeadline`) that fails reads once `http.header_read_timeout` passes with the protocol still undecided | `axum::serve`; a bounded `peek` for the first byte before hyper sees the socket | `axum::serve` sets no timer and exposes no limits (axum #2741). The `auto` builder reads until the bytes stop matching the HTTP/2 preface and starts no timer before that (hyper #3756), so a client that sends nothing, or only the start of the preface, would hold a connection forever. The `peek` closed the first case and let the second through: one byte of the preface passed it. The wrapper is a pass-through once the protocol is decided, and reads the decrypted stream on a TLS listener, where a peek sees only the handshake |
 | One `http.header_read_timeout` that hyper restarts on idle, so it is both the header and the keep-alive idle bound; body reads are bounded by `http.request_timeout` because extractors run inside the handler future | Go's read/write/idle deadlines | hyper has no per-connection read/write deadlines; one value covers both risks. Streaming response bodies stay unbounded until a streaming operation adopts `ResponseBodyTimeoutLayer` |
 | `TCP_NODELAY` on every accepted socket | Nagle's algorithm, the kernel default | hyper sends HTTP/2 headers, data and trailers as separate segments, so a later one waited for the peer's delayed ACK: gRPC unary calls with 1 KiB messages and client-streaming calls stalled 41 ms each (1.5k → 19.8k calls/s on DigitalOcean c-4). Tonic's own server and grpc-go set it too. Saturated tiny-message streams lose 5–9% throughput to the extra packets |
-| Each connection runs in a `tokio_util` `TaskTracker` task that selects over the connection, the drain token, and `max_connection_age`, then calls hyper's `graceful_shutdown` and waits for the connection to end. The age is spread by up to 10% either way. `http.max_connection_age` defaults to off; `grpc.max_connection_age` to thirty minutes | `hyper_util::server::graceful::GracefulShutdown`, which signals only at drain and whose connection trait is sealed, so nothing else can ask one watched connection to finish; tonic's own `Server`, which has `max_connection_age` but is a second accept loop | A long-lived HTTP/2 connection behind a connection-level balancer keeps every call on the replica it first reached, so replicas added later get none until something closes it. grpc-go (`MaxConnectionAge`, with the same spread), Envoy (`max_connection_duration`) and nginx (`keepalive_time`) bound a connection's age for this reason. This is hyper's documented graceful-shutdown shape and what tonic's serve loop does. HTTP stays off because an HTTP/1 proxy that reuses an idle connection just as the server closes it sees a failed request; HTTP/2 GOAWAY has no such race. There is no forced close after the age: a stream that outlives it keeps its connection |
+| Each connection runs in a `tokio_util` `TaskTracker` task that selects over the connection, the drain token, and `max_connection_age`, then calls hyper's `graceful_shutdown` and waits for the connection to end. A TLS handshake still running at drain is dropped, since no request can be in flight before it ends. The age is spread by up to 10% either way. `http.max_connection_age` defaults to off; `grpc.max_connection_age` to thirty minutes | `hyper_util::server::graceful::GracefulShutdown`, which signals only at drain and whose connection trait is sealed, so nothing else can ask one watched connection to finish; tonic's own `Server`, which has `max_connection_age` but is a second accept loop | A long-lived HTTP/2 connection behind a connection-level balancer keeps every call on the replica it first reached, so replicas added later get none until something closes it. grpc-go (`MaxConnectionAge`, with the same spread), Envoy (`max_connection_duration`) and nginx (`keepalive_time`) bound a connection's age for this reason. This is hyper's documented graceful-shutdown shape and what tonic's serve loop does. HTTP stays off because an HTTP/1 proxy that reuses an idle connection just as the server closes it sees a failed request; HTTP/2 GOAWAY has no such race. There is no forced close after the age: a stream that outlives it keeps its connection |
 | `header_read_timeout(Some(_))` always paired with `timer()`; `max_buf_size` at least 8192 | — | both panic at `serve_connection` otherwise |
 
 ### Contract
@@ -254,6 +268,18 @@ exists. Public operations, including probes, explicitly override it with
   whose bodies are large enough to pay for it and whose platform edge does not
   compress; it joins the feature router, not the chain, and never wraps a
   response that mixes a secret with caller-controlled text.
+- An idle bound for HTTP/2 connections: hyper has none, and the PING
+  keep-alive only closes a peer that stopped answering, so an idle HTTP/2
+  connection keeps its `http.max_connections` slot until its peer closes it
+  or `http.max_connection_age` is set. grpc-go's `MaxConnectionIdle` is
+  unlimited by default for the same reason: a client pool keeps idle
+  connections on purpose. Reopen when a listener is reachable by callers the
+  deployment does not control and the connection cap is observed full of
+  idle connections; the bound then counts open streams per connection.
+- Problem rejections for other extractors (`Form`, `Multipart`, typed
+  headers, `axum-extra`'s repeated-key `Query`): the first operation that
+  takes one adds its wrapper to `infra_http::extract` and its entry to
+  `clippy.toml`. Until then such an extractor answers axum's `text/plain`.
 - `client.address` and `network.peer.address` on the server span: the peer
   behind a load balancer is the balancer, and a forwarded address is
   caller-controlled until a deployment names the proxies it trusts. Both are
@@ -263,20 +289,6 @@ exists. Public operations, including probes, explicitly override it with
   document: a consumer that needs them.
 
 ### Gotchas
-
-<!-- template:begin inbound-webhooks:docs-http-inbound-webhooks -->
-## Signed webhook ingress
-
-When retained, `POST /webhooks/{endpoint_id}` is an annotated `OpenApiRouter`
-operation. It deliberately uses the existing zero-group `security()` annotation
-to generate explicit `security: []`, overriding root bearer authentication. That
-OpenAPI expression means bearer is not required; it does not waive the required
-Standard Webhooks header/signature verification performed before persistence.
-
-The handler receives bounded raw bytes, maps receiver outcomes to 204/400/404/
-413/503 problems, and preserves existing hardened-chain outcomes. The
-generated OpenAPI document remains handler-derived and must not be hand-edited.
-<!-- template:end inbound-webhooks:docs-http-inbound-webhooks -->
 
 1. `routes!(a, b)` groups methods of one path; two `GET` handlers on
    different paths in one `routes!` panic with "Overlapping method route".

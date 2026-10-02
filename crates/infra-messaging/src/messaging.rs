@@ -15,6 +15,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::consumer::Consumer;
+use crate::credentials::{CredentialsFile, CredentialsFileError};
 use crate::error::MessagingError;
 use crate::producer::Producer;
 use crate::registry::Registry;
@@ -71,6 +72,9 @@ pub struct MessagingOptions {
     pub connection_name: String,
     pub servers: Vec<String>,
     pub credentials: Option<SecretString>,
+    /// A credentials file read again for every connection, the alternative
+    /// to `credentials` for a platform that rotates it.
+    pub credentials_file: Option<PathBuf>,
     pub root_ca_path: Option<PathBuf>,
     pub allow_plaintext: bool,
     pub source_stream: String,
@@ -87,6 +91,7 @@ impl std::fmt::Debug for MessagingOptions {
             // A server URL can carry a user and password.
             .field("server_count", &self.servers.len())
             .field("credentials", &self.credentials)
+            .field("credentials_file", &self.credentials_file)
             .field("root_ca_path", &self.root_ca_path)
             .field("allow_plaintext", &self.allow_plaintext)
             .field("source_stream", &self.source_stream)
@@ -167,7 +172,8 @@ impl Messaging {
             return Err(MessagingError::Bounds);
         }
         let (closed_tx, closed) = watch::channel(false);
-        let mut connect = async_nats::ConnectOptions::new()
+        let mut connect = authenticated(&options, deadline, &cancel)
+            .await?
             .name(&options.connection_name)
             .connection_timeout(BROKER_OPERATION_BUDGET)
             .request_timeout(Some(BROKER_OPERATION_BUDGET))
@@ -179,21 +185,6 @@ impl Messaging {
                 report_connection_event(&event);
                 std::future::ready(())
             });
-        if let Some(credentials) = &options.credentials {
-            connect = connect
-                .credentials(credentials.expose_secret())
-                .map_err(|_| {
-                    // The client's parse error is free text about the credentials.
-                    let failure = MessagingError::Authentication;
-                    tracing::warn!(
-                        operation = "credentials",
-                        reason = %failure,
-                        error.type = "malformed_credentials",
-                        "messaging_admission_failed"
-                    );
-                    failure
-                })?;
-        }
         if let Some(root_ca) = options.root_ca_path.clone() {
             connect = connect.add_root_certificates(root_ca);
         }
@@ -324,6 +315,44 @@ impl Probe for MessagingProbe {
     }
 }
 
+/// Client options that authenticate with the configured credential source:
+/// inline credentials, a credentials file read again for every connection,
+/// or neither.
+async fn authenticated(
+    options: &MessagingOptions,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Result<async_nats::ConnectOptions, MessagingError> {
+    match (&options.credentials, options.credentials_file.clone()) {
+        (Some(_), Some(_)) => Err(MessagingError::Configuration(
+            "credentials and a credentials file are both set",
+        )),
+        (Some(credentials), None) => async_nats::ConnectOptions::new()
+            .credentials(credentials.expose_secret())
+            // The client's parse error is free text about the credentials.
+            .map_err(|_| credentials_failure(CredentialsFileError::Malformed)),
+        (None, Some(path)) => {
+            let file = admission(deadline, cancel, async {
+                CredentialsFile::admit(path)
+                    .await
+                    .map_err(credentials_failure)
+            })
+            .await?;
+            Ok(async_nats::ConnectOptions::with_auth_callback(
+                move |nonce| {
+                    let file = file.clone();
+                    async move {
+                        file.answer(&nonce)
+                            .await
+                            .map_err(async_nats::AuthError::new)
+                    }
+                },
+            ))
+        }
+        (None, None) => Ok(async_nats::ConnectOptions::new()),
+    }
+}
+
 async fn close_client(
     client: &async_nats::Client,
     closed: &watch::Receiver<bool>,
@@ -386,17 +415,32 @@ async fn admit_topology(
     cancel: &CancellationToken,
 ) -> Result<Option<String>, MessagingError> {
     let envelope_limit = options.max_payload_bytes + HEADER_LIMIT_BYTES;
-    validate_server(client, envelope_limit)?;
+    validate_server(client, envelope_limit).map_err(|refusal| {
+        limit_failure(
+            "server",
+            refusal,
+            envelope_limit,
+            i64::try_from(client.server_info().max_payload).ok(),
+        )
+    })?;
     let source = get_stream(jetstream, &options.source_stream, deadline, cancel).await?;
     let Some(consumer) = &options.consumer else {
         return Ok(None);
     };
     // The stream's own message limit bounds what one delivery can hold in memory.
     let source_limit = source.cached_info().config.max_message_size;
-    if source_limit <= 0
-        || usize::try_from(source_limit).map_err(|_| MessagingError::Bounds)? > envelope_limit
-    {
-        return Err(MessagingError::Bounds);
+    let refusal = match usize::try_from(source_limit) {
+        Ok(limit) if limit > envelope_limit => Some(Refusal::StreamMessageSize),
+        Ok(1..) => None,
+        _ => Some(Refusal::StreamMessageSizeUnset),
+    };
+    if let Some(refusal) = refusal {
+        return Err(limit_failure(
+            "source_stream",
+            refusal,
+            envelope_limit,
+            Some(source_limit.into()),
+        ));
     }
     let dlq_name = match &options.dlq_stream {
         Some(name) => name.clone(),
@@ -417,7 +461,12 @@ async fn admit_topology(
         }
     };
     if dlq_name == options.source_stream {
-        return Err(MessagingError::Topology);
+        return Err(limit_failure(
+            "dead_letter_stream",
+            Refusal::DeadLetterIsSource,
+            envelope_limit,
+            None,
+        ));
     }
     get_stream(jetstream, &dlq_name, deadline, cancel).await?;
     Ok(Some(dlq_name))
@@ -470,16 +519,100 @@ pub(crate) fn topology_failure(
     failure
 }
 
-fn validate_server(
-    client: &async_nats::Client,
-    envelope_limit: usize,
-) -> Result<(), MessagingError> {
-    let info = client.server_info();
-    if !client.is_server_compatible(2, 12, 3) || !info.jetstream || !info.headers {
-        return Err(MessagingError::Topology);
+/// Why an answering broker cannot carry this adapter's deliveries.
+#[derive(Clone, Copy, Debug)]
+enum Refusal {
+    ServerVersion,
+    JetStreamDisabled,
+    HeadersUnsupported,
+    ServerMaxPayload,
+    StreamMessageSizeUnset,
+    StreamMessageSize,
+    DeadLetterIsSource,
+}
+
+impl Refusal {
+    /// The closed `error.type` of this refusal.
+    const fn error_type(self) -> &'static str {
+        match self {
+            Self::ServerVersion => "server_version",
+            Self::JetStreamDisabled => "jetstream_disabled",
+            Self::HeadersUnsupported => "headers_unsupported",
+            Self::ServerMaxPayload => "server_max_payload",
+            Self::StreamMessageSizeUnset => "stream_max_message_size_unset",
+            Self::StreamMessageSize => "stream_max_message_size",
+            Self::DeadLetterIsSource => "dead_letter_stream_is_source",
+        }
     }
+
+    const fn failure(self) -> MessagingError {
+        match self {
+            Self::ServerMaxPayload | Self::StreamMessageSizeUnset | Self::StreamMessageSize => {
+                MessagingError::Bounds
+            }
+            Self::ServerVersion
+            | Self::JetStreamDisabled
+            | Self::HeadersUnsupported
+            | Self::DeadLetterIsSource => MessagingError::Topology,
+        }
+    }
+}
+
+/// Classifies a refusal and logs which property of the broker caused it.
+///
+/// `required_bytes` is one delivery, the payload limit plus the header
+/// limit; `limit_bytes` is the broker's own limit when the refusal compares
+/// the two. Both are operator configuration, not message content.
+fn limit_failure(
+    operation: &'static str,
+    refusal: Refusal,
+    required_bytes: usize,
+    limit_bytes: Option<i64>,
+) -> MessagingError {
+    let failure = refusal.failure();
+    tracing::warn!(
+        operation,
+        reason = %failure,
+        error.type = refusal.error_type(),
+        required_bytes,
+        limit_bytes,
+        "messaging_admission_failed"
+    );
+    failure
+}
+
+/// Classifies an unusable credentials source and logs why, without the path
+/// or any of its content.
+fn credentials_failure(error: CredentialsFileError) -> MessagingError {
+    let failure = match error {
+        CredentialsFileError::Unreadable(_) => {
+            MessagingError::Configuration("credentials file is unreadable")
+        }
+        CredentialsFileError::Malformed => MessagingError::Authentication,
+    };
+    tracing::warn!(
+        operation = "credentials",
+        reason = %failure,
+        error.type = error.error_type(),
+        "messaging_admission_failed"
+    );
+    failure
+}
+
+fn validate_server(client: &async_nats::Client, envelope_limit: usize) -> Result<(), Refusal> {
+    let info = client.server_info();
+    if !client.is_server_compatible(2, 12, 3) {
+        return Err(Refusal::ServerVersion);
+    }
+    if !info.jetstream {
+        return Err(Refusal::JetStreamDisabled);
+    }
+    if !info.headers {
+        return Err(Refusal::HeadersUnsupported);
+    }
+    // The server bounds payload and headers together.
     if info.max_payload < envelope_limit {
-        return Err(MessagingError::Bounds);
+        return Err(Refusal::ServerMaxPayload);
     }
     Ok(())
 }

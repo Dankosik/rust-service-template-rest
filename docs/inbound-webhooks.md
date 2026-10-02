@@ -96,7 +96,7 @@ method, and server outcomes remain effective contract behavior.
 The provider API is `infra_webhooks::inbound::{Receiver, Verifier, Rejection,
 ReceiptOutcome, ReceiveError, Incoming, Consumer, Consumers, Processor}`.
 Construction uses `Receiver::new(PgPool, endpoint_verifiers)`; admission is
-`receive(endpoint_id, &HeaderMap, body, SystemTime)` and returns Accepted,
+`receive(endpoint_id, &HeaderMap, body, SystemTime)` and returns Accepted
 or Duplicate, or closed UnknownEndpoint, Rejected, or Unavailable
 errors. `Rejected` carries the verifier's `Rejection`, a static reason label.
 `Incoming` exposes original endpoint, message-ID, body, and optional
@@ -150,7 +150,8 @@ provider's stable message identity or a static rejection reason. `KeyRing` is
 the Standard Webhooks verifier and the only one the template wires. A provider
 with its own signature scheme (a different header, digest, or an identity
 carried in the body) implements `Verifier` in the derived service and takes
-that endpoint's place in `prepare_inbound_webhooks`; a receiver that mixes
+that endpoint's place in `prepare` in
+`crates/service/src/bootstrap/webhooks.rs`; a receiver that mixes
 schemes takes each endpoint as `Arc<dyn Verifier>`. The receipt, duplicate
 arbitration, job, and consumer path are unchanged. The receiver refuses an
 identity outside 1--255 bytes because the receipt key is indexed, and the
@@ -158,9 +159,11 @@ identity outside 1--255 bytes because the receipt key is indexed, and the
 key bytes in its reason, and it bounds its own work per request.
 
 The template deliberately supplies an empty registry because it has no business
-consumer. It is not a successful default: active ingress without the derived
-service's binding fails startup in both processes. A historical queued job whose
-binding is no longer configured retries and spends its normal attempt budget.
+consumer. It is not a successful default: a worker refuses to start while a
+configured endpoint has no binding. The service checks no binding and keeps
+admitting; its receipts wait for a worker that has one. A historical queued job
+whose binding is no longer configured retries and spends its normal attempt
+budget.
 
 Every endpoint shares the one `webhooks.process` kind and the worker's job
 slots, so one endpoint's slow consumer delays the others. Deliveries of one
@@ -220,7 +223,22 @@ the verifier's label (`missing_header`, `conflicting_header`,
 steady `timestamp_out_of_window` points at clock skew, `invalid_signature` at a
 wrong or rotated key. The `webhook_delivery_rejected`,
 `webhook_receipt_unavailable`, and `webhook_processor_missing_binding` events
-carry the same endpoint and reason as fields.
+carry the same endpoint and reason as fields. `webhook_receipt_unavailable`
+adds the driver's `sqlstate` and bounded `cause` when one failed.
+
+Every endpoint shares the `webhooks.process` kind, so the jobs events and
+metrics cannot say whose consumer failed. `webhook_consumer_incomplete` names
+the endpoint when its consumer returns a failure or a snooze, with `permanent`
+set for a permanent failure; the jobs event that follows in the same attempt
+span carries the outcome and summary.
+
+`webhook_receipt_cleanup_runs_total` counts cleanup runs by `outcome`
+(`completed`, `failed`), and `webhook_receipt_cleanup_removed_receipts_total`
+counts the receipts each committed batch deleted. Each service replica runs
+the cleanup, so both add up across replicas. A failed batch logs
+`webhook_receipt_cleanup_failed` with its `failure` class (`acquire`, `begin`,
+`statement`, `commit`), `sqlstate`, and `cause`. A run that keeps failing lets
+the receipt table grow; it changes neither readiness nor admission.
 
 Endpoint IDs are operator configuration, so the configured set bounds the
 label. A requested ID that matches no configured endpoint is caller-controlled:

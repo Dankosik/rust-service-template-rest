@@ -8,18 +8,23 @@
 
 use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
+use std::io;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
+use tokio::time::Sleep;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -28,12 +33,11 @@ use tokio_util::task::TaskTracker;
 pub struct ServerOptions {
     /// Time a connection may take to deliver a complete request head. hyper
     /// restarts it whenever an HTTP/1 connection goes idle, so it is also
-    /// the HTTP/1 keep-alive idle bound. Also bounds a client that connects
-    /// and sends nothing, which hyper's protocol sniff would otherwise leave
-    /// open forever. The accept loop peeks for that first byte with this
-    /// same duration, then hyper's timer starts for the rest of the head:
-    /// a slow first byte plus a slow remainder can add, not replace.
-    /// HTTP/2 idle uses a separate PING cadence, not this value.
+    /// the HTTP/1 keep-alive idle bound. hyper starts it only once it knows
+    /// the protocol, so the same duration first bounds that decision: a
+    /// client that connects and sends nothing, or only the start of the
+    /// HTTP/2 preface, is closed after it. The two waits can add, not
+    /// replace. HTTP/2 idle uses a separate PING cadence, not this value.
     pub header_read_timeout: Duration,
     /// Read-buffer ceiling for one request head. HTTP/1 overflow answers
     /// hyper-native 431 before the router (not a [`crate::Problem`]). HTTP/2
@@ -110,9 +114,10 @@ impl Server {
     // template:begin grpc:http-server-tls
     /// Bind `addr` and start accepting TLS connections on the current Tokio runtime.
     ///
-    /// The handshake runs after the first-byte peek and is bounded by
-    /// [`ServerOptions::header_read_timeout`]. A handshake error or timeout
-    /// closes the connection without a response.
+    /// The handshake is bounded by [`ServerOptions::header_read_timeout`],
+    /// which also closes a client that never starts it. A handshake error or
+    /// timeout closes the connection without a response, and so does drain:
+    /// no request can be in flight before the handshake ends.
     ///
     /// # Errors
     ///
@@ -315,15 +320,19 @@ async fn accept_loop<F, Fut, IO>(
         // (about 40 ms). Failing to set it only costs latency.
         let _ = stream.set_nodelay(true);
         connections.spawn(async move {
-            // Keep admission for the first-byte wait, TLS handshake, and the
-            // entire hyper connection, releasing it on every exit path.
+            // Keep admission for the TLS handshake and the entire hyper
+            // connection, releasing it on every exit path.
             let _permit = permit;
-            if !wait_for_first_byte(&stream, options.header_read_timeout).await {
-                return;
-            }
-            let Some(io) = prepare_io(stream).await else {
+            // No request can be in flight before the handshake ends, so drain
+            // drops the connection instead of waiting the handshake out.
+            let io = tokio::select! {
+                io = prepare_io(stream) => io,
+                () = finish.cancelled() => None,
+            };
+            let Some(io) = io else {
                 return;
             };
+            let io = SniffDeadline::new(io, options.header_read_timeout);
             let connection = builder
                 .serve_connection_with_upgrades(TokioIo::new(io), TowerToHyperService::new(app));
             tokio::pin!(connection);
@@ -369,19 +378,96 @@ fn spread(age: Duration) -> Duration {
 /// reached.
 pub const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
 
-/// hyper's protocol sniff reads the first bytes without a timer, so a client
-/// that connects and stays silent is never timed out (hyper #3756). Peek
-/// with our own bound before handing the socket over. The first byte must
-/// stay queued for that sniff: this is `peek`, not `read`. Peek only
-/// waits for the first queued byte; hyper's header-read timer starts
-/// after handoff, so the operator key is shared and the two waits add.
-/// `true` means a byte is available and still in the stream; timeout,
-/// peek I/O error, and EOF are the same close-without-response.
-async fn wait_for_first_byte(stream: &TcpStream, timeout: Duration) -> bool {
-    let mut probe = [0u8; 1];
-    match tokio::time::timeout(timeout, stream.peek(&mut probe)).await {
-        Ok(Ok(read)) => read > 0,
-        Ok(Err(_)) | Err(_) => false,
+/// The HTTP/2 connection preface, which hyper-util's protocol sniff compares
+/// the first bytes of a connection against.
+const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// A socket whose reads fail once `timeout` passes with the protocol still
+/// undecided.
+///
+/// hyper-util's sniff reads until the bytes stop matching the HTTP/2 preface
+/// and has no timer (hyper #3756), so a client that connects and sends
+/// nothing, or only the start of the preface, would never be timed out.
+/// hyper's header timer and HTTP/2 keep-alive start once the protocol is
+/// decided; from then on this is a pass-through. The failed read ends the
+/// connection without a response.
+struct SniffDeadline<IO> {
+    io: IO,
+    /// The preface bytes matched so far and the deadline, until decided.
+    undecided: Option<(usize, Pin<Box<Sleep>>)>,
+}
+
+impl<IO> SniffDeadline<IO> {
+    fn new(io: IO, timeout: Duration) -> Self {
+        Self {
+            io,
+            undecided: Some((0, Box::pin(tokio::time::sleep(timeout)))),
+        }
+    }
+}
+
+impl<IO: AsyncRead + Unpin> AsyncRead for SniffDeadline<IO> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let Some((matched, deadline)) = this.undecided.as_mut() else {
+            return Pin::new(&mut this.io).poll_read(cx, buf);
+        };
+        let filled = buf.filled().len();
+        match Pin::new(&mut this.io).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                let read = &buf.filled()[filled..];
+                let rest = &HTTP2_PREFACE[*matched..];
+                // Undecided only while everything read is a strict prefix of
+                // the preface; the end of the stream decides as well.
+                if !read.is_empty() && read.len() < rest.len() && rest.starts_with(read) {
+                    *matched += read.len();
+                } else {
+                    this.undecided = None;
+                }
+                Poll::Ready(Ok(()))
+            }
+            Poll::Pending => deadline
+                .as_mut()
+                .poll(cx)
+                .map(|()| Err(io::ErrorKind::TimedOut.into())),
+            failed @ Poll::Ready(Err(_)) => failed,
+        }
+    }
+}
+
+impl<IO: AsyncWrite + Unpin> AsyncWrite for SniffDeadline<IO> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().io).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_shutdown(cx)
+    }
+
+    // hyper writes a response head and body as one vectored write; the
+    // default implementation would send them as separate segments.
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().io).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.io.is_write_vectored()
     }
 }
 
@@ -486,6 +572,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stalled_http2_preface_is_closed_after_the_header_timeout() {
+        let server = Server::bind(loopback(), app(), options()).await.unwrap();
+        let mut stalled = TcpStream::connect(server.local_addr()).await.unwrap();
+        // A strict prefix of the HTTP/2 preface leaves the protocol undecided,
+        // which is before hyper's own header timer starts.
+        stalled.write_all(b"PRI * HTTP/2.0\r\n").await.unwrap();
+        let mut buf = [0u8; 1];
+        let closed = tokio::time::timeout(Duration::from_secs(2), stalled.read(&mut buf)).await;
+        assert!(
+            matches!(closed, Ok(Ok(0))),
+            "expected EOF from the server, got {closed:?}"
+        );
+        server.drain(Duration::from_secs(1)).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_undecided_protocol_fails_reads_at_the_deadline() {
+        let timeout = Duration::from_secs(5);
+        let preface_but_one = &HTTP2_PREFACE[..HTTP2_PREFACE.len() - 1];
+        for sent in [&b""[..], b"P", preface_but_one] {
+            let (mut client, server) = tokio::io::duplex(64);
+            let mut io = SniffDeadline::new(server, timeout);
+            let started = tokio::time::Instant::now();
+            client.write_all(sent).await.unwrap();
+            let mut read = [0u8; 64];
+            let error = loop {
+                match io.read(&mut read).await {
+                    Ok(_) => {}
+                    Err(error) => break error,
+                }
+            };
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{sent:?}");
+            assert_eq!(started.elapsed(), timeout, "{sent:?}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_decided_protocol_is_never_timed_out() {
+        let cases: [&[&[u8]]; 4] = [
+            // An HTTP/1 request line differs from the preface at once.
+            &[b"GET"],
+            // It differs after a prefix that matched.
+            &[b"PR", b"OPFIND"],
+            // The whole preface, in two reads.
+            &[b"PRI * HTTP/2.0\r\n", b"\r\nSM\r\n\r\n"],
+            // The whole preface and the first frame bytes in one read.
+            &[b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0"],
+        ];
+        for chunks in cases {
+            let (mut client, server) = tokio::io::duplex(64);
+            let mut io = SniffDeadline::new(server, Duration::from_secs(5));
+            let mut read = [0u8; 64];
+            for chunk in chunks {
+                client.write_all(chunk).await.unwrap();
+                assert_eq!(io.read(&mut read).await.unwrap(), chunk.len());
+            }
+            let idle = tokio::time::timeout(Duration::from_mins(1), io.read(&mut read)).await;
+            assert!(idle.is_err(), "{chunks:?}: {idle:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_does_not_wait_for_a_connection_that_sent_nothing() {
+        let mut opts = options();
+        opts.header_read_timeout = Duration::from_secs(30);
+        let server = Server::bind(loopback(), app(), opts).await.unwrap();
+        let addr = server.local_addr();
+        let mut silent = TcpStream::connect(addr).await.unwrap();
+        // Connections are accepted in order, so an answer on a later one
+        // proves the silent one already has its task.
+        assert!(fetch(addr, "/ok").await.starts_with("HTTP/1.1 200 "));
+        let drained = server.drain(Duration::from_secs(2)).await.unwrap();
+        assert_eq!(drained, Drained::Complete);
+        let mut buf = [0u8; 1];
+        let closed = tokio::time::timeout(Duration::from_secs(2), silent.read(&mut buf)).await;
+        assert!(
+            matches!(closed, Ok(Ok(0))),
+            "expected EOF from the server, got {closed:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn oversized_header_is_431() {
         let server = Server::bind(loopback(), app(), options()).await.unwrap();
         let mut stream = TcpStream::connect(server.local_addr()).await.unwrap();
@@ -587,49 +755,81 @@ mod tests {
     }
 
     // template:begin grpc:http-server-tls-test
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+    use rustls::{ClientConfig, RootCertStore, ServerConfig};
+    use tokio_rustls::TlsConnector;
+
+    /// A server and a client configuration for `localhost` under one fresh CA,
+    /// both TLS 1.3 with `h2` as the only protocol.
+    fn localhost_tls() -> (ServerConfig, ClientConfig) {
+        use rcgen::{
+            BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
+            KeyPair, KeyUsagePurpose,
+        };
+
+        let mut ca = CertificateParams::default();
+        ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let issuer = CertifiedIssuer::self_signed(ca, KeyPair::generate().unwrap()).unwrap();
+        let key = KeyPair::generate().unwrap();
+        let mut leaf = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
+        leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let certificate = leaf.signed_by(&key, &issuer).unwrap();
+        let cert = CertificateDer::from(certificate.der().to_vec());
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        let mut server = ServerConfig::builder_with_provider(provider.clone().into())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap();
+        server.alpn_protocols = vec![b"h2".to_vec()];
+        let mut roots = RootCertStore::empty();
+        roots.add(issuer.der().clone()).unwrap();
+        let mut client = ClientConfig::builder_with_provider(provider.into())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client.alpn_protocols = vec![b"h2".to_vec()];
+        (server, client)
+    }
+
+    #[tokio::test]
+    async fn drain_does_not_wait_for_an_unfinished_tls_handshake() {
+        let (server_config, client_config) = localhost_tls();
+        let mut opts = options();
+        opts.header_read_timeout = Duration::from_secs(30);
+        let server = Server::bind_tls(loopback(), app(), opts, Arc::new(server_config))
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let mut stalled = TcpStream::connect(addr).await.unwrap();
+        // The first byte of a handshake record: the handshake has begun and
+        // cannot finish.
+        stalled.write_all(&[0x16]).await.unwrap();
+        // Connections are accepted in order, so a completed handshake on a
+        // later one proves the stalled one already has its task.
+        let later = TcpStream::connect(addr).await.unwrap();
+        let later = TlsConnector::from(Arc::new(client_config))
+            .connect(ServerName::try_from("localhost").unwrap(), later)
+            .await
+            .unwrap();
+        let drained = server.drain(Duration::from_secs(2)).await.unwrap();
+        assert_eq!(drained, Drained::Complete);
+        drop(later);
+        let mut buf = [0u8; 1];
+        let closed = tokio::time::timeout(Duration::from_secs(2), stalled.read(&mut buf)).await;
+        assert!(
+            matches!(closed, Ok(Ok(0))),
+            "expected EOF from the server, got {closed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn tls_listener_serves_http2() {
-        use std::sync::Arc;
-
         use http_body_util::BodyExt as _;
-        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-        use rustls::{ClientConfig, RootCertStore, ServerConfig};
-        use tokio_rustls::TlsConnector;
-
-        fn localhost_tls() -> (ServerConfig, ClientConfig) {
-            use rcgen::{
-                BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose,
-                IsCa, KeyPair, KeyUsagePurpose,
-            };
-
-            let mut ca = CertificateParams::default();
-            ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-            ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-            let issuer = CertifiedIssuer::self_signed(ca, KeyPair::generate().unwrap()).unwrap();
-            let key = KeyPair::generate().unwrap();
-            let mut leaf = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
-            leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-            let certificate = leaf.signed_by(&key, &issuer).unwrap();
-            let cert = CertificateDer::from(certificate.der().to_vec());
-            let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
-            let provider = rustls::crypto::aws_lc_rs::default_provider();
-            let mut server = ServerConfig::builder_with_provider(provider.clone().into())
-                .with_protocol_versions(&[&rustls::version::TLS13])
-                .unwrap()
-                .with_no_client_auth()
-                .with_single_cert(vec![cert], key)
-                .unwrap();
-            server.alpn_protocols = vec![b"h2".to_vec()];
-            let mut roots = RootCertStore::empty();
-            roots.add(issuer.der().clone()).unwrap();
-            let mut client = ClientConfig::builder_with_provider(provider.into())
-                .with_protocol_versions(&[&rustls::version::TLS13])
-                .unwrap()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            client.alpn_protocols = vec![b"h2".to_vec()];
-            (server, client)
-        }
 
         let (server_config, client_config) = localhost_tls();
         let mut opts = options();

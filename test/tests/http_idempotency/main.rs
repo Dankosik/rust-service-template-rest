@@ -96,6 +96,12 @@ const SEED_LIVE: &str = "INSERT INTO http_idempotency_records \
 const LOCK_SEEDED_ROW: &str = "SELECT 1 FROM http_idempotency_records \
     WHERE scope_key = sha256(int8send(1::bigint)) FOR UPDATE";
 
+/// A live record of scope `$1` and fingerprint `$2`, written past the store.
+const INSERT_LIVE: &str = "INSERT INTO http_idempotency_records \
+    (scope_key, fingerprint, status, headers, body, issuer, caller_kind, caller_value, expires_at) \
+    VALUES ($1, $2, 201, ARRAY[]::http_idempotency_header_pair[], '{}', \
+    'https://issuer.example', 'subject', 'fixture-subject', now() + interval '1 hour')";
+
 /// The template pool on `dsn`: the service's session defaults and budgets.
 async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
     infra_postgres::connect(
@@ -407,6 +413,49 @@ async fn p1_a_held_key_refuses_duplicates_and_commits_one_effect(pool: PgPool) {
     assert_eq!(work.runs(), 1);
     assert_eq!(count(&pool, EFFECTS).await, 1);
     close(&[&pool_1, &pool_2]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p1_a_record_committed_under_the_work_is_kept_and_the_work_rolls_back(pool: PgPool) {
+    create_effects(&pool).await;
+    let (store_pool, store) = replica(&dsn_for(&pool).await).await;
+    let record = success(INPUT, r#"{"id":1}"#);
+    let work = Work::default();
+
+    // Arbitration admits one attempt per scope to its work. Should a record
+    // of the scope commit under that work anyway, here written past the
+    // store, the attempt's write leaves it in place and the work rolls back:
+    // a second effect for a live key never commits.
+    let caller = caller("fixture-subject");
+    let refused: Outcome<Refusal> = store
+        .attempt(
+            &ScopeKey::from_digest(SCOPE),
+            &caller,
+            &INPUT,
+            async |tx: &mut Tx<'_>| {
+                work.run(tx).await;
+                sqlx::query(INSERT_LIVE)
+                    .bind(SCOPE)
+                    .bind(OTHER_INPUT)
+                    .execute(&pool)
+                    .await
+                    .expect("another writer commits a live record");
+                Ok(returned(record.clone()))
+            },
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(AttemptError::Internal)),
+        "{refused:?}"
+    );
+    assert_eq!(count(&pool, EFFECTS).await, 0);
+
+    // The other writer's record still decides the key.
+    let decided = execute(&store, SCOPE, INPUT, &record, &work).await;
+    assert_eq!(live(decided), None);
+    assert_eq!(records(&pool, SCOPE).await, 1);
+    assert_eq!(work.runs(), 1);
+    close(&[&store_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
