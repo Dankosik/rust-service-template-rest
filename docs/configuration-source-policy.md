@@ -334,7 +334,8 @@ fields.
   way. A set value must be between `1s` and `1d`. It stays off by default
   because an HTTP/1 proxy that reuses an idle connection just as the server
   closes it sees a failed request; set it when HTTP/2 clients hold
-  connections behind a connection-level balancer.
+  connections behind a connection-level balancer. The diagnostics listener
+  shares the HTTP listener's options, this one included.
 - `http.access_log_health_probes` defaults to `false`, so matched
   `GET /health/live` and `GET /health/ready` requests are served without an
   access-log line. The exclusion is by route template: an unmatched path that

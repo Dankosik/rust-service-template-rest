@@ -10,7 +10,8 @@
 pub mod codec;
 
 /// The encoded `FileDescriptorSet` the Rust was generated from, with its
-/// imports, for `infra_grpc::Services::add_reflection`.
+/// imports, for `infra_grpc::Services::describe`: it names the methods and
+/// is what reflection serves.
 pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/file_descriptor_set.binpb");
 
 // Keep generated-code lint exceptions off the handwritten codec. Re-export
