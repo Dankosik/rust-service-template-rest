@@ -75,7 +75,7 @@ fn blank_duration_as_none<'de, D>(deserializer: D) -> Result<Option<Duration>, D
 where
     D: serde::Deserializer<'de>,
 {
-    blank_as_none(deserializer)?
+    blank_as_none::<_, String>(deserializer)?
         .map(|text| {
             humantime::parse_duration(&text).map_err(|_| {
                 serde::de::Error::invalid_value(

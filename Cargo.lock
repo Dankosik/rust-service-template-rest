@@ -2048,6 +2048,7 @@ name = "health"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "metrics",
  "metrics-exporter-prometheus",
  "thiserror",
@@ -2423,6 +2424,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
+ "futures-util",
  "health",
  "metrics",
  "metrics-exporter-prometheus",
@@ -2454,7 +2456,10 @@ dependencies = [
  "infra-bearerauthn",
  "infra-http",
  "metrics",
+ "metrics-exporter-prometheus",
  "opentelemetry",
+ "prost",
+ "prost-types",
  "rcgen",
  "rustls",
  "secrecy",
@@ -2569,6 +2574,7 @@ dependencies = [
  "infra-jobs",
  "infra-postgres",
  "metrics",
+ "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry_sdk",
  "secrecy",
@@ -2582,6 +2588,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]
@@ -4108,6 +4115,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "itoa",
+ "log",
  "percent-encoding",
  "pin-project-lite",
  "rustls",

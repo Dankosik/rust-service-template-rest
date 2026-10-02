@@ -486,6 +486,10 @@ fn install_observability(
             infra_postgres::TRANSACTION_DURATION_METRIC,
             infra_postgres::TRANSACTION_DURATION_BUCKETS,
         ),
+        (
+            infra_postgres::OPERATION_DURATION_METRIC,
+            infra_postgres::OPERATION_DURATION_BUCKETS,
+        ),
         (ATTEMPT_DURATION_METRIC, ATTEMPT_DURATION_BUCKETS),
         (
             infra_jobs::CLAIM_DURATION_METRIC,
@@ -782,6 +786,7 @@ fn server_options(config: &Config) -> ServerOptions {
         max_header_bytes: usize::try_from(config.http.max_header_bytes.as_u64())
             .unwrap_or(usize::MAX),
         max_connections: config.http.connection_cap(),
+        max_connection_age: config.http.connection_age(),
     }
 }
 

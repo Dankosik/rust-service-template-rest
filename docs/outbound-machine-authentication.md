@@ -115,7 +115,7 @@ with the service's own authority. Bind an integration that only ever acts for
 a user with `credentials.http(resource_client).require_on_behalf_of()` (the
 gRPC binding has the same method): such a client refuses a request without
 `OnBehalfOf` before any token or resource I/O, as `Error::SubjectRequired`
-or gRPC `INVALID_ARGUMENT`, and never sends the service token.
+or gRPC `INTERNAL`, and never sends the service token.
 
 An existing Authorization header is refused before token or resource I/O,
 whether or not `OnBehalfOf` is attached. Otherwise acquisition supplies
@@ -179,7 +179,9 @@ A missing or unrepresentably large lifetime has no reuse cutoff: as in Go's
 token already past its expiry when the response arrives cannot authorize
 dispatch. Hits never slide expiry. Failed attempts are not cached, and no token
 is reused past its cutoff. A later operation may fetch again. Unknown response
-fields and refresh tokens are discarded; JWT claims are not interpreted. Only
+fields and refresh tokens are discarded; JWT claims are not interpreted.
+`expires_in` is a JSON number of whole seconds, as RFC 6749 section 5.1
+defines it; a response that sends it as a string is an invalid response. Only
 case-insensitive Bearer tokens that are nonempty and form a valid header value
 are admitted. A present Content-Type must be `application/json`; there is no
 custom TTL ceiling or stricter JSON or duplicate-field rule.
@@ -282,7 +284,8 @@ present, otherwise the owner's fetch timeout. `OnBehalfOf` set on the call's
 extensions through `tonic::Request::extensions_mut` selects the same token
 exchange as the HTTP binding; without it, the service token is sent, unless
 the client was bound with `require_on_behalf_of()`, which answers
-`INVALID_ARGUMENT`. Token
+`INTERNAL`, as a caller-supplied `Authorization` does: both are this
+service's own composition mistakes, never its caller's. Token
 failure prevents resource
 dispatch: `DEADLINE_EXCEEDED` when the budget ran out, `UNAVAILABLE` when the
 provider could not be reached or answered 5xx or 429, and `UNAUTHENTICATED`

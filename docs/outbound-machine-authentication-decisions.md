@@ -26,6 +26,8 @@ behavior.
 | `algorithm` is required, with no default; `EdDSA` is not offered | The algorithm must match the key, so a default only chose `RS256` for whoever omitted it, and FAPI 2.0 admits no PKCS#1 v1.5 signatures. RFC 9864 (2025) deprecates the polymorphic `EdDSA` identifier for `Ed25519`, which `jsonwebtoken` 11.1.0 cannot emit. | A tuple written without `algorithm` fails startup naming the key. Reopen `Ed25519` when `jsonwebtoken` and the chosen authorization server accept it. |
 | A bound client may require `OnBehalfOf` (`require_on_behalf_of()`), refusing a request without it before any I/O | The subject travels in request extensions, the only channel a `tower::Service` has, so a forgotten one was a call made with the service's own, usually wider, authority. A second client type per transport would duplicate both bindings for one boolean. | Opt-in per binding: a client that serves both paths keeps the fallback. Reopen if an integration needs the requirement per call. |
 | `exchange_cache_capacity` is a configuration key (default 1024, inclusive 1–65536) | The bound is the number of users active on one replica within a token lifetime, which is a property of the deployment, unlike the protocol timeouts that stay constants. Past it every call for an unretained subject costs a token request. | One more key per tuple. The bound counts entries, not bytes: at a few KiB a token the largest cache is a few hundred MiB, and a provider issuing far larger tokens raises that in proportion. Reopen if entries must be bounded by bytes. |
+| The gRPC binding answers its two local refusals, a caller-supplied `Authorization` and a missing required subject, with `INTERNAL` | Both are composition mistakes of this service. gRFC A54 reserves `INVALID_ARGUMENT`, `FAILED_PRECONDITION` and five more codes for the application and has a channel turn them into `INTERNAL` when call credentials fail an RPC; the earlier `INVALID_ARGUMENT` blamed the inbound caller whenever a handler forwarded the status. | A handler that matched `INVALID_ARGUMENT` from this client now sees `INTERNAL`. The HTTP binding keeps its typed `Error` variants. |
+| `expires_in` is admitted only as a JSON number of whole seconds | RFC 6749 section 5.1 defines a number, and every supported provider in the guide sends one. Go's `oauth2` also accepts a numeric string for older Microsoft endpoints, which this profile does not support for another reason (`x5t#S256`). | A provider that sends a string is an `invalid` outcome on every acquisition, visible at once. Reopen when a provider the guide lists as supported sends a string. |
 | One new provider crate, independent of inbound authentication | Extending inbound auth joins separate trust and credential lifetimes; placing OAuth in outbound HTTP makes an optional protocol a dependency of every bare HTTP consumer. | Explicit crate/profile pruning keeps independent adoption; remove speculative traits and unused registry/generator paths. |
 
 Authorization-server evidence: versions checked were Zitadel v4.19.2,
@@ -112,7 +114,7 @@ its token is still cached.
 The private `post_form(&self, fields, deadline)` uses the fixed endpoint, the
 owner's bounded token client and the absolute attempt deadline; it sends `application/x-www-form-urlencoded`
 (`url::form_urlencoded::Serializer`) with `Accept: application/json` for
-either grant and decodes one private serde `TokenResponse`. A 5xx token
+either grant and decodes one private serde `TokenResponse`. A 5xx or 429 token
 response is `Unavailable`; any other non-2xx is `Rejected`.
 
 `Token` holds the private sensitive header and an optional Tokio monotonic reuse
@@ -137,7 +139,12 @@ The ten-second rule is a refresh preference, never a minimum accepted token TTL.
 Exchanged tokens use the same `Token` and cutoff in a Moka cache keyed by the
 subject token's SHA-256 digest. Moka's own clock only reclaims memory: a hit is
 used only while `is_reusable` holds on the Tokio clock, and a stale hit is
-invalidated and exchanged once more. A token the calling request itself just
+removed and exchanged once more. That removal, like the one after a resource
+401, is one `and_compute_with` step that deletes the entry only when the
+cache still returns the token the caller used, so a token another caller
+stored meanwhile survives. Moka serializes such steps per key but not against
+its own expiry, so a replacement stored in the instant the old entry expires
+can still be removed; it costs one more exchange. A token the calling request itself just
 fetched serves that request even inside its margin (Moka's `Entry::is_fresh`),
 so a short-lived token never loops. A token without `expires_in` is stored with
 zero retention: the requests coalesced into its exchange use it, later ones
@@ -160,13 +167,17 @@ the adapter receives primitives/SecretString through composition and does not
 depend on service-config. Normal config validation runs in every existing binary;
 there is no eager token call or extra service lifecycle field.
 
-The section decodes through `config::Value` instead of derived serde like the
-webhook sections. Derived decoding surfaces serde's `invalid type: string "..."`
-as a config-rs `Message` error, which echoes the rejected value; config-rs keeps
-its `Unexpected` type private, so a global redaction in `load` would have to
-parse error text. The explicit decoder keeps full key paths and unknown-key
-names without values. Reopen when config-rs exposes value-free type errors or
-the service adopts one loader-wide diagnostic policy for every section.
+The section decodes with derived serde like every other section. Its values
+stay out of decode failures through the loader's one redaction rule: `load`
+rebuilds a failure at a key a variable sets from the key and the expected
+form, and `integrations` is listed in `VALUE_FREE_SECTIONS` there, so a file
+value of this section is not shown either. The section first shipped with an
+explicit decoder over `config::Value` for that purpose; once the loader had
+the rule for every variable, a second decoder was a parallel path and was
+removed. With it went its refusal of a number where text is expected:
+config-rs converts scalars here as in every section, and validation still
+checks the result. `algorithm` is decoded by hand only to answer a refused
+value with the accepted ones.
 
 Runtime errors separate caller Authorization conflict, a missing required
 subject, acquisition failure, and existing resource transport failure. Acquisition reasons and all public

@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::{Method, StatusCode};
+use axum::http::{Method, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::Response;
 use http_body::{Frame, SizeHint};
@@ -129,16 +129,20 @@ fn make_span(
     request_id: Option<&str>,
 ) -> tracing::Span {
     let method = request.method();
-    let route = matched.map_or("", MatchedPath::as_str);
+    let route = matched.map(MatchedPath::as_str);
     let span = otel_trace_span!(
         "HTTP request",
-        otel.name = format!("{method} {route}").trim(),
+        otel.name = format!("{method} {}", route.unwrap_or_default()).trim(),
         otel.kind = ?opentelemetry::trace::SpanKind::Server,
         request_id,
     );
     let (server_address, server_port) = otel_http::http_host_port(request);
     span.set_attribute("http.request.method", method.as_str().to_owned());
-    span.set_attribute("http.route", route.to_owned());
+    // The conventions leave `http.route` and `user_agent.original` off a span
+    // that has none; an empty string would read as a value.
+    if let Some(route) = route {
+        span.set_attribute("http.route", route.to_owned());
+    }
     span.set_attribute(
         "network.protocol.version",
         otel_http::http_flavor(request.version()).into_owned(),
@@ -147,25 +151,35 @@ fn make_span(
     if let Some(port) = server_port {
         span.set_attribute("server.port", port);
     }
-    span.set_attribute(
-        "user_agent.original",
-        otel_http::user_agent(request).to_owned(),
-    );
+    let user_agent = otel_http::user_agent(request);
+    if !user_agent.is_empty() {
+        span.set_attribute("user_agent.original", user_agent.to_owned());
+    }
     span.set_attribute("url.path", request.uri().path().to_owned());
     if let Some(query) = request.uri().query() {
         span.set_attribute("url.query", redact_query(query).into_owned());
     }
-    span.set_attribute(
-        "url.scheme",
-        otel_http::url_scheme(request.uri()).to_owned(),
-    );
+    span.set_attribute("url.scheme", url_scheme(request.uri()));
     span.set_attribute("span.type", "web");
     span
+}
+
+/// The scheme of the request as this server received it. An HTTP/2 request
+/// carries it in `:scheme`; an HTTP/1 request line has none, and the listener
+/// the hardened chain is bound to is plaintext (TLS ends at the platform edge),
+/// so that request is `http`.
+fn url_scheme(uri: &Uri) -> &'static str {
+    match uri.scheme_str() {
+        Some("https") => "https",
+        _ => "http",
+    }
 }
 
 fn update_span_from_response(span: &tracing::Span, status: StatusCode) {
     span.set_attribute("http.response.status_code", i64::from(status.as_u16()));
     if status.is_server_error() {
+        // The conventions name a failed response by its status code.
+        span.set_attribute("error.type", status.as_str().to_owned());
         span.set_status(opentelemetry::trace::Status::error(""));
     }
 }
@@ -325,16 +339,15 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    /// The one server span a request through the hardened chain exports.
     #[allow(
         clippy::disallowed_methods,
         reason = "transport fixture exercises the middleware independently of contract finalization"
     )]
-    async fn exported_server_span_keeps_the_http_attributes_and_the_error_status() {
+    async fn exported_span(request: Request) -> opentelemetry_sdk::trace::SpanData {
         use axum::Router;
         use axum::routing::get;
-        use opentelemetry::trace::{Status, TracerProvider as _};
-        use opentelemetry::{KeyValue, Value};
+        use opentelemetry::trace::TracerProvider as _;
         use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
         use tower::ServiceExt as _;
         use tracing_subscriber::layer::SubscriberExt as _;
@@ -358,29 +371,39 @@ mod tests {
                 log_health_probes: false,
             },
         );
+        drop(app.oneshot(request).await.unwrap());
+
+        let mut spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 1, "one server span, got {spans:?}");
+        spans.remove(0)
+    }
+
+    fn attribute(
+        span: &opentelemetry_sdk::trace::SpanData,
+        key: &str,
+    ) -> Option<opentelemetry::Value> {
+        span.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.clone())
+    }
+
+    #[tokio::test]
+    async fn exported_server_span_keeps_the_http_attributes_and_the_error_status() {
+        use opentelemetry::trace::Status;
+        use opentelemetry::{KeyValue, Value};
+
         let request = Request::builder()
             .uri("/items/7?full=1")
             .header("host", "api.test:8443")
             .header("user-agent", "probe/1")
             .body(Body::empty())
             .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        drop(response);
+        let span = exported_span(request).await;
 
-        let spans = exporter.get_finished_spans().unwrap();
-        let [span] = spans.as_slice() else {
-            panic!("one server span, got {spans:?}");
-        };
         assert_eq!(span.name, "GET /items/{id}");
         assert_eq!(span.span_kind, opentelemetry::trace::SpanKind::Server);
         assert!(matches!(span.status, Status::Error { .. }));
-        let attribute = |key: &str| {
-            span.attributes
-                .iter()
-                .find(|kv| kv.key.as_str() == key)
-                .map(|kv| kv.value.clone())
-        };
         for KeyValue { key, value, .. } in [
             KeyValue::new("http.request.method", "GET"),
             KeyValue::new("http.route", "/items/{id}"),
@@ -390,11 +413,41 @@ mod tests {
             KeyValue::new("server.port", 8443),
             KeyValue::new("url.path", "/items/7"),
             KeyValue::new("url.query", "full=1"),
+            KeyValue::new("url.scheme", "http"),
+            KeyValue::new("error.type", "500"),
             KeyValue::new("user_agent.original", "probe/1"),
             KeyValue::new("span.type", "web"),
         ] {
-            assert_eq!(attribute(key.as_str()), Some(value), "{key}");
+            assert_eq!(attribute(&span, key.as_str()), Some(value), "{key}");
         }
-        assert!(matches!(attribute("request_id"), Some(Value::String(_))));
+        assert!(matches!(
+            attribute(&span, "request_id"),
+            Some(Value::String(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_unmatched_request_span_omits_what_the_request_does_not_have() {
+        use opentelemetry::trace::Status;
+
+        let request = Request::builder()
+            .uri("https://api.test/missing")
+            .body(Body::empty())
+            .unwrap();
+        let span = exported_span(request).await;
+
+        // No route template and a client error: the method alone names the
+        // span, and a 404 is not a server failure.
+        assert_eq!(span.name, "GET");
+        assert!(matches!(span.status, Status::Unset));
+        for absent in ["http.route", "user_agent.original", "error.type"] {
+            assert_eq!(attribute(&span, absent), None, "{absent}");
+        }
+        assert_eq!(
+            attribute(&span, "http.response.status_code"),
+            Some(404.into())
+        );
+        // An absolute-form target (HTTP/2 `:scheme`) names its own scheme.
+        assert_eq!(attribute(&span, "url.scheme"), Some("https".into()));
     }
 }

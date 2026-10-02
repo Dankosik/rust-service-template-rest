@@ -1,18 +1,19 @@
 //! Typed, validated, immutable runtime configuration.
 //!
 //! Precedence, last wins: code defaults → `--config` file → `--config-overlay`
-//! files in order → `APP__SECTION__KEY` environment variables. Unknown keys
-//! anywhere fail startup. Secret-like keys may carry a value only through the
-//! environment. Each section owns its type, defaults, and validation in one
-//! file. [`Config::validate`] runs those section validators; a rule spanning
+//! files in order → `APP__SECTION__KEY` variables, read from the files of
+//! `--secrets-dir` and then from the environment. Unknown keys anywhere fail
+//! startup. Secret-like keys may carry a value only through a variable. Each
+//! section owns its type, defaults, and validation in one file.
+//! [`Config::validate`] runs those section validators; a rule spanning
 //! two sections lives in the one that depends on the other. Rules that need
 //! process structure, such as the drain-plus-teardown tail against the grace
 //! period, stay in the composition root.
 //!
 //! The loader is [`config`](https://docs.rs/config) with `serde`; see
 //! `docs/configuration-source-policy.md` for why, and for what the
-//! environment-name and file pre-scans in [`load`] add that the crate does
-//! not.
+//! variable-name and file pre-scans and the secrets directory in [`load`]
+//! add that the crate does not.
 
 pub mod app;
 pub mod health;
@@ -140,7 +141,6 @@ pub struct Config {
     pub object_storage: ObjectStorageConfig,
     // template:end object-storage:config-field
     // template:begin client-integrations:config-field
-    #[serde(default, deserialize_with = "integrations::deserialize_integrations")]
     pub integrations: std::collections::BTreeMap<String, IntegrationConfig>,
     // template:end client-integrations:config-field
     // template:begin authn:config-field
@@ -171,7 +171,7 @@ impl Config {
         self.app.validate()?;
         self.http.validate()?;
         // template:begin grpc:config-validate
-        self.grpc.validate()?;
+        self.grpc.validate(&self.http)?;
         // template:end grpc:config-validate
         // template:begin inbound-webhooks:config-inbound-webhooks-validate
         self.inbound_webhooks.validate(self.postgres.enabled)?;

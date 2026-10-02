@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM webhook_receipts WHERE (endpoint_id, message_id) IN (SELECT endpoint_id, message_id FROM webhook_receipts WHERE received_at < statement_timestamp() - $1::bigint * interval '1 second' ORDER BY received_at LIMIT $2 FOR UPDATE SKIP LOCKED)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d94027739e840cfac8a2a5bc1bbe1407833ab7b6e5750759e965d174f5db9f4d"
+}

@@ -5,6 +5,7 @@
 //! receives only typed events and a cancellation token.
 
 mod consumer;
+mod contract;
 mod error;
 mod messaging;
 // template:begin outbox:messaging-outbox-module
@@ -17,6 +18,7 @@ mod trace;
 pub mod wire;
 
 pub use consumer::{Consumer, ConsumerError, ConsumerHandle};
+pub use contract::ContractError;
 pub use error::{HandlerError, MessagingError, PublishError, RegistryError};
 pub use messaging::{CloseOutcome, ConsumerOptions, Messaging, MessagingOptions, MessagingProbe};
 pub use prepared::{PreparedEvent, PublishAck};

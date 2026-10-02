@@ -24,6 +24,8 @@ infra-bearerauthn = { workspace = true }
 # template:end authn:grpc-bearer-dependency
 metrics = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
+prost = { workspace = true, features = ["std"] }
+prost-types = { workspace = true, features = ["std"] }
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 secrecy = { workspace = true }
 service-failure = { workspace = true }
@@ -48,5 +50,6 @@ tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 infra-bearerauthn = { workspace = true, features = ["test-support"] }
 tokio-util = { workspace = true, features = ["rt"] }
 # template:end authn:grpc-bearer-test-dependency
+metrics-exporter-prometheus = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
 tokio = { workspace = true, features = ["macros", "net", "io-util", "rt-multi-thread", "sync", "test-util"] }

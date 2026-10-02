@@ -1,7 +1,7 @@
 //! Optional cache profile: DSN, TLS escape hatches, and the command budget.
 //!
 //! The section is inert until `dsn` is set. The DSN is secret-like, so it
-//! arrives through the environment only. URL shape, TLS, and password
+//! arrives only as its `APP__` variable. URL shape, TLS, and password
 //! admission stay in `infra-cache`, which is the crate that parses what the
 //! driver would connect to. `command_timeout` is the one budget an operator
 //! sets; connect and keepalive ceilings are template constants there.
@@ -13,19 +13,26 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::app::is_local_development;
-use crate::de::blank_secret_as_none;
+use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::validate::{ValidationError, duration_range};
 
 /// Optional Redis-compatible cache. Absent `dsn` keeps the profile inert.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct CacheConfig {
-    /// `redis://`, `rediss://`, `valkey://`, or `valkeys://`, password included.
+    /// `redis://`, `rediss://`, `valkey://`, or `valkeys://`, password included
+    /// unless `password_file` is set.
     /// Environment only (`APP__CACHE__DSN`). Missing, empty, or whitespace-only
     /// is absent (`None`).
     #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub dsn: Option<SecretString>,
-    /// PEM root CA path for a private certificate. Empty when unset.
+    /// A file that holds the password alone, for a platform that rotates it
+    /// by rewriting the file. The DSN then carries no password, and the
+    /// running service follows the file. Unset by default.
+    pub password_file: Option<PathBuf>,
+    /// PEM root CA path for a private certificate. Missing, empty, or
+    /// whitespace-only is unset (`None`).
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub root_ca_path: Option<PathBuf>,
     /// Permit a plaintext DSN. Local and development only.
     pub allow_plaintext: bool,
@@ -40,6 +47,7 @@ impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             dsn: None,
+            password_file: None,
             root_ca_path: None,
             allow_plaintext: false,
             allow_unauthenticated: false,
@@ -77,12 +85,12 @@ impl CacheConfig {
             ));
         }
         if self
-            .root_ca_path
+            .password_file
             .as_ref()
             .is_some_and(|path| path.as_os_str().is_empty())
         {
             return Err(ValidationError::new(
-                "cache.root_ca_path",
+                "cache.password_file",
                 "cannot be empty when set",
             ));
         }
@@ -114,6 +122,7 @@ mod tests {
     fn defaults_are_inert() {
         let config = CacheConfig::default();
         assert!(!config.is_active());
+        assert_eq!(config.password_file, None);
         assert_eq!(config.command_timeout, Duration::from_millis(100));
         config.validate("production", REQUEST_TIMEOUT).unwrap();
     }
@@ -163,6 +172,16 @@ mod tests {
         };
         local.validate("local", REQUEST_TIMEOUT).unwrap();
         local.validate("development", REQUEST_TIMEOUT).unwrap();
+    }
+
+    #[test]
+    fn an_empty_password_file_path_is_refused() {
+        let config = CacheConfig {
+            password_file: Some(PathBuf::new()),
+            ..CacheConfig::default()
+        };
+        let err = config.validate("production", REQUEST_TIMEOUT).unwrap_err();
+        assert_eq!(err.key, "cache.password_file");
     }
 
     #[test]

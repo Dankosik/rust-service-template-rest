@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH sampled AS ( SELECT statement_timestamp() AS observed_at ), registered AS ( SELECT name.kind FROM unnest($1::text[]) AS name(kind) ) SELECT registered.kind AS \"kind!\", available.count AS \"available!\", scheduled.count AS \"scheduled!\", running.count AS \"running!\", COALESCE(EXTRACT(EPOCH FROM sampled.observed_at - oldest.not_before), 0)::double precision AS \"oldest_available_seconds!\", EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\" FROM sampled CROSS JOIN registered CROSS JOIN LATERAL ( SELECT count(*) AS count FROM ( SELECT 1 FROM background_jobs AS job WHERE job.kind = registered.kind AND job.state = 'pending' AND job.not_before <= sampled.observed_at LIMIT $2 ) AS capped ) AS available CROSS JOIN LATERAL ( SELECT count(*) AS count FROM ( SELECT 1 FROM background_jobs AS job WHERE job.kind = registered.kind AND job.state = 'pending' AND job.not_before > sampled.observed_at LIMIT $2 ) AS capped ) AS scheduled CROSS JOIN LATERAL ( SELECT count(*) AS count FROM ( SELECT 1 FROM background_jobs AS job WHERE job.kind = registered.kind AND job.state = 'running' LIMIT $2 ) AS capped ) AS running LEFT JOIN LATERAL ( SELECT job.not_before FROM background_jobs AS job WHERE job.kind = registered.kind AND job.state = 'pending' AND job.not_before <= sampled.observed_at ORDER BY job.not_before, job.id LIMIT 1 ) AS oldest ON true",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "available!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "scheduled!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "running!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "oldest_available_seconds!",
+        "type_info": "Float8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "observed_at!",
+        "type_info": "Float8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "f1329f9490bd290b370c9358737319f3b3d444597d83fb6c97ef960897f2f9cd"
+}

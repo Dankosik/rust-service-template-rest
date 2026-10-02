@@ -21,6 +21,7 @@ fn options(
 ) -> CacheOptions {
     CacheOptions {
         dsn: SecretString::from(dsn.to_owned()),
+        password_file: None,
         root_ca_path,
         allow_plaintext,
         allow_unauthenticated,
@@ -30,7 +31,7 @@ fn options(
 
 fn admitted(dsn: &str, allow_plaintext: bool, allow_unauthenticated: bool) -> Cache {
     on_runtime(|| {
-        Cache::connect(options(dsn, allow_plaintext, allow_unauthenticated, None))
+        Cache::connect_lazy(options(dsn, allow_plaintext, allow_unauthenticated, None))
             .expect("lazy connect admits without a server")
     })
 }
@@ -49,7 +50,7 @@ fn on_runtime<T>(body: impl FnOnce() -> T) -> T {
 
 #[test]
 fn plaintext_without_the_allow_flag_is_refused() {
-    let err = Cache::connect(options(
+    let err = Cache::connect_lazy(options(
         "redis://:hunter2@127.0.0.1:6379",
         false,
         true,
@@ -69,13 +70,14 @@ fn plaintext_and_a_missing_password_are_admitted_when_allowed() {
     let debug = format!("{cache:?}");
     assert!(
         debug.contains("127.0.0.1") && !debug.contains("redis://"),
-        "{debug}"
+        "cache debug output must identify the server without the DSN"
     );
 }
 
 #[test]
 fn a_missing_password_is_refused_without_the_allow_flag() {
-    let err = Cache::connect(options("rediss://127.0.0.1:6379", false, false, None)).unwrap_err();
+    let err =
+        Cache::connect_lazy(options("rediss://127.0.0.1:6379", false, false, None)).unwrap_err();
     assert_eq!(err, CacheError::UnauthenticatedRefused);
 }
 
@@ -85,12 +87,15 @@ fn an_authenticated_tls_address_is_admitted_without_dialing() {
     assert!(cache.server().tls);
     assert_eq!(cache.server().port, 6380);
     let rendered = format!("{cache:?} {}", cache.server().host);
-    assert!(!rendered.contains("hunter2"), "{rendered}");
+    assert!(
+        !rendered.contains("hunter2"),
+        "cache debug output disclosed a password"
+    );
 }
 
 #[test]
 fn insecure_tls_fragment_is_refused() {
-    let err = Cache::connect(options(
+    let err = Cache::connect_lazy(options(
         "rediss://:hunter2@127.0.0.1:6379#insecure",
         false,
         true,
@@ -104,13 +109,13 @@ fn insecure_tls_fragment_is_refused() {
 #[test]
 fn a_unix_socket_is_unsupported() {
     let err =
-        Cache::connect(options("redis+unix:///tmp/cache.sock", true, true, None)).unwrap_err();
+        Cache::connect_lazy(options("redis+unix:///tmp/cache.sock", true, true, None)).unwrap_err();
     assert_eq!(err, CacheError::UnsupportedAddress);
 }
 
 #[test]
 fn a_root_ca_on_plaintext_is_refused_before_the_file_is_read() {
-    let err = Cache::connect(options(
+    let err = Cache::connect_lazy(options(
         "redis://127.0.0.1:6379",
         true,
         true,
@@ -123,7 +128,7 @@ fn a_root_ca_on_plaintext_is_refused_before_the_file_is_read() {
 #[test]
 fn a_missing_root_ca_file_reports_only_the_io_kind() {
     let missing = PathBuf::from("/no/such/cache-ca.pem");
-    let err = Cache::connect(options(
+    let err = Cache::connect_lazy(options(
         "rediss://:secret@127.0.0.1:6379",
         false,
         false,
@@ -141,7 +146,7 @@ fn a_missing_root_ca_file_reports_only_the_io_kind() {
 fn a_root_ca_without_a_pem_certificate_is_invalid() {
     let file = tempfile::NamedTempFile::new().expect("temp ca");
     std::fs::write(file.path(), b"not a certificate").expect("write ca");
-    let err = Cache::connect(options(
+    let err = Cache::connect_lazy(options(
         "rediss://:hunter2@127.0.0.1:6379",
         false,
         false,
@@ -160,7 +165,7 @@ fn a_root_ca_with_a_certificate_header_and_invalid_base64_is_invalid() {
         b"-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n",
     )
     .expect("write ca");
-    let err = Cache::connect(options(
+    let err = Cache::connect_lazy(options(
         "rediss://:hunter2@127.0.0.1:6379",
         false,
         false,
@@ -173,14 +178,14 @@ fn a_root_ca_with_a_certificate_header_and_invalid_base64_is_invalid() {
 
 #[test]
 fn an_unparseable_dsn_does_not_echo_the_password() {
-    let err = Cache::connect(options("not a url hunter2", true, true, None)).unwrap_err();
+    let err = Cache::connect_lazy(options("not a url hunter2", true, true, None)).unwrap_err();
     assert_eq!(err, CacheError::InvalidDsn);
     assert!(!format!("{err} {err:?}").contains("hunter2"));
 }
 
 #[test]
 fn an_admitted_dsn_outside_a_runtime_is_refused() {
-    let err = Cache::connect(options("redis://127.0.0.1:6379", true, true, None)).unwrap_err();
+    let err = Cache::connect_lazy(options("redis://127.0.0.1:6379", true, true, None)).unwrap_err();
     assert_eq!(err, CacheError::NoRuntime);
 }
 
@@ -190,7 +195,10 @@ fn options_debug_redacts_the_dsn() {
         "{:?}",
         options("redis://:hunter2@127.0.0.1:6379", true, true, None)
     );
-    assert!(!rendered.contains("hunter2"), "{rendered}");
+    assert!(
+        !rendered.contains("hunter2"),
+        "cache debug output disclosed a password"
+    );
 }
 
 #[test]
@@ -219,14 +227,95 @@ fn redis_errors_map_to_bounded_error_types() {
     ];
     for (kind, expected) in cases {
         let error = redis::RedisError::from((kind, "hunter2 must not leak"));
-        assert_eq!(crate::observe::error_type(&error), expected);
+        assert_eq!(crate::observe::error_type(&error).label(), expected);
         assert!(!error.to_string().is_empty());
     }
     let server = redis::RedisError::from((
         redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
         "NOAUTH hunter2",
     ));
-    assert_eq!(crate::observe::error_type(&server), "response");
+    assert_eq!(crate::observe::error_type(&server).label(), "response");
+}
+
+fn with_password_file(dsn: &str, password_file: PathBuf) -> CacheOptions {
+    CacheOptions {
+        password_file: Some(password_file),
+        ..options(dsn, true, false, None)
+    }
+}
+
+#[test]
+fn a_password_file_admits_a_dsn_without_a_password() {
+    let file = tempfile::NamedTempFile::new().expect("temp password");
+    std::fs::write(file.path(), "hunter2\n").expect("write password");
+    // No password in the DSN and no `allow_unauthenticated`.
+    on_runtime(|| {
+        Cache::connect_lazy(with_password_file(
+            "redis://127.0.0.1:6379",
+            file.path().to_path_buf(),
+        ))
+        .expect("the file is the password source")
+    });
+}
+
+#[test]
+fn a_password_in_the_dsn_and_a_password_file_are_refused_together() {
+    let file = tempfile::NamedTempFile::new().expect("temp password");
+    std::fs::write(file.path(), "from-file").expect("write password");
+    let err = Cache::connect_lazy(with_password_file(
+        "redis://:hunter2@127.0.0.1:6379",
+        file.path().to_path_buf(),
+    ))
+    .unwrap_err();
+    assert_eq!(err, CacheError::PasswordInDsn);
+    assert!(!format!("{err} {err:?}").contains("hunter2"));
+}
+
+#[test]
+fn an_unreadable_or_empty_password_file_fails_admission() {
+    let missing = PathBuf::from("/no/such/cache-password");
+    let err =
+        Cache::connect_lazy(with_password_file("redis://127.0.0.1:6379", missing)).unwrap_err();
+    assert!(
+        matches!(err, CacheError::PasswordFile { kind } if kind == std::io::ErrorKind::NotFound),
+        "{err:?}"
+    );
+    assert!(!err.to_string().contains("/no/such"), "{err}");
+
+    let file = tempfile::NamedTempFile::new().expect("temp password");
+    std::fs::write(file.path(), "\n").expect("write password");
+    let err = Cache::connect_lazy(with_password_file(
+        "redis://127.0.0.1:6379",
+        file.path().to_path_buf(),
+    ))
+    .unwrap_err();
+    assert_eq!(err, CacheError::PasswordFileEmpty);
+}
+
+#[test]
+fn a_failed_command_names_its_cause_on_the_series() {
+    use crate::observe::{ErrorType, Histograms, Operation, OperationGuard};
+
+    let recorder = observation_recorder();
+    let server = crate::ServerIdentity {
+        host: "cache.example".to_owned(),
+        port: 6379,
+        tls: true,
+    };
+    metrics::with_local_recorder(&recorder, || {
+        let histograms = Histograms::default();
+        for error_type in [ErrorType::Auth, ErrorType::Io, ErrorType::Timeout] {
+            let _ = OperationGuard::start("causes", &histograms, Operation::Set, &server)
+                .fail(error_type);
+        }
+    });
+    let scrape = recorder.handle().render();
+    for (outcome, error_type) in [("error", "auth"), ("error", "io"), ("timeout", "timeout")] {
+        let series = format!(
+            "cache_operation_duration_seconds_count{{cache=\"causes\",operation=\"set\",outcome=\"{outcome}\",error_type=\"{error_type}\"}} 1"
+        );
+        assert!(scrape.contains(&series), "{series} missing from {scrape}");
+    }
 }
 
 #[test]
@@ -307,8 +396,9 @@ fn a_silent_server_records_timeout() {
                     });
                 }
             });
-            let cache = Cache::connect(CacheOptions {
+            let cache = Cache::connect_lazy(CacheOptions {
                 dsn: SecretString::from(format!("redis://{address}")),
+                password_file: None,
                 root_ca_path: None,
                 allow_plaintext: true,
                 allow_unauthenticated: true,
@@ -325,6 +415,7 @@ fn a_silent_server_records_timeout() {
     let scrape = recorder.handle().render();
     assert!(
         scrape.contains("outcome=\"timeout\"")
+            && scrape.contains("error_type=\"timeout\"")
             && scrape.contains("operation=\"get\"")
             && scrape.contains("cache=\"obs\""),
         "{scrape}"
@@ -367,8 +458,9 @@ async fn a_reply_inside_the_command_timeout_is_not_cut_short() {
             }
         }
     });
-    let cache = Cache::connect(CacheOptions {
+    let cache = Cache::connect_lazy(CacheOptions {
         dsn: SecretString::from(format!("redis://{address}")),
+        password_file: None,
         root_ca_path: None,
         allow_plaintext: true,
         allow_unauthenticated: true,
@@ -429,10 +521,12 @@ fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
 /// every `GET` with a miss. The client authenticates inside `HELLO 3`; the
 /// server counts those attempts so the test can wait for the client's own
 /// reconnect chain to give up. Each accepted connection records the primary
-/// generation; a `SET` on an older generation is `READONLY`.
+/// generation; a `SET` on an older generation is `READONLY`. With a
+/// `password` set, authentication succeeds only with that password.
 struct FakeServer {
     address: std::net::SocketAddr,
     accept_auth: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    password: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     auth_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     primary: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -447,12 +541,14 @@ impl FakeServer {
             .expect("fake server bind");
         let address = listener.local_addr().expect("fake server address");
         let accept_auth = std::sync::Arc::new(AtomicBool::new(false));
+        let password = std::sync::Arc::new(std::sync::Mutex::new(None));
         let auth_attempts = std::sync::Arc::new(AtomicUsize::new(0));
         let primary = std::sync::Arc::new(AtomicUsize::new(0));
         let connections = std::sync::Arc::new(AtomicUsize::new(0));
         let sessions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (accept, attempts, generation, accepted, open) = (
+        let (accept, expected, attempts, generation, accepted, open) = (
             accept_auth.clone(),
+            password.clone(),
             auth_attempts.clone(),
             primary.clone(),
             connections.clone(),
@@ -465,6 +561,7 @@ impl FakeServer {
                 let session = tokio::spawn(serve_resp(
                     stream,
                     accept.clone(),
+                    expected.clone(),
                     attempts.clone(),
                     recorded,
                     generation.clone(),
@@ -475,6 +572,7 @@ impl FakeServer {
         Self {
             address,
             accept_auth,
+            password,
             auth_attempts,
             primary,
             connections,
@@ -489,6 +587,11 @@ impl FakeServer {
         }
     }
 
+    /// Accept only this password from now on.
+    fn require_password(&self, password: &str) {
+        *self.password.lock().expect("password lock") = Some(password.to_ascii_uppercase());
+    }
+
     fn attempts(&self) -> usize {
         self.auth_attempts.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -501,6 +604,7 @@ impl FakeServer {
 async fn serve_resp(
     stream: tokio::net::TcpStream,
     accept_auth: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    password: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     auth_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     generation: usize,
     primary: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -551,7 +655,12 @@ async fn serve_resp(
         let reply: &[u8] = match arguments.first().map(String::as_str) {
             _ if authenticates => {
                 auth_attempts.fetch_add(1, Ordering::SeqCst);
-                if accept_auth.load(Ordering::SeqCst) {
+                // Arguments were upper-cased above, and so was the password.
+                let accepted = match password.lock().expect("password lock").as_ref() {
+                    Some(expected) => arguments.last() == Some(expected),
+                    None => accept_auth.load(Ordering::SeqCst),
+                };
+                if accepted {
                     b"+OK\r\n"
                 } else {
                     b"-WRONGPASS invalid username-password pair\r\n"
@@ -577,8 +686,9 @@ async fn serve_resp(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_auth_is_retried_after_the_client_gives_up() {
     let gate = FakeServer::start().await;
-    let cache = Cache::connect(CacheOptions {
+    let cache = Cache::connect_lazy(CacheOptions {
         dsn: SecretString::from(format!("redis://:secret@{}", gate.address)),
+        password_file: None,
         root_ca_path: None,
         allow_plaintext: true,
         allow_unauthenticated: false,
@@ -619,8 +729,9 @@ async fn a_refused_auth_is_retried_after_the_client_gives_up() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_readonly_reply_reconnects_to_the_new_primary() {
     let server = FakeServer::start().await;
-    let cache = Cache::connect(CacheOptions {
+    let cache = Cache::connect_lazy(CacheOptions {
         dsn: SecretString::from(format!("redis://{}", server.address)),
+        password_file: None,
         root_ca_path: None,
         allow_plaintext: true,
         allow_unauthenticated: true,
@@ -664,8 +775,9 @@ async fn a_refused_hello_is_reported_as_auth() {
     use health::Probe;
 
     let gate = FakeServer::start().await;
-    let cache = Cache::connect(CacheOptions {
+    let cache = Cache::connect_lazy(CacheOptions {
         dsn: SecretString::from(format!("redis://:secret@{}", gate.address)),
+        password_file: None,
         root_ca_path: None,
         allow_plaintext: true,
         allow_unauthenticated: false,
@@ -700,4 +812,83 @@ async fn a_dropped_idle_connection_reconnects_before_the_next_call() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(namespace.get("key").await, Ok(None));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replaced_connection_dials_without_waiting_for_a_call() {
+    let server = FakeServer::start().await;
+    let cache = admitted(&format!("redis://{}", server.address), true, true);
+    let namespace = cache.namespace("warm");
+    let ttl = Duration::from_secs(1);
+    namespace
+        .set("key", b"value", ttl)
+        .await
+        .expect("set on the current primary");
+    server
+        .primary
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        namespace.set("key", b"value", ttl).await,
+        Err(crate::Unavailable)
+    );
+
+    // No cache call from here on: the replaced manager must dial on its own.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while server.connections() < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the replaced connection waited for a call before it dialed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rotated_password_file_authenticates_the_next_connection() {
+    let server = FakeServer::start().await;
+    let mut password_bytes = [0_u8; 32];
+    let random = rustls::crypto::aws_lc_rs::default_provider().secure_random;
+    random
+        .fill(&mut password_bytes)
+        .expect("ephemeral password");
+    let first = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, password_bytes);
+    random
+        .fill(&mut password_bytes)
+        .expect("rotated ephemeral password");
+    let second = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, password_bytes);
+    server.require_password(&first);
+    let file = tempfile::NamedTempFile::new().expect("temp password");
+    std::fs::write(file.path(), format!("{first}\n")).expect("write password");
+    let cache = Cache::connect_lazy(with_password_file(
+        &format!("redis://{}", server.address),
+        file.path().to_path_buf(),
+    ))
+    .expect("lazy connect");
+    let namespace = cache.namespace("rotation");
+    assert_eq!(namespace.get("key").await, Ok(None));
+    // One `HELLO … AUTH`; the live connection's own subscription may already
+    // have repeated it.
+    let opened = server.attempts();
+    assert!(opened >= 1, "the file's password was not sent");
+
+    // The platform rotates the password; the old connection is gone.
+    std::fs::write(file.path(), format!("{second}\n")).expect("rotate password");
+    server.require_password(&second);
+    server.hang_up();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if namespace.get("key").await == Ok(None) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the cache did not authenticate with the rotated password"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        server.attempts() > opened,
+        "the new connection did not authenticate"
+    );
 }

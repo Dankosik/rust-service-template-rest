@@ -20,15 +20,15 @@ mod transaction;
 
 pub use credentials::{PASSWORD_REFRESH_INTERVAL, refresh_password_periodically};
 pub use dsn::{Dsn, DsnError};
-pub use error::{failure_cause, retryable, sqlstate, transient};
+pub use error::{failure_cause, sqlstate, transient};
 pub use observe::{
-    CONNECTION_WAIT_BUCKETS, CONNECTION_WAIT_METRIC, TRANSACTION_DURATION_BUCKETS,
-    TRANSACTION_DURATION_METRIC,
+    CONNECTION_WAIT_BUCKETS, CONNECTION_WAIT_METRIC, OPERATION_DURATION_BUCKETS,
+    OPERATION_DURATION_METRIC, TRANSACTION_DURATION_BUCKETS, TRANSACTION_DURATION_METRIC, observed,
 };
 pub use pool::{
-    ACQUIRE_TIMEOUT, Closed, ConnectError, IDLE_IN_TRANSACTION_TIMEOUT, PoolOptions,
-    STATEMENT_TIMEOUT, SessionBudgets, SessionOptions, close, connect, connect_session,
-    record_metrics, record_metrics_periodically,
+    ACQUIRE_TIMEOUT, Closed, ConnectError, IDLE_CONNECTION_TIMEOUT, IDLE_IN_TRANSACTION_TIMEOUT,
+    MAX_CONNECTION_LIFETIME, PoolOptions, STATEMENT_TIMEOUT, SessionBudgets, SessionOptions, close,
+    connect, connect_session, record_metrics, record_metrics_periodically,
 };
 pub use probe::PostgresProbe;
 pub use sqlx::postgres::PgPool;

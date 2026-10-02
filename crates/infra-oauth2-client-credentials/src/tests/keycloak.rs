@@ -19,9 +19,8 @@ use tokio::time::Instant;
 use url::Url;
 use uuid::Uuid;
 
-use super::{
-    AcquisitionError, Algorithm, Credentials, Options, Rejection, TOKEN_LIMITS, subject_key,
-};
+use super::{AcquisitionError, Algorithm, Credentials, Options, Rejection, TOKEN_LIMITS};
+use crate::subject_key;
 
 const KEY_ID: &str = "key-1";
 /// The audience client an exchanged token is addressed to.

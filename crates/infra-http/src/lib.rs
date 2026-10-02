@@ -42,5 +42,5 @@ pub use harden::RequestDeadline;
 // template:end request-budget:infra-http-request-deadline-export
 pub use problem::{Code, InvalidParam, Problem};
 pub use request_id::REQUEST_ID_HEADER;
-pub use router::router;
+pub use router::{liveness_router, router};
 pub use server::{CONNECTIONS_REFUSED_METRIC, Drained, Server, ServerError, ServerOptions};

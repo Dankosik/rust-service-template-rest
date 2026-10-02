@@ -16,7 +16,9 @@ represented by a literal btree key, and no runtime query needs that access
 path. Trusted operators can still use the heap metadata with bound queries.
 `20260928190000_compress_http_idempotency_bodies_with_lz4.sql` switches new
 bodies to lz4 TOAST compression, which PostgreSQL 14+ builds with lz4 support
-provide. Only `infra-idempotency-store` names the table; the service never
+provide. `20261002150000_tune_http_idempotency_records_autovacuum.sql` sets a
+table-local autovacuum threshold of 5,000 rows and scale factor of 1%, which
+the TOAST table follows; it does not change any server setting or role. Only `infra-idempotency-store` names the table; the service never
 creates or alters it at runtime.
 <!-- template:end http-idempotency:migrations-readme-http-idempotency -->
 <!-- template:begin jobs:migrations-readme-jobs -->
@@ -50,6 +52,10 @@ Rules, proven by `cargo test -p migrate` over the embedded set:
   That source-only exception does not make runtime history compatible with the
   former migrations; a database made from the former history must be explicitly
   recreated outside startup.
+
+A migration changes what the checked statements (`sqlx::query!`) compile
+against: run `make sqlx-prepare` with it and commit the `.sqlx/` changes.
+`make sqlx-check` refuses stale metadata in CI.
 
 Files that are not `<version>_<name>.sql` (this README) are ignored by the
 resolver.

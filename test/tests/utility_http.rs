@@ -4,11 +4,12 @@
 use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue, Uri};
-use axum::{Json, Router, routing::get};
+use axum::{Router, routing::get};
 use axum_extra::TypedHeader;
 use axum_extra::extract::Query;
 use axum_extra::headers::{ContentLength, HeaderMapExt, UserAgent};
 use axum_test::TestServer;
+use infra_http::extract::Json;
 use serde::Deserialize;
 use serde_json::json;
 use wiremock::matchers::{method, path};

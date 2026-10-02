@@ -39,10 +39,11 @@ alternatives they beat, are recorded at the end of this document.
    Failures are `Problem` values from the closed catalog in
    `infra_http::problem`, rendered as `application/problem+json` with the
    request id; no submitted value is echoed. Request data enters through
-   `infra_http::extract::{Json, Query, Path}`, whose rejections are Problems.
+   `infra_http::extract::{Json, Query, Path}`, whose rejections are Problems;
+   Clippy refuses axum's own three in application code.
 6. Edge observability uses route templates, not raw paths; unmatched requests
    carry an explicit label. `/metrics` stays on the separate diagnostics
-   listener owned by
+   listener, which also answers `GET /health/live`, owned by
    [Configuration Source Policy](../configuration-source-policy.md#opentelemetry-environment-policy),
    which binds IPv4 all-interfaces (`0.0.0.0`) by default and must be kept private by deployment.
 
@@ -87,7 +88,8 @@ regenerated fails everywhere tests run.
    composer. Request and response types derive `ToSchema`;
    `#[serde(deny_unknown_fields)]` closes an object. Take a body, query, or
    path parameters through `infra_http::extract::{Json, Query, Path}`, not
-   axum's own extractors, whose rejections answer `text/plain`.
+   axum's own extractors, whose rejections answer `text/plain`; the same
+   `Json` renders a JSON response body.
 4. Register the handler as `OpenApiRouter::routes(utoipa_axum::routes!(handler))`
    in the feature's `OpenApiRouter`, and merge that router in
    `service::api::contract()`; the hardened chain is unchanged.
@@ -103,7 +105,9 @@ annotation documents HEAD. Clippy's `disallowed-methods` (`clippy.toml`)
 rejects the remaining escape hatches in application code: raw
 `OpenApiRouter`/`Router` routes and services, fallbacks, and separately
 registered HEAD or any-method handlers. Multi-handler macro calls group only
-annotated methods on the same path.
+annotated methods on the same path. Its `disallowed-types` rejects
+`axum::Json`, `axum::extract::Query`, and `axum::extract::Path`, so a handler
+cannot take a `text/plain` rejection by importing the upstream name.
 
 `infra_http::extract::{Json, Query, Path}` map extractor rejections into the
 catalog: a body without the JSON media type is `415`
@@ -196,13 +200,14 @@ one only with new evidence.
 
 | Decision | Alternative rejected | Why |
 | --- | --- | --- |
-| Every middleware applied with `Router::layer`; one `admit` middleware over a router-wide `Semaphore` sheds with `503` + `Retry-After: 1` and lets the probe routes through without a permit; `HandleErrorLayer` maps `Elapsed` → `504` | `route_layer`; `LoadShedLayer` over `GlobalConcurrencyLimitLayer`; a plain `ConcurrencyLimitLayer` | `Router::layer` covers the `404`/`405` fallbacks. The tower layers cannot exempt a route, so a saturated instance answered `503` to `/health/live` and the platform would restart it under load; `infra-grpc` sheds with the same `admit` shape. A plain `ConcurrencyLimitLayer` becomes per-route under `Router::layer` (verified in tower source). The connection cap still applies to a probe's connection |
+| Every middleware applied with `Router::layer`; one `admit` middleware over a router-wide `Semaphore` sheds with `503` + `Retry-After: 1` and lets the probe routes through without a permit; `HandleErrorLayer` maps `Elapsed` → `504` | `route_layer`; `LoadShedLayer` over `GlobalConcurrencyLimitLayer`; a plain `ConcurrencyLimitLayer` | `Router::layer` covers the `404`/`405` fallbacks. The tower layers cannot exempt a route, so a saturated instance answered `503` to `/health/live` and the platform would restart it under load; `infra-grpc` sheds with the same `admit` shape. A plain `ConcurrencyLimitLayer` becomes per-route under `Router::layer` (verified in tower source). The connection cap still applies to a probe's connection, so the diagnostics listener, with its own cap, serves `/health/live` as well ([Runtime Lifecycle](runtime-lifecycle.md#readiness-and-liveness)) |
 | No `CorsLayer` | an empty `CorsLayer` | an empty layer answers every `OPTIONS` with `200`; browser cross-origin requests are fail-closed by omission until a profile decides |
 | Inbound `X-Request-ID` accepted only within `^[A-Za-z0-9._~-]{1,128}$`, otherwise replaced by a UUIDv4 | tower-http's default, which trusts any present header | a caller-provided id is data, not identity; the grammar bounds log and header size |
 | Template-owned one-line access log with `Option<MatchedPath>` and route-based probe suppression | tower-http `TraceLayer` alone | route templates, not raw paths, keep label cardinality bounded; `MatchedPath` is absent in `Router::fallback`, so unmatched requests carry an explicit label |
 | One observation middleware (`observe.rs`) opens the server span from `tracing-opentelemetry-instrumentation-sdk` pieces with `http.route`, `otel.name`, and `request_id` set at creation, and emits the HTTP metrics through the `metrics` facade, as `infra-grpc`'s `observe` does | `axum-tracing-opentelemetry`'s `OtelAxumLayer` plus `axum-prometheus` plus separate access-log and problem-completion layers | every `Span::record` re-serialized the span in `json-subscriber` (the JSON layer then in use), `axum-prometheus` allocates about two dozen times per request, and each `from_fn` layer clones the inner stack; on a dedicated 4-vCPU host with JSON logs and an always-on tracer this removed about 16% of the instructions and 19% of the allocations of a small request. Reopen if the upstream layer takes creation-time fields |
 | Only `otel.name`, `otel.kind`, and `request_id` are `tracing` fields of the server span; the other HTTP attributes and the error status are set with `OpenTelemetrySpanExt`, and the `tracing-opentelemetry` layer adds no source location, thread, or busy/idle attributes | every HTTP attribute as a span field, flattened into each JSON log record | the JSON log layer serializes every span field and repeats it on each record inside the request, so the access line carried `url.path`, `user_agent.original`, and `server.*` twice over its own fields; exported spans keep the same HTTP attributes (`exported_server_span_keeps_the_http_attributes_and_the_error_status`). On a dedicated 4-vCPU host with JSON logs this removed about 29% of a small request's instructions. Log records keep `request_id`, trace and span ids, and the fields of other spans such as `job_attempt`; the Go template logs the same correlation set |
 | HTTP metrics under the OpenTelemetry HTTP semantic-convention names as Prometheus renders them: `http_server_request_duration_seconds{http_request_method, http_route, http_response_status_code}` and `http_server_active_requests{http_request_method}`; the request count is the histogram's `_count`; an extension method is `_OTHER` and an unmatched request `http_route="<unmatched>"` | the `axum-prometheus` names (`axum_http_requests_total`, `..._duration_seconds`, `..._pending` with `method`/`endpoint`/`status`) | `axum-prometheus` left the dependency graph with the observation middleware, the server span already follows the conventions, and the template's other server counters are `http_server_*`. A separate request counter repeated the histogram's `_count`. A service that adopted the old names renames its queries: `rate(axum_http_requests_total[..])` becomes `rate(http_server_request_duration_seconds_count[..])` |
+| The server span sets `http.route` and `user_agent.original` only when the request has one, `url.scheme` from an absolute-form target (HTTP/2 `:scheme`) and otherwise `http`, and `error.type` with the status code on a `5xx` | the upstream helpers' empty strings for a missing route, user agent, or scheme | the conventions omit an attribute the request lacks and require `url.scheme`; an HTTP/1 request line carries no scheme and the listener under the hardened chain is plaintext, so `http` is the scheme of the request as received. A deployment that terminates TLS in this process for HTTP/1 revisits it. `error.type` stays off the duration histogram, whose status label already separates failures |
 | The span's `url.query` replaces the values of `AWSAccessKeyId`, `Signature`, `sig`, and `X-Goog-Signature` with `REDACTED` | the raw query string | the HTTP conventions' default redaction list; the rest of the query stays for diagnosis |
 | tower-http `RequestBodyLimitLayer` plus axum `DefaultBodyLimit` at `http.max_body_bytes`; problem completion maps their `text/plain` `413` to the `Problem` envelope | a template-owned body-limit middleware | the stock layer already short-circuits on `Content-Length` and caps streamed bodies; only the envelope is template policy |
 | Template-owned `Problem` (`code`, `request_id`, `invalid_params`) with a closed `Code` catalog | `problem_details` 0.10 (acceptable), `problemdetails` 0.7 (pins tower-http 0.6) | about sixty lines; nothing submitted by the caller is echoed; a new code is a reviewed contract change |
@@ -210,6 +215,7 @@ one only with new evidence.
 | Template-owned accept loop over `hyper_util::server::conn::auto` with `TokioTimer`, a `Semaphore(max_connections)` permit per connection, and a bounded `peek` before hyper sees the socket | `axum::serve` | `axum::serve` sets no timer and exposes no limits (axum #2741); the `auto` builder starts no timer until the first byte (hyper #3756), so a silent client would hold a connection forever |
 | One `http.header_read_timeout` that hyper restarts on idle, so it is both the header and the keep-alive idle bound; body reads are bounded by `http.request_timeout` because extractors run inside the handler future | Go's read/write/idle deadlines | hyper has no per-connection read/write deadlines; one value covers both risks. Streaming response bodies stay unbounded until a streaming operation adopts `ResponseBodyTimeoutLayer` |
 | `TCP_NODELAY` on every accepted socket | Nagle's algorithm, the kernel default | hyper sends HTTP/2 headers, data and trailers as separate segments, so a later one waited for the peer's delayed ACK: gRPC unary calls with 1 KiB messages and client-streaming calls stalled 41 ms each (1.5k → 19.8k calls/s on DigitalOcean c-4). Tonic's own server and grpc-go set it too. Saturated tiny-message streams lose 5–9% throughput to the extra packets |
+| Each connection runs in a `tokio_util` `TaskTracker` task that selects over the connection, the drain token, and `max_connection_age`, then calls hyper's `graceful_shutdown` and waits for the connection to end. The age is spread by up to 10% either way. `http.max_connection_age` defaults to off; `grpc.max_connection_age` to thirty minutes | `hyper_util::server::graceful::GracefulShutdown`, which signals only at drain and whose connection trait is sealed, so nothing else can ask one watched connection to finish; tonic's own `Server`, which has `max_connection_age` but is a second accept loop | A long-lived HTTP/2 connection behind a connection-level balancer keeps every call on the replica it first reached, so replicas added later get none until something closes it. grpc-go (`MaxConnectionAge`, with the same spread), Envoy (`max_connection_duration`) and nginx (`keepalive_time`) bound a connection's age for this reason. This is hyper's documented graceful-shutdown shape and what tonic's serve loop does. HTTP stays off because an HTTP/1 proxy that reuses an idle connection just as the server closes it sees a failed request; HTTP/2 GOAWAY has no such race. There is no forced close after the age: a stream that outlives it keeps its connection |
 | `header_read_timeout(Some(_))` always paired with `timer()`; `max_buf_size` at least 8192 | — | both panic at `serve_connection` otherwise |
 
 ### Contract
@@ -219,7 +225,7 @@ one only with new evidence.
 | Code-first: `utoipa` 6 + `utoipa-axum` 0.3 generate `service.yaml` from the handlers; the committed file is the reviewed authority, tied by a byte-exact test | `openapi-generator` `rust-axum` (JVM) spec-first; `aide` as runner-up | no maintained Rust-native spec-first server generator exists for axum; the JVM generator's output failed on quality (handler-trait shape, validation, error mapping). Oxide's `dropshot` uses the same committed-document model at scale |
 | OpenAPI 3.1 | 3.0.3; 3.2 | utoipa 6 emits 3.1 by default and never 3.0; Redocly and oasdiff handle 3.1 (verified). 3.2 is opt-in in utoipa 6 and waits for a feature the contract needs |
 | Extractors are the request validator; `#[serde(deny_unknown_fields)]` closes objects | a runtime spec validator (`openapi3filter` in Go) | no spec-driven validator exists for axum and none is needed when the types are the source; constraint keywords (`pattern`, `minLength`) get explicit enforcement with the first constrained parameter |
-| `infra_http::extract::{Json, Query, Path}` wrap axum's extractors and turn each rejection into a `Problem`; the body pointer comes from the `serde_path_to_error` path axum already records (direct dependency on 0.1.20, the version axum resolves) | axum's extractors with their `text/plain` rejections; `axum-extra`'s `WithRejection`; `#[derive(FromRequest)]` with `rejection(...)`; a response-rewriting layer | the wrappers are three short `FromRequest` impls. `WithRejection` needs a second type parameter at every handler, the derive adds the `axum-macros` proc-macro crate for the same three impls, and rewriting bare `4xx` responses cannot tell a rejection from a handler's own answer. A body member is named by its location, which is the caller's own key, so a location over 256 bytes is omitted; the submitted value never appears |
+| `infra_http::extract::{Json, Query, Path}` wrap axum's extractors and turn each rejection into a `Problem`; the body pointer comes from the `serde_path_to_error` path axum already records (direct dependency on 0.1.20, the version axum resolves) | axum's extractors with their `text/plain` rejections; `axum-extra`'s `WithRejection`; `#[derive(FromRequest)]` with `rejection(...)`; a response-rewriting layer | the wrappers are three short `FromRequest` impls. `clippy.toml` `disallowed-types` rejects axum's three in application code, and `Json` also implements `IntoResponse` so the ban leaves one name for both directions. `WithRejection` needs a second type parameter at every handler, the derive adds the `axum-macros` proc-macro crate for the same three impls, and rewriting bare `4xx` responses cannot tell a rejection from a handler's own answer. A body member is named by its location, which is the caller's own key, so a location over 256 bytes is omitted; the submitted value never appears |
 | `Problem.code` rendered as `string` (`value_type = String`) although the catalog is a closed enum | an enum in the schema | oasdiff classifies a new enum value in a response as breaking, and the catalog grows with features |
 | Optional members `#[schema(nullable = false)]` | utoipa's default `type: [string, 'null']` | the wire omits the member and never sends `null`; the default over-promises and oasdiff flags it |
 | An authentication profile declares root bearer security; public operations override it with `security: []` | a placeholder scheme or per-handler enforcement | Missing operation security inherits the root default, while `security(())` renders `[{}]` and is ambiguous. A no-auth output has no bearer scheme or per-operation security mandate |
@@ -244,6 +250,15 @@ exists. Public operations, including probes, explicitly override it with
   problem components: the authentication profile.
 - `ResponseBodyTimeoutLayer`: the first streaming operation.
 - Rate limiting (`tower_governor`) and CORS: profile decisions.
+- Response compression (tower-http `CompressionLayer`): the first operation
+  whose bodies are large enough to pay for it and whose platform edge does not
+  compress; it joins the feature router, not the chain, and never wraps a
+  response that mixes a secret with caller-controlled text.
+- `client.address` and `network.peer.address` on the server span: the peer
+  behind a load balancer is the balancer, and a forwarded address is
+  caller-controlled until a deployment names the proxies it trusts. Both are
+  personal data in traces. A service that needs them decides the trusted-proxy
+  rule and the retention first.
 - `x-extensible-enum` on `Problem.code`, Swagger UI, publishing the
   document: a consumer that needs them.
 

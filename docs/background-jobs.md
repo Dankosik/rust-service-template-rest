@@ -217,7 +217,9 @@ publisher engine shares it. `LISTEN` needs a session of its own: through a
 transaction-mode pooler such as PgBouncer the statement succeeds but no
 notification arrives, nothing is reported as failed, and pickup falls back to
 the one-second poll. Give the worker a direct or session-mode connection when
-pickup latency matters. `http.grace_period` must cover `http.drain_timeout` plus the fixed
+pickup latency matters. The listener opens every connection with the pool's
+current connect options, so a password rotated through
+`postgres.password_file` reaches it too. `http.grace_period` must cover `http.drain_timeout` plus the fixed
 17-second cleanup, listener, join, pool-close, and telemetry tail.
 
 ## Run and stop the worker
@@ -253,7 +255,10 @@ at its next one-second poll. After a claim that found work but did not fill
 every free slot, the next claim starts 25 ms after the previous one; after a
 claim that filled every slot, at once; after an empty claim, at the next
 notification or poll. A lost notification or listener connection delays a
-job only until the next poll.
+job only until the next poll. So does a skipped one: an enqueue inside the
+25 ms window relies on the worker the earlier notification woke, and waits
+for the poll when it commits after that worker has gone idle again, or when
+the notifying transaction rolled back.
 
 One supervisor owns each admitted claim, slot, handler, deadline, and
 intended queue transition through cleanup. The handler runs on the
@@ -302,6 +307,11 @@ New trace data stores bounded ASCII `trace_context` and `trace_state` only.
 The worker extracts through the installed propagator and creates a span link,
 never a remote parent. Empty trace-state is absent; malformed, overbound, or
 control-bearing context produces an unlinked attempt. No baggage is stored.
+Each attempt runs in one consumer span, exported as `process <kind>`, with
+`job.id`, `job.kind`, `job.attempt`, and the `outcome` that
+`jobs_attempts_total` counts. `retry`, `timeout`, `exhausted`, and `permanent`
+mark the span as an error; `snoozed` and `cancelled` do not. An attempt whose
+result never became known leaves `outcome` unset.
 
 Each worker exposes these counters and the histogram on its `/metrics`
 listener:
@@ -321,7 +331,9 @@ Records never carry the payload: `job_failed` (`warn`), `job_attempt_failed`
 when unknown), and
 `jobs_operation_failed` / `jobs_operation_recovered` on the first failure
 and the first recovery of each operation. `jobs_operation_failed` carries
-`sqlstate` or `cause`.
+`sqlstate` or `cause`. A startup check that could not read the session logs
+`jobs_startup_check_failed` (`warn`) with `sqlstate` and `cause`, `timeout`
+for the five-second bound, before startup fails.
 
 Every worker samples only registered kinds every ten seconds. For each kind and
 `available`, `scheduled`, or `running` state, it counts at most 1000 indexed

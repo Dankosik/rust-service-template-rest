@@ -17,7 +17,8 @@ and JSON payload. Composition maps the registered `(type, version)` to a fixed
 subject and registers typed handlers. Domain code never receives subjects,
 consumer names, broker metadata, retries, or ACKs. A payload type implements
 `Serialize` to be published and `DeserializeOwned` to be delivered; a service
-needs only the direction it uses.
+needs only the direction it uses. A type that appears in the [contract
+document](#contract-document) also implements `utoipa::ToSchema`.
 
 The adapter uses the Go wire unchanged: `Message-Id`, `Event-Type`,
 `Event-Schema` (`vN`), `Created-At`, and `Nats-Msg-Id`; the original publication
@@ -42,6 +43,47 @@ both templates and every deployed stream would take together, and no consumer
 outside these services reads the events today. Reopen the choice when events
 are offered to a party that does not use this adapter.
 
+## Contract document
+
+`Registry::asyncapi(title, version)` renders the registered routes as an
+[AsyncAPI 3.0](https://www.asyncapi.com/docs/reference/specification/v3.0.0)
+document, the event counterpart of the OpenAPI document. A route declared with
+`Route::documented::<T>(subject)` keeps the payload type's `utoipa::ToSchema`
+schema, so the document comes from the declaration that routes the event and
+cannot name another subject, type, or version. `Route::new` stays for a
+service that publishes no document; a registry that mixes the two has no
+document, and `asyncapi` names the undocumented route.
+
+The document has one channel per subject, addressed by that subject, and one
+message per `(type, version)` under the key `<type>.v<version>`. Each message
+declares the five identity headers, with `Event-Type` and `Event-Schema` as
+constants, and references its payload schema under `components.schemas`.
+Schemas referenced by a payload are collected with it; two different types
+under one schema name are refused rather than merged. Keys are sorted, so the
+same routes always render the same text. There are no operations and no
+servers: a route does not say whether a process publishes or consumes it, and
+broker addresses are deployment facts.
+
+Payload schemas are what `utoipa` renders for OpenAPI 3.1, the JSON Schema
+2020-12 dialect, while AsyncAPI 3.0 reads a schema as Draft 07 with
+extensions. The two agree for what serde structs and enums usually render;
+a 2020-12 keyword such as `prefixItems`, which a tuple field renders, is
+ignored by a Draft 07 tool.
+
+The template ships no event, so it ships no document and no gate. A service
+with events keeps the document as it keeps `api/openapi/service.yaml`: one
+function returns the routes for the worker, the publisher, and a binary that
+prints `serde_json::to_string_pretty` of the document; the printed file is
+committed; a test compares the two, so a payload change appears in review as a
+contract change.
+
+Rejected alternatives, checked on 2026-10-02: `asyncapi-rust` 0.5.0 declares
+channels and addresses in derive attributes apart from the routes, and takes
+payload schemas from `schemars`; `schemars` 1.2.2 would be a second schema
+derive beside `utoipa` and has no `time` integration; a hand-written AsyncAPI
+file drifts from the routes. The document structure the crate's tests pin was
+validated once against the official AsyncAPI 3.0.0 JSON Schema.
+
 ## Delivery and settlement
 
 Publication succeeds only after a positive JetStream ACK for the expected
@@ -65,8 +107,12 @@ no handler admitted is returned at drain with a one-second redelivery delay
 instead of waiting for ack wait; the broker still counts it as a delivery. The
 worker declares its named durable
 consumer (create or update): explicit ACK, `DeliverAll`, `AckWait=41s`,
-unlimited broker delivery, `ReplayInstant`, and the fixed filter. `MaxAckPending`
-keeps the broker default, which bounds the durable across all replicas; each
+unlimited broker delivery, `ReplayInstant`, and the fixed filter. Startup
+refuses a handler whose route subject the filter does not select; a route
+without a handler is one the process only publishes to and may lie outside the
+filter. A delivery the filter selects but no handler claims transfers to the
+DLQ as permanent, so keep the filter as narrow as the handled subjects.
+`MaxAckPending` keeps the broker default, which bounds the durable across all replicas; each
 replica bounds its own in-flight work by the configured concurrency. The
 application never creates, deletes, or repairs streams. Only a deleted or
 replaced durable consumer stops the worker unready. The broker reports that on
@@ -107,8 +153,17 @@ and fails with sanitized configuration, authentication, connection, topology,
 bounds, or timeout reasons. A refused stream or durable request also logs
 `messaging_admission_failed` with the request, that reason, and the broker's
 numeric JetStream error code; the broker's description can quote configuration
-and is not logged. The connection carries the worker's identity as its NATS
-client name. Readiness uses the existing refresher and reads
+and is not logged. A failed first connection logs the same event with
+`operation="connect"` and an `error.type` that names the stage: `dns`, `tls`,
+`io`, `timeout`, `authentication`, `authorization_violation`, `server_parse`,
+or `max_reconnects`; unparseable credentials log `operation="credentials"`.
+The connection carries the worker's identity as its NATS client name. After
+startup the client reconnects on its own, and every change logs
+`messaging_connection` with its `result`: `connected`, `disconnected`,
+`lame_duck`, `draining`, `closed`, `server_error`, or `client_error`, the last
+two with a closed `error.type` such as `authorization_violation` for revoked
+credentials. A slow-consumer event repeats per dropped message and is only
+counted. Readiness uses the existing refresher and reads
 only local connection state; a lost connection fails its next evaluation. On shutdown, readiness drains, pulls
 stop, admitted handlers settle under the existing shared deadline, application
 tasks join, and dependency close waits for the NATS closed event. A forced drain
@@ -123,16 +178,39 @@ connection result vocabularies, plus counters for pull-stream errors and
 failed settlements. It never labels metrics or logs with payloads,
 credentials, arbitrary errors, or event IDs.
 
+| Metric | Labels |
+| --- | --- |
+| `messaging_publish_total`, `messaging_publish_duration_seconds` | `result`: `acknowledged`, `rejected`, `ambiguous` |
+| `messaging_handler_total`, `messaging_handler_duration_seconds` | `event_type`; `outcome`: `success`, `permanent`, `retryable`, `timeout`, `panic` |
+| `messaging_dead_letter_total` | `event_type`; `reason`: `malformed`, `permanent`, `exhausted`; `outcome`: `accepted`, `rejected`, `ambiguous` |
+| `messaging_settlement_failures_total` | `operation`: `ack`, `nak` |
+| `messaging_consumer_stream_errors_total` | none |
+| `messaging_connection_events_total` | `result`, as logged by `messaging_connection`, plus `slow_consumer` |
+
+`event_type` is the event type of a registered handler, so the worker's
+handlers bound its values; schema versions of one type share it. A delivery
+whose type has no handler, including a malformed envelope, is counted as
+`unregistered`: the type a publisher wrote into a header never becomes a
+label. Publication metrics carry no event type. A publication outcome is the
+broker's answer rather than a property of the event, the outbox publisher
+restores the type from a stored row instead of a compiled constant, and
+`messaging_publish_failed` already names the subject.
+
 Publication runs in a `messaging_publish` producer span and writes that span's
 W3C `traceparent` and `tracestate` into the message headers, as the Go
 template does; no other propagation field is written. An admitted delivery runs
 its handler and settlement in a `messaging_process` consumer span whose parent
 is the publisher's span, so one trace covers the outbox job, the publication,
 and the handler. A delivery without a valid trace context starts its own
-trace. Both spans carry the subject and the closed outcome. A failed
+trace. Both spans carry the subject and the closed outcome. Their exported
+names are `publish <subject>` and `process <consumer filter>`, with
+`messaging.operation.name` and, on the delivery, the filter as
+`messaging.destination.template`; a delivery's own subject is not a span name
+because any publisher under the filter chooses it. A result other than
+success sets the span status to error and `error.type` to the outcome. A failed
 publication logs `messaging_publish_failed`, and a handler result other than
-success logs `messaging_delivery_failed` with the subject, the delivery
-attempt, and the outcome. `HandlerError` carries no cause; a handler logs its
+success logs `messaging_delivery_failed` with the subject, the event type as
+labelled above, the delivery attempt, and the outcome. `HandlerError` carries no cause; a handler logs its
 own cause inside the delivery span, where the record shares the trace.
 
 To remove the profile, initialize or migrate a service with `MESSAGING=none` so

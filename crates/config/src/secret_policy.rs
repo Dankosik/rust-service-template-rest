@@ -1,4 +1,4 @@
-//! Which keys may only be set through the environment.
+//! Which keys may only be set through an `APP__` variable.
 //!
 //! Baseline files describe non-secret defaults. A secret-like key may appear
 //! in a file only as an empty placeholder that documents the key; a non-empty

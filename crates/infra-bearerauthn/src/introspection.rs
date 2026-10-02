@@ -14,7 +14,7 @@ use crate::{
     BearerToken, Failure, PreparationError, Principal, VerificationError, VerificationReason,
     Verifier,
     claims::{ClaimPolicy, validate_introspection_claims},
-    provider::{ProviderClient, ProviderFailure},
+    provider::ProviderClient,
 };
 
 /// The largest verified provider payload one cache entry retains.
@@ -167,12 +167,12 @@ impl IntrospectionVerifier {
             .map_err(|failure| {
                 VerificationError::new(Failure::Unavailable, VerificationReason::Provider(failure))
             })?;
-        // A clock before the Unix epoch reads as the far future, so tokens are
-        // expired rather than admitted.
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(u64::MAX, |elapsed| elapsed.as_secs());
-        validate_introspection_claims(&response, &self.policy, now, token.access_token())
+        validate_introspection_claims(
+            &response,
+            &self.policy,
+            crate::unix_now(),
+            token.access_token(),
+        )
     }
 }
 
@@ -214,23 +214,9 @@ fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration 
         .map_or(Duration::ZERO, |remaining| remaining.min(ttl))
 }
 
-/// The closed metric and log label of one provider failure class.
-pub(crate) const fn provider_reason_label(failure: ProviderFailure) -> &'static str {
-    match failure {
-        ProviderFailure::Timeout => "provider_timeout",
-        ProviderFailure::Connect => "provider_connect",
-        ProviderFailure::Status(400..=499) => "provider_status_4xx",
-        ProviderFailure::Status(500..=599) => "provider_status_5xx",
-        ProviderFailure::Status(_) => "provider_status_other",
-        ProviderFailure::MediaType => "provider_media_type",
-        ProviderFailure::TooLarge => "provider_too_large",
-        ProviderFailure::Transfer => "provider_transfer",
-    }
-}
-
 fn form_body(token: &BearerToken<'_>) -> String {
     url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("token", &token.as_str())
+        .append_pair("token", token.as_str())
         .append_pair("token_type_hint", "access_token")
         .finish()
 }

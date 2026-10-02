@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use infra_postgres::{TxError, failure_cause, in_tx, sqlstate};
+use infra_postgres::{TxError, failure_cause, in_tx, observed, sqlstate};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -22,25 +22,6 @@ pub const CLEANUP_RUNS_METRIC: &str = "http_idempotency_cleanup_runs_total";
 
 /// Expired records the cleanup deleted, counted per committed batch.
 pub const CLEANUP_REMOVED_METRIC: &str = "http_idempotency_cleanup_removed_records_total";
-
-/// Whether the current session can write. Migration-history admission owns
-/// schema compatibility; this check keeps only the live writer property.
-const STARTUP_CHECK: &str = "SELECT NOT pg_is_in_recovery() \
-    AND current_setting('transaction_read_only') = 'off'";
-
-/// Bounds a cleanup batch on the server, so a batch whose client has gone
-/// still ends within 1 s.
-const CLEANUP_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '1000ms'";
-
-/// One batch of at most `$1` expired records. It skips rows a running attempt
-/// holds, and re-checks expiry, so it never deletes a live record. The tuple
-/// locator is consumed under its row lock within this statement.
-const CLEANUP_BATCH: &str = "WITH batch AS ( \
-    SELECT ctid FROM http_idempotency_records \
-    WHERE expires_at <= statement_timestamp() \
-    ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED) \
-    DELETE FROM http_idempotency_records AS r USING batch \
-    WHERE r.ctid = batch.ctid AND r.expires_at <= statement_timestamp()";
 
 /// Why an active idempotency boundary cannot start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -99,7 +80,16 @@ impl Store {
     /// and [`StartupError::Unavailable`] for anything else, including the
     /// bound; that one is logged with a bounded cause.
     pub async fn check_startup(&self) -> Result<(), StartupError> {
-        let writable = sqlx::query_scalar::<_, bool>(STARTUP_CHECK).fetch_one(&self.pool);
+        // Migration-history admission owns schema compatibility; this check
+        // keeps only the live writer property.
+        let writable = observed(
+            "check idempotency session",
+            sqlx::query_scalar!(
+                "SELECT NOT pg_is_in_recovery() \
+                 AND current_setting('transaction_read_only') = 'off' AS \"writable!\""
+            )
+            .fetch_one(&self.pool),
+        );
         match tokio::time::timeout(STARTUP_CHECK_BUDGET, writable).await {
             Ok(Ok(true)) => Ok(()),
             Ok(Ok(false)) => Err(StartupError::NotWritable),
@@ -131,15 +121,33 @@ impl Store {
         let mut removed = 0;
         loop {
             let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupError> {
-                sqlx::query(CLEANUP_STATEMENT_TIMEOUT)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
-                let deleted = sqlx::query(CLEANUP_BATCH)
-                    .bind(i64::from(CLEANUP_BATCH_ROWS))
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
+                // Bounds the batch on the server, so a batch whose client has
+                // gone still ends within 1 s.
+                observed(
+                    "set statement timeout",
+                    sqlx::query!("SET LOCAL statement_timeout = '1000ms'").execute(&mut *tx),
+                )
+                .await
+                .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
+                // One batch of at most `$1` expired records. It skips rows a
+                // running attempt holds, and re-checks expiry, so it never
+                // deletes a live record. The tuple locator is consumed under
+                // its row lock within this statement.
+                let deleted = observed(
+                    "delete expired idempotency records",
+                    sqlx::query!(
+                        "WITH batch AS ( \
+                         SELECT ctid FROM http_idempotency_records \
+                         WHERE expires_at <= statement_timestamp() \
+                         ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED) \
+                         DELETE FROM http_idempotency_records AS r USING batch \
+                         WHERE r.ctid = batch.ctid AND r.expires_at <= statement_timestamp()",
+                        i64::from(CLEANUP_BATCH_ROWS),
+                    )
+                    .execute(&mut *tx),
+                )
+                .await
+                .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
                 Ok(deleted.rows_affected())
             })
             .await?;

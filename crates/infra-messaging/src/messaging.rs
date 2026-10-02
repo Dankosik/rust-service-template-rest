@@ -23,21 +23,27 @@ use crate::wire::HEADER_LIMIT_BYTES;
 pub(crate) const BROKER_OPERATION_BUDGET: Duration = Duration::from_secs(5);
 
 /// A count and a duration per outcome label, registered once with the
-/// recorder installed at connect. Emitting through the macros instead looks
-/// each metric up and allocates its labels on every publish and delivery.
+/// installed recorder. Emitting through the macros instead looks each metric
+/// up and allocates its labels on every publish and delivery.
 pub(crate) struct Outcomes<const N: usize>([(metrics::Counter, metrics::Histogram); N]);
 
 impl<const N: usize> Outcomes<N> {
-    fn register(
+    /// `event_type`, when given, labels every outcome with that event type.
+    pub(crate) fn register(
         total: &'static str,
         duration: &'static str,
         label: &'static str,
         values: [&'static str; N],
+        event_type: Option<&'static str>,
     ) -> Self {
         Self(values.map(|value| {
+            let mut labels = vec![metrics::Label::from_static_parts(label, value)];
+            if let Some(event_type) = event_type {
+                labels.push(metrics::Label::from_static_parts("event_type", event_type));
+            }
             (
-                metrics::counter!(total, label => value),
-                metrics::histogram!(duration, label => value),
+                metrics::counter!(total, labels.clone()),
+                metrics::histogram!(duration, labels),
             )
         }))
     }
@@ -120,8 +126,6 @@ pub(crate) struct Shared {
     pub(crate) failed: AtomicBool,
     /// Indexed like `producer::PUBLISH_RESULTS`.
     pub(crate) publish_metrics: Outcomes<3>,
-    /// Indexed by `consumer::Outcome`.
-    pub(crate) handler_metrics: Outcomes<5>,
     closed: watch::Receiver<bool>,
 }
 
@@ -142,8 +146,9 @@ pub enum CloseOutcome {
 impl Messaging {
     /// Connects and admits the source stream before the process accepts work.
     ///
-    /// Publication and handler metrics bind to the metrics recorder installed
-    /// at this call, so install the recorder first.
+    /// Publication metrics bind to the metrics recorder installed at this
+    /// call, and handler metrics to the one installed at [`Self::consumer`],
+    /// so install the recorder first.
     ///
     /// # Errors
     ///
@@ -168,27 +173,26 @@ impl Messaging {
             .request_timeout(Some(BROKER_OPERATION_BUDGET))
             .require_tls(!options.allow_plaintext)
             .event_callback(move |event| {
-                let outcome = match event {
-                    async_nats::Event::Connected => "connected",
-                    async_nats::Event::Disconnected => "disconnected",
-                    async_nats::Event::Draining => "draining",
-                    async_nats::Event::Closed => {
-                        closed_tx.send_replace(true);
-                        "closed"
-                    }
-                    async_nats::Event::LameDuckMode => "lame_duck",
-                    async_nats::Event::SlowConsumer(_) => "slow_consumer",
-                    async_nats::Event::ServerError(_) => "server_error",
-                    async_nats::Event::ClientError(_) => "client_error",
-                };
-                metrics::counter!("messaging_connection_events_total", "result" => outcome)
-                    .increment(1);
+                if matches!(event, async_nats::Event::Closed) {
+                    closed_tx.send_replace(true);
+                }
+                report_connection_event(&event);
                 std::future::ready(())
             });
         if let Some(credentials) = &options.credentials {
             connect = connect
                 .credentials(credentials.expose_secret())
-                .map_err(|_| MessagingError::Authentication)?;
+                .map_err(|_| {
+                    // The client's parse error is free text about the credentials.
+                    let failure = MessagingError::Authentication;
+                    tracing::warn!(
+                        operation = "credentials",
+                        reason = %failure,
+                        error.type = "malformed_credentials",
+                        "messaging_admission_failed"
+                    );
+                    failure
+                })?;
         }
         if let Some(root_ca) = options.root_ca_path.clone() {
             connect = connect.add_root_certificates(root_ca);
@@ -197,9 +201,10 @@ impl Messaging {
             connect
                 .connect(options.servers.clone())
                 .await
-                .map_err(|error| classify_connect(&error))
+                .map_err(|error| connect_failure(&error))
         })
         .await?;
+        describe_metrics();
         let jetstream = async_nats::jetstream::context::ContextBuilder::new()
             .timeout(BROKER_OPERATION_BUDGET)
             .ack_timeout(BROKER_OPERATION_BUDGET)
@@ -234,12 +239,7 @@ impl Messaging {
                     "messaging_publish_duration_seconds",
                     "result",
                     crate::producer::PUBLISH_RESULTS,
-                ),
-                handler_metrics: Outcomes::register(
-                    "messaging_handler_total",
-                    "messaging_handler_duration_seconds",
-                    "outcome",
-                    crate::consumer::OUTCOME_LABELS,
+                    None,
                 ),
                 closed,
             }),
@@ -508,18 +508,261 @@ fn classify_topology(error: &(dyn std::error::Error + 'static)) -> MessagingErro
         .map_or(MessagingError::Topology, classify_topology)
 }
 
-fn classify_connect(error: &async_nats::ConnectError) -> MessagingError {
-    match error.kind() {
-        ConnectErrorKind::Authentication | ConnectErrorKind::AuthorizationViolation => {
-            MessagingError::Authentication
+/// Classifies a failed first connection and logs which stage refused it.
+///
+/// `Connection` covers name resolution, TLS and the socket alike; the client's
+/// kind is a closed vocabulary that tells them apart. Its source can quote a
+/// server URL and stays out of the log.
+fn connect_failure(error: &async_nats::ConnectError) -> MessagingError {
+    let (failure, error_type) = match error.kind() {
+        ConnectErrorKind::Authentication => (MessagingError::Authentication, "authentication"),
+        ConnectErrorKind::AuthorizationViolation => {
+            (MessagingError::Authentication, "authorization_violation")
         }
-        ConnectErrorKind::TimedOut => MessagingError::TimedOut {
-            budget: BROKER_OPERATION_BUDGET,
-        },
-        ConnectErrorKind::ServerParse => MessagingError::Configuration("server URL is invalid"),
-        ConnectErrorKind::Dns
-        | ConnectErrorKind::Tls
-        | ConnectErrorKind::Io
-        | ConnectErrorKind::MaxReconnects => MessagingError::Connection,
+        ConnectErrorKind::TimedOut => (
+            MessagingError::TimedOut {
+                budget: BROKER_OPERATION_BUDGET,
+            },
+            "timeout",
+        ),
+        ConnectErrorKind::ServerParse => (
+            MessagingError::Configuration("server URL is invalid"),
+            "server_parse",
+        ),
+        ConnectErrorKind::Dns => (MessagingError::Connection, "dns"),
+        ConnectErrorKind::Tls => (MessagingError::Connection, "tls"),
+        ConnectErrorKind::Io => (MessagingError::Connection, "io"),
+        ConnectErrorKind::MaxReconnects => (MessagingError::Connection, "max_reconnects"),
+    };
+    tracing::warn!(
+        operation = "connect",
+        reason = %failure,
+        error.type = error_type,
+        "messaging_admission_failed"
+    );
+    failure
+}
+
+/// Counts every connection event and logs the ones an operator acts on.
+///
+/// The client reports a slow consumer once per dropped message, so that
+/// event is only counted. Server and client error text is arbitrary and stays
+/// out of the log; `error.type` names the client's closed variant.
+fn report_connection_event(event: &async_nats::Event) {
+    use async_nats::{ClientError, Event, ServerError};
+
+    let (result, error_type) = match event {
+        Event::Connected => ("connected", None),
+        Event::Disconnected => ("disconnected", None),
+        Event::Draining => ("draining", None),
+        Event::Closed => ("closed", None),
+        Event::LameDuckMode => ("lame_duck", None),
+        Event::SlowConsumer(_) => ("slow_consumer", None),
+        Event::ServerError(error) => (
+            "server_error",
+            Some(match error {
+                ServerError::AuthorizationViolation => "authorization_violation",
+                ServerError::SlowConsumer(_) => "slow_consumer",
+                ServerError::Other(_) => "other",
+            }),
+        ),
+        Event::ClientError(error) => (
+            "client_error",
+            Some(match error {
+                ClientError::MaxReconnects => "max_reconnects",
+                ClientError::ServerNotInPool => "server_not_in_pool",
+                ClientError::Other(_) => "other",
+            }),
+        ),
+    };
+    metrics::counter!("messaging_connection_events_total", "result" => result).increment(1);
+    match event {
+        Event::SlowConsumer(_) => {}
+        Event::Connected | Event::Draining | Event::Closed => {
+            tracing::info!(result, "messaging_connection");
+        }
+        Event::Disconnected
+        | Event::LameDuckMode
+        | Event::ServerError(_)
+        | Event::ClientError(_) => {
+            tracing::warn!(result, error.type = error_type, "messaging_connection");
+        }
+    }
+}
+
+/// Describes the adapter's metrics to the installed recorder. Repeating it is
+/// harmless.
+fn describe_metrics() {
+    use metrics::{Unit, describe_counter, describe_histogram};
+
+    describe_counter!(
+        "messaging_publish_total",
+        "Publications by result: acknowledged, rejected or ambiguous"
+    );
+    describe_histogram!(
+        "messaging_publish_duration_seconds",
+        Unit::Seconds,
+        "Time from publication start to its result"
+    );
+    describe_counter!(
+        "messaging_handler_total",
+        "Handled deliveries by event type and outcome"
+    );
+    describe_histogram!(
+        "messaging_handler_duration_seconds",
+        Unit::Seconds,
+        "Handler run time by event type and outcome"
+    );
+    describe_counter!(
+        "messaging_dead_letter_total",
+        "Dead-letter transfers by event type, reason and transfer outcome"
+    );
+    describe_counter!(
+        "messaging_settlement_failures_total",
+        "Source acknowledgements and redelivery requests the broker did not confirm"
+    );
+    describe_counter!(
+        "messaging_consumer_stream_errors_total",
+        "Recoverable pull-stream errors"
+    );
+    describe_counter!(
+        "messaging_connection_events_total",
+        "Broker connection events by result"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_nats::{ClientError, ConnectError, Event, ServerError};
+
+    use super::*;
+
+    /// One logged event's fields, the message under `message`.
+    type Logged = Vec<(&'static str, String)>;
+
+    #[derive(Clone, Default)]
+    struct Events(Arc<Mutex<Vec<Logged>>>);
+
+    struct Fields(Logged);
+
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push((field.name(), format!("{value:?}")));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.push((field.name(), value.to_owned()));
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = Fields(Vec::new());
+            event.record(&mut fields);
+            self.0.lock().expect("event lock").push(fields.0);
+        }
+    }
+
+    fn logged(test: impl FnOnce()) -> Vec<Logged> {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let events = Events::default();
+        let subscriber = tracing_subscriber::registry().with(events.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            // Keep callsite interest independent of a sibling test's
+            // thread-local subscriber.
+            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+            test();
+        });
+        events.0.lock().expect("event lock").clone()
+    }
+
+    fn field<'a>(event: &'a Logged, name: &str) -> Option<&'a str> {
+        event
+            .iter()
+            .find(|(field, _)| *field == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn a_failed_first_connection_logs_which_stage_refused_it() {
+        let stages = [
+            (ConnectErrorKind::Dns, "dns"),
+            (ConnectErrorKind::Tls, "tls"),
+            (ConnectErrorKind::Io, "io"),
+        ];
+        let events = logged(|| {
+            for (kind, _) in stages {
+                let source = std::io::Error::other("nats://user:sentinel@broker.invalid");
+                let failure = connect_failure(&ConnectError::with_source(kind, source));
+                assert!(matches!(failure, MessagingError::Connection));
+            }
+        });
+
+        assert_eq!(events.len(), stages.len());
+        for (event, (_, error_type)) in events.iter().zip(stages) {
+            assert_eq!(field(event, "message"), Some("messaging_admission_failed"));
+            assert_eq!(field(event, "operation"), Some("connect"));
+            assert_eq!(field(event, "error.type"), Some(error_type));
+            assert!(event.iter().all(|(_, value)| !value.contains("sentinel")));
+        }
+    }
+
+    #[test]
+    fn connection_events_are_counted_and_logged_without_broker_text() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let events = metrics::with_local_recorder(&recorder, || {
+            logged(|| {
+                for event in [
+                    Event::Disconnected,
+                    Event::SlowConsumer(7),
+                    Event::SlowConsumer(7),
+                    Event::ServerError(ServerError::Other("sentinel broker text".to_owned())),
+                    Event::ClientError(ClientError::MaxReconnects),
+                    Event::Connected,
+                ] {
+                    report_connection_event(&event);
+                }
+            })
+        });
+
+        let scrape = recorder.handle().render();
+        for (result, count) in [
+            ("disconnected", 1),
+            ("slow_consumer", 2),
+            ("server_error", 1),
+            ("client_error", 1),
+            ("connected", 1),
+        ] {
+            let line = format!("messaging_connection_events_total{{result=\"{result}\"}} {count}");
+            assert!(scrape.contains(&line), "{line} is missing from:\n{scrape}");
+        }
+        // A slow consumer is reported once per dropped message and only counted.
+        let logged: Vec<_> = events
+            .iter()
+            .map(|event| {
+                assert_eq!(field(event, "message"), Some("messaging_connection"));
+                assert!(event.iter().all(|(_, value)| !value.contains("sentinel")));
+                (
+                    field(event, "result").expect("result"),
+                    field(event, "error.type"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            logged,
+            [
+                ("disconnected", None),
+                ("server_error", Some("other")),
+                ("client_error", Some("max_reconnects")),
+                ("connected", None),
+            ]
+        );
     }
 }

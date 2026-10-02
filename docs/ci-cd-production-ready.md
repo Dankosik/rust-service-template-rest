@@ -38,7 +38,10 @@ version) and starts only the jobs its surfaces select:
 <!-- template:begin postgres:docs-ci-postgres-gates -->
 With PostgreSQL retained, `quality` also checks migration history and embedded
 source rules. `integration` runs the real database proof on provider, migrator,
-DB-test, Compose or DB-script changes. A migration change selects the image
+migration, DB-test, Compose or DB-script changes, and then `make sqlx-check`:
+`.sqlx/` must equal what the checked statements produce against a database
+holding exactly the embedded migrations. `sqlx-cli` has no release binaries, so
+the job builds the pinned version once and caches it by version. A migration change selects the image
 rehearsal in place of plain lifecycle: `/migrate` against a fresh database,
 `no_change` replay, then lifecycle with the pool open.
 <!-- template:end postgres:docs-ci-postgres-gates -->

@@ -115,7 +115,18 @@ ends during teardown is joined like any other.
 `/health/live` is process-only and always `200 ok` while the process runs.
 Both probe routes are admitted without an in-flight permit, so a service
 shedding at `http.max_in_flight` still answers them; a probe's connection
-still counts toward `http.max_connections`.
+still counts toward `http.max_connections`, and a connection over that cap
+is closed without an answer.
+
+The diagnostics listener therefore serves `GET /health/live` as well. It has
+its own connection cap and no caller traffic, so a full application listener
+cannot fail liveness there. Point the platform's liveness probe at the
+diagnostics port and its readiness probe at the application port: an
+instance that cannot accept a connection should leave rotation, not be
+restarted. Without a diagnostics listener (`observability.metrics.addr`
+empty), liveness is served on the application listener only and shares its
+cap.
+
 `/health/ready` reads the cached verdict published by the `health` crate's
 refresher: ready after every probe passed; a failure is published at once
 while the instance is not ready yet, and after a ready verdict only once
@@ -124,8 +135,10 @@ the staleness bound is refused (a dead or hung refresher fails closed), and
 the instance is not ready as soon as teardown starts. The handler never runs
 a probe, so its latency is independent of dependency latency, and an
 unauthenticated caller cannot turn a probe request into a dependency
-round-trip. A probe that runs out of `health.probe_budget` is named in the
-verdict.
+round-trip. Every probe of one check runs at the same time under
+`health.probe_budget`, so a slow dependency does not spend another probe's
+budget; the verdict names the first probe, in registration order, that
+failed or ran out of it.
 
 Dependency probes are a trade-off. Registering a shared dependency such as
 PostgreSQL makes every instance unready together when that dependency fails,
@@ -135,13 +148,20 @@ instance that cannot reach its database cannot serve any route; a service
 whose routes degrade gracefully without a dependency should leave that
 dependency's probe out and watch it through metrics.
 
-The refresher reports itself through `readiness_checks_total{outcome}` (`ok`,
-`failed`, `timed_out`; one increment per completed check) and four log
-events: `readiness_lost` and `readiness_recovered` for a published flip,
-`readiness_check_failed` for a failure the threshold absorbed, and
-`readiness_refresh_late` when a check completes after the previous verdict
-already went stale. A check rate of zero on a running process is a stopped
-refresher.
+The refresher reports itself through three metrics and four log events.
+`readiness_checks_total{outcome}` (`ok`, `failed`, `timed_out`) has one
+increment per completed check; a rate of zero on a running process is a
+stopped refresher. `readiness_probe_checks_total{probe,outcome}` counts each
+probe's own outcome in every check, so it shows which dependency fails,
+including a second one behind the probe the verdict names and one whose
+failures the threshold still absorbs. The `readiness_ready` gauge is the
+published answer: `1` while ready, `0` before the first check, while a probe
+verdict is withdrawn, and from the start of the drain. The refresher and the
+drain write it, so a stopped refresher leaves its last value standing; the
+check rate is the signal for that. The events are `readiness_lost` and
+`readiness_recovered` for a published flip, `readiness_check_failed` for a
+failure the threshold absorbed, and `readiness_refresh_late` when a check
+completes after the previous verdict already went stale.
 
 The failure threshold and the platform's own probe threshold add up. With the
 defaults, a dependency that fails fast withdraws readiness within about `6s`
@@ -324,7 +344,7 @@ drain yields the established degraded exit code rather than clean shutdown.
 <!-- template:begin cache:docs-lifecycle-cache -->
 ## Cache lifecycle
 
-`Cache::connect` admits configuration and builds a lazy `ConnectionManager`.
+`Cache::connect_lazy` admits configuration and builds a lazy `ConnectionManager`.
 It does no network I/O. Startup then runs one probe check inside a 1 s bound.
 Success logs `cache_connected`. Failure logs `cache_unavailable_at_startup`
 and startup continues. The cache is not a readiness probe unless composition
@@ -369,7 +389,8 @@ It builds the tonic router and any TLS config before serving. Health reads
 cached readiness and is `NOT_SERVING` until admission succeeds. At first stop,
 readiness drain publishes `NOT_SERVING` before the propagation delay. HTTP and
 gRPC then drain concurrently under the remaining effective drain budget.
-Health watchers end after `NOT_SERVING` and do not hold that drain. It does
+Health watchers end after `NOT_SERVING` and do not hold that drain.
+Configuration refuses a `grpc.request_timeout` longer than that budget. It does
 not add a second budget or change NATS/provider shutdown ownership. See
 [gRPC](../grpc.md#health-shutdown-and-observation).
 <!-- template:end grpc:docs-runtime-grpc -->

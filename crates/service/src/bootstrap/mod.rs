@@ -186,27 +186,9 @@ where
     }
 }
 
-async fn serve(
-    config: Config,
-    // template:begin grpc:bootstrap-grpc-serve-registration-parameter
-    grpc_registration: Option<crate::GrpcRegistration>,
-    // template:end grpc:bootstrap-grpc-serve-registration-parameter
-) -> Result<Outcome, BootstrapError> {
-    // Before this point SIGTERM has its default disposition and kills the
-    // process; install the handlers first and keep them for the lifetime.
-    let mut signals = Signals::install().map_err(BootstrapError::Signals)?;
-
-    let tracer_provider =
-        install_tracer_provider(&tracing_options(&config, replica_instance_id(&config.app)))?;
-    install_subscriber(&LoggingOptions {
-        level: &config.log.level,
-        format: match config.log.format {
-            LogFormat::Json => LoggingFormat::Json,
-            LogFormat::Text => LoggingFormat::Text,
-        },
-        tracer_provider: Some(&tracer_provider),
-    })?;
-    let metrics = Metrics::install(&[
+/// The metrics recorder with every retained crate's histogram buckets.
+fn install_metrics() -> Result<Metrics, BootstrapError> {
+    Ok(Metrics::install(&[
         (
             HTTP_REQUESTS_DURATION_SECONDS,
             HTTP_REQUESTS_DURATION_BUCKETS,
@@ -219,6 +201,10 @@ async fn serve(
         (
             infra_postgres::TRANSACTION_DURATION_METRIC,
             infra_postgres::TRANSACTION_DURATION_BUCKETS,
+        ),
+        (
+            infra_postgres::OPERATION_DURATION_METRIC,
+            infra_postgres::OPERATION_DURATION_BUCKETS,
         ),
         // template:end postgres:bootstrap-postgres-histograms
         // template:begin outbound-http:service-bootstrap-outbound-histogram
@@ -249,7 +235,30 @@ async fn serve(
             infra_object_storage::OPERATION_DURATION_BUCKETS,
         ),
         // template:end object-storage:service-bootstrap-object-storage-histogram
-    ])?;
+    ])?)
+}
+
+async fn serve(
+    config: Config,
+    // template:begin grpc:bootstrap-grpc-serve-registration-parameter
+    grpc_registration: Option<crate::GrpcRegistration>,
+    // template:end grpc:bootstrap-grpc-serve-registration-parameter
+) -> Result<Outcome, BootstrapError> {
+    // Before this point SIGTERM has its default disposition and kills the
+    // process; install the handlers first and keep them for the lifetime.
+    let mut signals = Signals::install().map_err(BootstrapError::Signals)?;
+
+    let tracer_provider =
+        install_tracer_provider(&tracing_options(&config, replica_instance_id(&config.app)))?;
+    install_subscriber(&LoggingOptions {
+        level: &config.log.level,
+        format: match config.log.format {
+            LogFormat::Json => LoggingFormat::Json,
+            LogFormat::Text => LoggingFormat::Text,
+        },
+        tracer_provider: Some(&tracer_provider),
+    })?;
+    let metrics = install_metrics()?;
     metrics.record_trace_exporter_initialized(matches!(
         tracer_provider.exporter_state,
         ExporterState::Initialized { .. }
@@ -384,6 +393,15 @@ async fn start(
         },
     );
 
+    // Built before any route or registration reads it, so both transports
+    // hand their handlers the same dependencies.
+    let state = crate::AppState {
+        readiness: readiness.reader(),
+        // template:begin inbound-webhooks:bootstrap-webhooks-route-state
+        webhooks: webhook_state,
+        // template:end inbound-webhooks:bootstrap-webhooks-route-state
+    };
+
     // template:begin grpc:bootstrap-grpc-prepare-start
     let grpc_prepared = if config.grpc.enabled {
         // template:end grpc:bootstrap-grpc-prepare-start
@@ -400,27 +418,20 @@ async fn start(
         };
         // template:end grpc-authn:bootstrap-grpc-verifier
         // template:begin grpc:bootstrap-grpc-prepare-call
-        if config.http.effective_drain_budget() < infra_grpc::CALL_DEADLINE_CAP {
-            return Err(service_config::ValidationError::new(
-                "http.drain_timeout",
-                format!(
-                    "minus http.readiness_propagation_delay must cover the {:?} gRPC unary deadline",
-                    infra_grpc::CALL_DEADLINE_CAP
-                ),
-            )
-            .into());
-        }
+        let limits = crate::grpc::limits(config);
         Some((
             infra_grpc::router(
-                crate::grpc::services(grpc_registration)?,
+                crate::grpc::services(grpc_registration, &state)?,
                 readiness.reader(),
                 // template:end grpc:bootstrap-grpc-prepare-call
                 // template:begin grpc-authn:bootstrap-grpc-verifier-argument
                 verifier,
                 // template:end grpc-authn:bootstrap-grpc-verifier-argument
                 // template:begin grpc:bootstrap-grpc-prepare-finish
-            ),
+                limits,
+            )?,
             crate::grpc::tls(config)?,
+            infra_grpc::server_options(limits),
         ))
     } else {
         None
@@ -460,12 +471,7 @@ async fn start(
         max_header_bytes: usize::try_from(config.http.max_header_bytes.as_u64())
             .unwrap_or(usize::MAX),
         max_connections: config.http.connection_cap(),
-    };
-    let state = crate::AppState {
-        readiness: readiness.reader(),
-        // template:begin inbound-webhooks:bootstrap-webhooks-route-state
-        webhooks: webhook_state,
-        // template:end inbound-webhooks:bootstrap-webhooks-route-state
+        max_connection_age: config.http.connection_age(),
     };
     let app = infra_http::harden(
         routes.with_state(state),
@@ -485,8 +491,11 @@ async fn start(
         Some(addr) => {
             // Intentionally unhardened: Prometheus text on a private listener.
             // `server_options` is shared HTTP transport policy, not `harden`.
-            let server =
-                Server::bind(addr, diagnostics_router(metrics.clone()), server_options).await?;
+            // Liveness is served here as well: this listener has its own
+            // connection cap, so a full application listener cannot fail it.
+            let diagnostics =
+                diagnostics_router(metrics.clone()).merge(infra_http::liveness_router());
+            let server = Server::bind(addr, diagnostics, server_options).await?;
             tracing::info!(addr = %server.local_addr(), "diagnostics listener bound");
             Some(server)
         }
@@ -494,13 +503,11 @@ async fn start(
 
     // template:begin grpc:bootstrap-grpc-bind
     let grpc_listener = match grpc_prepared {
-        Some((grpc_router, tls)) => {
+        Some((grpc_router, tls, grpc_options)) => {
             let addr = config.grpc.listen_addr()?;
             let bound = match tls {
-                Some(tls) => {
-                    Server::bind_tls(addr, grpc_router, infra_grpc::server_options(), tls).await?
-                }
-                None => Server::bind(addr, grpc_router, infra_grpc::server_options()).await?,
+                Some(tls) => Server::bind_tls(addr, grpc_router, grpc_options, tls).await?,
+                None => Server::bind(addr, grpc_router, grpc_options).await?,
             };
             tracing::info!(addr = %bound.local_addr(), "grpc listener bound");
             Some(bound)

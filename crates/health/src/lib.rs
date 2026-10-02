@@ -18,10 +18,12 @@
 //! the cached result with [`ReadinessReader::verdict`]. Teardown
 //! calls [`Readiness::start_drain`] before cancelling the refresher.
 //!
-//! Operators see the refresher through the `readiness_checks_total` counter
-//! (one increment per completed check, by outcome) and through its log
-//! events: `readiness_lost` and `readiness_recovered` for a published flip,
-//! `readiness_check_failed` for a failure the threshold absorbed, and
+//! Operators see the refresher through three metrics and four log events.
+//! `readiness_checks_total` counts completed checks by outcome,
+//! `readiness_probe_checks_total` counts each probe's own outcome in every
+//! check, and the `readiness_ready` gauge is the published answer. The
+//! events are `readiness_lost` and `readiness_recovered` for a published
+//! flip, `readiness_check_failed` for a failure the threshold absorbed, and
 //! `readiness_refresh_late` when a check completes after its predecessor
 //! already went stale.
 
@@ -29,17 +31,18 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::future::join_all;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// One dependency check.
 ///
-/// All probes of one check share one deadline, `probe_budget`. When it
-/// passes, the running [`Probe::check`] future is dropped and the verdict
-/// names that probe. Implementations must not detach work that would outlive
-/// that cancellation; a check that ignores cancellation holds the whole
-/// refresh past its budget.
+/// The probes of one check run together under one deadline, `probe_budget`.
+/// When it passes, every [`Probe::check`] future still running is dropped
+/// and counted as timed out. Implementations must not detach work that would
+/// outlive that cancellation; a check that ignores cancellation holds the
+/// whole refresh past its budget.
 ///
 /// `async_trait` boxes the future so this trait stays dyn compatible for
 /// `Box<dyn Probe>`. A trait with a native `async fn` is not dyn compatible
@@ -102,12 +105,24 @@ pub enum NotReady {
 /// show a dependency flapping below the failure threshold.
 const CHECKS_METRIC: &str = "readiness_checks_total";
 
+/// Each probe's own outcome in every check. The verdict and the log events
+/// name only the first failed probe; this counter shows the others, and a
+/// probe that fails while the threshold still holds readiness.
+const PROBE_CHECKS_METRIC: &str = "readiness_probe_checks_total";
+
+/// `1` while the published verdict is ready, `0` before the first check,
+/// while a probe verdict is withdrawn, and from the start of the drain. The
+/// refresher and the drain write it, so a stopped refresher leaves the last
+/// value standing; readers refuse that verdict as stale, and the check rate
+/// falling to zero is what reports it.
+const READY_METRIC: &str = "readiness_ready";
+
 /// Cadence and thresholds for the refresher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RefreshPolicy {
     /// Time between checks.
     pub interval: Duration,
-    /// Deadline for one check across every probe.
+    /// Deadline for one check; every probe runs under it at the same time.
     pub probe_budget: Duration,
     /// Failed checks in a row before a ready verdict is withdrawn. Some
     /// readers act on the first unready answer with no threshold of their
@@ -196,6 +211,17 @@ impl Readiness {
             metrics::Unit::Count,
             "Completed readiness checks by outcome."
         );
+        metrics::describe_counter!(
+            PROBE_CHECKS_METRIC,
+            metrics::Unit::Count,
+            "Completed readiness probe checks by probe and outcome."
+        );
+        metrics::describe_gauge!(
+            READY_METRIC,
+            "1 while the published readiness verdict is ready, 0 otherwise."
+        );
+        // Not ready until the first check: the series exists from startup.
+        metrics::gauge!(READY_METRIC).set(0.0);
         Self {
             tx: watch::Sender::new(State {
                 draining: false,
@@ -224,14 +250,18 @@ impl Readiness {
         self.tx.send_if_modified(|state| {
             let changed = !state.draining;
             state.draining = true;
+            // Written under the lock, like the refresher's write, so a check
+            // that completes during the drain cannot leave a `1` behind.
+            metrics::gauge!(READY_METRIC).set(0.0);
             changed
         });
     }
 
-    /// Check probes in registration order, stopping at the first failure or
-    /// timeout, and publish the verdict after applying the failure threshold.
-    /// All probes share one deadline, so adding a probe does not multiply the
-    /// refresh budget.
+    /// Check every probe at the same time under one deadline and publish the
+    /// verdict after applying the failure threshold. Adding a probe does not
+    /// lengthen the refresh, and a slow probe does not spend another probe's
+    /// budget. When several probes fail, the verdict names the first one in
+    /// registration order.
     ///
     /// Startup admission calls this and then reads
     /// [`ReadinessReader::verdict`] before announcing readiness.
@@ -272,6 +302,9 @@ impl Readiness {
                     .map(|previous| at.duration_since(previous.at))
                     .filter(|age| *age > stale_after);
             }
+            // Written under the lock so it cannot overwrite a concurrent drain.
+            let ready = !state.draining && next.verdict.is_ok();
+            metrics::gauge!(READY_METRIC).set(if ready { 1.0 } else { 0.0 });
             state.last_check = Some(next);
         });
         // Logged after the write lock is released so readers never wait on it.
@@ -322,24 +355,30 @@ impl Readiness {
     async fn check_probes(&self) -> Result<(), NotReady> {
         let budget = self.policy.probe_budget;
         let deadline = Instant::now() + budget;
-        for probe in self.probes.iter() {
-            match tokio::time::timeout_at(deadline, probe.check()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    return Err(NotReady::ProbeFailed {
-                        probe: probe.name(),
-                        error,
-                    });
-                }
-                Err(_elapsed) => {
-                    return Err(NotReady::TimedOut {
-                        probe: probe.name(),
-                        budget,
-                    });
-                }
-            }
-        }
-        Ok(())
+        let outcomes = join_all(self.probes.iter().map(|probe| async move {
+            let probe_name = probe.name();
+            let outcome = match tokio::time::timeout_at(deadline, probe.check()).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(NotReady::ProbeFailed {
+                    probe: probe_name,
+                    error,
+                }),
+                Err(_elapsed) => Err(NotReady::TimedOut {
+                    probe: probe_name,
+                    budget,
+                }),
+            };
+            let label = match &outcome {
+                Ok(()) => "ok",
+                Err(NotReady::TimedOut { .. }) => "timed_out",
+                Err(_) => "failed",
+            };
+            metrics::counter!(PROBE_CHECKS_METRIC, "probe" => probe_name, "outcome" => label)
+                .increment(1);
+            outcome
+        }))
+        .await;
+        outcomes.into_iter().collect()
     }
 }
 
@@ -690,18 +729,69 @@ mod tests {
         assert_eq!(readiness.reader().verdict(), Err(NotReady::NotEvaluated));
     }
 
+    struct Slow {
+        name: &'static str,
+        delay: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl Probe for Slow {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        async fn check(&self) -> Result<(), ProbeError> {
+            tokio::time::sleep(self.delay).await;
+            Ok(())
+        }
+    }
+
     #[tokio::test]
-    async fn a_failed_probe_does_not_start_the_next_probe() {
-        let (failing, _, first_calls) = flaky_probe(false);
-        let (healthy, _, second_calls) = flaky_probe(true);
-        let readiness = Readiness::new(vec![failing, healthy], policy());
+    async fn every_probe_is_checked_and_the_first_failure_in_registration_order_is_named() {
+        let (healthy, _, healthy_calls) = flaky_probe(true);
+        let (failing, _, failing_calls) = flaky_probe(false);
+        let readiness = Readiness::new(
+            vec![Box::new(Hanging), healthy, failing],
+            RefreshPolicy {
+                probe_budget: Duration::from_millis(1),
+                ..policy()
+            },
+        );
         readiness.refresh().await;
-        assert!(matches!(
-            readiness.reader().verdict(),
-            Err(NotReady::ProbeFailed { .. })
-        ));
-        assert_eq!(first_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(second_calls.load(Ordering::Relaxed), 0);
+        let verdict = readiness.reader().verdict();
+        assert!(
+            matches!(
+                verdict,
+                Err(NotReady::TimedOut {
+                    probe: "hanging",
+                    ..
+                })
+            ),
+            "{verdict:?}"
+        );
+        assert_eq!(healthy_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(failing_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_probe_does_not_spend_another_probes_budget() {
+        // Each probe needs most of the budget; one after the other they
+        // would overrun it.
+        let delay = policy().probe_budget * 3 / 4;
+        let readiness = Readiness::new(
+            vec![
+                Box::new(Slow {
+                    name: "first",
+                    delay,
+                }),
+                Box::new(Slow {
+                    name: "second",
+                    delay,
+                }),
+            ],
+            policy(),
+        );
+        readiness.refresh().await;
+        assert_eq!(readiness.reader().verdict(), Ok(()));
     }
 
     /// Event names in emission order.
@@ -742,27 +832,114 @@ mod tests {
             .expect("test runtime")
     }
 
+    fn scrape(test: impl Future<Output = ()>) -> String {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        metrics::with_local_recorder(&recorder, || paused_runtime().block_on(test));
+        recorder.handle().render()
+    }
+
+    #[track_caller]
+    fn assert_sample(scrape: &str, sample: &str) {
+        assert!(scrape.lines().any(|line| line == sample), "{scrape}");
+    }
+
     #[test]
     fn each_completed_check_is_counted_by_outcome() {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        metrics::with_local_recorder(&recorder, || {
-            paused_runtime().block_on(async {
-                let (readiness, flag, _) = flaky(true);
-                readiness.refresh().await;
-                flag.store(false, Ordering::Relaxed);
-                readiness.refresh().await;
-                readiness.refresh().await;
-                Readiness::new(vec![Box::new(Hanging)], policy())
-                    .refresh()
-                    .await;
-            });
+        let scrape = scrape(async {
+            let (readiness, flag, _) = flaky(true);
+            readiness.refresh().await;
+            flag.store(false, Ordering::Relaxed);
+            readiness.refresh().await;
+            readiness.refresh().await;
+            Readiness::new(vec![Box::new(Hanging)], policy())
+                .refresh()
+                .await;
         });
 
-        let scrape = recorder.handle().render();
         for (outcome, count) in [("ok", 1), ("failed", 2), ("timed_out", 1)] {
-            let sample = format!("readiness_checks_total{{outcome=\"{outcome}\"}} {count}");
-            assert!(scrape.lines().any(|line| line == sample), "{scrape}");
+            assert_sample(
+                &scrape,
+                &format!("readiness_checks_total{{outcome=\"{outcome}\"}} {count}"),
+            );
         }
+    }
+
+    #[test]
+    fn each_probe_is_counted_by_its_own_outcome_in_every_check() {
+        let scrape = scrape(async {
+            let (healthy, _, _) = flaky_probe(true);
+            let readiness = Readiness::new(
+                vec![
+                    healthy,
+                    Box::new(Hanging),
+                    Box::new(Slow {
+                        name: "slow",
+                        delay: Duration::ZERO,
+                    }),
+                ],
+                policy(),
+            );
+            readiness.refresh().await;
+            readiness.refresh().await;
+        });
+
+        for (probe, outcome) in [("flaky", "ok"), ("hanging", "timed_out"), ("slow", "ok")] {
+            assert_sample(
+                &scrape,
+                &format!(
+                    "readiness_probe_checks_total{{probe=\"{probe}\",outcome=\"{outcome}\"}} 2"
+                ),
+            );
+        }
+        // The check itself is counted once per round, under the first failure.
+        assert_sample(&scrape, "readiness_checks_total{outcome=\"timed_out\"} 2");
+    }
+
+    #[test]
+    fn the_ready_gauge_is_the_published_verdict() {
+        let ready = |scrape: String| {
+            scrape
+                .lines()
+                .find(|line| line.starts_with("readiness_ready "))
+                .map(str::to_owned)
+        };
+        let before_the_first_check = scrape(async {
+            let _ = flaky(true);
+        });
+        assert_eq!(
+            ready(before_the_first_check).as_deref(),
+            Some("readiness_ready 0")
+        );
+
+        let absorbed_failure = scrape(async {
+            let (readiness, flag, _) = flaky(true);
+            readiness.refresh().await;
+            flag.store(false, Ordering::Relaxed);
+            readiness.refresh().await;
+        });
+        assert_eq!(
+            ready(absorbed_failure).as_deref(),
+            Some("readiness_ready 1")
+        );
+
+        let withdrawn = scrape(async {
+            let (readiness, flag, _) = flaky(true);
+            readiness.refresh().await;
+            flag.store(false, Ordering::Relaxed);
+            for _ in 0..3 {
+                readiness.refresh().await;
+            }
+        });
+        assert_eq!(ready(withdrawn).as_deref(), Some("readiness_ready 0"));
+
+        let draining = scrape(async {
+            let (readiness, _, _) = flaky(true);
+            readiness.refresh().await;
+            readiness.start_drain();
+            // A check that passes during the drain does not bring it back.
+            readiness.refresh().await;
+        });
+        assert_eq!(ready(draining).as_deref(), Some("readiness_ready 0"));
     }
 
     #[test]

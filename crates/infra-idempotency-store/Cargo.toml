@@ -15,7 +15,7 @@ workspace = true
 bytes = { workspace = true }
 infra-postgres = { workspace = true }
 metrics = { workspace = true }
-sqlx = { workspace = true, features = ["derive", "postgres", "runtime-tokio", "tls-rustls-aws-lc-rs"] }
+sqlx = { workspace = true, features = ["macros", "postgres", "runtime-tokio", "tls-rustls-aws-lc-rs"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 tokio-util = { workspace = true }

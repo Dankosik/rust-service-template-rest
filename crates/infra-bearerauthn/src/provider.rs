@@ -1,10 +1,15 @@
 //! Trusted provider URL admission and pooled HTTPS transport.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use reqwest::{header, redirect::Policy};
 #[cfg(any(test, feature = "test-support"))]
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 use url::Url;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -14,6 +19,8 @@ use crate::{PreparationError, PreparationPhase, PreparationReason};
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
 /// Total budget of one provider exchange; reqwest applies it until the body ends.
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long one provider exchange took, by closed `operation` and `outcome`.
+const REQUEST_DURATION_METRIC: &str = "authn_provider_request_duration_seconds";
 
 /// Why a provider exchange produced no usable body. Closed, and free of
 /// provider-supplied text, URLs and credentials.
@@ -42,6 +49,20 @@ impl ProviderFailure {
             Self::Connect
         } else {
             Self::Transfer
+        }
+    }
+
+    /// The closed metric, span and log label of this failure class.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Timeout => "provider_timeout",
+            Self::Connect => "provider_connect",
+            Self::Status(400..=499) => "provider_status_4xx",
+            Self::Status(500..=599) => "provider_status_5xx",
+            Self::Status(_) => "provider_status_other",
+            Self::MediaType => "provider_media_type",
+            Self::TooLarge => "provider_too_large",
+            Self::Transfer => "provider_transfer",
         }
     }
 }
@@ -162,8 +183,14 @@ impl ProviderClient {
     }
 
     // template:begin oidc-jwt:authn-provider-get-json
-    pub(crate) async fn get_json(&self, url: &Url) -> Result<Vec<u8>, ProviderFailure> {
-        self.exchange(self.client.get(url.clone()), false).await
+    pub(crate) async fn get_json(
+        &self,
+        url: &Url,
+        document: Document,
+    ) -> Result<Vec<u8>, ProviderFailure> {
+        Exchange::start(document.operation(), "GET", url)
+            .run(self.client.get(url.clone()), false)
+            .await
     }
     // template:end oidc-jwt:authn-provider-get-json
 
@@ -186,44 +213,149 @@ impl ProviderClient {
                 header::HeaderValue::from_static("application/x-www-form-urlencoded"),
             )
             .body(form_body);
-        self.exchange(request, true).await
+        Exchange::start("introspection", "POST", url)
+            .run(request, true)
+            .await
     }
     // template:end oidc-introspection:authn-provider-post-form-json
+}
 
-    async fn exchange(
-        &self,
+// template:begin oidc-jwt:authn-provider-document
+/// The provider document a GET requests.
+#[derive(Clone, Copy)]
+pub(crate) enum Document {
+    Discovery,
+    Jwks,
+}
+
+impl Document {
+    const fn operation(self) -> &'static str {
+        match self {
+            Self::Discovery => "discovery",
+            Self::Jwks => "jwks",
+        }
+    }
+}
+// template:end oidc-jwt:authn-provider-document
+
+/// One provider exchange: its client span and its duration sample. Only the
+/// configured host and port are recorded, never a path, query or credential.
+/// Dropped unfinished, it records `cancelled`.
+struct Exchange {
+    operation: &'static str,
+    started: Instant,
+    span: tracing::Span,
+    finished: bool,
+}
+
+impl Exchange {
+    fn start(operation: &'static str, method: &'static str, url: &Url) -> Self {
+        let span = tracing::info_span!(
+            "authn_provider",
+            otel.name = method,
+            otel.kind = "client",
+            http.request.method = method,
+            server.address = url.host_str().unwrap_or_default(),
+            server.port = url.port_or_known_default().unwrap_or_default(),
+            authn.operation = operation,
+            http.response.status_code = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+        );
+        Self {
+            operation,
+            started: Instant::now(),
+            span,
+            finished: false,
+        }
+    }
+
+    /// Sends the request inside the span and records how the exchange ended.
+    async fn run(
+        self,
         request: reqwest::RequestBuilder,
         require_json_media_type: bool,
     ) -> Result<Vec<u8>, ProviderFailure> {
-        let transport = |error| ProviderFailure::from_transport(&error);
-        let mut response = request.send().await.map_err(transport)?;
-        if response.status() != reqwest::StatusCode::OK {
-            return Err(ProviderFailure::Status(response.status().as_u16()));
+        let result = receive(request, require_json_media_type)
+            .instrument(self.span.clone())
+            .await;
+        self.finish(result.as_ref().err().copied());
+        result
+    }
+
+    fn finish(mut self, failure: Option<ProviderFailure>) {
+        self.finished = true;
+        let status = match failure {
+            None => Some(reqwest::StatusCode::OK.as_u16()),
+            Some(ProviderFailure::Status(status)) => Some(status),
+            Some(_) => None,
+        };
+        self.span.record("http.response.status_code", status);
+        self.record(
+            failure.map_or("success", ProviderFailure::label),
+            failure.is_some(),
+        );
+    }
+
+    fn record(&self, outcome: &'static str, failed: bool) {
+        if failed {
+            self.span.record("error.type", outcome);
+            self.span.record("otel.status_code", "ERROR");
         }
-        if require_json_media_type && !is_json_response(&response) {
-            return Err(ProviderFailure::MediaType);
+        metrics::histogram!(
+            REQUEST_DURATION_METRIC,
+            "operation" => self.operation,
+            "outcome" => outcome
+        )
+        .record(self.started.elapsed().as_secs_f64());
+    }
+}
+
+impl Drop for Exchange {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.record("cancelled", true);
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-        {
+    }
+}
+
+async fn receive(
+    request: reqwest::RequestBuilder,
+    require_json_media_type: bool,
+) -> Result<Vec<u8>, ProviderFailure> {
+    let transport = |error| ProviderFailure::from_transport(&error);
+    let mut response = request.send().await.map_err(transport)?;
+    if response.status() != reqwest::StatusCode::OK {
+        return Err(ProviderFailure::Status(response.status().as_u16()));
+    }
+    if require_json_media_type && !is_json_response(&response) {
+        return Err(ProviderFailure::MediaType);
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(ProviderFailure::TooLarge);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(transport)? {
+        if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(body.len()) {
             return Err(ProviderFailure::TooLarge);
         }
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(transport)? {
-            if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(body.len()) {
-                return Err(ProviderFailure::TooLarge);
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok(body)
+        body.extend_from_slice(&chunk);
     }
+    Ok(body)
 }
 
 fn build_client(
     root: Option<reqwest::Certificate>,
     resolver: Option<Arc<dyn reqwest::dns::Resolve>>,
 ) -> Result<reqwest::Client, ()> {
+    metrics::describe_histogram!(
+        REQUEST_DURATION_METRIC,
+        metrics::Unit::Seconds,
+        "Authentication provider exchange duration by operation and closed outcome"
+    );
     let builder = reqwest::Client::builder()
         .tls_backend_rustls()
         .https_only(true)
@@ -341,6 +473,9 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use url::Url;
 
+    // template:begin oidc-jwt:authn-provider-document-test-import
+    use super::Document;
+    // template:end oidc-jwt:authn-provider-document-test-import
     use super::{
         EndpointUrl, IssuerUrl, ProviderClient, ProviderFailure, fixture_acceptor,
         new_fixture_client,
@@ -453,7 +588,7 @@ mod tests {
             ))
             .unwrap();
             let body = fixture_client(address, &root)
-                .get_json(endpoint.url())
+                .get_json(endpoint.url(), Document::Jwks)
                 .await
                 .unwrap();
             assert_eq!(
@@ -473,7 +608,7 @@ mod tests {
         let (address, root, server) = tls_server(oversized, false).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_json(&fixture_url(address))
+                .get_json(&fixture_url(address), Document::Jwks)
                 .await,
             Err(ProviderFailure::TooLarge)
         );
@@ -483,7 +618,7 @@ mod tests {
         let (address, root, server) = tls_server(response, false).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_json(&fixture_url(address))
+                .get_json(&fixture_url(address), Document::Jwks)
                 .await,
             Err(ProviderFailure::Status(404))
         );
@@ -493,7 +628,7 @@ mod tests {
         let (address, root, server) = tls_server(response, true).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_json(&fixture_url(address))
+                .get_json(&fixture_url(address), Document::Jwks)
                 .await,
             Err(ProviderFailure::Timeout),
         );

@@ -152,8 +152,8 @@ the existing service test owners.
   name avoids colliding with the `config` crate it wraps. Paths map to
   packages through the manifest (`scripts/ci/affected-crates.sh` reads it),
   never by directory name.
-- Inside `infra-http`, the local `health` module (probe handlers) shadows
-  the `health` crate; the crate is written `::health::…`.
+- Inside `infra-http` the probe handlers are the `probes` module; `health`
+  there always names the `health` crate.
 - The probe handlers, the `Problem` type, and the shared problem responses
   live in `infra-http` because every derived service keeps them; a feature
   adds a `ToResponse` component there only when a new shared status appears.

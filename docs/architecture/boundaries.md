@@ -8,13 +8,13 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | --- | --- | --- |
 | Service package (`crates/service/Cargo.toml`) | The main binary named by that manifest: `main` maps the bootstrap result to an exit code; `bootstrap` composes configuration, telemetry, readiness, the route tree, the two listeners, background tasks, signals, and the staged teardown; `api` merges every `OpenApiRouter` into the one contract and finalizes its served router; the `openapi` binary renders its document; the process tests drive the built binary. | Business behavior, request handling beyond composition, provider details. |
 | `service-config` (`crates/config`) | One validated immutable snapshot: section types with defaults and validation in `<section>.rs`, loader precedence, the `APP__` name pre-scan, the secret-in-file refusal, `SecretString` fields, human-form durations and sizes, build metadata (`app.version`, `app.commit`). | Feature behavior, dependency wiring, request handling, telemetry construction. |
-| `health` (`crates/health`) | The readiness refresher over `tokio::sync::watch`: probe trait, failure threshold, staleness guard, drain flag, O(1) snapshot reads, the `readiness_checks_total` counter and the readiness log events. | Probe implementations, HTTP handlers, the schedule (bootstrap owns the policy values). |
+| `health` (`crates/health`) | The readiness refresher over `tokio::sync::watch`: probe trait, failure threshold, staleness guard, drain flag, O(1) snapshot reads, the `readiness_checks_total` and `readiness_probe_checks_total` counters, the `readiness_ready` gauge and the readiness log events. | Probe implementations, HTTP handlers, the schedule (bootstrap owns the policy values). |
 | `service-failure` (`crates/service-failure`) | The closed catalog of failure codes and their wire spelling. | HTTP status, tonic Status, arbitrary detail text, configuration or provider calls. |
 <!-- template:begin grpc:docs-boundaries-grpc-owners -->
 | `infra-grpc` (`crates/infra-grpc`) | Tonic route assembly, auth/deadline/capacity middleware, health projection, server TLS config and lazy clients. | Configuration loading, handler validation, feature behavior, OAuth tokens, process signals or a second lifecycle budget. |
 | `grpc-contracts` (`crates/grpc-contracts`) | Committed prost messages, native tonic traits, the descriptor set they were generated from, and the per-call codec buffer sizes the generated code names. | Business behavior, listener or middleware policy, or a runtime generator. |
 <!-- template:end grpc:docs-boundaries-grpc-owners -->
-| `infra-http` (`crates/infra-http`) | The hardened middleware chain, the bounded accept loop (`Server`), the probe handlers with their `#[utoipa::path]` contract, the RFC 9457 `Problem` type and closed code catalog, request-id admission, the route-template access log. | Business rules, configuration loading, feature routes (they merge in `service::api`). |
+| `infra-http` (`crates/infra-http`) | The hardened middleware chain, the bounded accept loop (`Server`), the probe handlers with their `#[utoipa::path]` contract, the RFC 9457 `Problem` type and closed code catalog, the request extractors whose rejections are Problems, contract finalization from the assembled document, request-id admission, the route-template access log, and the inbound contract surface of each retained profile. | Business rules, configuration loading, feature routes (they merge in `service::api`). |
 | `infra-telemetry` (`crates/infra-telemetry`) | Subscriber installation (`json`/`text`), the tracer provider with the OTLP endpoint resolution and ambient-credential refusal, the Prometheus recorder with process and Tokio runtime metrics, the diagnostics router. | Feature semantics, startup logging content, request routing, which fields a handler emits. |
 <!-- template:begin authn:docs-boundaries-authn-owner -->
 | `infra-bearerauthn` (`crates/infra-bearerauthn`) | Bearer-envelope parsing, sealed verified identity and immutable typed claims access, canonical provider URL admission, and the selected OIDC JWT or introspection verifier with its trusted provider transport. | Authorization policy, configuration loading, route assembly, readiness, or application-visible raw tokens or mutable claim evidence. |
@@ -34,7 +34,7 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 <!-- template:end jobs:docs-boundaries-jobs-owners -->
 <!-- template:begin messaging:docs-boundaries-messaging-owner -->
 | `domain-events` (`crates/domain-events`) | Typed event payload contract (type/version) and the event value: logical ID, occurrence time, and payload. Wire limits and validation live in `infra-messaging`. | Subjects, broker metadata, ID minting, clocks, configuration, or tasks. |
-| `infra-messaging` (`crates/infra-messaging`) | Go-compatible wire admission, prepared publication, typed registry, bounded JetStream consumer, deterministic DLQ/restore, and connection/probe mapping ([guide](../durable-messaging.md)). | Business events, feature policy, queue SQL or commits, stream administration, configuration loading, signals, or a generic bus. |
+| `infra-messaging` (`crates/infra-messaging`) | Go-compatible wire admission, prepared publication, typed registry and its AsyncAPI contract document, bounded JetStream consumer, deterministic DLQ/restore, and connection/probe mapping ([guide](../durable-messaging.md)). | Business events, feature policy, queue SQL or commits, stream administration, configuration loading, signals, or a generic bus. |
 <!-- template:end messaging:docs-boundaries-messaging-owner -->
 <!-- template:begin cache:docs-boundaries-cache-owner -->
 | `infra-cache` (`crates/infra-cache`) | Bytes-only RESP admission, a lazy `ConnectionManager`, namespace `get`/`set`/`delete`, the `cache` probe, and sanitized observation ([guide](../cache.md)). | Keys, serialization, TTL policy, invalidation, a generic `Cache<K, V>`, get-or-load, locks, rate limits, configuration loading, or readiness policy. |
@@ -113,7 +113,7 @@ infra-http -> infra-bearerauthn
 <!-- template:end authn:docs-boundaries-authn-edges -->
 <!-- template:begin messaging:docs-boundaries-messaging-edges -->
   -> domain-events
-  -> infra-messaging -> domain-events, async-nats, health, tokio, bytes
+  -> infra-messaging -> domain-events, async-nats, health, tokio, bytes, utoipa
 jobs-worker -> infra-messaging only when the messaging profile is retained
 service -> infra-messaging only for optional producer/probe composition
 <!-- template:end messaging:docs-boundaries-messaging-edges -->
@@ -273,6 +273,16 @@ silently reopen:
 - **`infra-http` owns the probe handlers and their contract**, because the
   probes are platform behavior every derived service keeps; feature
   operations merge beside them in `service::api::contract()`.
+- **Every inbound HTTP contract surface a profile adds lives in `infra-http`**
+  (authentication finalization, idempotent composition, signed webhook
+  ingress) rather than in a crate per profile. Each one reads crate-private
+  transport state: the compiled security policy, the sealed principal, the
+  request deadline, the sanitized failure. A split would publish those seams,
+  and a feature would then choose among several transport crates. The price
+  is a provider edge on the transport crate per retained profile, each inside
+  that profile's markers, so a service without the profile does not carry it.
+  Reopen when a surface needs a dependency its profile markers cannot remove,
+  or when a binary that serves no API measurably pays for these edges.
 - **The `Problem` type is template-owned** (about sixty lines) with `code`,
   `request_id`, and `invalid_params` first-class; `problem_details` was the
   acceptable crate alternative and may replace it if the catalog outgrows the

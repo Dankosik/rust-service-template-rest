@@ -1,0 +1,126 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH policy AS ( SELECT policy.kind, policy.max_attempts, policy.timeout_micros FROM unnest($1::text[], $2::smallint[], $3::bigint[]) AS policy (kind, max_attempts, timeout_micros) ), candidates AS ( SELECT candidate.id, candidate.not_before FROM policy CROSS JOIN LATERAL ( SELECT job.id, job.not_before FROM background_jobs AS job WHERE job.state = 'pending' AND job.kind = policy.kind AND job.not_before <= statement_timestamp() ORDER BY job.not_before, job.id LIMIT $4 FOR UPDATE SKIP LOCKED ) AS candidate UNION ALL SELECT candidate.id, candidate.not_before FROM policy CROSS JOIN LATERAL ( SELECT job.id, job.not_before FROM background_jobs AS job WHERE job.state = 'running' AND job.kind = policy.kind AND job.claim_expires_at <= statement_timestamp() ORDER BY job.not_before, job.id LIMIT $4 FOR UPDATE SKIP LOCKED ) AS candidate ), picked AS ( SELECT candidates.id FROM candidates ORDER BY candidates.not_before, candidates.id LIMIT $4 ) UPDATE background_jobs AS job SET state = CASE WHEN job.attempts >= policy.max_attempts THEN 'failed' ELSE 'running' END, failure_reason = CASE WHEN job.attempts >= policy.max_attempts THEN 'exhausted' END, finished_at = CASE WHEN job.attempts >= policy.max_attempts THEN statement_timestamp() END, claim_expires_at = CASE WHEN job.attempts >= policy.max_attempts THEN NULL ELSE statement_timestamp() + policy.timeout_micros * interval '1 microsecond' + $6::bigint * interval '1 microsecond' END, attempts = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempts ELSE job.attempts + 1 END, attempted_by = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempted_by ELSE $5 END, error_summary = CASE WHEN job.state = 'running' AND job.claim_expires_at <= statement_timestamp() THEN 'lease expired; rescued' WHEN job.attempts >= policy.max_attempts THEN COALESCE(job.error_summary, 'attempt budget spent') ELSE job.error_summary END, errors = CASE WHEN job.state = 'running' AND job.claim_expires_at <= statement_timestamp() THEN job.errors || jsonb_build_object( 'attempt', job.attempts, 'at', statement_timestamp(), 'error', 'lease expired; rescued') ELSE job.errors END, claim_generation = nextval('background_jobs_claim_generation') FROM policy WHERE job.id = ANY (ARRAY(SELECT picked.id FROM picked)) AND policy.kind = job.kind AND ((job.state = 'pending' AND job.not_before <= statement_timestamp()) OR (job.state = 'running' AND job.claim_expires_at <= statement_timestamp())) RETURNING job.id, job.kind, (job.state = 'failed') AS \"exhausted!\", job.attempts, job.claim_generation, CASE WHEN job.state = 'running' THEN job.payload::text END AS payload, job.trace_context, job.trace_state, job.error_summary, EXTRACT(EPOCH FROM statement_timestamp() - job.not_before)::double precision AS \"queue_wait_seconds!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "exhausted!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "attempts",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "attempts"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "claim_generation",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "claim_generation"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "payload",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "trace_context",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "trace_context"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "trace_state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "trace_state"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "error_summary",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "error_summary"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "queue_wait_seconds!",
+        "type_info": "Float8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Int2Array",
+        "Int8Array",
+        "Int8",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      false,
+      false,
+      null,
+      true,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "90ec8f4f0ff2dc179d30d11fad89eb352af4f8ca520b4199391a25b515583f38"
+}

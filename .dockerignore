@@ -8,6 +8,8 @@
 !Cargo.toml
 !Cargo.lock
 !crates/
+# `sqlx::query!` reads its statement metadata at compile time.
+!.sqlx/
 # The migrate binary embeds the migration set at compile time.
 !migrations/
 # A workspace member cargo must see; its tests and fixtures are not built.

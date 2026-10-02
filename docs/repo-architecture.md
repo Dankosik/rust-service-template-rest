@@ -35,7 +35,7 @@ authority.
 | --- | --- |
 | `#[utoipa::path]` annotations, `ToSchema`/`IntoResponses` derives, and the router merge in `crates/service/src/api.rs` | `api/openapi/service.yaml` (generated, committed, drift-tested), the served axum `Router` |
 | `crates/config/src/<section>.rs` (type, defaults, validation) | The immutable `Config` snapshot bootstrap and the adapters read |
-| `env/config/*.toml`, `APP__SECTION__KEY`, `--config`, `--config-overlay` | Inputs whose precedence and secret rules live in [Configuration Source Policy](configuration-source-policy.md) |
+| `env/config/*.toml`, `APP__SECTION__KEY`, `--config`, `--config-overlay`, `--secrets-dir` | Inputs whose precedence and secret rules live in [Configuration Source Policy](configuration-source-policy.md) |
 | `crates/health` | The readiness verdict `/health/ready` serves and the drain flag teardown flips |
 | `crates/service-failure` | The closed catalog of failure codes; each transport owns its wire projection |
 <!-- template:begin grpc:docs-architecture-grpc-source -->

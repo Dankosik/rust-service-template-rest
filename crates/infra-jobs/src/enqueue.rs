@@ -4,7 +4,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use infra_postgres::Tx;
+use infra_postgres::{Tx, observed};
 use tokio::time::Instant;
 
 use crate::kind::{self, JobId, JobKind};
@@ -16,26 +16,6 @@ pub const MAX_PAYLOAD_BYTES: usize = 262_144;
 pub(crate) const MAX_UNIQUE_KEY_BYTES: usize = 255;
 /// The longest delay enqueue accepts: 36500 days.
 pub const MAX_DELAY: Duration = Duration::from_hours(36_500 * 24);
-
-/// One insert on the caller's connection. A conflict with a live unique key
-/// returns no row.
-const ENQUEUE: &str = "INSERT INTO background_jobs (id, kind, payload, unique_key, not_before, trace_context, trace_state) \
-     VALUES ($7, $1, $2::jsonb, $3::text COLLATE \"C\", \
-             statement_timestamp() + ($4 * interval '1 microsecond'), $5, $6) \
-     ON CONFLICT (kind, unique_key) WHERE unique_key IS NOT NULL AND state IN ('pending', 'running') \
-     DO NOTHING \
-     RETURNING 1 AS created";
-
-/// Wake idle workers of this kind when the caller's transaction commits.
-const WAKE: &str = "SELECT pg_notify($1, $2)";
-
-/// Compare one live job's stored payload while retaining its row lock.
-const COMPARE_LIVE_PAYLOAD: &str = "SELECT payload = $3::jsonb \
-     FROM background_jobs \
-     WHERE kind = $1 \
-       AND unique_key = $2::text COLLATE \"C\" \
-       AND state IN ('pending', 'running') \
-     FOR UPDATE";
 
 /// Delay and uniqueness for one enqueue.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -100,7 +80,7 @@ pub enum EnqueueError {
     },
     /// The statement failed; the caller's transaction is aborted.
     ///
-    /// Classify with [`infra_postgres::retryable`].
+    /// Its SQLSTATE is [`infra_postgres::sqlstate`].
     #[error("the enqueue statement failed")]
     Database(#[source] sqlx::Error),
 }
@@ -109,7 +89,7 @@ pub enum EnqueueError {
 ///
 /// Validation failures send nothing and leave the transaction usable. A
 /// [`EnqueueError::Database`] error means the caller's transaction is aborted;
-/// the caller classifies it with [`infra_postgres::retryable`]. With a unique
+/// [`infra_postgres::sqlstate`] names why. With a unique
 /// key, a live job of the same kind and key yields [`Enqueued::Duplicate`]
 /// and leaves the transaction usable. Under `REPEATABLE READ` or
 /// `SERIALIZABLE`, a holder written after the caller's snapshot fails the
@@ -128,27 +108,45 @@ pub async fn enqueue<K: JobKind>(
     let prepared = prepare(payload, options)?;
     let (traceparent, tracestate) = trace_context::capture();
     let id = JobId::new_v7();
-    let row = sqlx::query(ENQUEUE)
-        .bind(K::NAME)
-        .bind(prepared.payload)
-        .bind(prepared.unique_key)
-        .bind(prepared.delay_micros)
-        .bind(traceparent.as_deref())
-        .bind(tracestate.as_deref())
-        .bind(id.0)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(EnqueueError::Database)?;
+    // One insert on the caller's connection. A conflict with a live unique key
+    // returns no row.
+    let row = observed(
+        "enqueue job",
+        sqlx::query!(
+            "INSERT INTO background_jobs (id, kind, payload, unique_key, not_before, trace_context, trace_state) \
+             VALUES ($7, $1, $2::text::jsonb, $3::text COLLATE \"C\", \
+                     statement_timestamp() + ($4::bigint * interval '1 microsecond'), $5, $6) \
+             ON CONFLICT (kind, unique_key) WHERE unique_key IS NOT NULL AND state IN ('pending', 'running') \
+             DO NOTHING \
+             RETURNING 1 AS created",
+            K::NAME,
+            prepared.payload,
+            prepared.unique_key,
+            prepared.delay_micros,
+            traceparent.as_deref(),
+            tracestate.as_deref(),
+            id.0,
+        )
+        .fetch_optional(&mut *tx),
+    )
+    .await
+    .map_err(EnqueueError::Database)?;
     let Some(_created) = row else {
         return Ok(Enqueued::Duplicate);
     };
     if prepared.delay_micros == 0 && wake_due(K::NAME, Instant::now()) {
-        sqlx::query(WAKE)
-            .bind(crate::claim::WAKE_CHANNEL)
-            .bind(K::NAME)
-            .execute(&mut *tx)
-            .await
-            .map_err(EnqueueError::Database)?;
+        // Wake idle workers of this kind when the caller's transaction commits.
+        observed(
+            "wake job workers",
+            sqlx::query!(
+                "SELECT pg_notify($1, $2)",
+                crate::claim::WAKE_CHANNEL,
+                K::NAME
+            )
+            .execute(&mut *tx),
+        )
+        .await
+        .map_err(EnqueueError::Database)?;
     }
     Ok(Enqueued::Created(id))
 }
@@ -176,13 +174,24 @@ pub async fn compare_live_payload<K: JobKind>(
             unique_key: Some(unique_key),
         },
     )?;
-    let same = sqlx::query_scalar(COMPARE_LIVE_PAYLOAD)
-        .bind(K::NAME)
-        .bind(prepared.unique_key)
-        .bind(prepared.payload)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(EnqueueError::Database)?;
+    // Compare one live job's stored payload while retaining its row lock.
+    let same = observed(
+        "compare job payload",
+        sqlx::query_scalar!(
+            "SELECT payload = $3::text::jsonb AS \"same!\" \
+             FROM background_jobs \
+             WHERE kind = $1 \
+               AND unique_key = $2::text COLLATE \"C\" \
+               AND state IN ('pending', 'running') \
+             FOR UPDATE",
+            K::NAME,
+            prepared.unique_key,
+            prepared.payload,
+        )
+        .fetch_optional(&mut *tx),
+    )
+    .await
+    .map_err(EnqueueError::Database)?;
     Ok(match same {
         Some(true) => LivePayloadComparison::Same,
         Some(false) => LivePayloadComparison::Different,

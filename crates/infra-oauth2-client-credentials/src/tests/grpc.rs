@@ -238,7 +238,7 @@ fn rpc<T>(message: T, after: Duration) -> Request<T> {
 }
 
 #[tokio::test]
-async fn caller_authorization_is_invalid_argument_before_any_io() {
+async fn caller_authorization_is_internal_before_any_io() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let mut request = rpc(
@@ -255,7 +255,7 @@ async fn caller_authorization_is_invalid_argument_before_any_io() {
         .unary(request)
         .await
         .unwrap_err();
-    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(error.code(), Code::Internal);
     assert!(tokens.token_requests().is_empty());
     assert_eq!(resource.calls(), 0);
     resource.finish().await;
@@ -648,7 +648,7 @@ async fn on_behalf_of_dispatches_the_exchanged_token_instead_of_the_service_toke
 }
 
 #[tokio::test]
-async fn a_client_requiring_a_subject_is_invalid_argument_without_one_before_any_io() {
+async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let credentials = tokens.credentials(&[], None);
@@ -674,7 +674,7 @@ async fn a_client_requiring_a_subject_is_invalid_argument_without_one_before_any
         .unary(rpc(message(), Duration::from_secs(10)))
         .await
         .unwrap_err();
-    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(error.code(), Code::Internal);
     assert_eq!(tokens.token_requests().len(), 1);
     assert_eq!(resource.calls(), 1);
 

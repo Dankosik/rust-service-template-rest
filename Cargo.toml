@@ -62,8 +62,8 @@ infra-webhooks = { path = "crates/infra-webhooks" }
 # template:end webhooks-common:workspace-webhooks-crate
 
 # template:begin postgres:workspace-postgres-dependencies
-# Persistence (docs/architecture/persistence.md). `macros` where
-# `sqlx::migrate!` or `#[sqlx::test]` is used, and in `infra-postgres`.
+# Persistence (docs/architecture/persistence.md). `macros` where a checked
+# statement (`sqlx::query!`), `sqlx::migrate!` or `#[sqlx::test]` is used.
 sqlx = { version = "0.9.0", default-features = false }
 log = { version = "0.4", default-features = false }
 # template:end postgres:workspace-postgres-dependencies
@@ -119,6 +119,7 @@ tonic-health = { version = "=0.14.6", default-features = false }
 tonic-reflection = { version = "=0.14.6", default-features = false }
 tonic-types = { version = "=0.14.6", default-features = false }
 prost = { version = "=0.14.4", default-features = false }
+prost-types = { version = "=0.14.4", default-features = false }
 tokio-stream = { version = "0.1.19", default-features = false }
 # template:end grpc:workspace-grpc-dependencies
 # template:begin rustls:workspace-rustls
@@ -244,6 +245,7 @@ panic = "warn"
 todo = "warn"
 dbg_macro = "warn"
 disallowed_methods = "warn"
+disallowed_types = "warn"
 print_stdout = "warn"
 print_stderr = "warn"
 # Module names repeat in paths by design (`health::health_ready` reads worse).

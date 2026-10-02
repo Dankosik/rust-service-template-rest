@@ -25,10 +25,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use infra_postgres::{
-    Isolation, Tx, TxError, TxOptions, failure_cause, in_tx_with, sqlstate, transient,
+    Isolation, Tx, TxError, TxOptions, failure_cause, in_tx_with, observed, sqlstate, transient,
 };
-use sqlx::Row;
-use sqlx::postgres::PgRow;
 
 use crate::Store;
 
@@ -38,33 +36,6 @@ const READ_COMMITTED: TxOptions = TxOptions {
     isolation: Isolation::ReadCommitted,
     read_only: false,
 };
-
-/// Step 1. The lock is taken after the statement's snapshot, so a missing
-/// record with the lock still needs step 2. Advisory locks work on a standby
-/// too; a lock taken there ends with the refused transaction.
-const LOCK_AND_READ: &str = "SELECT \
-    NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS writable, \
-    pg_try_advisory_xact_lock($1) AS acquired, \
-    r.fingerprint, r.status, r.headers, \
-    CASE WHEN r.fingerprint = $3 THEN r.body END AS body \
-    FROM (VALUES (1)) AS one LEFT JOIN http_idempotency_records AS r \
-    ON r.scope_key = $2 AND r.expires_at > statement_timestamp()";
-
-/// Step 2. It must stay a statement of its own after step 1.
-const READ: &str = "SELECT fingerprint, status, headers, \
-    CASE WHEN fingerprint = $2 THEN body END AS body \
-    FROM http_idempotency_records \
-    WHERE scope_key = $1 AND expires_at > statement_timestamp()";
-
-/// Step 3. Replaces only an expired row; a live row leaves no row affected.
-const WRITE: &str = "INSERT INTO http_idempotency_records AS r \
-    (scope_key, fingerprint, status, headers, body, issuer, caller_kind, caller_value, expires_at) \
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, statement_timestamp() + $9) \
-    ON CONFLICT (scope_key) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, \
-    status = EXCLUDED.status, headers = EXCLUDED.headers, body = EXCLUDED.body, \
-    issuer = EXCLUDED.issuer, caller_kind = EXCLUDED.caller_kind, \
-    caller_value = EXCLUDED.caller_value, expires_at = EXCLUDED.expires_at \
-    WHERE r.expires_at <= statement_timestamp()";
 
 /// A SHA-256 digest.
 pub type Digest = [u8; 32];
@@ -227,19 +198,39 @@ async fn arbitrate<C, R>(
     scope: &ScopeKey,
     fingerprint: &Digest,
 ) -> Result<Option<Attempted<C, R>>, AttemptError> {
-    let (writable, acquired, live): (bool, bool, _) = sqlx::query(LOCK_AND_READ)
-        .bind(scope.lock_key())
-        .bind(scope.0)
-        .bind(fingerprint.as_slice())
-        .try_map(|row: PgRow| {
-            Ok((
-                row.try_get("writable")?,
-                row.try_get("acquired")?,
-                live_record(&row, fingerprint)?,
-            ))
+    // Step 1. The lock is taken after the statement's snapshot, so a missing
+    // record with the lock still needs step 2. Advisory locks work on a
+    // standby too; a lock taken there ends with the refused transaction.
+    let row = observed(
+        "lock and read idempotency record",
+        sqlx::query!(
+            "SELECT \
+             NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' \
+                 AS \"writable!\", \
+             pg_try_advisory_xact_lock($1) AS \"acquired!\", \
+             r.fingerprint AS \"fingerprint?: Digest\", r.status AS \"status?\", \
+             r.headers AS \"headers?: Vec<HeaderPair>\", \
+             CASE WHEN r.fingerprint = $3 THEN r.body END AS body \
+             FROM (VALUES (1)) AS one LEFT JOIN http_idempotency_records AS r \
+             ON r.scope_key = $2 AND r.expires_at > statement_timestamp()",
+            scope.lock_key(),
+            scope.0.as_slice(),
+            fingerprint.as_slice(),
+        )
+        .fetch_one(&mut *tx),
+    )
+    .await
+    .map_err(|err| read_failed(&err, "arbitrate"))?;
+    let (writable, acquired) = (row.writable, row.acquired);
+    // The join yields a whole record or none of its columns.
+    let live = row
+        .fingerprint
+        .zip(row.status)
+        .zip(row.headers)
+        .map(|((stored, status), headers)| {
+            live_record(stored, status, headers, row.body, fingerprint)
         })
-        .fetch_one(&mut *tx)
-        .await
+        .transpose()
         .map_err(|err| read_failed(&err, "arbitrate"))?;
     if !writable {
         tracing::warn!(
@@ -253,14 +244,33 @@ async fn arbitrate<C, R>(
     let live = match live {
         Some(live) => Some(live),
         None if !acquired => return Ok(Some(Attempted::InProgress)),
-        None => sqlx::query(READ)
-            .bind(scope.0)
-            .bind(fingerprint.as_slice())
-            .try_map(|row: PgRow| live_record(&row, fingerprint))
-            .fetch_optional(tx)
-            .await
-            .map_err(|err| read_failed(&err, "read_record"))?
-            .flatten(),
+        // Step 2. It must stay a statement of its own after step 1.
+        None => observed(
+            "read idempotency record",
+            sqlx::query!(
+                "SELECT fingerprint AS \"fingerprint: Digest\", status, \
+                 headers AS \"headers: Vec<HeaderPair>\", \
+                 CASE WHEN fingerprint = $2 THEN body END AS body \
+                 FROM http_idempotency_records \
+                 WHERE scope_key = $1 AND expires_at > statement_timestamp()",
+                scope.0.as_slice(),
+                fingerprint.as_slice(),
+            )
+            .fetch_optional(tx),
+        )
+        .await
+        .map_err(|err| read_failed(&err, "read_record"))?
+        .map(|row| {
+            live_record(
+                row.fingerprint,
+                row.status,
+                row.headers,
+                row.body,
+                fingerprint,
+            )
+        })
+        .transpose()
+        .map_err(|err| read_failed(&err, "read_record"))?,
     };
     Ok(live.map(|live| match live {
         Live::Same(record) => Attempted::Replay(record),
@@ -274,25 +284,26 @@ enum Live {
     Different,
 }
 
-/// The live record in `row`, if any. Every column but the body is validated
-/// before mismatch; the statement returns the body only for replay, so a
-/// mismatch neither detoasts nor transfers it.
-fn live_record(row: &PgRow, fingerprint: &Digest) -> Result<Option<Live>, sqlx::Error> {
-    let Some(stored_fingerprint) = row.try_get::<Option<Digest>, _>("fingerprint")? else {
-        return Ok(None);
-    };
-    let status: i16 = row.try_get("status")?;
-    let headers: Vec<HeaderPair> = row.try_get("headers")?;
-    if stored_fingerprint != *fingerprint {
-        return Ok(Some(Live::Different));
+/// A live record, compared with the request's fingerprint. Both reads return
+/// the body only for an equal fingerprint, so a mismatch neither detoasts nor
+/// transfers it; a replay whose body is missing is a corrupt record.
+fn live_record(
+    stored: Digest,
+    status: i16,
+    headers: Vec<HeaderPair>,
+    body: Option<Vec<u8>>,
+    fingerprint: &Digest,
+) -> Result<Live, sqlx::Error> {
+    if stored != *fingerprint {
+        return Ok(Live::Different);
     }
-    let body: &[u8] = row.try_get("body")?;
-    Ok(Some(Live::Same(Record {
-        fingerprint: stored_fingerprint,
+    let body = body.ok_or_else(|| sqlx::Error::Decode("the stored body is null".into()))?;
+    Ok(Live::Same(Record {
+        fingerprint: stored,
         status,
         headers,
-        body: Bytes::copy_from_slice(body),
-    })))
+        body: Bytes::from(body),
+    }))
 }
 
 fn read_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
@@ -312,19 +323,33 @@ async fn write(
     record: &Record,
     retention: Duration,
 ) -> Result<(), AttemptError> {
-    let written = sqlx::query(WRITE)
-        .bind(scope.0)
-        .bind(record.fingerprint)
-        .bind(record.status)
-        .bind(&record.headers)
-        .bind(record.body.as_ref())
-        .bind(&caller.issuer)
-        .bind(caller.kind.as_str())
-        .bind(&caller.value)
-        .bind(retention)
-        .execute(tx)
-        .await
-        .map_err(|err| failed(&err, "write_record", classify(&err)))?;
+    // Replaces only an expired row; a live row leaves no row affected.
+    let written = observed(
+        "write idempotency record",
+        sqlx::query!(
+            "INSERT INTO http_idempotency_records AS r \
+             (scope_key, fingerprint, status, headers, body, issuer, caller_kind, caller_value, \
+              expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, statement_timestamp() + $9) \
+             ON CONFLICT (scope_key) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, \
+             status = EXCLUDED.status, headers = EXCLUDED.headers, body = EXCLUDED.body, \
+             issuer = EXCLUDED.issuer, caller_kind = EXCLUDED.caller_kind, \
+             caller_value = EXCLUDED.caller_value, expires_at = EXCLUDED.expires_at \
+             WHERE r.expires_at <= statement_timestamp()",
+            scope.0.as_slice(),
+            record.fingerprint.as_slice(),
+            record.status,
+            &record.headers as _,
+            record.body.as_ref(),
+            caller.issuer,
+            caller.kind.as_str(),
+            caller.value,
+            retention as _,
+        )
+        .execute(tx),
+    )
+    .await
+    .map_err(|err| failed(&err, "write_record", classify(&err)))?;
     if written.rows_affected() == 1 {
         Ok(())
     } else {

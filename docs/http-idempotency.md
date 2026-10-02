@@ -172,12 +172,31 @@ Cancellation drops the transaction; cancellation during COMMIT remains
 durability-uncertain, and the outer 504 makes no rollback guarantee. In both
 cases an identical same-key retry returns to normal arbitration.
 
-The outcome metric keeps one outcome per attempt and its abandoned-attempt
-semantics. It folds the former `outcome_unknown` into `unavailable`, removes
-`reconciled`, uses `not_stored` for known internal faults and for a request
-body that cannot be read or exceeds the limit (400 or 413 before
-arbitration), and retains `integrity` for corrupt stored records. It adds no
-high-cardinality labels.
+`http_idempotency_outcomes_total` counts exactly one `outcome` per attempt
+and has no other label. An attempt is a request the boundary refused for its
+key or body before the handler, or one whose handler reached `execute`; a
+request the handler refuses before `execute` records none:
+
+| `outcome` | What happened | Answer |
+| --- | --- | --- |
+| `executed` | The work committed together with its record. | The 2xx |
+| `replayed` | A live record for the same request decided. | The stored 2xx |
+| `not_stored` | The operation answered a non-2xx and rolled back, or the request body could not be read or exceeded the limit before arbitration. | That response, 400, or 413 |
+| `in_progress` | Another attempt holds the key. | 409 |
+| `key_mismatch` | A live record belongs to a different request. | 422 |
+| `invalid_key` | The key is missing, repeated, or malformed. | 400 |
+| `unavailable` | A transient database fault or an uncertain commit. | 503 |
+| `internal` | A known non-transient database, query, or record-write fault. | 500 |
+| `unstorable` | The operation returned a 2xx the boundary cannot store: a body over 1 MiB, headers over 8 KiB, or a failed body stream. The work rolled back. | 500 |
+| `integrity` | A stored record cannot be decoded. | 500 |
+| `abandoned` | The attempt was dropped before it answered: the client left or the request timeout fired. | None, or the outer 504 |
+
+`not_stored` is ordinary traffic. `internal`, `unstorable`, and `integrity`
+each need an operator or a code change, so alert on them separately from it.
+Their log events are `http_idempotency_store_failed` (with `phase`,
+`failure_class`, SQLSTATE, and bounded cause),
+`http_idempotency_success_not_stored` (with `operation` and `failure`), and
+`http_idempotency_integrity_failed`.
 
 The first stored success and replay have byte-exact status/body and preserve
 only these response headers, including repeated values and per-name order:
@@ -209,6 +228,18 @@ operation whose success carries personal or otherwise sensitive data keeps
 that data in `http_idempotency_records` for that long: choose the retention,
 database access, and backup policy with that in mind.
 
+The table holds one row for every stored success until it expires: about the
+rate of stored successes multiplied by the retention, each row with its body.
+Nothing in the boundary limits one caller's share. Every new key from an
+authenticated caller keeps up to 1 MiB until it expires, so the bounds on
+that growth are the retention, the size of the operation's success body, and
+a per-caller rate limit at the gateway, which this template does not provide.
+Return an identifier or a small
+representation from an idempotent operation, not a large document, and watch
+the size with
+`SELECT pg_size_pretty(pg_total_relation_size('http_idempotency_records'))`,
+which includes the TOAST bodies and both indexes.
+
 Every request that reaches `execute` holds one pooled connection. Replay,
 mismatch, and in-progress arbitration use three transaction statements
 (`BEGIN`, one lock-and-read, `ROLLBACK`); a stored success uses five plus the
@@ -233,6 +264,13 @@ deleting shows without reading logs. A failed batch logs
 bounded cause; a startup check that could not reach a verdict logs
 `http_idempotency_startup_check_failed` with the same fields, or
 `cause = "timeout"` for its 5 s bound. None of them carries driver text.
+
+Deleted records become dead rows at the rate successes are stored. The table
+therefore starts its autovacuum at 5,000 dead rows plus 1% of the table, not
+at the server's default 20%, and its TOAST table follows the same values
+(`20261002150000_tune_http_idempotency_records_autovacuum.sql`). The values
+are table storage parameters: they change no server setting, and an operator
+may override them with `ALTER TABLE ... SET` without touching a migration.
 
 Each new record retains verified issuer, caller kind/value, non-secret scope
 digest, and expiry, never raw keys, credentials, or request bodies for
@@ -322,6 +360,15 @@ caller, so an authentication engine is required; retention has no template
 default. Cleanup deletes 500-row batches every 60 s under a 1 s statement
 timeout; reopen for a backlog one tick cannot drain or for lock waits cleanup
 causes.
+
+Expiry stays a batched `DELETE` followed by vacuum. Range partitioning on
+`expires_at` with partition drops would remove both, but a partitioned
+table's primary key must include the partition column, so `scope_key` alone
+would stop being unique and the advisory lock would become the only
+arbiter; the cleanup's `ctid` is also local to one partition. Reopen for
+partitioning when autovacuum cannot keep the table's dead space bounded at
+the measured write rate, or when the deletes' WAL volume matters to
+replication.
 
 
 ## Performance evidence

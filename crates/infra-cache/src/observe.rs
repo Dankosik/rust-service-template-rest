@@ -51,32 +51,78 @@ impl Operation {
     }
 }
 
-/// Every `outcome` label.
+/// Why a command returned no reply: the span's `error.type` and the
+/// `error_type` label of a failed series. Server text is never copied.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ErrorType {
+    /// `command_timeout` elapsed, or the client reported a timeout.
+    Timeout,
+    Io,
+    Auth,
+    Response,
+    Parse,
+    Other,
+}
+
+impl ErrorType {
+    /// Variant count. The match is exhaustive, so adding a variant stops the
+    /// build here until the count that sizes `Histograms` is updated.
+    const COUNT: usize = match Self::Timeout {
+        Self::Timeout | Self::Io | Self::Auth | Self::Response | Self::Parse | Self::Other => 6,
+    };
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Io => "io",
+            Self::Auth => "auth",
+            Self::Response => "response",
+            Self::Parse => "parse",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// How a command ended. Every variant is one series of an operation.
 #[derive(Clone, Copy)]
 pub(crate) enum Outcome {
     Hit,
     Miss,
     Ok,
-    Timeout,
-    Error,
     Cancelled,
+    Failed(ErrorType),
 }
 
 impl Outcome {
-    /// Variant count. The match is exhaustive, so adding a variant stops the
-    /// build here until the count that sizes `Histograms` is updated.
+    /// Series per operation. The match is exhaustive, so adding a variant
+    /// stops the build here until the count and [`Self::index`] are updated.
     const COUNT: usize = match Self::Hit {
-        Self::Hit | Self::Miss | Self::Ok | Self::Timeout | Self::Error | Self::Cancelled => 6,
+        Self::Hit | Self::Miss | Self::Ok | Self::Cancelled | Self::Failed(_) => {
+            4 + ErrorType::COUNT
+        }
     };
 
+    /// Position inside one operation's row of handles.
+    fn index(self) -> usize {
+        match self {
+            Self::Hit => 0,
+            Self::Miss => 1,
+            Self::Ok => 2,
+            Self::Cancelled => 3,
+            Self::Failed(error_type) => 4 + error_type as usize,
+        }
+    }
+
+    /// The `outcome` label. A timeout keeps its own value so an alert on it
+    /// needs no second label.
     fn label(self) -> &'static str {
         match self {
             Self::Hit => "hit",
             Self::Miss => "miss",
             Self::Ok => "ok",
-            Self::Timeout => "timeout",
-            Self::Error => "error",
             Self::Cancelled => "cancelled",
+            Self::Failed(ErrorType::Timeout) => "timeout",
+            Self::Failed(_) => "error",
         }
     }
 }
@@ -86,8 +132,13 @@ impl Outcome {
 /// call would hash and look it up in the recorder instead. A handle stays
 /// bound to the recorder of its first use; bootstrap installs the recorder
 /// before it opens the cache.
-#[derive(Default)]
 pub(crate) struct Histograms([OnceLock<Histogram>; Operation::COUNT * Outcome::COUNT]);
+
+impl Default for Histograms {
+    fn default() -> Self {
+        Self(std::array::from_fn(|_| OnceLock::new()))
+    }
+}
 
 impl std::fmt::Debug for Histograms {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -97,49 +148,29 @@ impl std::fmt::Debug for Histograms {
 
 impl Histograms {
     fn get(&self, namespace: &'static str, operation: Operation, outcome: Outcome) -> &Histogram {
-        // Each operation occupies one row of Outcome::COUNT handles. The enums
-        // must keep contiguous discriminants starting at zero for this indexing.
-        self.0[operation as usize * Outcome::COUNT + outcome as usize].get_or_init(|| {
-            metrics::histogram!(
-                OPERATION_DURATION_METRIC,
-                "cache" => namespace,
-                "operation" => operation.label(),
-                "outcome" => outcome.label(),
-            )
+        // Each operation occupies one row of Outcome::COUNT handles. Operation
+        // and ErrorType must keep contiguous discriminants starting at zero
+        // for this indexing.
+        self.0[operation as usize * Outcome::COUNT + outcome.index()].get_or_init(|| {
+            // Only a failed series names its cause, so the cause is visible
+            // without a trace or a debug log.
+            if let Outcome::Failed(error_type) = outcome {
+                metrics::histogram!(
+                    OPERATION_DURATION_METRIC,
+                    "cache" => namespace,
+                    "operation" => operation.label(),
+                    "outcome" => outcome.label(),
+                    "error_type" => error_type.label(),
+                )
+            } else {
+                metrics::histogram!(
+                    OPERATION_DURATION_METRIC,
+                    "cache" => namespace,
+                    "operation" => operation.label(),
+                    "outcome" => outcome.label(),
+                )
+            }
         })
-    }
-}
-
-/// Why a command returned no reply.
-#[derive(Clone, Copy)]
-pub(crate) enum Failure {
-    /// `command_timeout` elapsed, or the client reported a timeout.
-    Timeout,
-    /// A Redis client error, as its bounded `error.type`.
-    Redis(&'static str),
-}
-
-impl Failure {
-    pub(crate) fn from_error(error: &redis::RedisError) -> Self {
-        if error.is_timeout() {
-            Self::Timeout
-        } else {
-            Self::Redis(error_type(error))
-        }
-    }
-
-    fn outcome(self) -> Outcome {
-        match self {
-            Self::Timeout => Outcome::Timeout,
-            Self::Redis(_) => Outcome::Error,
-        }
-    }
-
-    fn error_type(self) -> &'static str {
-        match self {
-            Self::Timeout => "timeout",
-            Self::Redis(error_type) => error_type,
-        }
     }
 }
 
@@ -189,16 +220,16 @@ impl<'a> OperationGuard<'a> {
         self.finish(outcome);
     }
 
-    pub(crate) fn fail(&mut self, failure: Failure) -> Unavailable {
-        let error_type = failure.error_type();
-        self.span.record("error.type", error_type);
+    pub(crate) fn fail(&mut self, error_type: ErrorType) -> Unavailable {
+        let label = error_type.label();
+        self.span.record("error.type", label);
         self.span.record("otel.status_code", "ERROR");
-        self.finish(failure.outcome());
+        self.finish(Outcome::Failed(error_type));
         self.span.in_scope(|| {
             tracing::debug!(
                 cache.name = self.namespace,
                 cache.operation = self.operation.label(),
-                error.type = error_type,
+                error.type = label,
                 "cache_operation_failed"
             );
         });
@@ -231,21 +262,21 @@ pub(crate) fn describe() {
     );
 }
 
-/// Bounded `error.type` for a Redis client failure. Server text is not copied.
-pub(crate) fn error_type(error: &redis::RedisError) -> &'static str {
+/// Bounded cause of a Redis client failure.
+pub(crate) fn error_type(error: &redis::RedisError) -> ErrorType {
     if error.is_timeout() {
-        return "timeout";
+        return ErrorType::Timeout;
     }
     // RESP3 authenticates inside `HELLO`, whose refusal is a plain server error.
     if matches!(error.code(), Some("WRONGPASS" | "NOAUTH")) {
-        return "auth";
+        return ErrorType::Auth;
     }
     match error.kind() {
-        redis::ErrorKind::Io => "io",
-        redis::ErrorKind::AuthenticationFailed => "auth",
-        redis::ErrorKind::Server(_) => "response",
-        redis::ErrorKind::Parse => "parse",
+        redis::ErrorKind::Io => ErrorType::Io,
+        redis::ErrorKind::AuthenticationFailed => ErrorType::Auth,
+        redis::ErrorKind::Server(_) => ErrorType::Response,
+        redis::ErrorKind::Parse => ErrorType::Parse,
         // InvalidClientConfig and every other kind stay `other`.
-        _ => "other",
+        _ => ErrorType::Other,
     }
 }

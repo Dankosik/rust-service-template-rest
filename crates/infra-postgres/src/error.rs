@@ -16,12 +16,6 @@ pub fn sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
     })
 }
 
-/// Whether the same transaction work could succeed if rerun by its caller.
-#[must_use]
-pub fn retryable(err: &sqlx::Error) -> bool {
-    sqlstate(err).is_some_and(|code| code == "40001" || code == "40P01")
-}
-
 /// Whether `err` reports a transient condition that a later attempt may not
 /// meet. With a valid SQLSTATE: a lost connection (class `08`), exhausted
 /// resources (class `53`), a serialization failure, deadlock, or uncertain
@@ -71,10 +65,10 @@ pub(crate) mod tests {
     use super::*;
 
     #[test]
-    fn policies_keep_their_distinct_sqlstate_sets() {
-        assert!(retryable(&database("40001")));
-        assert!(retryable(&database("40P01")));
-        assert!(!retryable(&database("40003")));
+    fn transient_covers_the_conditions_a_later_attempt_may_not_meet() {
+        assert!(transient(&database("40001")));
+        assert!(transient(&database("40P01")));
+        assert!(transient(&database("40003")));
         assert!(transient(&database("08006")));
         assert!(transient(&database("57014")));
         assert!(transient(&sqlx::Error::PoolTimedOut));

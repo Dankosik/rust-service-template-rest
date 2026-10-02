@@ -5,9 +5,7 @@ use infra_jobs::{
     EnqueueError, EnqueueOptions, Enqueued, JobId, JobKind, LivePayloadComparison, MAX_DELAY,
     MAX_PAYLOAD_BYTES, compare_live_payload, enqueue,
 };
-use infra_postgres::{
-    Isolation, PgPool, Tx, TxError, TxOptions, connection, in_tx, in_tx_with, retryable,
-};
+use infra_postgres::{Isolation, PgPool, Tx, TxError, TxOptions, connection, in_tx, in_tx_with};
 use integration_tests::dsn_for;
 use serde::ser::Error as _;
 use serde::{Deserialize, Serialize};
@@ -395,7 +393,6 @@ async fn expect_serialization(tx: &mut Tx<'_>, key: &str) -> Result<Enqueued, At
         other => panic!("expected a serialization failure, got {other:?}"),
     };
     assert_eq!(super::sqlstate(&err).as_deref(), Some("40001"), "{err}");
-    assert!(retryable(&err), "{err}");
     let next_err = sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(&mut *tx)
         .await

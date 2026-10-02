@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use futures_util::FutureExt as _;
+use infra_postgres::observed;
 use sqlx::postgres::PgConnection;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -32,44 +33,6 @@ pub const ATTEMPT_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
     1800.0, 3600.0,
 ];
-
-// Every outcome write fences on `claim_expires_at IS NOT NULL`, which the
-// table's CHECK makes equivalent to `state = 'running'`. A literal
-// `state = 'running'` proves the partial `background_jobs_running` predicate,
-// and after ANALYZE saw few running rows the planner scans that whole index
-// for the id, dead entries of every job claimed since the last VACUUM
-// included. This predicate leaves the primary key as the only access path.
-pub(crate) const COMPLETE: &str = "UPDATE background_jobs \
-     SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
-     WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
-const RETRY: &str = "UPDATE background_jobs \
-     SET state = 'pending', not_before = statement_timestamp() + \
-         GREATEST($3::double precision * (0.9 + 0.2 * random()), $4::bigint) * interval '1 microsecond', \
-         claim_expires_at = NULL, error_summary = $5, \
-         errors = errors || jsonb_build_object('attempt', attempts, 'at', statement_timestamp(), 'error', $5::text) \
-     WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
-const FAIL: &str = "UPDATE background_jobs \
-     SET state = 'failed', failure_reason = $3, finished_at = statement_timestamp(), \
-         claim_expires_at = NULL, error_summary = $4, \
-         errors = errors || jsonb_build_object('attempt', attempts, 'at', statement_timestamp(), 'error', $4::text) \
-     WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
-const SNOOZE: &str = "UPDATE background_jobs \
-     SET state = 'pending', not_before = statement_timestamp() + $3, claim_expires_at = NULL, \
-         attempts = attempts - 1 \
-     WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
-/// COMPLETE for every attempt queued while the previous batch was in flight.
-/// Returns the 1-based position of each applied completion.
-const COMPLETE_BATCH: &str = "UPDATE background_jobs AS job \
-     SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
-     FROM unnest($1::uuid[], $2::bigint[]) WITH ORDINALITY AS done (id, generation, position) \
-     WHERE job.id = done.id AND job.claim_generation = done.generation \
-       AND job.claim_expires_at IS NOT NULL \
-     RETURNING done.position";
-/// A cancelled attempt gives its unit back and keeps `not_before`, so the job
-/// keeps its place in claim order instead of queueing behind the backlog.
-const RELEASE: &str = "UPDATE background_jobs \
-     SET state = 'pending', claim_expires_at = NULL, attempts = attempts - 1 \
-     WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL";
 
 /// The queue transition a known attempt result asks for.
 enum Transition {
@@ -239,7 +202,7 @@ pub(crate) async fn supervise(
         trace_state,
         slot,
     } = claimed;
-    let span = tracing::info_span!("job_attempt", job.id = %id, job.kind = kind, job.attempt = u64::from(attempt), otel.kind = "consumer");
+    let span = attempt_span(id, kind, attempt);
     crate::trace_context::link(&span, parent.as_deref(), trace_state.as_deref());
     drop(parent);
     drop(trace_state);
@@ -257,6 +220,33 @@ pub(crate) async fn supervise(
     )
     .instrument(span)
     .await;
+}
+
+/// One span per attempt, named `process <kind>` in an exported trace. The
+/// kind set is the registered one, so the name stays low-cardinality.
+fn attempt_span(id: JobId, kind: &'static str, attempt: u16) -> tracing::Span {
+    tracing::info_span!(
+        "job_attempt",
+        otel.name = %format_args!("process {kind}"),
+        otel.kind = "consumer",
+        otel.status_code = tracing::field::Empty,
+        job.id = %id,
+        job.kind = kind,
+        job.attempt = u64::from(attempt),
+        outcome = tracing::field::Empty,
+    )
+}
+
+/// The attempt's `outcome`, the `jobs_attempts_total` label. An attempt that
+/// spent its unit on a failure is an error; a snooze or a release is not.
+fn record_on_span(span: &tracing::Span, transition: &Transition) {
+    span.record("outcome", transition.label());
+    if matches!(
+        transition,
+        Transition::Retry { .. } | Transition::Fail { .. }
+    ) {
+        span.record("otel.status_code", "ERROR");
+    }
 }
 
 async fn run_attempt(
@@ -315,6 +305,7 @@ async fn run_attempt(
             .known_results
             .fetch_add(1, Ordering::Relaxed);
     }
+    record_on_span(&tracing::Span::current(), &transition);
     record(registered.metrics.get(), &attempt, &transition, ran);
     persist(shared, &attempt, &transition, deadline).await;
 }
@@ -513,12 +504,24 @@ async fn write_batch(shared: &Shared, batch: Vec<QueuedCompletion>) {
             .acquire()
             .await
             .map_err(OperationError::Acquire)?;
-        sqlx::query_scalar::<_, i64>(COMPLETE_BATCH)
-            .bind(&ids)
-            .bind(&generations)
-            .fetch_all(&mut *connection)
-            .await
-            .map_err(OperationError::from)
+        // COMPLETE for every attempt queued while the previous batch was in flight.
+        // Returns the 1-based position of each applied completion.
+        observed(
+            "complete jobs",
+            sqlx::query_scalar!(
+                "UPDATE background_jobs AS job \
+                 SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
+                 FROM unnest($1::uuid[], $2::bigint[]) WITH ORDINALITY AS done (id, generation, position) \
+                 WHERE job.id = done.id AND job.claim_generation = done.generation \
+                   AND job.claim_expires_at IS NOT NULL \
+                 RETURNING done.position AS \"position!\"",
+                &ids,
+                &generations,
+            )
+            .fetch_all(&mut *connection),
+        )
+        .await
+        .map_err(OperationError::from)
     }))
     .await;
     match result {
@@ -572,35 +575,99 @@ async fn execute(
     transition: &Transition,
 ) -> Result<u64, sqlx::Error> {
     let id = id.0;
-    let query = match transition {
-        Transition::Complete => sqlx::query(COMPLETE).bind(id).bind(generation),
+    let (summary, query) = match transition {
+        Transition::Complete => ("complete job", complete(id, generation)),
         Transition::Retry {
             summary,
             base_micros,
             floor_micros,
             ..
-        } => sqlx::query(RETRY)
-            .bind(id)
-            .bind(generation)
-            .bind(base_micros)
-            .bind(floor_micros)
-            .bind(summary.as_str()),
+        } => (
+            "retry job",
+            sqlx::query!(
+                "UPDATE background_jobs \
+                 SET state = 'pending', not_before = statement_timestamp() + \
+                     GREATEST($3::double precision * (0.9 + 0.2 * random()), $4::bigint) * interval '1 microsecond', \
+                     claim_expires_at = NULL, error_summary = $5, \
+                     errors = errors || jsonb_build_object('attempt', attempts, 'at', statement_timestamp(), 'error', $5::text) \
+                 WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
+                id,
+                generation,
+                base_micros,
+                floor_micros,
+                summary.as_str(),
+            ),
+        ),
         Transition::Snooze { delay_micros } => {
             let delay = sqlx::postgres::types::PgInterval {
                 months: 0,
                 days: 0,
                 microseconds: *delay_micros,
             };
-            sqlx::query(SNOOZE).bind(id).bind(generation).bind(delay)
+            (
+                "snooze job",
+                sqlx::query!(
+                    "UPDATE background_jobs \
+                     SET state = 'pending', not_before = statement_timestamp() + $3, claim_expires_at = NULL, \
+                         attempts = attempts - 1 \
+                     WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
+                    id,
+                    generation,
+                    delay,
+                ),
+            )
         }
-        Transition::Release => sqlx::query(RELEASE).bind(id).bind(generation),
-        Transition::Fail { reason, summary } => sqlx::query(FAIL)
-            .bind(id)
-            .bind(generation)
-            .bind(reason.label())
-            .bind(summary.as_str()),
+        // A cancelled attempt gives its unit back and keeps `not_before`, so the job
+        // keeps its place in claim order instead of queueing behind the backlog.
+        Transition::Release => (
+            "release job",
+            sqlx::query!(
+                "UPDATE background_jobs \
+                 SET state = 'pending', claim_expires_at = NULL, attempts = attempts - 1 \
+                 WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
+                id,
+                generation,
+            ),
+        ),
+        Transition::Fail { reason, summary } => (
+            "fail job",
+            sqlx::query!(
+                "UPDATE background_jobs \
+                 SET state = 'failed', failure_reason = $3, finished_at = statement_timestamp(), \
+                     claim_expires_at = NULL, error_summary = $4, \
+                     errors = errors || jsonb_build_object('attempt', attempts, 'at', statement_timestamp(), 'error', $4::text) \
+                 WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
+                id,
+                generation,
+                reason.label(),
+                summary.as_str(),
+            ),
+        ),
     };
-    Ok(query.execute(connection).await?.rows_affected())
+    Ok(observed(summary, query.execute(connection))
+        .await?
+        .rows_affected())
+}
+
+/// COMPLETE for one fenced claim.
+///
+/// Every outcome write fences on `claim_expires_at IS NOT NULL`, which the
+/// table's CHECK makes equivalent to `state = 'running'`. A literal
+/// `state = 'running'` proves the partial `background_jobs_running` predicate,
+/// and after ANALYZE saw few running rows the planner scans that whole index
+/// for the id, dead entries of every job claimed since the last VACUUM
+/// included. This predicate leaves the primary key as the only access path.
+pub(crate) fn complete(
+    id: uuid::Uuid,
+    generation: i64,
+) -> sqlx::query::Query<'static, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    sqlx::query!(
+        "UPDATE background_jobs \
+         SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
+         WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
+        id,
+        generation,
+    )
 }
 
 enum Ended {
@@ -768,6 +835,91 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Collects the fields of every span, from creation and later records.
+    #[derive(Clone, Default)]
+    struct SpanFields(Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>);
+
+    struct Collect<'a>(&'a mut std::collections::BTreeMap<String, String>);
+
+    impl tracing::field::Visit for Collect<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_owned(), value.to_owned());
+        }
+    }
+
+    impl tracing::Subscriber for SpanFields {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            let mut spans = self.0.lock().unwrap();
+            let mut fields = std::collections::BTreeMap::new();
+            attributes.record(&mut Collect(&mut fields));
+            spans.push(fields);
+            tracing::span::Id::from_u64(spans.len() as u64)
+        }
+
+        fn record(&self, span: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+            let index = usize::try_from(span.into_u64()).unwrap() - 1;
+            values.record(&mut Collect(&mut self.0.lock().unwrap()[index]));
+        }
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, _: &tracing::Event<'_>) {}
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn the_attempt_span_is_named_for_its_kind_and_carries_the_outcome() {
+        let id = JobId(uuid::Uuid::try_parse("01234567-89ab-cdef-fedc-ba9876543210").unwrap());
+        let spans = SpanFields::default();
+        tracing::subscriber::with_default(spans.clone(), || {
+            for ended in [
+                Ended::Success,
+                Ended::Error(JobError::retryable("fail")),
+                Ended::Error(JobError::permanent("stop")),
+                Ended::Cancelled,
+            ] {
+                let span = attempt_span(id, "sample", 3);
+                record_on_span(&span, &outcome(ended, 3));
+            }
+        });
+        let spans = spans.0.lock().unwrap();
+        let seen: Vec<_> = spans
+            .iter()
+            .map(|fields| {
+                (
+                    fields["outcome"].as_str(),
+                    fields.get("otel.status_code").map(String::as_str),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("completed", None),
+                ("retry", Some("ERROR")),
+                ("permanent", Some("ERROR")),
+                ("cancelled", None),
+            ]
+        );
+        let first = &spans[0];
+        assert_eq!(first["otel.name"], "process sample");
+        assert_eq!(first["otel.kind"], "consumer");
+        assert_eq!(first["job.kind"], "sample");
+        assert_eq!(first["job.id"], "01234567-89ab-cdef-fedc-ba9876543210");
+        assert_eq!(first["job.attempt"], "3");
     }
 
     #[test]

@@ -344,7 +344,9 @@ Each call has one `object_storage` span exported as `S3.<Operation>`
 name for an AWS SDK client span. It carries `otel.kind` `client`,
 `rpc.system` `aws-api`, `rpc.service` `S3`, `rpc.method`,
 `object_storage.outcome`, `error.type`, `otel.status_code`, and, once the
-store has answered, `aws.request_id` and `aws.extended_request_id`.
+store has answered, `aws.request_id` and `aws.extended_request_id`. On
+`amazon_s3` it also carries `cloud.region`; the other providers' signing
+region can be a placeholder such as `auto`, so they record none.
 `error.type` is the provider's error code (`AccessDenied`, `SlowDown`,
 `PreconditionFailed`), the HTTP status when there is no code, or a transport
 class (`timeout`, `dispatch`, `response`, `body`, `checksum`, `credentials`).

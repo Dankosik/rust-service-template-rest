@@ -51,11 +51,23 @@ refuses startup with an error that names the certificate, private key or CA,
 never its value. The key is borrowed from its secret wrapper, not copied. Certificates reload on process restart. Configuration Debug
 omits certificate, CA and key material.
 
-The effective HTTP drain budget must be at least eight seconds
-(`infra_grpc::CALL_DEADLINE_CAP`) when gRPC is enabled. A shorter budget
-refuses startup and says so. Disabled gRPC does not bind, read
-TLS material or require a verifier. [Configuration source
-policy](configuration-source-policy.md) owns precedence and secret custody.
+Four more keys bound the listener, each with the default its HTTP
+counterpart has:
+
+```toml
+[grpc]
+request_timeout = "8s"      # cap on a call's time to response headers
+max_in_flight = 256         # business calls at once; 0 never sheds
+max_connections = 4096      # accepted connections; 0 is unbounded
+max_connection_age = "30m"  # GOAWAY after this age; "0s" sets no age
+```
+
+`grpc.request_timeout` must fit inside the effective HTTP drain budget
+(`http.drain_timeout` minus `http.readiness_propagation_delay`), because both
+listeners drain under it. A longer value refuses startup and says so.
+Disabled gRPC does not bind, read TLS material, check these limits or require
+a verifier. [Configuration source policy](configuration-source-policy.md)
+owns precedence and secret custody.
 
 ## Register a service
 
@@ -71,11 +83,15 @@ in `buf.yaml` `deps` and a committed `buf.lock`; its package is then generated
 beside the owned ones, unless `tools/grpc-codegen` maps it with `extern_path`
 to a crate that already owns those types.
 
-Implement the generated tonic server trait. Register the generated server
-once and run it through the service bootstrap:
+Implement the generated tonic server trait. Describe the contract, register
+the generated server once and run it through the service bootstrap:
 
 ```rust,ignore
-fn register(services: &mut infra_grpc::Services) -> Result<(), infra_grpc::Error> {
+fn register(
+    services: &mut infra_grpc::Services,
+    _state: &service::AppState,
+) -> Result<(), infra_grpc::Error> {
+    services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
     services.add(EchoServiceServer::new(Echo))
 }
 
@@ -84,10 +100,22 @@ fn main() -> std::process::ExitCode {
 }
 ```
 
-See the complete [example](../crates/service/examples/grpc.rs). `Services::add`
-records `NamedService::NAME` for health and adds the server to tonic
-`Routes`. A duplicate name fails startup with `Error::DuplicateService`. Do not build another listener or
-per-handler middleware stack. Handler `Status` values pass through unchanged.
+See the complete [example](../crates/service/examples/grpc.rs). Bootstrap
+calls the registration once, after it opened the dependencies, with the
+`AppState` the HTTP routes also receive. A feature adds its state to
+`AppState` as one more field; its generated server takes that field when it
+is constructed, as its HTTP handlers take it through `State`.
+
+`Services::describe` reads the services and methods of a descriptor set. A
+generated server does not list its methods, so the set is how the transport
+knows them: for scope requirements, for metric labels and for reflection.
+`Services::add` records `NamedService::NAME` for health and adds the server
+to tonic `Routes`. A server whose service no described set holds fails
+startup with `Error::UndescribedService`, a duplicate name with
+`Error::DuplicateService`. A server from another crate needs that crate's
+descriptor set described first; tonic crates export one as
+`FILE_DESCRIPTOR_SET`. Do not build another listener or per-handler
+middleware stack. Handler `Status` values pass through unchanged.
 
 With authentication retained, a successful verify inserts
 `infra_bearerauthn::Principal` into the request extensions and removes
@@ -103,21 +131,20 @@ Every listed scope is required. A principal that lacks one gets
 `PERMISSION_DENIED` / `the verified principal lacks the required scope`
 before the handler. A method with no declared requirement admits any
 authenticated caller, as an OpenAPI operation without scopes does. A path
-outside a registered service, or a second requirement for one method, fails
-startup. The method name itself is not checked, because generated servers do
-not list their methods: a misspelled method protects nothing, so cover each
-requirement with a test that expects the denial.
+that is not a described method of a registered service, such as a misspelled
+method name, or a second requirement for one method, fails startup.
 
 ## Reflection
 
 Server reflection is off unless the registration adds it:
 
 ```rust,ignore
-services.add_reflection(grpc_contracts::FILE_DESCRIPTOR_SET)?;
+services.add_reflection()?;
 ```
 
 `grpcurl`, `grpcui`, Postman and `buf curl` can then list and call the
-registered services, and health, without the schema files. It is
+registered services, and health, without the schema files. It serves every
+described set, whether described before or after this call. It is
 `grpc.reflection.v1` from `tonic-reflection`, served as a business route: it
 needs the same bearer as any application method and is limited and
 deadline-bound with them. It publishes the whole schema, comments included,
@@ -140,16 +167,18 @@ Outermost to innermost:
    authentication outcome is counted
    in `authn_verifications_total{transport="grpc"}` by the same
    `Verifier::authenticate` the HTTP boundary uses.
-4. Business routes only: a concurrency limit of 256. A shed call is
+4. Business routes only: the `grpc.max_in_flight` concurrency limit, 256
+   unless configured, and none at zero. A shed call is
    `RESOURCE_EXHAUSTED` / `server is at capacity` and increments
    `grpc_server_shed_requests_total`. Health is outside this limit. A permit
    is held until response headers, so it bounds unary and client-streaming
    calls; server-streaming and bidi streams that are already open are bounded
    by the connection cap and the HTTP/2 stream limit instead.
-5. Business routes only: deadline `min(grpc-timeout, 8s)`, measured until the
-   handler returns response headers. Expiry is `DEADLINE_EXCEEDED` /
-   `request deadline exceeded`. A malformed `grpc-timeout`, including more
-   than eight digits, counts as absent and the eight-second cap applies.
+5. Business routes only: deadline `min(grpc-timeout, grpc.request_timeout)`,
+   measured until the handler returns response headers. Expiry is
+   `DEADLINE_EXCEEDED` / `request deadline exceeded`. A malformed
+   `grpc-timeout`, including more than eight digits, counts as absent and
+   `grpc.request_timeout` applies.
 
 An authentication failure or a shed call is answered after reading the rest
 of its request body, for at most 100 ms and 64 KiB. A caller sends request
@@ -159,8 +188,9 @@ with every other call on it.
 
 ## Deadlines
 
-The eight-second cap (`CALL_DEADLINE_CAP`) is tonic `Server::timeout` placement with a
-`DEADLINE_EXCEEDED` status. It is not a body-lifetime timer.
+`grpc.request_timeout`, eight seconds unless configured, is tonic
+`Server::timeout` placement with a `DEADLINE_EXCEEDED` status. It is not a
+body-lifetime timer.
 
 - Unary: the whole call, because the handler returns the response.
 - Client-streaming: the upload must finish and the handler must return within
@@ -173,9 +203,20 @@ Health is outside the deadline.
 
 ## Listener bounds
 
-Fixed listener options, shared with HTTP except for the values below:
+Listener options, shared with HTTP except for the values below:
 
-- 4096 connections. Excess connections are closed without a response.
+- `grpc.max_connections` connections, 4096 unless configured. Excess
+  connections are closed without a response.
+- `grpc.max_connection_age`, thirty minutes unless configured. A connection
+  that reaches it gets HTTP/2 GOAWAY: its open calls and streams finish, and
+  the client opens a new connection for the next call. A gRPC channel
+  otherwise keeps one connection for the life of its process, so behind a
+  connection-level balancer, such as a Kubernetes `Service` without a mesh,
+  replicas added later would get no calls from existing clients. Each
+  connection's age is spread by up to 10% either way, as grpc-go spreads
+  `MaxConnectionAge`, so connections opened together do not all reconnect
+  together. There is no forced close after the age: a stream that outlives
+  it keeps its connection until it ends.
 - 5 seconds to the first byte, then a separate 5 second TLS handshake bound.
   A handshake error or timeout closes the connection without a response.
 - 16 KiB of request metadata.
@@ -274,11 +315,20 @@ verification, native roots unless a CA is supplied, and an optional
 `ClientIdentity` whose key is a `SecretString`. Unusable PEM input fails
 construction with the variant that names it. The server remains TLS 1.3-only; the client does not. Construction
 sets a 5 second connect timeout, a 60 second TCP keepalive, HTTP/2
-keepalive at 20 seconds with a 20 second timeout, and adaptive receive
-windows. Clones share the lazy channel and its metric handles.
+keepalive at 60 seconds with a 20 second timeout, and adaptive receive
+windows. The keepalive PING is sent only while a call is open, and no more
+often than gRPC's keepalive guide asks of clients. A grpc-go, grpc-java or
+C-core server that keeps its default five-minute ping allowance can still
+answer a stream that stays silent for minutes with `GOAWAY too_many_pings`;
+such a server sets its `PermitWithoutStream`/`MinTime` policy for long quiet
+streams. Clones share the lazy channel and its metric handles.
 
 Set the call budget with tonic `Request::set_timeout`. That writes
-`grpc-timeout`. The server still applies `min(grpc-timeout, 8s)`.
+`grpc-timeout`, and tonic's channel ends the call when it runs out. The
+caller then gets `DEADLINE_EXCEEDED` / `request deadline exceeded`, never
+`UNAVAILABLE`: the server may still be running the call, so a caller that
+retries `UNAVAILABLE` must not repeat it. The server still applies
+`min(grpc-timeout, grpc.request_timeout)`.
 
 ```rust,ignore
 let channel = infra_grpc::Client::new(destination, security)?;
@@ -289,7 +339,7 @@ let response = client.unary(request).await?;
 ```
 
 The client injects the current trace context and records its span and metrics
-from response headers. A transport failure is `UNAVAILABLE` /
+from response headers. Any other transport failure is `UNAVAILABLE` /
 `transport unavailable` to the caller, because a handler may forward that
 status; the cause is logged as `grpc_client_transport_failed` inside the
 client span. There is no application retry, replay, hedging,
@@ -305,7 +355,7 @@ let authenticated = credentials.grpc(channel);
 let client = EchoServiceClient::new(authenticated);
 ```
 
-A caller-supplied `Authorization` is `INVALID_ARGUMENT` before any token or
+A caller-supplied `Authorization` is `INTERNAL` before any token or
 resource I/O. To call on behalf of a verified user instead of as the service
 itself, attach `OnBehalfOf::new(principal.access_token().clone())` to the
 call's extensions through `tonic::Request::extensions_mut` before dispatch;
@@ -323,8 +373,10 @@ status; the closed `AcquisitionError`, with the provider's registered error
 code, is the status source. A handler should translate this status rather
 than forward it: `UNAUTHENTICATED` here means the service's own credentials
 were refused, not its caller's. `credentials.grpc(channel).require_on_behalf_of()`
-binds a client that answers `INVALID_ARGUMENT` to a call without `OnBehalfOf`
-instead of sending the service token. One bearer is inserted at
+binds a client that answers `INTERNAL` to a call without `OnBehalfOf`
+instead of sending the service token. Both refusals are `INTERNAL` because
+they are this service's composition mistakes, and gRFC A54 keeps
+`INVALID_ARGUMENT` for the application. One bearer is inserted at
 opening and is not refreshed mid-stream.
 
 Eviction runs only on the initial response: `grpc-status` `UNAUTHENTICATED`,
@@ -344,7 +396,10 @@ The empty service name means the overall service. A name registered with
 `Services::add`, plus `grpc.health.v1.Health`, is known. Any other `Check`
 name is `NOT_FOUND`. A known service is `SERVING` only while the verdict is
 ready, and `NOT_SERVING` otherwise, including before the first successful
-admission.
+admission. Health is a readiness answer and shares the gRPC listener's
+connection cap; for a platform liveness probe use `GET /health/live` on the
+diagnostics listener
+([Runtime Lifecycle](architecture/runtime-lifecycle.md#readiness-and-liveness)).
 
 `Watch` streams changes and does not spawn a task. A known service emits the
 current status, then each change. When readiness is draining it emits
@@ -354,7 +409,7 @@ and ends when readiness is draining, without a later `NOT_SERVING`.
 
 Shutdown starts readiness drain first, so health becomes `NOT_SERVING` during
 the propagation delay. HTTP and gRPC then drain concurrently, each with the
-same remaining drain budget. The budget must be at least eight seconds.
+same remaining drain budget. The budget must cover `grpc.request_timeout`.
 In-flight calls may finish; health watchers do not hold the drain. An overrun
 votes in the existing degraded shutdown. There is no second budget and no
 separate gRPC cleanup stage.
@@ -367,10 +422,12 @@ RPC attributes on every record; `rpc.system`, `rpc.service`, `rpc.method`,
 extracted incoming context, kept current even when the span is disabled.
 Client spans are built the same way. Metrics follow the grpc-ecosystem Prometheus
 names, so standard gRPC dashboards and alerts apply:
-`grpc_server_handled_total` and `grpc_client_handled_total`
-(`grpc_service`, `grpc_method`, `grpc_code`), the histograms
-`grpc_server_handling_seconds` and `grpc_client_handling_seconds`
+`grpc_server_started_total` and `grpc_client_started_total`
+(`grpc_service`, `grpc_method`), `grpc_server_handled_total` and
+`grpc_client_handled_total` (`grpc_service`, `grpc_method`, `grpc_code`), the
+histograms `grpc_server_handling_seconds` and `grpc_client_handling_seconds`
 (`grpc_service`, `grpc_method`), and `grpc_server_shed_requests_total`.
+Started minus handled is the number of calls waiting for response headers.
 `grpc_code` is the grpc-go code name, one of all 17: `OK`, `Canceled`,
 `InvalidArgument`, `FailedPrecondition` and so on. The histograms measure time
 to response headers, with the Prometheus default buckets that
@@ -378,10 +435,14 @@ to response headers, with the Prometheus default buckets that
 bootstrap). Metric handles are kept per method after the first call.
 
 On the server, `grpc_service` and `grpc_method` come from the request path
-only when the call was dispatched to a registered service or to health and the
-header status is not `UNIMPLEMENTED`. Otherwise both are `"unknown"`, so a
-caller-chosen path cannot create a series. Spans and metrics use the
-response-header status. A missing `grpc-status` header is recorded as ok, so
+only when it is a described method of a registered service or of health.
+Every outcome of such a call carries its method: an answer, an
+authentication failure, a shed, a deadline, a recovered panic. Any other
+path is `"unknown"` in the labels and in the span name, so a caller-chosen
+path cannot create a series. A call its caller abandons before the response
+headers, by resetting the stream or closing the connection, is handled as
+`Canceled`, as grpc-go counts it; so is a client call whose caller stops
+waiting. Spans and metrics use the response-header status. A missing `grpc-status` header is recorded as ok, so
 a streaming error sent only in trailers is not reflected. Payloads, metadata
 values, bearer tokens and raw errors are not transport attributes.
 

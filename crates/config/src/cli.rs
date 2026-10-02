@@ -35,6 +35,11 @@ pub struct LoadOptions {
     /// Overlay file applied after the base file; repeatable, applied in order.
     #[arg(long = "config-overlay", value_name = "PATH")]
     pub config_overlay: Vec<PathBuf>,
+
+    /// Directory whose `APP__SECTION__KEY` files each hold one value, for a
+    /// platform that mounts secrets as files. The environment overrides it.
+    #[arg(long = "secrets-dir", value_name = "PATH")]
+    pub secrets_dir: Option<PathBuf>,
 }
 
 impl LoadOptions {
@@ -71,6 +76,8 @@ mod tests {
             "a.toml",
             "--config-overlay",
             "b.toml",
+            "--secrets-dir",
+            "/run/secrets/app",
         ])
         .unwrap();
         assert_eq!(opts.config, Some(PathBuf::from("base.toml")));
@@ -78,6 +85,7 @@ mod tests {
             opts.config_overlay,
             vec![PathBuf::from("a.toml"), PathBuf::from("b.toml")]
         );
+        assert_eq!(opts.secrets_dir, Some(PathBuf::from("/run/secrets/app")));
         let files: Vec<_> = opts.files().collect();
         assert_eq!(files.len(), 3);
     }

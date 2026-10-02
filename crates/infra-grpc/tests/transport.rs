@@ -9,6 +9,7 @@
 
 use std::{
     net::SocketAddr,
+    num::NonZeroU32,
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -35,7 +36,7 @@ use infra_bearerauthn::{
 };
 // template:end authn:grpc-transport-test-auth-imports
 use infra_grpc::{
-    ClientIdentity, ClientSecurity, ClientTlsMaterial, ERROR_DOMAIN, Error, Failure,
+    ClientIdentity, ClientSecurity, ClientTlsMaterial, ERROR_DOMAIN, Error, Failure, Limits,
     ServerTlsMaterial, Services, server_options, server_tls_config,
 };
 use infra_http::{Drained, Server};
@@ -282,7 +283,20 @@ impl Fixture {
         Self::open(true, Some((pki, mtls))).await
     }
 
+    /// A plaintext listener that sheds above `max_in_flight` business calls.
+    async fn limited(max_in_flight: u32) -> Self {
+        let limits = Limits {
+            max_in_flight: NonZeroU32::new(max_in_flight),
+            ..limits()
+        };
+        Self::open_with(true, None, limits).await
+    }
+
     async fn open(seed: bool, tls: Option<(&Pki, bool)>) -> Self {
+        Self::open_with(seed, tls, limits()).await
+    }
+
+    async fn open_with(seed: bool, tls: Option<(&Pki, bool)>, limits: Limits) -> Self {
         // template:begin authn:grpc-transport-test-auth-fixture
         let (verifier, provider) = verifier_fixture().await;
         // template:end authn:grpc-transport-test-auth-fixture
@@ -299,12 +313,16 @@ impl Fixture {
         }
         let echo = Echo::new();
         let mut services = Services::new();
+        // Before the contract is described: reflection serves it all the same.
+        services
+            .add_reflection()
+            .expect("reflection registers once");
+        services
+            .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
+            .expect("the committed contract decodes");
         services
             .add(EchoServiceServer::new(echo.clone()))
             .expect("echo registers once");
-        services
-            .add_reflection(grpc_contracts::FILE_DESCRIPTOR_SET)
-            .expect("reflection registers once");
         // template:begin authn:grpc-transport-test-scope-requirement
         services
             .require_scopes(UNARY_PATH, &["echo.read"])
@@ -316,7 +334,9 @@ impl Fixture {
             // template:begin authn:grpc-transport-test-router-verifier
             verifier,
             // template:end authn:grpc-transport-test-router-verifier
-        );
+            limits,
+        )
+        .expect("router builds");
         let bound = match tls {
             Some((pki, mtls)) => {
                 let certificate = pem(&pki.server_certificate);
@@ -328,11 +348,11 @@ impl Fixture {
                     client_ca_pem: mtls.then_some(ca.as_str()),
                 })
                 .expect("server TLS config");
-                Server::bind_tls(loopback(), app, server_options(), config)
+                Server::bind_tls(loopback(), app, server_options(limits), config)
                     .await
                     .expect("tls listener binds")
             }
-            None => Server::bind(loopback(), app, server_options())
+            None => Server::bind(loopback(), app, server_options(limits))
                 .await
                 .expect("listener binds"),
         };
@@ -373,6 +393,24 @@ impl Fixture {
         self.provider.stop().await;
         // template:end authn:grpc-transport-test-auth-provider-stop
     }
+}
+
+/// The configuration defaults, without a connection age.
+fn limits() -> Limits {
+    Limits {
+        request_timeout: Duration::from_secs(8),
+        max_in_flight: NonZeroU32::new(256),
+        max_connections: NonZeroU32::new(4096),
+        max_connection_age: None,
+    }
+}
+
+fn described() -> Services {
+    let mut services = Services::new();
+    services
+        .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
+        .expect("the committed contract decodes");
+    services
 }
 
 fn loopback() -> SocketAddr {
@@ -639,8 +677,8 @@ async fn a_principal_without_a_declared_scope_is_denied_before_the_handler() {
 }
 
 #[test]
-fn a_scope_requirement_needs_a_registered_service_and_is_declared_once() {
-    let mut services = Services::new();
+fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_declared_once() {
+    let mut services = described();
     assert_eq!(
         services.require_scopes(UNARY_PATH, &["echo.read"]),
         Err(Error::UnregisteredMethodPath)
@@ -653,6 +691,8 @@ fn a_scope_requirement_needs_a_registered_service_and_is_declared_once() {
         "/example.v1.EchoService",
         "/example.v1.EchoService/",
         "/example.v1.EchoService/Unary/extra",
+        "/example.v1.EchoService/unary",
+        "/example.v1.EchoService/Unry",
         "/example.v1.Other/Unary",
     ] {
         assert_eq!(
@@ -713,8 +753,8 @@ async fn rejected_calls_do_not_close_the_shared_connection() {
 // template:end authn:grpc-transport-test-rejection-flood
 
 #[tokio::test]
-async fn business_limit_sheds_the_next_call_without_starving_health() {
-    let fixture = Fixture::plaintext().await;
+async fn the_configured_limit_sheds_the_next_call_without_starving_health() {
+    let fixture = Fixture::limited(2).await;
     timeout(
         WAIT,
         fixture.echo_client().unary(request(UnaryRequest {
@@ -725,24 +765,20 @@ async fn business_limit_sheds_the_next_call_without_starving_health() {
     .expect("warm call")
     .unwrap();
 
-    let first = fixture.echo_client();
-    let second = fixture.echo_client();
-    let mut calls = Vec::with_capacity(256);
-    for index in 0..256 {
-        let mut client = if index < 128 {
-            first.clone()
-        } else {
-            second.clone()
-        };
-        calls.push(tokio::spawn(async move {
-            client
-                .unary(request(UnaryRequest {
-                    message: "hold".to_owned(),
-                }))
-                .await
-        }));
-    }
-    fixture.echo.hold.wait_for(256).await;
+    let held = fixture.echo_client();
+    let calls: Vec<_> = (0..2)
+        .map(|_| {
+            let mut client = held.clone();
+            tokio::spawn(async move {
+                client
+                    .unary(request(UnaryRequest {
+                        message: "hold".to_owned(),
+                    }))
+                    .await
+            })
+        })
+        .collect();
+    fixture.echo.hold.wait_for(2).await;
 
     let exhausted = timeout(
         WAIT,
@@ -788,8 +824,7 @@ async fn business_limit_sheds_the_next_call_without_starving_health() {
     .expect("call after release")
     .unwrap();
     assert_eq!(followed.into_inner().message, "after");
-    drop(first);
-    drop(second);
+    drop(held);
     fixture.stop().await;
 }
 
@@ -797,7 +832,7 @@ async fn business_limit_sheds_the_next_call_without_starving_health() {
 async fn unary_deadline_is_deadline_exceeded_on_the_raw_http2_response() {
     let fixture = Fixture::plaintext().await;
     let address = fixture.address;
-    let call = tokio::spawn(async move { raw_deadline(address).await });
+    let call = tokio::spawn(async move { raw_call(address, ECHO_SERVICE_UNARY).await });
     fixture.echo.hold.wait_for(1).await;
     let status = timeout(WAIT, call)
         .await
@@ -807,7 +842,9 @@ async fn unary_deadline_is_deadline_exceeded_on_the_raw_http2_response() {
     fixture.stop().await;
 }
 
-async fn raw_deadline(address: SocketAddr) -> String {
+/// The `grpc-status` response header of a unary `deadline` request with a
+/// 100 ms `grpc-timeout`, sent to `path` without a client-side timer.
+async fn raw_call(address: SocketAddr, path: &str) -> String {
     let stream = TcpStream::connect(address).await.expect("connect");
     let (mut sender, connection) = hyper::client::conn::http2::handshake(
         hyper_util::rt::TokioExecutor::new(),
@@ -829,7 +866,7 @@ async fn raw_deadline(address: SocketAddr) -> String {
         .to_owned();
     let mut builder = http::Request::builder()
         .method("POST")
-        .uri(format!("http://{address}{ECHO_SERVICE_UNARY}"))
+        .uri(format!("http://{address}{path}"))
         .header("host", address.to_string())
         .header("content-type", "application/grpc")
         .header("te", "trailers")
@@ -1132,16 +1169,32 @@ async fn reflection_describes_the_committed_contract_and_health() {
 }
 
 #[test]
-fn reflection_rejects_bytes_that_are_not_a_descriptor_set() {
+fn bytes_that_are_not_a_descriptor_set_are_rejected() {
     assert_eq!(
-        Services::new().add_reflection(&[0xff]),
+        Services::new().describe(&[0xff]),
         Err(Error::InvalidFileDescriptorSet)
     );
 }
 
 #[test]
-fn a_service_registered_twice_is_rejected() {
+fn reflection_added_twice_is_rejected() {
     let mut services = Services::new();
+    services.add_reflection().expect("first registration");
+    assert_eq!(
+        services.add_reflection(),
+        Err(Error::DuplicateService(
+            "grpc.reflection.v1.ServerReflection"
+        ))
+    );
+}
+
+#[test]
+fn a_service_is_described_before_it_is_added_and_added_once() {
+    assert_eq!(
+        Services::new().add(EchoServiceServer::new(Echo::new())),
+        Err(Error::UndescribedService("example.v1.EchoService"))
+    );
+    let mut services = described();
     services
         .add(EchoServiceServer::new(Echo::new()))
         .expect("first registration");
@@ -1149,6 +1202,101 @@ fn a_service_registered_twice_is_rejected() {
         services.add(EchoServiceServer::new(Echo::new())),
         Err(Error::DuplicateService("example.v1.EchoService"))
     );
+}
+
+/// Counted on one thread, so the local recorder sees the server's tasks and
+/// the client's.
+#[tokio::test]
+async fn calls_are_counted_by_described_method_whatever_ended_them() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let fixture = Fixture::plaintext().await;
+    let mut client = fixture.echo_client();
+
+    timeout(
+        WAIT,
+        client.unary(request(UnaryRequest {
+            message: "answered".to_owned(),
+        })),
+    )
+    .await
+    .expect("answered call")
+    .unwrap();
+
+    // The caller stops waiting while the handler runs.
+    let abandoned = tokio::spawn({
+        let mut client = client.clone();
+        async move {
+            client
+                .unary(request(UnaryRequest {
+                    message: "hold".to_owned(),
+                }))
+                .await
+        }
+    });
+    fixture.echo.hold.wait_for(1).await;
+    abandoned.abort();
+    assert!(abandoned.await.unwrap_err().is_cancelled());
+
+    // The server's own deadline, and a method the contract does not have.
+    assert_eq!(raw_call(fixture.address, ECHO_SERVICE_UNARY).await, "4");
+    assert_eq!(
+        raw_call(fixture.address, "/example.v1.EchoService/Invented").await,
+        "12"
+    );
+
+    let unary = r#"grpc_service="example.v1.EchoService",grpc_method="Unary""#;
+    let expected = [
+        format!("grpc_server_started_total{{{unary}}} 3"),
+        format!(r#"grpc_server_handled_total{{{unary},grpc_code="OK"}} 1"#),
+        format!(r#"grpc_server_handled_total{{{unary},grpc_code="Canceled"}} 1"#),
+        format!(r#"grpc_server_handled_total{{{unary},grpc_code="DeadlineExceeded"}} 1"#),
+        r#"grpc_server_started_total{grpc_service="unknown",grpc_method="unknown"} 1"#.to_owned(),
+        r#"grpc_server_handled_total{grpc_service="unknown",grpc_method="unknown",grpc_code="Unimplemented"} 1"#.to_owned(),
+        format!("grpc_client_started_total{{{unary}}} 2"),
+        format!(r#"grpc_client_handled_total{{{unary},grpc_code="OK"}} 1"#),
+        format!(r#"grpc_client_handled_total{{{unary},grpc_code="Canceled"}} 1"#),
+    ];
+    // The server learns of the abandoned call when the reset arrives.
+    let rendered = timeout(WAIT, async {
+        loop {
+            let rendered = handle.render();
+            if expected.iter().all(|line| rendered.contains(line)) {
+                return rendered;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("metrics settle: {}", handle.render()));
+    assert!(!rendered.contains("Invented"), "{rendered}");
+    fixture.stop().await;
+}
+
+/// A peer that accepts and never answers: the call's own deadline ends it.
+#[tokio::test]
+async fn a_call_whose_deadline_runs_out_is_deadline_exceeded_not_unavailable() {
+    let listener = tokio::net::TcpListener::bind(loopback())
+        .await
+        .expect("silent peer binds");
+    let address = listener.local_addr().expect("silent peer address");
+    let silent = tokio::spawn(async move {
+        let _connection = listener.accept().await;
+        std::future::pending::<()>().await;
+    });
+    let mut client = EchoServiceClient::new(plaintext_client(address));
+    let mut call = Request::new(UnaryRequest {
+        message: "unanswered".to_owned(),
+    });
+    call.set_timeout(Duration::from_millis(100));
+    let status = timeout(WAIT, client.unary(call))
+        .await
+        .expect("the deadline ends the call")
+        .unwrap_err();
+    assert_eq!(status.code(), Code::DeadlineExceeded);
+    assert_eq!(status.message(), "request deadline exceeded");
+    silent.abort();
 }
 
 fn pem(bytes: &[u8]) -> String {

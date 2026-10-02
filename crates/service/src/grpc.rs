@@ -1,7 +1,8 @@
 //! Application-owned generated-service registration for native gRPC.
 //!
 //! The transport owns listener policy. This module only gives a derived
-//! service one registration hook and converts admitted TLS material.
+//! service one registration hook and converts admitted limits and TLS
+//! material.
 
 use std::sync::Arc;
 
@@ -9,8 +10,12 @@ use infra_grpc::ServerTlsMaterial;
 use rustls::ServerConfig;
 use service_config::{Config, GrpcSecurity, ValidationError};
 
-/// Registers this service's generated native gRPC adapters.
-pub type GrpcRegistration = fn(&mut infra_grpc::Services) -> Result<(), infra_grpc::Error>;
+/// Registers this service's generated native gRPC adapters. Bootstrap calls
+/// it once, after it opened the dependencies, with the state the HTTP routes
+/// also receive: a generated server takes what it needs from that state when
+/// it is constructed.
+pub type GrpcRegistration =
+    fn(&mut infra_grpc::Services, &crate::AppState) -> Result<(), infra_grpc::Error>;
 
 /// Build the immutable service registry that the transport prepares.
 ///
@@ -18,12 +23,23 @@ pub type GrpcRegistration = fn(&mut infra_grpc::Services) -> Result<(), infra_gr
 /// services opt in through [`crate::run_with_grpc`].
 pub(crate) fn services(
     registration: Option<GrpcRegistration>,
+    state: &crate::AppState,
 ) -> Result<infra_grpc::Services, infra_grpc::Error> {
     let mut services = infra_grpc::Services::new();
     if let Some(registration) = registration {
-        registration(&mut services)?;
+        registration(&mut services, state)?;
     }
     Ok(services)
+}
+
+/// The admitted `grpc` limits in the transport's form.
+pub(crate) fn limits(config: &Config) -> infra_grpc::Limits {
+    infra_grpc::Limits {
+        request_timeout: config.grpc.request_timeout,
+        max_in_flight: config.grpc.in_flight_cap(),
+        max_connections: config.grpc.connection_cap(),
+        max_connection_age: config.grpc.connection_age(),
+    }
 }
 
 /// Convert admitted TLS material into a listener config.
