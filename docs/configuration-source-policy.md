@@ -460,10 +460,14 @@ into its panic.
 <!-- template:begin postgres:docs-config-postgres-budget -->
 - `postgres.enabled` (default `false`) selects the PostgreSQL profile;
   `postgres.max_connections` (default `4`, `1..500`) is the pool's upper
-  bound and the one database capacity value an operator sets. The acquire
+  bound and the one database capacity value an operator sets.
+  `postgres.migration_deadline` (environment
+  `APP__POSTGRES__MIGRATION_DEADLINE`, default `5m`, `1s..24h`) bounds one
+  `migrate` run and each `-- no-transaction` migration in it; the service
+  and the worker decode it and do not use it. The acquire
   budget (`3s`), the session `statement_timeout` and
-  `idle_in_transaction_session_timeout` (`8s`), and the migration budgets
-  are constants in the adapter
+  `idle_in_transaction_session_timeout` (`8s`), and the other migration
+  budgets are constants in the adapter and the runner
   ([Persistence](architecture/persistence.md#budgets)); the readiness probe
   draws `health.probe_budget`, and the pool closes inside the `5s`
   dependency-close stage. Enabled service and worker startup also bound the
@@ -574,6 +578,13 @@ bytes. Outgoing producers receive only configured endpoint IDs and final bytes;
 workers build each endpoint's client and keys before claiming jobs. A restart with
 changed URL or keys applies to pending work. Keep the predecessor secret through
 the rotation cutover, then remove it and restart.
+
+`webhooks.max_concurrent_deliveries` (environment
+`APP__WEBHOOKS__MAX_CONCURRENT_DELIVERIES`, unset by default, at least `1`) is
+the most deliveries one jobs worker process runs at once. Unset, deliveries
+may take every `jobs.max_workers` slot; a value below `jobs.max_workers`
+keeps the difference for the worker's other job kinds while a receiver
+answers slowly. Only the worker uses it.
 <!-- template:end webhooks:docs-config-webhooks-outbound -->
 
 <!-- template:begin inbound-webhooks:docs-config-webhooks-inbound -->

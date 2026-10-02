@@ -67,11 +67,11 @@ only under the crate's `test-support` feature, for a loopback fixture:
 
 ```rust,ignore
 let endpoint = Endpoint::new(&url, keys)?;
-Dispatcher::new(endpoints).register(kinds);
+Dispatcher::new(endpoints).register(kinds, config.webhooks.max_concurrent_deliveries);
 ```
 
 `Dispatcher::register` installs `webhooks.deliver` with `DELIVERY_POLICY` (20
-attempts and 30 seconds). Producers never resolve signing secrets. The queued
+attempts and 30 seconds) and the configured delivery bound. Producers never resolve signing secrets. The queued
 payload carries `"version": 2`, endpoint ID, content type, and base64 body.
 New workers ignore that version and other unknown fields. A payload the worker
 cannot decode is retried by jobs, which keeps a rolling deploy safe; it is not a
@@ -132,10 +132,21 @@ A complete bounded 2xx completes delivery; 410 is a permanent `endpoint_gone`
 outcome with an operator warning. Every other HTTP status, plus network,
 timeout, DNS, and response-read failures, retries with the stable ID. Valid
 `Retry-After` delta-seconds or HTTP-date is a jobs delay floor capped at 24h;
-malformed, elapsed, or zero advice uses ordinary backoff. Slow endpoints can
-occupy worker slots until their 30-second deadline. Isolating them needs a
-claim-time concurrency limit in the jobs owner, not a webhook-side refusal.
+malformed, elapsed, or zero advice uses ordinary backoff.
 Jobs alone owns jitter, leases, delay, exhaustion, and retry.
+
+A receiver that answers slowly holds a worker slot until the 30-second
+deadline. `webhooks.max_concurrent_deliveries`
+(`APP__WEBHOOKS__MAX_CONCURRENT_DELIVERIES`) bounds how many deliveries one
+worker process runs at once; it is the `max_running` of the
+`webhooks.deliver` kind, enforced when the worker claims
+([Background jobs](background-jobs.md)). Deliveries above the bound wait in
+the queue and spend no attempt. Set it below `jobs.max_workers` to keep the
+difference for the worker's other job kinds. It is unset by default, and a
+value at or above `jobs.max_workers` reserves nothing. The bound covers the
+kind, not one endpoint: a slow receiver still delays deliveries to the other
+endpoints. The bound limits concurrent deliveries; it does not reserve
+execution capacity or bound their queueing time.
 
 Each attempt ends with one `webhook_delivery_finished` event carrying the
 configured endpoint ID, the outcome (delivered, retryable, or permanent), and
@@ -144,6 +155,17 @@ for a failure its reason: `response_status` with the HTTP status,
 `transport`, `response_too_large`, or `client`. The same summary
 (`response_status_503`, `timeout`, ...) is the attempt's entry in the job's
 failure history, so one delivery's attempts can be read back from its row.
+
+`webhook_delivery_outcomes_total` counts the same attempts with the bounded
+`outcome` label (delivered, retryable, permanent), the configured endpoint ID
+as `endpoint`, and for a failure the same `reason` without the status code;
+`invalid_payload` and `clock_unavailable` are the two reasons that end an
+attempt before a request is sent. A rising `retryable` rate for one endpoint
+is that receiver refusing or timing out; `jobs_attempts_total` shows the kind
+as a whole, and is the only counter of an attempt the worker cancels or times
+out before the exchange returns. An endpoint ID a queued delivery names but
+the worker no longer configures is counted as `missing_endpoint` without an
+`endpoint` label.
 
 ## Raw-byte interoperability vector
 

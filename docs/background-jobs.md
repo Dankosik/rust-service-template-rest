@@ -195,6 +195,17 @@ Registration rejects an empty set, duplicate/invalid names, and out-of-range
 policies. Defaults are 25 attempts and a 60-second timeout; accepted ranges
 are 1–25 attempts and 1 second–1 hour. The claiming worker's policy owns both.
 
+`Policy::max_running` bounds how many attempts of one kind an engine runs at
+once; the default `None` leaves `jobs.max_workers` as the only bound. The
+engine asks each claim for no more of the kind than the free part of the
+bound, counting due jobs and expired leases together, so the rest of the
+kind's due work stays `pending` in the queue: it spends no attempt, holds no
+slot, and the engine's other slots stay free for its other kinds. A finished
+attempt of a full kind wakes the claim loop, so the next due job starts
+without waiting for the poll. The bound is per engine and so per worker
+process: `N` processes run up to `N` times as many. It does not order the
+kind's jobs and does not partition them by payload.
+
 PostgreSQL computes `attempt^4 * (0.9 + 0.2 * random())` seconds (floored by
 `retry_after_at_least`) when it writes the retry; a re-sent fenced write may
 redraw. Exhaustion and permanent failure are terminal. Summaries replace
@@ -398,10 +409,10 @@ business closure or writes a competing transition.
 `webhooks.deliver` uses 20 attempts and a 30-second timeout. Its valid
 `Retry-After` value is only a capped floor beneath jobs-owned retry scheduling.
 A missing configured endpoint retries, consumes attempts and eventually
-exhausts. The only normal deferral is endpoint capacity: one active exchange
-per endpoint in each worker process, with a one-second snooze that refunds its attempt and releases
-the worker slot. Completed 2xx succeeds; 410 terminates with `endpoint_gone`
-and operator guidance; all other HTTP responses retry.
+exhausts. `webhooks.max_concurrent_deliveries` is the kind's `max_running`:
+deliveries above it wait in the queue instead of holding worker slots.
+Completed 2xx succeeds; 410 terminates with `endpoint_gone` and operator
+guidance; all other HTTP responses retry.
 <!-- template:end webhooks:docs-background-jobs-webhooks-outbound -->
 
 <!-- template:begin inbound-webhooks:docs-background-jobs-webhooks-inbound -->

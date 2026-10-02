@@ -17,7 +17,7 @@ should weigh before reopening them.
 | --- | --- | --- |
 | `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`) and of a rotated password file (`refresh_password_periodically`), the pool with the template's session budgets and their verification (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), the pool, transaction and statement signals (`observed`), the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
 | `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), read-only embedded-history verification (`verify_history`), the shared history rule, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
-| `migrations/` | Forward-only SQL files, one transaction each, `<version>_<snake_case>.sql` ([rules](../../migrations/README.md)). | Access code; a repository adapts to the schema, never the reverse. |
+| `migrations/` | Forward-only SQL files, one transaction each unless marked `-- no-transaction`, `<version>_<snake_case>.sql` ([rules](../../migrations/README.md)). | Access code; a repository adapts to the schema, never the reverse. |
 | `service-config` (`postgres` section) | `postgres.enabled`, `postgres.dsn` (secret, environment only), `postgres.password_file`, `postgres.session_budgets`, `postgres.max_connections`. | DSN shape (the adapter refuses what the driver would accept). |
 | `service` bootstrap | Opening the pool before readiness admission when the profile is enabled, verifying the embedded migration history, registering the probe, the gauge task and the password refresh task, partial-startup cleanup, closing the pool in the dependency-close stage. | Pool mechanics, migration execution. |
 | `test/` (`integration-tests`) | Database-backed proof behind the `integration` feature; fixtures under `test/fixtures/migrations/`. | Anything the service binary runs. |
@@ -69,8 +69,9 @@ which both passwords work or five seconds of tolerance for new connections.
 
 ## Budgets
 
-Constants in `infra-postgres`, not configuration keys: a service that needs
-different ones changes them in one reviewed place.
+Constants in `infra-postgres` and `migrate`, not configuration keys: a
+service that needs different ones changes them in one reviewed place. The
+two exceptions are the values no constant can know, named below the table.
 
 | Budget | Value | Where it acts |
 | --- | --- | --- |
@@ -86,12 +87,18 @@ different ones changes them in one reviewed place.
 | Pool close at shutdown | 5 s (`DEPENDENCY_CLOSE`) | After background tasks joined, before the telemetry flush |
 | Migration `statement_timeout`, idle-in-transaction | 2 min | Session defaults of the one migration connection |
 | Migration `lock_timeout` | 15 s | Also bounds the wait for the advisory session lock |
-| Migration deadline | 5 min | `tokio::time::timeout` around the whole run |
+| Migration deadline | `postgres.migration_deadline`, default 5 min | `tokio::time::timeout` around the whole run; also the `statement_timeout` and `lock_timeout` of a `-- no-transaction` migration |
 | Startup history admission | 5 s | One read-only embedded-history check, including pool acquire |
 
-`postgres.max_connections` (1..500, default 4) is the one operator-owned
-value: size it from the database's `max_connections` divided across every
-instance and job that shares it, not from the service's concurrency.
+`postgres.max_connections` (1..500, default 4) is the operator-owned
+capacity value: size it from the database's `max_connections` divided across
+every instance and job that shares it, not from the service's concurrency.
+`postgres.migration_deadline` (`1s`..`24h`, default `5m`) is read by the
+`migrate` binary alone. A concurrent index build takes as long as the table
+is large, which differs between the databases one image is deployed to, so
+the run that carries one sets `APP__POSTGRES__MIGRATION_DEADLINE` on the
+migration job. A transactional migration keeps its two-minute statement
+budget and 15-second lock budget whatever the deadline is.
 
 A budget the session does not carry is not a budget. Opening the pool reads
 the effective `statement_timeout`, `idle_in_transaction_session_timeout`,
@@ -270,6 +277,13 @@ else can work:
   where the jobs pack is retained, its worker's `LISTEN` connection, which
   through a transaction-mode pooler receives nothing and leaves pickup to
   the poll interval.
+- **The migration job may use a role of its own.** It reads the same keys,
+  so its `APP__POSTGRES__DSN` can name the role that owns the schema and a
+  direct endpoint, while the service's names a role with data privileges
+  only and the pooler. The template creates no roles and grants nothing:
+  with two roles, the owner's default privileges
+  (`ALTER DEFAULT PRIVILEGES ... GRANT ... TO <service role>`) are the
+  deployment's to set before the first migration.
 - **One host.** The DSN admits no host list and no
   `target_session_attrs`; failover is the endpoint's job (a managed
   endpoint, a virtual IP, DNS). After a failover a session on a server that
@@ -297,7 +311,10 @@ no migration directory). The runner follows the `sqlx migrate run` sequence
 over the `Migrate` trait on one connection whose session defaults are the
 migration budgets above, under a `tokio::time::timeout`: lock before reading
 history, ensure the history table, refuse a failed row, compare, apply each
-pending migration in one transaction with its history row, unlock. A changed
+pending migration in one transaction with its history row, unlock. Each
+applied migration is logged as `migration_applying` and `migration_applied`
+(`migration.version`, `migration.transaction`, `migration.duration_ms`), so a
+long run shows where it is. A changed
 checksum (`VersionMismatch`) or an unknown applied version inside the
 embedded range (`VersionMissing`) fails before anything is applied. A
 version above the newest embedded one is admitted by both the runner and
@@ -306,19 +323,43 @@ both succeed. On failure the connection is dropped;
 `client_connection_check_interval = 1s` makes the server end the session,
 its lock and transaction promptly.
 
+A file that starts with `-- no-transaction` runs outside a transaction, for
+the statement PostgreSQL refuses inside one (`CREATE INDEX CONCURRENTLY`).
+Nothing rolls it back and its history row follows it, so the file holds one
+statement that is safe to rerun (`IF NOT EXISTS`); PostgreSQL itself refuses
+a concurrent build that shares the file with another statement. The runner
+does two things for it. It raises the session `statement_timeout` and
+`lock_timeout` to the deadline for that statement and restores them
+afterwards: the build holds no lock that blocks writes, its duration follows
+the table size, and it waits for every transaction older than itself, a wait
+`lock_timeout` would otherwise cut at 15 seconds and leave an invalid index.
+And it refuses to start while `pg_index` holds an invalid index
+(`RunError::InvalidIndexes`, stage `execute`, the index names in the error):
+that is what a failed or interrupted concurrent build leaves, and
+`IF NOT EXISTS` would otherwise record it as built. The operator drops it
+with `DROP INDEX CONCURRENTLY` and runs the job again. The check covers the
+whole database, so a `REINDEX CONCURRENTLY` in progress also defers the run;
+the index of a partitioned table, invalid until every partition is attached,
+is not counted.
+
 Source rules beyond the resolver's are a unit test over the embedded set
 (`cargo test -p migrate`, part of `make migration-check`): positive version,
-simple forward-only files (no `.up.sql`/`.down.sql`), no
-`-- no-transaction`, lowercase `snake_case` description.
-`scripts/ci/migration-history-check.sh`
+simple forward-only files (no `.up.sql`/`.down.sql`), lowercase `snake_case`
+description. `scripts/ci/migration-history-check.sh`
 refuses a pull request that modifies, deletes, or renames an existing
-migration or adds one older than the newest the base has.
+migration or adds one older than the newest the base has, and lints the
+added files with Squawk: transactional files as wrapped in a transaction,
+`-- no-transaction` files as not, where the linter also requires the
+rerunnable spelling. A finding fails the check; an intended operation
+carries `-- squawk-ignore <rule>` with its reason above the statement. Files
+the base already has are not linted, because an applied file cannot change.
 
 The `migrate` binary reads the same configuration sources as the service but
 decodes only `app`, `log`, `observability`, and `postgres`, so it needs no
 other section's secrets. It requires `postgres.enabled = true`, and writes `migration_starting` and one terminal
 `migration_run` record (`before`, `target`, `after`, `applied_count`,
-`duration_ms`, `outcome` in `success`/`no_change`/`error`). A version field
+`duration_ms`, `outcome` in `success`/`no_change`/`error`);
+`migration_starting` carries the effective `migration.deadline_ms`. A version field
 is omitted when there is none or it was not observed. On error the record
 adds `stage` in `config`/`signals`/`connect`/`lock`/`history`/`execute`/
 `deadline`/`interrupted` and `error`, which names the failing migration
@@ -554,6 +595,29 @@ scratch project against `postgres:18.4`):
   refused to expose. The template ships no feature migration;
   `migrations/README.md` states the rules and the runner proves the
   empty-history path.
+- **`-- no-transaction` is admitted, guarded, and bounded by one key**
+  (2026-10-02; it was refused before). Without it an index on a table that
+  already holds rows can only be built under a lock that blocks writes. The
+  alternatives were a statement splitter in the runner (it would parse SQL),
+  dropping invalid indexes automatically (an index is also invalid while
+  another session builds or reindexes it), and budgets written into the file
+  (a concurrent build cannot share its file with a `SET`). The deadline is a
+  key because the same image meets a small table in one database and a large
+  one in another; the other budgets stay constants.
+- **Squawk 2.66 lints added migrations** (through `npx`, as Redocly). It
+  knows which PostgreSQL DDL takes which lock; `sqlx` checks none of it and
+  the rehearsal runs against an empty database, where every statement is
+  fast. `require-lock-timeout` and `require-statement-timeout` are off
+  because the session carries both, `prefer-bigint-over-smallint` because
+  bounded counts are `smallint` here. Reopen the choice if Node stops being
+  a prerequisite: the same linter is a crate (`squawk`), at the cost of
+  building it.
+- **A pending migration older than an applied one is applied, not refused**,
+  as `sqlx` does and unlike Flyway's default. The static check owns the
+  order: it refuses such a file in the pull request, and on a push it
+  compares with the commit the push replaced, so a branch merged behind its
+  base is caught there. A runtime refusal would also stop the rolled-back
+  release this history rule exists to admit.
 - **The advisory lock is bounded by `lock_timeout`, not by a locker with its
   own timeouts** (Goose), and **the orchestration deadline drops the
   connection instead of sending a cancel request** (`pgx`): `sqlx` has

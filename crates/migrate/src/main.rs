@@ -131,10 +131,16 @@ async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, 
         postgres.database = dsn.database(),
         postgres.sslmode = dsn.ssl_mode_name(),
         migration.target = target,
+        migration.deadline_ms =
+            u64::try_from(config.postgres.migration_deadline.as_millis()).unwrap_or(u64::MAX),
         "migration_starting"
     );
     // Same service identity as traces; not a separate Postgres label.
-    let options = RunOptions::defaults(&dsn, &config.observability.otel.service_name);
+    let options = RunOptions::defaults(
+        &dsn,
+        &config.observability.otel.service_name,
+        config.postgres.migration_deadline,
+    );
     run_until_stop(&options).await
 }
 

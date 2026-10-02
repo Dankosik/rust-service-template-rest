@@ -143,6 +143,7 @@ fn probe_registry(max_attempts: u16, timeout: Duration) -> infra_jobs::Registry 
         Policy {
             max_attempts,
             timeout,
+            ..Policy::default()
         },
         jobs::handle,
     );
@@ -1006,6 +1007,99 @@ async fn x2_an_engine_beside_another_shares_its_listener_and_worker_id(pool: PgP
     super::close(&[&jobs]).await;
 }
 
+struct Capped {
+    running: AtomicUsize,
+    peak: AtomicUsize,
+    open: tokio::sync::Semaphore,
+}
+
+/// One kind bounded to a single running attempt beside an unbounded kind.
+fn capped_registry(capped: Arc<Capped>) -> infra_jobs::Registry {
+    let mut kinds = Kinds::new();
+    kinds.register(
+        Policy {
+            max_running: Some(NonZeroU32::MIN),
+            ..Policy::default()
+        },
+        move |_: Job<Gate>| {
+            let capped = Arc::clone(&capped);
+            async move {
+                let running = capped.running.fetch_add(1, Ordering::SeqCst) + 1;
+                capped.peak.fetch_max(running, Ordering::SeqCst);
+                let pass = capped.open.acquire().await;
+                capped.running.fetch_sub(1, Ordering::SeqCst);
+                pass.map_err(JobError::permanent)?.forget();
+                Ok(())
+            }
+        },
+    );
+    kinds.register(Policy::default(), |_: Job<Stranded>| async { Ok(()) });
+    kinds.validate().expect("the capped registry")
+}
+
+async fn states(pool: &PgPool, kind: &str) -> Vec<String> {
+    sqlx::query_scalar("SELECT state FROM background_jobs WHERE kind = $1 ORDER BY state")
+        .bind(kind)
+        .fetch_all(pool)
+        .await
+        .expect("the kind's job states")
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn k1_a_kinds_max_running_leaves_the_other_slots_to_other_kinds(pool: PgPool) {
+    let jobs = open(&pool, 4).await;
+    let capped = Arc::new(Capped {
+        running: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+        open: tokio::sync::Semaphore::new(0),
+    });
+    must(
+        in_tx(&jobs, async |tx| -> Result<(), Step> {
+            for token in 0..3 {
+                let _ = created(enqueue(tx, &Gate { token }, EnqueueOptions::default()).await?);
+            }
+            // Due after every gate job, so the claim order alone would run it last.
+            let _ = created(enqueue(tx, &Stranded { token: 0 }, EnqueueOptions::default()).await?);
+            Ok(())
+        })
+        .await,
+        "three bounded jobs and one other commit",
+    );
+    let run = start(&jobs, capped_registry(Arc::clone(&capped)), 4);
+
+    // Four slots are free and three bounded jobs are due: one runs, two wait
+    // in the queue, and the other kind is not held behind them.
+    until("the other kind completes", super::WAIT, async || {
+        (states(&jobs, Stranded::NAME).await == ["completed"]).then_some(())
+    })
+    .await;
+    assert_eq!(
+        states(&jobs, Gate::NAME).await,
+        ["pending", "pending", "running"]
+    );
+
+    // Each finished attempt hands its place to the next due job.
+    for finished in 1..=3 {
+        capped.open.add_permits(1);
+        until(
+            "the next bounded job takes the place",
+            super::WAIT,
+            async || {
+                let completed = states(&jobs, Gate::NAME)
+                    .await
+                    .iter()
+                    .filter(|state| *state == "completed")
+                    .count();
+                (completed == finished).then_some(())
+            },
+        )
+        .await;
+    }
+    assert_eq!(capped.peak.load(Ordering::SeqCst), 1);
+
+    finish(run, &[&jobs]).await;
+}
+
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn e2_uncommitted_enqueue_is_not_run(pool: PgPool) {
     let jobs = open(&pool, 1).await;
@@ -1218,6 +1312,7 @@ fn gate_registry(gate: Arc<GateState>) -> infra_jobs::Registry {
         Policy {
             max_attempts: 2,
             timeout: DEFAULT_TIMEOUT,
+            ..Policy::default()
         },
         move |job: Job<Gate>| {
             let gate = Arc::clone(&gate);
@@ -1245,6 +1340,7 @@ fn grace_registry(gate: Arc<GraceState>, reaction: Reaction) -> infra_jobs::Regi
         Policy {
             max_attempts: 2,
             timeout: DEFAULT_TIMEOUT,
+            ..Policy::default()
         },
         move |job: Job<Gate>| {
             let gate = Arc::clone(&gate);
@@ -1267,6 +1363,7 @@ fn transactional_gate_registry(gate: Arc<TransactionGateState>) -> infra_jobs::R
         Policy {
             max_attempts: 2,
             timeout: DEFAULT_TIMEOUT,
+            ..Policy::default()
         },
         move |job: Job<TransactionGate>| {
             let gate = Arc::clone(&gate);

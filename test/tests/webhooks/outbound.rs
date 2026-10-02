@@ -111,7 +111,7 @@ impl Drop for RunningDispatcher {
 impl RunningDispatcher {
     fn start(pool: &PgPool, dispatcher: Dispatcher, workers: u32) -> Self {
         let mut kinds = Kinds::new();
-        dispatcher.register(&mut kinds);
+        dispatcher.register(&mut kinds, None);
         let engine = Engine::new(
             pool.clone(),
             kinds.validate().expect("delivery registry"),

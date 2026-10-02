@@ -28,6 +28,12 @@ enum RegistrationError {
         #[source]
         source: infra_webhooks::protocol::ProtocolError,
     },
+    #[error("outbound webhook endpoint {endpoint} cannot be built: {source}")]
+    OutboundEndpoint {
+        endpoint: String,
+        #[source]
+        source: infra_webhooks::outbound::EndpointError,
+    },
 }
 
 fn register_outbound(
@@ -47,9 +53,16 @@ fn register_outbound(
             endpoint: endpoint_id.clone(),
             source,
         })?;
-        endpoints.insert(endpoint_id.clone(), Endpoint::new(&endpoint.url, keys)?);
+        let built = Endpoint::new(&endpoint.url, keys).map_err(|source| {
+            RegistrationError::OutboundEndpoint {
+                endpoint: endpoint_id.clone(),
+                source,
+            }
+        })?;
+        endpoints.insert(endpoint_id.clone(), built);
     }
-    Dispatcher::new(endpoints).register(&mut registration.jobs);
+    let max_concurrent = config.webhooks.max_concurrent_deliveries;
+    Dispatcher::new(endpoints).register(&mut registration.jobs, max_concurrent);
     Ok(())
 }
 // template:end webhooks:worker-webhooks-outbound-registration

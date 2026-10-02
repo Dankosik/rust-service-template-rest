@@ -716,9 +716,16 @@ mod tests {
                     "APP__WEBHOOKS__ENDPOINTS__PARTNER__PREVIOUS_SECRET",
                     "fixture-previous-secret",
                 ),
+                ("APP__WEBHOOKS__MAX_CONCURRENT_DELIVERIES", "4"),
             ]),
         )
         .unwrap();
+        assert_eq!(
+            cfg.webhooks
+                .max_concurrent_deliveries
+                .map(std::num::NonZeroU32::get),
+            Some(4)
+        );
         let endpoint = cfg.webhooks.endpoints.get("partner").unwrap();
         assert_eq!(endpoint.url, "https://partner.example/events");
         assert_eq!(endpoint.secret.expose_secret(), "fixture-current-secret");
@@ -2269,6 +2276,7 @@ mod tests {
                 "/run/secrets/postgres-password",
             ),
             ("APP__POSTGRES__SESSION_BUDGETS", "server"),
+            ("APP__POSTGRES__MIGRATION_DEADLINE", "2h"),
             ("APP__LOG__FORMAT", "text"),
             ("APP__GRPC__ENABLED", "true"),
         ];
@@ -2285,6 +2293,10 @@ mod tests {
         assert_eq!(
             cfg.postgres.session_budgets,
             crate::PostgresSessionBudgets::Server
+        );
+        assert_eq!(
+            cfg.postgres.migration_deadline,
+            std::time::Duration::from_hours(2)
         );
         assert_eq!(cfg.log.format, LogFormat::Text);
         assert_eq!(cfg.app.version, "1.2.3");
@@ -2309,6 +2321,17 @@ mod tests {
         assert!(
             matches!(unknown_source, Error::Deserialize(_)),
             "{unknown_source}"
+        );
+
+        let unbounded = load_migration_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__POSTGRES__MIGRATION_DEADLINE", "25h")]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&unbounded, Error::Validate(error) if error.key == "postgres.migration_deadline"),
+            "{unbounded}"
         );
 
         let missing_dsn = load_migration_from(

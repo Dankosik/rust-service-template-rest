@@ -31,6 +31,7 @@ const FORMAT_VERSION: u8 = 1;
 const POLICY: Policy = Policy {
     max_attempts: 25,
     timeout: Duration::from_secs(30),
+    max_running: None,
 };
 
 /// The durable enqueue outcome for an immutable event intent.
