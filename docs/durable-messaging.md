@@ -17,7 +17,8 @@ and JSON payload. Composition maps the registered `(type, version)` to a fixed
 subject and registers typed handlers. Domain code never receives subjects,
 consumer names, broker metadata, retries, or ACKs. A payload type implements
 `Serialize` to be published and `DeserializeOwned` to be delivered; a service
-needs only the direction it uses.
+needs only the direction it uses. A type that appears in the [contract
+document](#contract-document) also implements `utoipa::ToSchema`.
 
 The adapter uses the Go wire unchanged: `Message-Id`, `Event-Type`,
 `Event-Schema` (`vN`), `Created-At`, and `Nats-Msg-Id`; the original publication
@@ -41,6 +42,47 @@ carries the same identity under other names; adopting it is a wire break that
 both templates and every deployed stream would take together, and no consumer
 outside these services reads the events today. Reopen the choice when events
 are offered to a party that does not use this adapter.
+
+## Contract document
+
+`Registry::asyncapi(title, version)` renders the registered routes as an
+[AsyncAPI 3.0](https://www.asyncapi.com/docs/reference/specification/v3.0.0)
+document, the event counterpart of the OpenAPI document. A route declared with
+`Route::documented::<T>(subject)` keeps the payload type's `utoipa::ToSchema`
+schema, so the document comes from the declaration that routes the event and
+cannot name another subject, type, or version. `Route::new` stays for a
+service that publishes no document; a registry that mixes the two has no
+document, and `asyncapi` names the undocumented route.
+
+The document has one channel per subject, addressed by that subject, and one
+message per `(type, version)` under the key `<type>.v<version>`. Each message
+declares the five identity headers, with `Event-Type` and `Event-Schema` as
+constants, and references its payload schema under `components.schemas`.
+Schemas referenced by a payload are collected with it; two different types
+under one schema name are refused rather than merged. Keys are sorted, so the
+same routes always render the same text. There are no operations and no
+servers: a route does not say whether a process publishes or consumes it, and
+broker addresses are deployment facts.
+
+Payload schemas are what `utoipa` renders for OpenAPI 3.1, the JSON Schema
+2020-12 dialect, while AsyncAPI 3.0 reads a schema as Draft 07 with
+extensions. The two agree for what serde structs and enums usually render;
+a 2020-12 keyword such as `prefixItems`, which a tuple field renders, is
+ignored by a Draft 07 tool.
+
+The template ships no event, so it ships no document and no gate. A service
+with events keeps the document as it keeps `api/openapi/service.yaml`: one
+function returns the routes for the worker, the publisher, and a binary that
+prints `serde_json::to_string_pretty` of the document; the printed file is
+committed; a test compares the two, so a payload change appears in review as a
+contract change.
+
+Rejected alternatives, checked on 2026-10-02: `asyncapi-rust` 0.5.0 declares
+channels and addresses in derive attributes apart from the routes, and takes
+payload schemas from `schemars`; `schemars` 1.2.2 would be a second schema
+derive beside `utoipa` and has no `time` integration; a hand-written AsyncAPI
+file drifts from the routes. The document structure the crate's tests pin was
+validated once against the official AsyncAPI 3.0.0 JSON Schema.
 
 ## Delivery and settlement
 

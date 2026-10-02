@@ -16,7 +16,8 @@ use time::UtcDateTime;
 ///
 /// The messaging adapter asks for `serde::Serialize` where it publishes a
 /// payload and for `serde::de::DeserializeOwned` where it delivers one, so a
-/// type implements only the direction its service uses.
+/// type implements only the direction its service uses. It asks for
+/// `utoipa::ToSchema` where a route is documented in the contract document.
 pub trait EventPayload {
     /// Stable event name, for example `"order.created"`. Never rename it once
     /// published: consumers route by it.

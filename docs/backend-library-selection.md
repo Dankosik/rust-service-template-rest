@@ -180,7 +180,7 @@ rather than assuming any SeaORM release can share the current pool.
 | Durable background jobs on PostgreSQL | The template-owned engine in `crates/infra-jobs` | Enqueue inside the caller's transaction; kinds and handlers in adapter crates; effects idempotent per [the guide](background-jobs.md); reassess the crates on [async.md's watch list](architecture/async.md#reopen-conditions-and-watch-list) before replacing the engine |
 <!-- template:end jobs:docs-library-selection-jobs -->
 <!-- template:begin messaging:docs-library-selection-messaging -->
-| Typed durable JetStream transport interoperable with Go | `async-nats = "=0.50.0"`, default features off, with only `jetstream`, `aws-lc-rs`, and `nkeys` in `infra-messaging` | Reuse `time`, `serde`/`serde_json`, `bytes`, `sha2`, `base64`, `secrecy` (the credentials stay a `SecretString` until the client reads them), Tokio, metrics, and tracing; `opentelemetry` and `tracing-opentelemetry` carry the W3C trace context through message headers with the installed propagator, as `infra-jobs` does for its carrier. AWS-LC is the workspace Rustls provider; do not also enable `ring`, whose coexistence makes native client-provider selection ambiguous. Keep normal hostname verification and native roots. No chrono, websocket, KV, object-store, service, nuid, crypto, experimental, or server-extension feature is admitted. `foldhash` 0.2 (default features off, `std`) hashes the event registry maps; hashbrown already depends on it, and the keys are compile-time constants no caller can choose. |
+| Typed durable JetStream transport interoperable with Go | `async-nats = "=0.50.0"`, default features off, with only `jetstream`, `aws-lc-rs`, and `nkeys` in `infra-messaging` | Reuse `time`, `serde`/`serde_json`, `bytes`, `sha2`, `base64`, `secrecy` (the credentials stay a `SecretString` until the client reads them), Tokio, metrics, and tracing; `opentelemetry` and `tracing-opentelemetry` carry the W3C trace context through message headers with the installed propagator, as `infra-jobs` does for its carrier. AWS-LC is the workspace Rustls provider; do not also enable `ring`, whose coexistence makes native client-provider selection ambiguous. Keep normal hostname verification and native roots. No chrono, websocket, KV, object-store, service, nuid, crypto, experimental, or server-extension feature is admitted. `foldhash` 0.2 (default features off, `std`) hashes the event registry maps; hashbrown already depends on it, and the keys are compile-time constants no caller can choose. `utoipa` (default features off) supplies the payload schemas of the [AsyncAPI contract document](durable-messaging.md#contract-document); it is the schema derive the REST contract already uses. |
 | Provider-free typed event identity | `domain-events`, a small local contract crate | It exists to enforce feature-to-provider dependency direction. It does not mint IDs, read clocks, own routes, or introduce a generic producer/event-bus API. |
 <!-- template:end messaging:docs-library-selection-messaging -->
 
@@ -215,7 +215,11 @@ client, second worker executable, lifecycle crate, or stream-administration
 wrapper. `async-nats` supplies the selected protocol mechanics; the local
 adapter owns the accepted Go-compatible wire and settlement policy. Reconsider
 that boundary only for an accepted second transport or changed feature
-dependency direction.
+dependency direction. Do not add `asyncapi-rust` or `schemars` for the event
+contract document; the [guide](durable-messaging.md#contract-document) records
+why. `cloudevents-sdk` 0.9.0 requires `async-nats ^0.42` and cannot resolve
+beside the pinned client, which adds to the guide's reasons against a
+CloudEvents envelope.
 
 The adapter enables `time/large-dates` because a Go-accepted RFC3339 timestamp
 with a year-9999 offset can normalize to UTC year 10000. This keeps that
