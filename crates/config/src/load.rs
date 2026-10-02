@@ -1157,6 +1157,38 @@ mod tests {
     }
 
     #[test]
+    fn cache_client_certificate_paths_are_set_from_the_environment_together() {
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__CACHE__CLIENT_CERT_PATH", "/run/tls/client.crt"),
+                ("APP__CACHE__CLIENT_KEY_PATH", "/run/tls/client.key"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.cache.client_cert_path.as_deref(),
+            Some(std::path::Path::new("/run/tls/client.crt"))
+        );
+        assert_eq!(
+            cfg.cache.client_key_path.as_deref(),
+            Some(std::path::Path::new("/run/tls/client.key"))
+        );
+
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__CACHE__CLIENT_CERT_PATH", "/run/tls/client.crt"),
+                ("APP__CACHE__CLIENT_KEY_PATH", ""),
+            ]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cache.client_key_path"), "{err}");
+    }
+
+    #[test]
     fn cache_unknown_environment_key_fails_loading() {
         assert!(matches!(
             load_from(

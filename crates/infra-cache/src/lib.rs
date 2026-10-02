@@ -11,6 +11,26 @@
 //! Each namespace stores keys as `{namespace}:{key}` so two features sharing
 //! one server do not collide. The namespace name is also the bounded `cache`
 //! metric label.
+//!
+//! A read-through use: a hit returns the bytes, a miss or an outage takes
+//! the source of truth, and the write back is best effort.
+//!
+//! ```no_run
+//! # use std::time::Duration;
+//! # use infra_cache::{Cache, Unavailable};
+//! # async fn load_from_source_of_truth(_key: &str) -> Vec<u8> { Vec::new() }
+//! # async fn user_profile(cache: &Cache, key: &str) -> Vec<u8> {
+//! // Build the namespace once and keep it, for example in the feature's state.
+//! let profiles = cache.namespace("user_profile");
+//! match profiles.get(key).await {
+//!     Ok(Some(bytes)) => return bytes,
+//!     Ok(None) | Err(Unavailable) => {}
+//! }
+//! let bytes = load_from_source_of_truth(key).await;
+//! let _ = profiles.set(key, &bytes, Duration::from_secs(60)).await;
+//! bytes
+//! # }
+//! ```
 
 mod credentials;
 mod observe;
@@ -66,6 +86,9 @@ pub struct CacheOptions {
     pub password_file: Option<PathBuf>,
     /// PEM file of a private root CA. Absent uses the process trust store.
     pub root_ca_path: Option<PathBuf>,
+    /// The certificate this client presents to a server that requires one
+    /// (mutual TLS). Absent presents none.
+    pub client_certificate: Option<ClientCertificate>,
     /// Permit a non-TLS address. Callers must already have applied the local-only policy.
     pub allow_plaintext: bool,
     /// Permit a DSN with no password and no password file. Callers must
@@ -73,6 +96,16 @@ pub struct CacheOptions {
     pub allow_unauthenticated: bool,
     /// Bound for one command, including the wait for a reconnect.
     pub command_timeout: Duration,
+}
+
+/// The certificate and key a client presents on a TLS address. Both files are
+/// read once, at admission.
+#[derive(Clone, Debug)]
+pub struct ClientCertificate {
+    /// PEM file of the certificate chain, leaf first.
+    pub cert_path: PathBuf,
+    /// PEM file of the leaf's private key.
+    pub key_path: PathBuf,
 }
 
 /// Why admission refused to build a client. Display never includes the DSN,
@@ -119,6 +152,28 @@ pub enum CacheError {
     /// The file did not contain a PEM certificate.
     #[error("cache root CA is invalid")]
     InvalidCa,
+    /// A client certificate was set on a plaintext address.
+    #[error("cache client certificate requires TLS")]
+    ClientCertificateRequiresTls,
+    /// The client certificate could not be read. `kind` is the I/O class, not the path.
+    #[error("cache client certificate file could not be read ({kind})")]
+    ClientCertificateFile {
+        /// [`std::io::ErrorKind`] of the read, without the path or a message.
+        kind: std::io::ErrorKind,
+    },
+    /// The file did not contain a PEM certificate.
+    #[error("cache client certificate is invalid")]
+    InvalidClientCertificate,
+    /// The client key could not be read. `kind` is the I/O class, not the path.
+    #[error("cache client key file could not be read ({kind})")]
+    ClientKeyFile {
+        /// [`std::io::ErrorKind`] of the read, without the path or a message.
+        kind: std::io::ErrorKind,
+    },
+    /// The file held no usable PEM private key, or the key does not belong
+    /// to the client certificate.
+    #[error("cache client key is invalid or does not match the client certificate")]
+    InvalidClientKey,
     /// [`Cache::connect_lazy`] was called outside a Tokio runtime.
     #[error("cache requires a Tokio runtime")]
     NoRuntime,
@@ -253,14 +308,16 @@ impl Cache {
     ///
     /// # Errors
     ///
-    /// Returns [`CacheError`] when the DSN, address policy, password file, or
-    /// CA file is refused, when no Tokio runtime is current, or when the
-    /// client cannot be built. The message does not include the DSN.
+    /// Returns [`CacheError`] when the DSN, address policy, password file, CA
+    /// file, or client certificate is refused, when no Tokio runtime is
+    /// current, or when the client cannot be built. The message does not
+    /// include the DSN.
     pub fn connect_lazy(options: CacheOptions) -> Result<Self, CacheError> {
         let CacheOptions {
             dsn,
             password_file,
             root_ca_path,
+            client_certificate,
             allow_plaintext,
             allow_unauthenticated,
             command_timeout,
@@ -269,7 +326,12 @@ impl Cache {
             .expose_secret()
             .into_connection_info()
             .map_err(|_| CacheError::InvalidDsn)?;
-        let server = admit_address(&info, allow_plaintext, root_ca_path.is_some())?;
+        let server = admit_address(
+            &info,
+            allow_plaintext,
+            root_ca_path.is_some(),
+            client_certificate.is_some(),
+        )?;
         let has_password = info
             .redis_settings()
             .password()
@@ -281,6 +343,10 @@ impl Cache {
             None => return Err(CacheError::UnauthenticatedRefused),
         };
         let root_cert = root_ca_path.as_deref().map(read_root_ca).transpose()?;
+        let client_tls = client_certificate
+            .as_ref()
+            .map(read_client_certificate)
+            .transpose()?;
         // RESP3 whatever the DSN asks: only then does the manager reconnect
         // when the socket closes instead of failing the next command first.
         let settings = info
@@ -293,15 +359,16 @@ impl Cache {
         if server.tls {
             install_tls_provider();
         }
-        let client = match root_cert {
-            Some(pem) => redis::Client::build_with_tls(
+        let client = if root_cert.is_some() || client_tls.is_some() {
+            redis::Client::build_with_tls(
                 info,
                 redis::TlsCertificates {
-                    client_tls: None,
-                    root_cert: Some(pem),
+                    client_tls,
+                    root_cert,
                 },
-            ),
-            None => redis::Client::open(info),
+            )
+        } else {
+            redis::Client::open(info)
         }
         .map_err(|_| CacheError::Client)?;
         if tokio::runtime::Handle::try_current().is_err() {
@@ -520,6 +587,7 @@ fn admit_address(
     info: &redis::ConnectionInfo,
     allow_plaintext: bool,
     has_root_ca: bool,
+    has_client_certificate: bool,
 ) -> Result<ServerIdentity, CacheError> {
     match info.addr() {
         redis::ConnectionAddr::Tcp(host, port) => {
@@ -528,6 +596,9 @@ fn admit_address(
             }
             if has_root_ca {
                 return Err(CacheError::CaRequiresTls);
+            }
+            if has_client_certificate {
+                return Err(CacheError::ClientCertificateRequiresTls);
             }
             Ok(ServerIdentity {
                 host: host.clone(),
@@ -565,6 +636,42 @@ fn read_root_ca(path: &Path) -> Result<Vec<u8>, CacheError> {
         return Err(CacheError::InvalidCa);
     }
     Ok(bytes)
+}
+
+/// Reads the PEM certificate chain and key. [`admit_address`] has already
+/// refused them on plaintext.
+///
+/// redis-rs hands the pair to rustls only when it dials, where a key that
+/// does not belong to the certificate is a configuration error on every
+/// connection attempt. Building the signing key here makes it a startup error.
+fn read_client_certificate(
+    certificate: &ClientCertificate,
+) -> Result<redis::ClientTlsConfig, CacheError> {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+    let client_cert = std::fs::read(&certificate.cert_path)
+        .map_err(|error| CacheError::ClientCertificateFile { kind: error.kind() })?;
+    let client_key = std::fs::read(&certificate.key_path)
+        .map_err(|error| CacheError::ClientKeyFile { kind: error.kind() })?;
+    let chain = CertificateDer::pem_slice_iter(&client_cert)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| CacheError::InvalidClientCertificate)?;
+    if chain.is_empty() {
+        return Err(CacheError::InvalidClientCertificate);
+    }
+    let key =
+        PrivateKeyDer::from_pem_slice(&client_key).map_err(|_| CacheError::InvalidClientKey)?;
+    rustls::sign::CertifiedKey::from_der(
+        chain,
+        key,
+        &rustls::crypto::aws_lc_rs::default_provider(),
+    )
+    .map_err(|_| CacheError::InvalidClientKey)?;
+    Ok(redis::ClientTlsConfig {
+        client_cert,
+        client_key,
+    })
 }
 
 fn tcp_settings() -> redis::io::tcp::TcpSettings {

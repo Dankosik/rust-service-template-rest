@@ -106,6 +106,7 @@ mod tests {
             "http.addr",
             "observability.otel.exporter.otlp_endpoint",
             "cache.key_prefix",
+            "cache.client_key_path",
             "object_storage.access_key_id",
             "keyboard.layout",
         ] {

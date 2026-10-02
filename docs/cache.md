@@ -45,6 +45,18 @@ required, in the DSN or through `password_file`, unless
 PEM file at `root_ca_path` when that path is set. A CA path on a plaintext
 scheme is refused. The `#insecure` fragment is refused.
 
+A server that requires a client certificate (mutual TLS) gets one through
+`cache.client_cert_path` and `cache.client_key_path`. A self-hosted Valkey or
+Redis with TLS requires it unless `tls-auth-clients no` is set; managed
+services usually do not. The certificate file is a PEM chain, leaf first; the
+key file is the leaf's PEM private key (PKCS #8; a PKCS #1 or SEC1 key also
+loads). The two are set together: one without the other, either on a plaintext scheme, a
+file that cannot be read, or a key that does not belong to the certificate
+fails startup. Both files are read once at startup, so a renewed
+certificate takes effect at the next restart; restart the service when the
+platform renews it. Both keys are paths, so a file or the environment may
+set them.
+
 The connection always speaks RESP3: the client opens with `HELLO 3` and
 authenticates inside it, whatever `protocol=` the DSN carries. A server or
 proxy without `HELLO` (Redis before 6.0) is not supported.
@@ -79,6 +91,8 @@ errors fail startup with a sanitized message.
 command_timeout = "100ms"
 # dsn is environment-only: APP__CACHE__DSN
 # password_file = "/run/secrets/cache-password"
+# client_cert_path = "/run/tls/cache-client.crt"
+# client_key_path = "/run/tls/cache-client.key"
 # allow_plaintext and allow_unauthenticated are local or development only.
 ```
 
@@ -91,13 +105,18 @@ Hold a `Cache` from composition. `namespace` panics unless the name matches
 entries. The feature still puts a format version in its key.
 
 ```rust
+// Build the namespace once and keep it, for example in the feature's state.
 let profiles = cache.namespace("user_profile");
-let bytes = match profiles.get(&key).await {
-    Ok(Some(bytes)) => bytes,
-    Ok(None) | Err(Unavailable) => load_from_source_of_truth(&key).await?,
-};
+match profiles.get(&key).await {
+    Ok(Some(bytes)) => return Ok(bytes),
+    Ok(None) | Err(Unavailable) => {}
+}
+let bytes = load_from_source_of_truth(&key).await?;
 let _ = profiles.set(&key, &bytes, ttl).await;
 ```
+
+The crate documentation of `infra-cache` carries the same example as a
+compiled doctest.
 
 `Ok(None)` is a miss. `Err(Unavailable)` is an outage or a timeout. Both take
 the source of truth. A best-effort `set` may ignore `Unavailable`. An
@@ -121,8 +140,8 @@ call costs at most `command_timeout`.
 `2 * cache.command_timeout <= http.request_timeout`, so one degraded cache
 call still leaves at least half of the request budget. The rule covers one
 call, not a handler: each sequential cache call on the request path can spend
-another `command_timeout`, and the example above spends two (a `get`, then a
-`set`). The feature counts its calls: calls × `command_timeout`, plus its
+another `command_timeout`, and the example above spends two on a miss (a
+`get`, then a `set`). The feature counts its calls: calls × `command_timeout`, plus its
 source-of-truth work, plus a reserve for writing the response, must fit in
 `http.request_timeout`. With the defaults (100 ms and 8 s) that is not tight.
 There is no per-command retry. A timed-out `SET` is ambiguous, and the TTL
@@ -212,7 +231,8 @@ The client span is `cache`, exported under the name `GET`, `SET`, or `DEL`
 `error.type`; it is not a warning because an outage would log it at the
 request rate. Alert on the `error` and `timeout` outcomes of the histogram
 instead. `error.type` takes the same values as the `error_type` label; a TLS
-handshake failure surfaces as `io`, and a `HELLO` refused with `WRONGPASS`
+handshake failure, including a client certificate the server refuses,
+surfaces as `io`, and a `HELLO` refused with `WRONGPASS`
 or `NOAUTH`, or a password file that cannot be read when a connection
 opens, as `auth`. Metrics, spans, and logs never carry keys, values, the DSN, or raw server text. `CacheError` Display follows the same
 rule.

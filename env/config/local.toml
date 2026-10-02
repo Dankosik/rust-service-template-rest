@@ -97,6 +97,9 @@ session_budgets = "startup"
 # command_timeout = "100ms"
 # A rotated password comes from a file instead of the DSN:
 # password_file = "/run/secrets/cache-password"
+# A TLS server that requires a client certificate takes both paths:
+# client_cert_path = "/run/tls/cache-client.crt"
+# client_key_path = "/run/tls/cache-client.key"
 # template:end cache:local-config
 
 # template:begin object-storage:local-config

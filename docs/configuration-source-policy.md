@@ -131,13 +131,18 @@ Quote text in TOML.
   file that holds the password alone, for a platform that rotates it. The
   DSN then carries no password, both at once is refused, and the client
   follows the file while it runs. The key names a path, not a credential,
-  so it may appear in TOML. `password_file`, `root_ca_path`, and
-  `command_timeout` use normal file/environment precedence; a blank
-  `password_file` or `root_ca_path` is unset. `allow_plaintext`
+  so it may appear in TOML. `cache.client_cert_path` and
+  `cache.client_key_path` (unset by default) name the PEM certificate chain
+  and private key the client presents to a server that requires a client
+  certificate; they are set together, and one without the other fails
+  startup. Both are paths, so they may appear in TOML; the key itself stays
+  in the file. `password_file`, `root_ca_path`, `client_cert_path`,
+  `client_key_path`, and `command_timeout` use normal file/environment
+  precedence; a blank path is unset. `allow_plaintext`
   and `allow_unauthenticated` are accepted only when `app.env` is `local` or
   `development`. Admitted schemes are `redis`, `rediss`, `valkey`, and
   `valkeys`. `#insecure` and a unix socket are refused; Sentinel and Cluster
-  URLs are not admitted. A CA path requires TLS. DSN form checks stay in `infra-cache`. The
+  URLs are not admitted. A CA path or a client certificate requires TLS. DSN form checks stay in `infra-cache`. The
   [guide](cache.md) owns admission.
 <!-- template:end cache:docs-config-cache-source -->
 <!-- template:begin object-storage:docs-config-object-storage-source -->
