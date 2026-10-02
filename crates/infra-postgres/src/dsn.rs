@@ -537,9 +537,10 @@ mod tests {
     fn diagnostics_and_debug_never_carry_credentials() {
         let dsn = parse(VALID).unwrap();
         let rendered = format!("{dsn:?}");
-        assert!(rendered.contains("db.internal"), "{rendered}");
-        assert!(!rendered.contains("s3cret"), "{rendered}");
-        assert!(!rendered.contains("app:"), "{rendered}");
+        // The assertions carry no message: a failure must not print the rendering.
+        assert!(rendered.contains("db.internal"));
+        assert!(!rendered.contains("s3cret"));
+        assert!(!rendered.contains("app:"));
         for raw in [
             "postgres://app:s3cret@h:5432/app?sslmode=prefer",
             "postgres://app:s3cret@h:5432/app?sslmode=require&sslkey=s3cret",

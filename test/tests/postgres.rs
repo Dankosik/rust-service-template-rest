@@ -293,6 +293,11 @@ async fn an_idle_connection_whose_peer_went_silent_is_replaced_inside_the_acquir
         .await
         .unwrap();
 
+    // The release ping of the first query is itself a round trip; silence the
+    // peer only once the connection is back in the pool.
+    while ours.num_idle() == 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     silence.send_replace(());
     // Past the pool's one-second idle threshold, so the next acquire pings.
     tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -458,8 +463,10 @@ async fn through_a_pooler_the_database_carries_the_budgets_when_nothing_is_publi
 #[sqlx::test(migrations = false)]
 async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
-    // Roles are cluster-wide; the per-test database name keeps this one apart.
-    let role = format!("rotating{}", dsn.database());
+    // Roles are cluster-wide; the tail of the per-test database name keeps this
+    // one apart and the role inside PostgreSQL's 63-byte identifier limit.
+    let database = dsn.database();
+    let role = format!("rotating_{}", &database[database.len().saturating_sub(24)..]);
     sqlx::query(AssertSqlSafe(format!(
         "CREATE ROLE {role:?} LOGIN PASSWORD 'first'"
     )))
