@@ -44,14 +44,14 @@ const READ_COMMITTED: TxOptions = TxOptions {
 
 /// A sender retries one message ID with fresh timestamps for its whole retry
 /// horizon. Standard Webhooks senders retry for more than a day; this
-/// template's own outbound schedule runs about six days, so receipts must
-/// outlive that horizon. The spec's 5-minute example only covers replay of
-/// one signed request.
-const RECEIPT_RETENTION: Duration = Duration::from_hours(7 * 24);
+/// template's own outbound schedule runs about six and a half days before
+/// jitter and any `Retry-After` floor, so receipts are kept for twice that.
+/// The spec's 5-minute example only covers replay of one signed request.
+const RECEIPT_RETENTION: Duration = Duration::from_hours(14 * 24);
 
 #[allow(
     clippy::cast_possible_wrap,
-    reason = "seven days of seconds is far inside i64"
+    reason = "fourteen days of seconds is far inside i64"
 )]
 const RETENTION_SECONDS: i64 = RECEIPT_RETENTION.as_secs() as i64;
 

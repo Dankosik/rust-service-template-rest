@@ -4,6 +4,7 @@
 //! decoded-secret validation remain with the provider that consumes the values.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
@@ -17,6 +18,13 @@ use crate::validate::non_empty;
 pub struct WebhooksConfig {
     /// Stable endpoint IDs bound to destination and current signing keys.
     pub endpoints: BTreeMap<String, WebhookEndpointConfig>,
+    /// The most deliveries one worker process runs at once
+    /// (`APP__WEBHOOKS__MAX_CONCURRENT_DELIVERIES`). Unset by default:
+    /// deliveries may then take every `jobs.max_workers` slot, and a receiver
+    /// that answers slowly delays the worker's other job kinds for up to the
+    /// 30-second attempt timeout per delivery. A value below
+    /// `jobs.max_workers` keeps the difference for those kinds.
+    pub max_concurrent_deliveries: Option<NonZeroU32>,
 }
 
 /// One configured outbound destination and its current signing keys.
@@ -58,6 +66,8 @@ fn validate_endpoint_id(section: &str, endpoint_id: &str) -> Result<(), Validati
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use secrecy::SecretString;
 
     use super::{WebhookEndpointConfig, WebhooksConfig};
@@ -66,7 +76,22 @@ mod tests {
     fn defaults_are_inert() {
         let config = WebhooksConfig::default();
         assert!(config.endpoints.is_empty());
+        assert_eq!(config.max_concurrent_deliveries, None);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn a_zero_delivery_bound_fails_to_deserialize() {
+        let err = toml::from_str::<WebhooksConfig>("max_concurrent_deliveries = 0").unwrap_err();
+        assert!(
+            err.to_string().contains("max_concurrent_deliveries"),
+            "{err}"
+        );
+        let config = toml::from_str::<WebhooksConfig>("max_concurrent_deliveries = 4").unwrap();
+        assert_eq!(
+            config.max_concurrent_deliveries.map(NonZeroU32::get),
+            Some(4)
+        );
     }
 
     #[test]

@@ -22,6 +22,7 @@ bytes = { workspace = true, features = ["std"] }
 http = { workspace = true, features = ["std"] }
 infra-jobs = { workspace = true }
 infra-postgres = { workspace = true }
+metrics = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_with = { workspace = true, features = ["std", "macros", "base64"] }
 thiserror = { workspace = true }
@@ -34,7 +35,6 @@ url = { workspace = true, features = ["std"] }
 # template:end webhooks:webhooks-outbound-dependencies
 # template:begin inbound-webhooks:webhooks-inbound-dependencies
 async-trait = { workspace = true }
-metrics = { workspace = true }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros"] }
 tokio = { workspace = true, features = ["time"] }
 tokio-util = { workspace = true }

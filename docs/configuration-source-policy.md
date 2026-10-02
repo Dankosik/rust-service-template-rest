@@ -574,6 +574,13 @@ bytes. Outgoing producers receive only configured endpoint IDs and final bytes;
 workers build each endpoint's client and keys before claiming jobs. A restart with
 changed URL or keys applies to pending work. Keep the predecessor secret through
 the rotation cutover, then remove it and restart.
+
+`webhooks.max_concurrent_deliveries` (environment
+`APP__WEBHOOKS__MAX_CONCURRENT_DELIVERIES`, unset by default, at least `1`) is
+the most deliveries one jobs worker process runs at once. Unset, deliveries
+may take every `jobs.max_workers` slot; a value below `jobs.max_workers`
+keeps the difference for the worker's other job kinds while a receiver
+answers slowly. Only the worker uses it.
 <!-- template:end webhooks:docs-config-webhooks-outbound -->
 
 <!-- template:begin inbound-webhooks:docs-config-webhooks-inbound -->

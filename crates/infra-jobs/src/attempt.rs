@@ -201,6 +201,7 @@ pub(crate) async fn supervise(
         trace_context: parent,
         trace_state,
         slot,
+        kind_slot,
     } = claimed;
     let span = attempt_span(id, kind, attempt);
     crate::trace_context::link(&span, parent.as_deref(), trace_state.as_deref());
@@ -216,7 +217,7 @@ pub(crate) async fn supervise(
         },
         payload,
         deadline,
-        slot,
+        (slot, kind_slot),
     )
     .instrument(span)
     .await;
@@ -254,7 +255,10 @@ async fn run_attempt(
     attempt: AttemptId,
     payload: Vec<u8>,
     deadline: Instant,
-    slot: tokio::sync::OwnedSemaphorePermit,
+    slots: (
+        tokio::sync::OwnedSemaphorePermit,
+        Option<crate::claim::KindSlot>,
+    ),
 ) {
     if expired(shared, deadline) {
         uncertain(shared, &attempt);
@@ -293,9 +297,9 @@ async fn run_attempt(
             (ended, Some(started.elapsed()))
         }
     };
-    // The handler has returned: its slot admits the next attempt while this
+    // The handler has returned: its slots admit the next attempt while this
     // supervisor records the outcome.
-    drop(slot);
+    drop(slots);
     let transition = map_outcome(attempt.kind, attempt.attempt, policy, ended);
     if matches!(transition, Transition::Release) {
         shared.counters.cancelled.fetch_add(1, Ordering::Relaxed);

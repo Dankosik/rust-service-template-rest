@@ -716,9 +716,16 @@ mod tests {
                     "APP__WEBHOOKS__ENDPOINTS__PARTNER__PREVIOUS_SECRET",
                     "fixture-previous-secret",
                 ),
+                ("APP__WEBHOOKS__MAX_CONCURRENT_DELIVERIES", "4"),
             ]),
         )
         .unwrap();
+        assert_eq!(
+            cfg.webhooks
+                .max_concurrent_deliveries
+                .map(std::num::NonZeroU32::get),
+            Some(4)
+        );
         let endpoint = cfg.webhooks.endpoints.get("partner").unwrap();
         assert_eq!(endpoint.url, "https://partner.example/events");
         assert_eq!(endpoint.secret.expose_secret(), "fixture-current-secret");
