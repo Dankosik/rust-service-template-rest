@@ -21,7 +21,10 @@ use http::{
 use infra_outbound_http::{Client, Limits};
 use moka::{Expiry, ops::compute::Op};
 use secrecy::{ExposeSecret as _, SecretString};
-use tokio::time::Instant;
+use tokio::{
+    sync::{Semaphore, SemaphorePermit},
+    time::Instant,
+};
 use url::Url;
 use uuid::Uuid;
 
@@ -103,6 +106,8 @@ pub struct Options {
     /// The largest number of distinct subjects whose exchanged token is
     /// retained.
     pub exchange_cache_capacity: u32,
+    /// Maximum simultaneous token attempts shared by both grants. Must be positive.
+    pub provider_concurrency: u32,
 }
 
 impl fmt::Debug for Options {
@@ -130,6 +135,8 @@ pub enum AcquisitionError {
     ResponseLimit,
     #[error("OAuth2 provider is unavailable")]
     Unavailable,
+    #[error("OAuth2 provider acquisition capacity is exhausted")]
+    AtCapacity,
     #[error("OAuth2 provider rejected the request: {0}")]
     Rejected(Rejection),
     #[error("OAuth2 token response is invalid")]
@@ -145,6 +152,7 @@ impl AcquisitionError {
             Self::Transport => "transport",
             Self::ResponseLimit => "limit",
             Self::Unavailable => "unavailable",
+            Self::AtCapacity => "capacity",
             Self::Rejected(rejection) => rejection.label(),
             Self::InvalidResponse => "invalid",
             Self::Assertion => "assertion",
@@ -265,6 +273,7 @@ struct Inner {
     /// Held by the one caller requesting a new service token, so requests
     /// for it never overlap.
     refresh: tokio::sync::Mutex<()>,
+    permits: Semaphore,
     /// Tokens exchanged on behalf of a verified subject, keyed by the SHA-256
     /// digest of its access token. Moka lets concurrent misses for one
     /// subject share a single exchange.
@@ -453,6 +462,7 @@ impl Credentials {
         endpoint: &Url,
         token_http: Client,
     ) -> Result<Self, ConfigurationError> {
+        let permits = admitted_provider_concurrency(options.provider_concurrency)?;
         let signer = Signer::new(&options)?;
         metrics::describe_counter!(
             "oauth2_token_acquisitions_total",
@@ -466,6 +476,7 @@ impl Credentials {
             signer,
             cached: Mutex::default(),
             refresh: tokio::sync::Mutex::new(()),
+            permits: Semaphore::new(permits),
             exchanged: moka::future::Cache::builder()
                 .max_capacity(u64::from(options.exchange_cache_capacity))
                 .expire_after(ExchangedExpiry)
@@ -686,19 +697,24 @@ impl Credentials {
         subject: &SecretString,
         deadline: Instant,
     ) -> Result<(Arc<Token>, bool), AcquisitionError> {
-        let fetch_deadline = Instant::now() + FETCH_TIMEOUT;
+        let fetch_deadline = deadline.min(Instant::now() + FETCH_TIMEOUT);
         let attempt = self
             .0
             .exchanged
             .entry(key)
             .or_try_insert_with(self.0.fetch_exchange(subject, fetch_deadline));
-        match tokio::time::timeout_at(deadline, attempt).await {
-            Ok(Ok(entry)) => {
-                let fresh = entry.is_fresh();
-                Ok((entry.into_value(), fresh))
-            }
-            Ok(Err(error)) => Err(*error),
-            Err(_) => Err(AcquisitionError::Timeout),
+        tokio::select! {
+            // Drop this caller's initializer before it can publish its own
+            // deadline as a shared failure; a surviving waiter may take over.
+            biased;
+            () = tokio::time::sleep_until(deadline) => Err(AcquisitionError::Timeout),
+            result = attempt => match result {
+                Ok(entry) => {
+                    let fresh = entry.is_fresh();
+                    Ok((entry.into_value(), fresh))
+                }
+                Err(error) => Err(*error),
+            },
         }
     }
 }
@@ -765,6 +781,15 @@ impl AuthenticatedClient {
 }
 
 impl Inner {
+    fn admit_attempt(&self, deadline: Instant) -> Result<SemaphorePermit<'_>, AcquisitionError> {
+        if Instant::now() >= deadline {
+            return Err(AcquisitionError::Timeout);
+        }
+        self.permits
+            .try_acquire()
+            .map_err(|_| AcquisitionError::AtCapacity)
+    }
+
     /// Performs one client-credentials token request, bounded by the
     /// caller's deadline and [`FETCH_TIMEOUT`], and records its outcome.
     async fn fetch_service_token(
@@ -774,7 +799,11 @@ impl Inner {
         let started = Instant::now();
         let deadline = caller_deadline.min(started + FETCH_TIMEOUT);
         let mut metric = AttemptMetric::new(GRANT_CLIENT_CREDENTIALS, deadline);
-        let result = self.request_client_credentials(started, deadline).await;
+        let result = async {
+            let _permit = self.admit_attempt(deadline)?;
+            self.request_client_credentials(started, deadline).await
+        }
+        .await;
         metric.finish(&result);
         result
     }
@@ -809,9 +838,12 @@ impl Inner {
     ) -> Result<Arc<Token>, AcquisitionError> {
         let started = Instant::now();
         let mut metric = AttemptMetric::new(METRIC_GRANT_TOKEN_EXCHANGE, deadline);
-        let result = self
-            .request_token_exchange(subject, started, deadline)
-            .await;
+        let result = async {
+            let _permit = self.admit_attempt(deadline)?;
+            self.request_token_exchange(subject, started, deadline)
+                .await
+        }
+        .await;
         metric.finish(&result);
         result.map(Arc::new)
     }
@@ -998,7 +1030,18 @@ impl Drop for AttemptMetric {
     }
 }
 
+fn admitted_provider_concurrency(value: u32) -> Result<usize, ConfigurationError> {
+    usize::try_from(value)
+        .ok()
+        .filter(|&permits| permits > 0 && permits <= Semaphore::MAX_PERMITS)
+        .ok_or(ConfigurationError {
+            key: "provider_concurrency",
+            reason: "must be positive and supported on this target",
+        })
+}
+
 fn admit_options(options: &Options) -> Result<Url, ConfigurationError> {
+    admitted_provider_concurrency(options.provider_concurrency)?;
     let error = |key, reason| Err(ConfigurationError { key, reason });
     // The same rules as the typed configuration section, which refuses a
     // whitespace-only value as empty.

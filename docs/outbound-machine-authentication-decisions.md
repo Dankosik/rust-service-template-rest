@@ -26,6 +26,7 @@ behavior.
 | `algorithm` is required, with no default; `EdDSA` is not offered | The algorithm must match the key, so a default only chose `RS256` for whoever omitted it, and FAPI 2.0 admits no PKCS#1 v1.5 signatures. RFC 9864 (2025) deprecates the polymorphic `EdDSA` identifier for `Ed25519`, which `jsonwebtoken` 11.1.0 cannot emit. | A tuple written without `algorithm` fails startup naming the key. Reopen `Ed25519` when `jsonwebtoken` and the chosen authorization server accept it. |
 | A bound client may require `OnBehalfOf` (`require_on_behalf_of()`), refusing a request without it before any I/O | The subject travels in request extensions, the only channel a `tower::Service` has, so a forgotten one was a call made with the service's own, usually wider, authority. A second client type per transport would duplicate both bindings for one boolean. | Opt-in per binding: a client that serves both paths keeps the fallback. Reopen if an integration needs the requirement per call. |
 | `exchange_cache_capacity` is a configuration key (default 1024, inclusive 1–65536) | The bound is the number of users active on one replica within a token lifetime, which is a property of the deployment, unlike the protocol timeouts that stay constants. Past it every call for an unretained subject costs a token request. | One more key per tuple. The bound counts entries, not bytes: at a few KiB a token the largest cache is a few hundred MiB, and a provider issuing far larger tokens raises that in proportion. Reopen if entries must be bounded by bytes. |
+| `provider_concurrency` is a positive `u32` configuration key (default 32) | One semaphore on the prepared `Inner` bounds actual attempts across both grants; cache hits and same-key waiters consume no permit. The default matches introspection, while operators choose their deployment's bound. | Add the field to direct `Options` literals and handle `AtCapacity` in exhaustive matches. No admission queue, retry, reservation, priority, or cached capacity failure. Independent preparations have independent bounds. |
 | The gRPC binding answers its two local refusals, a caller-supplied `Authorization` and a missing required subject, with `INTERNAL` | Both are composition mistakes of this service. gRFC A54 reserves `INVALID_ARGUMENT`, `FAILED_PRECONDITION` and five more codes for the application and has a channel turn them into `INTERNAL` when call credentials fail an RPC; the earlier `INVALID_ARGUMENT` blamed the inbound caller whenever a handler forwarded the status. | A handler that matched `INVALID_ARGUMENT` from this client now sees `INTERNAL`. The HTTP binding keeps its typed `Error` variants. |
 | `expires_in` is admitted only as a JSON number of whole seconds | RFC 6749 section 5.1 defines a number, and every supported provider in the guide sends one. Go's `oauth2` also accepts a numeric string for older Microsoft endpoints, which this profile does not support for another reason (`x5t#S256`). | A provider that sends a string is an `invalid` outcome on every acquisition, visible at once. Reopen when a provider the guide lists as supported sends a string. |
 | One new provider crate, independent of inbound authentication | Extending inbound auth joins separate trust and credential lifetimes; placing OAuth in outbound HTTP makes an optional protocol a dependency of every bare HTTP consumer. | Explicit crate/profile pruning keeps independent adoption; remove speculative traits and unused registry/generator paths. |
@@ -156,9 +157,29 @@ request. That is the service token's rule: a cancelled holder's request is
 cancelled and the next waiter proceeds. A detached exchange that outlives its
 first caller would save the repeated request at the price of a second
 unjoined task, and is not added. Exchanges for different subjects are not
-serialized: each belongs to an admitted request, so inbound admission bounds
-them. Reopen with a per-owner limit if concurrent exchanges are measured to
-load the provider.
+serialized: they acquire the same owner's finite provider capacity as service
+tokens and refresh-ahead. Inbound admission and cache-entry capacity are
+separate controls.
+
+Each actual fetch initializer creates its existing attempt metric, checks its
+absolute deadline, then uses `Semaphore::try_acquire` before assertion signing.
+An expired deadline yields `Timeout`; saturation yields `AtCapacity`. The
+borrowed permit belongs to that initializer through the complete token body,
+JSON parsing, and token admission. RAII releases it on success, every error,
+timeout, and future drop. Waiters and cache hits hold no permit. Cancellation
+of a waiter cannot free its leader's slot; a replacement leader undergoes
+admission anew. The semaphore is never closed or manually replenished.
+Refresh refusal keeps the usable token and thirty-second retry spacing.
+No detached replacement request or resource dispatch follows a refusal.
+
+The configured positive u32 is checked for `usize` conversion and
+`Semaphore::MAX_PERMITS` before construction; an unsupported target receives a
+sanitized configuration error rather than a semaphore panic. All positive u32
+values fit the current 64-bit targets. One owner at the default admits at most
+32 active bodies with a 1 MiB payload ceiling each, with at most 32 MiB requested
+accumulator storage between growths or 64 MiB during simultaneous relocation.
+Transport frames/buffers, allocator overhead, parsing, and cached tokens are
+additional costs; this is no process-memory or throughput guarantee.
 
 The caller's resource deadline is forwarded unchanged after acquisition.
 The token client uses constants: five seconds, 64 response headers, 1 MiB encoded body. One MiB matches the existing provider envelope and
@@ -187,17 +208,23 @@ explicit decoder over `config::Value` for that purpose; once the loader had
 the rule for every variable, a second decoder was a parallel path and was
 removed. With it went its refusal of a number where text is expected:
 config-rs converts scalars here as in every section, and validation still
-checks the result. `algorithm` is decoded by hand only to answer a refused
-value with the accepted ones.
+checks the result. `algorithm` is decoded by hand to answer a refused
+value with the accepted ones. `provider_concurrency` has a field-local
+untagged typed/text scalar decoder inside the OAuth markers. It preserves the
+scalar kind through config-rs, whose ordinary unsigned conversion rounds
+floating-point values; fractions, booleans, negatives, and values outside u32
+are rejected, and validation refuses zero. The loader retains value-free
+errors. No optional introspection-profile decoder dependency is introduced.
 
 Runtime errors separate caller Authorization conflict, a missing required
 subject, acquisition failure, and existing resource transport failure. Acquisition reasons and all public
 Debug/Display are closed. Record
-`oauth2_token_acquisitions_total{grant, outcome}` once per token request,
+`oauth2_token_acquisitions_total{grant, outcome}` once per actual initializer,
 with `grant` in `client_credentials | token_exchange` and finite
-success/timeout/transport/limit/unavailable/rejected/invalid/cancelled/assertion
+success/timeout/capacity/transport/limit/unavailable/rejected/invalid/cancelled/assertion
 outcomes, plus the seven registered error codes in place of `rejected`. A
-failed background refresh, which no caller receives, logs
+capacity refusal is recorded once per initializer, emits no outbound HTTP
+attempt, and is not multiplied by coalesced waiters. A failed background refresh, which no caller receives, logs
 `oauth2_background_refresh_failed`. No scope/audience/URL/integration label or response content
 is emitted. Existing resource transport error policy remains unchanged.
 
@@ -242,7 +269,7 @@ publication is implied by template proof.
 The concrete gRPC binding stays inside `Credentials`. It injects one bearer,
 does not replay, and evicts only from the initial `UNAUTHENTICATED` status or
 HTTP 401 without `grpc-status`. An acquisition failure that may pass unchanged
-later (transport, provider 5xx or 429) is `UNAVAILABLE`; a refusal, an
+later (local `AtCapacity`, transport, provider 5xx or 429) is `UNAVAILABLE`; a refusal, an
 unusable response, or an unsignable assertion is `UNAUTHENTICATED`, the code
 gRPC assigns to credentials that failed to produce call metadata, as
 grpc-java separates retryable from other credential failures. One

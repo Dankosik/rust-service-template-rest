@@ -211,6 +211,7 @@ impl Realm {
             scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
             audience: audience.map(str::to_owned),
             exchange_cache_capacity: 1024,
+            provider_concurrency: 32,
         };
         Credentials::prepare(
             options,

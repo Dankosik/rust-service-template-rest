@@ -1564,6 +1564,104 @@ mod tests {
         assert!(!rendered.contains("many"), "{rendered}");
     }
 
+    fn load_oauth_provider_concurrency(
+        file_value: Option<&str>,
+        environment_value: Option<&str>,
+    ) -> Result<Config, Error> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut content = String::from(
+            "[integrations.billing.oauth]\n\
+             token_url = \"https://identity.example/token\"\n\
+             client_id = \"billing-service\"\n\
+             key_id = \"key-1\"\n\
+             algorithm = \"ES256\"\n\
+             assertion_audience = \"https://identity.example\"\n",
+        );
+        if let Some(value) = file_value {
+            use std::fmt::Write as _;
+
+            writeln!(content, "provider_concurrency = {value}").unwrap();
+        }
+        let file = write(&dir, "provider-concurrency.toml", &content);
+        let mut variables = vec![(
+            "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+            "test-private-key",
+        )];
+        if let Some(value) = environment_value {
+            variables.push((
+                "APP__INTEGRATIONS__BILLING__OAUTH__PROVIDER_CONCURRENCY",
+                value,
+            ));
+        }
+        load_from(
+            &LoadOptions {
+                config: Some(file),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&variables),
+        )
+    }
+
+    #[test]
+    fn oauth_provider_concurrency_defaults_and_loads_file_and_environment_boundaries() {
+        for (file, environment, expected) in [
+            (None, None, 32),
+            (Some("7"), None, 7),
+            (Some("\"9\""), None, 9),
+            (Some("7"), Some("11"), 11),
+            (Some("1"), None, 1),
+            (None, Some("1"), 1),
+            (Some("4294967295"), None, u32::MAX),
+            (None, Some("4294967295"), u32::MAX),
+        ] {
+            let cfg = load_oauth_provider_concurrency(file, environment).unwrap();
+            assert_eq!(
+                cfg.integrations["billing"]
+                    .oauth
+                    .as_ref()
+                    .unwrap()
+                    .provider_concurrency,
+                expected,
+                "file={file:?}, environment={environment:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn oauth_provider_concurrency_rejects_invalid_scalars_without_echoing_values() {
+        for (file, environment) in [(Some("0"), None), (None, Some("0"))] {
+            let err = load_oauth_provider_concurrency(file, environment).unwrap_err();
+            assert!(
+                matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.provider_concurrency" && error.message == "must be greater than zero"),
+                "{err}"
+            );
+        }
+        for (file, environment) in [
+            ("-1", "-1"),
+            ("1.5", "1.5"),
+            ("1.0", "1.0"),
+            ("true", "true"),
+            ("4294967296", "4294967296"),
+            ("\"private-sentinel\"", "private-sentinel"),
+            ("\"\"", ""),
+            ("[1]", "[1]"),
+        ] {
+            for (file, environment) in [(Some(file), None), (None, Some(environment))] {
+                let err = load_oauth_provider_concurrency(file, environment).unwrap_err();
+                assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+                let rendered = err.to_string();
+                assert!(
+                    rendered.contains(
+                        "must be an integer from 0 to 4294967295 for key `integrations.billing.oauth.provider_concurrency`"
+                    ),
+                    "{rendered}"
+                );
+                assert!(!rendered.contains("private-sentinel"), "{rendered}");
+            }
+        }
+    }
+
     #[test]
     fn oauth_algorithm_accepts_ps256_and_es256() {
         for (value, expected) in [

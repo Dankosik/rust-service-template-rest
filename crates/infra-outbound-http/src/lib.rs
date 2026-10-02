@@ -234,12 +234,22 @@ impl Client {
             }
 
             let (parts, body) = response.into_parts();
-            let body = Limited::new(body, body_limit)
-                .collect()
-                .await
-                .map_err(map_body_error)?
-                .to_bytes();
-            Ok(Response::from_parts(parts, body))
+            let mut body = Limited::new(body, body_limit);
+            let mut collected = Vec::new();
+            while let Some(frame) = body.frame().await {
+                if let Ok(data) = frame.map_err(map_body_error)?.into_data() {
+                    // Limited admits at most body_limit bytes in total.
+                    let required = collected.len().saturating_add(data.len());
+                    if required > collected.capacity() {
+                        let target =
+                            required.max(collected.capacity().saturating_mul(2).min(body_limit));
+                        collected.reserve_exact(target - collected.len());
+                    }
+                    collected.extend_from_slice(&data);
+                }
+                // Release this frame's backing allocation before polling again.
+            }
+            Ok(Response::from_parts(parts, Bytes::from(collected)))
         };
         tokio::time::timeout(timeout, exchange.instrument(span))
             .await

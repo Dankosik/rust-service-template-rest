@@ -217,7 +217,11 @@ Quote text in TOML.
   an unknown key and fails startup. Nonsecret
   `scopes`, optional `audience` (not blank when set), and `exchange_cache_capacity` (a whole
   number, default 1024, inclusive 1–65536) follow normal TOML/environment
-  layering; scopes use a TOML list or one space-separated environment value. File secrets
+  layering. `provider_concurrency` defaults to 32 and accepts a positive `u32`
+  integer or integer string; zero, fractions, booleans, negatives, and overflow
+  fail startup. It bounds actual token attempts across both grants on one
+  prepared owner, independently of cache capacity. Scopes use a TOML list or
+  one space-separated environment value. File secrets
   are refused by the recursive secret guard. The [outbound machine-authentication
   guide](outbound-machine-authentication.md) owns endpoint admission and
   provider compatibility.

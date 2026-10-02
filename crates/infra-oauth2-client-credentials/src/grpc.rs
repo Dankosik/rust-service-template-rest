@@ -146,9 +146,9 @@ fn unauthenticated(response: &Response<Body>) -> bool {
 fn acquisition_status(error: AcquisitionError) -> Status {
     let mut status = match error {
         AcquisitionError::Timeout => Status::deadline_exceeded("request deadline exceeded"),
-        AcquisitionError::Transport | AcquisitionError::Unavailable => {
-            Status::unavailable("client credentials unavailable")
-        }
+        AcquisitionError::Transport
+        | AcquisitionError::Unavailable
+        | AcquisitionError::AtCapacity => Status::unavailable("client credentials unavailable"),
         AcquisitionError::ResponseLimit
         | AcquisitionError::Rejected(_)
         | AcquisitionError::InvalidResponse

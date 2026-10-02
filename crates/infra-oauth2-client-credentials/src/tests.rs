@@ -132,6 +132,7 @@ impl Fixture {
             scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
             audience: audience.map(str::to_owned),
             exchange_cache_capacity: 1024,
+            provider_concurrency: 32,
         }
     }
 
@@ -424,6 +425,7 @@ fn valid_options() -> Options {
         scopes: Vec::new(),
         audience: None,
         exchange_cache_capacity: 1024,
+        provider_concurrency: 32,
     }
 }
 
@@ -507,6 +509,13 @@ fn direct_construction_repeats_sensitive_option_admission() {
                 ..valid_options()
             },
             "private_key",
+        ),
+        (
+            Options {
+                provider_concurrency: 0,
+                ..valid_options()
+            },
+            "provider_concurrency",
         ),
         (
             Options {
@@ -953,7 +962,10 @@ async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
     let fixture = Fixture::new().await;
     fixture.token_json("200 OK", &exchange_response("shared"));
     let client = fixture
-        .credentials(&[], None)
+        .prepare(Options {
+            provider_concurrency: 1,
+            ..fixture.options(&[], None)
+        })
         .http(fixture.resource_client());
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(
@@ -980,11 +992,139 @@ async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
 }
 
 #[tokio::test]
+async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_consume_it() {
+    let fixture = Fixture::new().await;
+    fixture.token_json("200 OK", &exchange_response("shared"));
+    let credentials = fixture.prepare(Options {
+        provider_concurrency: 2,
+        ..fixture.options(&[], None)
+    });
+    let client = credentials.http(fixture.resource_client());
+    client
+        .execute(
+            fixture.on_behalf_of_request("cached"),
+            deadline(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    let gate = fixture.block_tokens();
+    let mut service =
+        Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
+    tokio::select! { () = fixture.token_received() => {}, result = &mut service => panic!("service must be gated: {result:?}"), }
+    let other_binding = credentials.clone().http(fixture.resource_client());
+    let mut exchange = Box::pin(other_binding.execute(
+        fixture.on_behalf_of_request("active"),
+        deadline(Duration::from_secs(10)),
+    ));
+    tokio::select! { () = fixture.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
+    let mut waiter = Box::pin(client.execute(
+        fixture.on_behalf_of_request("active"),
+        deadline(Duration::from_secs(10)),
+    ));
+    poll_pending(waiter.as_mut()).await;
+    drop(waiter);
+    for _ in 0..2 {
+        assert!(matches!(
+            client
+                .execute(
+                    fixture.on_behalf_of_request("refused"),
+                    deadline(Duration::from_secs(10))
+                )
+                .await,
+            Err(Error::Acquisition(AcquisitionError::AtCapacity))
+        ));
+    }
+    assert!(matches!(
+        client
+            .execute(fixture.on_behalf_of_request("expired"), Instant::now())
+            .await,
+        Err(Error::Acquisition(AcquisitionError::Timeout))
+    ));
+    assert_eq!(fixture.token_requests().len(), 3);
+    assert_eq!(fixture.resource_requests().len(), 1);
+    client
+        .execute(
+            fixture.on_behalf_of_request("cached"),
+            deadline(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fixture.token_requests().len(), 3);
+    gate.add_permits(2);
+    let (service, exchange) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(service, exchange)
+    })
+    .await
+    .unwrap();
+    service.unwrap();
+    exchange.unwrap();
+    *fixture.state.token_gate.lock().unwrap() = None;
+    client
+        .execute(
+            fixture.on_behalf_of_request("refused"),
+            deadline(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fixture.token_requests().len(), 4);
+    assert_eq!(fixture.resource_requests().len(), 5);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waiters_leader() {
+    let fixture = Fixture::new().await;
+    fixture.token_json("200 OK", &exchange_response("replacement"));
+    let credentials = fixture.prepare(Options {
+        provider_concurrency: 1,
+        ..fixture.options(&[], None)
+    });
+    let client = credentials.http(fixture.resource_client());
+    let gate = fixture.block_tokens();
+    let mut leader = Box::pin(client.execute(
+        fixture.on_behalf_of_request("subject"),
+        deadline(Duration::from_secs(10)),
+    ));
+    tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("leader must be gated: {result:?}"), }
+    let mut waiter = Box::pin(client.execute(
+        fixture.on_behalf_of_request("subject"),
+        deadline(Duration::from_secs(10)),
+    ));
+    poll_pending(waiter.as_mut()).await;
+    drop(waiter);
+    assert!(matches!(
+        client
+            .execute(fixture.request(), deadline(Duration::from_secs(10)))
+            .await,
+        Err(Error::Acquisition(AcquisitionError::AtCapacity))
+    ));
+    assert!(matches!(
+        client.execute(fixture.request(), Instant::now()).await,
+        Err(Error::Acquisition(AcquisitionError::Timeout))
+    ));
+    assert_eq!(fixture.token_requests().len(), 1);
+    assert!(fixture.resource_requests().is_empty());
+    drop(leader);
+    *fixture.state.token_gate.lock().unwrap() = None;
+    client
+        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.resource_requests().len(), 1);
+    drop(gate);
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn a_waiter_restarts_the_exchange_its_leader_ran_out_of_budget_for() {
     let fixture = Fixture::new().await;
     fixture.token_json("200 OK", &exchange_response("exchanged"));
     let client = fixture
-        .credentials(&[], None)
+        .prepare(Options {
+            provider_concurrency: 1,
+            ..fixture.options(&[], None)
+        })
         .http(fixture.resource_client());
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(
@@ -1069,7 +1209,10 @@ async fn a_failed_exchange_is_not_cached() {
     let fixture = Fixture::new().await;
     fixture.token_raw(response("500 Internal Server Error", b"{}"));
     let client = fixture
-        .credentials(&[], None)
+        .prepare(Options {
+            provider_concurrency: 1,
+            ..fixture.options(&[], None)
+        })
         .http(fixture.resource_client());
     for _ in 0..2 {
         let result = client
@@ -1325,7 +1468,7 @@ fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome() {
                 let fixture = Fixture::new().await;
                 let client = || {
                     fixture
-                        .credentials(&[], None)
+                        .prepare(Options { provider_concurrency: 1, ..fixture.options(&[], None) })
                         .http(fixture.resource_client())
                 };
                 let far = || deadline(Duration::from_secs(10));
@@ -1359,8 +1502,26 @@ fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome() {
                 advance(Duration::from_secs(1)).await;
                 timed.await.unwrap_err();
                 let dropped = client();
-                let mut dropped = Box::pin(dropped.execute(fixture.request(), far()));
+                let dropped_client = dropped;
+                let mut dropped = Box::pin(dropped_client.execute(fixture.request(), far()));
                 tokio::select! { () = fixture.token_received() => {}, result = &mut dropped => panic!("response must be gated: {result:?}"), }
+                let outbound_counts = || {
+                    let mut counts = recorder.handle().render().lines()
+                        .filter(|line| line.starts_with("http_client_request_duration_seconds_count"))
+                        .map(str::to_owned).collect::<Vec<_>>();
+                    counts.sort();
+                    counts
+                };
+                let before_capacity = outbound_counts();
+                assert!(!before_capacity.is_empty());
+                assert!(matches!(
+                    dropped_client.execute(fixture.on_behalf_of_request("at-capacity"), far()).await,
+                    Err(Error::Acquisition(AcquisitionError::AtCapacity))
+                ));
+                assert_eq!(outbound_counts(), before_capacity);
+                let mut waiter = Box::pin(dropped_client.execute(fixture.request(), far()));
+                poll_pending(waiter.as_mut()).await;
+                drop(waiter);
                 drop(dropped);
                 drop(gate);
                 fixture.finish().await;
@@ -1374,6 +1535,7 @@ fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome() {
             count("client_credentials", "invalid_client"),
             count("client_credentials", "success"),
             count("client_credentials", "timeout"),
+            count("token_exchange", "capacity"),
             count("token_exchange", "invalid_target"),
         ]
     );
@@ -1462,6 +1624,51 @@ fn a_failed_background_refresh_is_logged_with_its_error_type() {
         *events.0.lock().unwrap(),
         [
             r#"error.type="invalid_client" message=oauth2_background_refresh_failed server.address="127.0.0.1""#
+        ]
+    );
+}
+
+#[test]
+fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing() {
+    let events = Events::default();
+    tracing::subscriber::with_default(events.clone(), || {
+        let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let fixture = Fixture::new().await;
+            fixture.token_json("200 OK", &serde_json::json!({"access_token":"kept", "token_type":"Bearer", "expires_in":3600}));
+            let credentials = fixture.prepare(Options { provider_concurrency: 1, ..fixture.options(&[], None) });
+            let client = credentials.http(fixture.resource_client());
+            client.execute(fixture.request(), deadline(Duration::from_secs(10))).await.unwrap();
+            advance(Duration::from_secs(3291)).await;
+            let gate = fixture.block_tokens();
+            let mut exchange = Box::pin(client.execute(fixture.on_behalf_of_request("active"), deadline(Duration::from_secs(10))));
+            tokio::select! { () = fixture.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
+            client.execute(fixture.request(), deadline(Duration::from_secs(10))).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while events.0.lock().unwrap().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+            assert_eq!(fixture.token_requests().len(), 2);
+            drop(exchange);
+            drop(gate);
+            *fixture.state.token_gate.lock().unwrap() = None;
+            client.execute(fixture.request(), deadline(Duration::from_secs(10))).await.unwrap();
+            assert_eq!(fixture.token_requests().len(), 2);
+            advance(Duration::from_secs(31)).await;
+            client.execute(fixture.request(), deadline(Duration::from_secs(10))).await.unwrap();
+            fixture.token_received().await;
+            let refresh = tokio::time::timeout(Duration::from_secs(2), credentials.0.refresh.lock()).await.unwrap();
+            drop(refresh);
+            assert_eq!(fixture.token_requests().len(), 3);
+            assert!(fixture.resource_requests().iter().all(|request| request.header("authorization") == Some("Bearer kept")));
+            fixture.finish().await;
+        });
+    });
+    assert_eq!(
+        *events.0.lock().unwrap(),
+        [
+            r#"error.type="capacity" message=oauth2_background_refresh_failed server.address="127.0.0.1""#
         ]
     );
 }
@@ -1566,7 +1773,10 @@ async fn a_waiter_shares_a_reusable_token_but_retries_a_failure_after_the_leader
     ] {
         fixture.token_json("200 OK", body);
         let client = fixture
-            .credentials(&[], None)
+            .prepare(Options {
+                provider_concurrency: 1,
+                ..fixture.options(&[], None)
+            })
             .http(fixture.resource_client());
         let gate = fixture.block_tokens();
         let before_tokens = fixture.token_requests().len();
@@ -1605,7 +1815,10 @@ async fn a_waiter_shares_a_reusable_token_but_retries_a_failure_after_the_leader
 async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
     let fixture = Fixture::new().await;
     let client = fixture
-        .credentials(&[], None)
+        .prepare(Options {
+            provider_concurrency: 1,
+            ..fixture.options(&[], None)
+        })
         .http(fixture.resource_client());
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
@@ -1629,7 +1842,10 @@ async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
 async fn each_waiter_keeps_its_own_deadline_without_cancelling_the_leader() {
     let fixture = Fixture::new().await;
     let client = fixture
-        .credentials(&[], None)
+        .prepare(Options {
+            provider_concurrency: 1,
+            ..fixture.options(&[], None)
+        })
         .http(fixture.resource_client());
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
