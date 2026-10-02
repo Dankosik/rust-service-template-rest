@@ -896,6 +896,42 @@ async fn a_short_lived_exchanged_token_serves_its_own_request_after_one_exchange
 }
 
 #[tokio::test]
+async fn an_exchanged_token_past_its_reuse_cutoff_is_exchanged_once_more() {
+    let fixture = Fixture::new().await;
+    fixture.token_json("200 OK", &exchange_response("first"));
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    let execute = || async {
+        client
+            .execute(
+                fixture.on_behalf_of_request("alice"),
+                deadline(Duration::from_secs(10)),
+            )
+            .await
+            .unwrap();
+    };
+    execute().await;
+    // Only the Tokio clock moves past the cutoff of a sixty-second token, so
+    // the cache still holds the entry and the reuse check alone refuses it.
+    advance(Duration::from_secs(51)).await;
+    fixture.token_json("200 OK", &exchange_response("second"));
+    execute().await;
+    execute().await;
+    assert_eq!(fixture.token_requests().len(), 2);
+    let authorizations = fixture
+        .resource_requests()
+        .into_iter()
+        .map(|request| request.header("authorization").unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        authorizations,
+        ["Bearer first", "Bearer second", "Bearer second"]
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
     let fixture = Fixture::new().await;
     fixture.token_json("200 OK", &exchange_response("shared"));

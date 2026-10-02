@@ -40,7 +40,7 @@ headers. It runs only when that response has `grpc-status` `UNAUTHENTICATED`,
 or HTTP 401 and no `grpc-status`. Trailers are not read. The response is
 returned unchanged.
 Eviction is an in-memory update and starts no background work. `PERMISSION_DENIED` keeps the credential. A caller-supplied
-`Authorization` is `INVALID_ARGUMENT` before acquisition. Reopen if an
+`Authorization` is `INTERNAL` before acquisition (gRFC A54). Reopen if an
 accepted provider rejects machine auth only in trailers and a supported hook
 can observe that without a body inspector.
 <!-- template:end outbound-auth-grpc:docs-grpc-oauth-eviction -->
