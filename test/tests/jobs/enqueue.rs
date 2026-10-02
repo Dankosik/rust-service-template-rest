@@ -1221,6 +1221,10 @@ async fn e6_repeatable_read_inflight_claim_keeps_commit_and_rollback_oracles(poo
             action,
         );
         super::bounded("the snapshot", snapshot.notified()).await;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test holds a raw transaction open to keep a lock"
+        )]
         let mut claim = jobs.begin().await.expect("the claim transaction");
         claim_like(&mut claim, &key).await;
         go.notify_one();

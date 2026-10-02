@@ -1,7 +1,8 @@
 //! PostgreSQL adapter over `sqlx`.
 //!
 //! Owns what the driver leaves to the application: admission of the one
-//! connection string ([`Dsn`]), the pool with the template's session
+//! connection string ([`Dsn`]) and of a rotated password
+//! ([`refresh_password_periodically`]), the pool with the template's session
 //! budgets ([`connect`]), readiness participation ([`PostgresProbe`]), and
 //! the transaction seam with its commit-outcome policy ([`in_tx`]). Owns no
 //! business rule and no process lifecycle: the composition root decides when
@@ -9,6 +10,7 @@
 //! transaction. Rationale and the decisions behind each budget:
 //! `docs/architecture/persistence.md`.
 
+mod credentials;
 mod dsn;
 mod error;
 mod observe;
@@ -16,6 +18,7 @@ mod pool;
 mod probe;
 mod transaction;
 
+pub use credentials::{PASSWORD_REFRESH_INTERVAL, refresh_password_periodically};
 pub use dsn::{Dsn, DsnError};
 pub use error::{failure_cause, retryable, sqlstate, transient};
 pub use observe::{
@@ -24,8 +27,8 @@ pub use observe::{
 };
 pub use pool::{
     ACQUIRE_TIMEOUT, Closed, ConnectError, IDLE_IN_TRANSACTION_TIMEOUT, PoolOptions,
-    STATEMENT_TIMEOUT, SessionOptions, close, connect, connect_session, record_metrics,
-    record_metrics_periodically,
+    STATEMENT_TIMEOUT, SessionBudgets, SessionOptions, close, connect, connect_session,
+    record_metrics, record_metrics_periodically,
 };
 pub use probe::PostgresProbe;
 pub use sqlx::postgres::PgPool;

@@ -50,6 +50,12 @@ mode = "none"
 enabled = false
 dsn = ""
 max_connections = 4
+# "server" when a pooler in front refuses startup parameters and the database
+# role carries statement_timeout and idle_in_transaction_session_timeout.
+session_budgets = "startup"
+# A file holding the password alone, for a platform that rotates it; the DSN
+# then carries no password.
+# password_file = "/run/secrets/postgres-password"
 # template:end postgres:local-config
 
 # template:begin http-idempotency:local-config-http-idempotency

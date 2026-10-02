@@ -21,7 +21,7 @@ use infra_messaging::{
 };
 // template:end messaging:worker-bootstrap-messaging-imports
 // template:begin jobs:worker-bootstrap-postgres-imports
-use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe};
+use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe, SessionBudgets};
 // template:end jobs:worker-bootstrap-postgres-imports
 use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, TracerProviderHandle, TracingOptions,
@@ -600,7 +600,10 @@ async fn open_pool(
     tracker: &TaskTracker,
     resources: &mut Resources,
 ) -> Result<PgPool, WorkerError> {
-    let dsn = Dsn::admit(config.postgres.required_dsn()?.expose_secret())?;
+    let dsn = Dsn::admit_with(
+        config.postgres.required_dsn()?.expose_secret(),
+        config.postgres.password_file.as_deref(),
+    )?;
     let application_name = application_name(&config.observability.otel.service_name);
     let pool = infra_postgres::connect(
         &dsn,
@@ -608,6 +611,10 @@ async fn open_pool(
             max_connections: config.postgres.max_connections,
             application_name: &application_name,
             default_isolation: infra_postgres::Isolation::ReadCommitted,
+            session_budgets: match config.postgres.session_budgets {
+                service_config::PostgresSessionBudgets::Startup => SessionBudgets::Startup,
+                service_config::PostgresSessionBudgets::Server => SessionBudgets::Server,
+            },
         },
     )
     .await?;
@@ -623,6 +630,12 @@ async fn open_pool(
     tracker.spawn(infra_postgres::record_metrics_periodically(
         pool.clone(),
         METRICS_MAINTENANCE_INTERVAL,
+        cancel.child_token(),
+    ));
+    // Ends at once unless `postgres.password_file` is set.
+    tracker.spawn(infra_postgres::refresh_password_periodically(
+        pool.clone(),
+        dsn,
         cancel.child_token(),
     ));
     Ok(pool)

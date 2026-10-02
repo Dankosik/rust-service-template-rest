@@ -102,7 +102,7 @@ pub use authn::{JwtAlgorithm, TokenProfile};
 // template:end oidc-jwt:config-jwt-input-exports
 // template:begin postgres:config-export
 pub use load::load_migration;
-pub use postgres::{MigrationConfig, PostgresConfig};
+pub use postgres::{MigrationConfig, PostgresConfig, PostgresSessionBudgets};
 // template:end postgres:config-export
 // template:begin http-idempotency:config-http-idempotency-export
 pub use http_idempotency::HttpIdempotencyConfig;

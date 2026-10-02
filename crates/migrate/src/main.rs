@@ -115,7 +115,10 @@ async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, 
     if !config.postgres.enabled {
         return Err(Failure::PostgresDisabled);
     }
-    let dsn = Dsn::admit(config.postgres.required_dsn()?.expose_secret())?;
+    let dsn = Dsn::admit_with(
+        config.postgres.required_dsn()?.expose_secret(),
+        config.postgres.password_file.as_deref(),
+    )?;
     tracing::info!(
         app.env = %config.app.env,
         app.version = %config.app.version,

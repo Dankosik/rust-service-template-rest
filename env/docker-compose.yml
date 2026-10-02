@@ -9,6 +9,7 @@
 #   APP__POSTGRES__DSN='postgres://app:app@127.0.0.1:5432/app?sslmode=disable' make run
 # The same file serves `make test-integration-db` and the image rehearsal,
 # which set POSTGRES_PORT=0 for an ephemeral host port and read it back.
+# `make test-integration-db` also starts `pgbouncer` in front of it.
 # template:end postgres:compose-postgres-header
 services:
   # template:begin postgres:compose-postgres-service
@@ -30,6 +31,23 @@ services:
       interval: 30s
       start_interval: 1s
       start_period: 30s
+      timeout: 3s
+      retries: 20
+  # PgBouncer in transaction pooling mode in front of the same server, for
+  # the pooled-deployment proof in `make test-integration-db`.
+  pgbouncer:
+    image: ghcr.io/cloudnative-pg/pgbouncer:1.26.0@sha256:d19bf5c8e785f602f5c0fb9ab570b58b47ac9699650f1976273a19411608bfd9
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${PGBOUNCER_PORT:-6432}:6432"
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "6432"]
+      interval: 2s
       timeout: 3s
       retries: 20
   # template:end postgres:compose-postgres-service

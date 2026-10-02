@@ -1,6 +1,6 @@
 //! PostgreSQL pool admission.
 
-use infra_postgres::{Dsn, PgPool, PoolOptions};
+use infra_postgres::{Dsn, PgPool, PoolOptions, SessionBudgets};
 use secrecy::ExposeSecret;
 use service_config::Config;
 use tokio::task::JoinSet;
@@ -18,7 +18,10 @@ pub(super) async fn open(
     if !config.postgres.enabled {
         return Ok(None);
     }
-    let dsn = Dsn::admit(config.postgres.required_dsn()?.expose_secret())?;
+    let dsn = Dsn::admit_with(
+        config.postgres.required_dsn()?.expose_secret(),
+        config.postgres.password_file.as_deref(),
+    )?;
     let pool = infra_postgres::connect(
         &dsn,
         &PoolOptions {
@@ -26,6 +29,10 @@ pub(super) async fn open(
             // Same process identity as traces (`service.name`).
             application_name: &config.observability.otel.service_name,
             default_isolation: infra_postgres::Isolation::ServerDefault,
+            session_budgets: match config.postgres.session_budgets {
+                service_config::PostgresSessionBudgets::Startup => SessionBudgets::Startup,
+                service_config::PostgresSessionBudgets::Server => SessionBudgets::Server,
+            },
         },
     )
     .await?;
@@ -42,5 +49,14 @@ pub(super) async fn open(
         METRICS_MAINTENANCE_INTERVAL,
         cancel.child_token(),
     ));
+    // The rotation task ends at once without a password file, and an ended
+    // background task is a service failure.
+    if dsn.password_file().is_some() {
+        background.spawn(infra_postgres::refresh_password_periodically(
+            pool.clone(),
+            dsn,
+            cancel.child_token(),
+        ));
+    }
     Ok(Some(pool))
 }

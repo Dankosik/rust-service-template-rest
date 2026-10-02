@@ -17,20 +17,24 @@
 #[path = "support/commit_proxy.rs"]
 mod commit_proxy;
 
+use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use commit_proxy::CommitProxy;
 use health::Probe;
 use infra_postgres::{
-    ACQUIRE_TIMEOUT, Dsn, Isolation, PgPool, PoolOptions, PostgresProbe, TxError, TxOptions,
-    connection, in_tx, in_tx_with, retryable,
+    ACQUIRE_TIMEOUT, ConnectError, Dsn, Isolation, PASSWORD_REFRESH_INTERVAL, PgPool, PoolOptions,
+    PostgresProbe, SessionBudgets, TxError, TxOptions, connection, in_tx, in_tx_with,
+    refresh_password_periodically, retryable, sqlstate,
 };
-use integration_tests::{DATABASE_URL, dsn_for, fixture_dir};
+use integration_tests::{DATABASE_URL, dsn_for, fixture_dir, pooler_dsn_for, url_for};
 use migrate::{HistoryError, MIGRATOR, RunError, RunOptions};
 use sqlx::migrate::{Migrate, MigrateError, Migrator};
-use sqlx::{Connection, Executor};
-use url::Url;
+use sqlx::{AssertSqlSafe, Connection, Executor};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 const APP: &str = "integration-tests";
 
@@ -41,6 +45,7 @@ async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
             max_connections: NonZeroU32::new(max_connections).expect("pool size in tests"),
             application_name: APP,
             default_isolation: Isolation::ServerDefault,
+            session_budgets: SessionBudgets::Startup,
         },
     )
     .await
@@ -58,10 +63,88 @@ async fn pool_with_default_isolation(
             max_connections: NonZeroU32::new(max_connections).expect("pool size in tests"),
             application_name: APP,
             default_isolation,
+            session_budgets: SessionBudgets::Startup,
         },
     )
     .await
     .expect("pool connects")
+}
+
+/// A pool that publishes nothing and expects the server to carry the
+/// budgets and, when one is named, the default isolation.
+async fn pool_with_server_budgets(
+    dsn: &Dsn,
+    default_isolation: Isolation,
+) -> Result<PgPool, ConnectError> {
+    infra_postgres::connect(
+        dsn,
+        &PoolOptions {
+            max_connections: NonZeroU32::MIN,
+            application_name: APP,
+            default_isolation,
+            session_budgets: SessionBudgets::Server,
+        },
+    )
+    .await
+}
+
+/// Set a default on the per-test database; sessions opened later carry it.
+async fn alter_database(pool: &PgPool, setting: &str) {
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    sqlx::query(AssertSqlSafe(format!(
+        "ALTER DATABASE {database:?} SET {setting}"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// A TCP relay that can stop relaying the connections it already carries
+/// without closing them, which is what a client sees of a peer that vanished
+/// without a reset. Connections accepted afterwards are relayed as usual.
+async fn silenceable_relay(server: SocketAddr) -> (SocketAddr, watch::Sender<()>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (silence, _) = watch::channel(());
+    let silenced = silence.clone();
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let mut went_silent = silenced.subscribe();
+            tokio::spawn(async move {
+                let Ok(mut upstream) = TcpStream::connect(server).await else {
+                    return;
+                };
+                tokio::select! {
+                    _ = tokio::io::copy_bidirectional(&mut client, &mut upstream) => {}
+                    // Both sockets stay open and say nothing more.
+                    _ = went_silent.changed() => std::future::pending::<()>().await,
+                }
+            });
+        }
+    });
+    (address, silence)
+}
+
+async fn server_address(dsn: &Dsn) -> SocketAddr {
+    let host = dsn.host().trim_start_matches('[').trim_end_matches(']');
+    tokio::net::lookup_host((host, dsn.port()))
+        .await
+        .expect("the server address resolves")
+        .next()
+        .expect("the server has an address")
+}
+
+/// The per-test database of `pool`, reached at `address` instead.
+async fn dsn_at(pool: &PgPool, address: SocketAddr) -> Dsn {
+    let mut url = url_for(pool, DATABASE_URL).await;
+    url.set_ip_host(address.ip())
+        .expect("the relay address is a host");
+    url.set_port(Some(address.port()))
+        .expect("the relay URL accepts a port");
+    Dsn::admit(url.as_str()).expect("the relayed DSN is admitted")
 }
 
 async fn proxied_pool(pool: &PgPool, max_connections: u32) -> (CommitProxy, PgPool) {
@@ -71,21 +154,8 @@ async fn proxied_pool(pool: &PgPool, max_connections: u32) -> (CommitProxy, PgPo
         "disable",
         "the test proxy frames the plaintext protocol"
     );
-    let host = dsn.host().trim_start_matches('[').trim_end_matches(']');
-    let server = tokio::net::lookup_host((host, dsn.port()))
-        .await
-        .expect("the server address resolves")
-        .next()
-        .expect("the server has an address");
-    let proxy = CommitProxy::start(server).await;
-    let raw = std::env::var(DATABASE_URL).expect("DATABASE_URL is set");
-    let mut url = Url::parse(&raw).expect("DATABASE_URL is a URL");
-    url.set_path(dsn.database());
-    url.set_ip_host(proxy.address().ip())
-        .expect("the proxy address is a host");
-    url.set_port(Some(proxy.address().port()))
-        .expect("the proxy URL accepts a port");
-    let proxied = Dsn::admit(url.as_str()).expect("the proxied DSN is admitted");
+    let proxy = CommitProxy::start(server_address(&dsn).await).await;
+    let proxied = dsn_at(pool, proxy.address()).await;
     (proxy, template_pool(&proxied, max_connections).await)
 }
 
@@ -209,6 +279,256 @@ async fn an_idle_connection_the_server_closed_is_replaced_before_use(pool: PgPoo
         .await
         .expect("the idle ping discards the closed connection");
     assert_ne!(first_pid, second_pid);
+}
+
+#[sqlx::test(migrations = false)]
+async fn an_idle_connection_whose_peer_went_silent_is_replaced_inside_the_acquire_budget(
+    pool: PgPool,
+) {
+    let dsn = dsn_for(&pool).await;
+    let (relay, silence) = silenceable_relay(server_address(&dsn).await).await;
+    let ours = template_pool(&dsn_at(&pool, relay).await, 1).await;
+    let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&ours)
+        .await
+        .unwrap();
+
+    // The release ping of the first query is itself a round trip; silence the
+    // peer only once the connection is back in the pool.
+    while ours.num_idle() == 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    silence.send_replace(());
+    // Past the pool's one-second idle threshold, so the next acquire pings.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let started = Instant::now();
+    let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&ours)
+        .await
+        .expect("the bounded idle ping discards the silent connection");
+    assert_ne!(first_pid, second_pid);
+    // The ping waited its own bound, not the rest of the acquire budget.
+    assert!(started.elapsed() >= Duration::from_millis(900));
+    assert!(started.elapsed() < ACQUIRE_TIMEOUT);
+}
+
+#[sqlx::test(migrations = false)]
+async fn budgets_the_server_carries_are_verified_when_the_pool_opens(pool: PgPool) {
+    let dsn = dsn_for(&pool).await;
+
+    // The compose server sets no session timeout of its own.
+    let unlimited = pool_with_server_budgets(&dsn, Isolation::ServerDefault)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            unlimited,
+            ConnectError::SessionBudget {
+                setting: "statement_timeout",
+                found_ms: 0,
+                ..
+            }
+        ),
+        "{unlimited}"
+    );
+
+    alter_database(&pool, "statement_timeout = '30s'").await;
+    alter_database(&pool, "idle_in_transaction_session_timeout = '8s'").await;
+    let looser = pool_with_server_budgets(&dsn, Isolation::ServerDefault)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            looser,
+            ConnectError::SessionBudget {
+                setting: "statement_timeout",
+                found_ms: 30_000,
+                ..
+            }
+        ),
+        "{looser}"
+    );
+
+    // A stricter limit than the template's is the operator's to choose.
+    alter_database(&pool, "statement_timeout = '5s'").await;
+    let ours = pool_with_server_budgets(&dsn, Isolation::ServerDefault)
+        .await
+        .expect("the database carries both budgets");
+    assert_eq!(show(&ours, "statement_timeout").await, "5s");
+    assert_eq!(
+        show(&ours, "idle_in_transaction_session_timeout").await,
+        "8s"
+    );
+    ours.close().await;
+
+    alter_database(&pool, "default_transaction_isolation = 'serializable'").await;
+    let isolation = pool_with_server_budgets(&dsn, Isolation::ReadCommitted)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            isolation,
+            ConnectError::SessionIsolation {
+                expected: "READ COMMITTED",
+                ..
+            }
+        ),
+        "{isolation}"
+    );
+}
+
+#[sqlx::test(migrations = false)]
+async fn through_a_transaction_pooler_the_published_budgets_reach_every_transaction(pool: PgPool) {
+    sqlx::query("CREATE TABLE pooled_items (id int PRIMARY KEY)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Opening the pool already verified the budgets through the pooler.
+    let ours =
+        pool_with_default_isolation(&pooler_dsn_for(&pool).await, 2, Isolation::ReadCommitted)
+            .await;
+    assert_eq!(show(&ours, "statement_timeout").await, "8s");
+    assert_eq!(
+        show(&ours, "idle_in_transaction_session_timeout").await,
+        "8s"
+    );
+    assert_eq!(
+        show(&ours, "default_transaction_isolation").await,
+        "read committed"
+    );
+    assert_eq!(show(&ours, "application_name").await, APP);
+
+    // Two transactions at a time, so the pooler hands the same prepared
+    // statement to more than one server connection.
+    let insert = async |id: i32| -> Result<(), AppError> {
+        in_tx(&ours, async |tx| {
+            sqlx::query("INSERT INTO pooled_items (id) VALUES ($1)")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            Ok(())
+        })
+        .await
+    };
+    for round in 0..3 {
+        let (left, right) = tokio::join!(insert(round * 2), insert(round * 2 + 1));
+        left.unwrap();
+        right.unwrap();
+    }
+    let rolled_back: Result<(), AppError> = in_tx(&ours, async |tx| {
+        sqlx::query("INSERT INTO pooled_items (id) VALUES (100)")
+            .execute(&mut *tx)
+            .await?;
+        Err(AppError::Business)
+    })
+    .await;
+    assert!(matches!(rolled_back, Err(AppError::Business)));
+    let swallowed: Result<(), AppError> = in_tx(&ours, async |tx| {
+        let duplicate = sqlx::query("INSERT INTO pooled_items (id) VALUES (0)")
+            .execute(&mut *tx)
+            .await;
+        assert!(duplicate.is_err());
+        Ok(())
+    })
+    .await;
+    assert!(
+        matches!(swallowed, Err(AppError::Tx(TxError::CommitFailed(_)))),
+        "{swallowed:?}"
+    );
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM pooled_items")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 6);
+}
+
+#[sqlx::test(migrations = false)]
+async fn through_a_pooler_the_database_carries_the_budgets_when_nothing_is_published(pool: PgPool) {
+    // Before the pooler opens its first server connection to this database:
+    // a session keeps the defaults it started with.
+    alter_database(&pool, "statement_timeout = '8s'").await;
+    alter_database(&pool, "idle_in_transaction_session_timeout = '8s'").await;
+    let ours = pool_with_server_budgets(&pooler_dsn_for(&pool).await, Isolation::ReadCommitted)
+        .await
+        .expect("the database carries both budgets");
+    assert_eq!(show(&ours, "statement_timeout").await, "8s");
+    let committed: Result<i32, AppError> = in_tx(&ours, async |tx| {
+        Ok(sqlx::query_scalar("SELECT 1").fetch_one(&mut *tx).await?)
+    })
+    .await;
+    assert_eq!(committed.unwrap(), 1);
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: PgPool) {
+    let dsn = dsn_for(&pool).await;
+    // Roles are cluster-wide; the tail of the per-test database name keeps this
+    // one apart and the role inside PostgreSQL's 63-byte identifier limit.
+    let database = dsn.database();
+    let role = format!(
+        "rotating_{}",
+        &database[database.len().saturating_sub(24)..]
+    );
+    sqlx::query(AssertSqlSafe(format!(
+        "CREATE ROLE {role:?} LOGIN PASSWORD 'first'"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("password");
+    std::fs::write(&file, "first\n").unwrap();
+    let mut url = url_for(&pool, DATABASE_URL).await;
+    url.set_username(&role).unwrap();
+    url.set_password(None).unwrap();
+    let rotating = Dsn::admit_with(url.as_str(), Some(&file)).expect("the file is the password");
+    let ours = template_pool(&rotating, 1).await;
+    let cancel = CancellationToken::new();
+    let refresh = tokio::spawn(refresh_password_periodically(
+        ours.clone(),
+        rotating,
+        cancel.clone(),
+    ));
+    let current_user = async || {
+        sqlx::query_scalar::<_, String>("SELECT current_user")
+            .fetch_one(&ours)
+            .await
+    };
+    assert_eq!(current_user().await.unwrap(), role);
+
+    sqlx::query(AssertSqlSafe(format!(
+        "ALTER ROLE {role:?} PASSWORD 'second'"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    // The open session stays authenticated; a new connection is refused
+    // while the file still holds the old password.
+    ours.acquire().await.unwrap().close().await.unwrap();
+    let refused = current_user().await.unwrap_err();
+    assert_eq!(sqlstate(&refused).as_deref(), Some("28P01"), "{refused}");
+
+    std::fs::write(&file, "second\n").unwrap();
+    let deadline = Instant::now() + PASSWORD_REFRESH_INTERVAL + Duration::from_secs(5);
+    let user = loop {
+        match current_user().await {
+            Ok(user) => break user,
+            Err(err) if Instant::now() < deadline => {
+                assert_eq!(sqlstate(&err).as_deref(), Some("28P01"), "{err}");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            Err(err) => panic!("the pool never picked up the rotated password: {err}"),
+        }
+    };
+    assert_eq!(user, role);
+
+    cancel.cancel();
+    refresh.await.unwrap();
+    ours.close().await;
+    let _ = sqlx::query(AssertSqlSafe(format!("DROP ROLE {role:?}")))
+        .execute(&pool)
+        .await;
 }
 
 #[sqlx::test(migrations = false)]

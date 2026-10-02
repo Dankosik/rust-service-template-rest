@@ -21,7 +21,8 @@ workspace = true
 # template:begin postgres:test-integration-feature
 [features]
 # Utility recipes run with `make test` and need no Docker or external service.
-# PostgreSQL tests alone require `integration` and a live DATABASE_URL.
+# PostgreSQL tests alone require `integration`, a live DATABASE_URL, and a
+# PGBOUNCER_DATABASE_URL in front of the same server.
 integration = []
 # template:end postgres:test-integration-feature
 

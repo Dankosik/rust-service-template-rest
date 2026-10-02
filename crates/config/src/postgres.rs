@@ -6,11 +6,15 @@
 //! channels) live in `infra-postgres`, which is the crate that knows what
 //! the driver would otherwise read. Timeouts are template constants there
 //! as well; the pool size is the one capacity value without a universal
-//! safe answer, so it is the one an operator sets.
+//! safe answer, so it is the one an operator sets. Two keys describe the
+//! deployment rather than tune it: where the password comes from when the
+//! platform rotates it, and whether a pooler in front of the database lets
+//! the service publish its session budgets.
 //!
 //! [`MigrationConfig`] is the narrower snapshot the migration binary loads.
 
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -18,6 +22,20 @@ use serde::Deserialize;
 use crate::de::blank_secret_as_none;
 use crate::validate::{ValidationError, int_range};
 use crate::{AppConfig, LogConfig, ObservabilityConfig};
+
+/// Where a pooled session's `statement_timeout` and
+/// `idle_in_transaction_session_timeout` come from. The adapter verifies the
+/// effective values when the pool opens, whichever is selected.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PostgresSessionBudgets {
+    /// The service publishes them in each connection's startup packet.
+    #[default]
+    Startup,
+    /// The database role or database carries them (`ALTER ROLE ... SET`);
+    /// for a pooler that refuses startup parameters.
+    Server,
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -30,6 +48,11 @@ pub struct PostgresConfig {
     /// whitespace-only is absent (`None`); `enabled` is a separate axis.
     #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub dsn: Option<SecretString>,
+    /// A file that holds the password alone, for a platform that rotates it
+    /// by rewriting the file. The DSN then carries no password, and the
+    /// running service follows the file. Unset by default.
+    pub password_file: Option<PathBuf>,
+    pub session_budgets: PostgresSessionBudgets,
     /// Upper bound on pooled connections. Size it from the database's
     /// `max_connections` divided across every instance and job that shares
     /// the database, not from the service's concurrency.
@@ -41,6 +64,8 @@ impl Default for PostgresConfig {
         Self {
             enabled: false,
             dsn: None,
+            password_file: None,
+            session_budgets: PostgresSessionBudgets::Startup,
             max_connections: const { NonZeroU32::new(4).expect("4 is nonzero") },
         }
     }
@@ -68,6 +93,16 @@ impl PostgresConfig {
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
         if self.enabled {
             self.required_dsn()?;
+        }
+        if self
+            .password_file
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(ValidationError::new(
+                "postgres.password_file",
+                "cannot be empty when set",
+            ));
         }
         int_range(
             "postgres.max_connections",
@@ -113,6 +148,8 @@ mod tests {
         assert!(!config.enabled);
         assert!(!config.has_dsn());
         assert_eq!(config.max_connections.get(), 4);
+        assert_eq!(config.password_file, None);
+        assert_eq!(config.session_budgets, PostgresSessionBudgets::Startup);
         config.validate().unwrap();
     }
 
@@ -137,6 +174,16 @@ mod tests {
             ..PostgresConfig::default()
         };
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn an_empty_password_file_path_is_refused() {
+        let config = PostgresConfig {
+            password_file: Some(PathBuf::new()),
+            ..PostgresConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert_eq!(err.key, "postgres.password_file");
     }
 
     #[test]

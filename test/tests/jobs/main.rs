@@ -54,6 +54,7 @@ pub(crate) async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
             max_connections: NonZeroU32::new(max_connections).expect("a pool size"),
             application_name: APP,
             default_isolation: Isolation::ReadCommitted,
+            session_budgets: infra_postgres::SessionBudgets::Startup,
         },
     )
     .await

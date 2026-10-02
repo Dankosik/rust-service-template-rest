@@ -6,6 +6,7 @@
 #   source scripts/lib/compose-postgres.sh
 #   require_docker            # exit 1 under REQUIRE_DOCKER=1, else refuse with 2
 #   compose_postgres_up       # sets COMPOSE_PROJECT, COMPOSE_NETWORK, POSTGRES_HOST_PORT
+#   compose_pgbouncer_up      # optional; sets PGBOUNCER_HOST_PORT
 #   trap compose_postgres_down EXIT INT TERM
 #
 # Callers own `set -euo pipefail` and the repository root as working directory.
@@ -33,7 +34,7 @@ require_docker() {
 }
 
 compose_postgres() {
-	POSTGRES_PORT=0 docker compose -p "${COMPOSE_PROJECT}" -f env/docker-compose.yml "$@"
+	POSTGRES_PORT=0 PGBOUNCER_PORT=0 docker compose -p "${COMPOSE_PROJECT}" -f env/docker-compose.yml "$@"
 }
 
 compose_postgres_up() {
@@ -60,6 +61,25 @@ compose_postgres_down() {
 compose_postgres_host_dsn() {
 	printf 'postgres://%s:%s@127.0.0.1:%s/%s?sslmode=disable' \
 		"${COMPOSE_POSTGRES_USER}" "${COMPOSE_POSTGRES_PASSWORD}" "${POSTGRES_HOST_PORT}" "${COMPOSE_POSTGRES_DB}"
+}
+
+# PgBouncer in front of the running PostgreSQL; sets PGBOUNCER_HOST_PORT.
+compose_pgbouncer_up() {
+	compose_postgres up -d --wait pgbouncer
+	local address
+	address=$(compose_postgres port pgbouncer 6432)
+	PGBOUNCER_HOST_PORT=${address##*:}
+	if [[ -z ${PGBOUNCER_HOST_PORT} ]]; then
+		echo "failed to resolve the compose PgBouncer port" >&2
+		exit 1
+	fi
+	export PGBOUNCER_HOST_PORT
+}
+
+# DSN of the same database through PgBouncer, as seen from the host.
+compose_pgbouncer_host_dsn() {
+	printf 'postgres://%s:%s@127.0.0.1:%s/%s?sslmode=disable' \
+		"${COMPOSE_POSTGRES_USER}" "${COMPOSE_POSTGRES_PASSWORD}" "${PGBOUNCER_HOST_PORT}" "${COMPOSE_POSTGRES_DB}"
 }
 
 # DSN as seen from a container on the compose network.

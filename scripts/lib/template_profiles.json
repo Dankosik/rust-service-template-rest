@@ -26,6 +26,7 @@
       "test/fixtures/migrations/",
       "test/src/lib.rs",
       "scripts/lib/compose-postgres.sh",
+      "env/pgbouncer/",
       "scripts/ci/test-integration-db.sh",
       "scripts/ci/migration-validate.sh",
       "scripts/ci/migration-history-check.sh",
