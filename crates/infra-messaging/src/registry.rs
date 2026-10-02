@@ -16,7 +16,23 @@ use crate::prepared::PreparedEvent;
 use crate::wire::{InboundEnvelope, valid_subject};
 
 type HandlerFuture = Pin<Box<dyn Future<Output = Result<(), HandlerError>> + Send>>;
-type ErasedHandler = Arc<dyn Fn(InboundEnvelope, CancellationToken) -> HandlerFuture + Send + Sync>;
+/// Starts the typed handler, or returns `None` when the payload is not the
+/// handler's type.
+type ErasedHandler =
+    Arc<dyn Fn(InboundEnvelope, CancellationToken) -> Option<HandlerFuture> + Send + Sync>;
+
+/// Why a delivery ended without a handler's success.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DispatchError {
+    /// No handler is registered for this event type and schema version on
+    /// this subject. The handler never ran.
+    Unhandled,
+    /// The payload is not the JSON the handler's type reads. The handler
+    /// never ran.
+    Undecodable,
+    /// The handler ran and returned this classification.
+    Handler(HandlerError),
+}
 
 /// Event type and schema version. Every key comes from an [`EventPayload`]
 /// constant, so building one to look up a route does not allocate.
@@ -154,15 +170,13 @@ impl Registry {
         self.handlers.insert(
             key,
             Arc::new(move |envelope, cancel| {
-                let Ok(payload) = serde_json::from_slice::<T>(&envelope.payload) else {
-                    return Box::pin(async { Err(HandlerError::Permanent) });
-                };
+                let payload = serde_json::from_slice::<T>(&envelope.payload).ok()?;
                 let event = Event {
                     id: envelope.message_id,
                     occurred_at: envelope.occurred_at.to_utc(),
                     payload,
                 };
-                Box::pin(handler(event, cancel))
+                Some(Box::pin(handler(event, cancel)))
             }),
         );
         Ok(())
@@ -185,11 +199,11 @@ impl Registry {
         PreparedEvent::prepare(subject, event, max_payload_bytes)
     }
 
-    /// Whether no handler is registered. Routes alone do not count: a
+    /// Whether a handler is registered. Routes alone do not count: a
     /// registry with routes and no handler only publishes.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.handlers.is_empty()
+    pub fn has_handlers(&self) -> bool {
+        !self.handlers.is_empty()
     }
 
     /// Refuses a consuming worker with no registered typed behavior.
@@ -197,10 +211,10 @@ impl Registry {
     /// # Errors
     /// Returns `Empty` when no handler has been registered.
     pub fn validate_consumer(&self) -> Result<(), RegistryError> {
-        if self.is_empty() {
-            Err(RegistryError::Empty)
-        } else {
+        if self.has_handlers() {
             Ok(())
+        } else {
+            Err(RegistryError::Empty)
         }
     }
 
@@ -226,20 +240,19 @@ impl Registry {
         subject: &str,
         mut envelope: InboundEnvelope,
         cancel: CancellationToken,
-    ) -> Result<(), HandlerError> {
+    ) -> Result<(), DispatchError> {
         // The maps are covariant in the key, so the inbound type looks up the
         // `'static` keys without a copy. Typed handlers never read it.
         let event_type = std::mem::take(&mut envelope.event_type);
         let key = (event_type.as_str(), envelope.schema_version);
         let routes: &HashMap<(&str, u16), String> = &self.routes;
         if routes.get(&key).is_none_or(|route| route != subject) {
-            return Err(HandlerError::Permanent);
+            return Err(DispatchError::Unhandled);
         }
         let handlers: &HashMap<(&str, u16), ErasedHandler> = &self.handlers;
-        let Some(handler) = handlers.get(&key) else {
-            return Err(HandlerError::Permanent);
-        };
-        handler(envelope, cancel).await
+        let handler = handlers.get(&key).ok_or(DispatchError::Unhandled)?;
+        let run = handler(envelope, cancel).ok_or(DispatchError::Undecodable)?;
+        run.await.map_err(DispatchError::Handler)
     }
 
     /// Every route with its subject and, when documented, its payload schema.
@@ -249,5 +262,109 @@ impl Registry {
         self.routes
             .iter()
             .map(|(key, subject)| (*key, subject.as_str(), self.schemas.get(key).copied()))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "fixed valid fixtures")]
+mod tests {
+    use bytes::Bytes;
+
+    use super::*;
+
+    #[derive(serde::Deserialize)]
+    struct Created {
+        quantity: u32,
+    }
+
+    impl EventPayload for Created {
+        const EVENT_TYPE: &'static str = "order.created";
+        const SCHEMA_VERSION: u16 = 2;
+    }
+
+    struct Shipped;
+
+    impl EventPayload for Shipped {
+        const EVENT_TYPE: &'static str = "order.shipped";
+        const SCHEMA_VERSION: u16 = 1;
+    }
+
+    /// Routes both types and handles `Created`, rejecting a zero quantity.
+    fn registry() -> Registry {
+        let mut registry = Registry::new([
+            Route::new::<Created>("orders.created"),
+            Route::new::<Shipped>("orders.shipped"),
+        ])
+        .unwrap();
+        registry
+            .register::<Created, _, _>(|event, _| async move {
+                if event.payload.quantity == 0 {
+                    Err(HandlerError::Permanent)
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap();
+        registry
+    }
+
+    async fn dispatch(
+        subject: &str,
+        event_type: &str,
+        schema: &str,
+        payload: &'static str,
+    ) -> Result<(), DispatchError> {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert(crate::wire::name::MESSAGE_ID, "event-1");
+        headers.insert(crate::wire::name::EVENT_TYPE, event_type);
+        headers.insert(crate::wire::name::EVENT_SCHEMA, schema);
+        headers.insert(crate::wire::name::CREATED_AT, "2026-09-29T10:00:00Z");
+        headers.insert(crate::wire::name::NATS_MSG_ID, "event-1");
+        let envelope =
+            crate::wire::decode_envelope(subject, &headers, Bytes::from_static(payload.as_bytes()))
+                .unwrap();
+        registry()
+            .dispatch(subject, envelope, CancellationToken::new())
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_delivery_no_handler_claims_is_told_apart_from_a_handler_rejection() {
+        let payload = r#"{"quantity":1}"#;
+        assert_eq!(
+            dispatch("orders.created", "order.created", "v2", payload).await,
+            Ok(())
+        );
+        for (subject, event_type, schema) in [
+            // A schema version published before its consumer was deployed.
+            ("orders.created", "order.created", "v3"),
+            // A type no route knows.
+            ("orders.created", "order.cancelled", "v1"),
+            // A handled type on another subject.
+            ("orders.shipped", "order.created", "v2"),
+            // A route this process only publishes to.
+            ("orders.shipped", "order.shipped", "v1"),
+        ] {
+            assert_eq!(
+                dispatch(subject, event_type, schema, payload).await,
+                Err(DispatchError::Unhandled),
+                "{subject} {event_type} {schema}"
+            );
+        }
+        assert_eq!(
+            dispatch("orders.created", "order.created", "v2", r#"{"quantity":0}"#).await,
+            Err(DispatchError::Handler(HandlerError::Permanent))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_payload_the_handler_type_cannot_read_never_reaches_the_handler() {
+        for payload in [r#"{"quantity":"many"}"#, r#"{"count":1}"#, "not json"] {
+            assert_eq!(
+                dispatch("orders.created", "order.created", "v2", payload).await,
+                Err(DispatchError::Undecodable),
+                "{payload}"
+            );
+        }
     }
 }
