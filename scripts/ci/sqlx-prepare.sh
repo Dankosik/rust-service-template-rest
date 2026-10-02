@@ -36,6 +36,24 @@ command -v cargo-sqlx >/dev/null 2>&1 || {
 	exit 2
 }
 
+# The metadata format belongs to the driver and the tool alike.
+# shellcheck source=tools/versions.env
+. tools/versions.env
+driver=$(sed -n 's/^sqlx = { version = "\([^"]*\)".*/\1/p' Cargo.toml)
+[[ ${driver} == "${SQLX_CLI_VERSION}" ]] || {
+	echo "Cargo.toml pins sqlx ${driver:-<none>}, tools/versions.env pins sqlx-cli ${SQLX_CLI_VERSION}; move them together" >&2
+	exit 2
+}
+
+# Nothing to drop or stop until the steps below created it.
+cleanup() {
+	if [[ -n ${DATABASE_URL:-} && ${DATABASE_URL} == *sqlx_prepare_* ]]; then
+		sqlx database drop -y >/dev/null 2>&1 || true
+	fi
+	compose_postgres_down
+}
+trap cleanup EXIT INT TERM
+
 if [[ ${INTEGRATION_COMPOSE_MANAGED:-} != 1 ]]; then
 	require_docker
 	compose_postgres_up sqlx-prepare
@@ -55,12 +73,6 @@ fi
 }
 DATABASE_URL="${BASH_REMATCH[1]}sqlx_prepare_$$${BASH_REMATCH[2]}"
 export DATABASE_URL
-
-cleanup() {
-	sqlx database drop -y >/dev/null 2>&1 || true
-	compose_postgres_down
-}
-trap cleanup EXIT INT TERM
 
 sqlx database create
 sqlx migrate run --source migrations

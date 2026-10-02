@@ -1,5 +1,5 @@
-# `sqlx::query!` checks each statement against the metadata committed under
-# `crates/*/.sqlx` instead of a live database, so a build never depends on
+# `sqlx::query!` checks each statement against the metadata committed in
+# `.sqlx/` instead of a live database, so a build never depends on
 # `DATABASE_URL`, which the database tests export for another purpose.
 # `make sqlx-prepare` regenerates the metadata against a migrated database.
 [env]

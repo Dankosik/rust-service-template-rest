@@ -40,16 +40,19 @@ migration changed:
 
 ```bash
 make sqlx-prepare               # regenerate .sqlx/
-ALLOW_HEAVY=1 make sqlx-check   # fail when .sqlx/ is stale; what CI runs
+ALLOW_HEAVY=1 make sqlx-check   # fail when .sqlx/ is stale
 ```
 
-Both start the compose PostgreSQL on an ephemeral port, create a database
-of their own, apply `migrations/` with the pinned `sqlx-cli` (built once
+Both start the compose PostgreSQL on an ephemeral port (CI runs
+`make sqlx-check` against the integration job's server instead), create a
+database of their own, apply `migrations/` with the pinned `sqlx-cli` (built once
 into the Git common directory), and describe every checked statement in the
 workspace against it. A statement whose metadata is missing already fails
 an ordinary build; the check adds what a build cannot see, metadata that no
-longer matches the schema. Unused metadata is reported as a warning and
-removed by the next `make sqlx-prepare`.
+longer matches the schema. `cargo sqlx prepare --check` only warns about
+metadata no statement uses (observed with sqlx-cli 0.9.0), and the next
+`make sqlx-prepare` rewrites the directory without it. The script refuses
+to run when the `sqlx` pin in `Cargo.toml` and `SQLX_CLI_VERSION` differ.
 
 Migration source shape and the static append-only rule:
 
