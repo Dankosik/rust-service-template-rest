@@ -520,8 +520,12 @@ into its panic.
   that many calls at once and refuses the excess without queueing; a download
   holds its slot until its body ends. `object_storage.max_object_bytes`
   (default `8 MiB`, at most 4.995 GiB, the smallest single-upload limit of the
-  supported providers) bounds a put and a get. Buffered reads cost up to
-  `max_concurrency * max_object_bytes` of memory. See the
+  supported providers) bounds a put and a get. The payload collected by
+  downloads still holding a slot is budgeted as
+  `max_concurrency * max_object_bytes`; collection copies, SDK buffers, and
+  allocation overhead add to it. Completed `Bytes` outlive their slots, so
+  this is not a process memory ceiling. The consuming HTTP/job path owns
+  concurrency and payload budgets for those retained responses. See the
   [object storage guide](object-storage.md).
 <!-- template:end object-storage:docs-config-object-storage-budget -->
 

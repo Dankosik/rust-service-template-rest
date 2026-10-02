@@ -1,7 +1,8 @@
 # S3-compatible object storage: research and decisions
 
 Stage 10.9. Baseline `2590d29` (main after PR #121). Research date
-2026-09-29. This record is the accepted decision artifact for the profile; the
+2026-09-29, with review amendments on 2026-10-01 and 2026-10-02. This record is
+the accepted decision artifact for the profile; the
 [guide](../../../docs/object-storage.md) and the
 [decision record](../../../docs/object-storage-decisions.md) that ship with the
 profile are derived from it.
@@ -46,7 +47,7 @@ own SHA-256 of each object in PostgreSQL.
 | Candidate (latest, date) | Verdict | Decisive evidence |
 | --- | --- | --- |
 | `aws-sdk-s3` 1.150.0 (2026-09-25), default features off: `rt-tokio`, `default-https-client` | **Accepted** | Official SDK; typed `if_none_match`/`if_match` on PutObject and CompleteMultipartUpload; CRC32, CRC32C, CRC64NVME, SHA1, SHA256 with full-object or composite types; response validation at EOF; `expected_bucket_owner`; presign with the 7-day cap; per-operation retry override; `SdkError` separates service, timeout, dispatch, and response failures. Default-off resolves to +30 lock packages with two small duplicates (`const-oid` 0.10.2, `spin` 0.10.1) and no ring, OpenSSL, or native-tls. |
-| `object_store` 0.14.2 (2026-09-15) | Rejected | Lightest (+4 to +5 packages), but: a `PutMode::Create` answered 5xx/429 is retried whatever the idempotency flag says, so a create that the provider applied returns `AlreadyExists` (`client/retry.rs:405-420`); any 409 maps to `AlreadyExists`; throttling and timeouts are untyped `Generic`; `put` takes an in-memory payload only (#281); no response checksum validation; no create-only multipart (#289); the `aws` feature turns on HTTP/2 for every reqwest client in the workspace. The alternative, `aws-base` with a template-owned `HttpConnector`, trades those gaps for a homegrown transport. |
+| `object_store` 0.14.2 (2026-09-15) | Not selected | Lightest (+4 to +5 packages). With default retries, a `PutMode::Create` answered 5xx/429 is retried whatever the idempotency flag says, so a create that the provider applied can return `AlreadyExists` (`client/retry.rs:405-420`). Public `RetryConfig.max_retries = 0` disables those retries and is a viable supported setting. Remaining differences: any 409 maps to `AlreadyExists`; throttling and timeouts are untyped `Generic`; single `put` takes an in-memory payload only (#281); no response checksum validation; no create-only multipart (#289); the `aws` feature turns on HTTP/2 for every reqwest client in the workspace. `aws-base` with a template-owned `HttpConnector` adds transport ownership. Reopen if a bounded adapter over supported settings meets the required contracts at lower total maintenance cost. |
 | `opendal` 0.59.3 (2026-09-22) | Rejected | Breaking 0.x minor every one to two months, +26 packages and three duplicates, transport failures all `Unexpected` with no timeout kind, error context carries the full request URL (key and upload id), checksums limited to CRC32C and MD5. It does have create-only multipart and typed rate-limit and conflict errors. |
 | `aws-sdk-s3-transfer-manager` 0.2.0 | Rejected | README: developer preview, not recommended for production; requires default SDK features (hyper 0.14, rustls 0.21, ring: +79 packages, 14 duplicates). |
 | `rust-s3` 0.37.2 | Rejected | reqwest 0.12 duplicate, adds ring as a second rustls provider, and pulls `attohttpc` under MPL-2.0, which `deny.toml` does not allow. |
@@ -85,11 +86,11 @@ Known costs, accepted:
 
 | Decision | Go template | Rust decision and reason |
 | --- | --- | --- |
-| One concrete client per bucket, no port trait | `objectstorage.Store` interface plus adapter | Same as the cache profile: the template has no second implementation to abstract over. A feature that wants a test double or a filesystem backend defines its trait at its own boundary. |
-| Operations | Upload, Download, Metadata, Delete, PresignGet | The same five plus `probe`. Listing, copy, range reads, tagging, and user metadata are not in the pack: no production consumer calls them. A feature that needs one adds it beside the others so it shares admission, retries, and observation. |
+| One concrete infrastructure client per bucket, no general storage trait | `objectstorage.Store` interface plus adapter | A feature owns a narrow business interface; its provider adapter implements it over `ObjectStorage` and composition wires it. This enforces dependency direction with a single implementation, independent of a need for test doubles. No general infrastructure interface or empty adapter is created before a real consumer exists. |
+| Operations | Upload, Download, Metadata, Delete, PresignGet | The same five plus `probe`. Listing, copy, range reads, tagging, and user metadata are not in the pack: no production consumer calls them. Extend the concrete client when a feature needs one, so its provider adapter shares admission, retries, and observation. |
 | Keys | UTF-8, 1..1024 bytes | `ObjectKey`, a validated type: 1..1024 bytes of `[A-Za-z0-9._~-]` in `/`-separated segments, no empty, `.` or `..` segment, no leading or trailing `/`. R2 NFC-normalizes keys, so two distinct Unicode keys can collide; both consumers' keys already fit the grammar. This restores the Go spec's grammar that the Go simplification dropped without a recorded reason. |
 | Upload body | `io.Reader` plus declared size | `Bytes` or a stream with a declared length that the client enforces. The declared length is checked against `max_object_bytes` before any I/O. |
-| Download | Body owns the admission token; the caller must close it | The admission permit moves into the download; dropping it releases the slot and the connection, so the caller-must-close rule disappears. A download succeeds only at EOF, after SDK checksum validation. `bytes()` collects a bounded body. A `Content-Range` response is an integrity failure. |
+| Download | Body owns the admission token; the caller must close it | The admission permit moves into the download; dropping it releases the slot and the connection, so the caller-must-close rule disappears. A download succeeds only at EOF, after any supported full-object checksum validation. Success does not attest that a checksum was present or validated. `bytes()` collects a bounded payload. A `Content-Range` response is an integrity failure. |
 | Object size | 80,000 MiB ceiling from 8 MiB parts × 10,000 | No multipart, so the ceiling is the smallest documented single-PUT limit across the providers, R2's 4.995 GiB (5,363,466,240 bytes). `max_object_bytes` defaults to 8 MiB. Head reports the provider's size even above the limit (Go refuses, F13); get refuses it with `TooLarge`. |
 | Create-only | `If-None-Match: *`, single PUT ≤ 8 MiB only | `If-None-Match: *` on every size (single PUT only), one attempt. A 412 on that single attempt is `AlreadyExists`. |
 
@@ -101,7 +102,7 @@ A closed error enum. Each variant tells the caller what it may do next:
 | --- | --- |
 | `NotFound` | The object does not exist (`NoSuchKey`, `NotFound`, 404 on get or head). Delete of a missing key succeeds, as S3 does. |
 | `AlreadyExists` | A create-only put found the key (412 on its only attempt). |
-| `TooLarge` | A declared or reported size exceeds `max_object_bytes`. Nothing was sent. |
+| `TooLarge` | A declared or reported size exceeds `max_object_bytes`. A put sends nothing; a get refuses the body after receiving its headers. |
 | `Busy` | The process admission limit is full. Nothing was sent. |
 | `Unavailable` | Not applied and transient: any failed read, or a mutation the provider refused before applying it (429, 503, 409 `ConditionalRequestConflict`). Retrying is safe. A mutation's transport failure is not here: the SDK cannot say whether the request reached the provider. |
 | `Rejected` | Not applied and permanent: another 4xx such as 400, 403, or 404 `NoSuchBucket`. Configuration, credentials, or input are wrong. |
@@ -120,7 +121,7 @@ outcome is unknown by construction.
 | Retry | The SDK standard retryer, three attempts with each delay capped at 1 s (the SDK default of 20 s would outlast an interactive timeout), for get, head, and the probe. Put and delete run exactly one attempt through a per-operation `config_override`: the SDK keeps only the last attempt's reply, so after a retry a refusal could hide an applied earlier attempt, and a 412 could answer a retry of this call's own lost success (Go F3). The independent review found the first case; the original Go spec (D6) had also chosen one-attempt mutations. |
 | Timeouts | `object_storage.operation_timeout` bounds one call from start to response headers, retries included: default `5s` (pricing's put, head, and delete budgets), inclusive `1s` to `15m`. Connect is the SDK's 3.1 s from the pinned behavior version. A download body is bounded by the SDK's stalled-stream protection (no progress for 5 s fails it; stated in code because an explicit config takes the builder's 20 s), not by the operation timeout. A streamed upload is held to its declared length, because hyper cuts a longer body at `Content-Length` silently. |
 | Behavior version | `BehaviorVersion::v2026_01_12()` in code, not the `behavior-version-latest` feature, so an SDK bump cannot silently change retry, timeout, or proxy defaults. |
-| Admission | Reject, do not queue: `Semaphore::try_acquire_owned` refuses excess work with `Busy`. `object_storage.max_concurrency`, default 8, inclusive 1 to 512. Go's fixed 4 is too low for document-processing's per-request reads. The permit is held through a download's body. Worst-case buffered memory is `max_concurrency × max_object_bytes` (64 MiB by default); the guide states the formula. |
+| Admission | Reject, do not queue: `Semaphore::try_acquire_owned` refuses excess work with `Busy`. `object_storage.max_concurrency`, default 8, inclusive 1 to 512. Go's fixed 4 is too low for document-processing's per-request reads. The permit is held through a download's body. `max_concurrency × max_object_bytes` budgets admitted downloads' collected payload (64 MiB by default), not process RSS: collection copies, SDK buffers and allocation overhead add to it, and completed `Bytes` outlive their slots. The consuming HTTP/job path owns retained-response concurrency and payload budgets. |
 | Readiness | Not a readiness dependency, and startup performs no I/O. `probe()` returns a `HeadBucket` probe that a service registers only when its business outcome requires storage (document-processing's worker does). A bucket probe during a provider outage would otherwise evict every replica. |
 
 ### Integrity
@@ -138,11 +139,15 @@ outcome is unknown by construction.
   never on Railway until a conformance run proves Tigris accepts it (Tigris
   documents only a SHA-256 checksum).
 - Downloads send `x-amz-checksum-mode: ENABLED` and the SDK validates a
-  full-object checksum at EOF when the provider returns one. A missing
+  supported, decodable full-object checksum at EOF when available. It skips
+  composite/part-level checksums ending in `-N` and logs then skips invalid
+  base64 (`aws-sdk-s3` 1.150.0, `src/http_response_checksum.rs`). A missing
   checksum is not a failure: objects written by other clients (Go SDK v2
   defaults to CRC32) must stay readable (Go F6).
-- Consumers keep their own content digest where the business needs it; both
-  production consumers already store SHA-256 in PostgreSQL.
+- Consumers keep their own authoritative expected digest where the business
+  needs end-to-end integrity, and their adapters verify the downloaded content
+  before returning a verified value. ETag and size are not a content digest;
+  both recorded production consumers store SHA-256 in PostgreSQL.
 
 ### Providers and configuration
 
@@ -296,3 +301,33 @@ Verified in the SDK sources (`aws-smithy-runtime` 1.15.0,
 
 Unproven: no run against an AWS account exercised a workload identity, and
 no `s3_compatible` store has a conformance run.
+
+## Addendum 2026-10-02: adoption contract closure
+
+The review reconciled the current guide, decision record, configuration policy,
+component graph, and Rustdoc with the implementation. The changed rows above
+close four interpretation gaps:
+
+- Feature-owned business interfaces enforce dependency direction; provider
+  adapters hold the concrete client and map storage types and errors. A fake
+  uses that existing boundary rather than creating it solely for tests.
+- Storage admission bounds active downloads, while completed bytes remain
+  owned by callers. The default 64 MiB payload budget is not a memory ceiling
+  for the service; SDK buffers and collection overhead also consume memory.
+- Checksum verification is conditional. EOF and the SDK's supported checksum
+  validation protect the final chunk, but a successful get is not an integrity
+  attestation. An authoritative digest is the feature's stricter contract.
+- `object_store`'s [zero-retry setting](https://docs.rs/object_store/0.14.2/object_store/struct.RetryConfig.html)
+  is a supported alternative, confirmed in the 0.14.2 registry sources
+  (`src/client/retry.rs`, `src/aws/builder.rs`). It removes the retry objection
+  without closing the remaining error, streaming, and integrity gaps.
+
+The registry refresh found `aws-sdk-s3` 1.152.0, released 2026-10-01; the
+project deliberately retains 1.150.0 and its pinned behavior version. Refresh
+the SDK-family resolution and adapter/emulator proof when updating that pin.
+The selection does not depend on always having the newest release.
+
+Direct streaming to slow external clients still needs an externally enforced
+transfer deadline if buffering or presigning cannot meet a real feature's
+requirements. Provider conformance and AWS workload identity remain adopter
+proof, as the guide already requires; this amendment records no live run.

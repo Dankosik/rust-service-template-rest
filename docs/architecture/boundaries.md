@@ -94,6 +94,12 @@ tests over an in-process HTTP stub, so `make test` needs no credentials or
 Docker. Its emulator proof runs versitygw through Compose; its live provider
 test is ignored and runs only by explicit authorization. The service process
 test observes that startup sends nothing and refuses a production emulator.
+
+A feature owns the business interface for its storage need. Its provider
+adapter depends on that feature and `infra-object-storage`, maps keys, errors,
+and any required content-digest check, and is wired by composition. The feature
+does not depend on this provider crate or expose its types. No general storage
+trait or empty adapter crate is created before the first real feature needs it.
 <!-- template:end object-storage:docs-boundaries-object-storage-tests -->
 
 ## Dependency Direction
@@ -126,7 +132,8 @@ a feature -> infra-cache for namespace get, set, and delete
 <!-- template:begin object-storage:docs-boundaries-object-storage-edges -->
   -> infra-object-storage -> aws-sdk-s3, aws-config, aws-smithy-http-client, health, secrecy, metrics, tracing, tokio
 service -> infra-object-storage for construction, shutdown drop, and optional probe registration
-a feature -> infra-object-storage for put, get, head, delete, and presigned GET
+a feature's provider adapter -> feature (business interface), infra-object-storage
+service -> the feature's provider adapter for business-interface wiring
 <!-- template:end object-storage:docs-boundaries-object-storage-edges -->
 <!-- template:begin outbox:docs-boundaries-outbox-edges -->
 infra-messaging::outbox -> domain-events, infra-jobs, infra-postgres, base64
