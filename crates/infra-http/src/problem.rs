@@ -7,7 +7,7 @@
 //! the standard members say only what the status says and `code` is the one
 //! identifier. A code with no matching response in a service's contract is
 //! unreachable, not wrong. Connection-layer outcomes (hyper 431, the
-//! accept-cap close, a silent first-byte close) are not `Problem` values
+//! accept-cap close, a protocol-sniff deadline close) are not `Problem` values
 //! even when a matching `Code` exists in the catalog.
 //!
 //! The same types describe themselves in the OpenAPI document: `ToSchema`

@@ -391,7 +391,8 @@ into its panic.
 - `http.header_read_timeout` (default `5s`) bounds delivery of a request head
   and, because hyper restarts it whenever an HTTP/1 connection goes idle, is
   also the HTTP/1 keep-alive idle bound. HTTP/2 idle uses a separate PING
-  cadence. It also closes a client that connects and sends nothing.
+  cadence. It also closes a client that connects and sends nothing, or only
+  the start of the HTTP/2 preface.
 - `health.probe_budget` (default `4s`) bounds one background readiness
   evaluation; every probe runs under it at the same time, and
   `/health/ready` itself never runs a probe. The verdict names the first

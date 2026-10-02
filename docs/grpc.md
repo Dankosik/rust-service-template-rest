@@ -42,7 +42,7 @@ expect. Every application method requires the opening bearer. Selecting
 
 Process TLS uses the same accept loop. `security = "tls"` builds a rustls
 `ServerConfig` in `infra_grpc` and passes it to
-`infra_http::Server::bind_tls`. The handshake runs after the first-byte peek.
+`infra_http::Server::bind_tls`. The handshake has its own five-second bound.
 Supply the PEM certificate chain in `grpc.certificate` and
 `APP__GRPC__PRIVATE_KEY` through the environment. The private key is rejected
 in configuration files. `grpc.client_ca` makes verified client certificates
@@ -218,8 +218,9 @@ Listener options, shared with HTTP except for the values below:
   `MaxConnectionAge`, so connections opened together do not all reconnect
   together. There is no forced close after the age: a stream that outlives
   it keeps its connection until it ends.
-- 5 seconds to the first byte, then a separate 5 second TLS handshake bound.
-  A handshake error or timeout closes the connection without a response.
+- 5 seconds for the TLS handshake, then 5 seconds for the HTTP/2 preface.
+  A handshake error or either timeout closes the connection without a
+  response.
 - 16 KiB of request metadata.
 - HTTP/2 PING keepalive every 20 seconds, with a 20 second timeout.
 - `TCP_NODELAY`, so response headers, data, and trailers do not wait for the

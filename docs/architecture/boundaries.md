@@ -291,11 +291,12 @@ silently reopen:
   no maintained crate publishes a cached verdict with a failure threshold,
   staleness guard, and drain flag (`health` on crates.io is unmaintained since
   2022; `axum-health` probes per request).
-- **The accept loop is template-owned** (about eighty lines over
+- **The accept loop is template-owned** (over
   `hyper_util::server::conn::auto`): `axum::serve` sets no timer and exposes
   no connection limits, so hyper's header timeout is silently disabled there
-  (axum #2741) and the `auto` builder starts no timer until the first byte
-  (hyper #3756); the loop adds the permit, the peek, and the timer.
+  (axum #2741) and the `auto` builder starts no timer until the protocol is
+  decided (hyper #3756); the loop adds the permit, the sniff deadline, and
+  the timer.
 <!-- template:begin postgres:docs-boundaries-migrator-decision -->
 - **`migrate` is a library plus a binary in one crate** so the runner is
   testable against fixture migrators while the binary embeds the real set;
