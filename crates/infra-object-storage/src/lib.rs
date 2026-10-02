@@ -1,8 +1,10 @@
 //! Optional S3-compatible object storage client for one bucket at one fixed
 //! endpoint.
 //!
-//! The calling feature owns keys, authorization, content policy, retention,
-//! and whether an operation is create-only. The AWS SDK owns signing, the
+//! The feature owns keys, authorization, content policy, retention,
+//! and whether an operation is create-only. Its provider adapter uses this
+//! client and maps storage results into the feature's business interface;
+//! the feature does not depend on this crate. The AWS SDK owns signing, the
 //! wire protocol, retries, checksums, and presigning; this crate admits the
 //! provider tuple, bounds size and concurrency, maps every result onto
 //! [`ObjectStorageError`], and observes each call without recording keys.
@@ -12,7 +14,9 @@
 //!
 //! [`PutBody::stream`] takes any `http_body::Body`, and [`Download`] is one,
 //! so a request body can be stored and an object returned as a response body
-//! without an adapter.
+//! without a body conversion. Direct response streaming holds an admission
+//! slot at the reader's pace; use collected bytes or a presigned URL for a
+//! reader that may be slow.
 
 mod body;
 mod credentials;
