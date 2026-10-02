@@ -287,8 +287,8 @@ failure class: `provider_timeout`, `provider_connect`, `provider_status_4xx`,
 `provider_too_large` or `provider_transfer`. It uses the default histogram
 buckets. Each exchange also runs in an `authn_provider` client span, exported
 under its method name, that carries the operation, the provider host and port,
-the response status and, when the exchange failed, the same class as
-`error.type`; never a path, query or credential. An introspection span is a child of the
+the status of a successful or status-refused response and, when the exchange
+failed, the same class as `error.type`; never a path, query or credential. An introspection span is a child of the
 request's span; a key refresh has no request and starts its own trace. A
 caller that stops waiting, including the startup budget, is `cancelled`.
 A system clock before the Unix epoch reads as the far future, so a token is
