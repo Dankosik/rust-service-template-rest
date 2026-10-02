@@ -172,10 +172,11 @@ primary key uses C-collated endpoint text and binary message IDs. Only the first
 insert enqueues a job; an authenticated duplicate leaves the original job body
 and content type unchanged. A new receipt's database-default `received_at`
 records its first admission and never refreshes on replay. The service process
-deletes receipts older than 7 days, in batches, every 60 seconds, starting at
+deletes receipts older than 14 days, in batches, every 60 seconds, starting at
 boot. A sender retries one message ID with fresh timestamps for its whole retry
 horizon (Standard Webhooks senders retry for more than a day; this template's
-outbound schedule runs about six days), so receipts must outlive that horizon.
+outbound schedule runs about six and a half days before jitter and any
+`Retry-After` floor), so receipts are kept for twice that horizon.
 The specification's 5-minute example only covers replay of one signed request.
 
 The worker uses existing jobs policy (25 attempts, 60 seconds), resolves a
@@ -188,7 +189,7 @@ cannot undo an already committed completion. An external consumer must supply
 recipient idempotency from endpoint/message identity because PostgreSQL cannot
 roll back its effect.
 
-Receipts older than 7 days are deleted by that service-process cleanup; deleting
+Receipts older than 14 days are deleted by that service-process cleanup; deleting
 one permits reacceptance of that identity. This profile does not certify payload erasure,
 legal retention, provider registration, capacity, TLS ingress, or production
 operation. Terminal job retention remains jobs-owned and cannot delete live work.
@@ -226,5 +227,5 @@ label. A requested ID that matches no configured endpoint is caller-controlled:
 it is counted as unknown_endpoint without an `endpoint` label and never logged.
 Never use webhook IDs, URLs, payloads, signatures, secrets, or arbitrary errors
 as labels or diagnostic values. Jobs owns queue/attempt telemetry; no second
-webhook worker, lifecycle, or delivery observer exists.
+webhook worker or lifecycle exists.
 <!-- template:end inbound-webhooks:docs-inbound-webhooks-guide -->

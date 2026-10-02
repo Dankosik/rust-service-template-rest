@@ -698,7 +698,7 @@ async fn a_provider_verifier_shares_the_receipt_path_beside_standard_webhooks(po
 async fn remove_expired_deletes_only_receipts_older_than_retention(pool: PgPool) {
     sqlx::query(
         "INSERT INTO webhook_receipts (endpoint_id, message_id, received_at) \
-         VALUES ($1, $2, now() - interval '8 days'), ($1, $3, now())",
+         VALUES ($1, $2, now() - interval '15 days'), ($1, $3, now() - interval '13 days')",
     )
     .bind("partner")
     .bind(vec![1_u8])

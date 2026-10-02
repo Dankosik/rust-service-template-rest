@@ -3,6 +3,7 @@
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +12,7 @@ use infra_postgres::{Tx, observed};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sqlx::postgres::PgPool;
+use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 use crate::enqueue::{InvalidDelay, checked_delay_micros};
@@ -291,13 +293,18 @@ where
     }
 }
 
-/// The claiming worker's attempt budget and timeout for one kind.
+/// The claiming worker's attempt budget, timeout, and concurrency for one kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Policy {
     /// `1..=MAX_ATTEMPTS`.
     pub max_attempts: u16,
     /// `MIN_TIMEOUT..=MAX_TIMEOUT`.
     pub timeout: Duration,
+    /// The most attempts of this kind one engine runs at once. The engine
+    /// claims no more than the free part, so the kind's due jobs wait in the
+    /// queue and the engine's other slots stay free for its other kinds.
+    /// `None` leaves the engine's slots as the only bound.
+    pub max_running: Option<NonZeroU32>,
 }
 
 impl Default for Policy {
@@ -305,6 +312,7 @@ impl Default for Policy {
         Self {
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             timeout: DEFAULT_TIMEOUT,
+            max_running: None,
         }
     }
 }
@@ -329,6 +337,11 @@ impl Kinds {
         self.entries.push(Registered {
             name: K::NAME,
             policy,
+            running: policy.max_running.map(|limit| {
+                Arc::new(Semaphore::new(
+                    usize::try_from(limit.get()).unwrap_or(Semaphore::MAX_PERMITS),
+                ))
+            }),
             dispatch: Box::new(Typed {
                 handler: Arc::new(handler),
                 _kind: PhantomData,
@@ -487,6 +500,8 @@ pub const fn assert_valid_kind_name(name: &str) {
 pub(crate) struct Registered {
     pub(crate) name: &'static str,
     pub(crate) policy: Policy,
+    /// The free part of `policy.max_running`, when the kind sets one.
+    pub(crate) running: Option<Arc<Semaphore>>,
     pub(crate) dispatch: Box<dyn Dispatch>,
     /// Handles for every completed attempt, registered once the engine starts
     /// under the installed recorder.
@@ -630,6 +645,7 @@ mod tests {
             refuse(Policy {
                 max_attempts: 0,
                 timeout: DEFAULT_TIMEOUT,
+                ..Policy::default()
             }),
             KindError::InvalidPolicy {
                 kind: "sample",
@@ -640,6 +656,7 @@ mod tests {
             refuse(Policy {
                 max_attempts: 26,
                 timeout: DEFAULT_TIMEOUT,
+                ..Policy::default()
             })
             .to_string(),
             "job kind \"sample\": max_attempts must be between 1 and 25"
@@ -648,6 +665,7 @@ mod tests {
             refuse(Policy {
                 max_attempts: 1,
                 timeout: Duration::from_millis(999),
+                ..Policy::default()
             }),
             KindError::InvalidPolicy {
                 kind: "sample",
@@ -658,6 +676,7 @@ mod tests {
             refuse(Policy {
                 max_attempts: 1,
                 timeout: MAX_TIMEOUT + Duration::from_nanos(1),
+                ..Policy::default()
             })
             .to_string(),
             "job kind \"sample\": timeout must be between 1s and 1h"
@@ -665,10 +684,12 @@ mod tests {
         admit(Policy {
             max_attempts: 1,
             timeout: MIN_TIMEOUT,
+            ..Policy::default()
         });
         admit(Policy {
             max_attempts: MAX_ATTEMPTS,
             timeout: MAX_TIMEOUT,
+            ..Policy::default()
         });
     }
 

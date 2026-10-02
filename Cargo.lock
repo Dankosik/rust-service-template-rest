@@ -2732,6 +2732,7 @@ dependencies = [
  "infra-jobs",
  "infra-outbound-http",
  "infra-postgres",
+ "metrics",
  "serde",
  "serde_json",
  "serde_with",

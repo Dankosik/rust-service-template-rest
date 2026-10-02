@@ -7,6 +7,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    num::NonZeroU32,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -28,10 +29,17 @@ const DEFAULT_CONTENT_TYPE: &str = "application/json";
 const RESPONSE_HEADER_COUNT: usize = 64;
 const RESPONSE_BODY_BYTES: usize = 64 * 1024;
 
-/// Jobs policy for one outbound delivery attempt.
+/// Delivery attempts by result. Label `outcome` is `delivered`, `retryable`,
+/// or `permanent`. A configured endpoint adds its operator-chosen ID as
+/// `endpoint`, and a failure adds its static `reason`.
+pub const WEBHOOK_DELIVERY_OUTCOMES_METRIC: &str = "webhook_delivery_outcomes_total";
+
+/// Jobs policy for one outbound delivery attempt. [`Dispatcher::register`]
+/// sets the concurrency bound.
 pub const DELIVERY_POLICY: Policy = Policy {
     max_attempts: 20,
     timeout: Duration::from_secs(30),
+    max_running: None,
 };
 
 const LIMITS: Limits = Limits {
@@ -113,11 +121,11 @@ impl Endpoint {
     ///
     /// # Errors
     ///
-    /// Returns [`OutboundError::InvalidEndpoint`] for an unusable destination or
-    /// client limit, and [`OutboundError::Client`] when client construction fails.
-    pub fn new(destination: &str, keys: KeyRing) -> Result<Self, OutboundError> {
+    /// Returns [`EndpointError::InvalidDestination`] for an unusable destination,
+    /// and [`EndpointError::Client`] when client construction fails.
+    pub fn new(destination: &str, keys: KeyRing) -> Result<Self, EndpointError> {
         let destination = parse_destination(destination)?;
-        let client = Client::new(&destination, LIMITS).map_err(OutboundError::Client)?;
+        let client = Client::new(&destination, LIMITS).map_err(EndpointError::Client)?;
         Ok(Self {
             destination,
             client,
@@ -132,21 +140,21 @@ impl Endpoint {
     ///
     /// # Errors
     ///
-    /// Returns [`OutboundError::InvalidEndpoint`] when the destination cannot
+    /// Returns [`EndpointError::InvalidDestination`] when the destination cannot
     /// be represented as an HTTP request URI.
     #[cfg(feature = "test-support")]
     pub fn with_client(
         destination: Url,
         client: Client,
         keys: KeyRing,
-    ) -> Result<Self, OutboundError> {
+    ) -> Result<Self, EndpointError> {
         if !matches!(destination.scheme(), "http" | "https")
             || destination.host().is_none()
             || !destination.username().is_empty()
             || destination.password().is_some()
             || destination.fragment().is_some()
         {
-            return Err(OutboundError::InvalidEndpoint);
+            return Err(EndpointError::InvalidDestination);
         }
         Ok(Self {
             destination,
@@ -176,11 +184,22 @@ impl Dispatcher {
 
     /// Register `webhooks.deliver` with the existing jobs kind registry.
     ///
-    /// The dispatcher is consumed into the registered handler; no webhook task
-    /// or retry loop is spawned.
-    pub fn register(self, kinds: &mut Kinds) -> &mut Kinds {
+    /// `max_concurrent` bounds the deliveries one engine runs at once, so a
+    /// receiver that answers slowly cannot hold every job slot; `None` leaves
+    /// the engine's slots as the only bound. The dispatcher is consumed into
+    /// the registered handler; no webhook task or retry loop is spawned.
+    pub fn register(self, kinds: &mut Kinds, max_concurrent: Option<NonZeroU32>) -> &mut Kinds {
+        metrics::describe_counter!(
+            WEBHOOK_DELIVERY_OUTCOMES_METRIC,
+            metrics::Unit::Count,
+            "Outbound webhook delivery attempts by result."
+        );
         let dispatcher = Arc::new(self);
-        kinds.register(DELIVERY_POLICY, move |job| {
+        let policy = Policy {
+            max_running: max_concurrent,
+            ..DELIVERY_POLICY
+        };
+        kinds.register(policy, move |job| {
             let dispatcher = Arc::clone(&dispatcher);
             async move { dispatcher.dispatch(job).await }
         })
@@ -196,23 +215,44 @@ impl Dispatcher {
                 webhook.reason = "missing_endpoint",
                 "webhook_delivery_finished"
             );
+            // The ID is no longer configured, so it is not a label.
+            metrics::counter!(
+                WEBHOOK_DELIVERY_OUTCOMES_METRIC,
+                "outcome" => "retryable",
+                "reason" => "missing_endpoint"
+            )
+            .increment(1);
             return Err(JobError::retryable(DeliveryOutcome::MissingEndpoint));
         };
-        let timestamp = unix_timestamp(SystemTime::now())
-            .ok_or_else(|| JobError::retryable(DeliveryOutcome::ClockUnavailable))?;
+        let Some(timestamp) = unix_timestamp(SystemTime::now()) else {
+            count_failure(endpoint_id, "retryable", "clock_unavailable");
+            return Err(JobError::retryable(DeliveryOutcome::ClockUnavailable));
+        };
         let message_id = job.id().to_string();
-        let signature = endpoint
+        let request = endpoint
             .keys
             .signatures(message_id.as_bytes(), timestamp, &delivery.body)
-            .map_err(|_| JobError::permanent(DeliveryOutcome::InvalidPayload))?;
-        let request = request(
-            delivery,
-            &endpoint.destination,
-            &message_id,
-            timestamp,
-            &signature,
-        )
-        .map_err(|_| JobError::permanent(DeliveryOutcome::InvalidPayload))?;
+            .ok()
+            .and_then(|signature| {
+                request(
+                    delivery,
+                    &endpoint.destination,
+                    &message_id,
+                    timestamp,
+                    &signature,
+                )
+                .ok()
+            });
+        let Some(request) = request else {
+            tracing::warn!(
+                webhook.endpoint = endpoint_id,
+                webhook.outcome = "permanent",
+                webhook.reason = "invalid_payload",
+                "webhook_delivery_finished"
+            );
+            count_failure(endpoint_id, "permanent", "invalid_payload");
+            return Err(JobError::permanent(DeliveryOutcome::InvalidPayload));
+        };
         let response = endpoint.client.execute(request, job.deadline()).await;
         classify_response(endpoint_id, response, SystemTime::now())
     }
@@ -253,9 +293,6 @@ pub enum OutboundError {
     /// The producer selected no configured endpoint.
     #[error("outbound webhook endpoint is not configured")]
     UnknownEndpoint,
-    /// An endpoint identity, URL, or transport construction is invalid.
-    #[error("outbound webhook endpoint configuration is invalid")]
-    InvalidEndpoint,
     /// The producer body is larger than the wire capability permits.
     #[error("outbound webhook body exceeds the maximum size")]
     BodyTooLarge,
@@ -268,6 +305,15 @@ pub enum OutboundError {
     /// A no-unique-key delivery unexpectedly received a duplicate result.
     #[error("outbound webhook enqueue unexpectedly deduplicated")]
     UnexpectedDuplicate,
+}
+
+/// Why a worker could not build one configured endpoint.
+#[derive(Debug, thiserror::Error)]
+pub enum EndpointError {
+    /// The destination is not an HTTPS URL with a host, or carries
+    /// credentials or a fragment.
+    #[error("outbound webhook destination is invalid")]
+    InvalidDestination,
     /// Existing fixed-authority client construction failed.
     #[error("outbound webhook client configuration is invalid")]
     Client(#[source] BuildError),
@@ -308,15 +354,15 @@ const fn transport_reason(error: &HttpError) -> &'static str {
     }
 }
 
-fn parse_destination(raw: &str) -> Result<Url, OutboundError> {
-    let destination = Url::parse(raw).map_err(|_| OutboundError::InvalidEndpoint)?;
+fn parse_destination(raw: &str) -> Result<Url, EndpointError> {
+    let destination = Url::parse(raw).map_err(|_| EndpointError::InvalidDestination)?;
     if destination.scheme() != "https"
         || destination.host().is_none()
         || !destination.username().is_empty()
         || destination.password().is_some()
         || destination.fragment().is_some()
     {
-        return Err(OutboundError::InvalidEndpoint);
+        return Err(EndpointError::InvalidDestination);
     }
     Ok(destination)
 }
@@ -327,7 +373,7 @@ fn request(
     message_id: &str,
     timestamp: i64,
     signature: &str,
-) -> Result<Request<Bytes>, OutboundError> {
+) -> Result<Request<Bytes>, http::Error> {
     Request::builder()
         .method(Method::POST)
         .uri(destination.as_str())
@@ -336,7 +382,6 @@ fn request(
         .header("webhook-timestamp", timestamp.to_string())
         .header("webhook-signature", signature)
         .body(delivery.body.clone())
-        .map_err(|_| OutboundError::InvalidEndpoint)
 }
 
 fn classify_response(
@@ -352,6 +397,12 @@ fn classify_response(
                 http.status = response.status().as_u16(),
                 "webhook_delivery_finished"
             );
+            metrics::counter!(
+                WEBHOOK_DELIVERY_OUTCOMES_METRIC,
+                "endpoint" => endpoint_id.to_owned(),
+                "outcome" => "delivered"
+            )
+            .increment(1);
             Ok(())
         }
         Ok(response) if response.status() == StatusCode::GONE => {
@@ -364,6 +415,7 @@ fn classify_response(
                 http.status = response.status().as_u16(),
                 "webhook_delivery_finished"
             );
+            count_failure(endpoint_id, "permanent", "endpoint_gone");
             Err(JobError::permanent(DeliveryOutcome::EndpointGone))
         }
         Ok(response) => {
@@ -374,6 +426,7 @@ fn classify_response(
                 http.status = response.status().as_u16(),
                 "webhook_delivery_finished"
             );
+            count_failure(endpoint_id, "retryable", "response_status");
             let outcome = DeliveryOutcome::Status(response.status());
             if let Some(delay) = retry_after(response.headers(), response_time) {
                 return Err(JobError::retry_after_at_least(outcome, delay)?);
@@ -388,9 +441,20 @@ fn classify_response(
                 webhook.reason = reason,
                 "webhook_delivery_finished"
             );
+            count_failure(endpoint_id, "retryable", reason);
             Err(JobError::retryable(DeliveryOutcome::Transport(reason)))
         }
     }
+}
+
+fn count_failure(endpoint_id: &str, outcome: &'static str, reason: &'static str) {
+    metrics::counter!(
+        WEBHOOK_DELIVERY_OUTCOMES_METRIC,
+        "endpoint" => endpoint_id.to_owned(),
+        "outcome" => outcome,
+        "reason" => reason
+    )
+    .increment(1);
 }
 
 fn retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
@@ -417,7 +481,7 @@ mod tests {
 
     use http::{HeaderMap, HeaderValue, header};
 
-    use super::{Endpoint, OutboundError, RETRY_AFTER_CAP, parse_destination, retry_after};
+    use super::{Endpoint, EndpointError, RETRY_AFTER_CAP, parse_destination, retry_after};
     use crate::protocol::KeyRing;
 
     fn ring() -> KeyRing {
@@ -518,11 +582,114 @@ mod tests {
         );
     }
 
+    /// Collects the key of every counter a delivery registers.
+    #[derive(Default)]
+    struct Keys(std::sync::Mutex<Vec<metrics::Key>>);
+
+    impl metrics::Recorder for Keys {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            self.0.lock().expect("keys").push(key.clone());
+            metrics::Counter::noop()
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    #[test]
+    fn each_attempt_is_counted_by_endpoint_outcome_and_reason_without_the_status() {
+        let response = |status: u16| {
+            Ok(http::Response::builder()
+                .status(status)
+                .body(bytes::Bytes::new())
+                .unwrap())
+        };
+        let keys = Keys::default();
+        metrics::with_local_recorder(&keys, || {
+            for exchange in [
+                response(204),
+                response(503),
+                response(410),
+                Err(super::HttpError::Timeout),
+            ] {
+                let _ = super::classify_response("partner", exchange, UNIX_EPOCH);
+            }
+        });
+        let labels: Vec<Vec<(String, String)>> = keys
+            .0
+            .lock()
+            .expect("keys")
+            .iter()
+            .map(|key| {
+                assert_eq!(key.name(), super::WEBHOOK_DELIVERY_OUTCOMES_METRIC);
+                key.labels()
+                    .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                    .collect()
+            })
+            .collect();
+        let failure = |outcome: &str, reason: &str| {
+            vec![
+                ("endpoint".to_owned(), "partner".to_owned()),
+                ("outcome".to_owned(), outcome.to_owned()),
+                ("reason".to_owned(), reason.to_owned()),
+            ]
+        };
+        assert_eq!(
+            labels,
+            [
+                vec![
+                    ("endpoint".to_owned(), "partner".to_owned()),
+                    ("outcome".to_owned(), "delivered".to_owned()),
+                ],
+                failure("retryable", "response_status"),
+                failure("permanent", "endpoint_gone"),
+                failure("retryable", "timeout"),
+            ]
+        );
+    }
+
     #[test]
     fn endpoint_construction_failure_is_a_closed_error() {
         assert!(matches!(
             Endpoint::new("http://partner.example/events", ring()),
-            Err(OutboundError::InvalidEndpoint)
+            Err(EndpointError::InvalidDestination)
         ));
     }
 }

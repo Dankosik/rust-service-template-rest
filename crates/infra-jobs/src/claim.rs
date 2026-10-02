@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use infra_postgres::observed;
 use sqlx::postgres::{PgConnection, PgListener, PgPool, PgPoolOptions};
-use tokio::sync::{OwnedSemaphorePermit, SemaphorePermit};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, SemaphorePermit};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -42,6 +42,44 @@ pub(crate) struct Claimed {
     pub(crate) trace_context: Option<String>,
     pub(crate) trace_state: Option<String>,
     pub(crate) slot: OwnedSemaphorePermit,
+    pub(crate) kind_slot: Option<KindSlot>,
+}
+
+/// One attempt's place under its kind's `max_running`.
+///
+/// A full kind leaves the claim loop idle with free engine slots, so the
+/// release that frees a place in a full kind wakes the loop instead of
+/// leaving the kind's due jobs to the next poll.
+#[derive(Debug)]
+pub(crate) struct KindSlot {
+    permit: Option<OwnedSemaphorePermit>,
+    wake: Arc<Notify>,
+}
+
+impl KindSlot {
+    /// The claim loop is the only taker and asked for no more than the free
+    /// part, so a place is free for every row it drew.
+    fn take(running: &Arc<Semaphore>, wake: &Arc<Notify>) -> Option<Self> {
+        let permit = Arc::clone(running).try_acquire_owned().ok()?;
+        Some(Self {
+            permit: Some(permit),
+            wake: Arc::clone(wake),
+        })
+    }
+}
+
+impl Drop for KindSlot {
+    fn drop(&mut self) {
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        let was_full = permit.semaphore().available_permits() == 0;
+        // Released before the wake, so the woken loop sees the free place.
+        drop(permit);
+        if was_full {
+            self.wake.notify_one();
+        }
+    }
 }
 
 /// Describe claim metrics once during engine startup.
@@ -267,23 +305,32 @@ async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
 /// lateral), so a row another session holds is skipped and the scan moves on.
 /// Choosing ids first and locking them afterwards hands concurrent workers the
 /// same few ids: the losers claim nothing until the next poll.
+///
+/// A kind's `claim_limit` is the free slots, or the free part of its
+/// `max_running` when that is smaller. It bounds each scan and, through the
+/// rank, the kind's due and expired rows together.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one statement, and its binds beside it"
+)]
 async fn claim(
     connection: &mut PgConnection,
     shared: &Shared,
     requested: i64,
 ) -> Result<Vec<Drawn>, sqlx::Error> {
-    let (names, max_attempts, timeouts) = policy_binds(&shared.registry);
+    let (names, max_attempts, timeouts, limits) = policy_binds(&shared.registry, requested);
     observed(
         "claim jobs",
         sqlx::query_as!(
             ClaimRow,
             "WITH policy AS ( \
-                 SELECT policy.kind, policy.max_attempts, policy.timeout_micros \
-                 FROM unnest($1::text[], $2::smallint[], $3::bigint[]) \
-                     AS policy (kind, max_attempts, timeout_micros) \
+                 SELECT policy.kind, policy.max_attempts, policy.timeout_micros, \
+                        policy.claim_limit \
+                 FROM unnest($1::text[], $2::smallint[], $3::bigint[], $6::bigint[]) \
+                     AS policy (kind, max_attempts, timeout_micros, claim_limit) \
              ), \
              candidates AS ( \
-                 SELECT candidate.id, candidate.not_before \
+                 SELECT candidate.id, candidate.not_before, policy.kind, policy.claim_limit \
                  FROM policy \
                  CROSS JOIN LATERAL ( \
                      SELECT job.id, job.not_before \
@@ -292,11 +339,11 @@ async fn claim(
                        AND job.kind = policy.kind \
                        AND job.not_before <= statement_timestamp() \
                      ORDER BY job.not_before, job.id \
-                     LIMIT $4 \
+                     LIMIT policy.claim_limit \
                      FOR UPDATE SKIP LOCKED \
                  ) AS candidate \
                  UNION ALL \
-                 SELECT candidate.id, candidate.not_before \
+                 SELECT candidate.id, candidate.not_before, policy.kind, policy.claim_limit \
                  FROM policy \
                  CROSS JOIN LATERAL ( \
                      SELECT job.id, job.not_before \
@@ -305,14 +352,23 @@ async fn claim(
                        AND job.kind = policy.kind \
                        AND job.claim_expires_at <= statement_timestamp() \
                      ORDER BY job.not_before, job.id \
-                     LIMIT $4 \
+                     LIMIT policy.claim_limit \
                      FOR UPDATE SKIP LOCKED \
                  ) AS candidate \
              ), \
-             picked AS ( \
-                 SELECT candidates.id \
+             ranked AS ( \
+                 SELECT candidates.id, candidates.not_before, candidates.claim_limit, \
+                        row_number() OVER ( \
+                            PARTITION BY candidates.kind \
+                            ORDER BY candidates.not_before, candidates.id \
+                        ) AS position \
                  FROM candidates \
-                 ORDER BY candidates.not_before, candidates.id \
+             ), \
+             picked AS ( \
+                 SELECT ranked.id \
+                 FROM ranked \
+                 WHERE ranked.position <= ranked.claim_limit \
+                 ORDER BY ranked.not_before, ranked.id \
                  LIMIT $4 \
              ) \
              UPDATE background_jobs AS job \
@@ -322,7 +378,7 @@ async fn claim(
                  claim_expires_at = CASE WHEN job.attempts >= policy.max_attempts THEN NULL \
                                          ELSE statement_timestamp() \
                                               + policy.timeout_micros * interval '1 microsecond' \
-                                              + $6::bigint * interval '1 microsecond' END, \
+                                              + $7::bigint * interval '1 microsecond' END, \
                  attempts = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempts \
                                  ELSE job.attempts + 1 END, \
                  attempted_by = CASE WHEN job.attempts >= policy.max_attempts THEN job.attempted_by \
@@ -356,6 +412,7 @@ async fn claim(
             &timeouts,
             requested,
             shared.worker_id,
+            &limits,
             lease_reserve_micros(),
         )
         .try_map(|row| row.into_drawn(&shared.registry))
@@ -368,16 +425,25 @@ fn lease_reserve_micros() -> i64 {
     i64::try_from(LEASE_RESERVE.as_micros()).unwrap_or(i64::MAX)
 }
 
-fn policy_binds(registry: &crate::Registry) -> (Vec<&str>, Vec<i16>, Vec<i64>) {
+/// Each kind's name, attempt budget, timeout, and how many rows this claim
+/// may draw of it.
+fn policy_binds(
+    registry: &crate::Registry,
+    requested: i64,
+) -> (Vec<&str>, Vec<i16>, Vec<i64>, Vec<i64>) {
     let mut names = Vec::new();
     let mut max_attempts = Vec::new();
     let mut timeouts = Vec::new();
+    let mut limits = Vec::new();
     for registered in registry.iter() {
         names.push(registered.name);
         max_attempts.push(i16::try_from(registered.policy.max_attempts).unwrap_or(i16::MAX));
         timeouts.push(timeout_micros(registered.policy.timeout));
+        limits.push(registered.running.as_ref().map_or(requested, |running| {
+            requested.min(as_i64(running.available_permits()))
+        }));
     }
-    (names, max_attempts, timeouts)
+    (names, max_attempts, timeouts, limits)
 }
 
 fn timeout_micros(timeout: Duration) -> i64 {
@@ -446,6 +512,11 @@ fn dispatch_known(
                     tracing::error!(job.id = %id, "job_claim_exceeded_slots");
                     break;
                 };
+                let kind_slot = shared
+                    .registry
+                    .get(kind)
+                    .and_then(|registered| registered.running.as_ref())
+                    .and_then(|running| KindSlot::take(running, &shared.wake));
                 let claimed = Claimed {
                     id,
                     generation,
@@ -455,6 +526,7 @@ fn dispatch_known(
                     trace_context,
                     trace_state,
                     slot,
+                    kind_slot,
                 };
                 match crate::attempt::kind_metrics(shared, kind) {
                     Some(handles) => handles.queue_wait.record(queue_wait.max(0.0)),
@@ -560,6 +632,31 @@ mod tests {
             .to_url_lossy()
             .password()
             .map(str::to_owned)
+    }
+
+    #[tokio::test]
+    async fn only_the_release_that_frees_a_full_kind_wakes_the_claim_loop() {
+        let running = Arc::new(Semaphore::new(2));
+        let wake = Arc::new(Notify::new());
+        let first = KindSlot::take(&running, &wake).expect("a free place");
+        let second = KindSlot::take(&running, &wake).expect("a free place");
+        assert!(KindSlot::take(&running, &wake).is_none());
+
+        // The kind was full: the place is free again before the wake is stored.
+        drop(first);
+        assert_eq!(running.available_permits(), 1);
+        tokio::time::timeout(Duration::from_secs(1), wake.notified())
+            .await
+            .expect("the release of a full kind wakes the loop");
+
+        // A place was already free: the loop saw it in its last claim.
+        drop(second);
+        assert_eq!(running.available_permits(), 2);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), wake.notified())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
