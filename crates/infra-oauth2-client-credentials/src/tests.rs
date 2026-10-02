@@ -1517,7 +1517,7 @@ fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome() {
                     counts
                 };
                 let before_capacity = outbound_counts();
-                assert!(!before_capacity.is_empty());
+                assert_ne!(before_capacity, [] as [String; 0]);
                 assert!(matches!(
                     dropped_client.execute(fixture.on_behalf_of_request("at-capacity"), far()).await,
                     Err(Error::Acquisition(AcquisitionError::AtCapacity))
