@@ -28,12 +28,23 @@ pub struct CacheConfig {
     pub dsn: Option<SecretString>,
     /// A file that holds the password alone, for a platform that rotates it
     /// by rewriting the file. The DSN then carries no password, and the
-    /// running service follows the file. Unset by default.
+    /// running service follows the file. Missing, empty, or whitespace-only
+    /// is unset (`None`), the default.
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub password_file: Option<PathBuf>,
     /// PEM root CA path for a private certificate. Missing, empty, or
     /// whitespace-only is unset (`None`).
     #[serde(default, deserialize_with = "blank_as_none")]
     pub root_ca_path: Option<PathBuf>,
+    /// PEM certificate chain this client presents to a server that requires
+    /// one (mutual TLS). Set together with `client_key_path`. Missing, empty,
+    /// or whitespace-only is unset (`None`).
+    #[serde(default, deserialize_with = "blank_as_none")]
+    pub client_cert_path: Option<PathBuf>,
+    /// PEM private key of that certificate. The key is a path, so a file may
+    /// set it; the key itself stays in the file it names.
+    #[serde(default, deserialize_with = "blank_as_none")]
+    pub client_key_path: Option<PathBuf>,
     /// Permit a plaintext DSN. Local and development only.
     pub allow_plaintext: bool,
     /// Permit a DSN with no password. Local and development only.
@@ -49,6 +60,8 @@ impl Default for CacheConfig {
             dsn: None,
             password_file: None,
             root_ca_path: None,
+            client_cert_path: None,
+            client_key_path: None,
             allow_plaintext: false,
             allow_unauthenticated: false,
             // A degraded call must still leave most of an HTTP request for the source of truth.
@@ -84,15 +97,22 @@ impl CacheConfig {
                 "is local/development-only",
             ));
         }
-        if self
-            .password_file
-            .as_ref()
-            .is_some_and(|path| path.as_os_str().is_empty())
-        {
-            return Err(ValidationError::new(
-                "cache.password_file",
-                "cannot be empty when set",
-            ));
+        // A certificate without its key, or a key without its certificate,
+        // would silently present nothing.
+        match (&self.client_cert_path, &self.client_key_path) {
+            (Some(_), None) => {
+                return Err(ValidationError::new(
+                    "cache.client_key_path",
+                    "is required when cache.client_cert_path is set",
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(ValidationError::new(
+                    "cache.client_cert_path",
+                    "is required when cache.client_key_path is set",
+                ));
+            }
+            (Some(_), Some(_)) | (None, None) => {}
         }
         duration_range(
             "cache.command_timeout",
@@ -175,13 +195,35 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_password_file_path_is_refused() {
-        let config = CacheConfig {
-            password_file: Some(PathBuf::new()),
+    fn a_client_certificate_and_its_key_are_set_together() {
+        let certificate_only = CacheConfig {
+            client_cert_path: Some(PathBuf::from("/run/tls/client.crt")),
             ..CacheConfig::default()
         };
-        let err = config.validate("production", REQUEST_TIMEOUT).unwrap_err();
-        assert_eq!(err.key, "cache.password_file");
+        assert_eq!(
+            certificate_only
+                .validate("production", REQUEST_TIMEOUT)
+                .unwrap_err()
+                .key,
+            "cache.client_key_path"
+        );
+        let key_only = CacheConfig {
+            client_key_path: Some(PathBuf::from("/run/tls/client.key")),
+            ..CacheConfig::default()
+        };
+        assert_eq!(
+            key_only
+                .validate("production", REQUEST_TIMEOUT)
+                .unwrap_err()
+                .key,
+            "cache.client_cert_path"
+        );
+        let both = CacheConfig {
+            client_cert_path: Some(PathBuf::from("/run/tls/client.crt")),
+            client_key_path: Some(PathBuf::from("/run/tls/client.key")),
+            ..CacheConfig::default()
+        };
+        both.validate("production", REQUEST_TIMEOUT).unwrap();
     }
 
     #[test]

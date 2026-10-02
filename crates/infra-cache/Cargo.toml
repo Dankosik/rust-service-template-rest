@@ -17,11 +17,6 @@ name = "valkey"
 path = "tests/valkey.rs"
 required-features = ["integration"]
 
-# cargo-shear 1.13.4 scans target directories, missing the #[path] inclusion
-# of test/fixtures/tls.rs. Remove this exception when it follows that source.
-[package.metadata.cargo-shear]
-ignored = ["rcgen"]
-
 [lints]
 workspace = true
 

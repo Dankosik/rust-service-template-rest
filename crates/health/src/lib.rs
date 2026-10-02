@@ -117,10 +117,15 @@ const PROBE_CHECKS_METRIC: &str = "readiness_probe_checks_total";
 /// falling to zero is what reports it.
 const READY_METRIC: &str = "readiness_ready";
 
+/// Tokio's timer resolution: a shorter [`RefreshPolicy::interval`] cannot
+/// tick faster, and a zero period would panic the ticker.
+const MIN_INTERVAL: Duration = Duration::from_millis(1);
+
 /// Cadence and thresholds for the refresher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RefreshPolicy {
-    /// Time between checks.
+    /// Time between checks. Timers resolve to a millisecond, so a shorter
+    /// interval, zero included, runs at that pace.
     pub interval: Duration,
     /// Deadline for one check; every probe runs under it at the same time.
     pub probe_budget: Duration,
@@ -137,9 +142,9 @@ impl RefreshPolicy {
     ///
     /// `stale_after = probe_budget + period * 3` where
     /// `period = interval.max(probe_budget)`. The leading `probe_budget`
-    /// covers one in-flight check after the last stamp. Checks are serial, so
-    /// a probe budget above the interval makes the loop run at the budget's
-    /// pace; sizing from the interval alone would expire a verdict that is
+    /// covers one in-flight check after the last stamp. One check finishes
+    /// before the next starts, so a probe budget above the interval makes the
+    /// loop run at the budget's pace; sizing from the interval alone would expire a verdict that is
     /// being refreshed as fast as it can be. Three periods so an ordinary
     /// missed tick does not flip readiness, finite so a dead refresher cannot
     /// leave a verdict standing forever.
@@ -338,7 +343,7 @@ impl Readiness {
                 if self.tx.borrow().last_check.is_none() {
                     self.refresh().await;
                 }
-                let interval = self.policy.interval;
+                let interval = self.policy.interval.max(MIN_INTERVAL);
                 let mut ticker = tokio::time::interval_at(Instant::now() + interval, interval);
                 // Delay, not Burst: a late tick is skipped rather than fired in a
                 // catch-up burst that would pile probe work onto a recovering
@@ -727,6 +732,40 @@ mod tests {
         readiness.refresh_until(cancel).await;
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         assert_eq!(readiness.reader().verdict(), Err(NotReady::NotEvaluated));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_zero_interval_refreshes_at_the_timer_resolution() {
+        let (probe, _, calls) = flaky_probe(true);
+        let readiness = Readiness::new(
+            vec![probe],
+            RefreshPolicy {
+                interval: Duration::ZERO,
+                ..policy()
+            },
+        );
+        let cancel = CancellationToken::new();
+        let refresher = tokio::spawn({
+            let readiness = readiness.clone();
+            let cancel = cancel.clone();
+            async move { readiness.refresh_until(cancel).await }
+        });
+        readiness.tx.subscribe().changed().await.unwrap();
+        for _ in 0..3 {
+            tokio::time::advance(MIN_INTERVAL).await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(readiness.reader().verdict(), Ok(()));
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            4,
+            "the first check, then one per millisecond"
+        );
+
+        cancel.cancel();
+        refresher
+            .await
+            .expect("a zero interval must not panic the refresher");
     }
 
     struct Slow {

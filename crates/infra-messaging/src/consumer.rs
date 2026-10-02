@@ -425,19 +425,7 @@ impl Delivery {
         cancel: &CancellationToken,
     ) {
         let started = Instant::now();
-        let dispatch =
-            self.registry
-                .dispatch(message.subject.as_ref(), envelope, cancel.child_token());
-        let outcome =
-            match tokio::time::timeout(HANDLER_TIMEOUT, AssertUnwindSafe(dispatch).catch_unwind())
-                .await
-            {
-                Ok(Ok(Ok(()))) => Outcome::Success,
-                Ok(Ok(Err(HandlerError::Permanent))) => Outcome::Permanent,
-                Ok(Ok(Err(HandlerError::Retryable))) => Outcome::Retryable,
-                Ok(Err(_)) => Outcome::Panicked,
-                Err(_) => Outcome::TimedOut,
-            };
+        let outcome = run_handler(&self.registry, message.subject.as_ref(), envelope, cancel).await;
         metrics.outcomes.record(outcome as usize, started.elapsed());
         let event_type = metrics.event_type;
         let label = OUTCOME_LABELS[outcome as usize];
@@ -565,6 +553,28 @@ impl Delivery {
             );
             redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
         }
+    }
+}
+
+/// Runs the typed handler of one delivery under the handler time limit.
+///
+/// The handler's token is cancelled when the invocation ends, by return,
+/// time limit or panic, so work the handler started with it stops too.
+async fn run_handler(
+    registry: &Registry,
+    subject: &str,
+    envelope: wire::InboundEnvelope,
+    cancel: &CancellationToken,
+) -> Outcome {
+    let handler_cancel = cancel.child_token();
+    let _ended = handler_cancel.clone().drop_guard();
+    let dispatch = registry.dispatch(subject, envelope, handler_cancel);
+    match tokio::time::timeout(HANDLER_TIMEOUT, AssertUnwindSafe(dispatch).catch_unwind()).await {
+        Ok(Ok(Ok(()))) => Outcome::Success,
+        Ok(Ok(Err(HandlerError::Permanent))) => Outcome::Permanent,
+        Ok(Ok(Err(HandlerError::Retryable))) => Outcome::Retryable,
+        Ok(Err(_)) => Outcome::Panicked,
+        Err(_) => Outcome::TimedOut,
     }
 }
 
@@ -723,6 +733,48 @@ mod tests {
             assert!(scrape.contains(line), "{line} is missing from:\n{scrape}");
         }
         assert!(!scrape.contains("order.shipped") && !scrape.contains("sentinel"));
+    }
+
+    fn created_envelope() -> wire::InboundEnvelope {
+        wire::InboundEnvelope {
+            message_id: "event-1".to_owned(),
+            event_type: Created::EVENT_TYPE.to_owned(),
+            schema_version: Created::SCHEMA_VERSION,
+            occurred_at: time::OffsetDateTime::UNIX_EPOCH,
+            payload: bytes::Bytes::from_static(b"null"),
+        }
+    }
+
+    /// A handler hands its token to work it starts. That work must hear when
+    /// the delivery is over, or it outlives a handler the adapter gave up on.
+    #[tokio::test(start_paused = true)]
+    async fn the_handler_token_is_cancelled_when_its_delivery_ends() {
+        for (stalls, expected) in [(true, "timeout"), (false, "success")] {
+            let (token_tx, token_rx) = tokio::sync::oneshot::channel();
+            let token_tx = std::sync::Mutex::new(Some(token_tx));
+            let mut registry = Registry::new([Route::new::<Created>("orders.created")]).unwrap();
+            registry
+                .register::<Created, _, _>(move |_, cancel| {
+                    let token_tx = token_tx.lock().unwrap().take();
+                    async move {
+                        token_tx.unwrap().send(cancel).unwrap();
+                        if stalls {
+                            std::future::pending::<()>().await;
+                        }
+                        Ok(())
+                    }
+                })
+                .unwrap();
+
+            let delivery = CancellationToken::new();
+            let outcome =
+                run_handler(&registry, "orders.created", created_envelope(), &delivery).await;
+
+            assert_eq!(OUTCOME_LABELS[outcome as usize], expected);
+            let handler_token = token_rx.await.unwrap();
+            assert!(handler_token.is_cancelled(), "{expected}");
+            assert!(!delivery.is_cancelled(), "{expected}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

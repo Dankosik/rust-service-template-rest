@@ -50,8 +50,12 @@ Selection alone builds nothing. The `[object_storage]` section is active when
 Every provider needs `bucket`. With `credentials = "access_key"` (the
 default) it also needs `access_key_id` and `secret_access_key`.
 `secret_access_key` is environment-only
-(`APP__OBJECT_STORAGE__SECRET_ACCESS_KEY`); a nonempty file value fails
-startup. A key another provider owns fails startup instead of being ignored.
+(`APP__OBJECT_STORAGE__SECRET_ACCESS_KEY`, or a file of that name in the
+[secrets directory](configuration-source-policy.md#secrets-directory)); a
+nonempty value in the configuration file fails startup. The pair is read once,
+at startup: rotate it by restarting the service with the new pair while the
+old one is still valid. A key another provider owns fails startup instead of
+being ignored.
 An endpoint is a bare origin: no path, query, or user information, and a port
 only where the table allows one. The bucket is a dotless DNS name, so
 virtual-hosted TLS certificates match. `local` is for an emulator and is
@@ -242,6 +246,8 @@ A `head` response has no body, so a missing bucket on `head` also reads as
   call up to its response headers, retries included. One read attempt gets
   half of it, so an attempt that hangs before its response headers leaves
   room for a retry; the single attempt of a put or delete gets all of it.
+  A put is answered only after its whole body is sent, so the budget covers
+  the upload: raise it together with `max_object_bytes`.
   Connect is bounded at 3.1 s, or at the attempt bound when that is shorter.
   A download body is bounded by the SDK's stalled-stream protection: no
   progress for 5 s fails it with `Unavailable`.
@@ -407,9 +413,33 @@ ALLOW_HEAVY=1 make test-integration-object-storage
 
 It proves signing, create-only, CRC64NVME in a header and in a trailer,
 validation at EOF, presigned expiry, and credential refusal. It does not
-certify a provider. For a local service run, start the emulator with
-`make compose-up`, create the bucket, and use the `local` provider from
-`env/config/local.toml`.
+certify a provider.
+
+For a local service run, start the emulator and uncomment the
+`[object_storage]` section of `env/config/local.toml`, which selects the
+`local` provider:
+
+```sh
+docker compose -f env/docker-compose.yml up -d --wait versitygw
+APP__OBJECT_STORAGE__SECRET_ACCESS_KEY=template-secret make run
+```
+
+The Compose service creates the bucket `template-bucket` before it listens,
+so nothing else has to: the client never creates a bucket. `docker compose -f
+env/docker-compose.yml down -v` drops the emulator with its objects.
+
+## Test a feature that uses it
+
+The crate ships no fake and no trait (see [Decisions](object-storage-decisions.md)).
+A feature proves its storage path one of two ways:
+
+| Test | How |
+| --- | --- |
+| Against a real S3 implementation | Build `ObjectStorage` with `Provider::Local` for the Compose emulator and `template-bucket`, as `crates/infra-object-storage/tests/emulator.rs` does, and write under a prefix unique to the test. This runs the real client, so create-only, `NotFound`, and checksums are the client's own, not a fake's. |
+| Without storage | Put a narrow trait at the feature's own boundary, named for what the feature does (store a result, load a document), implement it over `ObjectStorage`, and give the test an in-memory implementation. A `Download` cannot be built outside the crate, so the trait returns `Bytes` or the feature's own type; `ObjectStorageError` variants are plain values a fake can return. |
+
+A fake cannot show that a provider honors create-only or returns a checksum:
+keep at least one emulator test for the feature's write path.
 
 ## Live provider conformance
 

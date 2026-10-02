@@ -34,7 +34,13 @@ url = { workspace = true, features = ["std"] }
 # template:end webhooks:webhooks-outbound-dependencies
 # template:begin inbound-webhooks:webhooks-inbound-dependencies
 async-trait = { workspace = true }
+metrics = { workspace = true }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros"] }
 tokio = { workspace = true, features = ["time"] }
 tokio-util = { workspace = true }
 # template:end inbound-webhooks:webhooks-inbound-dependencies
+
+[dev-dependencies]
+# template:begin inbound-webhooks:webhooks-inbound-test-dependencies
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+# template:end inbound-webhooks:webhooks-inbound-test-dependencies

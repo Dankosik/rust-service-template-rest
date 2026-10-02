@@ -27,6 +27,7 @@ const SERVER_HANDLED: &str = "grpc_server_handled_total";
 /// Server time to response headers, a histogram by service and method.
 pub const SERVER_HANDLING_SECONDS: &str = "grpc_server_handling_seconds";
 const SERVER_SHED: &str = "grpc_server_shed_requests_total";
+const SERVER_FAILURES: &str = "grpc_server_failures_total";
 const CLIENT_STARTED: &str = "grpc_client_started_total";
 const CLIENT_HANDLED: &str = "grpc_client_handled_total";
 /// Client time to response headers, a histogram by service and method.
@@ -65,6 +66,14 @@ pub(crate) async fn observe(
         ))
         .into_http()
     });
+    // tonic keeps the status of a Trailers-Only answer in the extensions.
+    if let Some(failure) = response
+        .extensions()
+        .get::<tonic::Status>()
+        .and_then(crate::status::catalog_code)
+    {
+        call.failed(failure);
+    }
     call.finish(code_from_headers(response.headers()));
     response
 }
@@ -107,6 +116,14 @@ impl Call {
         &self.span
     }
 
+    /// The catalog failure behind the status: several share one status code,
+    /// and during an incident which one is the whole question. Bounded by
+    /// the catalog.
+    fn failed(&self, failure: service_failure::Code) {
+        self.span.set_attribute("failure.code", failure.as_str());
+        self.series.failed(self.path(), failure);
+    }
+
     pub(crate) fn finish(mut self, code: Code) {
         self.record(code);
         self.finished = true;
@@ -114,8 +131,12 @@ impl Call {
 
     fn record(&self, code: Code) {
         update_span(&self.span, code, &self.kind);
-        let path = self.uri.as_ref().map_or(UNKNOWN_PATH, http::Uri::path);
-        self.series.handled(path, code, self.started.elapsed());
+        self.series
+            .handled(self.path(), code, self.started.elapsed());
+    }
+
+    fn path(&self) -> &str {
+        self.uri.as_ref().map_or(UNKNOWN_PATH, http::Uri::path)
     }
 }
 
@@ -197,6 +218,8 @@ struct Handles {
     handling_seconds: metrics::Histogram,
     /// Indexed by status code.
     handled: [OnceLock<metrics::Counter>; 17],
+    /// Indexed by catalog code.
+    failed: [OnceLock<metrics::Counter>; service_failure::Code::ALL.len()],
 }
 
 impl Series {
@@ -263,6 +286,22 @@ impl Series {
         });
     }
 
+    fn failed(&self, path: &str, failure: service_failure::Code) {
+        self.with(path, |handles| {
+            handles.failed[failure as usize]
+                .get_or_init(|| {
+                    let (service, method) = labels(path);
+                    metrics::counter!(
+                        SERVER_FAILURES,
+                        "grpc_service" => service.to_owned(),
+                        "grpc_method" => method.to_owned(),
+                        "failure_code" => failure.as_str(),
+                    )
+                })
+                .increment(1);
+        });
+    }
+
     fn with(&self, path: &str, record: impl FnOnce(&Handles)) {
         {
             let paths = self.paths.read().unwrap_or_else(PoisonError::into_inner);
@@ -283,6 +322,7 @@ impl Series {
                 "grpc_method" => method.to_owned(),
             ),
             handled: Default::default(),
+            failed: std::array::from_fn(|_| OnceLock::new()),
         };
         let mut paths = self.paths.write().unwrap_or_else(PoisonError::into_inner);
         record(paths.entry(path.into()).or_insert(handles));
@@ -335,6 +375,11 @@ fn describe() {
             SERVER_SHED,
             metrics::Unit::Count,
             "Business gRPC calls rejected without running a handler because the concurrency limit was reached"
+        );
+        metrics::describe_counter!(
+            SERVER_FAILURES,
+            metrics::Unit::Count,
+            "Server gRPC calls answered with a failure from the shared catalog by service, method, and catalog code"
         );
         metrics::describe_counter!(
             CLIENT_HANDLED,

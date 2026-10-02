@@ -72,6 +72,19 @@ impl From<Failure> for Status {
     }
 }
 
+/// The catalog code a status answers with: its `ErrorInfo` reason, when the
+/// domain is [`ERROR_DOMAIN`] and the reason is a published code.
+pub(crate) fn catalog_code(status: &Status) -> Option<Code> {
+    let info = status.get_details_error_info()?;
+    if info.domain != ERROR_DOMAIN {
+        return None;
+    }
+    Code::ALL
+        .iter()
+        .copied()
+        .find(|code| code.as_str().eq_ignore_ascii_case(&info.reason))
+}
+
 /// The status code and fixed safe message of each catalog code.
 #[allow(
     clippy::match_same_arms,
@@ -112,14 +125,12 @@ const fn projection(code: Code) -> (tonic::Code, &'static str) {
         Code::IdempotencyRequestInProgress => CONFLICT,
         // template:end http-idempotency:grpc-idempotency-conflict-status
         Code::MethodNotAllowed => (tonic::Code::Unimplemented, "method is not implemented"),
-        Code::RequestEntityTooLarge | Code::RequestHeaderFieldsTooLarge | Code::TooManyRequests => {
-            EXHAUSTED
-        }
+        Code::RequestEntityTooLarge | Code::TooManyRequests => EXHAUSTED,
         Code::ServiceUnavailable => UNAVAILABLE,
         // template:begin http-idempotency:grpc-idempotency-unavailable-status
         Code::IdempotencyUnavailable => UNAVAILABLE,
         // template:end http-idempotency:grpc-idempotency-unavailable-status
-        Code::RequestTimeout => (tonic::Code::DeadlineExceeded, "request deadline exceeded"),
+        Code::GatewayTimeout => (tonic::Code::DeadlineExceeded, "request deadline exceeded"),
         Code::InternalServerError => (tonic::Code::Internal, SANITIZED_DETAIL),
     }
 }
@@ -154,6 +165,20 @@ mod tests {
             );
             assert!(details.retry_info().is_none());
             assert!(details.bad_request().is_none());
+            assert_eq!(catalog_code(&status), Some(code));
+        }
+    }
+
+    #[test]
+    fn a_status_outside_the_catalog_has_no_catalog_code() {
+        assert_eq!(catalog_code(&Status::not_found("no details")), None);
+        for (reason, domain) in [
+            ("NOT_FOUND", "another.service"),
+            ("QUOTA_SPENT", ERROR_DOMAIN),
+        ] {
+            let details = ErrorDetails::with_error_info(reason, domain, HashMap::new());
+            let status = Status::with_error_details(tonic::Code::NotFound, "foreign", details);
+            assert_eq!(catalog_code(&status), None, "{reason} in {domain}");
         }
     }
 
@@ -203,11 +228,6 @@ mod tests {
                 "resource limit exceeded",
             ),
             (
-                Code::RequestHeaderFieldsTooLarge,
-                tonic::Code::ResourceExhausted,
-                "resource limit exceeded",
-            ),
-            (
                 Code::TooManyRequests,
                 tonic::Code::ResourceExhausted,
                 "resource limit exceeded",
@@ -218,7 +238,7 @@ mod tests {
                 "service is unavailable",
             ),
             (
-                Code::RequestTimeout,
+                Code::GatewayTimeout,
                 tonic::Code::DeadlineExceeded,
                 "request deadline exceeded",
             ),

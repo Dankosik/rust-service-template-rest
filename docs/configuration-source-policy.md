@@ -110,11 +110,20 @@ Quote text in TOML.
 - `messaging` is an optional typed section. Its non-secret endpoint, stream,
   consumer, DLQ, TLS, timeout, concurrency, and delivery-size inputs use normal
   file/environment precedence, and a blank `root_ca_path` is unset; credentials are `SecretString`, environment-only,
-  and redacted. Active consumption requires complete named topology and distinct
+  and redacted. `messaging.credentials_file` (unset by default; a blank
+  value is unset) is the one alternative credential source: a path to a
+  NATS credentials file, for a platform that rotates it. The client reads
+  the file again for every connection, which a secrets-directory value,
+  read once at startup, cannot do. Both at once is refused. The key names a
+  path, not a credential, so it may appear in TOML. Active consumption requires complete named topology and distinct
   source/DLQ subjects. Local plaintext or unauthenticated use is an explicit
   development/test escape hatch, never a production default. Configuration
   validates shape and resource bounds before any provider I/O; the adapter maps
   the admitted snapshot to its client options.
+  `messaging.max_payload_bytes` defaults to `256 KiB`, the Go template's
+  default. A broker bounds payload and headers together, by default at
+  1 MiB, so the payload limit plus the 8 KiB header limit must fit the
+  broker's `max_payload`; startup refuses a larger one.
   `messaging.urls` uses a list or one comma-separated string, such as an
   `APP__MESSAGING__URLS` value, for example
   `tls://nats-a.example:4222,tls://nats-b.example:4222`. A single URL is written
@@ -131,13 +140,18 @@ Quote text in TOML.
   file that holds the password alone, for a platform that rotates it. The
   DSN then carries no password, both at once is refused, and the client
   follows the file while it runs. The key names a path, not a credential,
-  so it may appear in TOML. `password_file`, `root_ca_path`, and
-  `command_timeout` use normal file/environment precedence; a blank
-  `root_ca_path` is unset. `allow_plaintext`
+  so it may appear in TOML. `cache.client_cert_path` and
+  `cache.client_key_path` (unset by default) name the PEM certificate chain
+  and private key the client presents to a server that requires a client
+  certificate; they are set together, and one without the other fails
+  startup. Both are paths, so they may appear in TOML; the key itself stays
+  in the file. `password_file`, `root_ca_path`, `client_cert_path`,
+  `client_key_path`, and `command_timeout` use normal file/environment
+  precedence; a blank path is unset. `allow_plaintext`
   and `allow_unauthenticated` are accepted only when `app.env` is `local` or
   `development`. Admitted schemes are `redis`, `rediss`, `valkey`, and
   `valkeys`. `#insecure` and a unix socket are refused; Sentinel and Cluster
-  URLs are not admitted. A CA path requires TLS. DSN form checks stay in `infra-cache`. The
+  URLs are not admitted. A CA path or a client certificate requires TLS. DSN form checks stay in `infra-cache`. The
   [guide](cache.md) owns admission.
 <!-- template:end cache:docs-config-cache-source -->
 <!-- template:begin object-storage:docs-config-object-storage-source -->
@@ -310,8 +324,18 @@ OpenTelemetry environment stays a supported platform fallback:
   `APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS`; a malformed
   `name=value` entry there fails startup instead of being dropped.
 - The OTLP/HTTP exporter verifies the collector with the platform trust
-  store and does not read `..._CERTIFICATE`, `..._CLIENT_KEY`, or
-  `..._CLIENT_CERTIFICATE`. An occupied one is named in a startup warning.
+  store. `OTEL_EXPORTER_OTLP_CERTIFICATE` names a PEM file of trusted
+  certificates instead: with it only those certificates are trusted, which
+  is how a collector behind a private certificate authority is reached.
+  `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` and `OTEL_EXPORTER_OTLP_CLIENT_KEY`
+  name the PEM files of a client certificate and its key for a collector
+  that requires one; one without the other is refused. Each variable has a
+  `..._TRACES_...` variant that wins, and a blank value is vacant. They
+  apply under a typed endpoint too: they are paths, read once at startup,
+  and carry no credential to the collector. A file that is missing or not
+  usable PEM leaves the exporter `degraded` with a reason that names the
+  variable. The `trace exporter initialized` record carries
+  `certificate_file` and `client_certificate`.
 - `OTEL_EXPORTER_OTLP_COMPRESSION` and `OTEL_EXPORTER_OTLP_TRACES_COMPRESSION`
   select `gzip`; the default is uncompressed. Any other value fails the
   exporter build and leaves the exporter `degraded`.
@@ -361,18 +385,28 @@ scope takes the event's value, and a nested span's value over its parent's. A
 record bridged from the `log` crate carries its real target and no `log.*`
 fields.
 
+A panic is an ERROR record, `panicked`, with `panic.file`, `panic.line`,
+`panic.column`, `panic.thread`, `panic.message`, and `panic.backtrace` when
+`RUST_BACKTRACE` asks for one. Every binary replaces Rust's panic hook with
+it once the subscriber is installed, so a panic is one parseable line in the
+log stream and not plain text on stderr; like any ERROR record it follows
+`log.level`. The jobs worker with messaging
+retained leaves `panic.message` out: a handler may format a message's content
+into its panic.
+
 ## Runtime Budget Policy
 
 - `http.request_timeout` (default `8s`) is the per-request handler budget and
   the only bound on how long one request may hold a task and its pooled
   resources. Body reads happen inside it because extractors run inside the
-  handler future. Expiry answers a `504` problem with code `request_timeout`.
+  handler future. Expiry answers a `504` problem with code `gateway_timeout`.
   It must not exceed the drain budget left after readiness propagation, so
   in-flight requests can finish inside the drain.
 - `http.header_read_timeout` (default `5s`) bounds delivery of a request head
   and, because hyper restarts it whenever an HTTP/1 connection goes idle, is
   also the HTTP/1 keep-alive idle bound. HTTP/2 idle uses a separate PING
-  cadence. It also closes a client that connects and sends nothing.
+  cadence. It also closes a client that connects and sends nothing, or only
+  the start of the HTTP/2 preface.
 - `health.probe_budget` (default `4s`) bounds one background readiness
   evaluation; every probe runs under it at the same time, and
   `/health/ready` itself never runs a probe. The verdict names the first
@@ -564,19 +598,22 @@ only with new evidence.
 | Secrets as `secrecy::SecretString`; `APP__` variables are the only secret source; each TOML file is pre-scanned for non-empty secret-like keys (`password`, `secret`, `credentials`, `token`, `dsn`, `authorization`, `api_key`, `private_key`, `otlp_headers`) | trusting file contents | a committed baseline cannot leak a credential; `Debug` prints `[REDACTED]` |
 | `tracing` + `tracing-subscriber` (`EnvFilter` parses `log.level`; a directive without span filters runs as the equivalent `Targets`); the telemetry crate's JSON layer for `log.format = json`, `fmt::layer()` for `text`; `log` records bridged | `json-subscriber` 0.3 (chosen in stage 2) | it wrote the same line but built a JSON value map for the event and another for the span list on every record, and re-serialized all of a span's fields on every `record`: 61% of a small request's instructions. The crate's layer wrote the identical line (a differential corpus of 64 records matched byte for byte) with two thirds fewer instructions per record ([Telemetry performance](infra-telemetry-performance.md)). It has since left that line in three places where the line was the defect: a key an event shared with a span was written twice, which a strict JSON consumer rejects; a `log` crate record had the target `log`; and the trace context was nested as `openTelemetry.traceId` and `spanId`, where OpenTelemetry names it `trace_id`, `span_id`, and `trace_flags` for a non-OTLP log format. `EnvFilter` takes a shared lock on every span enter, exit, and close even without span directives. Reopen if an upstream layer flattens span fields without per-record maps |
 | Tracer provider always installed; the OTLP HTTP/protobuf batch exporter added only when a typed endpoint or a standard `OTEL_EXPORTER_OTLP_*ENDPOINT` resolves one; `TraceContextPropagator` installed explicitly | exporter `disabled` when no endpoint, provider absent | trace ids in every log line cost nothing without an exporter and avoid connection-refused noise against the SDK's `localhost:4318` default |
-| Ambient `OTEL_EXPORTER_OTLP_*HEADERS` fail validation when the typed endpoint selects the destination; unread trust variables are named in a startup warning | letting the SDK merge them | one collector's credential is never sent to another; the mechanism stays the SDK's, the safety property is a validation rule |
+| Ambient `OTEL_EXPORTER_OTLP_*HEADERS` fail validation when the typed endpoint selects the destination; the standard certificate and client-certificate variables build the exporter's HTTP client, which the SDK's OTLP/HTTP exporter does not do | letting the SDK merge them | one collector's credential is never sent to another; the mechanism stays the SDK's, the safety property is a validation rule |
 | The `metrics` facade with `metrics-exporter-prometheus` (`default-features = false`), the HTTP adapter's own server metrics under the OpenTelemetry HTTP semantic-convention names (route template or `<unmatched>`), `metrics-process`, `tokio-metrics` | OpenTelemetry SDK metrics with `opentelemetry-prometheus` and OTLP push | the facade is the dominant Rust idiom, process and Tokio metrics have no OTel-native crates, and `opentelemetry-prometheus` was deprecated, un-deprecated, and is still Beta. A collector `prometheus` receiver scraping `:9090` serves OTLP-only platforms |
 | `log.level` filters records; spans at INFO and above are enabled under every directive by one global filter around `Targets` or `EnvFilter` | the directive as the only filter; a per-layer filter on the format layer | the server, job, and client spans are INFO, so `log.level = warn` stopped trace export and stripped the request id and trace context from the remaining records. A per-layer filter hides a filtered span from the format layer, which loses the same fields, and costs bookkeeping on every span ([Telemetry performance](infra-telemetry-performance.md)) |
 | Every histogram has buckets: the emitter's own, or the Prometheus client default for one nobody registered | an unregistered histogram rendered as a summary | a summary's quantiles cannot be aggregated across replicas, and a forgotten registration was silent |
 | The OTLP exporter is wrapped to count finished exports as `otel_sdk_exporter_span_exported_total` (the SDK's semantic-convention name) | startup gauge only; SDK log records | export failures after startup were visible only as log lines. The SDK has no hook for spans its batch queue drops, so those stay in its log records |
 | `opentelemetry-otlp/gzip-http` enabled, compression off by default | feature off | with the feature off, the standard `OTEL_EXPORTER_OTLP_COMPRESSION=gzip` fails the exporter build and tracing degrades. Costs `flate2` with its pure-Rust backends in the graph |
+| `OTEL_EXPORTER_OTLP_*CERTIFICATE`, `*CLIENT_CERTIFICATE`, and `*CLIENT_KEY` build the exporter's `reqwest` blocking client (the client and TLS stack `opentelemetry-otlp` builds itself, with the SDK's timeout); none set leaves the SDK's own client | a startup warning naming the unread variables; typed `observability.otel.exporter` keys | the specification lists the three among the exporter's options, and the HTTP exporter of `opentelemetry-otlp` 0.33 reads none of them, so a collector behind a private certificate authority or one requiring a client certificate could not be reached. The standard variables are what a platform already sets; typed keys would be a second name for the same paths. A certificate file replaces the platform trust store, as the Go and Java SDKs do. Reopen when `opentelemetry-otlp` reads them itself |
+| One panic hook for every binary, installed after the subscriber: a panic is an ERROR record with its place, thread, and message; the worker with messaging retained withholds the message | Rust's hook in the service and the migrator, a hook only in the messaging worker; the `tracing-panic` crate | Rust's hook writes plain text to stderr beside JSON records, and gRPC panic recovery relies on the hook for the message. `tracing-panic` is the same twenty lines without the choice to withhold the message |
+| `deny.toml` refuses a second version of `opentelemetry` and `opentelemetry_sdk`; an exporter test delivers a span to a listening collector | a documented `cargo tree` check | a second version's `global` provider is a silent no-op, and no test had a span arrive anywhere, so a broken exporter client or feature set passed every check |
 | `log.format` added; `runtime.memory_limit_ratio`, `GOMAXPROCS` awareness, and `observability.pprof` not ported | Go parity | human-readable local logs are a Rust convention; there is no garbage collector, `available_parallelism` honours cgroup quotas, and there is no standard-library profiler to expose |
 
 Version discipline: every OpenTelemetry crate stays on one minor and moves
 together, with `tracing-opentelemetry` one ahead (0.34 ↔ 0.33). A dependency
 that pins another minor creates a second `global::` whose data goes to a
-no-op provider silently; check `cargo tree -d -i opentelemetry` after a
-dependency change. A dependency enabling `opentelemetry-otlp/reqwest-client`
+no-op provider silently; `deny.toml` refuses a second version of
+`opentelemetry` or `opentelemetry_sdk`, so `make deny` fails on it. A dependency enabling `opentelemetry-otlp/reqwest-client`
 flips the exporter to the async client, which the batch processor does not
 support; check `cargo tree -e features -i opentelemetry-otlp`.
 `reqwest-rustls` must stay enabled: without it an `https://` collector

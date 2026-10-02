@@ -18,12 +18,23 @@ mod maintenance;
 
 use std::time::Duration;
 
+use infra_postgres::{Isolation, TxOptions};
 use sqlx::postgres::PgPool;
 
 pub use attempt::{
     AttemptError, Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey,
 };
 pub use maintenance::{CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, CleanupError, StartupError};
+
+/// Every transaction of the store names its isolation, because the server
+/// default may be stricter. Arbitration needs a new snapshot per statement
+/// (see `attempt`), and under a stricter level the cleanup's row lock fails
+/// with a serialization error on a record replaced or removed since its
+/// snapshot, where this level re-checks the row.
+const READ_COMMITTED: TxOptions = TxOptions {
+    isolation: Isolation::ReadCommitted,
+    read_only: false,
+};
 
 /// Handle on the record store. Cloning shares the pool.
 #[derive(Clone, Debug)]

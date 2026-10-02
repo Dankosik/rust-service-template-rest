@@ -37,9 +37,12 @@ scopes = ["billing.read"]
 # exchange_cache_capacity = 1024
 ```
 
-Supply the private key only through
-`APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY`; nonempty file secrets are
-rejected by the recursive secret guard. `client_secret` is an unknown key and
+Supply the private key only as the variable
+`APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY`: in the process environment
+or, which keeps a multi-line PEM whole, as a file of that name in the
+[secrets directory](configuration-source-policy.md#secrets-directory). A
+nonempty `private_key` in a TOML file is rejected by the recursive secret
+guard. `client_secret` is an unknown key and
 fails startup: this profile authenticates only with a private key, never a
 shared secret ([mandate](service-to-service-authentication.md#mandate)).
 `key_id`, `assertion_audience`, and `algorithm` are required; `algorithm` is
@@ -137,8 +140,8 @@ client-credentials form with `grant_type=client_credentials`, `client_id`,
 and `client_assertion`; there is no `Authorization` header. Scopes and
 audience are sent only when configured. Each token attempt has one
 five-second cap through body completion, narrowed by its initiating caller's
-remaining deadline. The token transport has one active exchange, 64 response
-headers, and a 1 MiB encoded body maximum. The shared transport enforces
+remaining deadline. The token transport admits 64 response headers and a
+1 MiB encoded body. The shared transport enforces
 header count, not a configurable aggregate header-byte limit. These are
 implementation constants, not operator tuning keys.
 
@@ -151,11 +154,13 @@ behind from reading it as issued in the future. A new assertion is signed for
 every token request and never cached or reused; two requests never share a
 `jti`.
 
-One owner never runs two token requests at once. Callers that arrive while a
-request is in flight wait for it, then reuse its token if it is reusable. After
-a failure, each waiting caller makes its own request in turn. Every caller
-bounds its own wait by its own absolute deadline. Dropping the requesting future
-cancels its exchange and lets the next waiter proceed. Dropping the last
+One owner never runs two service-token requests at once; [token
+exchange](#token-exchange-for-user-context) is coalesced per subject
+instead. Callers that arrive while a request is in flight wait for it, then
+reuse its token if it is reusable. After a failure, each waiting caller makes
+its own request in turn. Every caller bounds its own wait by its own absolute
+deadline. Dropping the requesting future cancels its request and lets the
+next waiter proceed. Dropping the last
 client/owner releases the cached token.
 
 Once a quarter of the reuse period, or at most five minutes, remains before the
@@ -207,7 +212,13 @@ Past that bound a subject without a retained token is exchanged on every
 call, which `oauth2_token_acquisitions_total{grant="token_exchange"}` shows
 as a rate tracking the request rate; size the bound to the users active on
 one replica within a token lifetime. Concurrent requests for one
-subject share a single in-flight exchange. A resource 401 evicts only that
+subject share a single in-flight exchange: the first caller's, bounded by
+that caller's deadline and the five-second cap. A failure is returned to
+every caller that waited for it. When the first caller is dropped or out of
+budget, its exchange is cancelled and a waiting caller starts its own, so no
+caller fails because of another's deadline. Exchanges for different subjects
+run concurrently, and nothing in this adapter limits how many: the admission
+of the requests that carry those subjects is the bound. A resource 401 evicts only that
 subject's cache entry, not the whole cache. An exchanged token with no
 `expires_in` serves only the request that fetched it and is never stored;
 failed exchanges are never cached.

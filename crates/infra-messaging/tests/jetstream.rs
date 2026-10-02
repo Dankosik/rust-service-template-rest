@@ -292,6 +292,7 @@ fn options_with_servers(
         connection_name: "infra-messaging-tests".to_owned(),
         servers,
         credentials: None,
+        credentials_file: None,
         root_ca_path: None,
         allow_plaintext: true,
         source_stream: fixture.stream.clone(),
@@ -1606,5 +1607,331 @@ async fn drain_returns_a_prefetched_delivery_before_ack_wait() {
         .await
         .expect("bounded consumer drain must join its pull task");
     close(messaging).await;
+    fixture.cleanup().await;
+}
+
+/// The fields of every event logged on this thread while the guard lives.
+type Logged = Arc<Mutex<Vec<Vec<(&'static str, String)>>>>;
+
+struct LoggedFields(Vec<(&'static str, String)>);
+
+impl tracing::field::Visit for LoggedFields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.push((field.name(), format!("{value:?}")));
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.push((field.name(), value.to_owned()));
+    }
+}
+
+struct LogCapture(Logged);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogCapture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let mut fields = LoggedFields(Vec::new());
+        event.record(&mut fields);
+        self.0.lock().expect("log lock").push(fields.0);
+    }
+}
+
+fn capture_logs() -> (tracing::subscriber::DefaultGuard, Logged) {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let logged = Logged::default();
+    let subscriber = tracing_subscriber::registry().with(LogCapture(Arc::clone(&logged)));
+    (tracing::subscriber::set_default(subscriber), logged)
+}
+
+/// The `messaging_admission_failed` events as (`error.type`, `required_bytes`, `limit_bytes`).
+fn admission_refusals(logged: &Logged) -> Vec<(String, String, Option<String>)> {
+    let field = |event: &[(&'static str, String)], name: &str| {
+        event
+            .iter()
+            .find(|(field, _)| *field == name)
+            .map(|(_, value)| value.clone())
+    };
+    logged
+        .lock()
+        .expect("log lock")
+        .iter()
+        .filter(|event| field(event, "message").as_deref() == Some("messaging_admission_failed"))
+        .map(|event| {
+            (
+                field(event, "error.type").expect("refusal names its error type"),
+                field(event, "required_bytes").expect("refusal names the delivery size"),
+                field(event, "limit_bytes"),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn admission_names_the_broker_limit_that_cannot_carry_one_delivery() {
+    let fixture = Fixture::create(false).await;
+    let cancel = CancellationToken::new();
+    let server_max_payload = async_nats::connect(nats_url())
+        .await
+        .expect("fixture broker is reachable")
+        .server_info()
+        .max_payload;
+    let (_guard, logged) = capture_logs();
+
+    // One delivery is the payload limit plus 8 KiB of headers, and the
+    // server bounds the two together.
+    let refused = Box::pin(Messaging::connect(
+        options(&fixture, None, server_max_payload),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect_err("a delivery the server cannot carry is refused");
+    assert!(
+        matches!(refused, infra_messaging::MessagingError::Bounds),
+        "{refused:?}"
+    );
+
+    // A consumer's source stream must bound its own messages.
+    let unbounded = format!("{}_UNBOUNDED", fixture.stream);
+    fixture
+        .jetstream
+        .create_stream(stream::Config {
+            name: unbounded.clone(),
+            subjects: vec![format!("{}.unbounded", fixture.subject)],
+            ..Default::default()
+        })
+        .await
+        .expect("test stream without a message limit is created");
+    let mut without_limit = options(&fixture, Some(consumer_options(&fixture)), 1024);
+    without_limit.source_stream.clone_from(&unbounded);
+    let refused = Box::pin(Messaging::connect(
+        without_limit,
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect_err("a source stream without a message limit is refused");
+    assert!(
+        matches!(refused, infra_messaging::MessagingError::Bounds),
+        "{refused:?}"
+    );
+
+    // A stream that admits more than one delivery is refused too.
+    let refused = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer_options(&fixture)), 512),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect_err("a source stream that admits a larger message is refused");
+    assert!(
+        matches!(refused, infra_messaging::MessagingError::Bounds),
+        "{refused:?}"
+    );
+
+    assert_eq!(
+        admission_refusals(&logged),
+        [
+            (
+                "server_max_payload".to_owned(),
+                (server_max_payload + 8 * 1024).to_string(),
+                Some(server_max_payload.to_string()),
+            ),
+            (
+                "stream_max_message_size_unset".to_owned(),
+                (1024 + 8 * 1024).to_string(),
+                Some("-1".to_owned()),
+            ),
+            (
+                "stream_max_message_size".to_owned(),
+                (512 + 8 * 1024).to_string(),
+                Some((1024 + 8 * 1024).to_string()),
+            ),
+        ]
+    );
+
+    fixture
+        .jetstream
+        .delete_stream(&unbounded)
+        .await
+        .expect("test stream is removable");
+    fixture.cleanup().await;
+}
+
+/// A transparent relay that records the user JWT of every client `CONNECT`
+/// and cuts the live connection on request.
+struct ConnectRecordingRelay {
+    url: String,
+    jwts: Arc<Mutex<Vec<String>>>,
+    cut: Arc<Notify>,
+    task: JoinHandle<()>,
+}
+
+impl ConnectRecordingRelay {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test relay listener must bind an ephemeral loopback port");
+        let address = listener
+            .local_addr()
+            .expect("test relay listener must report its loopback address");
+        let target = relay_target(&nats_url());
+        let jwts = Arc::new(Mutex::new(Vec::new()));
+        let cut = Arc::new(Notify::new());
+        let (recorded, cut_now) = (Arc::clone(&jwts), Arc::clone(&cut));
+        let task = tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let Ok(broker) = TcpStream::connect(&target).await else {
+                    return;
+                };
+                tokio::select! {
+                    _ = record_connect(client, broker, &recorded) => {}
+                    () = cut_now.notified() => {}
+                }
+            }
+        });
+        Self {
+            url: format!("nats://{address}"),
+            jwts,
+            cut,
+            task,
+        }
+    }
+
+    async fn jwts(&self, count: usize) -> Vec<String> {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let jwts = self.jwts.lock().expect("relay lock").clone();
+                if jwts.len() >= count {
+                    return jwts;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the client connects through the relay")
+    }
+}
+
+async fn record_connect(
+    client: TcpStream,
+    broker: TcpStream,
+    jwts: &Mutex<Vec<String>>,
+) -> Result<(), std::io::Error> {
+    let (client_read, mut client_write) = client.into_split();
+    let (mut broker_read, mut broker_write) = broker.into_split();
+    let mut client_read = BufReader::new(client_read);
+    let to_client = tokio::io::copy(&mut broker_read, &mut client_write);
+    let to_broker = async {
+        let mut line = Vec::new();
+        client_read.read_until(b'\n', &mut line).await?;
+        let connect: serde_json::Value = line
+            .strip_prefix(b"CONNECT ")
+            .and_then(|json| serde_json::from_slice(json).ok())
+            .expect("the client's first protocol line is CONNECT");
+        let jwt = connect["jwt"].as_str().unwrap_or_default().to_owned();
+        jwts.lock().expect("relay lock").push(jwt);
+        broker_write.write_all(&line).await?;
+        tokio::io::copy(&mut client_read, &mut broker_write).await
+    };
+    tokio::try_join!(to_client, to_broker).map(|_| ())
+}
+
+/// A credentials file as `nsc generate creds` writes it. The broker of this
+/// suite authenticates nobody, so only the client reads the JWT.
+fn write_creds(path: &std::path::Path, jwt: &str) {
+    let seed = nkeys::KeyPair::new_user()
+        .seed()
+        .expect("a generated user key has a seed");
+    let creds = format!(
+        "-----BEGIN NATS USER JWT-----\n{jwt}\n------END NATS USER JWT------\n\n\
+         -----BEGIN USER NKEY SEED-----\n{seed}\n------END USER NKEY SEED------\n"
+    );
+    let replacement = path.with_extension("next");
+    std::fs::write(&replacement, creds).expect("credentials file is written");
+    std::fs::rename(replacement, path).expect("credentials file is replaced");
+}
+
+#[tokio::test]
+async fn a_credentials_file_is_read_again_for_a_reconnect() {
+    let fixture = Fixture::create(false).await;
+    let relay = ConnectRecordingRelay::start().await;
+    let cancel = CancellationToken::new();
+    let dir = tempfile::tempdir().expect("temporary directory is created");
+    let creds = dir.path().join("nats.creds");
+    write_creds(&creds, "first.user.jwt");
+
+    let mut with_file = options_with_servers(&fixture, vec![relay.url.clone()], None, 1024);
+    with_file.credentials_file = Some(creds.clone());
+    let messaging = Box::pin(Messaging::connect(with_file, deadline(), cancel.clone()))
+        .await
+        .expect("a connection that authenticates from a credentials file is admitted");
+    assert_eq!(relay.jwts(1).await, ["first.user.jwt"]);
+
+    // The platform rotates the file, then the broker ends the connection.
+    write_creds(&creds, "rotated.user.jwt");
+    relay.cut.notify_one();
+    assert_eq!(relay.jwts(2).await, ["first.user.jwt", "rotated.user.jwt"]);
+
+    let prepared = registry(&fixture)
+        .prepare(&event("event-after-rotation"), 1024)
+        .expect("fixture event is prepared");
+    timeout(Duration::from_secs(10), async {
+        while messaging
+            .producer()
+            .publish(&prepared, deadline(), &cancel)
+            .await
+            .is_err()
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the reconnected client publishes again");
+
+    close(messaging).await;
+    relay.task.abort();
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_unusable_credentials_source_refuses_the_connection() {
+    let fixture = Fixture::create(false).await;
+    let cancel = CancellationToken::new();
+    let dir = tempfile::tempdir().expect("temporary directory is created");
+
+    let mut missing = options(&fixture, None, 1024);
+    missing.credentials_file = Some(dir.path().join("absent.creds"));
+    let refused = Box::pin(Messaging::connect(missing, deadline(), cancel.clone()))
+        .await
+        .expect_err("a missing credentials file refuses the connection");
+    assert!(
+        matches!(refused, infra_messaging::MessagingError::Configuration(_)),
+        "{refused:?}"
+    );
+
+    let malformed_path = dir.path().join("malformed.creds");
+    std::fs::write(&malformed_path, "not credentials").expect("fixture file is written");
+    let mut malformed = options(&fixture, None, 1024);
+    malformed.credentials_file = Some(malformed_path.clone());
+    let refused = Box::pin(Messaging::connect(malformed, deadline(), cancel.clone()))
+        .await
+        .expect_err("a malformed credentials file refuses the connection");
+    assert!(
+        matches!(refused, infra_messaging::MessagingError::Authentication),
+        "{refused:?}"
+    );
+
+    let mut both = options(&fixture, None, 1024);
+    both.credentials = Some("inline".to_owned().into());
+    both.credentials_file = Some(malformed_path);
+    let refused = Box::pin(Messaging::connect(both, deadline(), cancel.clone()))
+        .await
+        .expect_err("two credential sources refuse the connection");
+    assert!(
+        matches!(refused, infra_messaging::MessagingError::Configuration(_)),
+        "{refused:?}"
+    );
+
     fixture.cleanup().await;
 }
