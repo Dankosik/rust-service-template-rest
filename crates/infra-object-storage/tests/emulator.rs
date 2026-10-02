@@ -18,7 +18,9 @@ use infra_object_storage::{
 };
 use secrecy::SecretString;
 
-const BUCKET: &str = "template-emulator";
+/// The bucket the Compose service creates before it listens; the client
+/// never manages buckets. A supplied emulator must hold it already.
+const BUCKET: &str = "template-bucket";
 
 struct Emulator {
     endpoint: String,
@@ -57,34 +59,6 @@ impl Emulator {
         })
         .unwrap()
     }
-
-    /// Create the bucket with the raw SDK: the client itself never manages buckets.
-    async fn ensure_bucket(&self) {
-        let config = aws_sdk_s3::Config::builder()
-            .behavior_version(aws_sdk_s3::config::BehaviorVersion::v2026_01_12())
-            .region(aws_sdk_s3::config::Region::new("us-east-1"))
-            .endpoint_url(&self.endpoint)
-            .force_path_style(true)
-            .credentials_provider(aws_sdk_s3::config::Credentials::new(
-                &self.access_key_id,
-                &self.secret_access_key,
-                None,
-                None,
-                "emulator",
-            ))
-            .build();
-        let client = aws_sdk_s3::Client::from_conf(config);
-        if let Err(error) = client.create_bucket().bucket(BUCKET).send().await {
-            let code = aws_sdk_s3::error::ProvideErrorMetadata::code(&error);
-            assert!(
-                matches!(
-                    code,
-                    Some("BucketAlreadyOwnedByYou" | "BucketAlreadyExists")
-                ),
-                "create bucket: {code:?}"
-            );
-        }
-    }
 }
 
 fn unique_key(name: &str) -> ObjectKey {
@@ -98,7 +72,6 @@ fn unique_key(name: &str) -> ObjectKey {
 #[tokio::test]
 async fn round_trip_create_only_and_delete() {
     let emulator = Emulator::from_env();
-    emulator.ensure_bucket().await;
     let storage = emulator.storage(&emulator.secret_access_key);
     let key = unique_key("round-trip.json");
     let body = Bytes::from_static(br#"{"price":"1.25"}"#);
@@ -134,7 +107,6 @@ async fn round_trip_create_only_and_delete() {
 #[tokio::test]
 async fn streamed_upload_uses_a_trailing_checksum() {
     let emulator = Emulator::from_env();
-    emulator.ensure_bucket().await;
     let storage = emulator.storage(&emulator.secret_access_key);
     let key = unique_key("streamed.bin");
     let payload = Bytes::from(vec![7_u8; 256 * 1024]);
@@ -159,7 +131,6 @@ async fn streamed_upload_uses_a_trailing_checksum() {
 #[tokio::test]
 async fn presigned_get_works_until_it_expires() {
     let emulator = Emulator::from_env();
-    emulator.ensure_bucket().await;
     let storage = emulator.storage(&emulator.secret_access_key);
     let key = unique_key("presigned.txt");
     storage
@@ -196,7 +167,6 @@ async fn presigned_get_works_until_it_expires() {
 #[tokio::test]
 async fn wrong_credentials_are_rejected_and_the_probe_passes() {
     let emulator = Emulator::from_env();
-    emulator.ensure_bucket().await;
     emulator
         .storage(&emulator.secret_access_key)
         .probe()

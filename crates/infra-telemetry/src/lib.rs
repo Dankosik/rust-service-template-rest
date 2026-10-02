@@ -12,7 +12,10 @@ pub mod logging;
 pub mod metrics;
 pub mod traces;
 
-pub use logging::{LoggingError, LoggingFormat, LoggingOptions, install_subscriber};
+pub use logging::{
+    LoggingError, LoggingFormat, LoggingOptions, PanicMessage, install_panic_hook,
+    install_subscriber,
+};
 pub use metrics::{
     DEFAULT_BUCKETS, Metrics, MetricsError, TRACE_EXPORTER_ACTIVE_METRIC,
     TRACE_SPANS_EXPORTED_METRIC, diagnostics_router, runtime_metrics,

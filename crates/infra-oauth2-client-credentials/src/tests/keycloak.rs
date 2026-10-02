@@ -1,6 +1,6 @@
-//! The adapter against a real authorization server: Keycloak from
-//! `env/docker-compose.yml`. Run through `make test-integration-oauth`, which
-//! starts it and sets `OAUTH_TEST_KEYCLOAK_URL`.
+//! The adapter against a real authorization server: a throwaway Keycloak
+//! container. Run through `make test-integration-oauth`, which starts it
+//! (`scripts/ci/test-integration-oauth.sh`) and sets `OAUTH_TEST_KEYCLOAK_URL`.
 //!
 //! This proves what the local fixture cannot: that a real server accepts the
 //! client assertion for every supported algorithm, issues a service token and

@@ -253,8 +253,11 @@ work, replays, the readiness probe, and one cleanup connection, and keep the
 work inside `execute` short.
 
 While the boundary is active, a background task deletes expired records once
-a minute in batches of 500 rows, each under a 1 s statement timeout, skipping
-rows a live attempt holds. A failed run retries on the next tick; it changes
+a minute in batches of 500 rows, each its own `READ COMMITTED` transaction
+under a 1 s statement timeout, skipping rows a live attempt holds. The level
+is named because under a stricter server default a batch would fail with a
+serialization error whenever another replica's cleanup or an attempt changed
+one of its rows first. A failed run retries on the next tick; it changes
 neither readiness nor serving. `http_idempotency_cleanup_runs_total` counts
 every run by `outcome` (`completed`, `failed`), and
 `http_idempotency_cleanup_removed_records_total` counts the records each

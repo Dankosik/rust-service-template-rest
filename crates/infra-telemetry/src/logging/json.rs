@@ -217,7 +217,7 @@ impl<W> JsonLayer<W> {
         line.extend_from_slice(b"{\"level\":\"");
         line.extend_from_slice(metadata.level().as_str().as_bytes());
         line.extend_from_slice(b"\",\"target\":");
-        write_escaped(line, metadata.target());
+        write_json(line, metadata.target());
         line.extend_from_slice(b",\"timestamp\":\"");
         write_timestamp(line);
         line.push(b'"');
@@ -368,18 +368,6 @@ fn write_json(out: &mut Vec<u8>, value: &(impl serde::Serialize + ?Sized)) {
         out.truncate(start);
         out.extend_from_slice(b"null");
     }
-}
-
-/// `json-subscriber`'s quoting for the target: only `"` and `\` are escaped.
-fn write_escaped(out: &mut Vec<u8>, value: &str) {
-    out.push(b'"');
-    for &byte in value.as_bytes() {
-        if byte == b'"' || byte == b'\\' {
-            out.push(b'\\');
-        }
-        out.push(byte);
-    }
-    out.push(b'"');
 }
 
 fn write_hex(out: &mut Vec<u8>, bytes: &[u8]) {

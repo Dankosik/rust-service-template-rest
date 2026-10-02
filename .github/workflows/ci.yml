@@ -681,6 +681,7 @@ jobs:
         env:
           INTEGRATION_COMPOSE_MANAGED: "1"
           DATABASE_URL: compile-only
+          PGBOUNCER_DATABASE_URL: compile-only
           NATS_URL: compile-only
           CACHE_URL: compile-only
           OBJECT_STORAGE_TEST_ENDPOINT: compile-only

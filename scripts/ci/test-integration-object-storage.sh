@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Object storage adapter proof against a throwaway Compose versitygw. The CI
 # integration job can supply a shared, already-running emulator through
-# OBJECT_STORAGE_TEST_ENDPOINT.
+# OBJECT_STORAGE_TEST_ENDPOINT; it must hold the bucket `template-bucket`,
+# which the Compose service creates.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

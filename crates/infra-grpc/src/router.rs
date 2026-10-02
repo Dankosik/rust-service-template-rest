@@ -329,7 +329,7 @@ async fn admit(State(admission): State<Admission>, request: Request, next: Next)
         .min(admission.request_timeout);
     match tokio::time::timeout(budget, next.run(request)).await {
         Ok(response) => response,
-        Err(_elapsed) => tonic::Status::from(Failure::new(Code::RequestTimeout)).into_http(),
+        Err(_elapsed) => tonic::Status::from(Failure::new(Code::GatewayTimeout)).into_http(),
     }
 }
 

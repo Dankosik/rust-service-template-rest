@@ -19,7 +19,6 @@ use std::time::Duration;
 
 use service_config::{BuildInfo, LoadOptions, process_failure};
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 
 /// The error a registration returns; the worker refuses with it.
 pub type BuildError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -38,8 +37,7 @@ pub struct Registration<'a> {
     pub messages: infra_messaging::Registry,
     // template:end messaging:worker-registration-messaging
     config: &'a service_config::Config,
-    tracker: &'a TaskTracker,
-    cancel: &'a CancellationToken,
+    background: &'a shutdown::Background,
 }
 
 impl<'a> Registration<'a> {
@@ -49,16 +47,23 @@ impl<'a> Registration<'a> {
         self.config
     }
 
-    /// The worker's background task tracker.
-    #[must_use]
-    pub fn tracker(&self) -> &'a TaskTracker {
-        self.tracker
+    /// Spawn a background task the worker owns: `start` builds it from a
+    /// token cancelled at the background-join stage, which then joins it.
+    ///
+    /// The task must run until that token is cancelled. One that returns or
+    /// panics earlier stops the worker with exit code 1, and the failure
+    /// names it by `name`.
+    pub fn spawn<F>(&self, name: &'static str, start: impl FnOnce(CancellationToken) -> F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.background.spawn(name, start);
     }
 
     /// A new child of the worker's root token, cancelled at the background-join stage.
     #[must_use]
     pub fn shutdown(&self) -> CancellationToken {
-        self.cancel.child_token()
+        self.background.cancel.child_token()
     }
 }
 

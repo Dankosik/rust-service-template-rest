@@ -81,7 +81,7 @@ session_budgets = "startup"
 # allow_plaintext = true
 # allow_unauthenticated = true
 # source_stream = "events"
-# max_payload_bytes = "1 MiB"
+# max_payload_bytes = "256 KiB"
 # consumer_durable = "service-events"
 # consumer_filter_subject = "events.>"
 # dlq_subject = "dead.events"
@@ -97,11 +97,15 @@ session_budgets = "startup"
 # command_timeout = "100ms"
 # A rotated password comes from a file instead of the DSN:
 # password_file = "/run/secrets/cache-password"
+# A TLS server that requires a client certificate takes both paths:
+# client_cert_path = "/run/tls/cache-client.crt"
+# client_key_path = "/run/tls/cache-client.key"
 # template:end cache:local-config
 
 # template:begin object-storage:local-config
 # Object storage is inert until a provider is selected. The secret is
-# environment-only. With the emulator from `make compose-up`:
+# environment-only. With the emulator, which creates `template-bucket`:
+#   docker compose -f env/docker-compose.yml up -d --wait versitygw
 #   APP__OBJECT_STORAGE__SECRET_ACCESS_KEY=template-secret make run
 # [object_storage]
 # provider = "local"

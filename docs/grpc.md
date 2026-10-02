@@ -42,7 +42,7 @@ expect. Every application method requires the opening bearer. Selecting
 
 Process TLS uses the same accept loop. `security = "tls"` builds a rustls
 `ServerConfig` in `infra_grpc` and passes it to
-`infra_http::Server::bind_tls`. The handshake runs after the first-byte peek.
+`infra_http::Server::bind_tls`. The handshake has its own five-second bound.
 Supply the PEM certificate chain in `grpc.certificate` and
 `APP__GRPC__PRIVATE_KEY` through the environment. The private key is rejected
 in configuration files. `grpc.client_ca` makes verified client certificates
@@ -158,7 +158,8 @@ Outermost to innermost:
 
 1. Observation.
 2. Panic recovery, inside the observation layer. The response is `INTERNAL` / `request failed`. The payload
-   goes to the normal panic hook, as on HTTP. There is no suppressing hook.
+   goes to the process panic hook, which records it as an ERROR log record,
+   as on HTTP.
 3. Business routes only: bearer authentication, when that profile is
    retained. Health is outside it. Missing, malformed and invalid bearers are
    `UNAUTHENTICATED` / `authentication failed`. Provider unavailability is
@@ -217,8 +218,9 @@ Listener options, shared with HTTP except for the values below:
   `MaxConnectionAge`, so connections opened together do not all reconnect
   together. There is no forced close after the age: a stream that outlives
   it keeps its connection until it ends.
-- 5 seconds to the first byte, then a separate 5 second TLS handshake bound.
-  A handshake error or timeout closes the connection without a response.
+- 5 seconds for the TLS handshake, then 5 seconds for the HTTP/2 preface.
+  A handshake error or either timeout closes the connection without a
+  response.
 - 16 KiB of request metadata.
 - HTTP/2 PING keepalive every 20 seconds, with a 20 second timeout.
 - `TCP_NODELAY`, so response headers, data, and trailers do not wait for the
@@ -274,9 +276,9 @@ constraint, never the submitted value. `Failure::retry_after` adds
 | `already_exists` | `ALREADY_EXISTS` |
 | `conflict`, `idempotency_request_in_progress` | `ABORTED` |
 | `method_not_allowed` | `UNIMPLEMENTED` |
-| `request_entity_too_large`, `request_header_fields_too_large`, `too_many_requests` | `RESOURCE_EXHAUSTED` |
+| `request_entity_too_large`, `too_many_requests` | `RESOURCE_EXHAUSTED` |
 | `service_unavailable`, `authentication_unavailable`, `idempotency_unavailable` | `UNAVAILABLE` |
-| `request_timeout` | `DEADLINE_EXCEEDED` |
+| `gateway_timeout` | `DEADLINE_EXCEEDED` |
 | `internal_error` | `INTERNAL` |
 
 The transport answers its own rejections from the same catalog, so each
@@ -290,7 +292,7 @@ carries a reason:
 | Authentication provider unavailable | `UNAVAILABLE` | `AUTHENTICATION_UNAVAILABLE` |
 | Missing required scope | `PERMISSION_DENIED` | `FORBIDDEN` |
 | Concurrency shed | `RESOURCE_EXHAUSTED` | `SERVICE_UNAVAILABLE` |
-| Header deadline elapsed | `DEADLINE_EXCEEDED` | `REQUEST_TIMEOUT` |
+| Header deadline elapsed | `DEADLINE_EXCEEDED` | `GATEWAY_TIMEOUT` |
 | Recovered panic | `INTERNAL` | `INTERNAL_ERROR` |
 
 The shed is the one answer whose gRPC code differs from its catalog row: it
@@ -418,7 +420,8 @@ The server span, like the HTTP one, carries only `otel.name` and `otel.kind`
 as `tracing` fields, so the JSON log layer does not serialize and repeat the
 RPC attributes on every record; `rpc.system`, `rpc.service`, `rpc.method`,
 `rpc.grpc.status_code`, `server.address`, `server.port` and
-`user_agent.original` go to the OpenTelemetry span alone. The parent is the
+`user_agent.original` go to the OpenTelemetry span alone, as does
+`failure.code` when the answer is a catalog failure. The parent is the
 extracted incoming context, kept current even when the span is disabled.
 Client spans are built the same way. Metrics follow the grpc-ecosystem Prometheus
 names, so standard gRPC dashboards and alerts apply:
@@ -427,6 +430,13 @@ names, so standard gRPC dashboards and alerts apply:
 `grpc_client_handled_total` (`grpc_service`, `grpc_method`, `grpc_code`), the
 histograms `grpc_server_handling_seconds` and `grpc_client_handling_seconds`
 (`grpc_service`, `grpc_method`), and `grpc_server_shed_requests_total`.
+`grpc_server_failures_total` (`grpc_service`, `grpc_method`, `failure_code`)
+is the template's own addition: it counts the calls answered with a failure
+from the shared catalog, under the catalog code as HTTP's access log spells
+it in `problem_code`, so the failures that share one `grpc_code`
+(`authentication_unavailable` and `service_unavailable` are both
+`Unavailable`) stay apart. A status a handler builds without
+`infra_grpc::Failure` is not counted there.
 Started minus handled is the number of calls waiting for response headers.
 `grpc_code` is the grpc-go code name, one of all 17: `OK`, `Canceled`,
 `InvalidArgument`, `FailedPrecondition` and so on. The histograms measure time

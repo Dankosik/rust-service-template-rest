@@ -16,6 +16,24 @@ pub const REQUEST_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
 ];
 
+/// The path template of a request, such as `/v1/items/{id}`: OpenTelemetry
+/// `url.template`. Insert it as a request extension to tell one provider
+/// operation from another; the attempt's span is then named
+/// `{method} {template}` and both the span and the duration metric carry the
+/// template. It is a metric label, so it is a literal with placeholders and
+/// never a formatted path.
+///
+/// ```
+/// use infra_outbound_http::{Bytes, Request, UrlTemplate};
+///
+/// let mut request = Request::get("https://provider.example/v1/items/42")
+///     .body(Bytes::new())
+///     .expect("request");
+/// request.extensions_mut().insert(UrlTemplate("/v1/items/{id}"));
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UrlTemplate(pub &'static str);
+
 /// Configured server identity, formatted once per client. Clones share it.
 #[derive(Clone, Debug)]
 pub(crate) struct Server {
@@ -35,11 +53,13 @@ impl Server {
 }
 
 /// One polled outbound attempt. The guard retains only bounded configured
-/// identity and outcome state, never caller request data or transport errors.
+/// identity, the caller's static template, and outcome state, never caller
+/// request data or transport errors.
 /// A transport failure's cause is logged once, when the attempt finishes.
 pub(crate) struct Attempt {
     started: Instant,
     method: &'static str,
+    template: Option<&'static str>,
     server: Server,
     status: Option<StatusCode>,
     span: Span,
@@ -47,13 +67,15 @@ pub(crate) struct Attempt {
 }
 
 impl Attempt {
-    pub(crate) fn start(method: &Method, server: &Server) -> Self {
+    pub(crate) fn start(method: &Method, template: Option<UrlTemplate>, server: &Server) -> Self {
         let method = bounded_method(method);
+        let template = template.map(|UrlTemplate(template)| template);
         let span = tracing::info_span!(
             "outbound_http",
-            otel.name = span_name(method),
+            otel.name = %SpanName { method, template },
             otel.kind = "client",
             http.request.method = method,
+            url.template = template,
             server.address = &*server.address,
             server.port = server.port_number,
             http.response.status_code = tracing::field::Empty,
@@ -64,6 +86,7 @@ impl Attempt {
         Self {
             started: Instant::now(),
             method,
+            template,
             server: server.clone(),
             status: None,
             span,
@@ -127,7 +150,9 @@ impl Attempt {
 
         describe_histogram();
         let mut labels = Vec::with_capacity(
-            4 + usize::from(self.status.is_some()) + usize::from(error_type.is_some()),
+            4 + usize::from(self.template.is_some())
+                + usize::from(self.status.is_some())
+                + usize::from(error_type.is_some()),
         );
         labels.extend([
             Label::new("http.request.method", self.method),
@@ -135,6 +160,9 @@ impl Attempt {
             Label::new("server.port", self.server.port.clone()),
             Label::new("outbound.outcome", outcome),
         ]);
+        if let Some(template) = self.template {
+            labels.push(Label::new("url.template", template));
+        }
         let error_type = match (self.status, is_http_error, error_type) {
             (Some(_), true, Some(error_type)) => {
                 labels.push(Label::new("http.response.status_code", error_type.clone()));
@@ -193,10 +221,26 @@ fn bounded_method(method: &Method) -> &'static str {
     }
 }
 
-/// The OpenTelemetry HTTP client span name: the method, or `HTTP` when the
-/// method is not a known one.
-fn span_name(method: &'static str) -> &'static str {
-    if method == "_OTHER" { "HTTP" } else { method }
+/// The OpenTelemetry HTTP client span name: `{method} {url.template}`, or the
+/// method alone without a template; `HTTP` stands for a method that is not a
+/// known one.
+struct SpanName {
+    method: &'static str,
+    template: Option<&'static str>,
+}
+
+impl fmt::Display for SpanName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(if self.method == "_OTHER" {
+            "HTTP"
+        } else {
+            self.method
+        })?;
+        match self.template {
+            Some(template) => write!(formatter, " {template}"),
+            None => Ok(()),
+        }
+    }
 }
 
 fn http_error_type(status: StatusCode) -> Option<SharedString> {

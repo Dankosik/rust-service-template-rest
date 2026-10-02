@@ -36,7 +36,8 @@ use tokio_rustls::{
 use hyper_util::client::legacy::connect::dns::Name;
 
 use crate::{
-    BuildError, Client, Error, Limits, Url, build_transport, observe, policy, tls::TlsMaterial,
+    BuildError, Client, Error, Limits, Url, UrlTemplate, build_transport, observe, policy,
+    tls::TlsMaterial,
 };
 
 const FIXTURE_HOST: &str = "authn.fixture.test";
@@ -676,6 +677,10 @@ fn observation_records_polled_attempts_once_without_request_data() {
     for secret in REQUEST_SENTINELS {
         assert!(!scrape.contains(secret), "metric disclosed request data");
     }
+    assert!(
+        !scrape.contains("url_template"),
+        "a request without a template has no template label"
+    );
 
     let spans = diagnostics.0.lock().expect("span diagnostic lock");
     assert_eq!(
@@ -712,6 +717,79 @@ fn observation_records_polled_attempts_once_without_request_data() {
             assert!(!fields.contains(secret), "span disclosed request data");
         }
     }
+}
+
+#[test]
+fn url_template_names_the_operation_in_the_span_and_the_metric() {
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let recorder = observation_recorder();
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    metrics::with_local_recorder(&recorder, || {
+        tracing::subscriber::with_default(subscriber, || {
+            // See `observation_records_polled_attempts_once_without_request_data`.
+            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+            runtime.block_on(async {
+                let material = TlsMaterial::new(FIXTURE_HOST);
+                let (address, captured, server) = tls_server_capture(
+                    &material,
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+                )
+                .await;
+                let mut request = request_to("https://authn.fixture.test/items/sentinel-path");
+                request.extensions_mut().insert(UrlTemplate("/items/{id}"));
+                fixture_client(address, &material)
+                    .execute(request, deadline())
+                    .await
+                    .expect("HTTP error statuses remain responses");
+                let wire = captured.await.expect("captured request");
+                assert!(wire.starts_with(b"GET /items/sentinel-path HTTP/1.1\r\n"));
+                server.await.expect("capture fixture server succeeds");
+            });
+        });
+    });
+
+    let scrape = recorder.handle().render();
+    assert_eq!(
+        recorded_count(
+            &scrape,
+            &[
+                "url_template=\"/items/{id}\"",
+                "http_request_method=\"GET\"",
+                "http_response_status_code=\"404\"",
+            ],
+        ),
+        1,
+        "{scrape}"
+    );
+    assert!(
+        !scrape.contains("sentinel-path"),
+        "metric disclosed the path"
+    );
+
+    let spans = exporter.get_finished_spans().expect("exported spans");
+    let [span] = spans.as_slice() else {
+        panic!("one client span, got {spans:?}");
+    };
+    assert_eq!(span.name, "GET /items/{id}");
+    assert!(span.attributes.iter().any(|attribute| {
+        attribute.key.as_str() == "url.template" && attribute.value.as_str() == "/items/{id}"
+    }));
+    assert!(
+        !format!("{span:?}").contains("sentinel-path"),
+        "span disclosed the path"
+    );
 }
 
 #[test]
@@ -1086,6 +1164,8 @@ async fn completed_exchange_reuses_an_idle_https_connection() {
 
 #[tokio::test]
 async fn target_and_caller_headers_reach_the_wire_unchanged() {
+    // Framing headers are the exception: see
+    // `buffered_body_length_replaces_caller_framing_on_the_wire`.
     let material = TlsMaterial::new(FIXTURE_HOST);
     let (address, captured, server) =
         tls_server_capture(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
@@ -1109,6 +1189,30 @@ async fn target_and_caller_headers_reach_the_wire_unchanged() {
     assert!(wire.contains("host: authn.fixture.test\r\n"));
     assert!(wire.contains("traceparent: 00-abc-def-01"));
     assert!(wire.contains("accept-encoding: gzip"));
+    server.await.expect("capture fixture server succeeds");
+}
+
+#[tokio::test]
+async fn buffered_body_length_replaces_caller_framing_on_the_wire() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let (address, captured, server) =
+        tls_server_capture(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let request = Request::post(FIXTURE_URL)
+        .version(Version::HTTP_2)
+        .header(header::CONTENT_LENGTH, "2")
+        .header(header::TRANSFER_ENCODING, "chunked")
+        .body(Bytes::from_static(b"hello"))
+        .expect("misframed request");
+    fixture_client(address, &material)
+        .execute(request, deadline())
+        .await
+        .expect("captured request response");
+    let wire = String::from_utf8(captured.await.expect("captured request")).expect("ASCII request");
+    assert!(wire.starts_with("POST /fixture HTTP/1.1\r\n"), "{wire}");
+    let wire = wire.to_ascii_lowercase();
+    assert!(wire.contains("content-length: 5\r\n"), "{wire}");
+    assert_eq!(wire.matches("content-length:").count(), 1);
+    assert!(!wire.contains("transfer-encoding"), "{wire}");
     server.await.expect("capture fixture server succeeds");
 }
 
@@ -1241,18 +1345,22 @@ fn requests_must_name_the_configured_origin() {
 }
 
 #[test]
-fn admission_preserves_the_request_and_sets_the_configured_host() {
+fn admission_preserves_the_request_and_sets_the_transport_properties() {
     let origin = policy::admit_origin(&url("https://authn.fixture.test")).expect("origin");
     let request = Request::builder()
         .method(http::Method::PATCH)
         .uri("https://AUTHN.fixture.test:443/items")
         .version(Version::HTTP_2)
         .header("x-request-part", "preserved")
+        .header(header::CONTENT_LENGTH, "4")
+        .header(header::TRANSFER_ENCODING, "chunked")
         .body(Bytes::from_static(b"preserved"))
         .expect("request parts");
     let admitted = policy::admit_request(&origin, request).expect("admitted request");
     assert_eq!(admitted.method(), http::Method::PATCH);
-    assert_eq!(admitted.version(), Version::HTTP_2);
+    assert_eq!(admitted.version(), Version::HTTP_11);
+    assert_eq!(admitted.headers()[header::CONTENT_LENGTH], "9");
+    assert!(!admitted.headers().contains_key(header::TRANSFER_ENCODING));
     assert_eq!(admitted.uri(), "https://AUTHN.fixture.test:443/items");
     assert_eq!(admitted.headers()[header::HOST], "authn.fixture.test");
     assert_eq!(admitted.headers()[header::ACCEPT], "*/*");
@@ -1263,6 +1371,35 @@ fn admission_preserves_the_request_and_sets_the_configured_host() {
     let admitted = policy::admit_request(&port, request_to("https://[::1]:8443/items"))
         .expect("admitted IPv6 request");
     assert_eq!(admitted.headers()[header::HOST], "[::1]:8443");
+    assert!(!admitted.headers().contains_key(header::CONTENT_LENGTH));
+
+    // A provider may answer 411 to a content method without a length, and a
+    // length on a request without content would be read from the next one.
+    for (method, sent, expected) in [
+        (http::Method::POST, None, Some("0")),
+        (http::Method::POST, Some("7"), Some("0")),
+        (http::Method::DELETE, Some("7"), None),
+    ] {
+        let mut request = Request::builder()
+            .method(method.clone())
+            .uri("https://authn.fixture.test/items")
+            .body(Bytes::new())
+            .expect("empty request");
+        if let Some(sent) = sent {
+            request
+                .headers_mut()
+                .insert(header::CONTENT_LENGTH, sent.parse().expect("length"));
+        }
+        let admitted = policy::admit_request(&origin, request).expect("admitted request");
+        assert_eq!(
+            admitted
+                .headers()
+                .get(header::CONTENT_LENGTH)
+                .map(|value| value.to_str().expect("ASCII length")),
+            expected,
+            "{method} sent {sent:?}"
+        );
+    }
 }
 
 #[test]
