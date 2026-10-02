@@ -1,6 +1,7 @@
 //! One duration histogram and one span per operation. Neither carries a key,
 //! bucket, endpoint, URL, or provider message. The span and the failure event
-//! carry the provider's request identifiers, which name none of those.
+//! carry the provider's request identifiers, which name none of those; on
+//! Amazon S3 the span also carries the region.
 
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -146,7 +147,11 @@ impl std::fmt::Debug for OperationGuard {
 }
 
 impl OperationGuard {
-    pub(crate) fn start(histograms: std::sync::Arc<Histograms>, operation: Operation) -> Self {
+    pub(crate) fn start(
+        histograms: std::sync::Arc<Histograms>,
+        operation: Operation,
+        cloud_region: Option<&str>,
+    ) -> Self {
         let span = tracing::info_span!(
             "object_storage",
             otel.name = operation.span_name(),
@@ -154,6 +159,7 @@ impl OperationGuard {
             rpc.system = "aws-api",
             rpc.service = "S3",
             rpc.method = operation.method(),
+            cloud.region = cloud_region,
             object_storage.outcome = tracing::field::Empty,
             aws.request_id = tracing::field::Empty,
             aws.extended_request_id = tracing::field::Empty,
@@ -275,4 +281,61 @@ pub(crate) fn describe() {
         Unit::Seconds,
         "Object storage operation duration in seconds; a get includes its body"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    /// `Histograms` is sized by the hand-kept `COUNT`s. A new variant fails
+    /// to compile here until it is listed, and the test then fails until its
+    /// `COUNT` and column follow.
+    #[test]
+    fn every_series_has_its_own_cached_handle() {
+        use ObjectStorageError as E;
+        use Operation as O;
+        let operations = [O::Put, O::Get, O::Head, O::Delete, O::PresignGet, O::Probe];
+        let errors = [
+            E::NotFound,
+            E::AlreadyExists,
+            E::TooLarge,
+            E::Busy,
+            E::Unavailable,
+            E::Rejected,
+            E::OutcomeUnknown,
+            E::Integrity,
+        ];
+        match operations[0] {
+            O::Put | O::Get | O::Head | O::Delete | O::PresignGet | O::Probe => {}
+        }
+        match errors[0] {
+            E::NotFound
+            | E::AlreadyExists
+            | E::TooLarge
+            | E::Busy
+            | E::Unavailable
+            | E::Rejected
+            | E::OutcomeUnknown
+            | E::Integrity => {}
+        }
+        assert_eq!(operations.len(), Operation::COUNT);
+        assert_eq!(errors.len(), ObjectStorageError::COUNT);
+
+        let outcomes = [Outcome::Ok, Outcome::Cancelled]
+            .into_iter()
+            .chain(errors.map(Outcome::Failure));
+        let mut columns = HashSet::new();
+        let mut labels = HashSet::new();
+        for outcome in outcomes {
+            let (column, label) = outcome.metric_slot();
+            assert!(column < Outcome::COUNT, "{label} is outside the cache");
+            assert!(columns.insert(column), "{label} shares a column");
+            assert!(labels.insert(label), "{label} is used twice");
+        }
+        let rows: HashSet<usize> = operations.map(|operation| operation as usize).into();
+        assert_eq!(rows.len(), Operation::COUNT);
+        assert!(rows.iter().all(|row| *row < Operation::COUNT));
+    }
 }

@@ -1208,6 +1208,38 @@ async fn presign_is_bounded_and_redacted() {
     assert!(stub.seen().is_empty(), "presigning sends nothing");
 }
 
+#[tokio::test]
+async fn the_span_names_the_region_only_on_amazon() {
+    let records = Records::default();
+    let _subscriber = tracing::subscriber::set_default(records.clone());
+    // See `a_failure_reports_the_request_identifiers_of_its_response`.
+    let _every_dispatcher = tracing::Dispatch::new(Records::default());
+
+    // Presigning creates the span and sends nothing.
+    let amazon = ObjectStorage::new(options(Provider::AmazonS3 {
+        region: "eu-central-1".to_owned(),
+        expected_bucket_owner: "123456789012".to_owned(),
+    }))
+    .unwrap();
+    amazon
+        .presign_get(&key(), Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!(
+        records.matching("span", " cloud.region=eu-central-1").len(),
+        1
+    );
+
+    let r2 = ObjectStorage::new(options(Provider::CloudflareR2 {
+        endpoint: R2_ENDPOINT.to_owned(),
+    }))
+    .unwrap();
+    r2.presign_get(&key(), Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!(records.matching("span", " cloud.region=").len(), 1);
+}
+
 /// Every span and event a test emits, one line each with its recorded fields.
 #[derive(Clone, Default)]
 struct Records(Arc<Mutex<Vec<String>>>);

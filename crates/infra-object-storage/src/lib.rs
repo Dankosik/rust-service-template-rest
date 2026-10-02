@@ -118,6 +118,9 @@ pub struct ObjectStorage {
 struct Inner {
     client: aws_sdk_s3::Client,
     provider: &'static str,
+    /// The span's `cloud.region`: set only for Amazon S3, where the signing
+    /// region names a real one. Elsewhere it can be a placeholder (`auto`).
+    cloud_region: Option<String>,
     bucket: String,
     expected_bucket_owner: Option<String>,
     checksum: UploadChecksum,
@@ -257,6 +260,8 @@ impl ObjectStorage {
             max_concurrency,
             operation_timeout,
         } = options;
+        let cloud_region =
+            matches!(provider, Provider::AmazonS3 { .. }).then(|| admitted.region.clone());
         let mut config = aws_sdk_s3::Config::builder()
             .behavior_version(BehaviorVersion::v2026_01_12())
             .region(Region::new(admitted.region))
@@ -292,6 +297,7 @@ impl ObjectStorage {
             inner: Arc::new(Inner {
                 client: aws_sdk_s3::Client::from_conf(config.build()),
                 provider: provider.name(),
+                cloud_region,
                 bucket,
                 expected_bucket_owner: admitted.expected_bucket_owner,
                 checksum: admitted.checksum,
@@ -323,6 +329,8 @@ impl ObjectStorage {
         body: PutBody,
         options: PutOptions,
     ) -> Result<(), ObjectStorageError> {
+        // `sleep` saturates a budget too long to add to an instant, as the
+        // SDK's own timeout does; `Instant + Duration` would panic.
         let deadline = tokio::time::sleep(self.inner.operation_timeout).deadline();
         let mut guard = self.start(Operation::Put);
         if body.len > self.inner.max_object_bytes {
@@ -575,7 +583,11 @@ impl ObjectStorage {
     }
 
     fn start(&self, operation: Operation) -> OperationGuard {
-        OperationGuard::start(Arc::clone(&self.inner.histograms), operation)
+        OperationGuard::start(
+            Arc::clone(&self.inner.histograms),
+            operation,
+            self.inner.cloud_region.as_deref(),
+        )
     }
 
     fn admit(
