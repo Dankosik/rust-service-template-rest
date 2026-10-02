@@ -220,41 +220,46 @@ mod tests {
 
     #[test]
     fn public_finalization_checks_security_but_leaves_documentation_to_the_gate() {
-        for (root, security, exposure, public) in [
-            (None, None, None, true),
-            (None, Some(serde_json::json!([])), None, true),
+        for (root, security, exposure, expected) in [
+            (None, None, None, Ok(())),
+            (None, Some(serde_json::json!([])), None, Ok(())),
             (
                 Some(serde_json::json!([{"bearerAuth": []}])),
                 Some(serde_json::json!([])),
                 None,
-                true,
+                Ok(()),
             ),
             (
                 Some(serde_json::json!([{"bearerAuth": []}])),
                 None,
                 None,
-                false,
+                Err(FinalizeError::NonPublicOperation),
             ),
-            (None, Some(serde_json::json!([])), Some("protected"), true),
-            (None, Some(serde_json::json!([])), Some("public"), true),
-            (None, Some(serde_json::json!([{}])), None, false),
+            (None, Some(serde_json::json!([])), Some("protected"), Ok(())),
+            (None, Some(serde_json::json!([])), Some("public"), Ok(())),
+            (
+                None,
+                Some(serde_json::json!([{}])),
+                None,
+                Err(FinalizeError::InvalidPolicy),
+            ),
             (
                 None,
                 Some(serde_json::json!([{"bearerAuth": ["write"]}])),
                 None,
-                false,
+                Err(FinalizeError::NonPublicOperation),
             ),
             (
                 None,
                 Some(serde_json::json!([{"unknown": []}])),
                 None,
-                false,
+                Err(FinalizeError::InvalidPolicy),
             ),
             (
                 None,
                 Some(serde_json::json!([{"bearerAuth": []}, {}])),
                 None,
-                false,
+                Err(FinalizeError::InvalidPolicy),
             ),
         ] {
             let mut document = serde_json::json!({
@@ -276,41 +281,11 @@ mod tests {
             let contract = OpenApiRouter::<()>::with_openapi(
                 serde_json::from_value(document.clone()).expect("valid OpenAPI fixture"),
             );
-            let result = finalize_public(contract);
-            if public {
-                assert!(result.is_ok(), "{document}");
-            } else {
-                // A well-formed bearer requirement (scoped or not) compiles to
-                // `Access::Protected` and fails finalization only because this
-                // contract must be all-public; any other shape never compiles
-                // to an access decision at all.
-                let effective = document["paths"]["/_test/policy"]["get"]
-                    .get("security")
-                    .unwrap_or(&document["security"]);
-                let supported_bearer_requirement =
-                    effective.as_array().is_some_and(|requirements| {
-                        !requirements.is_empty()
-                            && requirements.iter().all(|requirement| {
-                                requirement.as_object().is_some_and(|object| {
-                                    object.len() == 1
-                                        && object.get("bearerAuth").is_some_and(|scopes| {
-                                            scopes.as_array().is_some_and(|scopes| {
-                                                scopes.iter().all(serde_json::Value::is_string)
-                                            })
-                                        })
-                                })
-                            })
-                    });
-                let expected = if supported_bearer_requirement {
-                    FinalizeError::NonPublicOperation
-                } else {
-                    FinalizeError::InvalidPolicy
-                };
-                assert!(
-                    matches!(result, Err(error) if error == expected),
-                    "{document}"
-                );
-            }
+            assert_eq!(
+                finalize_public(contract).map(|_| ()),
+                expected,
+                "{document}"
+            );
         }
     }
 

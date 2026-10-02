@@ -823,6 +823,10 @@ mod tests {
     /// A handler hands its token to work it starts. That work must hear when
     /// the delivery is over, or it outlives a handler the adapter gave up on.
     #[tokio::test(start_paused = true)]
+    #[allow(
+        clippy::excessive_nesting,
+        reason = "the two-outcome cancellation oracle keeps token extraction beside the returned async handler"
+    )]
     async fn the_handler_token_is_cancelled_when_its_delivery_ends() {
         for (stalls, expected) in [(true, "timeout"), (false, "success")] {
             let (token_tx, token_rx) = tokio::sync::oneshot::channel();

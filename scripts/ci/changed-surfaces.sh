@@ -19,7 +19,7 @@
 set -euo pipefail
 
 names=(
-	rust_source cargo_dependencies dependency_policy lint_config openapi tool_manifest
+	rust_source cargo_dependencies dependency_policy lint_config openapi tool_manifest duplication architecture
 	# template:begin grpc:classifier-grpc-surface
 	grpc_schema
 	# template:end grpc:classifier-grpc-surface
@@ -212,6 +212,22 @@ classify() {
 		case "${file}" in
 		Cargo.toml | Cargo.lock | crates/*/Cargo.toml | test/Cargo.toml | rust-toolchain.toml) mark cargo_dependencies ;;
 		esac
+		# Both checks use the whole declared workspace; a new clone can match
+		# unchanged source. Standalone tool workspaces are not scanned as Rust.
+		case "${file}" in
+		crates/*.rs | test/*.rs) mark duplication ;;
+		esac
+		case "${file}" in
+		Cargo.toml | Cargo.lock | */Cargo.toml | */Cargo.lock | rust-toolchain.toml | \
+		make/template.mk | make/source.mk | scripts/ci/template-init-check.sh | scripts/tests/template-profile-projections.py | scripts/tests/template-candidate-paths.txt | .github/workflows/ci.yml | scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | \
+		tools/versions.env | scripts/tests/quality-checks.py)
+			mark duplication architecture
+			;;
+		esac
+		case "${file}" in
+		.jscpd.json | quality/duplication-baseline.json | scripts/ci/duplication-check.py) mark duplication ;;
+		quality/architecture.json | scripts/ci/architecture-check.py | docs/architecture/boundaries.md) mark architecture ;;
+		esac
 		# Database-backed proof: the adapter, the runner, the test crate and
 		# its fixtures, the compose file, and the scripts that drive them.
 		# The same job proves the query metadata, which every checked
@@ -361,6 +377,7 @@ classify() {
 			mark module_initializer initializer_runtime
 			;;
 		# template:end grpc:classifier-grpc-initializer
+		.jscpd.json | quality/*.json | scripts/ci/duplication-check.py | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
 		build/docker/Dockerfile | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
 		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | \
@@ -471,6 +488,22 @@ self_test() {
 {"schema_version":1,"state":"complete","identity":{"service_name":"fixture-api","repository":"https://github.com/example/fixture-api","description":"Fixture API","codeowner":"@example/platform"},"profiles":{"database":"none","agent_harness":"core"},"source":{"repository":"https://github.com/Dankosik/rust-service-template-rest","checkout_revision":"${head}","provenance":"local-checkout"}}
 EOF
 	classifier_root=${source_fixture}
+
+	# Gate selection is independent of the existing Rust/build routes.
+	for file in crates/config/build.rs crates/health/src/lib.rs test/tests/probes.rs; do
+		assert_case "${file}" "duplication" "architecture"
+	done
+	for file in .jscpd.json quality/duplication-baseline.json scripts/ci/duplication-check.py; do
+		assert_case "${file}" "duplication" "architecture"
+	done
+	for file in quality/architecture.json scripts/ci/architecture-check.py docs/architecture/boundaries.md; do
+		assert_case "${file}" "architecture" "duplication"
+	done
+	for file in Cargo.toml Cargo.lock crates/health/Cargo.toml rust-toolchain.toml make/template.mk make/source.mk scripts/ci/template-init-check.sh scripts/tests/template-profile-projections.py scripts/tests/template-candidate-paths.txt .github/workflows/ci.yml scripts/ci/changed-surfaces.sh scripts/ci/verify.sh tools/versions.env scripts/tests/quality-checks.py; do
+		assert_case "${file}" "duplication architecture" ""
+	done
+	assert_case docs/example.md "documentation" "duplication architecture"
+	assert_case tools/grpc-codegen/src/main.rs "rust_source" "duplication architecture"
 
 	assert_case template.lock \
 		"agent_instructions validation_system module_initializer initializer_runtime" \
@@ -796,7 +829,7 @@ EOF
 	done
 
 	output="$(printf '%s\n' Cargo.toml | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
-	has_line "${output}" 'surface_count=5'
+	has_line "${output}" 'surface_count=7'
 	output="$(printf '%s\n' LICENSE | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
 	has_line "${output}" 'surface_count=0'
 	has_line "${output}" 'classified=true'

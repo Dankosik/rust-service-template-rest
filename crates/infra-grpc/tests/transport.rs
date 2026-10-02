@@ -2024,27 +2024,28 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
                 let acceptor = acceptor.clone();
                 let silent = Arc::clone(&silent);
                 tokio::spawn(async move {
-                    if let Ok(mut stream) = acceptor.accept(stream).await {
-                        // The form body can arrive after the request head.
-                        let mut request = [0_u8; 4096];
-                        let mut read = 0;
-                        let contains = |seen: &[u8], needle: &[u8]| {
-                            seen.windows(needle.len()).any(|window| window == needle)
-                        };
-                        while !contains(&request[..read], b"token=") {
-                            match stream.read(&mut request[read..]).await {
-                                Ok(more) if more > 0 => read += more,
-                                _ => break,
-                            }
+                    let Ok(mut stream) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    // The form body can arrive after the request head.
+                    let mut request = [0_u8; 4096];
+                    let mut read = 0;
+                    let contains = |seen: &[u8], needle: &[u8]| {
+                        seen.windows(needle.len()).any(|window| window == needle)
+                    };
+                    while !contains(&request[..read], b"token=") {
+                        match stream.read(&mut request[read..]).await {
+                            Ok(more) if more > 0 => read += more,
+                            _ => break,
                         }
-                        if silent.load(Ordering::Acquire) {
-                            std::future::pending::<()>().await;
-                        }
-                        let unscoped = contains(&request[..read], b"token=unscoped");
-                        let response = introspection_response(unscoped);
-                        let _ = stream.write_all(response.as_bytes()).await;
-                        let _ = stream.shutdown().await;
                     }
+                    if silent.load(Ordering::Acquire) {
+                        std::future::pending::<()>().await;
+                    }
+                    let unscoped = contains(&request[..read], b"token=unscoped");
+                    let response = introspection_response(unscoped);
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
                 });
             }
         }

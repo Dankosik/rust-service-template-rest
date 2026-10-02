@@ -1,0 +1,268 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "T1",
+      "kind": "test",
+      "reason": "Independent JWT and introspection malformed actor scenarios retain their own expected cases. Reconsider when the independently verified scenario contract changes, not merely because the expected cases repeat.",
+      "occurrences": [
+        {
+          "path": "crates/infra-bearerauthn/src/claims.rs",
+          "original_lines": [
+            610,
+            629
+          ],
+          "max_tokens": 196,
+          "before": {
+            "text": "ormat!(\"{actor:?}\"), \"Actor([REDACTED])\"",
+            "boundary": false
+          },
+          "source": ");\n        for absent in [serde_json::json!({}), serde_json::json!({\"act\": null})] {\n            assert!(verify(absent).unwrap().actor().is_none());\n        }\n        assert_eq!(\n            verify(serde_json::json!({\"act\": {\"sub\": \"solo\"}}))\n                .unwrap()\n                .actor()\n                .unwrap()\n                .client_id(),\n            None\n        );\n        for malformed in [\n            serde_json::json!({\"act\": \"not-an-object\"}),\n            serde_json::json!({\"act\": []}),\n            serde_json::json!({\"act\": {}}),\n            serde_json::json!({\"act\": {\"sub\": \"\"}}),\n            serde_json::json!({\"act\": {\"sub\": 5}}),\n            serde_json::json!({\"act\": {\"sub\": \"x\", \"client_id\": 5}}),\n        ] {",
+          "after": {
+            "text": "\n            assert_eq!(\n                verify(malformed.clone()).unwrap_err().",
+            "boundary": false
+          }
+        },
+        {
+          "path": "crates/infra-bearerauthn/src/claims.rs",
+          "original_lines": [
+            744,
+            763
+          ],
+          "max_tokens": 196,
+          "before": {
+            "text": "s_bytes(),\n                &policy(),\n                100,\n                access_token(),\n            )\n        };\n        let principal = verify(serde_json::json!({\n            \"act\": {\"sub\": \"service-a\", \"client_id\": \"gateway\", \"act\": {\"sub\": \"nested\"}},\n        }))\n        .unwrap();\n        let actor = principal.actor().unwrap();\n        assert_eq!(actor.subject(), \"service-a\");\n        assert_eq!(actor.client_id(), Some(\"gateway\")",
+            "boundary": false
+          },
+          "source": ");\n        for absent in [serde_json::json!({}), serde_json::json!({\"act\": null})] {\n            assert!(verify(absent).unwrap().actor().is_none());\n        }\n        assert_eq!(\n            verify(serde_json::json!({\"act\": {\"sub\": \"solo\"}}))\n                .unwrap()\n                .actor()\n                .unwrap()\n                .client_id(),\n            None\n        );\n        for malformed in [\n            serde_json::json!({\"act\": \"not-an-object\"}),\n            serde_json::json!({\"act\": []}),\n            serde_json::json!({\"act\": {}}),\n            serde_json::json!({\"act\": {\"sub\": \"\"}}),\n            serde_json::json!({\"act\": {\"sub\": 5}}),\n            serde_json::json!({\"act\": {\"sub\": \"x\", \"client_id\": 5}}),\n        ] {",
+          "after": {
+            "text": "\n            let error = verify(malforme",
+            "boundary": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "P1",
+      "kind": "production",
+      "reason": "Provider-owned histogram storage, Default and redacted Debug retain distinct metric dimensions. Reconsider only if one real metric owner can preserve both provider dimensions and independent lifecycles.",
+      "occurrences": [
+        {
+          "path": "crates/infra-cache/src/observe.rs",
+          "original_lines": [
+            135,
+            150
+          ],
+          "max_tokens": 112,
+          "before": {
+            "text": "recorder\n/// before it opens the cache.\n",
+            "boundary": false
+          },
+          "source": "pub(crate) struct Histograms([OnceLock<Histogram>; Operation::COUNT * Outcome::COUNT]);\n\nimpl Default for Histograms {\n    fn default() -> Self {\n        Self(std::array::from_fn(|_| OnceLock::new()))\n    }\n}\n\nimpl std::fmt::Debug for Histograms {\n    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        formatter.debug_struct(\"Histograms\").finish_non_exhaustive()\n    }\n}\n\nimpl Histograms {\n    fn get(&self,",
+          "after": {
+            "text": " namespace: &'static str, operation: Ope",
+            "boundary": false
+          }
+        },
+        {
+          "path": "crates/infra-object-storage/src/observe.rs",
+          "original_lines": [
+            101,
+            116
+          ],
+          "max_tokens": 112,
+          "before": {
+            "text": "e recorder before it builds the client.\n",
+            "boundary": false
+          },
+          "source": "pub(crate) struct Histograms([OnceLock<Histogram>; Operation::COUNT * Outcome::COUNT]);\n\nimpl Default for Histograms {\n    fn default() -> Self {\n        Self(std::array::from_fn(|_| OnceLock::new()))\n    }\n}\n\nimpl std::fmt::Debug for Histograms {\n    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        formatter.debug_struct(\"Histograms\").finish_non_exhaustive()\n    }\n}\n\nimpl Histograms {\n    fn get(&self,",
+          "after": {
+            "text": " operation: Operation, outcome: Outcome)",
+            "boundary": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "P2",
+      "kind": "production",
+      "reason": "Cleanup failure classification belongs to separate transaction cleanup and logging owners. Reconsider when both cleanup owners deliberately share failure and reporting policy.",
+      "occurrences": [
+        {
+          "path": "crates/infra-idempotency-store/src/maintenance.rs",
+          "original_lines": [
+            38,
+            68
+          ],
+          "max_tokens": 203,
+          "before": {
+            "text": "/ The failure class of one cleanup run.\n",
+            "boundary": false
+          },
+          "source": "#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]\npub enum CleanupError {\n    #[error(\"acquire\")]\n    Acquire,\n    #[error(\"begin\")]\n    Begin,\n    #[error(\"statement\")]\n    Statement,\n    #[error(\"commit\")]\n    Commit,\n}\n\nimpl From<TxError> for CleanupError {\n    fn from(err: TxError) -> Self {\n        match &err {\n            TxError::Acquire(err) => cleanup_failed(err, Self::Acquire),\n            TxError::Begin(err) => cleanup_failed(err, Self::Begin),\n            TxError::CommitFailed(err) | TxError::CommitUnknown(err) => {\n                cleanup_failed(err, Self::Commit)\n            }\n        }\n    }\n}\n\n/// Log a failed cleanup batch with only bounded fields, never driver text,\n/// and return its class.\nfn cleanup_failed(err: &sqlx::Error, class: CleanupError) -> CleanupError {\n    tracing::warn!(\n        failure = %class,\n        sqlstate = sqlstate(err).as_deref(),\n        cause = failure_cause(err),",
+          "after": {
+            "text": "\n        \"http_idempotency_cleanup_faile",
+            "boundary": false
+          }
+        },
+        {
+          "path": "crates/infra-webhooks/src/inbound.rs",
+          "original_lines": [
+            678,
+            708
+          ],
+          "max_tokens": 203,
+          "before": {
+            "text": "ilure class of one receipt cleanup run.\n",
+            "boundary": false
+          },
+          "source": "#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]\npub enum CleanupError {\n    #[error(\"acquire\")]\n    Acquire,\n    #[error(\"begin\")]\n    Begin,\n    #[error(\"statement\")]\n    Statement,\n    #[error(\"commit\")]\n    Commit,\n}\n\nimpl From<TxError> for CleanupError {\n    fn from(err: TxError) -> Self {\n        match &err {\n            TxError::Acquire(err) => cleanup_failed(err, Self::Acquire),\n            TxError::Begin(err) => cleanup_failed(err, Self::Begin),\n            TxError::CommitFailed(err) | TxError::CommitUnknown(err) => {\n                cleanup_failed(err, Self::Commit)\n            }\n        }\n    }\n}\n\n/// Log a failed cleanup batch with only bounded fields, never driver text,\n/// and return its class.\nfn cleanup_failed(err: &sqlx::Error, class: CleanupError) -> CleanupError {\n    tracing::warn!(\n        failure = %class,\n        sqlstate = sqlstate(err).as_deref(),\n        cause = failure_cause(err),",
+          "after": {
+            "text": "\n        \"webhook_receipt_cleanup_failed",
+            "boundary": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "P3",
+      "kind": "production",
+      "reason": "Periodic cancellation-bound cleanup retains provider-owned statements, cadence and metrics. Reconsider when a shared lifecycle owner is required beyond line reduction.",
+      "occurrences": [
+        {
+          "path": "crates/infra-idempotency-store/src/maintenance.rs",
+          "original_lines": [
+            182,
+            197
+          ],
+          "max_tokens": 101,
+          "before": {
+            "text": "led token never polls the loop.\n        ",
+            "boundary": false
+          },
+          "source": "let _ = cancel\n            .run_until_cancelled(async {\n                let mut ticker = tokio::time::interval(CLEANUP_INTERVAL);\n                ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);\n                loop {\n                    ticker.tick().await;\n                    let outcome = match self.remove_expired().await {\n                        Ok(_) => \"completed\",\n                        Err(_) => \"failed\",\n                    };\n                    metrics::counter!(CLEANUP_RUNS_METRIC, \"outcome\" => outcome).increment(1);\n                }\n            })\n            .await;\n    }\n}",
+          "after": {
+            "text": "\n",
+            "boundary": true
+          }
+        },
+        {
+          "path": "crates/infra-webhooks/src/inbound.rs",
+          "original_lines": [
+            359,
+            374
+          ],
+          "max_tokens": 101,
+          "before": {
+            "text": "he cleanup deleted.\"\n        );\n        ",
+            "boundary": false
+          },
+          "source": "let _ = cancel\n            .run_until_cancelled(async {\n                let mut ticker = tokio::time::interval(CLEANUP_INTERVAL);\n                ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);\n                loop {\n                    ticker.tick().await;\n                    let outcome = match self.remove_expired().await {\n                        Ok(_) => \"completed\",\n                        Err(_) => \"failed\",\n                    };\n                    metrics::counter!(CLEANUP_RUNS_METRIC, \"outcome\" => outcome).increment(1);\n                }\n            })\n            .await;\n    }\n}",
+          "after": {
+            "text": "\n\nimpl fmt::Debug for Receiver {\n    fn ",
+            "boundary": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "T5",
+      "kind": "test",
+      "reason": "Deadline-clamping scenarios independently prove the service and worker shutdown owners. Reconsider when service and worker shutdown acquire one actual lifecycle owner.",
+      "occurrences": [
+        {
+          "path": "crates/jobs-worker/src/shutdown.rs",
+          "original_lines": [
+            626,
+            643
+          ],
+          "max_tokens": 149,
+          "before": {
+            "text": "ndency close, telemetry flush)\"\n        ",
+            "boundary": false
+          },
+          "source": ");\n    }\n\n    #[tokio::test(start_paused = true)]\n    async fn stages_are_clamped_to_the_remaining_deadline() {\n        let budget = Budget::start(Duration::from_secs(10));\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(4)\n        );\n        tokio::time::advance(Duration::from_secs(8)).await;\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(2)\n        );\n        tokio::time::advance(Duration::from_secs(5)).await;\n        assert_eq!(budget.remaining(Duration::from_secs(4)), Duration::ZERO);\n    }",
+          "after": {
+            "text": "\n\n    #[tokio::test]\n    async fn abort_",
+            "boundary": false
+          }
+        },
+        {
+          "path": "crates/service/src/bootstrap/shutdown.rs",
+          "original_lines": [
+            436,
+            453
+          ],
+          "max_tokens": 149,
+          "before": {
+            "text": ").contains(\"http.grace_period\"), \"{err}\"",
+            "boundary": false
+          },
+          "source": ");\n    }\n\n    #[tokio::test(start_paused = true)]\n    async fn stages_are_clamped_to_the_remaining_deadline() {\n        let budget = Budget::start(Duration::from_secs(10));\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(4)\n        );\n        tokio::time::advance(Duration::from_secs(8)).await;\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(2)\n        );\n        tokio::time::advance(Duration::from_secs(5)).await;\n        assert_eq!(budget.remaining(Duration::from_secs(4)), Duration::ZERO);\n    }",
+          "after": {
+            "text": "\n}\n",
+            "boundary": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "T2-T4",
+      "kind": "test",
+      "reason": "Inbound/outbound webhook tests consolidate their identical counter-key recorder in one crate-private cfg(test) owner; HTTP and JWT retain independent recorders, and JWT also observes increments, histograms and spans. The shared occurrence is the observed union of its describe/register method spans, retaining the former outbound ceiling of 277 for detector re-pairing after profile removal. Reconsider when recorder responsibilities acquire a real shared owner across crates or their observed events diverge.",
+      "occurrences": [
+        {
+          "path": "crates/infra-bearerauthn/src/jwt.rs",
+          "original_lines": [
+            1813,
+            1839
+          ],
+          "max_tokens": 131,
+          "before": {
+            "text": " impl metrics::Recorder for Diagnostics ",
+            "boundary": false
+          },
+          "source": "{\n        fn describe_counter(\n            &self,\n            _: metrics::KeyName,\n            _: Option<metrics::Unit>,\n            _: metrics::SharedString,\n        ) {\n        }\n        fn describe_gauge(\n            &self,\n            _: metrics::KeyName,\n            _: Option<metrics::Unit>,\n            _: metrics::SharedString,\n        ) {\n        }\n        fn describe_histogram(\n            &self,\n            _: metrics::KeyName,\n            _: Option<metrics::Unit>,\n            _: metrics::SharedString,\n        ) {\n        }\n        fn register_counter(\n            &self,\n            key: &metrics::Key,\n            _: &metrics::Metadata<'_>,\n        ) -> metrics::Counter {",
+          "after": {
+            "text": "\n            metrics::Counter::from_arc(",
+            "boundary": false
+          }
+        },
+        {
+          "path": "crates/infra-http/src/webhooks.rs",
+          "original_lines": [
+            196,
+            247
+          ],
+          "max_tokens": 277,
+          "before": {
+            "text": " every counter the route registers.\n    ",
+            "boundary": false
+          },
+          "source": "#[derive(Default)]\n    struct Keys(std::sync::Mutex<Vec<metrics::Key>>);\n\n    impl metrics::Recorder for Keys {\n        fn describe_counter(\n            &self,\n            _: metrics::KeyName,\n            _: Option<metrics::Unit>,\n            _: metrics::SharedString,\n        ) {\n        }\n\n        fn describe_gauge(\n            &self,\n            _: metrics::KeyName,\n            _: Option<metrics::Unit>,\n            _: metrics::SharedString,\n        ) {\n        }\n\n        fn describe_histogram(\n            &self,\n            _: metrics::KeyName,\n            _: Option<metrics::Unit>,\n            _: metrics::SharedString,\n        ) {\n        }\n\n        fn register_counter(\n            &self,\n            key: &metrics::Key,\n            _: &metrics::Metadata<'_>,\n        ) -> metrics::Counter {\n            self.0.lock().expect(\"keys\").push(key.clone());\n            metrics::Counter::noop()\n        }\n\n        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {\n            metrics::Gauge::noop()\n        }\n\n        fn register_histogram(\n            &self,\n            _: &metrics::Key,\n            _: &metrics::Metadata<'_>,\n        ) -> metrics::Histogram {\n            metrics::Histogram::noop()\n        }\n    }\n\n    #[test]\n    fn",
+          "after": {
+            "text": " outcomes_label_a_configured_endpoint_an",
+            "boundary": false
+          }
+        },
+        {
+          "path": "crates/infra-webhooks/src/test_metrics.rs",
+          "original_lines": [
+            5,
+            46
+          ],
+          "max_tokens": 277,
+          "before": {
+            "text": "\nimpl metrics::Recorder for CounterKeys ",
+            "boundary": false
+          },
+          "source": "{\n    fn describe_counter(\n        &self,\n        _: metrics::KeyName,\n        _: Option<metrics::Unit>,\n        _: metrics::SharedString,\n    ) {\n    }\n\n    fn describe_gauge(\n        &self,\n        _: metrics::KeyName,\n        _: Option<metrics::Unit>,\n        _: metrics::SharedString,\n    ) {\n    }\n\n    fn describe_histogram(\n        &self,\n        _: metrics::KeyName,\n        _: Option<metrics::Unit>,\n        _: metrics::SharedString,\n    ) {\n    }\n\n    fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {\n        self.0.lock().expect(\"keys\").push(key.clone());\n        metrics::Counter::noop()\n    }\n\n    fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {\n        metrics::Gauge::noop()\n    }\n\n    fn register_histogram(\n        &self,\n        _: &metrics::Key,\n        _: &metrics::Metadata<'_>,\n    ) -> metrics::Histogram {\n        metrics::Histogram::noop()\n    }\n}",
+          "after": {
+            "text": "\n",
+            "boundary": true
+          }
+        }
+      ]
+    }
+  ]
+}
