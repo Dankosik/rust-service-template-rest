@@ -174,6 +174,10 @@ fn operator_commands_use_only_postgres_configuration_and_safe_identity_receipts(
         (&["failed"], "failed"),
         (&["unhandled", "--handled-kinds", ""], "unhandled"),
         (
+            &["unhandled", "--handled-kinds", "zebra,alpha,zebra"],
+            "unhandled",
+        ),
+        (
             &[
                 "redrive",
                 JOB_ID,
@@ -208,6 +212,7 @@ fn operator_commands_use_only_postgres_configuration_and_safe_identity_receipts(
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(1), "{args:?}: {stderr}");
         let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(receipt["schema_version"], 1);
         assert_eq!(receipt["action"], *action);
         assert_eq!(receipt["cause"], "postgres_disabled");
         assert!(
@@ -224,6 +229,16 @@ fn operator_commands_use_only_postgres_configuration_and_safe_identity_receipts(
             assert_eq!(receipt["outcome"], "unavailable");
             assert!(receipt.get("items").is_none());
             assert!(receipt.get("next_cursor").is_none());
+        }
+        if *action == "unhandled" {
+            let expected = if args[2].is_empty() {
+                serde_json::json!([])
+            } else {
+                serde_json::json!(["alpha", "zebra"])
+            };
+            assert_eq!(receipt["handled_kinds"], expected);
+        } else {
+            assert!(receipt.get("handled_kinds").is_none());
         }
     }
 }

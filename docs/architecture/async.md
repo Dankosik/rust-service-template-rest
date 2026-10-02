@@ -226,7 +226,13 @@ aggregate; the bounded operator traversal uses an explicit fleet kind set.
 `infra_jobs::operator` owns validated requests, payload-free snapshots and
 all inspection/recovery SQL. `jobs-worker` owns syntax, PostgreSQL-only
 admission, one-shot lifetime, safe JSON receipts and exit codes. It bypasses
-ordinary registrations, NATS and listeners. See the
+ordinary registrations, NATS and listeners. All modes admit the canonical
+writable UTF-8/READ COMMITTED queue; inspection then uses a read-only transaction.
+Both reads and mutations set a two-second local statement timeout, before the
+mutation's initial lock, inside the existing 12-second operation backstop.
+Executed JSON carries `schema_version: 1`; unhandled results, including failures
+after argument admission, echo the validated sorted, deduplicated `handled_kinds`.
+See the
 [operator contract](../background-jobs.md#inspect-and-recover-retained-jobs).
 
 Mutations lock one failed row by id and require the inspected kind and
@@ -240,6 +246,16 @@ inspection and never automatic business replay. History has no truncation cap;
 operators own retained storage until completion or explicit discard. The
 [upgrade gate](../background-jobs.md#upgrade-and-custody) stops every old
 failed-retention owner before relying on custody or activating recovery.
+
+Retain compatible handlers for outstanding kinds/payload versions across rolling
+deployment and backup restore. A rename is not migration, and redrive cannot
+repair poison payloads. Restore invalidates saved tokens, commands, and receipts:
+restore queue/history/sequence consistently, reconcile effects, and re-inspect
+before recovery. Indefinite failed custody and manual replay exceed any finite
+consumer deduplication TTL; retain durable logical-ID effect identity for the
+permitted replay lifetime, or reconcile and explicitly constrain replay before
+expiring it. The [retry policy arithmetic](../background-jobs.md#register-kinds-and-retain-terminal-history)
+illustrates the unchanged retry horizon; it is not a delivery bound.
 
 ## Proof boundary
 

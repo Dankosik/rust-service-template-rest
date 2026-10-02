@@ -33,7 +33,13 @@ const _: () = infra_jobs::assert_valid_kind_name(<Welcome as infra_jobs::JobKind
 
 Runtime registration and enqueue still reject invalid reachable names with a
 typed error. Renaming a kind strands its live rows until a worker registers its
-old name.
+old name; a rename is not a queue migration. Across rolling deployments and
+backup restore, retain handlers that understand every outstanding kind and
+payload version. Inspect stranded or failed identities and restore compatible
+code, or perform a separately reviewed data conversion, before recovery.
+Redrive resets attempts; it does not repair a poison payload, rename a kind,
+or reinterpret stored intent. Malformed or incompatible payloads keep their
+existing retry/exhaustion classification and sanitized failure behavior.
 
 `infra_jobs::enqueue(tx, &payload, options)` takes the shared opaque
 `&mut infra_postgres::Tx` that an `in_tx` or `in_tx_with` closure receives,
@@ -210,7 +216,15 @@ kind's jobs and does not partition them by payload.
 
 PostgreSQL computes `attempt^4 * (0.9 + 0.2 * random())` seconds (floored by
 `retry_after_at_least`) when it writes the retry; a re-sent fenced write may
-redraw. Exhaustion and permanent failure are terminal. Summaries replace
+redraw. With immediate failures and no extra floor, queueing, downtime, or
+handler cost, the nominal delays before the final attempt sum to
+`sum(a^4, a=1..24) = 1,763,020 seconds` (about 20.4 days) for 25 attempts.
+For 20 attempts, `sum(a^4, a=1..19) = 562,666 seconds` (about 6.51 days).
+Independent jitter gives a +/-10% jitter-only range. These are policy arithmetic,
+not a delivery bound: handler time, retry floors, outage, backpressure, and
+scheduling can lengthen the horizon.
+
+Exhaustion and permanent failure are terminal. Summaries replace
 controls with spaces and are limited to 1024 UTF-8 bytes; handlers must not
 include secrets in them. `error_summary` holds the most recent summary. The
 `errors` JSONB array keeps the history: every failed attempt (retry,
@@ -401,7 +415,9 @@ bounds elapsed time, not physical pages or dead tuples scanned.
 The same executable supplies PostgreSQL-only commands. Loader flags precede
 the command; omitting it runs the normal worker. Operator commands load only
 the typed PostgreSQL configuration, use one pooled connection, and admit migration
-history and session settings. They start no handler registry, broker,
+history and UTF-8/writable/READ COMMITTED session settings against the canonical
+writable queue, including for inspection. Read operations then use read-only
+transactions. They start no handler registry, broker,
 listener, telemetry exporter, claim loop, or maintenance task. The common
 loader still refuses secret-like values anywhere in TOML; unrelated provider
 sections otherwise need not be valid. Password files are read once. The
@@ -415,11 +431,14 @@ jobs-worker [loader flags] unhandled --handled-kinds LIST [--after CURSOR] [--li
 jobs-worker [loader flags] redrive ID --kind KIND --version VERSION
 ```
 
-Inspection returns JSON with database `observed_at` and safe snapshots: id,
+Each executed command emits one JSON document with `schema_version: 1`,
+`action`, and `outcome`; help and pre-execution usage errors keep their CLI
+presentation. Inspection includes database `observed_at` and safe snapshots: id,
 kind, state, lossless decimal-string version, attempts, failure reason,
 created/scheduled/claim-expiry/finished times, and recovery count. It never
 returns payloads, unique keys, trace carriers, error summaries, error arrays,
-or archived bodies. `inspect` reports `found` or `missing`.
+or archived bodies. Timestamps use UTC RFC3339 with six fractional digits,
+nullable where absent. `inspect` reports `found` or `missing`.
 
 `failed` includes every failed kind. `unhandled` requires the explicit
 comma-separated union of kinds handled anywhere in the intended fleet, with
@@ -428,8 +447,10 @@ no whitespace normalization. For example, if the fleet handles ordinary
 `--handled-kinds widgets.welcome,publish_domain_event`; include any retained
 webhook kinds too. An explicit `--handled-kinds ''` means none. Omission is a
 usage error. The request accepts at most 1024 input names and 66,559 bytes.
-A different handled set changes the question: restart traversal without a
-cursor after changing it.
+Every unhandled response after argument admission, including failure results,
+echoes the validated, sorted, deduplicated `handled_kinds` array; the explicit
+empty set returns `[]`. A different handled set changes the question: restart
+traversal without a cursor after changing it.
 
 Each page scans at most `limit` primary-key-ordered rows (1–500, default 100),
 then filters them. JSON includes `scanned`, `items`, `complete`, and
@@ -449,7 +470,12 @@ sequence. Job id, payload, unique key, creation time, and traces stay unchanged.
 The next claim spends attempt 1 under the current policy; normal polling picks
 it up. A competing live unique key causes `conflict` and leaves the failed row
 and history intact. Recovery performs no business-closure replay and gives no
-exactly-once external effect guarantee.
+exactly-once external effect guarantee. Failed custody and permitted manual
+replay have no automatic expiry, so any finite consumer deduplication TTL can
+expire before a permitted replay. Retain durable logical-ID effect identity
+for the full permitted replay lifetime, or reconcile effects and explicitly
+constrain replay before expiring that identity. A redrive receipt or unchanged
+completion write does not establish whether an external effect happened.
 
 **Discard permanently abandons unresolved work.** It deletes the inspected
 failed row and all its history. Use it only after deciding that this exact work
@@ -474,8 +500,11 @@ Success exits 0, unsuccessful operations exit 1, and CLI usage exits 2.
 stdout/receipt cannot undo a commit and requires inspection. After argument,
 configuration, and file admission, network work and teardown have a 33-second
 ceiling: connect 5s, history 5s, session check 5s, operation 12s, pool close 5s,
-and runtime close 1s. Reads also have a two-second statement limit. This does
-not bound filesystem latency.
+and runtime close 1s. Reads and mutations set a transaction-local two-second
+statement limit; mutations set it before the initial row lock. The 12-second
+operation backstop includes acquire, begin, and commit; ordinary pooled session
+budgets are unchanged after the transaction. This does not bound filesystem
+latency.
 
 ## Upgrade and custody
 
@@ -492,6 +521,11 @@ rollback restores failed deletion, early capacity release, and the observation
 race. Stop claims/retention while repairing if custody must remain assured.
 Never reset the claim-generation sequence or clear history; restore the sequence
 above every persisted version so stale recovery tokens cannot become valid.
+That fence does not survive restoring an earlier database history. Restore the
+queue, history, and sequence consistently; invalidate saved pre-restore tokens,
+commands, and receipts. Restore compatible handlers for outstanding kinds and
+payload versions, reconcile already-applied effects, then re-inspect individual
+identities before recovery. Never reuse a saved command as restore authority.
 
 Static leases still delay uncertain/crashed-attempt recovery until expiry;
 revisit them only for changed availability needs or measured unacceptable rescue

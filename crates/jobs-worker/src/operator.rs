@@ -59,8 +59,14 @@ impl Request {
     }
 
     fn receipt(&self, outcome: &str) -> Value {
-        match self {
-            Self::Inspect { action, .. } => json!({"action": action, "outcome": outcome}),
+        let mut body = match self {
+            Self::Inspect { action, query } => {
+                let mut body = json!({"action": action, "outcome": outcome});
+                if let Some(kinds) = query.handled_kinds() {
+                    body["handled_kinds"] = json!(kinds);
+                }
+                body
+            }
             Self::Redrive(target) | Self::Discard(target) => json!({
                 "action": if matches!(self, Self::Redrive(_)) { "redrive" } else { "discard" },
                 "id": target.id().to_string(),
@@ -68,7 +74,9 @@ impl Request {
                 "expected_version": target.version().to_string(),
                 "outcome": outcome,
             }),
-        }
+        };
+        body["schema_version"] = 1.into();
+        body
     }
 
     fn failed(&self, cause: &'static str, invoked: bool) -> Report {
@@ -117,7 +125,7 @@ impl Request {
 
     async fn execute(&self, pool: &PgPool) -> Result<Value, OperatorError> {
         match self {
-            Self::Inspect { action, query } => {
+            Self::Inspect { query, .. } => {
                 let result = infra_postgres::in_tx_with(
                     pool,
                     TxOptions {
@@ -127,7 +135,7 @@ impl Request {
                     async |tx| jobs::inspect(tx, query).await,
                 )
                 .await?;
-                Ok(inspection(action, result))
+                Ok(inspection(self.receipt("ok"), result))
             }
             Self::Redrive(target) => {
                 let redriven =
@@ -150,9 +158,9 @@ struct Report {
 }
 
 /// Returns process success, never maps an exit code or retries an operation.
-pub(crate) fn run(options: &LoadOptions, request: Request) -> bool {
+pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
     let report = match service_config::load_jobs_operator(options) {
-        Ok(config) => run_configured(&config.postgres, &request),
+        Ok(config) => run_configured(&config.postgres, request),
         Err(error) => {
             let _ = process_failure(&error.to_string());
             request.failed("configuration", false)
@@ -175,12 +183,11 @@ fn run_configured(config: &PostgresConfig, request: &Request) -> Report {
     if !config.enabled {
         return request.failed("postgres_disabled", false);
     }
-    let runtime = match tokio::runtime::Builder::new_current_thread()
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-    {
-        Ok(runtime) => runtime,
-        Err(_) => return request.failed("runtime", false),
+    else {
+        return request.failed("runtime", false);
     };
     let report = runtime.block_on(serve(config, request));
     runtime.shutdown_timeout(crate::RUNTIME_SHUTDOWN_TIMEOUT);
@@ -188,18 +195,15 @@ fn run_configured(config: &PostgresConfig, request: &Request) -> Report {
 }
 
 async fn serve(config: &PostgresConfig, request: &Request) -> Report {
-    let mut signals = match Signals::install() {
-        Ok(signals) => signals,
-        Err(_) => return request.failed("signals", false),
+    let Ok(mut signals) = Signals::install() else {
+        return request.failed("signals", false);
     };
-    let raw = match config.required_dsn() {
-        Ok(raw) => raw,
-        Err(_) => return request.failed("dsn", false),
+    let Ok(raw) = config.required_dsn() else {
+        return request.failed("dsn", false);
     };
-    let dsn = match Dsn::admit_with(raw.expose_secret(), config.password_file.as_deref()) {
-        Ok(dsn) => dsn,
+    let Ok(dsn) = Dsn::admit_with(raw.expose_secret(), config.password_file.as_deref()) else {
         // Do not repeat an arbitrary URL parameter from DsnError::Parameter.
-        Err(_) => return request.failed("dsn", false),
+        return request.failed("dsn", false);
     };
     let options = PoolOptions {
         max_connections: NonZeroU32::MIN,
@@ -242,13 +246,7 @@ async fn admitted(pool: &PgPool, signals: &mut Signals, request: &Request) -> Re
         Ok(Err(_)) => return request.failed("migration_history", false),
         Err(cause) => return request.failed(cause, false),
     }
-    match bounded(
-        signals,
-        jobs::STARTUP_TIMEOUT,
-        jobs::check_startup(pool, request.mutation()),
-    )
-    .await
-    {
+    match bounded(signals, jobs::STARTUP_TIMEOUT, jobs::check_startup(pool)).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => return request.failed("session_admission", false),
         Err(cause) => return request.failed(cause, false),
@@ -285,30 +283,28 @@ async fn bounded<T>(
     }
 }
 
-fn inspection(action: &str, result: InspectionResult) -> Value {
+fn inspection(mut body: Value, result: InspectionResult) -> Value {
     match result {
-        InspectionResult::One { observed_at, item } => json!({
-            "action": action,
-            "outcome": if item.is_some() { "found" } else { "missing" },
-            "observed_at": observed_at,
-            "item": item.as_ref().map(snapshot),
-        }),
+        InspectionResult::One { observed_at, item } => {
+            body["outcome"] = if item.is_some() { "found" } else { "missing" }.into();
+            body["observed_at"] = observed_at.into();
+            body["item"] = json!(item.as_ref().map(snapshot));
+        }
         InspectionResult::Page {
             observed_at,
             scanned,
             items,
             complete,
             next_cursor,
-        } => json!({
-            "action": action,
-            "outcome": "ok",
-            "observed_at": observed_at,
-            "scanned": scanned,
-            "items": items.iter().map(snapshot).collect::<Vec<_>>(),
-            "complete": complete,
-            "next_cursor": next_cursor,
-        }),
+        } => {
+            body["observed_at"] = observed_at.into();
+            body["scanned"] = scanned.into();
+            body["items"] = items.iter().map(snapshot).collect();
+            body["complete"] = complete.into();
+            body["next_cursor"] = json!(next_cursor);
+        }
     }
+    body
 }
 
 fn snapshot(item: &JobSnapshot) -> Value {

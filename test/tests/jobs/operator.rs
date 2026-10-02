@@ -240,11 +240,51 @@ mod outbox {
 }
 // template:end outbox:test-jobs-operator-outbox
 
-#[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn worker_operator_commands_commit_with_postgres_only_and_emit_safe_receipts(pool: PgPool) {
+async fn run_operator(url: &str, args: &[&str], code: i32) -> Value {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
+    // Use the existing fixture's shipped run(args, register) path. A
+    // one-connection pool and absent broker configuration cannot start
+    // an ordinary worker, but suffice for this admitted command mode.
+    let stdout = tempfile::NamedTempFile::new().unwrap();
+    let stderr = tempfile::NamedTempFile::new().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_jobs-worker-fixture"))
+        .args(args)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("APP__POSTGRES__ENABLED", "true")
+        .env("APP__POSTGRES__DSN", url)
+        .env("APP__POSTGRES__MAX_CONNECTIONS", "1")
+        .stdout(Stdio::from(stdout.reopen().unwrap()))
+        .stderr(Stdio::from(stderr.reopen().unwrap()))
+        .spawn()
+        .expect("the existing worker fixture starts");
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => tokio::time::sleep(super::POLL).await,
+            wait => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("operator failed to exit within its bound: {wait:?}");
+            }
+        }
+    };
+    let output = std::fs::read_to_string(stdout.path()).unwrap();
+    let diagnostic = std::fs::read_to_string(stderr.path()).unwrap();
+    assert_eq!(status.code(), Some(code), "{diagnostic}");
+    assert!(!output.contains(SECRET) && !diagnostic.contains(SECRET));
+    assert!(!output.contains(url) && !diagnostic.contains(url));
+    let receipt: Value = serde_json::from_str(&output).expect("one JSON receipt only");
+    assert_eq!(receipt["schema_version"], 1);
+    assert_eq!(receipt["action"], args[0]);
+    receipt
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn worker_operator_commands_commit_with_postgres_only_and_emit_safe_receipts(pool: PgPool) {
     let target = failed(&pool, Uuid::new_v4(), SECRET).await;
     let discard_target = failed(&pool, Uuid::new_v4(), "discard").await;
     let url = url_for(&pool, DATABASE_URL).await;
@@ -254,6 +294,13 @@ async fn worker_operator_commands_commit_with_postgres_only_and_emit_safe_receip
     let discard_version = discard_target.version().to_string();
     let cases: &[(&[&str], i32, &str)] = &[
         (&["inspect", &id], 0, "found"),
+        (&["failed"], 0, "ok"),
+        (&["unhandled", "--handled-kinds", ""], 0, "ok"),
+        (
+            &["unhandled", "--handled-kinds", "zebra,alpha,zebra"],
+            0,
+            "ok",
+        ),
         (
             &["redrive", &id, "--kind", KIND, "--version", &version],
             0,
@@ -291,41 +338,18 @@ async fn worker_operator_commands_commit_with_postgres_only_and_emit_safe_receip
         ),
     ];
     for (args, code, outcome) in cases {
-        // Use the existing fixture's shipped run(args, register) path. A
-        // one-connection pool and absent broker configuration cannot start
-        // an ordinary worker, but suffice for this admitted command mode.
-        let stdout = tempfile::NamedTempFile::new().unwrap();
-        let stderr = tempfile::NamedTempFile::new().unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_jobs-worker-fixture"))
-            .args(*args)
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("APP__POSTGRES__ENABLED", "true")
-            .env("APP__POSTGRES__DSN", url.as_str())
-            .env("APP__POSTGRES__MAX_CONNECTIONS", "1")
-            .stdout(Stdio::from(stdout.reopen().unwrap()))
-            .stderr(Stdio::from(stderr.reopen().unwrap()))
-            .spawn()
-            .expect("the existing worker fixture starts");
-        let deadline = Instant::now() + Duration::from_secs(40);
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() < deadline => tokio::time::sleep(super::POLL).await,
-                wait => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    panic!("operator failed to exit within its bound: {wait:?}");
-                }
-            }
-        };
-        let output = std::fs::read_to_string(stdout.path()).unwrap();
-        let diagnostic = std::fs::read_to_string(stderr.path()).unwrap();
-        assert_eq!(status.code(), Some(*code), "{diagnostic}");
-        assert!(!output.contains(SECRET) && !diagnostic.contains(SECRET));
-        assert!(!output.contains(url.as_str()) && !diagnostic.contains(url.as_str()));
-        let receipt: Value = serde_json::from_str(&output).expect("one JSON receipt only");
+        let receipt = run_operator(url.as_str(), args, *code).await;
         assert_eq!(receipt["outcome"], *outcome);
+        if args[0] == "unhandled" {
+            let expected = if args[2].is_empty() {
+                json!([])
+            } else {
+                json!(["alpha", "zebra"])
+            };
+            assert_eq!(receipt["handled_kinds"], expected);
+        } else {
+            assert!(receipt.get("handled_kinds").is_none());
+        }
         if *outcome == "redriven" {
             let row = stored(&pool, &target).await;
             assert_eq!(row["state"], "pending");
@@ -347,6 +371,100 @@ async fn worker_operator_commands_commit_with_postgres_only_and_emit_safe_receip
             assert_eq!(remaining, 0);
         }
     }
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn worker_operator_refuses_read_only_sessions_for_every_command(pool: PgPool) {
+    let target = failed(&pool, Uuid::new_v4(), "read-only-admission").await;
+    let before = stored(&pool, &target).await;
+    let url = url_for(&pool, DATABASE_URL).await;
+    let id = target.id().to_string();
+    let version = target.version().to_string();
+    // Existing sessions remain writable; each operator opens a new session
+    // against this database's read-only default, as a replica would expose.
+    sqlx::query(
+        "DO $$ BEGIN EXECUTE format(\
+         'ALTER DATABASE %I SET default_transaction_read_only = on', current_database()); END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let cases: &[&[&str]] = &[
+        &["inspect", &id],
+        &["failed"],
+        &["unhandled", "--handled-kinds", "zebra,alpha,zebra"],
+        &["redrive", &id, "--kind", KIND, "--version", &version],
+        &["discard", &id, "--kind", KIND, "--version", &version],
+    ];
+    for args in cases {
+        let receipt = run_operator(url.as_str(), args, 1).await;
+        assert_eq!(receipt["cause"], "session_admission");
+        assert_eq!(
+            receipt["outcome"],
+            if matches!(args[0], "redrive" | "discard") {
+                "failed"
+            } else {
+                "unavailable"
+            }
+        );
+        assert!(receipt.get("items").is_none());
+        assert!(receipt.get("next_cursor").is_none());
+        assert!(receipt.get("complete").is_none());
+        if args[0] == "unhandled" {
+            assert_eq!(receipt["handled_kinds"], json!(["alpha", "zebra"]));
+        }
+    }
+    assert_eq!(stored(&pool, &target).await, before);
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn recovery_initial_lock_has_local_statement_budget_and_preserves_failed_custody(
+    pool: PgPool,
+) {
+    let jobs = super::template_pool(&dsn_for(&pool).await, 1).await;
+    for discard in [false, true] {
+        let target = failed(&pool, Uuid::new_v4(), "blocked-recovery").await;
+        let before = stored(&pool, &target).await;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a raw independent transaction holds the row lock while the adapter is exercised"
+        )]
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM background_jobs WHERE id::text = $1 FOR UPDATE")
+            .bind(target.id().to_string())
+            .fetch_one(&mut *holder)
+            .await
+            .unwrap();
+        // The admitted pool's ordinary statement budget is eight seconds.
+        // A local two-second timeout must fail at the first lock while it is
+        // still held, rather than escape via the caller's operation deadline.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            in_tx(&jobs, async |tx| {
+                if discard {
+                    operator::discard(tx, &target).await.map(|_| ())
+                } else {
+                    operator::redrive(tx, &target).await.map(|_| ())
+                }
+            }),
+        )
+        .await;
+        holder.rollback().await.unwrap();
+        let error = result
+            .expect("the local statement budget expires before the caller deadline")
+            .unwrap_err();
+        assert_eq!(error.sqlstate().as_deref(), Some("57014"));
+        assert_eq!(stored(&pool, &target).await, before);
+        let budget: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&jobs)
+            .await
+            .unwrap();
+        assert_eq!(
+            budget, "8s",
+            "the failed transaction restores the session budget"
+        );
+    }
+    super::close(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

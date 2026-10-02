@@ -32,19 +32,16 @@ pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const LIVE_JOBS_SAMPLE_CAP: i64 = 1_000;
 /// Bound on the startup check, from acquire through the session query.
 pub(crate) const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
-/// Check UTF8, READ COMMITTED and optionally writability, bounded to 5 s.
+/// Check UTF8, READ COMMITTED and writability, bounded to 5 s.
 ///
 /// # Errors
 ///
 /// [`StartupError::UnsupportedEncoding`] when PostgreSQL is not UTF8,
-/// [`StartupError::NotWritable`] when required and `writable` is false, and
+/// [`StartupError::NotWritable`] when `writable` is false, and
 /// [`StartupError::UnsupportedIsolation`] when the pool default is not read
 /// committed, and [`StartupError::Unavailable`] for anything else, including
 /// the bound; that one is logged with a bounded cause.
-pub(crate) async fn check_startup(
-    pool: &PgPool,
-    require_writable: bool,
-) -> Result<(), StartupError> {
+pub(crate) async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
     let session = async {
         let mut connection = pool.acquire().await?;
         // Whether the current session has the worker's required defaults. Migration-history
@@ -66,7 +63,7 @@ pub(crate) async fn check_startup(
     };
     match tokio::time::timeout(STARTUP_CHECK_BUDGET, session).await {
         Ok(Ok((encoding, _, _))) if encoding != "UTF8" => Err(StartupError::UnsupportedEncoding),
-        Ok(Ok((_, false, _))) if require_writable => Err(StartupError::NotWritable),
+        Ok(Ok((_, false, _))) => Err(StartupError::NotWritable),
         Ok(Ok((_, _, false))) => Err(StartupError::UnsupportedIsolation),
         Ok(Ok(_)) => Ok(()),
         Ok(Err(err)) => {
@@ -129,8 +126,9 @@ pub(crate) async fn run_sampling(shared: Arc<Shared>, cancel: CancellationToken)
             ticker.tick().await;
             match sample_once(&shared).await {
                 Ok(sample) => {
-                    publish_sample(&sample);
-                    observe_recovery(&shared, Operation::Sample);
+                    if shared.publish_for_kinds(&sample.kinds, || publish_sample(&sample)) {
+                        observe_recovery(&shared, Operation::Sample);
+                    }
                 }
                 Err(error) => {
                     observe_failure(&shared, Operation::Sample, &error);
@@ -143,7 +141,7 @@ pub(crate) async fn run_sampling(shared: Arc<Shared>, cancel: CancellationToken)
 
 /// Describe the queue-observation gauges and publish neutral pre-sample values.
 /// The worker composition root calls this once at startup.
-pub(crate) fn init_metrics(shared: &Shared) {
+pub(crate) fn init_metrics(kinds: &[&'static str]) {
     metrics::describe_gauge!(
         LIVE_JOBS_METRIC,
         "Per-process capped depth of live jobs by registered kind and state."
@@ -160,13 +158,21 @@ pub(crate) fn init_metrics(shared: &Shared) {
         OBSERVATION_TIMESTAMP_METRIC,
         "Database Unix timestamp of the last successful jobs observation."
     );
-    for kind in shared.registered_kinds() {
-        set_live(kind, "available", 0);
-        set_live(kind, "scheduled", 0);
-        set_live(kind, "running", 0);
-        metrics::gauge!(FAILED_JOBS_METRIC, "kind" => kind).set(0.0);
-        metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => kind).set(0.0);
+    for &kind in kinds {
+        init_kind_metrics(kind);
     }
+    invalidate_sample();
+}
+
+pub(crate) fn init_kind_metrics(kind: &'static str) {
+    set_live(kind, "available", 0);
+    set_live(kind, "scheduled", 0);
+    set_live(kind, "running", 0);
+    metrics::gauge!(FAILED_JOBS_METRIC, "kind" => kind).set(0.0);
+    metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => kind).set(0.0);
+}
+
+pub(crate) fn invalidate_sample() {
     metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(0.0);
 }
 
@@ -297,7 +303,7 @@ async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
                 .fetch_all(&mut *tx),
             )
             .await?;
-            decode_sample(rows)
+            decode_sample(rows, kinds)
         })
         .await
     })
@@ -315,17 +321,22 @@ struct SampleRow {
 }
 
 struct Sample {
+    kinds: Vec<&'static str>,
     rows: Vec<SampleRow>,
     observed_at: f64,
 }
 
-fn decode_sample(rows: Vec<SampleRow>) -> Result<Sample, OperationError> {
+fn decode_sample(rows: Vec<SampleRow>, kinds: Vec<&'static str>) -> Result<Sample, OperationError> {
     let Some(observed_at) = rows.first().map(|row| row.observed_at) else {
         return Err(OperationError::Statement(sqlx::Error::Decode(
             "jobs sample returned no rows".into(),
         )));
     };
-    Ok(Sample { rows, observed_at })
+    Ok(Sample {
+        kinds,
+        rows,
+        observed_at,
+    })
 }
 
 fn publish_sample(sample: &Sample) {
